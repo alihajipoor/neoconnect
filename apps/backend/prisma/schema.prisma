@@ -1,0 +1,359 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum AdminRole {
+  SUPERADMIN
+  SUPPORT
+  BILLING
+}
+
+enum CustomerStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+  CANCELLED
+}
+
+enum NodeRole {
+  RELAY
+  EXIT
+  STANDALONE
+}
+
+enum NodeStatus {
+  PENDING
+  ONLINE
+  OFFLINE
+  DISABLED
+}
+
+enum Protocol {
+  XRAY_VLESS_REALITY
+  XRAY_VMESS
+  XRAY_TROJAN
+  WIREGUARD
+  OPENVPN
+}
+
+enum ProtocolUserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum EnrollmentTokenStatus {
+  PENDING
+  CLAIMED
+  REVOKED
+  EXPIRED
+}
+
+enum PaymentProvider {
+  STRIPE
+  NOWPAYMENTS
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  REFUNDED
+}
+
+enum ActorType {
+  ADMIN
+  SYSTEM
+  AGENT
+}
+
+enum AgentCommandType {
+  CREATE_USER
+  UPDATE_USER
+  DELETE_USER
+  DISABLE_USER
+  ENABLE_USER
+  SET_QUOTA
+  SYNC
+}
+
+enum AgentCommandStatus {
+  QUEUED
+  SENT
+  ACKED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model AdminUser {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  role         AdminRole @default(SUPPORT)
+  mfaSecret    String?
+  tokenVersion Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  enrollmentTokens EnrollmentToken[]
+
+  @@map("admin_users")
+}
+
+model Customer {
+  id           String         @id @default(uuid())
+  email        String         @unique
+  passwordHash String
+  telegramId   String?
+  referralCode String?        @unique
+  status       CustomerStatus @default(ACTIVE)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  subscriptions Subscription[]
+  transactions  PaymentTransaction[]
+
+  @@map("customers")
+}
+
+// ---------------------------------------------------------------------------
+// Plans & Subscriptions
+// ---------------------------------------------------------------------------
+
+model SubscriptionPlan {
+  id                       String   @id @default(uuid())
+  name                     String
+  dataCapBytes             BigInt
+  durationDays             Int
+  priceUsd                 Decimal  @db.Decimal(10, 2)
+  maxConcurrentConnections Int?
+  protocolsAllowed         Protocol[]
+  isActive                 Boolean  @default(true)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@map("subscription_plans")
+}
+
+model Subscription {
+  id             String              @id @default(uuid())
+  customerId     String
+  planId         String
+  primaryNodeId  String?
+  status         SubscriptionStatus  @default(ACTIVE)
+  startAt        DateTime            @default(now())
+  expireAt       DateTime
+  dataCapBytes   BigInt
+  dataUsedBytes  BigInt              @default(0)
+  autoRenew      Boolean             @default(false)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  customer     Customer           @relation(fields: [customerId], references: [id])
+  plan         SubscriptionPlan   @relation(fields: [planId], references: [id])
+  primaryNode  Node?              @relation(fields: [primaryNodeId], references: [id])
+  protocolUsers ProtocolUser[]
+  usageRecords  UsageRecord[]
+  transactions  PaymentTransaction[]
+
+  @@index([customerId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+// ---------------------------------------------------------------------------
+// Nodes & Protocols
+// ---------------------------------------------------------------------------
+
+model Node {
+  id                String     @id @default(uuid())
+  name              String
+  role              NodeRole   @default(STANDALONE)
+  region            String
+  publicIp          String
+  status            NodeStatus @default(PENDING)
+  lastHeartbeatAt   DateTime?
+  agentVersion      String?
+  agentPubKey       String?    @unique
+  relayTargetNodeId String?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  relayTarget      Node?             @relation("RelayToExit", fields: [relayTargetNodeId], references: [id])
+  relaySources     Node[]            @relation("RelayToExit")
+  protocolConfigs  ProtocolConfig[]
+  protocolUsers    ProtocolUser[]
+  agentCommands    AgentCommand[]
+  usageRecords     UsageRecord[]
+  subscriptions    Subscription[]
+  enrollmentTokens EnrollmentToken[]
+
+  @@map("nodes")
+}
+
+model ProtocolConfig {
+  id               String   @id @default(uuid())
+  nodeId           String
+  protocol         Protocol
+  listenPort       Int
+  publicParamsJson Json
+  isEnabled        Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  node          Node           @relation(fields: [nodeId], references: [id])
+  protocolUsers ProtocolUser[]
+
+  @@unique([nodeId, protocol, listenPort])
+  @@map("protocol_configs")
+}
+
+model ProtocolUser {
+  id               String              @id @default(uuid())
+  subscriptionId   String
+  nodeId           String
+  protocolConfigId String
+  protocol         Protocol
+  externalUserId   String
+  credentialsJson  String // encrypted at rest (application-level envelope encryption)
+  status           ProtocolUserStatus  @default(ACTIVE)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  subscription   Subscription   @relation(fields: [subscriptionId], references: [id])
+  node           Node           @relation(fields: [nodeId], references: [id])
+  protocolConfig ProtocolConfig @relation(fields: [protocolConfigId], references: [id])
+  usageRecords   UsageRecord[]
+
+  @@unique([nodeId, protocol, externalUserId])
+  @@index([subscriptionId])
+  @@map("protocol_users")
+}
+
+// ---------------------------------------------------------------------------
+// Usage
+// ---------------------------------------------------------------------------
+
+model UsageRecord {
+  id             String   @id @default(uuid())
+  protocolUserId String
+  subscriptionId String
+  nodeId         String
+  periodStart    DateTime
+  periodEnd      DateTime
+  bytesUp        BigInt
+  bytesDown      BigInt
+  reportedAt     DateTime @default(now())
+
+  protocolUser ProtocolUser @relation(fields: [protocolUserId], references: [id])
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  node         Node         @relation(fields: [nodeId], references: [id])
+
+  @@index([subscriptionId, reportedAt])
+  @@index([nodeId, reportedAt])
+  @@map("usage_records")
+}
+
+// ---------------------------------------------------------------------------
+// Enrollment
+// ---------------------------------------------------------------------------
+
+model EnrollmentToken {
+  id              String                @id @default(uuid())
+  nodeId          String?
+  tokenHash       String                @unique
+  status          EnrollmentTokenStatus @default(PENDING)
+  expiresAt       DateTime
+  createdByAdminId String
+  createdAt       DateTime              @default(now())
+  claimedAt       DateTime?
+
+  node           Node?     @relation(fields: [nodeId], references: [id])
+  createdByAdmin AdminUser @relation(fields: [createdByAdminId], references: [id])
+
+  @@map("enrollment_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------------------
+
+model PaymentTransaction {
+  id                 String          @id @default(uuid())
+  customerId         String
+  subscriptionId     String?
+  provider           PaymentProvider
+  providerRef        String
+  amountUsd          Decimal         @db.Decimal(10, 2)
+  currency           String
+  status             PaymentStatus   @default(PENDING)
+  rawWebhookPayload  Json?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  customer     Customer      @relation(fields: [customerId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@unique([provider, providerRef])
+  @@index([customerId])
+  @@map("payment_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Audit & Agent command outbox
+// ---------------------------------------------------------------------------
+
+// actorId is intentionally not a foreign key: actorType determines which
+// table it points into (AdminUser.id, Node.id for AGENT, or a fixed
+// "system" sentinel), so it can't be modeled as a single Prisma relation.
+model AuditLog {
+  id         String    @id @default(uuid())
+  actorType  ActorType
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  beforeJson Json?
+  afterJson  Json?
+  ip         String?
+  createdAt  DateTime  @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+model AgentCommand {
+  id         String             @id @default(uuid())
+  nodeId     String
+  type       AgentCommandType
+  payloadJson Json
+  status     AgentCommandStatus @default(QUEUED)
+  createdAt  DateTime           @default(now())
+  sentAt     DateTime?
+  ackedAt    DateTime?
+  error      String?
+
+  node Node @relation(fields: [nodeId], references: [id])
+
+  @@index([nodeId, status])
+  @@map("agent_commands")
+}

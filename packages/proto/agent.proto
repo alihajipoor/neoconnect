@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package neoxify.agent.v1;
+
+option go_package = "github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb";
+
+// AgentSync is the single long-lived bidirectional stream an agent opens.
+// The TCP connection is always initiated by the agent (never the control
+// plane), so relay/exit nodes never need an inbound firewall hole; once
+// open, messages flow both directions on the same stream. See
+// docs/protocol-contract.md for the full enrollment and reconciliation flow.
+//
+// NOTE: this is a draft to be finalized in M2 (Agent skeleton + enrollment
+// flow) — message fields below are the shape agreed in the Phase 1 plan,
+// not yet wired to generated Go/TS stubs.
+service AgentGateway {
+  rpc AgentSync(stream AgentMessage) returns (stream ControlMessage);
+}
+
+// ---- Agent -> Control plane ----
+
+message AgentMessage {
+  oneof payload {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    StatsBatch stats_batch = 3;
+    CommandAck command_ack = 4;
+    StateSnapshot state_snapshot = 5;
+  }
+}
+
+message Hello {
+  string node_id = 1;
+  string signed_nonce = 2;
+  string agent_version = 3;
+}
+
+message Heartbeat {
+  double cpu_percent = 1;
+  double mem_percent = 2;
+  int32 active_connections = 3;
+}
+
+message StatsBatch {
+  repeated UsageDelta deltas = 1;
+}
+
+message UsageDelta {
+  string external_user_id = 1;
+  string protocol = 2;
+  uint64 bytes_up = 3;
+  uint64 bytes_down = 4;
+}
+
+message CommandAck {
+  string command_id = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message StateSnapshot {
+  repeated ProtocolUserRef users = 1;
+}
+
+message ProtocolUserRef {
+  string external_user_id = 1;
+  string protocol = 2;
+  int64 version = 3;
+}
+
+// ---- Control plane -> Agent ----
+
+message ControlMessage {
+  oneof payload {
+    Command command = 1;
+  }
+}
+
+message Command {
+  string id = 1;
+  CommandType type = 2;
+  bytes payload_json = 3;
+}
+
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  CREATE_USER = 1;
+  UPDATE_USER = 2;
+  DELETE_USER = 3;
+  DISABLE_USER = 4;
+  ENABLE_USER = 5;
+  SET_QUOTA = 6;
+  SYNC = 7;
+}

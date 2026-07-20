@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+*.tsbuildinfo
+coverage/
+agent/bin/
+agent/*.exe
+go.work.sum
+.vscode/
+.idea/
