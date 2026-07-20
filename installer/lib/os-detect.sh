@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detects the host OS/version and exits with a clear error on anything
-# outside the supported matrix (Ubuntu 20.04-24.04, Debian 11-12).
+# outside the supported matrix (Ubuntu 20.04-26.04, Debian 11-12).
 set -euo pipefail
 
 detect_os() {
@@ -17,9 +17,9 @@ detect_os() {
   case "$OS_ID" in
     ubuntu)
       case "$OS_VERSION" in
-        20.04|22.04|24.04) ;;
+        20.04|22.04|24.04|26.04) ;;
         *)
-          echo "ERROR: Ubuntu $OS_VERSION is not in the supported matrix (20.04, 22.04, 24.04)." >&2
+          echo "ERROR: Ubuntu $OS_VERSION is not in the supported matrix (20.04, 22.04, 24.04, 26.04)." >&2
           exit 1
           ;;
       esac
@@ -34,7 +34,7 @@ detect_os() {
       esac
       ;;
     *)
-      echo "ERROR: Unsupported OS '$OS_ID'. NeoConnect agent supports Ubuntu 20.04-24.04 and Debian 11-12." >&2
+      echo "ERROR: Unsupported OS '$OS_ID'. NeoConnect agent supports Ubuntu 20.04-26.04 and Debian 11-12." >&2
       exit 1
       ;;
   esac
