@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# NeoConnect node agent installer.
+# NeoConnect installer. One script, two possible roles for the Linux box
+# it's run on:
+#   - Main Panel Server: backend + admin panel + Postgres + Redis (Docker
+#     Compose) fronted by nginx + Let's Encrypt. Must be run from inside
+#     a checked-out copy of this repo (it builds the Docker images from
+#     source) -- e.g. `git clone <repo-url> && cd neoconnect/installer &&
+#     sudo ./install.sh`.
+#   - VPN Agent Node: downloads the compiled agentd binary (no source
+#     tree needed) and enrolls with the panel.
 #
 # Usage:
-#   curl -fsSL https://get.neoxify.example/install.sh | sudo bash
-#   sudo bash install.sh            # interactive menu on subsequent runs
-#
-# See docs/architecture.md for the full enrollment flow this script feeds
-# into (Panel -> Add Node -> paste the Node ID/IP/Token this script prints).
+#   sudo ./install.sh          # fresh box: asks which role, then installs
+#   sudo ./install.sh          # already installed: shows that role's menu
 set -euo pipefail
+trap 'echo "ERROR: installer failed at line $LINENO. Re-run ./install.sh — steps already completed (Docker install, image builds, etc.) are safe to repeat." >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROLE_FILE="/etc/neoxify/role"
 
 # shellcheck source=lib/os-detect.sh
 . "$SCRIPT_DIR/lib/os-detect.sh"
@@ -19,119 +26,44 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/systemd.sh"
 # shellcheck source=lib/menu.sh
 . "$SCRIPT_DIR/lib/menu.sh"
+# shellcheck source=lib/agent.sh
+. "$SCRIPT_DIR/lib/agent.sh"
+# shellcheck source=lib/panel.sh
+. "$SCRIPT_DIR/lib/panel.sh"
 
-AGENT_RELEASE_URL_BASE="${AGENT_RELEASE_URL_BASE:-}"
+prompt_role() {
+  cat <<'EOF'
 
-# --------------------------------------------------------------------------
-# Actions
-# --------------------------------------------------------------------------
+  What does this server do?
+    1) Main Panel Server (backend + admin panel + database)
+    2) VPN Agent Node (runs VPN protocols, connects to the panel)
 
-fetch_agent_binary() {
-  if [[ -z "$AGENT_RELEASE_URL_BASE" ]]; then
-    cat >&2 <<'EOF'
-ERROR: no agent release available yet.
-
-The agent binary release pipeline (signed builds + checksums for
-linux/amd64 and linux/arm64) is built in Milestone M10. Until then, set
-AGENT_RELEASE_URL_BASE to a build you've published yourself, e.g.:
-
-  AGENT_RELEASE_URL_BASE=https://example.com/releases/v0.1.0 sudo -E bash install.sh
 EOF
-    exit 1
-  fi
-
-  local url="$AGENT_RELEASE_URL_BASE/agentd-linux-$AGENT_ARCH"
-  local sums_url="$AGENT_RELEASE_URL_BASE/sha256sums.txt"
-
-  echo "Downloading agent binary for linux/$AGENT_ARCH..."
-  curl -fsSL "$url" -o /tmp/agentd
-  curl -fsSL "$sums_url" -o /tmp/sha256sums.txt
-
-  if ! (cd /tmp && grep "agentd-linux-$AGENT_ARCH" sha256sums.txt | sha256sum -c -); then
-    echo "ERROR: checksum verification failed, aborting install." >&2
-    exit 1
-  fi
-
-  install -m 755 /tmp/agentd /usr/local/bin/agentd
-  rm -f /tmp/agentd /tmp/sha256sums.txt
+  read -r -p "Choose [1-2]: " role_choice
+  case "$role_choice" in
+    1) action_install_panel ;;
+    2) action_install_agent ;;
+    *)
+      echo "Invalid choice: $role_choice" >&2
+      exit 1
+      ;;
+  esac
 }
-
-action_install() {
-  require_root
-  detect_os
-  install_base_deps
-  fetch_agent_binary
-  install_agentd_unit
-
-  echo
-  read -r -p "Node role [relay/exit/standalone] (default: standalone): " role
-  role="${role:-standalone}"
-
-  echo "Running enrollment..."
-  /usr/local/bin/agentd --enroll-init --role "$role"
-
-  start_agentd
-  echo
-  echo "Paste the Node ID / Public IP / Enrollment Token above into"
-  echo "Panel -> Nodes -> Add Node to finish registering this location."
-}
-
-action_update() {
-  require_root
-  detect_os
-  echo "Updating agent binary only (protocol engines are left running so"
-  echo "active sessions on this node are not disrupted)..."
-  fetch_agent_binary
-  systemctl restart neoxify-agentd
-  echo "Agent updated and restarted."
-}
-
-action_status() {
-  systemctl status neoxify-agentd --no-pager || true
-  echo
-  echo "Recent logs (Ctrl+C to exit follow mode):"
-  journalctl -u neoxify-agentd -n 50 --no-pager
-}
-
-action_reenroll() {
-  require_root
-  read -r -p "New panel URL: " panel_url
-  /usr/local/bin/agentd --enroll-init --panel-url "$panel_url"
-  systemctl restart neoxify-agentd
-}
-
-action_engines() {
-  echo "Protocol engine management is built in Milestone M9/M10."
-  echo "For now, engines selected at install time are managed automatically by the agent."
-}
-
-action_uninstall() {
-  require_root
-  read -r -p "Remove config/certs too, not just the agent binary? [y/N]: " purge
-  systemctl stop neoxify-agentd || true
-  systemctl disable neoxify-agentd || true
-  rm -f /etc/systemd/system/neoxify-agentd.service
-  rm -f /usr/local/bin/agentd
-  systemctl daemon-reload
-  if [[ "${purge,,}" == "y" ]]; then
-    rm -rf /etc/neoxify
-  fi
-  echo "Uninstalled."
-}
-
-# --------------------------------------------------------------------------
-# Entry point
-# --------------------------------------------------------------------------
 
 main() {
   detect_os
 
-  # Fresh box (no prior install) -> go straight to install.
-  # Already installed, or re-run -> interactive menu.
-  if [[ ! -f /etc/systemd/system/neoxify-agentd.service ]]; then
-    action_install
+  if [[ -f "$ROLE_FILE" ]]; then
+    case "$(cat "$ROLE_FILE")" in
+      panel) run_panel_menu ;;
+      agent) run_agent_menu ;;
+      *)
+        echo "ERROR: $ROLE_FILE contains an unrecognized role." >&2
+        exit 1
+        ;;
+    esac
   else
-    run_menu
+    prompt_role
   fi
 }
 

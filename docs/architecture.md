@@ -17,8 +17,13 @@ individual decisions as they're revisited.
   VPN protocol engines, and syncs with the backend over gRPC.
 - `packages/proto/agent.proto` — source of truth for the agent<->backend
   wire contract (generates both Go and TypeScript stubs).
-- `installer/install.sh` — one-shot installer + management menu that turns
-  a fresh Ubuntu/Debian VPS into an enrolled node.
+- `installer/install.sh` — single entrypoint for both deployable roles on
+  a fresh Ubuntu/Debian box: **Main Panel Server** (Docker Compose stack
+  of backend+panel+Postgres+Redis, fronted by host nginx + Let's Encrypt
+  — see `installer/lib/panel.sh`) or **VPN Agent Node** (downloads the
+  compiled `agentd` binary and enrolls — see `installer/lib/agent.sh`).
+  The chosen role persists in `/etc/neoxify/role`; re-running the script
+  shows that role's management menu instead of re-prompting.
 
 ## Two requirements that drive every protocol decision
 
