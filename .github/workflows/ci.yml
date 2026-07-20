@@ -39,8 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
+        # No `version:` here — pnpm/action-setup reads it from
+        # package.json's "packageManager" field, which is the single
+        # source of truth (also used by corepack locally). Setting it
+        # here too caused a hard version-mismatch error.
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -73,3 +75,7 @@ jobs:
       - uses: ludeeus/action-shellcheck@master
         with:
           scandir: installer
+          # info-level SC1091 ("can't follow $SCRIPT_DIR/lib/x.sh") is
+          # expected noise for scripts that source relative paths computed
+          # at runtime — real issues are warning severity and above.
+          severity: warning

@@ -152,7 +152,9 @@ action_seed_admin_panel() {
 action_uninstall_panel() {
   require_root
   read -r -p "This stops and removes the panel stack. Also delete the database volume? [y/N]: " purge
-  docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" down $( [[ "${purge,,}" == "y" ]] && echo "--volumes" )
+  local down_args=()
+  [[ "${purge,,}" == "y" ]] && down_args+=("--volumes")
+  docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" down "${down_args[@]}"
   rm -f /etc/nginx/sites-enabled/neoxify-panel /etc/nginx/sites-available/neoxify-panel
   systemctl reload nginx || true
   rm -f /etc/neoxify/role
