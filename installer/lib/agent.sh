@@ -56,12 +56,67 @@ EOF
   echo "Claiming enrollment token..."
   /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token"
 
-  start_agentd
   install -d -m 755 /etc/neoxify
   echo "agent" > /etc/neoxify/role
+
+  echo
+  read -r -p "Install Xray (VLESS+REALITY) on this node now? [Y/n]: " install_xray_choice
+  if [[ "${install_xray_choice,,}" != "n" ]]; then
+    install_xray
+  fi
+
+  start_agentd
   echo
   echo "Enrolled. This node should show as ONLINE in the panel within a"
   echo "few seconds -- check: systemctl status neoxify-agentd"
+}
+
+# Installs xray-core, generates a REALITY keypair, and writes a config
+# with an empty client list -- users are hot-added/removed entirely
+# through the agent's HandlerService calls (see
+# agent/internal/protocols/xray), never by editing this file again.
+install_xray() {
+  echo "Installing Xray-core..."
+  bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+  local keys private_key public_key
+  keys="$(/usr/local/bin/xray x25519)"
+  private_key="$(echo "$keys" | grep '^PrivateKey:' | awk '{print $2}')"
+  public_key="$(echo "$keys" | grep '(PublicKey):' | awk '{print $3}')"
+  local short_id
+  short_id="$(openssl rand -hex 8)"
+
+  read -r -p "Listen port for VLESS+REALITY [443]: " listen_port
+  listen_port="${listen_port:-443}"
+  read -r -p "Camouflage destination (a real HTTPS site) [www.microsoft.com:443]: " dest
+  dest="${dest:-www.microsoft.com:443}"
+  local server_name="${dest%%:*}"
+
+  sed \
+    -e "s/__LISTEN_PORT__/$listen_port/g" \
+    -e "s/__DEST__/$dest/g" \
+    -e "s/__SERVER_NAME__/$server_name/g" \
+    -e "s/__REALITY_PRIVATE_KEY__/$private_key/g" \
+    -e "s/__SHORT_ID__/$short_id/g" \
+    "$SCRIPT_DIR/assets/xray-config.json.template" > /usr/local/etc/xray/config.json
+
+  systemctl restart xray
+
+  cat <<EOF
+
+Xray is running on port $listen_port. Register this as a Protocol Config
+in the panel (Nodes -> this node -> Add Protocol Config once that UI
+exists; for now, POST /protocol-configs) with:
+
+  protocol:    XRAY_VLESS_REALITY
+  listenPort:  $listen_port
+  publicParamsJson:
+    realityPublicKey: $public_key
+    shortIds:          ["$short_id"]
+    dest:              "$dest"
+    serverName:        "$server_name"
+
+EOF
 }
 
 action_update_agent() {
@@ -90,8 +145,19 @@ action_reenroll_agent() {
 }
 
 action_engines_agent() {
-  echo "Protocol engine management is built in Milestone M9/M10."
-  echo "For now, engines selected at install time are managed automatically by the agent."
+  require_root
+  cat <<'EOF'
+
+  1) Install/reconfigure Xray (VLESS+REALITY)
+  2) Back
+
+EOF
+  read -r -p "Choose [1-2]: " choice
+  case "$choice" in
+    1) install_xray ;;
+    *) return ;;
+  esac
+  echo "WireGuard and OpenVPN engine management land in M4/M8."
 }
 
 action_uninstall_agent() {

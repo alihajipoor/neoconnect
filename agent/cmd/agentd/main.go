@@ -14,7 +14,9 @@ import (
 
 	"github.com/neoxify/neoxify-hub/agent/internal/config"
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane"
+	"github.com/neoxify/neoxify-hub/agent/internal/dispatch"
 	"github.com/neoxify/neoxify-hub/agent/internal/enroll"
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
 )
 
 func main() {
@@ -23,6 +25,8 @@ func main() {
 	panelURL := flag.String("panel-url", "", "control-plane base URL, e.g. https://connect.example.com (required with --enroll-init)")
 	grpcTarget := flag.String("grpc-target", "", "override the gRPC host:port (default: <panel-url host>:50051)")
 	configPath := flag.String("config", config.DefaultPath, "path to the agent's persisted config")
+	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
+	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
 	flag.Parse()
 
 	if *enrollInit {
@@ -38,10 +42,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	xrayProvisioner, err := xray.New(*xrayAPIAddr, *xrayInboundTag)
+	if err != nil {
+		log.Fatalf("connect to xray api: %v", err)
+	}
+	defer xrayProvisioner.Close()
+
+	dispatcher := dispatch.New()
+	dispatcher.Register("XRAY_VLESS_REALITY", xrayProvisioner)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := controlplane.Run(ctx, cfg); err != nil && ctx.Err() == nil {
+	if err := controlplane.Run(ctx, cfg, dispatcher); err != nil && ctx.Err() == nil {
 		log.Fatalf("agent sync loop exited: %v", err)
 	}
 }
