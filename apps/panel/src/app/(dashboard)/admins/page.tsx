@@ -6,7 +6,7 @@ import { AdminsTable } from "./admins-table";
 
 export default async function AdminsPage() {
   const session = await getSession();
-  if (session?.role !== "SUPERADMIN") redirect("/customers");
+  if (session?.role !== "SUPERADMIN") redirect("/overview");
 
   const admins = await apiFetch<AdminUser[]>("/admins");
   return <AdminsTable admins={admins} currentAdminId={session.sub} />;

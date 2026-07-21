@@ -3,49 +3,38 @@
 
 @custom-variant dark (&:is(.dark *));
 
-:root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-}
-
+/* Dark, techy theme -- this product is a gaming VPN control panel, not a
+   generic back-office tool, so it stays dark-only rather than splitting
+   design effort across light+dark. Violet is the primary accent (buttons,
+   active nav, focus rings); cyan is a secondary highlight reserved for
+   stat-card icons and gradient accents so it doesn't compete with primary
+   actions. */
+:root,
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --radius: 0.75rem;
+  --background: #0a0a10;
+  --foreground: #f4f4f8;
+  --card: #131319;
+  --card-foreground: #f4f4f8;
+  --popover: #15151c;
+  --popover-foreground: #f4f4f8;
+  --primary: #8b5cf6;
+  --primary-foreground: #ffffff;
+  --secondary: #1c1c26;
+  --secondary-foreground: #f4f4f8;
+  --muted: #1a1a22;
+  --muted-foreground: #9797a8;
+  --accent: #1e1e2a;
+  --accent-foreground: #f4f4f8;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --success: #10b981;
+  --success-foreground: #ffffff;
+  --highlight: #22d3ee;
+  --highlight-foreground: #06282e;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.1);
+  --ring: #8b5cf6;
 }
 
 @theme inline {
@@ -69,6 +58,10 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-highlight: var(--highlight);
+  --color-highlight-foreground: var(--highlight-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -82,5 +75,40 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+@layer utilities {
+  /* Soft blurred color blobs used behind hero-ish surfaces (login, empty
+     states) for a bit of "premium tech" atmosphere without ever getting in
+     the way of legibility -- always paired with a solid background under
+     the content itself. */
+  .glow-backdrop {
+    position: relative;
+    isolation: isolate;
+  }
+  .glow-backdrop::before,
+  .glow-backdrop::after {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    border-radius: 9999px;
+    filter: blur(120px);
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .glow-backdrop::before {
+    width: 32rem;
+    height: 32rem;
+    background: var(--primary);
+    top: -10rem;
+    left: -8rem;
+  }
+  .glow-backdrop::after {
+    width: 28rem;
+    height: 28rem;
+    background: var(--highlight);
+    bottom: -10rem;
+    right: -8rem;
   }
 }

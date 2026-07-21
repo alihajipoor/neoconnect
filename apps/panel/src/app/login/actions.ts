@@ -37,5 +37,5 @@ export async function loginAction(_prevState: LoginState, formData: FormData): P
     refreshToken: string;
   };
   await setSessionCookies({ accessToken, refreshToken });
-  redirect("/customers");
+  redirect("/overview");
 }

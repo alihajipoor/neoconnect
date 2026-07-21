@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Users, CreditCard, ShieldCheck } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
 const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: AdminRole[] }[] = [
+  { href: "/overview", label: "Overview", icon: LayoutDashboard },
   { href: "/customers", label: "Customers", icon: Users },
   { href: "/plans", label: "Plans", icon: CreditCard },
   { href: "/admins", label: "Admins", icon: ShieldCheck, roles: ["SUPERADMIN"] },
@@ -26,13 +27,16 @@ export function SidebarNav({ role }: { role: AdminRole }) {
             key={item.href}
             href={item.href}
             className={cn(
-              "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+              "group relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
               active
-                ? "bg-secondary text-secondary-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                ? "bg-primary/15 text-foreground"
+                : "text-muted-foreground hover:bg-white/5 hover:text-foreground",
             )}
           >
-            <Icon className="size-4" />
+            {active && (
+              <span className="absolute top-1/2 left-0 h-5 w-[3px] -translate-y-1/2 rounded-full bg-primary" />
+            )}
+            <Icon className={cn("size-4", active && "text-primary")} />
             {item.label}
           </Link>
         );

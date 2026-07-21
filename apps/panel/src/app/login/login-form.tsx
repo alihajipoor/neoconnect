@@ -13,9 +13,9 @@ export function LoginForm() {
   const [state, formAction, pending] = useActionState(loginAction, initialState);
 
   return (
-    <Card className="w-full max-w-sm">
+    <Card className="w-full border-white/10 bg-card/80 shadow-2xl shadow-black/40 backdrop-blur-sm">
       <CardHeader>
-        <CardTitle className="text-xl">NeoConnect Admin</CardTitle>
+        <CardTitle className="text-xl">Welcome back</CardTitle>
         <CardDescription>Sign in to manage your panel.</CardDescription>
       </CardHeader>
       <CardContent>
@@ -34,8 +34,12 @@ export function LoginForm() {
               required
             />
           </div>
-          {state.error ? <p className="text-sm text-destructive">{state.error}</p> : null}
-          <Button type="submit" disabled={pending} className="mt-2">
+          {state.error ? (
+            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {state.error}
+            </p>
+          ) : null}
+          <Button type="submit" disabled={pending} size="lg" className="mt-2">
             {pending ? "Signing in..." : "Sign in"}
           </Button>
         </form>
