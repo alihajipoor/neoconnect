@@ -62,6 +62,12 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      # Server-side only (never sent to the browser): the panel's Next.js
+      # server calls the backend directly over the internal compose
+      # network, same as nginx would, but without the extra hop.
+      INTERNAL_API_URL: http://backend:4000
+      NODE_ENV: production
     ports:
       - "127.0.0.1:3000:3000"
 
