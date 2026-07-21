@@ -3,11 +3,13 @@ import { ConfigService } from "@nestjs/config";
 import { existsSync, readFileSync } from "node:fs";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
+import { AgentCommandType } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
 import { verifyEd25519 } from "./ed25519";
+import type { AgentDuplexCall, AgentMessageEnvelope, HelloMessage } from "./agent-messages";
 
 // Hello timestamps must fall within this window of the server's clock --
 // bounds replay of a captured Hello without requiring an interactive
@@ -25,21 +27,6 @@ const HELLO_FRESHNESS_SECONDS = 120;
 // sweeps in the architecture plan.
 const HEARTBEAT_STALE_MS = 60_000;
 const SWEEP_INTERVAL_MS = 30_000;
-
-interface HelloMessage {
-  nodeId: string;
-  timestamp: string | number;
-  nonce: string;
-  signature: Buffer;
-  agentVersion: string;
-}
-
-interface AgentMessageEnvelope {
-  payload: "hello" | "heartbeat" | "statsBatch" | "commandAck" | "stateSnapshot";
-  hello?: HelloMessage;
-}
-
-type AgentDuplexCall = grpc.ServerDuplexStream<AgentMessageEnvelope, unknown>;
 
 @Injectable()
 export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
@@ -166,9 +153,11 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               return;
             }
             await this.nodesService.touchHeartbeat(nodeId);
+          } else if (msg.payload === "commandAck") {
+            await this.handleCommandAck(msg.commandAck!);
           }
-          // statsBatch / commandAck / stateSnapshot: no handling yet --
-          // that lands with usage accounting (M6) and provisioning (M3+).
+          // statsBatch / stateSnapshot: no handling yet -- usage
+          // accounting (M6) and full reconciliation are later work.
         } catch (err) {
           this.logger.warn(`AgentSync stream error: ${(err as Error).message}`);
           call.destroy(err as Error);
@@ -217,6 +206,70 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     await this.nodesService.setStatus(node.id, "ONLINE", { agentVersion: hello.agentVersion });
     this.registry.set(node.id, call);
     this.logger.log(`Node ${node.id} (${node.name}) authenticated and connected`);
+
+    await this.replayQueuedCommands(node.id);
     return node.id;
+  }
+
+  private async handleCommandAck(ack: { commandId: string; success: boolean; error: string }) {
+    await this.prisma.agentCommand.update({
+      where: { id: ack.commandId },
+      data: {
+        status: ack.success ? "ACKED" : "FAILED",
+        ackedAt: new Date(),
+        error: ack.success ? null : ack.error,
+      },
+    });
+  }
+
+  /** Re-sends any command this node hasn't acked yet, in the order it was
+   * created. Handles both "was never delivered" (agent was offline when
+   * it was enqueued) and "delivered but the ack never arrived" (agent
+   * crashed mid-command) the same way: commands are idempotent by
+   * external_user_id on the agent side (create-if-not-exists,
+   * delete-if-exists), so re-sending a command that already landed is
+   * safe. */
+  private async replayQueuedCommands(nodeId: string) {
+    const pending = await this.prisma.agentCommand.findMany({
+      where: { nodeId, status: { in: ["QUEUED", "SENT"] } },
+      orderBy: { createdAt: "asc" },
+    });
+    for (const command of pending) {
+      this.writeCommand(nodeId, command.id, command.type, command.payloadJson as object);
+      await this.prisma.agentCommand.update({ where: { id: command.id }, data: { status: "SENT", sentAt: new Date() } });
+    }
+  }
+
+  /** Writes a Command onto a node's live stream if it has one. Returns
+   * whether it was actually sent -- false just means "queued, will go out
+   * on next connect/reconnect via replayQueuedCommands", not an error. */
+  private writeCommand(nodeId: string, commandId: string, type: AgentCommandType, payload: object): boolean {
+    const call = this.registry.get(nodeId);
+    if (!call) return false;
+    call.write({
+      command: {
+        id: commandId,
+        type,
+        payloadJson: Buffer.from(JSON.stringify(payload), "utf8"),
+      },
+    });
+    return true;
+  }
+
+  /** Public entry point for anything that needs to provision/change a
+   * user on an agent (ProtocolUsersService today; quota enforcement in
+   * M6 will call this too). Always durable -- writes the outbox row
+   * first -- so a command issued while the node is offline isn't lost,
+   * just delayed until reconnect. */
+  async enqueueCommand(nodeId: string, type: AgentCommandType, payload: object) {
+    const command = await this.prisma.agentCommand.create({
+      data: { nodeId, type, payloadJson: payload, status: "QUEUED" },
+    });
+
+    const sent = this.writeCommand(nodeId, command.id, type, payload);
+    if (sent) {
+      await this.prisma.agentCommand.update({ where: { id: command.id }, data: { status: "SENT", sentAt: new Date() } });
+    }
+    return command;
   }
 }

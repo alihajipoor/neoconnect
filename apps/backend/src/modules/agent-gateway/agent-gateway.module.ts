@@ -6,6 +6,6 @@ import { NodesModule } from "../nodes/nodes.module";
 @Module({
   imports: [NodesModule],
   providers: [AgentGatewayService, AgentConnectionRegistry],
-  exports: [AgentConnectionRegistry],
+  exports: [AgentConnectionRegistry, AgentGatewayService],
 })
 export class AgentGatewayModule {}

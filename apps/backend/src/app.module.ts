@@ -10,6 +10,9 @@ import { PlansModule } from "./modules/plans/plans.module";
 import { NodesModule } from "./modules/nodes/nodes.module";
 import { EnrollmentModule } from "./modules/enrollment/enrollment.module";
 import { AgentGatewayModule } from "./modules/agent-gateway/agent-gateway.module";
+import { SubscriptionsModule } from "./modules/subscriptions/subscriptions.module";
+import { ProtocolConfigsModule } from "./modules/protocol-configs/protocol-configs.module";
+import { ProtocolUsersModule } from "./modules/protocol-users/protocol-users.module";
 
 @Module({
   imports: [
@@ -26,6 +29,9 @@ import { AgentGatewayModule } from "./modules/agent-gateway/agent-gateway.module
     NodesModule,
     EnrollmentModule,
     AgentGatewayModule,
+    SubscriptionsModule,
+    ProtocolConfigsModule,
+    ProtocolUsersModule,
   ],
 })
 export class AppModule {}

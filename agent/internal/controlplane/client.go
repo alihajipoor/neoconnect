@@ -20,6 +20,7 @@ import (
 
 	"github.com/neoxify/neoxify-hub/agent/internal/config"
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
+	"github.com/neoxify/neoxify-hub/agent/internal/dispatch"
 	"github.com/neoxify/neoxify-hub/agent/internal/version"
 )
 
@@ -32,7 +33,7 @@ const (
 // Run connects to the control plane and keeps the AgentSync stream alive,
 // reconnecting with exponential backoff on any failure. Blocks until ctx
 // is cancelled.
-func Run(ctx context.Context, cfg *config.Config) error {
+func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatcher) error {
 	target, creds, err := dialTarget(cfg)
 	if err != nil {
 		return err
@@ -56,7 +57,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 			return ctx.Err()
 		}
 
-		if err := runStream(ctx, client, cfg.NodeID, signingKey); err != nil && ctx.Err() == nil {
+		if err := runStream(ctx, client, cfg.NodeID, signingKey, dispatcher); err != nil && ctx.Err() == nil {
 			log.Printf("agent sync stream error: %v (retrying in %s)", err, backoff)
 		}
 
@@ -102,7 +103,13 @@ func dialTarget(cfg *config.Config) (string, credentials.TransportCredentials, e
 	return target, insecure.NewCredentials(), nil
 }
 
-func runStream(ctx context.Context, client pb.AgentGatewayClient, nodeID string, key ed25519.PrivateKey) error {
+func runStream(
+	ctx context.Context,
+	client pb.AgentGatewayClient,
+	nodeID string,
+	key ed25519.PrivateKey,
+	dispatcher *dispatch.Dispatcher,
+) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -118,7 +125,7 @@ func runStream(ctx context.Context, client pb.AgentGatewayClient, nodeID string,
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- heartbeatLoop(streamCtx, stream) }()
-	go func() { errCh <- receiveLoop(stream) }()
+	go func() { errCh <- receiveLoop(streamCtx, stream, dispatcher) }()
 
 	err = <-errCh
 	cancel()
@@ -165,7 +172,7 @@ func heartbeatLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient) 
 	}
 }
 
-func receiveLoop(stream pb.AgentGateway_AgentSyncClient) error {
+func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, dispatcher *dispatch.Dispatcher) error {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -175,16 +182,20 @@ func receiveLoop(stream pb.AgentGateway_AgentSyncClient) error {
 		if cmd == nil {
 			continue
 		}
-		log.Printf(
-			"received command %s (type %s) -- no protocol provisioners implemented yet (M3+)",
-			cmd.GetId(), cmd.GetType(),
-		)
+
+		success, errMsg := dispatcher.Execute(ctx, cmd)
+		if success {
+			log.Printf("executed command %s (%s)", cmd.GetId(), cmd.GetType())
+		} else {
+			log.Printf("command %s (%s) failed: %s", cmd.GetId(), cmd.GetType(), errMsg)
+		}
+
 		if err := stream.Send(&pb.AgentMessage{
 			Payload: &pb.AgentMessage_CommandAck{
 				CommandAck: &pb.CommandAck{
 					CommandId: cmd.GetId(),
-					Success:   false,
-					Error:     "not yet implemented",
+					Success:   success,
+					Error:     errMsg,
 				},
 			},
 		}); err != nil {
