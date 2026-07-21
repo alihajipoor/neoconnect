@@ -43,19 +43,25 @@ action_install_agent() {
   fetch_agent_binary
   install_agentd_unit
 
-  echo
-  read -r -p "Node role [relay/exit/standalone] (default: standalone): " role
-  role="${role:-standalone}"
+  cat <<'EOF'
 
-  echo "Running enrollment..."
-  /usr/local/bin/agentd --enroll-init --role "$role"
+Before continuing: in the panel, go to Nodes -> Add Node, fill in this
+node's name/role/region, and copy the enrollment token it gives you
+(shown once). That's what this step needs below.
+
+EOF
+  read -r -p "Panel URL (e.g. https://connect.example.com): " panel_url
+  read -r -p "Enrollment token: " enroll_token
+
+  echo "Claiming enrollment token..."
+  /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token"
 
   start_agentd
   install -d -m 755 /etc/neoxify
   echo "agent" > /etc/neoxify/role
   echo
-  echo "Paste the Node ID / Public IP / Enrollment Token above into"
-  echo "Panel -> Nodes -> Add Node to finish registering this location."
+  echo "Enrolled. This node should show as ONLINE in the panel within a"
+  echo "few seconds -- check: systemctl status neoxify-agentd"
 }
 
 action_update_agent() {
@@ -78,7 +84,8 @@ action_status_agent() {
 action_reenroll_agent() {
   require_root
   read -r -p "New panel URL: " panel_url
-  /usr/local/bin/agentd --enroll-init --panel-url "$panel_url"
+  read -r -p "New enrollment token (from that panel's Nodes -> Add Node): " enroll_token
+  /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token"
   systemctl restart neoxify-agentd
 }
 

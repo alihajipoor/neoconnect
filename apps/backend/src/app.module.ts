@@ -7,6 +7,9 @@ import { AuthModule } from "./modules/auth/auth.module";
 import { AdminsModule } from "./modules/admins/admins.module";
 import { CustomersModule } from "./modules/customers/customers.module";
 import { PlansModule } from "./modules/plans/plans.module";
+import { NodesModule } from "./modules/nodes/nodes.module";
+import { EnrollmentModule } from "./modules/enrollment/enrollment.module";
+import { AgentGatewayModule } from "./modules/agent-gateway/agent-gateway.module";
 
 @Module({
   imports: [
@@ -20,6 +23,9 @@ import { PlansModule } from "./modules/plans/plans.module";
     AdminsModule,
     CustomersModule,
     PlansModule,
+    NodesModule,
+    EnrollmentModule,
+    AgentGatewayModule,
   ],
 })
 export class AppModule {}

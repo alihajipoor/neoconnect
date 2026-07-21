@@ -52,8 +52,22 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      # Agent gRPC gateway TLS: uses a copy of the same Let's Encrypt cert
+      # nginx manages for the panel domain, not the original -- certbot
+      # locks privkey.pem to root-only (0600), unreadable by this
+      # container's non-root user, so installer/lib/panel.sh copies both
+      # files into /etc/neoxify/certs (0644, fine since only the VPS's own
+      # root has shell access anyway) and re-copies on every renewal via a
+      # certbot deploy-hook. Unlike the HTTP API, agent traffic is NOT
+      # proxied through nginx -- see docs/architecture.md -- so it's
+      # published directly and needs its own TLS termination.
+      AGENT_TLS_CERT_PATH: /etc/neoxify/certs/fullchain.pem
+      AGENT_TLS_KEY_PATH: /etc/neoxify/certs/privkey.pem
+    volumes:
+      - /etc/neoxify/certs:/etc/neoxify/certs:ro
     ports:
       - "127.0.0.1:4000:4000"
+      - "50051:50051"
 
   panel:
     build:

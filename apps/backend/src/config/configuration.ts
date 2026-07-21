@@ -12,6 +12,12 @@ export default () => ({
   },
   agentGateway: {
     grpcPort: parseInt(process.env.AGENT_GRPC_PORT ?? "50051", 10),
+    // When both are set (production, mounted from the host's certbot
+    // directory), the gRPC server terminates real TLS. When unset (local
+    // dev, no domain/cert), it falls back to plaintext -- fine for
+    // localhost, never for a real deployment.
+    tlsCertPath: process.env.AGENT_TLS_CERT_PATH,
+    tlsKeyPath: process.env.AGENT_TLS_KEY_PATH,
   },
   billing: {
     stripeSecretKey: process.env.STRIPE_SECRET_KEY,

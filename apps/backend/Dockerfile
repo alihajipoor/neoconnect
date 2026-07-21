@@ -52,9 +52,10 @@ COPY --from=build /out/package.json ./package.json
 COPY --from=build /out/prisma ./prisma
 COPY --from=build /repo/apps/backend/dist ./dist
 COPY --from=build /repo/apps/backend/dist-seed ./dist-seed
+COPY --from=build /repo/packages/proto ./proto
 
 USER nestjs
-EXPOSE 4000
+EXPOSE 4000 50051
 ENV PORT=4000
 
 # Runs pending migrations before every boot. Safe to run on every
