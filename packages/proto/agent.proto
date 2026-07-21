@@ -103,4 +103,10 @@ enum CommandType {
   ENABLE_USER = 5;
   SET_QUOTA = 6;
   SYNC = 7;
+  // Hot-wires a relay node's local Xray process to forward one Route's
+  // traffic to its exit (AddOutbound + AddRule), or a WireGuard/OpenVPN
+  // subnet through the tun bridge -- see "Multi-Hop Relay Chaining" in
+  // the architecture plan. Targets the relay node, not an end customer.
+  CONFIGURE_ROUTE = 8;
+  REMOVE_ROUTE = 9;
 }

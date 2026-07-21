@@ -98,13 +98,20 @@ install_xray() {
   dest="${dest:-www.microsoft.com:443}"
   local server_name="${dest%%:*}"
 
+  local template="$SCRIPT_DIR/assets/xray-config.json.template"
+  read -r -p "Will this node relay other protocols (WireGuard/OpenVPN) to an exit node? [y/N]: " is_relay
+  if [[ "${is_relay,,}" == "y" ]]; then
+    template="$SCRIPT_DIR/assets/xray-relay-config.json.template"
+    echo "Using the relay config variant (adds a dormant tun bridge -- see docs/architecture.md, \"Multi-Hop Relay Chaining\"). Routes are wired up from the panel/API, not here."
+  fi
+
   sed \
     -e "s/__LISTEN_PORT__/$listen_port/g" \
     -e "s/__DEST__/$dest/g" \
     -e "s/__SERVER_NAME__/$server_name/g" \
     -e "s/__REALITY_PRIVATE_KEY__/$private_key/g" \
     -e "s/__SHORT_ID__/$short_id/g" \
-    "$SCRIPT_DIR/assets/xray-config.json.template" > /usr/local/etc/xray/config.json
+    "$template" > /usr/local/etc/xray/config.json
 
   systemctl restart xray
 

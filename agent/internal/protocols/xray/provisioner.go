@@ -54,6 +54,13 @@ func (p *Provisioner) Close() error {
 	return p.conn.Close()
 }
 
+// Conn exposes the underlying connection to Xray's local API so other
+// packages (agent/internal/relay) can talk to the same Xray process
+// without dialing a second connection.
+func (p *Provisioner) Conn() *grpc.ClientConn {
+	return p.conn
+}
+
 func (p *Provisioner) CreateUser(ctx context.Context, user common.ProtocolUser) error {
 	account := &vless.Account{
 		Id:   user.Credentials["uuid"],

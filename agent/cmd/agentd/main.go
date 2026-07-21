@@ -18,6 +18,7 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/enroll"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/wireguard"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
+	"github.com/neoxify/neoxify-hub/agent/internal/relay"
 )
 
 func main() {
@@ -29,6 +30,8 @@ func main() {
 	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
 	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
+	relayTunInboundTag := flag.String("relay-tun-inbound-tag", "relay-tun-in", "tag of the dormant tun inbound in a relay node's Xray config (see installer/assets/xray-relay-config.json.template)")
+	relayTunInterface := flag.String("relay-tun-interface", "relay-tun", "OS network interface name of that same tun inbound, used for ip route/rule when bridging WireGuard/OpenVPN entries into a Route's exit outbound")
 	flag.Parse()
 
 	if *enrollInit {
@@ -53,6 +56,10 @@ func main() {
 	dispatcher := dispatch.New()
 	dispatcher.Register("XRAY_VLESS_REALITY", xrayProvisioner)
 	dispatcher.Register("WIREGUARD", wireguard.New(*wgInterface))
+	// Every node's Xray process can be a relay's exit fabric regardless
+	// of which protocols it terminates -- CONFIGURE_ROUTE/REMOVE_ROUTE
+	// are simply no-ops in practice on nodes that never receive them.
+	dispatcher.RegisterRelay(relay.New(xrayProvisioner.Conn(), *relayTunInboundTag, *relayTunInterface))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
