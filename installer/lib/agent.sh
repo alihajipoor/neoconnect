@@ -65,6 +65,12 @@ EOF
     install_xray
   fi
 
+  echo
+  read -r -p "Install WireGuard on this node now? [Y/n]: " install_wg_choice
+  if [[ "${install_wg_choice,,}" != "n" ]]; then
+    install_wireguard
+  fi
+
   start_agentd
   echo
   echo "Enrolled. This node should show as ONLINE in the panel within a"
@@ -119,6 +125,59 @@ exists; for now, POST /protocol-configs) with:
 EOF
 }
 
+# Installs wireguard-tools, generates a server keypair, and brings up
+# wg0 with an empty peer list -- same "never re-templated for users"
+# pattern as install_xray: peers are hot-added/removed entirely through
+# the agent's `wg set` calls (see agent/internal/protocols/wireguard).
+install_wireguard() {
+  echo "Installing WireGuard..."
+  apt-get install -y -qq wireguard wireguard-tools
+
+  install -d -m 700 /etc/wireguard
+  ( umask 077 && wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key )
+  local private_key public_key
+  private_key="$(cat /etc/wireguard/server_private.key)"
+  public_key="$(cat /etc/wireguard/server_public.key)"
+
+  read -r -p "Listen port for WireGuard [51820]: " listen_port
+  listen_port="${listen_port:-51820}"
+  read -r -p "Client subnet, /24 only (e.g. 10.66.0.0/24) [10.66.0.0/24]: " subnet
+  subnet="${subnet:-10.66.0.0/24}"
+  local subnet_base="${subnet%.0/24}"
+  local server_ip="${subnet_base}.1"
+  read -r -p "DNS to hand out to clients [1.1.1.1]: " dns
+  dns="${dns:-1.1.1.1}"
+  read -r -p "Public endpoint host (this node's IP or DNS name) [$(curl -fsSL https://api.ipify.org || true)]: " endpoint_host
+  endpoint_host="${endpoint_host:-$(curl -fsSL https://api.ipify.org || true)}"
+
+  cat > /etc/wireguard/wg0.conf <<EOF
+[Interface]
+Address = ${server_ip}/24
+ListenPort = ${listen_port}
+PrivateKey = ${private_key}
+EOF
+  chmod 600 /etc/wireguard/wg0.conf
+
+  systemctl enable --now wg-quick@wg0
+  systemctl restart wg-quick@wg0
+
+  cat <<EOF
+
+WireGuard is running on port $listen_port. Register this as a Protocol
+Config in the panel (Nodes -> this node -> Add Protocol Config once
+that UI exists; for now, POST /protocol-configs) with:
+
+  protocol:    WIREGUARD
+  listenPort:  $listen_port
+  publicParamsJson:
+    serverPublicKey: $public_key
+    endpoint:         "${endpoint_host}:${listen_port}"
+    subnetCidr:       "$subnet"
+    dns:              "$dns"
+
+EOF
+}
+
 action_update_agent() {
   require_root
   detect_os
@@ -149,15 +208,17 @@ action_engines_agent() {
   cat <<'EOF'
 
   1) Install/reconfigure Xray (VLESS+REALITY)
-  2) Back
+  2) Install/reconfigure WireGuard
+  3) Back
 
 EOF
-  read -r -p "Choose [1-2]: " choice
+  read -r -p "Choose [1-3]: " choice
   case "$choice" in
     1) install_xray ;;
+    2) install_wireguard ;;
     *) return ;;
   esac
-  echo "WireGuard and OpenVPN engine management land in M4/M8."
+  echo "OpenVPN engine management lands in M8."
 }
 
 action_uninstall_agent() {
