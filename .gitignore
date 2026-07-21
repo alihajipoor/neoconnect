@@ -12,6 +12,10 @@ build/
 coverage/
 agent/bin/
 agent/*.exe
+# Local test agent configs contain a private key -- never meant to be
+# committed. The real runtime path is /etc/neoxify/agent.json, outside
+# the repo entirely, so any *.json directly under agent/ is a test leftover.
+agent/*.json
 go.work.sum
 .vscode/
 .idea/

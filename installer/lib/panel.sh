@@ -61,16 +61,52 @@ configure_nginx_and_tls() {
   systemctl reload nginx
 
   echo "Requesting a Let's Encrypt certificate for $domain..."
-  if ! certbot --nginx -d "$domain" -m "$email" --agree-tos --non-interactive --redirect; then
+  if certbot --nginx -d "$domain" -m "$email" --agree-tos --non-interactive --redirect; then
+    install_cert_sync_hook "$domain"
+    sync_agent_gateway_certs "$domain"
+    # The gRPC gateway only reads cert files at container startup, and the
+    # backend was already started (without certs) earlier in
+    # action_install_panel -- restart so it picks these up now.
+    docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" restart backend
+  else
     cat >&2 <<EOF
 
 WARNING: certificate issuance failed. This almost always means the
 domain doesn't resolve to this server's public IP yet, or port 80/443
 isn't reachable from the internet. The panel is still up over plain
-HTTP on port 80 for now — fix DNS and re-run:
+HTTP on port 80 for now, and the agent gRPC gateway stays disabled
+(enrollment won't work) until this is fixed. Fix DNS and re-run:
   sudo certbot --nginx -d $domain -m $email --agree-tos --redirect
+Then re-run this installer's "Rebuild and restart" to pick up the cert.
 EOF
   fi
+}
+
+# The backend container runs as a non-root user and can't read certbot's
+# privkey.pem (locked to root-only, 0600, for good reason). Copy both
+# files into a location with relaxed-but-still-root-VPS-only permissions
+# instead of bind-mounting /etc/letsencrypt directly -- see the comment
+# in infra/docker-compose.prod.yml.
+sync_agent_gateway_certs() {
+  local domain="$1"
+  install -d -m 755 /etc/neoxify/certs
+  cp "/etc/letsencrypt/live/$domain/fullchain.pem" /etc/neoxify/certs/fullchain.pem
+  cp "/etc/letsencrypt/live/$domain/privkey.pem" /etc/neoxify/certs/privkey.pem
+  chmod 644 /etc/neoxify/certs/fullchain.pem /etc/neoxify/certs/privkey.pem
+}
+
+install_cert_sync_hook() {
+  local domain="$1"
+  install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/neoxify-agent-gateway.sh <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+install -d -m 755 /etc/neoxify/certs
+cp "/etc/letsencrypt/live/$domain/fullchain.pem" /etc/neoxify/certs/fullchain.pem
+cp "/etc/letsencrypt/live/$domain/privkey.pem" /etc/neoxify/certs/privkey.pem
+chmod 644 /etc/neoxify/certs/fullchain.pem /etc/neoxify/certs/privkey.pem
+EOF
+  chmod 755 /etc/letsencrypt/renewal-hooks/deploy/neoxify-agent-gateway.sh
 }
 
 seed_first_admin() {

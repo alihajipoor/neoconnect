@@ -8,11 +8,12 @@ option go_package = "github.com/neoxify/neoxify-hub/agent/internal/controlplane/
 // The TCP connection is always initiated by the agent (never the control
 // plane), so relay/exit nodes never need an inbound firewall hole; once
 // open, messages flow both directions on the same stream. See
-// docs/protocol-contract.md for the full enrollment and reconciliation flow.
+// docs/architecture.md for the full enrollment and reconciliation flow.
 //
-// NOTE: this is a draft to be finalized in M2 (Agent skeleton + enrollment
-// flow) — message fields below are the shape agreed in the Phase 1 plan,
-// not yet wired to generated Go/TS stubs.
+// Enrollment happens over plain HTTPS (POST /enrollment/claim) before this
+// stream is ever opened -- that's where the agent trades a one-time admin-
+// issued token for its identity being recorded against a Node row. This
+// stream is purely for the ongoing authenticated channel once claimed.
 service AgentGateway {
   rpc AgentSync(stream AgentMessage) returns (stream ControlMessage);
 }
@@ -29,10 +30,21 @@ message AgentMessage {
   }
 }
 
+// Hello must be the first message on every stream. Authentication is a
+// self-signed, timestamped assertion rather than an interactive
+// challenge-response: the agent signs node_id+timestamp+nonce with the
+// Ed25519 private key it generated at enroll time, and the control plane
+// verifies the signature against the public key it stored for that node
+// during /enrollment/claim. The timestamp bounds replay -- the server
+// rejects Hellos outside a small freshness window (see agent-gateway
+// module) -- trading a round trip for simplicity, acceptable since this
+// only authenticates the transport, not individual privileged actions.
 message Hello {
   string node_id = 1;
-  string signed_nonce = 2;
-  string agent_version = 3;
+  int64 timestamp = 2;   // unix seconds when signed
+  string nonce = 3;      // random per-connection, included in the signed payload
+  bytes signature = 4;   // Ed25519 signature over `${node_id}.${timestamp}.${nonce}`
+  string agent_version = 5;
 }
 
 message Heartbeat {
