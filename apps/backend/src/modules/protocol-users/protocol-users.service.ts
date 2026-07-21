@@ -37,7 +37,10 @@ export class ProtocolUsersService {
       throw new BadRequestException("Protocol config does not belong to the given node");
     }
 
-    const { externalUserId, credentials } = generateCredentials(protocolConfig.protocol);
+    const usedAddresses =
+      protocolConfig.protocol === "WIREGUARD" ? await this.usedWireGuardAddresses(dto.protocolConfigId) : [];
+
+    const { externalUserId, credentials } = generateCredentials(protocolConfig.protocol, protocolConfig, usedAddresses);
 
     const protocolUser = await this.prisma.protocolUser.create({
       data: {
@@ -93,5 +96,15 @@ export class ProtocolUsersService {
       where: { id },
       data: { status: enabled ? "ACTIVE" : "DISABLED" },
     });
+  }
+
+  private async usedWireGuardAddresses(protocolConfigId: string): Promise<string[]> {
+    const existing = await this.prisma.protocolUser.findMany({
+      where: { protocolConfigId },
+      select: { credentialsJson: true },
+    });
+    return existing
+      .map((u) => (JSON.parse(u.credentialsJson) as Record<string, string>).address)
+      .filter((address): address is string => Boolean(address));
   }
 }

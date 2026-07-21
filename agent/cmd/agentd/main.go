@@ -16,6 +16,7 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane"
 	"github.com/neoxify/neoxify-hub/agent/internal/dispatch"
 	"github.com/neoxify/neoxify-hub/agent/internal/enroll"
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/wireguard"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
 )
 
@@ -27,6 +28,7 @@ func main() {
 	configPath := flag.String("config", config.DefaultPath, "path to the agent's persisted config")
 	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
 	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
+	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
 	flag.Parse()
 
 	if *enrollInit {
@@ -50,6 +52,7 @@ func main() {
 
 	dispatcher := dispatch.New()
 	dispatcher.Register("XRAY_VLESS_REALITY", xrayProvisioner)
+	dispatcher.Register("WIREGUARD", wireguard.New(*wgInterface))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
