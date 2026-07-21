@@ -32,6 +32,12 @@ const (
 	CommandType_ENABLE_USER              CommandType = 5
 	CommandType_SET_QUOTA                CommandType = 6
 	CommandType_SYNC                     CommandType = 7
+	// Hot-wires a relay node's local Xray process to forward one Route's
+	// traffic to its exit (AddOutbound + AddRule), or a WireGuard/OpenVPN
+	// subnet through the tun bridge -- see "Multi-Hop Relay Chaining" in
+	// the architecture plan. Targets the relay node, not an end customer.
+	CommandType_CONFIGURE_ROUTE CommandType = 8
+	CommandType_REMOVE_ROUTE    CommandType = 9
 )
 
 // Enum value maps for CommandType.
@@ -45,6 +51,8 @@ var (
 		5: "ENABLE_USER",
 		6: "SET_QUOTA",
 		7: "SYNC",
+		8: "CONFIGURE_ROUTE",
+		9: "REMOVE_ROUTE",
 	}
 	CommandType_value = map[string]int32{
 		"COMMAND_TYPE_UNSPECIFIED": 0,
@@ -55,6 +63,8 @@ var (
 		"ENABLE_USER":              5,
 		"SET_QUOTA":                6,
 		"SYNC":                     7,
+		"CONFIGURE_ROUTE":          8,
+		"REMOVE_ROUTE":             9,
 	}
 )
 
@@ -816,7 +826,7 @@ const file_agent_proto_rawDesc = "" +
 	"\aCommand\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x121\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x1d.neoxify.agent.v1.CommandTypeR\x04type\x12!\n" +
-	"\fpayload_json\x18\x03 \x01(\fR\vpayloadJson*\x9a\x01\n" +
+	"\fpayload_json\x18\x03 \x01(\fR\vpayloadJson*\xc1\x01\n" +
 	"\vCommandType\x12\x1c\n" +
 	"\x18COMMAND_TYPE_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vCREATE_USER\x10\x01\x12\x0f\n" +
@@ -825,7 +835,9 @@ const file_agent_proto_rawDesc = "" +
 	"\fDISABLE_USER\x10\x04\x12\x0f\n" +
 	"\vENABLE_USER\x10\x05\x12\r\n" +
 	"\tSET_QUOTA\x10\x06\x12\b\n" +
-	"\x04SYNC\x10\a2a\n" +
+	"\x04SYNC\x10\a\x12\x13\n" +
+	"\x0fCONFIGURE_ROUTE\x10\b\x12\x10\n" +
+	"\fREMOVE_ROUTE\x10\t2a\n" +
 	"\fAgentGateway\x12Q\n" +
 	"\tAgentSync\x12\x1e.neoxify.agent.v1.AgentMessage\x1a .neoxify.agent.v1.ControlMessage(\x010\x01B?Z=github.com/neoxify/neoxify-hub/agent/internal/controlplane/pbb\x06proto3"
 

@@ -88,6 +88,8 @@ enum AgentCommandType {
   ENABLE_USER
   SET_QUOTA
   SYNC
+  CONFIGURE_ROUTE
+  REMOVE_ROUTE
 }
 
 enum AgentCommandStatus {
@@ -184,21 +186,18 @@ model Subscription {
 // ---------------------------------------------------------------------------
 
 model Node {
-  id                String     @id @default(uuid())
-  name              String
-  role              NodeRole   @default(STANDALONE)
-  region            String
-  publicIp          String
-  status            NodeStatus @default(PENDING)
-  lastHeartbeatAt   DateTime?
-  agentVersion      String?
-  agentPubKey       String?    @unique
-  relayTargetNodeId String?
-  createdAt         DateTime   @default(now())
-  updatedAt         DateTime   @updatedAt
+  id              String     @id @default(uuid())
+  name            String
+  role            NodeRole   @default(STANDALONE)
+  region          String
+  publicIp        String
+  status          NodeStatus @default(PENDING)
+  lastHeartbeatAt DateTime?
+  agentVersion    String?
+  agentPubKey     String?    @unique
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
-  relayTarget      Node?             @relation("RelayToExit", fields: [relayTargetNodeId], references: [id])
-  relaySources     Node[]            @relation("RelayToExit")
   protocolConfigs  ProtocolConfig[]
   protocolUsers    ProtocolUser[]
   agentCommands    AgentCommand[]
@@ -221,30 +220,60 @@ model ProtocolConfig {
 
   node          Node           @relation(fields: [nodeId], references: [id])
   protocolUsers ProtocolUser[]
+  routeEntries  Route[]        @relation("RouteEntry")
+  routeExits    Route[]        @relation("RouteExit")
 
   @@unique([nodeId, protocol, listenPort])
   @@map("protocol_configs")
 }
 
+// A customer-facing "server" choice: pairs a client-facing entry
+// ProtocolConfig (any protocol, on any node) with an optional exit
+// ProtocolConfig (must be Xray-based, on an EXIT node). No exit = direct
+// route (client connects straight to the entry node, as in M2-M4). Exit
+// set = relayed route -- the entry node's agent forwards traffic to the
+// exit over one shared VLESS tunnel (uplinkCredentialsJson), so end
+// customers are still only ever provisioned on the entry engine. See the
+// "Multi-Hop Relay Chaining" section of the architecture plan.
+model Route {
+  id                    String   @id @default(uuid())
+  name                  String
+  entryProtocolConfigId String
+  exitProtocolConfigId  String?
+  uplinkCredentialsJson String?
+  isEnabled             Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  entryProtocolConfig ProtocolConfig  @relation("RouteEntry", fields: [entryProtocolConfigId], references: [id])
+  exitProtocolConfig  ProtocolConfig? @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
+  protocolUsers       ProtocolUser[]
+
+  @@map("routes")
+}
+
 model ProtocolUser {
-  id               String              @id @default(uuid())
+  id               String             @id @default(uuid())
   subscriptionId   String
+  routeId          String
   nodeId           String
   protocolConfigId String
   protocol         Protocol
   externalUserId   String
   credentialsJson  String // encrypted at rest (application-level envelope encryption)
-  status           ProtocolUserStatus  @default(ACTIVE)
-  createdAt        DateTime            @default(now())
-  updatedAt        DateTime            @updatedAt
+  status           ProtocolUserStatus @default(ACTIVE)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
   subscription   Subscription   @relation(fields: [subscriptionId], references: [id])
+  route          Route          @relation(fields: [routeId], references: [id])
   node           Node           @relation(fields: [nodeId], references: [id])
   protocolConfig ProtocolConfig @relation(fields: [protocolConfigId], references: [id])
   usageRecords   UsageRecord[]
 
   @@unique([nodeId, protocol, externalUserId])
   @@index([subscriptionId])
+  @@index([routeId])
   @@map("protocol_users")
 }
 

@@ -27,33 +27,38 @@ export class ProtocolUsersService {
   }
 
   async create(dto: CreateProtocolUserDto) {
-    const [subscription, protocolConfig] = await Promise.all([
+    const [subscription, route] = await Promise.all([
       this.prisma.subscription.findUnique({ where: { id: dto.subscriptionId } }),
-      this.prisma.protocolConfig.findUnique({ where: { id: dto.protocolConfigId } }),
+      this.prisma.route.findUnique({ where: { id: dto.routeId }, include: { entryProtocolConfig: true } }),
     ]);
     if (!subscription) throw new BadRequestException("Subscription not found");
-    if (!protocolConfig) throw new BadRequestException("Protocol config not found");
-    if (protocolConfig.nodeId !== dto.nodeId) {
-      throw new BadRequestException("Protocol config does not belong to the given node");
-    }
+    if (!route) throw new BadRequestException("Route not found");
+    if (!route.isEnabled) throw new BadRequestException("Route is not enabled");
+
+    const protocolConfig = route.entryProtocolConfig;
 
     const usedAddresses =
-      protocolConfig.protocol === "WIREGUARD" ? await this.usedWireGuardAddresses(dto.protocolConfigId) : [];
+      protocolConfig.protocol === "WIREGUARD" ? await this.usedWireGuardAddresses(protocolConfig.id) : [];
 
     const { externalUserId, credentials } = generateCredentials(protocolConfig.protocol, protocolConfig, usedAddresses);
 
     const protocolUser = await this.prisma.protocolUser.create({
       data: {
         subscriptionId: dto.subscriptionId,
-        nodeId: dto.nodeId,
-        protocolConfigId: dto.protocolConfigId,
+        routeId: dto.routeId,
+        nodeId: protocolConfig.nodeId,
+        protocolConfigId: protocolConfig.id,
         protocol: protocolConfig.protocol,
         externalUserId,
         credentialsJson: JSON.stringify(credentials),
       },
     });
 
-    await this.agentGateway.enqueueCommand(dto.nodeId, "CREATE_USER", {
+    // Whether this route is direct or relayed is transparent here --
+    // the customer is always provisioned on the entry engine only. A
+    // relayed route's relay->exit tunnel was already wired once when the
+    // Route itself was created (see routes.service.ts).
+    await this.agentGateway.enqueueCommand(protocolConfig.nodeId, "CREATE_USER", {
       protocol: protocolConfig.protocol,
       externalUserId,
       credentials,

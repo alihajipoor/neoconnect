@@ -13,6 +13,7 @@ import { AgentGatewayModule } from "./modules/agent-gateway/agent-gateway.module
 import { SubscriptionsModule } from "./modules/subscriptions/subscriptions.module";
 import { ProtocolConfigsModule } from "./modules/protocol-configs/protocol-configs.module";
 import { ProtocolUsersModule } from "./modules/protocol-users/protocol-users.module";
+import { RoutesModule } from "./modules/routes/routes.module";
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { ProtocolUsersModule } from "./modules/protocol-users/protocol-users.mod
     SubscriptionsModule,
     ProtocolConfigsModule,
     ProtocolUsersModule,
+    RoutesModule,
   ],
 })
 export class AppModule {}
