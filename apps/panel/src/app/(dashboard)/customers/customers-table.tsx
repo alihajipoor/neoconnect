@@ -19,7 +19,10 @@ export function CustomersTable({ customers }: { customers: Customer[] }) {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Customers</h1>
+        <div>
+          <h1 className="text-xl font-semibold">Customers</h1>
+          <p className="text-sm text-muted-foreground">Manage the people buying subscriptions.</p>
+        </div>
         <CustomerFormDialog
           trigger={
             <Button size="sm">
@@ -28,7 +31,7 @@ export function CustomersTable({ customers }: { customers: Customer[] }) {
           }
         />
       </div>
-      <div className="rounded-lg border">
+      <div className="rounded-lg border border-white/8 bg-card/40">
         <Table>
           <TableHeader>
             <TableRow>

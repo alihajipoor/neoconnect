@@ -21,7 +21,10 @@ export function PlansTable({ plans, canManage }: { plans: SubscriptionPlan[]; ca
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Plans</h1>
+        <div>
+          <h1 className="text-xl font-semibold">Plans</h1>
+          <p className="text-sm text-muted-foreground">Subscription tiers customers can purchase.</p>
+        </div>
         {canManage && (
           <PlanFormDialog
             trigger={
@@ -32,7 +35,7 @@ export function PlansTable({ plans, canManage }: { plans: SubscriptionPlan[]; ca
           />
         )}
       </div>
-      <div className="rounded-lg border">
+      <div className="rounded-lg border border-white/8 bg-card/40">
         <Table>
           <TableHeader>
             <TableRow>
