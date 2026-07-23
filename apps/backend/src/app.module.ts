@@ -16,6 +16,7 @@ import { ProtocolUsersModule } from "./modules/protocol-users/protocol-users.mod
 import { RoutesModule } from "./modules/routes/routes.module";
 import { UsageModule } from "./modules/usage/usage.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
+import { BillingModule } from "./modules/billing/billing.module";
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { JobsModule } from "./modules/jobs/jobs.module";
     RoutesModule,
     UsageModule,
     JobsModule,
+    BillingModule,
   ],
 })
 export class AppModule {}

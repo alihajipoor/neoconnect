@@ -13,7 +13,12 @@ import { AppModule } from "./app.module";
 };
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { cors: true });
+  // rawBody: true preserves req.rawBody alongside the normal parsed
+  // req.body on every request -- needed for Stripe webhook signature
+  // verification, which must hash the exact bytes Stripe sent, not a
+  // JSON.stringify of the re-parsed object (whitespace/key-order would
+  // change the hash). Every other route is unaffected.
+  const app = await NestFactory.create(AppModule, { cors: true, rawBody: true });
 
   app.useGlobalPipes(
     new ValidationPipe({
