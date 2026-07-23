@@ -71,6 +71,12 @@ EOF
     install_wireguard
   fi
 
+  echo
+  read -r -p "Install OpenVPN on this node now? [Y/n]: " install_ovpn_choice
+  if [[ "${install_ovpn_choice,,}" != "n" ]]; then
+    install_openvpn
+  fi
+
   start_agentd
   echo
   echo "Enrolled. This node should show as ONLINE in the panel within a"
@@ -185,6 +191,105 @@ that UI exists; for now, POST /protocol-configs) with:
 EOF
 }
 
+# Installs openvpn, then FETCHES its CA/server cert/key from the panel
+# API rather than generating them locally -- the reverse direction from
+# install_xray/install_wireguard. OpenVPN's per-client cert issuance
+# needs a CA that can sign new certs on every purchase, and that CA is
+# generated and held by the backend (see
+# apps/backend/src/modules/protocol-configs/openvpn-pki.ts for why: it's
+# the one protocol where "generate node-local, register the public half"
+# doesn't work, since backend needs actual signing capability, not just
+# a public key, to issue client certs). So the ProtocolConfig must exist
+# in the panel FIRST (which is what auto-generates the CA), and this
+# step pulls the result down.
+install_openvpn() {
+  echo "Installing OpenVPN..."
+  apt-get install -y -qq openvpn
+
+  cat <<'EOF'
+
+Before continuing: create this node's OpenVPN Protocol Config via the
+panel API first (POST /protocol-configs) -- that's what generates the
+CA and server cert this step fetches. Example body:
+
+  {
+    "nodeId": "<this node's id>",
+    "protocol": "OPENVPN",
+    "listenPort": 1194,
+    "publicParamsJson": { "proto": "udp", "endpoint": "<this node's public IP>:1194" }
+  }
+
+You'll need the resulting Protocol Config's id below, plus an admin
+bearer token (panel login) to fetch it.
+
+EOF
+  read -r -p "Panel URL (e.g. https://connect.example.com): " panel_url
+  read -r -p "Admin bearer token: " admin_token
+  read -r -p "Protocol Config id: " config_id
+
+  local config_json
+  config_json="$(curl -fsSL "$panel_url/protocol-configs/$config_id" -H "Authorization: Bearer $admin_token")"
+
+  local listen_port proto ca_cert server_cert server_key
+  listen_port="$(echo "$config_json" | jq -r '.listenPort')"
+  proto="$(echo "$config_json" | jq -r '.publicParamsJson.proto // "udp"')"
+  ca_cert="$(echo "$config_json" | jq -r '.publicParamsJson.caCertPem')"
+  server_cert="$(echo "$config_json" | jq -r '.publicParamsJson.serverCertPem')"
+  server_key="$(echo "$config_json" | jq -r '.publicParamsJson.serverKeyPem')"
+
+  if [[ -z "$listen_port" || "$listen_port" == "null" || -z "$ca_cert" || "$ca_cert" == "null" ]]; then
+    echo "ERROR: could not fetch a valid OpenVPN Protocol Config -- check the id/token and that its protocol is OPENVPN." >&2
+    exit 1
+  fi
+
+  install -d -m 755 /etc/openvpn/server /etc/openvpn/ccd
+  printf '%s' "$ca_cert" > /etc/openvpn/server/ca.crt
+  printf '%s' "$server_cert" > /etc/openvpn/server/server.crt
+  printf '%s' "$server_key" > /etc/openvpn/server/server.key
+  chmod 600 /etc/openvpn/server/server.key
+
+  openvpn --genkey secret /etc/openvpn/server/tls-crypt.key
+  # -dsaparam trades a little cryptographic conservatism for a
+  # dramatically faster generation (under a second vs. minutes) --
+  # acceptable here since these DH params only protect a supplementary
+  # key-exchange step behind the cert-based TLS handshake, not identity.
+  openssl dhparam -dsaparam -out /etc/openvpn/server/dh.pem 2048
+
+  local mgmt_port=7505
+  cat > /etc/openvpn/server/server.conf <<EOF
+port ${listen_port}
+proto ${proto}
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh dh.pem
+tls-crypt tls-crypt.key
+topology subnet
+server 10.77.0.0 255.255.255.0
+client-config-dir /etc/openvpn/ccd
+keepalive 10 60
+cipher AES-256-GCM
+persist-key
+persist-tun
+management 127.0.0.1 ${mgmt_port}
+status /var/log/openvpn-status.log
+verb 3
+EOF
+
+  systemctl enable --now openvpn-server@server
+  systemctl restart openvpn-server@server
+
+  cat <<EOF
+
+OpenVPN is running on port $listen_port/$proto. The agent's management
+interface / ccd settings default to 127.0.0.1:${mgmt_port} and
+/etc/openvpn/ccd, matching this config -- no extra agentd flags needed
+unless you changed those defaults above.
+
+EOF
+}
+
 action_update_agent() {
   require_root
   detect_os
@@ -216,16 +321,17 @@ action_engines_agent() {
 
   1) Install/reconfigure Xray (VLESS+REALITY)
   2) Install/reconfigure WireGuard
-  3) Back
+  3) Install/reconfigure OpenVPN
+  4) Back
 
 EOF
-  read -r -p "Choose [1-3]: " choice
+  read -r -p "Choose [1-4]: " choice
   case "$choice" in
     1) install_xray ;;
     2) install_wireguard ;;
+    3) install_openvpn ;;
     *) return ;;
   esac
-  echo "OpenVPN engine management lands in M8."
 }
 
 action_uninstall_agent() {
