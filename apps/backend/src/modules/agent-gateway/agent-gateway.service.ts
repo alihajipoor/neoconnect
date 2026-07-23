@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { forwardRef, Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { existsSync, readFileSync } from "node:fs";
 import * as grpc from "@grpc/grpc-js";
@@ -6,6 +6,7 @@ import * as protoLoader from "@grpc/proto-loader";
 import { AgentCommandType } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
+import { UsageService } from "../usage/usage.service";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
 import { verifyEd25519 } from "./ed25519";
@@ -39,6 +40,8 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     private readonly nodesService: NodesService,
     private readonly registry: AgentConnectionRegistry,
     private readonly config: ConfigService,
+    @Inject(forwardRef(() => UsageService))
+    private readonly usageService: UsageService,
   ) {}
 
   onModuleInit() {
@@ -155,9 +158,14 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
             await this.nodesService.touchHeartbeat(nodeId);
           } else if (msg.payload === "commandAck") {
             await this.handleCommandAck(msg.commandAck!);
+          } else if (msg.payload === "statsBatch") {
+            if (!nodeId) {
+              call.destroy(new Error("statsBatch received before a valid Hello"));
+              return;
+            }
+            await this.usageService.recordDeltas(nodeId, msg.statsBatch?.deltas ?? []);
           }
-          // statsBatch / stateSnapshot: no handling yet -- usage
-          // accounting (M6) and full reconciliation are later work.
+          // stateSnapshot: no handling yet -- full reconciliation is later work.
         } catch (err) {
           this.logger.warn(`AgentSync stream error: ${(err as Error).message}`);
           call.destroy(err as Error);

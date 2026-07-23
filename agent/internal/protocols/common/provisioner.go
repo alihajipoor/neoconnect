@@ -16,8 +16,13 @@ type ProtocolUser struct {
 
 // UsageDelta is bytes transferred since the last successful report for a
 // given user, ready to be batched into a StatsBatch to the control plane.
+// Protocol is left blank by provisioners themselves -- the dispatcher
+// fills it in from the registry key it polled to get these deltas, since
+// a provisioner already knows its own users but has no reason to know
+// the Protocol enum string the control plane uses for them.
 type UsageDelta struct {
 	ExternalUserID string
+	Protocol       string
 	BytesUp        uint64
 	BytesDown      uint64
 }

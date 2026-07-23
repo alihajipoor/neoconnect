@@ -45,6 +45,30 @@ func (d *Dispatcher) RegisterRelay(p *relay.Provisioner) {
 	d.relayProvisioner = p
 }
 
+// CollectStats polls every registered protocol's provisioner for usage
+// deltas since the last poll, tagging each with the protocol it came
+// from (provisioners don't know their own Protocol enum string -- see
+// common.UsageDelta). One protocol erroring doesn't stop the others from
+// reporting; errors are logged by the caller, not returned, so a
+// transient StatsSince failure on one engine never blocks the whole
+// StatsBatch.
+func (d *Dispatcher) CollectStats(ctx context.Context) ([]common.UsageDelta, []error) {
+	var deltas []common.UsageDelta
+	var errs []error
+	for protocol, provisioner := range d.provisioners {
+		protoDeltas, err := provisioner.StatsSince(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s StatsSince: %w", protocol, err))
+			continue
+		}
+		for i := range protoDeltas {
+			protoDeltas[i].Protocol = protocol
+		}
+		deltas = append(deltas, protoDeltas...)
+	}
+	return deltas, errs
+}
+
 // Execute runs the given command against the right provisioner and
 // returns the outcome for a CommandAck. Never returns a Go error itself --
 // every failure mode (bad payload, unknown protocol, provisioner error)

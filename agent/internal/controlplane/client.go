@@ -26,6 +26,7 @@ import (
 
 const (
 	heartbeatInterval = 20 * time.Second
+	statsInterval     = 30 * time.Second
 	initialBackoff    = time.Second
 	maxBackoff        = 30 * time.Second
 )
@@ -123,8 +124,9 @@ func runStream(
 	}
 	log.Printf("connected to control plane, node %s authenticated", nodeID)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go func() { errCh <- heartbeatLoop(streamCtx, stream) }()
+	go func() { errCh <- statsLoop(streamCtx, stream, dispatcher) }()
 	go func() { errCh <- receiveLoop(streamCtx, stream, dispatcher) }()
 
 	err = <-errCh
@@ -167,6 +169,48 @@ func heartbeatLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient) 
 				Payload: &pb.AgentMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}},
 			}); err != nil {
 				return fmt.Errorf("send heartbeat: %w", err)
+			}
+		}
+	}
+}
+
+// statsLoop polls every registered protocol engine's own counters
+// (Xray StatsService, `wg show transfer`, ...) and reports deltas since
+// the last poll. Skips sending an empty batch -- most polls on a quiet
+// node have nothing to report, no reason to put an empty message on the
+// wire every 30s. A StatsSince error on one protocol is logged and
+// otherwise ignored: a blip in one engine's counters must not stop
+// heartbeats or command handling on the same stream.
+func statsLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, dispatcher *dispatch.Dispatcher) error {
+	ticker := time.NewTicker(statsInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			deltas, errs := dispatcher.CollectStats(ctx)
+			for _, err := range errs {
+				log.Printf("stats collection error: %v", err)
+			}
+			if len(deltas) == 0 {
+				continue
+			}
+
+			pbDeltas := make([]*pb.UsageDelta, len(deltas))
+			for i, d := range deltas {
+				pbDeltas[i] = &pb.UsageDelta{
+					ExternalUserId: d.ExternalUserID,
+					Protocol:       d.Protocol,
+					BytesUp:        d.BytesUp,
+					BytesDown:      d.BytesDown,
+				}
+			}
+			if err := stream.Send(&pb.AgentMessage{
+				Payload: &pb.AgentMessage_StatsBatch{StatsBatch: &pb.StatsBatch{Deltas: pbDeltas}},
+			}); err != nil {
+				return fmt.Errorf("send stats batch: %w", err)
 			}
 		}
 	}

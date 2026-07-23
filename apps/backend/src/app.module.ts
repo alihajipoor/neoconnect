@@ -14,6 +14,8 @@ import { SubscriptionsModule } from "./modules/subscriptions/subscriptions.modul
 import { ProtocolConfigsModule } from "./modules/protocol-configs/protocol-configs.module";
 import { ProtocolUsersModule } from "./modules/protocol-users/protocol-users.module";
 import { RoutesModule } from "./modules/routes/routes.module";
+import { UsageModule } from "./modules/usage/usage.module";
+import { JobsModule } from "./modules/jobs/jobs.module";
 
 @Module({
   imports: [
@@ -34,6 +36,8 @@ import { RoutesModule } from "./modules/routes/routes.module";
     ProtocolConfigsModule,
     ProtocolUsersModule,
     RoutesModule,
+    UsageModule,
+    JobsModule,
   ],
 })
 export class AppModule {}
