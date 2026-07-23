@@ -1,0 +1,92 @@
+import { Injectable } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { createHmac } from "node:crypto";
+
+const NOWPAYMENTS_API_BASE = "https://api.nowpayments.io/v1";
+
+export interface NowPaymentsPayment {
+  paymentId: string;
+  payAddress: string;
+  payAmount: number;
+  payCurrency: string;
+}
+
+@Injectable()
+export class NowPaymentsProvider {
+  constructor(private readonly config: ConfigService) {}
+
+  private requireApiKey(): string {
+    const apiKey = this.config.get<string>("billing.nowpaymentsApiKey");
+    if (!apiKey) throw new Error("NOWPAYMENTS_API_KEY is not configured");
+    return apiKey;
+  }
+
+  /** Creates a crypto payment (USDT/TRC20) via NowPayments' API -- a
+   * pay-to address and amount the app/website can render directly (QR
+   * code, copy button), not a hosted invoice page redirect. Iranian
+   * customers who can't use international cards are the reason this
+   * provider exists at all -- see project scope notes. */
+  async createPayment(amountUsd: number, orderId: string): Promise<NowPaymentsPayment> {
+    const res = await fetch(`${NOWPAYMENTS_API_BASE}/payment`, {
+      method: "POST",
+      headers: { "x-api-key": this.requireApiKey(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        price_amount: amountUsd,
+        price_currency: "usd",
+        pay_currency: "usdttrc20",
+        order_id: orderId,
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`NowPayments createPayment failed: ${res.status} ${await res.text()}`);
+    }
+    const body = (await res.json()) as {
+      payment_id: number | string;
+      pay_address: string;
+      pay_amount: number;
+      pay_currency: string;
+    };
+    return {
+      paymentId: String(body.payment_id),
+      payAddress: body.pay_address,
+      payAmount: body.pay_amount,
+      payCurrency: body.pay_currency,
+    };
+  }
+
+  async getPaymentStatus(paymentId: string): Promise<{ paymentStatus: string }> {
+    const res = await fetch(`${NOWPAYMENTS_API_BASE}/payment/${paymentId}`, {
+      headers: { "x-api-key": this.requireApiKey() },
+    });
+    if (!res.ok) {
+      throw new Error(`NowPayments getPaymentStatus failed: ${res.status} ${await res.text()}`);
+    }
+    const body = (await res.json()) as { payment_status: string };
+    return { paymentStatus: body.payment_status };
+  }
+
+  /** NowPayments signs IPN callbacks as HMAC-SHA512 over the JSON body
+   * with keys sorted alphabetically at every nesting level -- computed
+   * from the parsed payload, unlike Stripe's raw-byte signature, since
+   * that's what NowPayments' own IPN spec defines. */
+  verifyIpnSignature(body: unknown, signature: string): boolean {
+    const ipnSecret = this.config.get<string>("billing.nowpaymentsIpnSecret");
+    if (!ipnSecret) throw new Error("NOWPAYMENTS_IPN_SECRET is not configured");
+    const sorted = sortKeysDeep(body);
+    const expected = createHmac("sha512", ipnSecret).update(JSON.stringify(sorted)).digest("hex");
+    return expected === signature;
+  }
+}
+
+function sortKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (value !== null && typeof value === "object") {
+    return Object.keys(value)
+      .sort()
+      .reduce<Record<string, unknown>>((acc, key) => {
+        acc[key] = sortKeysDeep((value as Record<string, unknown>)[key]);
+        return acc;
+      }, {});
+  }
+  return value;
+}
