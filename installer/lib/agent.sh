@@ -4,22 +4,15 @@
 # engines as systemd units, and enrolls with the control-plane panel.
 set -euo pipefail
 
-AGENT_RELEASE_URL_BASE="${AGENT_RELEASE_URL_BASE:-}"
+# Defaults to GitHub's "latest release" asset URLs (see
+# .github/workflows/release-agent.yml, which publishes agentd-linux-amd64/
+# arm64 + sha256sums.txt on every v* tag) -- always resolves to whatever
+# was most recently released, no version tracking needed. Override for a
+# self-hosted/custom build, e.g.:
+#   AGENT_RELEASE_URL_BASE=https://example.com/releases/v0.1.0 sudo -E ./install.sh
+AGENT_RELEASE_URL_BASE="${AGENT_RELEASE_URL_BASE:-https://github.com/alihajipoor/neoconnect/releases/latest/download}"
 
 fetch_agent_binary() {
-  if [[ -z "$AGENT_RELEASE_URL_BASE" ]]; then
-    cat >&2 <<'EOF'
-ERROR: no agent release available yet.
-
-The agent binary release pipeline (signed builds + checksums for
-linux/amd64 and linux/arm64) is built in Milestone M10. Until then, set
-AGENT_RELEASE_URL_BASE to a build you've published yourself, e.g.:
-
-  AGENT_RELEASE_URL_BASE=https://example.com/releases/v0.1.0 sudo -E ./install.sh
-EOF
-    exit 1
-  fi
-
   local url="$AGENT_RELEASE_URL_BASE/agentd-linux-$AGENT_ARCH"
   local sums_url="$AGENT_RELEASE_URL_BASE/sha256sums.txt"
 

@@ -1,0 +1,43 @@
+name: Release Agent
+
+# Builds and publishes the agentd binary (linux/amd64 + linux/arm64) plus
+# a checksums file whenever a v* tag is pushed. This is what
+# installer/lib/agent.sh's fetch_agent_binary actually downloads and
+# verifies -- its checksum verification has existed since M2 with
+# nothing real to check against until this workflow.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: agent/go.sum
+
+      - name: Build binaries
+        working-directory: agent
+        run: |
+          make build-linux-amd64
+          make build-linux-arm64
+
+      - name: Generate checksums
+        working-directory: agent/bin
+        run: sha256sum agentd-linux-amd64 agentd-linux-arm64 > sha256sums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            agent/bin/agentd-linux-amd64
+            agent/bin/agentd-linux-arm64
+            agent/bin/sha256sums.txt
+          generate_release_notes: true
