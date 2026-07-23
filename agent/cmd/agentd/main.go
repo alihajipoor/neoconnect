@@ -16,6 +16,7 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane"
 	"github.com/neoxify/neoxify-hub/agent/internal/dispatch"
 	"github.com/neoxify/neoxify-hub/agent/internal/enroll"
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/openvpn"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/wireguard"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
 	"github.com/neoxify/neoxify-hub/agent/internal/relay"
@@ -32,6 +33,8 @@ func main() {
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
 	relayTunInboundTag := flag.String("relay-tun-inbound-tag", "relay-tun-in", "tag of the dormant tun inbound in a relay node's Xray config (see installer/assets/xray-relay-config.json.template)")
 	relayTunInterface := flag.String("relay-tun-interface", "relay-tun", "OS network interface name of that same tun inbound, used for ip route/rule when bridging WireGuard/OpenVPN entries into a Route's exit outbound")
+	openvpnMgmtAddr := flag.String("openvpn-mgmt-addr", "127.0.0.1:7505", "OpenVPN server's local Management Interface address (see installer/lib/agent.sh's install_openvpn)")
+	openvpnCcdDir := flag.String("openvpn-ccd-dir", "/etc/openvpn/ccd", "OpenVPN client-config-dir this node's server is configured with")
 	flag.Parse()
 
 	if *enrollInit {
@@ -56,6 +59,7 @@ func main() {
 	dispatcher := dispatch.New()
 	dispatcher.Register("XRAY_VLESS_REALITY", xrayProvisioner)
 	dispatcher.Register("WIREGUARD", wireguard.New(*wgInterface))
+	dispatcher.Register("OPENVPN", openvpn.New(*openvpnMgmtAddr, *openvpnCcdDir))
 	// Every node's Xray process can be a relay's exit fabric regardless
 	// of which protocols it terminates -- CONFIGURE_ROUTE/REMOVE_ROUTE
 	// are simply no-ops in practice on nodes that never receive them.

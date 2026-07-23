@@ -1,6 +1,7 @@
 import { BadRequestException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { Protocol } from "@prisma/client";
+import { signCert } from "../protocol-configs/openvpn-pki";
 import { generateWireGuardKeypair } from "./wireguard-keys";
 import { allocateWireGuardAddress } from "./wireguard-subnet";
 
@@ -19,6 +20,24 @@ function isWireGuardPublicParams(value: unknown): value is WireGuardPublicParams
     typeof v.serverPublicKey === "string" &&
     typeof v.endpoint === "string" &&
     typeof v.subnetCidr === "string"
+  );
+}
+
+interface OpenVpnPublicParams {
+  caCertPem: string;
+  caKeyPem: string;
+  endpoint: string;
+  proto?: string;
+}
+
+function isOpenVpnPublicParams(value: unknown): value is OpenVpnPublicParams {
+  const v = value as Record<string, unknown> | null;
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof v.caCertPem === "string" &&
+    typeof v.caKeyPem === "string" &&
+    typeof v.endpoint === "string"
   );
 }
 
@@ -65,6 +84,32 @@ export function generateCredentials(
           allowedIPs: "0.0.0.0/0, ::/0",
           serverPublicKey,
           endpoint,
+        },
+      };
+    }
+    case Protocol.OPENVPN: {
+      if (!isOpenVpnPublicParams(protocolConfig.publicParamsJson)) {
+        throw new BadRequestException(
+          "This node's OpenVPN ProtocolConfig is missing caCertPem/caKeyPem/endpoint in publicParamsJson",
+        );
+      }
+      const { caCertPem, caKeyPem, endpoint, proto } = protocolConfig.publicParamsJson;
+      // The CN doubles as this user's file name in the node's
+      // client-config-dir (see agent/internal/protocols/openvpn) -- a
+      // fresh cert is signed per user rather than sharing one, unlike
+      // Xray/WireGuard's single-server-identity model, since OpenVPN's
+      // client auth is the cert itself.
+      const commonName = randomUUID();
+      const { certPem, keyPem } = signCert({ caCertPem, caKeyPem }, commonName, false);
+      return {
+        externalUserId: commonName,
+        credentials: {
+          certPem,
+          keyPem,
+          caCertPem,
+          commonName,
+          endpoint,
+          proto: proto ?? "udp",
         },
       };
     }
