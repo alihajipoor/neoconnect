@@ -19,6 +19,9 @@ import { RoutesModule } from "./modules/routes/routes.module";
 import { UsageModule } from "./modules/usage/usage.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { BillingModule } from "./modules/billing/billing.module";
+import { CustomerAuthModule } from "./modules/customer-auth/customer-auth.module";
+import { CustomerModule } from "./modules/customer/customer.module";
+import { FreeTrialSettingsModule } from "./modules/free-trial-settings/free-trial-settings.module";
 
 @Module({
   imports: [
@@ -49,6 +52,9 @@ import { BillingModule } from "./modules/billing/billing.module";
     UsageModule,
     JobsModule,
     BillingModule,
+    CustomerAuthModule,
+    CustomerModule,
+    FreeTrialSettingsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

@@ -36,6 +36,24 @@ export const ALL_PROTOCOLS: Protocol[] = [
   "OPENVPN",
 ];
 
+export interface Route {
+  id: string;
+  name: string;
+  entryProtocolConfigId: string;
+  exitProtocolConfigId: string | null;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FreeTrialSettings {
+  id: string;
+  enabled: boolean;
+  trialPlanId: string | null;
+  trialRouteId: string | null;
+  updatedAt: string;
+}
+
 export interface SubscriptionPlan {
   id: string;
   name: string;

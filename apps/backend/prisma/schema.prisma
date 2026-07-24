@@ -130,6 +130,10 @@ model Customer {
   telegramId   String?
   referralCode String?        @unique
   status       CustomerStatus @default(ACTIVE)
+  // Refresh-token revocation counter, same purpose/pattern as
+  // AdminUser.tokenVersion -- bumping it invalidates every outstanding
+  // customer refresh token at once (logout-all-sessions).
+  tokenVersion Int            @default(0)
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
@@ -155,7 +159,8 @@ model SubscriptionPlan {
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
-  subscriptions Subscription[]
+  subscriptions      Subscription[]
+  freeTrialSettings  FreeTrialSettings[]
 
   @@map("subscription_plans")
 }
@@ -253,6 +258,7 @@ model Route {
   entryProtocolConfig ProtocolConfig  @relation("RouteEntry", fields: [entryProtocolConfigId], references: [id])
   exitProtocolConfig  ProtocolConfig? @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
   protocolUsers       ProtocolUser[]
+  freeTrialSettings   FreeTrialSettings[]
 
   @@map("routes")
 }
@@ -390,4 +396,26 @@ model AgentCommand {
 
   @@index([nodeId, status])
   @@map("agent_commands")
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+// Lazily-initialized singleton (the service does findFirst(), creating one
+// default row on first read if none exists) rather than a DB-level
+// singleton constraint -- there's exactly one of these expected, but
+// nothing else in this schema enforces true singletons either, so this
+// stays consistent with the rest of the codebase's pragmatic style.
+model FreeTrialSettings {
+  id           String   @id @default(uuid())
+  enabled      Boolean  @default(false)
+  trialPlanId  String?
+  trialRouteId String?
+  updatedAt    DateTime @updatedAt
+
+  trialPlan  SubscriptionPlan? @relation(fields: [trialPlanId], references: [id])
+  trialRoute Route?            @relation(fields: [trialRouteId], references: [id])
+
+  @@map("free_trial_settings")
 }
