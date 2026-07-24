@@ -4,52 +4,24 @@
 # engines as systemd units, and enrolls with the control-plane panel.
 set -euo pipefail
 
-# The repo is private (see .github/workflows/release-agent.yml, which
-# publishes agentd-linux-amd64/arm64 + sha256sums.txt on every v* tag),
-# so a plain curl to GitHub's normal release-asset URLs 404s for anyone
-# not logged into a browser session -- confirmed directly against a real
-# private release, not assumed. Downloading requires GitHub's REST API
-# asset endpoint (which 302-redirects to a short-lived pre-signed URL)
-# with a bearer token, not the friendly /releases/latest/download/ URL.
-AGENT_RELEASE_REPO="${AGENT_RELEASE_REPO:-alihajipoor/neoconnect}"
-AGENT_RELEASE_GITHUB_TOKEN="${AGENT_RELEASE_GITHUB_TOKEN:-}"
+# The repo is public, so GitHub's friendly "latest release" asset URLs
+# (see .github/workflows/release-agent.yml, which publishes
+# agentd-linux-amd64/arm64 + sha256sums.txt on every v* tag) work with a
+# plain unauthenticated curl -- confirmed directly against the real
+# release. Override for a self-hosted/custom build, e.g.:
+#   AGENT_RELEASE_URL_BASE=https://example.com/releases/v0.1.0 sudo -E ./install.sh
+AGENT_RELEASE_URL_BASE="${AGENT_RELEASE_URL_BASE:-https://github.com/alihajipoor/neoconnect/releases/latest/download}"
 
 fetch_agent_binary() {
-  if [[ -z "$AGENT_RELEASE_GITHUB_TOKEN" ]]; then
-    cat <<'EOF'
-
-This repo is private, so downloading the agent release needs a GitHub
-token with read access to it (Settings -> Developer settings ->
-Fine-grained tokens -> this repo -> Repository permissions -> Contents:
-Read-only is enough). Set AGENT_RELEASE_GITHUB_TOKEN to skip this
-prompt on future runs/automation.
-
-EOF
-    read -r -p "GitHub token: " AGENT_RELEASE_GITHUB_TOKEN
-  fi
-
-  echo "Looking up the latest agent release..."
-  local release_json asset_name asset_id sums_id
-  release_json="$(curl -fsSL -H "Authorization: Bearer $AGENT_RELEASE_GITHUB_TOKEN" \
-    "https://api.github.com/repos/$AGENT_RELEASE_REPO/releases/latest")"
-
-  asset_name="agentd-linux-$AGENT_ARCH"
-  asset_id="$(echo "$release_json" | jq -r --arg name "$asset_name" '.assets[]? | select(.name == $name) | .id')"
-  sums_id="$(echo "$release_json" | jq -r '.assets[]? | select(.name == "sha256sums.txt") | .id')"
-
-  if [[ -z "$asset_id" || "$asset_id" == "null" ]]; then
-    echo "ERROR: no '$asset_name' asset found on the latest release of $AGENT_RELEASE_REPO -- check the token has Contents: Read-only access and that a release has actually been published." >&2
-    exit 1
-  fi
+  local asset_name="agentd-linux-$AGENT_ARCH"
 
   echo "Downloading agent binary for linux/$AGENT_ARCH..."
   # Saved under the same name sha256sums.txt references (not a generic
   # "agentd") -- sha256sum -c verifies by matching the exact filename in
-  # each checksum line against a file of that name in the cwd.
-  curl -fsSL -H "Authorization: Bearer $AGENT_RELEASE_GITHUB_TOKEN" -H "Accept: application/octet-stream" \
-    "https://api.github.com/repos/$AGENT_RELEASE_REPO/releases/assets/$asset_id" -o "/tmp/$asset_name"
-  curl -fsSL -H "Authorization: Bearer $AGENT_RELEASE_GITHUB_TOKEN" -H "Accept: application/octet-stream" \
-    "https://api.github.com/repos/$AGENT_RELEASE_REPO/releases/assets/$sums_id" -o /tmp/sha256sums.txt
+  # each checksum line against a file of that name in the cwd. (This
+  # tripped up an earlier version of this function -- see git history.)
+  curl -fsSL "$AGENT_RELEASE_URL_BASE/$asset_name" -o "/tmp/$asset_name"
+  curl -fsSL "$AGENT_RELEASE_URL_BASE/sha256sums.txt" -o /tmp/sha256sums.txt
 
   if ! (cd /tmp && grep "$asset_name" sha256sums.txt | sha256sum -c -); then
     echo "ERROR: checksum verification failed, aborting install." >&2
