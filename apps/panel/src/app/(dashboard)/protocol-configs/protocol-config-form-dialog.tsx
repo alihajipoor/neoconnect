@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { createProtocolConfig } from "./actions";
 import type { Node, Protocol } from "@/lib/types";
 import { ALL_PROTOCOLS } from "@/lib/types";
-import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
+import { DEFAULT_PROTOCOL_PORT, PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -25,6 +25,8 @@ import {
 export function ProtocolConfigFormDialog({ nodes, trigger }: { nodes: Node[]; trigger: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [protocol, setProtocol] = useState<Protocol>("XRAY_VLESS_REALITY");
+  const [listenPort, setListenPort] = useState(DEFAULT_PROTOCOL_PORT.XRAY_VLESS_REALITY);
 
   function handleSubmit(formData: FormData) {
     const rawParams = String(formData.get("publicParamsJson") ?? "").trim();
@@ -81,14 +83,22 @@ export function ProtocolConfigFormDialog({ nodes, trigger }: { nodes: Node[]; tr
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="protocol">Protocol</Label>
-            <Select name="protocol" defaultValue="XRAY_VLESS_REALITY">
+            <Select
+              name="protocol"
+              value={protocol}
+              onValueChange={(value) => {
+                const nextProtocol = value as Protocol;
+                setProtocol(nextProtocol);
+                setListenPort(DEFAULT_PROTOCOL_PORT[nextProtocol]);
+              }}
+            >
               <SelectTrigger id="protocol">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {ALL_PROTOCOLS.map((protocol) => (
-                  <SelectItem key={protocol} value={protocol}>
-                    {PROTOCOL_LABELS[protocol]}
+                {ALL_PROTOCOLS.map((p) => (
+                  <SelectItem key={p} value={p}>
+                    {PROTOCOL_LABELS[p]}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -96,7 +106,20 @@ export function ProtocolConfigFormDialog({ nodes, trigger }: { nodes: Node[]; tr
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="listenPort">Listen port</Label>
-            <Input id="listenPort" name="listenPort" type="number" min={1} max={65535} defaultValue={443} required />
+            <Input
+              id="listenPort"
+              name="listenPort"
+              type="number"
+              min={1}
+              max={65535}
+              value={listenPort}
+              onChange={(e) => setListenPort(Number(e.target.value))}
+              required
+            />
+            <p className="text-xs text-muted-foreground">
+              Auto-fills to {PROTOCOL_LABELS[protocol]}&apos;s conventional default when you change
+              protocol -- edit freely if this node uses a different port.
+            </p>
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="publicParamsJson">Public params (JSON)</Label>
