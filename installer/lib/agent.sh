@@ -400,6 +400,16 @@ action_reenroll_agent() {
 
 action_engines_agent() {
   require_root
+  # install_openvpn needs panel_url/node_id (see action_install_agent,
+  # where they're normally set) -- this menu entry runs standalone,
+  # after enrollment already happened in an earlier run, so read them
+  # back from the agent's own persisted config instead. Xray/WireGuard
+  # don't need either (fully node-local), so this was never hit until
+  # OpenVPN's install became self-service.
+  local panel_url node_id
+  panel_url="$(jq -r '.panelUrl' /etc/neoxify/agent.json)"
+  node_id="$(jq -r '.nodeId' /etc/neoxify/agent.json)"
+
   cat <<'EOF'
 
   1) Install/reconfigure Xray (VLESS+REALITY)
