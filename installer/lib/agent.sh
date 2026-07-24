@@ -46,7 +46,10 @@ node's name/role/region, and copy the enrollment token it gives you
 (shown once). That's what this step needs below.
 
 EOF
-  read -r -p "Panel URL (e.g. https://connect.example.com): " panel_url
+  # Must include /api -- nginx only proxies the backend under that
+  # prefix (see installer/assets/nginx-panel.conf.template); the bare
+  # domain hits the Next.js panel itself and 404s.
+  read -r -p "Panel URL, including /api (e.g. https://connect.example.com/api): " panel_url
   read -r -p "Enrollment token: " enroll_token
 
   echo "Claiming enrollment token..."

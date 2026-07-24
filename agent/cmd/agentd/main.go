@@ -25,7 +25,7 @@ import (
 func main() {
 	enrollInit := flag.Bool("enroll-init", false, "trade a one-time enrollment token for this node's identity, then exit")
 	token := flag.String("token", "", "enrollment token issued by an admin in the panel (required with --enroll-init)")
-	panelURL := flag.String("panel-url", "", "control-plane base URL, e.g. https://connect.example.com (required with --enroll-init)")
+	panelURL := flag.String("panel-url", "", "control-plane base URL INCLUDING /api -- nginx only proxies the backend under that prefix, e.g. https://connect.example.com/api (required with --enroll-init)")
 	grpcTarget := flag.String("grpc-target", "", "override the gRPC host:port (default: <panel-url host>:50051)")
 	configPath := flag.String("config", config.DefaultPath, "path to the agent's persisted config")
 	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
