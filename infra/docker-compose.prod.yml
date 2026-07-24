@@ -52,6 +52,10 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      CUSTOMER_JWT_ACCESS_SECRET: ${CUSTOMER_JWT_ACCESS_SECRET:?CUSTOMER_JWT_ACCESS_SECRET is required}
+      CUSTOMER_JWT_REFRESH_SECRET: ${CUSTOMER_JWT_REFRESH_SECRET:?CUSTOMER_JWT_REFRESH_SECRET is required}
+      CUSTOMER_JWT_ACCESS_TTL: ${CUSTOMER_JWT_ACCESS_TTL:-15m}
+      CUSTOMER_JWT_REFRESH_TTL: ${CUSTOMER_JWT_REFRESH_TTL:-7d}
       # Agent gRPC gateway TLS: uses a copy of the same Let's Encrypt cert
       # nginx manages for the panel domain, not the original -- certbot
       # locks privkey.pem to root-only (0600), unreadable by this

@@ -25,6 +25,17 @@ export class ProtocolUsersService {
     return withDecryptedCredentials(user);
   }
 
+  /** Customer-facing: only this customer's own credentials, resolved via
+   * subscription ownership -- used by CustomerController, never exposed
+   * via the admin-only routes above (which return everyone's). */
+  async listByCustomer(customerId: string) {
+    const users = await this.prisma.protocolUser.findMany({
+      where: { subscription: { customerId } },
+      orderBy: { createdAt: "desc" },
+    });
+    return users.map(withDecryptedCredentials);
+  }
+
   /** Internal callers (setEnabled, remove) need the raw encrypted row,
    * not the decrypted API-response shape get() returns. */
   private async getRaw(id: string) {

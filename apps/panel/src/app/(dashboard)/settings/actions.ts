@@ -30,3 +30,16 @@ export async function disableMfaAction(password: string): Promise<MutationResult
   if (result.ok) revalidatePath("/settings");
   return result;
 }
+
+export async function updateFreeTrialSettingsAction(input: {
+  enabled: boolean;
+  trialPlanId?: string;
+  trialRouteId?: string;
+}): Promise<MutationResult<void>> {
+  const result = await apiMutate<void>("/free-trial-settings", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  if (result.ok) revalidatePath("/settings");
+  return result;
+}

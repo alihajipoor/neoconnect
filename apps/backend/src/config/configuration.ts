@@ -10,6 +10,17 @@ export default () => ({
     accessTtl: process.env.JWT_ACCESS_TTL ?? "15m",
     refreshTtl: process.env.JWT_REFRESH_TTL ?? "7d",
   },
+  // Deliberately separate secrets from `jwt` above, not just a different
+  // payload shape on the same secret (unlike the MFA challenge token) --
+  // customers and admins are different trust domains, and a leaked
+  // customer secret shouldn't have any bearing on admin session security
+  // or vice versa. See modules/customer-auth.
+  customerJwt: {
+    accessSecret: process.env.CUSTOMER_JWT_ACCESS_SECRET,
+    refreshSecret: process.env.CUSTOMER_JWT_REFRESH_SECRET,
+    accessTtl: process.env.CUSTOMER_JWT_ACCESS_TTL ?? "15m",
+    refreshTtl: process.env.CUSTOMER_JWT_REFRESH_TTL ?? "7d",
+  },
   agentGateway: {
     grpcPort: parseInt(process.env.AGENT_GRPC_PORT ?? "50051", 10),
     // When both are set (production, mounted from the host's certbot

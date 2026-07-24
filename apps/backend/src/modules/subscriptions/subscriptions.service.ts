@@ -10,6 +10,15 @@ export class SubscriptionsService {
     return this.prisma.subscription.findMany({ orderBy: { createdAt: "desc" } });
   }
 
+  /** Customer-facing: only this customer's own subscriptions -- used by
+   * CustomerController, never exposed via the admin-only routes above. */
+  listByCustomer(customerId: string) {
+    return this.prisma.subscription.findMany({
+      where: { customerId },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
   async get(id: string) {
     const subscription = await this.prisma.subscription.findUnique({ where: { id } });
     if (!subscription) {
