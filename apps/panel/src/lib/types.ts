@@ -91,6 +91,7 @@ export interface SubscriptionPlan {
   maxConcurrentConnections: number | null;
   protocolsAllowed: Protocol[];
   isActive: boolean;
+  defaultRouteId: string | null;
   createdAt: string;
   updatedAt: string;
 }

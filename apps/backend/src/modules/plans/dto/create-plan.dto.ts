@@ -1,4 +1,4 @@
-import { ArrayMinSize, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsPositive, IsString, Min } from "class-validator";
+import { ArrayMinSize, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Min } from "class-validator";
 import { Protocol } from "@prisma/client";
 
 export class CreatePlanDto {
@@ -30,4 +30,12 @@ export class CreatePlanDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  /** Which Route a customer purchasing this plan gets provisioned on
+   * once payment clears -- see BillingService.confirmPayment(). Same v1
+   * simplification as FreeTrialSettings.trialRouteId (one admin-picked
+   * default, no per-purchase server picker yet). */
+  @IsOptional()
+  @IsUUID()
+  defaultRouteId?: string;
 }

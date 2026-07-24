@@ -12,6 +12,7 @@ export interface PlanInput {
   maxConcurrentConnections?: number;
   protocolsAllowed: Protocol[];
   isActive?: boolean;
+  defaultRouteId?: string;
 }
 
 export async function createPlan(input: PlanInput): Promise<MutationResult<SubscriptionPlan>> {

@@ -110,12 +110,22 @@ export class BillingService {
   }
 
   /** Extends the subscription from its own current expiry (not "now"),
-   * so renewing before expiry doesn't lose already-paid-for time, resets
-   * usage for the new period, and re-enables any ProtocolUsers a prior
-   * quota/expiry suspension had disabled -- the exact reverse of
-   * UsageService.disableProtocolUsers, reusing the same
-   * ProtocolUsersService.setEnabled(true) path M3/M4 already proved
-   * hot-updates a user without touching anyone else on the node. */
+   * so renewing before expiry doesn't lose already-paid-for time, and
+   * resets usage for the new period.
+   *
+   * Then either provisions or re-enables connection credentials,
+   * depending on whether this is the subscription's first confirmed
+   * payment or a renewal:
+   * - **First payment** (no ProtocolUser exists yet -- true for every
+   *   customer-initiated purchase, since `POST /customer/subscriptions`
+   *   only creates the Subscription row, deliberately not a working VPN
+   *   account, until payment actually clears): provisions one now via
+   *   the plan's `defaultRouteId`, the same hot-provisioning path M3/M4
+   *   already proved (`ProtocolUsersService.create()`).
+   * - **Renewal** (a ProtocolUser already exists, possibly `DISABLED` by
+   *   a prior quota/expiry suspension): re-enables it -- the exact
+   *   reverse of `UsageService.disableProtocolUsers`, reusing
+   *   `ProtocolUsersService.setEnabled(true)`. */
   private async renewSubscription(subscriptionId: string) {
     const subscription = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
@@ -136,11 +146,19 @@ export class BillingService {
       },
     });
 
-    const disabledUsers = await this.prisma.protocolUser.findMany({
-      where: { subscriptionId, status: "DISABLED" },
-    });
-    for (const user of disabledUsers) {
-      await this.protocolUsersService.setEnabled(user.id, true);
+    const existingUsers = await this.prisma.protocolUser.findMany({ where: { subscriptionId } });
+    if (existingUsers.length === 0) {
+      if (subscription.plan.defaultRouteId) {
+        await this.protocolUsersService.create({ subscriptionId, routeId: subscription.plan.defaultRouteId });
+      } else {
+        this.logger.warn(
+          `Subscription ${subscriptionId} (plan ${subscription.planId}) had a payment confirmed but the plan has no defaultRouteId configured -- no protocol user was provisioned`,
+        );
+      }
+    } else {
+      for (const user of existingUsers.filter((u) => u.status === "DISABLED")) {
+        await this.protocolUsersService.setEnabled(user.id, true);
+      }
     }
 
     this.logger.log(`Subscription ${subscriptionId} renewed through ${newExpireAt.toISOString()}`);

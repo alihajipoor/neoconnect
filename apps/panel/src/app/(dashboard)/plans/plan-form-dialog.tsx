@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { createPlan, updatePlan } from "./actions";
-import type { Protocol, SubscriptionPlan } from "@/lib/types";
+import type { Protocol, Route, SubscriptionPlan } from "@/lib/types";
 import { ALL_PROTOCOLS } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { formatBytes, parseBytesInput } from "@/lib/utils";
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -20,11 +21,15 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 
+const NO_DEFAULT_ROUTE = "none";
+
 export function PlanFormDialog({
   plan,
+  routes,
   trigger,
 }: {
   plan?: SubscriptionPlan;
+  routes: Route[];
   trigger: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -46,6 +51,7 @@ export function PlanFormDialog({
     }
 
     const maxConn = String(formData.get("maxConcurrentConnections") ?? "").trim();
+    const defaultRouteId = String(formData.get("defaultRouteId") ?? "");
 
     startTransition(async () => {
       const input = {
@@ -56,6 +62,7 @@ export function PlanFormDialog({
         maxConcurrentConnections: maxConn ? Number(maxConn) : undefined,
         protocolsAllowed,
         isActive: formData.get("isActive") === "on",
+        defaultRouteId: defaultRouteId === NO_DEFAULT_ROUTE ? undefined : defaultRouteId,
       };
 
       const result = isEdit ? await updatePlan(plan!.id, input) : await createPlan(input);
@@ -142,6 +149,26 @@ export function PlanFormDialog({
                 </label>
               ))}
             </div>
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="defaultRouteId">Default route (for purchases)</Label>
+            <Select name="defaultRouteId" defaultValue={plan?.defaultRouteId ?? NO_DEFAULT_ROUTE}>
+              <SelectTrigger id="defaultRouteId">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DEFAULT_ROUTE}>None -- purchases won&apos;t get provisioned</SelectItem>
+                {routes.map((route) => (
+                  <SelectItem key={route.id} value={route.id}>
+                    {route.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Which server a customer purchasing this plan gets connection credentials on once payment
+              clears. Required for self-service purchases to actually work.
+            </p>
           </div>
           <label className="flex items-center gap-2 text-sm">
             <Checkbox name="isActive" defaultChecked={plan?.isActive ?? true} />
