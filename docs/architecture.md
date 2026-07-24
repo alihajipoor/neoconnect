@@ -49,6 +49,38 @@ message semantics, and reconciliation-on-reconnect behavior are detailed
 in the project plan and will be expanded here as Milestone M2 implements
 them.
 
+### Agent gRPC gateway TLS
+
+Unlike the panel's HTTP API, the agent's gRPC stream is **not** proxied
+through nginx — it's published directly on its own port (50051 by
+default) with its own TLS termination, since blending it into 443 is
+explicitly deferred (only matters for Iran-relay stealth, see M9).
+`AgentGatewayService` refuses to start this gateway at all in production
+if `AGENT_TLS_CERT_PATH`/`AGENT_TLS_KEY_PATH` are unset or unreadable —
+deliberately, rather than falling back to plaintext — but it also
+deliberately doesn't crash the rest of the backend over it, so a broken
+gateway fails **silently**: the panel's HTTPS keeps working fine, and the
+only visible symptom is every Node staying `PENDING` with
+`lastHeartbeatAt: null` forever.
+
+The cert files live at `/etc/neoxify/certs/{fullchain,privkey}.pem` on
+the panel host — a copy of the same Let's Encrypt cert nginx uses,
+world-readable (`0644`) since certbot's own `privkey.pem` is root-only
+and unreadable by the backend container's non-root user. This copy is
+made by `installer/lib/panel.sh`'s `sync_agent_gateway_certs()`, which
+runs during the original TLS setup, on every certbot renewal (via a
+deploy hook), and — as of 2026-07-24, after this exact failure mode was
+hit live on a real box — on every "Rebuild and restart" (`action_update_panel`)
+too, so a box whose certs go missing for any reason self-heals on the
+next update instead of needing a manual fix.
+
+**To check the connection is actually healthy**: `GET /nodes` (or the
+panel's Nodes page) — look for `status: "ONLINE"` and a real, recently-
+updated `lastHeartbeatAt`. A node stuck `PENDING`/`null` almost always
+means this TLS setup, not the agent process itself (which will show as
+happily "active (running)" in `systemctl status` while endlessly retrying
+a connection that's being refused).
+
 ## Build order
 
 M0 repo scaffold -> M1 backend core (auth+schema+CRUD) -> M2 agent
