@@ -179,9 +179,13 @@ action_install_panel() {
   # Recorded now, not at the end: if anything below fails partway through,
   # a re-run should land in the panel management menu (which can retry
   # the failed step) rather than repeat this entire interactive prompt
-  # sequence and rebuild everything from scratch.
+  # sequence and rebuild everything from scratch. The domain is persisted
+  # too (not just used locally here) -- action_update_panel needs it on
+  # every later "Rebuild and restart" to keep the agent gateway's certs
+  # in sync, see get_panel_domain()/that action below.
   install -d -m 755 /etc/neoxify
   echo "panel" > /etc/neoxify/role
+  echo "$domain" > /etc/neoxify/panel-domain
 
   echo "Building and starting the panel stack (this can take a few minutes on first run)..."
   docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" up -d --build
@@ -206,9 +210,49 @@ action_install_panel() {
   echo "Daily backups are scheduled for 3am via /etc/cron.d/neoxify-backup (see docs/backup-restore.md)."
 }
 
+# Real bug found live (2026-07-24): a box whose original install's TLS
+# step never ran to completion (or whose /etc/neoxify/certs was lost some
+# other way -- disk migration, manual cleanup, anything) had a perfectly
+# healthy panel over HTTPS while the agent gRPC gateway silently refused
+# to start (AgentGatewayService deliberately won't run in plaintext in
+# production) -- every node showed PENDING with lastHeartbeatAt: null
+# forever, no error visible anywhere except the backend's own logs. Since
+# action_update_panel didn't re-run the same sync_agent_gateway_certs()
+# step that only ever happened once, during the original install, this
+# had to be fixed by hand on the live box. Reads the domain back from
+# /etc/neoxify/panel-domain (written by action_install_panel since this
+# fix); falls back to parsing nginx's own config for boxes that predate
+# that file (like the one this bug was actually found on), and persists
+# it there for next time.
+get_panel_domain() {
+  if [[ -f /etc/neoxify/panel-domain ]]; then
+    cat /etc/neoxify/panel-domain
+    return
+  fi
+  # Explicit `|| true`: under `set -o pipefail` (this script's default), a
+  # genuine no-match from grep (exit 1) would otherwise abort the whole
+  # caller (action_update_panel) via `set -e` -- "couldn't find a domain"
+  # must be a normal, handled outcome here, not a fatal error.
+  local domain
+  domain="$( { grep -m1 -oP 'server_name\s+\K[^;]+' /etc/nginx/sites-available/neoxify-panel 2>/dev/null || true; } | awk '{print $1}')"
+  if [[ -n "$domain" ]]; then
+    echo "$domain" > /etc/neoxify/panel-domain
+    echo "$domain"
+  fi
+}
+
 action_update_panel() {
   require_root
   generate_panel_secrets
+
+  local domain
+  domain="$(get_panel_domain)"
+  if [[ -n "$domain" && -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
+    sync_agent_gateway_certs "$domain"
+  else
+    echo "WARNING: couldn't determine this panel's domain (or no Let's Encrypt cert found for it) -- skipping the agent gateway cert re-sync. If Nodes are stuck PENDING with no heartbeat, this is almost certainly why; see \"Agent gRPC gateway TLS\" in docs/architecture.md." >&2
+  fi
+
   echo "Pulling latest source changes is up to you (git pull); rebuilding and restarting containers now..."
   docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" up -d --build
 }
@@ -262,7 +306,7 @@ action_uninstall_panel() {
   docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" down "${down_args[@]}"
   rm -f /etc/nginx/sites-enabled/neoxify-panel /etc/nginx/sites-available/neoxify-panel
   systemctl reload nginx || true
-  rm -f /etc/neoxify/role /etc/cron.d/neoxify-backup
+  rm -f /etc/neoxify/role /etc/neoxify/panel-domain /etc/cron.d/neoxify-backup
   echo "Panel stack stopped. infra/.env, the repo checkout, and /var/backups/neoxify were left in place."
 }
 
