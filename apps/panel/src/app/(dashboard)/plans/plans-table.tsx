@@ -1,7 +1,7 @@
 "use client";
 
 import { MoreHorizontal, Plus } from "lucide-react";
-import type { SubscriptionPlan } from "@/lib/types";
+import type { Route, SubscriptionPlan } from "@/lib/types";
 import { formatBytes } from "@/lib/utils";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { deletePlan } from "./actions";
@@ -17,7 +17,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-export function PlansTable({ plans, canManage }: { plans: SubscriptionPlan[]; canManage: boolean }) {
+export function PlansTable({
+  plans,
+  routes,
+  canManage,
+}: {
+  plans: SubscriptionPlan[];
+  routes: Route[];
+  canManage: boolean;
+}) {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
@@ -27,6 +35,7 @@ export function PlansTable({ plans, canManage }: { plans: SubscriptionPlan[]; ca
         </div>
         {canManage && (
           <PlanFormDialog
+            routes={routes}
             trigger={
               <Button size="sm">
                 <Plus /> New Plan
@@ -87,6 +96,7 @@ export function PlansTable({ plans, canManage }: { plans: SubscriptionPlan[]; ca
                         <DropdownMenuContent align="end">
                           <PlanFormDialog
                             plan={plan}
+                            routes={routes}
                             trigger={
                               <DropdownMenuItem onSelect={(e) => e.preventDefault()}>Edit</DropdownMenuItem>
                             }

@@ -27,13 +27,33 @@ export class ProtocolUsersService {
 
   /** Customer-facing: only this customer's own credentials, resolved via
    * subscription ownership -- used by CustomerController, never exposed
-   * via the admin-only routes above (which return everyone's). */
+   * via the admin-only routes above (which return everyone's).
+   *
+   * Also includes a `connection` field (server host/port + the entry
+   * ProtocolConfig's publicParamsJson) alongside the per-user
+   * `credentials` -- WireGuard/OpenVPN's generated credentials already
+   * embed everything needed to connect (server pubkey/endpoint, or
+   * cert/CA/endpoint), but Xray VLESS+REALITY's per-user credentials are
+   * only `{uuid, flow}`; the REALITY server params (public key, shortId,
+   * serverName, dest) live purely on the ProtocolConfig and were never
+   * returned to a caller before. Uniform across all three protocols on
+   * purpose, so a client doesn't need protocol-specific parsing just to
+   * find the server address -- this is the field a native client needs
+   * to actually build a working local tunnel config. */
   async listByCustomer(customerId: string) {
     const users = await this.prisma.protocolUser.findMany({
       where: { subscription: { customerId } },
       orderBy: { createdAt: "desc" },
+      include: { node: true, protocolConfig: true },
     });
-    return users.map(withDecryptedCredentials);
+    return users.map(({ node, protocolConfig, ...user }) => ({
+      ...withDecryptedCredentials(user),
+      connection: {
+        host: node.publicIp,
+        port: protocolConfig.listenPort,
+        publicParams: protocolConfig.publicParamsJson,
+      },
+    }));
   }
 
   /** Internal callers (setEnabled, remove) need the raw encrypted row,

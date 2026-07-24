@@ -27,6 +27,22 @@ export class SubscriptionsService {
     return subscription;
   }
 
+  /** Customer-facing ownership check -- used before letting a customer
+   * kick off a payment against a subscription (`POST
+   * /customer/billing/payments`), so one customer can't pay off (or
+   * otherwise trigger renewal side effects on) another customer's
+   * subscription by guessing/enumerating IDs. Deliberately throws the
+   * same NotFoundException as a missing ID rather than a
+   * ForbiddenException, so a caller can't distinguish "doesn't exist"
+   * from "exists but isn't yours" by probing IDs. */
+  async getOwned(id: string, customerId: string) {
+    const subscription = await this.get(id);
+    if (subscription.customerId !== customerId) {
+      throw new NotFoundException("Subscription not found");
+    }
+    return subscription;
+  }
+
   async create(dto: CreateSubscriptionDto) {
     const [customer, plan] = await Promise.all([
       this.prisma.customer.findUnique({ where: { id: dto.customerId } }),

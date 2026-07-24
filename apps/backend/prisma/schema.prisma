@@ -156,11 +156,19 @@ model SubscriptionPlan {
   maxConcurrentConnections Int?
   protocolsAllowed         Protocol[]
   isActive                 Boolean  @default(true)
+  // Which Route a customer purchasing this plan gets provisioned on --
+  // same v1 simplification as FreeTrialSettings.trialRouteId (one
+  // admin-configured default, no per-purchase server picker yet). Used
+  // by BillingService.confirmPayment() to provision the first
+  // ProtocolUser once payment actually clears -- see
+  // apps/backend/src/modules/billing/billing.service.ts.
+  defaultRouteId           String?
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
   subscriptions      Subscription[]
   freeTrialSettings  FreeTrialSettings[]
+  defaultRoute       Route?          @relation(fields: [defaultRouteId], references: [id])
 
   @@map("subscription_plans")
 }
@@ -259,6 +267,7 @@ model Route {
   exitProtocolConfig  ProtocolConfig? @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
   protocolUsers       ProtocolUser[]
   freeTrialSettings   FreeTrialSettings[]
+  defaultForPlans     SubscriptionPlan[]
 
   @@map("routes")
 }

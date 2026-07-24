@@ -11,6 +11,16 @@ export class PlansService {
     return this.prisma.subscriptionPlan.findMany({ orderBy: { priceUsd: "asc" } });
   }
 
+  /** Customer-facing: only plans that are actually purchasable right now
+   * -- used by CustomerController, never the admin-only routes above
+   * (which intentionally show inactive plans too, for management). */
+  listActive() {
+    return this.prisma.subscriptionPlan.findMany({
+      where: { isActive: true },
+      orderBy: { priceUsd: "asc" },
+    });
+  }
+
   async get(id: string) {
     const plan = await this.prisma.subscriptionPlan.findUnique({ where: { id } });
     if (!plan) {
@@ -29,6 +39,7 @@ export class PlansService {
         maxConcurrentConnections: dto.maxConcurrentConnections,
         protocolsAllowed: dto.protocolsAllowed,
         isActive: dto.isActive ?? true,
+        defaultRouteId: dto.defaultRouteId,
       },
     });
   }
@@ -45,6 +56,7 @@ export class PlansService {
         maxConcurrentConnections: dto.maxConcurrentConnections,
         protocolsAllowed: dto.protocolsAllowed,
         isActive: dto.isActive,
+        defaultRouteId: dto.defaultRouteId,
       },
     });
   }
