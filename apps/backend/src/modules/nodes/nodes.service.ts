@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AlertingService } from "../alerting/alerting.service";
 import { CreateNodeDto } from "./dto/create-node.dto";
@@ -26,9 +26,42 @@ export class NodesService {
     return this.prisma.node.create({ data: dto });
   }
 
+  /** A bare `prisma.node.delete()` 500s the instant anything still
+   * references this node -- previously unhandled, hit for real while
+   * cleaning up M15 test fixtures (see project memory). Splits the
+   * node's dependents into two kinds: things that represent real,
+   * still-meaningful state (ProtocolConfigs -- registered engines that
+   * might have live customers on them; Subscriptions with this as
+   * their primaryNode) block deletion with a clear, count-based
+   * message rather than silently cascading; things that are just
+   * bookkeeping/history for a node that's being decommissioned
+   * (AgentCommand outbox rows, UsageRecord history, EnrollmentToken
+   * history) are cleared automatically since keeping them around after
+   * the node itself is gone serves no purpose. */
   async remove(id: string) {
     await this.get(id);
-    await this.prisma.node.delete({ where: { id } });
+
+    const [protocolConfigCount, subscriptionCount] = await Promise.all([
+      this.prisma.protocolConfig.count({ where: { nodeId: id } }),
+      this.prisma.subscription.count({ where: { primaryNodeId: id } }),
+    ]);
+    if (protocolConfigCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete this node -- it still has ${protocolConfigCount} protocol config(s). Remove those first.`,
+      );
+    }
+    if (subscriptionCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete this node -- it's still the primary node for ${subscriptionCount} subscription(s).`,
+      );
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.agentCommand.deleteMany({ where: { nodeId: id } }),
+      this.prisma.usageRecord.deleteMany({ where: { nodeId: id } }),
+      this.prisma.enrollmentToken.deleteMany({ where: { nodeId: id } }),
+      this.prisma.node.delete({ where: { id } }),
+    ]);
   }
 
   /** Called by the agent gateway on successful Hello / on stream close /

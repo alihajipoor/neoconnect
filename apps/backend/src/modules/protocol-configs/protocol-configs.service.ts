@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateProtocolConfigDto } from "./dto/create-protocol-config.dto";
@@ -53,8 +53,29 @@ export class ProtocolConfigsService {
     });
   }
 
+  /** Same unhandled-FK-500 class of bug as Nodes/Plans (see those
+   * services' remove() for the fuller writeup) -- ProtocolUsers (real
+   * customer credentials) and Routes (entry or exit leg) both
+   * represent state that must be explicitly torn down first, never
+   * silently cascaded. */
   async remove(id: string) {
     await this.get(id);
+
+    const [protocolUserCount, routeCount] = await Promise.all([
+      this.prisma.protocolUser.count({ where: { protocolConfigId: id } }),
+      this.prisma.route.count({ where: { OR: [{ entryProtocolConfigId: id }, { exitProtocolConfigId: id }] } }),
+    ]);
+    if (protocolUserCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete this protocol config -- ${protocolUserCount} customer(s) are still provisioned on it.`,
+      );
+    }
+    if (routeCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete this protocol config -- ${routeCount} route(s) still use it as an entry or exit leg. Remove those first.`,
+      );
+    }
+
     await this.prisma.protocolConfig.delete({ where: { id } });
   }
 }

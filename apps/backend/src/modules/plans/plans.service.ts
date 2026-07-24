@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreatePlanDto } from "./dto/create-plan.dto";
 import { UpdatePlanDto } from "./dto/update-plan.dto";
@@ -61,8 +61,30 @@ export class PlansService {
     });
   }
 
+  /** A bare `prisma.subscriptionPlan.delete()` 500s (unhandled Prisma FK
+   * violation) if any Subscription still references this plan, or if
+   * it's currently set as FreeTrialSettings.trialPlanId -- both are
+   * real, meaningful state (billing history / live trial config), so
+   * this blocks with a clear message rather than silently cascading
+   * anything. */
   async remove(id: string) {
     await this.get(id);
+
+    const [subscriptionCount, trialSettings] = await Promise.all([
+      this.prisma.subscription.count({ where: { planId: id } }),
+      this.prisma.freeTrialSettings.findFirst({ where: { trialPlanId: id } }),
+    ]);
+    if (subscriptionCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete this plan -- ${subscriptionCount} subscription(s) still reference it.`,
+      );
+    }
+    if (trialSettings) {
+      throw new BadRequestException(
+        "Cannot delete this plan -- it's currently configured as the free trial plan. Change that in Settings first.",
+      );
+    }
+
     await this.prisma.subscriptionPlan.delete({ where: { id } });
   }
 }
