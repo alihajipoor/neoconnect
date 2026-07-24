@@ -134,6 +134,22 @@ exists; for now, POST /protocol-configs) with:
 EOF
 }
 
+# VPS providers use varying primary interface names (eth0/ens3/enX0/...)
+# so the NAT rule below can't hardcode one -- ask the routing table what
+# it would actually use to reach the internet.
+detect_default_iface() {
+  ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' | head -n1
+}
+
+# Without this, a WireGuard/OpenVPN client tunnel completes its
+# handshake but every packet past it is silently dropped -- the node
+# never forwards or NATs it out to the real internet. Idempotent, safe
+# to call on every install/re-run.
+enable_ip_forwarding() {
+  echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-neoxify-forwarding.conf
+  sysctl --system >/dev/null
+}
+
 # Installs wireguard-tools, generates a server keypair, and brings up
 # wg0 with an empty peer list -- same "never re-templated for users"
 # pattern as install_xray: peers are hot-added/removed entirely through
@@ -159,11 +175,25 @@ install_wireguard() {
   read -r -p "Public endpoint host (this node's IP or DNS name) [$(curl -fsSL https://api.ipify.org || true)]: " endpoint_host
   endpoint_host="${endpoint_host:-$(curl -fsSL https://api.ipify.org || true)}"
 
+  apt-get install -y -qq iptables
+  local default_iface
+  default_iface="$(detect_default_iface)"
+  if [[ -z "$default_iface" ]]; then
+    echo "ERROR: could not detect the default outbound network interface -- required so client traffic can actually reach the internet." >&2
+    exit 1
+  fi
+  enable_ip_forwarding
+
+  # PostUp/PostDown re-run on every wg-quick@wg0 start/stop (including
+  # every boot, since the unit is enabled below) -- the -C/-D idempotent
+  # check-then-add avoids duplicate rules piling up across restarts.
   cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 Address = ${server_ip}/24
 ListenPort = ${listen_port}
 PrivateKey = ${private_key}
+PostUp = iptables -t nat -C POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE
+PostDown = iptables -t nat -D POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || true
 EOF
   chmod 600 /etc/wireguard/wg0.conf
 
@@ -275,6 +305,24 @@ EOF
 
   systemctl enable --now openvpn-server@server
   systemctl restart openvpn-server@server
+
+  apt-get install -y -qq iptables
+  local default_iface ovpn_subnet="10.77.0.0/24"
+  default_iface="$(detect_default_iface)"
+  if [[ -z "$default_iface" ]]; then
+    echo "ERROR: could not detect the default outbound network interface -- required so client traffic can actually reach the internet." >&2
+    exit 1
+  fi
+  enable_ip_forwarding
+  if ! iptables -t nat -C POSTROUTING -s "$ovpn_subnet" -o "$default_iface" -j MASQUERADE 2>/dev/null; then
+    iptables -t nat -A POSTROUTING -s "$ovpn_subnet" -o "$default_iface" -j MASQUERADE
+  fi
+  # OpenVPN's systemd unit has no PostUp/PostDown-style hook the way
+  # wg-quick does, so the rule above needs to be persisted separately to
+  # survive a reboot -- iptables-persistent's own systemd unit restores
+  # /etc/iptables/rules.v4 on every boot.
+  apt-get install -y -qq iptables-persistent
+  netfilter-persistent save
 
   cat <<EOF
 
