@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { MapPin } from "lucide-react";
 import { getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, Subscription } from "../lib/types";
 import { formatBytes } from "../lib/utils";
 import { Button, Card } from "../components/ui";
 import { Logo } from "../components/Logo";
+import { LocationPicker } from "../components/LocationPicker";
 
 type ConnectionState = "disconnected" | "connecting" | "connected" | "disconnecting";
 
@@ -17,6 +19,7 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
   const [protocolUser, setProtocolUser] = useState<ProtocolUser | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [showLocationPicker, setShowLocationPicker] = useState(false);
 
   useEffect(() => {
     void loadAll();
@@ -80,7 +83,7 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
   }
 
   return (
-    <div className="flex h-full flex-col gap-4 p-5">
+    <div className="relative flex h-full flex-col gap-4 p-5">
       <div className="flex items-center justify-between">
         <Logo />
         <Button variant="ghost" onClick={handleLogout} className="h-7 px-2 text-xs">
@@ -133,7 +136,8 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
               </p>
             ) : protocolUser.protocol !== "WIREGUARD" ? (
               <p className="text-center text-sm text-muted-foreground">
-                This app version doesn&apos;t support {protocolUser.protocol} connections yet.
+                This app version doesn&apos;t support {protocolUser.protocol} connections yet. Try a different
+                location below.
               </p>
             ) : (
               <>
@@ -156,8 +160,29 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
               </>
             )}
           </Card>
+
+          {subscription ? (
+            <Button
+              variant="ghost"
+              onClick={() => setShowLocationPicker(true)}
+              disabled={connectionState !== "disconnected"}
+              className="w-full justify-center gap-2 border border-white/10"
+            >
+              <MapPin className="size-4" />
+              Change location
+            </Button>
+          ) : null}
         </>
       )}
+
+      {showLocationPicker && subscription ? (
+        <LocationPicker
+          subscriptionId={subscription.id}
+          currentRouteId={protocolUser?.routeId}
+          onClose={() => setShowLocationPicker(false)}
+          onSwitched={(updated) => setProtocolUser(updated)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -107,6 +107,35 @@ export class ProtocolUsersService {
     return withDecryptedCredentials(protocolUser);
   }
 
+  /** Customer-facing: moves a subscription's VPN account from whichever
+   * route(s) it's currently on to a different one -- the location
+   * picker's "switch server" action. Reuses remove()+create() directly
+   * (DELETE_USER on the old node, CREATE_USER on the new one) rather than
+   * inventing a dedicated agent command; there's no schema-level
+   * guarantee of exactly one ProtocolUser per subscription (see
+   * renewSubscription's own "existingUsers" list handling in
+   * billing.service.ts), so this removes every existing one, not just
+   * the first found. */
+  async switchRoute(subscriptionId: string, routeId: string) {
+    const [subscription, route] = await Promise.all([
+      this.prisma.subscription.findUnique({ where: { id: subscriptionId }, include: { plan: true } }),
+      this.prisma.route.findUnique({ where: { id: routeId }, include: { entryProtocolConfig: true } }),
+    ]);
+    if (!subscription) throw new BadRequestException("Subscription not found");
+    if (!route) throw new BadRequestException("Route not found");
+    if (!route.isEnabled) throw new BadRequestException("Route is not enabled");
+    if (!subscription.plan.protocolsAllowed.includes(route.entryProtocolConfig.protocol)) {
+      throw new BadRequestException("This route's protocol is not allowed on your plan");
+    }
+
+    const existing = await this.prisma.protocolUser.findMany({ where: { subscriptionId } });
+    for (const user of existing) {
+      await this.remove(user.id);
+    }
+
+    return this.create({ subscriptionId, routeId });
+  }
+
   async remove(id: string) {
     const user = await this.getRaw(id);
 
