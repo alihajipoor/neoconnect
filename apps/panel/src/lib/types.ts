@@ -9,6 +9,7 @@ export interface AdminUser {
   id: string;
   email: string;
   role: AdminRole;
+  mfaEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }

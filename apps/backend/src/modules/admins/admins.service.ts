@@ -8,6 +8,7 @@ const SAFE_SELECT = {
   id: true,
   email: true,
   role: true,
+  mfaEnabled: true,
   createdAt: true,
   updatedAt: true,
 } as const;
