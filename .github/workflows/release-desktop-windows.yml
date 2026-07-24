@@ -1,0 +1,60 @@
+name: Release Desktop (Windows)
+
+# Builds the native Windows client into a single setup.exe (NSIS,
+# tauri.conf.json's bundle.targets) and publishes it as a GitHub
+# Release asset whenever a desktop-v* tag is pushed -- a separate tag
+# prefix from the agent's own v* releases (release-agent.yml) since the
+# two ship on independent schedules.
+on:
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: pnpm install --frozen-lockfile
+
+      # Fetches the real, official wireguard.exe/wg.exe (see
+      # src-tauri/scripts/fetch-binaries.ps1 and resources/README.md) --
+      # gitignored, never vendored in git, must exist on disk before
+      # `tauri build` bundles them into the installer.
+      - name: Fetch WireGuard binaries
+        working-directory: apps/desktop-windows
+        run: pnpm run fetch-binaries
+
+      # No code-signing certificate exists yet (a real purchase/business
+      # decision, tracked separately in the M15 plan entry) -- this
+      # installer is unsigned for now, which means Windows SmartScreen
+      # will warn on first run. Once a certificate exists, sign here
+      # (e.g. via a signtool step against the built .exe, or Tauri's
+      # own WINDOWS_CERTIFICATE/WINDOWS_CERTIFICATE_PASSWORD env vars)
+      # before the release step below.
+      - name: Build
+        working-directory: apps/desktop-windows
+        run: pnpm exec tauri build
+
+      - name: Generate checksum
+        working-directory: apps/desktop-windows/src-tauri/target/release/bundle/nsis
+        shell: bash
+        run: sha256sum *.exe > sha256sums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            apps/desktop-windows/src-tauri/target/release/bundle/nsis/*.exe
+            apps/desktop-windows/src-tauri/target/release/bundle/nsis/sha256sums.txt
+          generate_release_notes: true
