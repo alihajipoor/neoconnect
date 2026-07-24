@@ -43,3 +43,20 @@ export async function updateFreeTrialSettingsAction(input: {
   if (result.ok) revalidatePath("/settings");
   return result;
 }
+
+export async function updateEmailSettingsAction(input: {
+  enabled: boolean;
+  secure: boolean;
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  fromAddress?: string;
+}): Promise<MutationResult<void>> {
+  const result = await apiMutate<void>("/email-settings", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  if (result.ok) revalidatePath("/settings");
+  return result;
+}

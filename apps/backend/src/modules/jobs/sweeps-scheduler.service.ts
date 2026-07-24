@@ -5,6 +5,11 @@ import { SWEEPS_QUEUE } from "./jobs.constants";
 
 const QUOTA_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPIRY_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+// Same cadence as their non-warning counterparts above -- low-data
+// warnings piggyback on the quota sweep's interval, expiry warnings on
+// the expiry sweep's.
+const LOW_DATA_WARNING_INTERVAL_MS = QUOTA_SWEEP_INTERVAL_MS;
+const EXPIRY_WARNING_INTERVAL_MS = EXPIRY_SWEEP_INTERVAL_MS;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -17,5 +22,15 @@ export class SweepsSchedulerService implements OnModuleInit {
   async onModuleInit() {
     await this.queue.add("quota", {}, { repeat: { every: QUOTA_SWEEP_INTERVAL_MS }, jobId: "quota-sweep" });
     await this.queue.add("expiry", {}, { repeat: { every: EXPIRY_SWEEP_INTERVAL_MS }, jobId: "expiry-sweep" });
+    await this.queue.add(
+      "low-data-warning",
+      {},
+      { repeat: { every: LOW_DATA_WARNING_INTERVAL_MS }, jobId: "low-data-warning-sweep" },
+    );
+    await this.queue.add(
+      "expiry-warning",
+      {},
+      { repeat: { every: EXPIRY_WARNING_INTERVAL_MS }, jobId: "expiry-warning-sweep" },
+    );
   }
 }

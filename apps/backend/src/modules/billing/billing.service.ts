@@ -143,6 +143,11 @@ export class BillingService {
         expireAt: newExpireAt,
         dataCapBytes: subscription.plan.dataCapBytes,
         dataUsedBytes: 0n,
+        // A fresh billing period gets fresh warning eligibility -- these
+        // "already warned" flags must not carry over from the period that
+        // just ended (M16).
+        lowDataWarningSentAt: null,
+        expiryWarningSentAt: null,
       },
     });
 

@@ -24,6 +24,16 @@ export class SweepsProcessor extends WorkerHost {
         this.logger.log(`expiry sweep: expired ${count} subscription(s)`);
         break;
       }
+      case "low-data-warning": {
+        const count = await this.usageService.sweepLowDataWarnings();
+        this.logger.log(`low-data warning sweep: warned ${count} subscription(s)`);
+        break;
+      }
+      case "expiry-warning": {
+        const count = await this.usageService.sweepExpiryWarnings();
+        this.logger.log(`expiry warning sweep: warned ${count} subscription(s)`);
+        break;
+      }
       default:
         this.logger.warn(`unknown sweep job name: ${job.name}`);
     }

@@ -124,18 +124,22 @@ model AdminUser {
 }
 
 model Customer {
-  id           String         @id @default(uuid())
-  email        String         @unique
-  passwordHash String
-  telegramId   String?
-  referralCode String?        @unique
-  status       CustomerStatus @default(ACTIVE)
+  id            String         @id @default(uuid())
+  email         String         @unique
+  passwordHash  String
+  telegramId    String?
+  referralCode  String?        @unique
+  status        CustomerStatus @default(ACTIVE)
   // Refresh-token revocation counter, same purpose/pattern as
   // AdminUser.tokenVersion -- bumping it invalidates every outstanding
   // customer refresh token at once (logout-all-sessions).
-  tokenVersion Int            @default(0)
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  tokenVersion  Int            @default(0)
+  // null = unverified. Set by POST /customer-auth/verify-email. No VPN
+  // access (trial or paid) is granted before this is set -- see M16's
+  // "Customer Self-Signup + Free Trial Mode" gating decision, 2026-07-24.
+  emailVerifiedAt DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   subscriptions Subscription[]
   transactions  PaymentTransaction[]
@@ -184,6 +188,13 @@ model Subscription {
   dataCapBytes   BigInt
   dataUsedBytes  BigInt              @default(0)
   autoRenew      Boolean             @default(false)
+  // Set once the low-data-remaining warning email has been sent for the
+  // current billing period, so the sweep that checks for it fires only
+  // once. Reset to null on renewal (BillingService.renewSubscription()).
+  lowDataWarningSentAt DateTime?
+  // Same "already warned" pattern for the subscription-expiring-soon
+  // email, reset on renewal alongside the field above.
+  expiryWarningSentAt  DateTime?
   createdAt      DateTime            @default(now())
   updatedAt      DateTime            @updatedAt
 
@@ -427,4 +438,25 @@ model FreeTrialSettings {
   trialRoute Route?            @relation(fields: [trialRouteId], references: [id])
 
   @@map("free_trial_settings")
+}
+
+// Same lazily-initialized-singleton shape as FreeTrialSettings above.
+// Configured via a new admin-only panel Settings card (M16) -- the
+// operator's own SMTP server, not a transactional-email API provider.
+// passwordEncrypted reuses ProtocolUser's exact AES-256-GCM envelope
+// scheme (see modules/protocol-users/credentials-crypto.ts) rather than a
+// new crypto scheme; the raw password is never logged or returned by any
+// API response.
+model EmailSettings {
+  id                String   @id @default(uuid())
+  enabled           Boolean  @default(false)
+  host              String?
+  port              Int?
+  secure            Boolean  @default(false)
+  username          String?
+  passwordEncrypted String?
+  fromAddress       String?
+  updatedAt         DateTime @updatedAt
+
+  @@map("email_settings")
 }

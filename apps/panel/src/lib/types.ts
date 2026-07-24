@@ -82,6 +82,19 @@ export interface FreeTrialSettings {
   updatedAt: string;
 }
 
+export interface EmailSettings {
+  id: string;
+  enabled: boolean;
+  host: string | null;
+  port: number | null;
+  secure: boolean;
+  username: string | null;
+  fromAddress: string | null;
+  updatedAt: string;
+}
+
+export type SubscriptionStatus = "ACTIVE" | "SUSPENDED" | "EXPIRED" | "CANCELLED";
+
 export interface SubscriptionPlan {
   id: string;
   name: string;

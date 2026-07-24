@@ -8,6 +8,7 @@ import { CustomersModule } from "../customers/customers.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
 import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
 import { FreeTrialSettingsModule } from "../free-trial-settings/free-trial-settings.module";
+import { EmailModule } from "../email/email.module";
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { FreeTrialSettingsModule } from "../free-trial-settings/free-trial-setti
     SubscriptionsModule,
     ProtocolUsersModule,
     FreeTrialSettingsModule,
+    EmailModule,
   ],
   controllers: [CustomerAuthController],
   providers: [CustomerAuthService, CustomerJwtStrategy],

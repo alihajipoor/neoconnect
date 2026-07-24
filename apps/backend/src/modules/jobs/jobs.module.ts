@@ -3,9 +3,18 @@ import { Module } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import IORedis from "ioredis";
 import { UsageModule } from "../usage/usage.module";
-import { SWEEPS_QUEUE } from "./jobs.constants";
+import { EmailModule } from "../email/email.module";
+import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { SweepsProcessor } from "./sweeps.processor";
 import { SweepsSchedulerService } from "./sweeps-scheduler.service";
+import { AnnouncementsProcessor } from "./announcements.processor";
+
+// Registered here (rather than in a new announcements module) so this
+// stays the single place BullMQ's Redis connection is configured -- the
+// announcements module imports JobsModule and re-exports below to get
+// its own @InjectQueue(ANNOUNCEMENTS_QUEUE), same as sweeps-scheduler
+// does for SWEEPS_QUEUE from within this same module.
+const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE });
 
 @Module({
   imports: [
@@ -20,8 +29,11 @@ import { SweepsSchedulerService } from "./sweeps-scheduler.service";
       }),
     }),
     BullModule.registerQueue({ name: SWEEPS_QUEUE }),
+    announcementsQueue,
     UsageModule,
+    EmailModule,
   ],
-  providers: [SweepsProcessor, SweepsSchedulerService],
+  providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
+  exports: [announcementsQueue],
 })
 export class JobsModule {}

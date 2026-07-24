@@ -22,6 +22,8 @@ import { BillingModule } from "./modules/billing/billing.module";
 import { CustomerAuthModule } from "./modules/customer-auth/customer-auth.module";
 import { CustomerModule } from "./modules/customer/customer.module";
 import { FreeTrialSettingsModule } from "./modules/free-trial-settings/free-trial-settings.module";
+import { EmailModule } from "./modules/email/email.module";
+import { AnnouncementsModule } from "./modules/announcements/announcements.module";
 
 @Module({
   imports: [
@@ -55,6 +57,8 @@ import { FreeTrialSettingsModule } from "./modules/free-trial-settings/free-tria
     CustomerAuthModule,
     CustomerModule,
     FreeTrialSettingsModule,
+    EmailModule,
+    AnnouncementsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
