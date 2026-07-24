@@ -25,4 +25,16 @@ export default () => ({
     nowpaymentsApiKey: process.env.NOWPAYMENTS_API_KEY,
     nowpaymentsIpnSecret: process.env.NOWPAYMENTS_IPN_SECRET,
   },
+  security: {
+    // AES-256-GCM key for ProtocolUser.credentialsJson envelope
+    // encryption (see modules/protocol-users/credentials-crypto.ts) --
+    // 32 raw bytes, hex-encoded (64 hex chars).
+    credentialsEncryptionKey: process.env.CREDENTIALS_ENCRYPTION_KEY,
+  },
+  alerting: {
+    // Optional generic webhook (Slack/Discord/Telegram-via-adapter/custom
+    // endpoint all accept a plain JSON POST) -- alerting is a silent
+    // no-op when unset, see modules/alerting.
+    webhookUrl: process.env.ALERT_WEBHOOK_URL,
+  },
 });
