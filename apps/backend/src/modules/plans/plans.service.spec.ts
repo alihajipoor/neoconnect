@@ -1,4 +1,4 @@
-import { NotFoundException } from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { PlansService } from "./plans.service";
 
 function buildPlan(overrides: Partial<Record<string, unknown>> = {}) {
@@ -27,7 +27,11 @@ const baseDto = {
 
 describe("PlansService", () => {
   let service: PlansService;
-  let prisma: { subscriptionPlan: { findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock } };
+  let prisma: {
+    subscriptionPlan: { findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock };
+    subscription: { count: jest.Mock };
+    freeTrialSettings: { findFirst: jest.Mock };
+  };
 
   beforeEach(() => {
     prisma = {
@@ -38,6 +42,8 @@ describe("PlansService", () => {
         update: jest.fn(),
         delete: jest.fn(),
       },
+      subscription: { count: jest.fn() },
+      freeTrialSettings: { findFirst: jest.fn() },
     };
     service = new PlansService(prisma as any);
   });
@@ -114,10 +120,28 @@ describe("PlansService", () => {
       expect(prisma.subscriptionPlan.delete).not.toHaveBeenCalled();
     });
 
-    it("deletes the plan when it exists", async () => {
+    it("deletes the plan when no subscriptions reference it and it's not the trial plan", async () => {
       prisma.subscriptionPlan.findUnique.mockResolvedValue(buildPlan());
+      prisma.subscription.count.mockResolvedValue(0);
+      prisma.freeTrialSettings.findFirst.mockResolvedValue(null);
       await service.remove("plan-1");
       expect(prisma.subscriptionPlan.delete).toHaveBeenCalledWith({ where: { id: "plan-1" } });
+    });
+
+    it("throws BadRequestException and does not delete when subscriptions still reference it", async () => {
+      prisma.subscriptionPlan.findUnique.mockResolvedValue(buildPlan());
+      prisma.subscription.count.mockResolvedValue(2);
+      prisma.freeTrialSettings.findFirst.mockResolvedValue(null);
+      await expect(service.remove("plan-1")).rejects.toThrow(BadRequestException);
+      expect(prisma.subscriptionPlan.delete).not.toHaveBeenCalled();
+    });
+
+    it("throws BadRequestException and does not delete when it's the configured trial plan", async () => {
+      prisma.subscriptionPlan.findUnique.mockResolvedValue(buildPlan());
+      prisma.subscription.count.mockResolvedValue(0);
+      prisma.freeTrialSettings.findFirst.mockResolvedValue({ id: "settings-1", trialPlanId: "plan-1" });
+      await expect(service.remove("plan-1")).rejects.toThrow(BadRequestException);
+      expect(prisma.subscriptionPlan.delete).not.toHaveBeenCalled();
     });
   });
 });
