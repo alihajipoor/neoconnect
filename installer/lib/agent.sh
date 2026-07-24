@@ -58,6 +58,13 @@ EOF
   install -d -m 755 /etc/neoxify
   echo "agent" > /etc/neoxify/role
 
+  # Needed below by install_openvpn (its Protocol Config's nodeId) --
+  # written to the agent's own config by the enroll-init call just
+  # above. Visible to install_xray/install_wireguard/install_openvpn
+  # too since bash functions see their caller's locals.
+  local node_id
+  node_id="$(jq -r '.nodeId' /etc/neoxify/agent.json)"
+
   echo
   read -r -p "Install Xray (VLESS+REALITY) on this node now? [Y/n]: " install_xray_choice
   if [[ "${install_xray_choice,,}" != "n" ]]; then
@@ -220,54 +227,83 @@ that UI exists; for now, POST /protocol-configs) with:
 EOF
 }
 
-# Installs openvpn, then FETCHES its CA/server cert/key from the panel
-# API rather than generating them locally -- the reverse direction from
-# install_xray/install_wireguard. OpenVPN's per-client cert issuance
-# needs a CA that can sign new certs on every purchase, and that CA is
-# generated and held by the backend (see
-# apps/backend/src/modules/protocol-configs/openvpn-pki.ts for why: it's
-# the one protocol where "generate node-local, register the public half"
-# doesn't work, since backend needs actual signing capability, not just
-# a public key, to issue client certs). So the ProtocolConfig must exist
-# in the panel FIRST (which is what auto-generates the CA), and this
-# step pulls the result down.
+# Prompts for panel admin credentials and exchanges them for a fresh
+# access token, including the MFA-enabled case -- needed because
+# OpenVPN's Protocol Config creation (unlike Xray/WireGuard, which set
+# themselves up node-locally) requires calling the backend's admin API
+# to generate the CA (see openvpn-pki.ts). Bash has no string return,
+# so callers do: token="$(get_admin_bearer_token)".
+get_admin_bearer_token() {
+  local email password login_response access_token
+  read -r -p "Panel admin email: " email
+  read -r -s -p "Panel admin password: " password
+  echo >&2
+
+  login_response="$(curl -fsSL -X POST "$panel_url/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n --arg email "$email" --arg password "$password" '{email: $email, password: $password}')")"
+
+  if [[ "$(echo "$login_response" | jq -r '.mfaRequired // false')" == "true" ]]; then
+    local mfa_token code mfa_response
+    mfa_token="$(echo "$login_response" | jq -r '.mfaToken')"
+    read -r -p "This admin account has MFA enabled -- enter a current 6-digit code: " code
+    mfa_response="$(curl -fsSL -X POST "$panel_url/auth/mfa/verify" \
+      -H "Content-Type: application/json" \
+      -d "$(jq -n --arg mfaToken "$mfa_token" --arg code "$code" '{mfaToken: $mfaToken, code: $code}')")"
+    access_token="$(echo "$mfa_response" | jq -r '.accessToken // empty')"
+  else
+    access_token="$(echo "$login_response" | jq -r '.accessToken // empty')"
+  fi
+
+  if [[ -z "$access_token" ]]; then
+    echo "ERROR: admin login failed -- check the email/password (and code, if MFA is enabled)." >&2
+    return 1
+  fi
+  echo "$access_token"
+}
+
+# Installs openvpn, then CREATES its Protocol Config via the panel's
+# admin API (which is what generates the CA/server cert -- the reverse
+# direction from install_xray/install_wireguard, which generate their
+# own server secrets node-locally and only register the public half).
+# OpenVPN's per-client cert issuance needs a CA that can sign new certs
+# on every purchase, and that CA has to live wherever client certs get
+# signed, i.e. the backend (see
+# apps/backend/src/modules/protocol-configs/openvpn-pki.ts). Fully
+# self-service: prompts for engine params + an admin login (needed
+# only for this one API call), same shape as install_xray/
+# install_wireguard's own prompts -- no separate manual panel/curl step
+# required first.
 install_openvpn() {
   echo "Installing OpenVPN..."
   apt-get install -y -qq openvpn
 
-  cat <<'EOF'
+  read -r -p "Listen port for OpenVPN [1194]: " listen_port
+  listen_port="${listen_port:-1194}"
+  read -r -p "Protocol, udp or tcp [udp]: " proto
+  proto="${proto:-udp}"
+  read -r -p "Public endpoint host (this node's IP or DNS name) [$(curl -fsSL https://api.ipify.org || true)]: " endpoint_host
+  endpoint_host="${endpoint_host:-$(curl -fsSL https://api.ipify.org || true)}"
 
-Before continuing: create this node's OpenVPN Protocol Config via the
-panel API first (POST /protocol-configs) -- that's what generates the
-CA and server cert this step fetches. Example body:
-
-  {
-    "nodeId": "<this node's id>",
-    "protocol": "OPENVPN",
-    "listenPort": 1194,
-    "publicParamsJson": { "proto": "udp", "endpoint": "<this node's public IP>:1194" }
-  }
-
-You'll need the resulting Protocol Config's id below, plus an admin
-bearer token (panel login) to fetch it.
-
-EOF
-  read -r -p "Panel URL (e.g. https://connect.example.com): " panel_url
-  read -r -p "Admin bearer token: " admin_token
-  read -r -p "Protocol Config id: " config_id
+  echo
+  echo "Creating this node's OpenVPN Protocol Config in the panel (needs an admin login -- only used for this one API call, not stored)..."
+  local admin_token
+  admin_token="$(get_admin_bearer_token)"
 
   local config_json
-  config_json="$(curl -fsSL "$panel_url/protocol-configs/$config_id" -H "Authorization: Bearer $admin_token")"
+  config_json="$(curl -fsSL -X POST "$panel_url/protocol-configs" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $admin_token" \
+    -d "$(jq -n --arg nodeId "$node_id" --argjson listenPort "$listen_port" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" \
+      '{nodeId: $nodeId, protocol: "OPENVPN", listenPort: $listenPort, publicParamsJson: {proto: $proto, endpoint: $endpoint}}')")"
 
-  local listen_port proto ca_cert server_cert server_key
-  listen_port="$(echo "$config_json" | jq -r '.listenPort')"
-  proto="$(echo "$config_json" | jq -r '.publicParamsJson.proto // "udp"')"
-  ca_cert="$(echo "$config_json" | jq -r '.publicParamsJson.caCertPem')"
-  server_cert="$(echo "$config_json" | jq -r '.publicParamsJson.serverCertPem')"
-  server_key="$(echo "$config_json" | jq -r '.publicParamsJson.serverKeyPem')"
+  local ca_cert server_cert server_key
+  ca_cert="$(echo "$config_json" | jq -r '.publicParamsJson.caCertPem // empty')"
+  server_cert="$(echo "$config_json" | jq -r '.publicParamsJson.serverCertPem // empty')"
+  server_key="$(echo "$config_json" | jq -r '.publicParamsJson.serverKeyPem // empty')"
 
-  if [[ -z "$listen_port" || "$listen_port" == "null" || -z "$ca_cert" || "$ca_cert" == "null" ]]; then
-    echo "ERROR: could not fetch a valid OpenVPN Protocol Config -- check the id/token and that its protocol is OPENVPN." >&2
+  if [[ -z "$ca_cert" ]]; then
+    echo "ERROR: could not create the OpenVPN Protocol Config -- response was: $config_json" >&2
     exit 1
   fi
 
