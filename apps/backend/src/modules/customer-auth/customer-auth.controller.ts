@@ -8,6 +8,9 @@ import { AuthenticatedCustomer } from "./types";
 import { CreateCustomerDto } from "../customers/dto/create-customer.dto";
 import { LoginDto } from "../auth/dto/login.dto";
 import { RefreshDto } from "../auth/dto/refresh.dto";
+import { VerifyEmailDto } from "./dto/verify-email.dto";
+import { ForgotPasswordDto } from "./dto/forgot-password.dto";
+import { ResetPasswordDto } from "./dto/reset-password.dto";
 
 // This is the API a future native client (Windows/macOS/Android/iOS)
 // signs up and logs in through -- there is deliberately no web UI for
@@ -20,11 +23,10 @@ import { RefreshDto } from "../auth/dto/refresh.dto";
 export class CustomerAuthController {
   constructor(private readonly customerAuthService: CustomerAuthService) {}
 
-  // Same brute-force reasoning as admin login, plus this is also the
-  // free-trial-grant endpoint -- an unlimited signup rate would be a
-  // direct path to scripted free-VPN abuse. Rate limiting is the only
-  // mitigation in this pass (no email verification/CAPTCHA infra exists
-  // yet -- see the plan's explicitly-flagged v1 limitations).
+  // Same brute-force reasoning as admin login. Registration no longer
+  // grants a free trial directly (see CustomerAuthService.register()'s
+  // doc comment) -- verify-email is the actual free-VPN-abuse gate now,
+  // rate limiting here is just standard signup-endpoint hygiene.
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("register")
   @HttpCode(HttpStatus.OK)
@@ -51,5 +53,39 @@ export class CustomerAuthController {
   @UseGuards(CustomerJwtAuthGuard)
   async logout(@CurrentCustomer() customer: AuthenticatedCustomer) {
     await this.customerAuthService.revokeAllSessions(customer.sub);
+  }
+
+  // No guard -- the token itself is the credential (mirrors admin MFA's
+  // mfaToken exchange). This is the actual free-VPN-access gate: no
+  // trial/paid credentials exist for a customer until this succeeds.
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("verify-email")
+  @HttpCode(HttpStatus.OK)
+  verifyEmail(@Body() dto: VerifyEmailDto) {
+    return this.customerAuthService.verifyEmail(dto.token);
+  }
+
+  @Post("resend-verification")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
+  @UseGuards(CustomerJwtAuthGuard)
+  async resendVerification(@CurrentCustomer() customer: AuthenticatedCustomer) {
+    await this.customerAuthService.resendVerification(customer.sub);
+  }
+
+  // Always returns 204 regardless of whether the email exists -- see
+  // CustomerAuthService.forgotPassword()'s doc comment on why.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("forgot-password")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+    await this.customerAuthService.forgotPassword(dto.email);
+  }
+
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("reset-password")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    await this.customerAuthService.resetPassword(dto.token, dto.newPassword);
   }
 }

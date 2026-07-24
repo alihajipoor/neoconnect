@@ -2,6 +2,8 @@ import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
 import { Protocol } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
+import { EmailService } from "../email/email.service";
+import { lowDataWarningEmail, expiringSoonEmail } from "../email/templates";
 
 export interface UsageDeltaInput {
   externalUserId: string;
@@ -9,6 +11,12 @@ export interface UsageDeltaInput {
   bytesUp: string;
   bytesDown: string;
 }
+
+const BYTES_PER_GB = 1_073_741_824n;
+// The user's own stated example ("1GB left") -- fires once per billing
+// period, tracked by Subscription.lowDataWarningSentAt.
+const LOW_DATA_WARNING_THRESHOLD_BYTES = 1n * BYTES_PER_GB;
+const EXPIRY_WARNING_THRESHOLD_DAYS = 3;
 
 /** Turns agent-reported StatsBatch deltas into UsageRecords + cap
  * enforcement, and provides the sweep jobs' quota/expiry checks. Depends
@@ -24,6 +32,7 @@ export class UsageService {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => AgentGatewayService))
     private readonly agentGateway: AgentGatewayService,
+    private readonly emailService: EmailService,
   ) {}
 
   async recordDeltas(nodeId: string, deltas: UsageDeltaInput[]) {
@@ -139,6 +148,43 @@ export class UsageService {
       await this.expireSubscription(s.id);
     }
     return expired.length;
+  }
+
+  /** M16 trigger #3: warns a customer once per billing period when their
+   * remaining data drops under the threshold. `lowDataWarningSentAt` is
+   * the "already warned" flag (reset to null on renewal, see
+   * BillingService.renewSubscription()) so this fires exactly once. */
+  async sweepLowDataWarnings(): Promise<number> {
+    const candidates = await this.prisma.subscription.findMany({
+      where: { status: "ACTIVE", lowDataWarningSentAt: null },
+      include: { customer: true },
+    });
+    const nearCap = candidates.filter(
+      (s) => s.dataUsedBytes < s.dataCapBytes && s.dataCapBytes - s.dataUsedBytes <= LOW_DATA_WARNING_THRESHOLD_BYTES,
+    );
+    for (const s of nearCap) {
+      const remainingGb = Number(s.dataCapBytes - s.dataUsedBytes) / Number(BYTES_PER_GB);
+      await this.emailService.sendMail({ to: s.customer.email, ...lowDataWarningEmail(remainingGb) });
+      await this.prisma.subscription.update({ where: { id: s.id }, data: { lowDataWarningSentAt: new Date() } });
+    }
+    return nearCap.length;
+  }
+
+  /** M16 trigger #4: same "already warned" shape as above, via
+   * `expiryWarningSentAt`. */
+  async sweepExpiryWarnings(): Promise<number> {
+    const now = new Date();
+    const threshold = new Date(now.getTime() + EXPIRY_WARNING_THRESHOLD_DAYS * 24 * 60 * 60 * 1000);
+    const soon = await this.prisma.subscription.findMany({
+      where: { status: "ACTIVE", expiryWarningSentAt: null, expireAt: { gt: now, lte: threshold } },
+      include: { customer: true },
+    });
+    for (const s of soon) {
+      const daysRemaining = Math.max(1, Math.ceil((s.expireAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)));
+      await this.emailService.sendMail({ to: s.customer.email, ...expiringSoonEmail(daysRemaining) });
+      await this.prisma.subscription.update({ where: { id: s.id }, data: { expiryWarningSentAt: new Date() } });
+    }
+    return soon.length;
   }
 }
 
