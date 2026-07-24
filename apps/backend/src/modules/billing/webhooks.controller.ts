@@ -1,4 +1,5 @@
 import { BadRequestException, Controller, Headers, Post, Req, type RawBodyRequest } from "@nestjs/common";
+import { SkipThrottle } from "@nestjs/throttler";
 import type { Request } from "express";
 import { BillingService } from "./billing.service";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
@@ -8,6 +9,10 @@ import { StripeProvider } from "./providers/stripe.provider";
 // Stripe/NowPayments themselves, not a logged-in admin or customer.
 // Signature verification is what actually protects them, same pattern as
 // enrollment.controller.ts's unauthenticated claim endpoint from M2.
+// Also exempt from IP-based rate limiting (SkipThrottle): a legitimate
+// provider's retry behavior after a transient failure shouldn't get
+// blocked, and signature verification is already the real gate here.
+@SkipThrottle()
 @Controller("billing/webhooks")
 export class WebhooksController {
   constructor(

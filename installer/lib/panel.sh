@@ -37,16 +37,27 @@ generate_panel_secrets() {
     return
   fi
   echo "Generating random secrets into infra/.env..."
-  local postgres_password jwt_access jwt_refresh
+  local postgres_password jwt_access jwt_refresh credentials_key
   postgres_password="$(openssl rand -hex 24)"
   jwt_access="$(openssl rand -hex 32)"
   jwt_refresh="$(openssl rand -hex 32)"
+  credentials_key="$(openssl rand -hex 32)"
   cat > "$PROD_ENV" <<EOF
 POSTGRES_PASSWORD=$postgres_password
 JWT_ACCESS_SECRET=$jwt_access
 JWT_REFRESH_SECRET=$jwt_refresh
 JWT_ACCESS_TTL=15m
 JWT_REFRESH_TTL=7d
+CREDENTIALS_ENCRYPTION_KEY=$credentials_key
+
+# Fill these in yourself, then re-run "Rebuild and restart" -- not
+# auto-generated since they're credentials from an external service, not
+# secrets this installer can invent:
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+NOWPAYMENTS_API_KEY=
+NOWPAYMENTS_IPN_SECRET=
+ALERT_WEBHOOK_URL=
 EOF
   chmod 600 "$PROD_ENV"
 }
@@ -164,8 +175,11 @@ action_install_panel() {
 
   configure_nginx_and_tls "$domain" "$email"
   seed_first_admin
+  install_backup_cron
+
   echo
   echo "Panel installed. Visit: https://$domain"
+  echo "Daily backups are scheduled for 3am via /etc/cron.d/neoxify-backup (see docs/backup-restore.md)."
 }
 
 action_update_panel() {
@@ -185,6 +199,36 @@ action_seed_admin_panel() {
   seed_first_admin
 }
 
+install_backup_cron() {
+  install -d -m 755 /etc/cron.d
+  cat > /etc/cron.d/neoxify-backup <<EOF
+# Daily panel backup (DB + TLS certs + infra/.env) -- see
+# infra/scripts/backup.sh and docs/backup-restore.md.
+0 3 * * * root $REPO_ROOT/infra/scripts/backup.sh >> /var/log/neoxify-backup.log 2>&1
+EOF
+  chmod 644 /etc/cron.d/neoxify-backup
+}
+
+action_backup_panel() {
+  require_root
+  "$REPO_ROOT/infra/scripts/backup.sh"
+}
+
+action_restore_panel() {
+  require_root
+  local default_dir="/var/backups/neoxify"
+  echo
+  echo "Backups in $default_dir:"
+  ls -1t "$default_dir"/neoxify-backup-*.tar.gz 2>/dev/null || echo "  (none found)"
+  echo
+  read -r -p "Path to backup file to restore (blank = latest in $default_dir): " backup_path
+  if [[ -z "$backup_path" ]]; then
+    "$REPO_ROOT/infra/scripts/restore.sh" --latest "$default_dir"
+  else
+    "$REPO_ROOT/infra/scripts/restore.sh" "$backup_path"
+  fi
+}
+
 action_uninstall_panel() {
   require_root
   read -r -p "This stops and removes the panel stack. Also delete the database volume? [y/N]: " purge
@@ -193,8 +237,8 @@ action_uninstall_panel() {
   docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" down "${down_args[@]}"
   rm -f /etc/nginx/sites-enabled/neoxify-panel /etc/nginx/sites-available/neoxify-panel
   systemctl reload nginx || true
-  rm -f /etc/neoxify/role
-  echo "Panel stack stopped. infra/.env and the repo checkout were left in place."
+  rm -f /etc/neoxify/role /etc/cron.d/neoxify-backup
+  echo "Panel stack stopped. infra/.env, the repo checkout, and /var/backups/neoxify were left in place."
 }
 
 print_panel_menu() {
@@ -205,8 +249,10 @@ print_panel_menu() {
   1) View status / logs
   2) Rebuild and restart (after a git pull)
   3) Seed another admin account
-  4) Uninstall
-  5) Exit
+  4) Backup now
+  5) Restore from backup
+  6) Uninstall
+  7) Exit
 
 EOF
 }
@@ -214,13 +260,15 @@ EOF
 run_panel_menu() {
   while true; do
     print_panel_menu
-    read -r -p "Choose an option [1-5]: " choice
+    read -r -p "Choose an option [1-7]: " choice
     case "$choice" in
       1) action_status_panel ;;
       2) action_update_panel ;;
       3) action_seed_admin_panel ;;
-      4) action_uninstall_panel ;;
-      5) exit 0 ;;
+      4) action_backup_panel ;;
+      5) action_restore_panel ;;
+      6) action_uninstall_panel ;;
+      7) exit 0 ;;
       *) echo "Invalid option: $choice" ;;
     esac
   done

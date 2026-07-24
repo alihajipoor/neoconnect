@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
+import { decryptCredentials, encryptCredentials } from "./credentials-crypto";
 import { CreateProtocolUserDto } from "./dto/create-protocol-user.dto";
 import { generateCredentials } from "./generate-credentials";
 
@@ -11,14 +12,22 @@ export class ProtocolUsersService {
     private readonly agentGateway: AgentGatewayService,
   ) {}
 
-  list(nodeId?: string) {
-    return this.prisma.protocolUser.findMany({
+  async list(nodeId?: string) {
+    const users = await this.prisma.protocolUser.findMany({
       where: nodeId ? { nodeId } : undefined,
       orderBy: { createdAt: "desc" },
     });
+    return users.map(withDecryptedCredentials);
   }
 
   async get(id: string) {
+    const user = await this.getRaw(id);
+    return withDecryptedCredentials(user);
+  }
+
+  /** Internal callers (setEnabled, remove) need the raw encrypted row,
+   * not the decrypted API-response shape get() returns. */
+  private async getRaw(id: string) {
     const user = await this.prisma.protocolUser.findUnique({ where: { id } });
     if (!user) {
       throw new NotFoundException("Protocol user not found");
@@ -50,7 +59,7 @@ export class ProtocolUsersService {
         protocolConfigId: protocolConfig.id,
         protocol: protocolConfig.protocol,
         externalUserId,
-        credentialsJson: JSON.stringify(credentials),
+        credentialsJson: encryptCredentials(credentials),
       },
     });
 
@@ -64,11 +73,11 @@ export class ProtocolUsersService {
       credentials,
     });
 
-    return protocolUser;
+    return withDecryptedCredentials(protocolUser);
   }
 
   async remove(id: string) {
-    const user = await this.get(id);
+    const user = await this.getRaw(id);
 
     await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", {
       protocol: user.protocol,
@@ -79,12 +88,12 @@ export class ProtocolUsersService {
   }
 
   async setEnabled(id: string, enabled: boolean) {
-    const user = await this.get(id);
+    const user = await this.getRaw(id);
 
     if (enabled) {
       // Re-enabling needs the original credentials back, not just a flag
       // flip -- see the SetEnabled contract in agent/internal/protocols/common.
-      const credentials = JSON.parse(user.credentialsJson) as Record<string, string>;
+      const credentials = decryptCredentials(user.credentialsJson);
       await this.agentGateway.enqueueCommand(user.nodeId, "ENABLE_USER", {
         protocol: user.protocol,
         externalUserId: user.externalUserId,
@@ -97,10 +106,11 @@ export class ProtocolUsersService {
       });
     }
 
-    return this.prisma.protocolUser.update({
+    const updated = await this.prisma.protocolUser.update({
       where: { id },
       data: { status: enabled ? "ACTIVE" : "DISABLED" },
     });
+    return withDecryptedCredentials(updated);
   }
 
   private async usedWireGuardAddresses(protocolConfigId: string): Promise<string[]> {
@@ -109,7 +119,20 @@ export class ProtocolUsersService {
       select: { credentialsJson: true },
     });
     return existing
-      .map((u) => (JSON.parse(u.credentialsJson) as Record<string, string>).address)
+      .map((u) => decryptCredentials(u.credentialsJson).address)
       .filter((address): address is string => Boolean(address));
   }
+}
+
+/** credentialsJson is encrypted at rest (see credentials-crypto.ts) --
+ * admin API responses still need to hand back the actual usable
+ * credentials (that's the entire point of this endpoint existing: an
+ * admin retrieves them to give to a customer), so every external-facing
+ * read replaces the encrypted string with the decrypted object. Access
+ * control is the existing admin JWT guard, unchanged. */
+function withDecryptedCredentials<T extends { credentialsJson: string }>(
+  user: T,
+): Omit<T, "credentialsJson"> & { credentials: Record<string, string> } {
+  const { credentialsJson, ...rest } = user;
+  return { ...rest, credentials: decryptCredentials(credentialsJson) };
 }

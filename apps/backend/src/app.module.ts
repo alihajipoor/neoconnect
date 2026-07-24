@@ -1,5 +1,7 @@
 import { Module } from "@nestjs/common";
+import { APP_GUARD } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
+import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import configuration from "./config/configuration";
 import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./modules/health/health.module";
@@ -24,6 +26,13 @@ import { BillingModule } from "./modules/billing/billing.module";
       isGlobal: true,
       load: [configuration],
     }),
+    // Global default: generous enough for normal panel/API use, applied
+    // per-IP via APP_GUARD below. Individual routes (login, enrollment
+    // claim) override this with a tighter limit -- see their
+    // controllers. Webhook endpoints skip throttling entirely (signature
+    // verification is what protects them, and a legitimate provider
+    // retry storm shouldn't get blocked) -- see billing/webhooks.controller.ts.
+    ThrottlerModule.forRoot([{ name: "default", ttl: 60_000, limit: 100 }]),
     PrismaModule,
     HealthModule,
     AuthModule,
@@ -41,5 +50,6 @@ import { BillingModule } from "./modules/billing/billing.module";
     JobsModule,
     BillingModule,
   ],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}
