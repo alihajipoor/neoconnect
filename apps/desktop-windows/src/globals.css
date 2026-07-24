@@ -1,0 +1,114 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Same design tokens as apps/panel/src/app/globals.css -- deliberately
+   kept in sync by hand for now (no shared package yet) so the native
+   client and the admin panel read as the same product. Dark-only,
+   violet primary / cyan highlight, see the panel's own comment for the
+   full reasoning. */
+:root,
+.dark {
+  --radius: 0.75rem;
+  --background: #0a0a10;
+  --foreground: #f4f4f8;
+  --card: #131319;
+  --card-foreground: #f4f4f8;
+  --popover: #15151c;
+  --popover-foreground: #f4f4f8;
+  --primary: #8b5cf6;
+  --primary-foreground: #ffffff;
+  --secondary: #1c1c26;
+  --secondary-foreground: #f4f4f8;
+  --muted: #1a1a22;
+  --muted-foreground: #9797a8;
+  --accent: #1e1e2a;
+  --accent-foreground: #f4f4f8;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --success: #10b981;
+  --success-foreground: #ffffff;
+  --highlight: #22d3ee;
+  --highlight-foreground: #06282e;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.1);
+  --ring: #8b5cf6;
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-highlight: var(--highlight);
+  --color-highlight-foreground: var(--highlight-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground;
+    /* Native app window, not a scrollable page -- v1 screens are all
+       designed to fit the fixed 400x640 window (see tauri.conf.json). */
+    overflow: hidden;
+    user-select: none;
+  }
+}
+
+@layer utilities {
+  .glow-backdrop {
+    position: relative;
+    isolation: isolate;
+  }
+  .glow-backdrop::before,
+  .glow-backdrop::after {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    border-radius: 9999px;
+    filter: blur(120px);
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .glow-backdrop::before {
+    width: 20rem;
+    height: 20rem;
+    background: var(--primary);
+    top: -6rem;
+    left: -6rem;
+  }
+  .glow-backdrop::after {
+    width: 18rem;
+    height: 18rem;
+    background: var(--highlight);
+    bottom: -6rem;
+    right: -6rem;
+  }
+}
