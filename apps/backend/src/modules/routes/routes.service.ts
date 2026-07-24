@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { Protocol } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { generateCredentials } from "../protocol-users/generate-credentials";
@@ -18,6 +19,45 @@ export class RoutesService {
 
   list() {
     return this.prisma.route.findMany({ orderBy: { createdAt: "desc" } });
+  }
+
+  /** Customer-facing: which Routes a plan's customers may pick, i.e. the
+   * location picker's option list. Reuses SubscriptionPlan.protocolsAllowed
+   * (already in the schema, previously write-only/unenforced) rather than
+   * adding a new plan<->route relation -- a route is eligible if it's
+   * enabled and its entry protocol is one the plan allows.
+   *
+   * Deliberately an explicit `select`, not `include` -- a plain `include`
+   * would return the raw Route row as-is, which contains
+   * `uplinkCredentialsJson` (the relay's shared exit-node secret). That
+   * must never reach a customer; only the fields a location picker
+   * actually needs are selected here. */
+  async listAvailableForPlan(protocolsAllowed: Protocol[]) {
+    const routes = await this.prisma.route.findMany({
+      where: {
+        isEnabled: true,
+        entryProtocolConfig: { protocol: { in: protocolsAllowed } },
+      },
+      select: {
+        id: true,
+        name: true,
+        exitProtocolConfigId: true,
+        entryProtocolConfig: {
+          select: {
+            protocol: true,
+            node: { select: { name: true, region: true } },
+          },
+        },
+      },
+      orderBy: { name: "asc" },
+    });
+
+    return routes.map(({ exitProtocolConfigId, entryProtocolConfig, ...route }) => ({
+      ...route,
+      protocol: entryProtocolConfig.protocol,
+      isRelay: exitProtocolConfigId !== null,
+      location: { region: entryProtocolConfig.node.region, nodeName: entryProtocolConfig.node.name },
+    }));
   }
 
   async get(id: string) {

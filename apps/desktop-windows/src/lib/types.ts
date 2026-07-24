@@ -73,3 +73,15 @@ export interface SubscriptionPlan {
 export interface RegisterResponse extends TokenPair {
   trial: { subscription: Subscription; protocolUser: ProtocolUser } | null;
 }
+
+// GET /customer/subscriptions/:id/routes -- the location picker's option
+// list. Deliberately doesn't include uplinkCredentialsJson or the exit
+// node's identity (see RoutesService.listAvailableForPlan) -- customers
+// never need to know which server backs a relay's egress leg.
+export interface RouteOption {
+  id: string;
+  name: string;
+  protocol: Protocol;
+  isRelay: boolean;
+  location: { region: string; nodeName: string };
+}
