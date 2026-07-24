@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
@@ -11,6 +11,9 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
   { href: "/customers", label: "Customers", icon: Users },
   { href: "/plans", label: "Plans", icon: CreditCard },
   { href: "/admins", label: "Admins", icon: ShieldCheck, roles: ["SUPERADMIN"] },
+  // No `roles` restriction -- every admin manages their own account
+  // security regardless of role, unlike /admins (managing OTHER admins).
+  { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 export function SidebarNav({ role }: { role: AdminRole }) {

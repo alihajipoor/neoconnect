@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { AuthService } from "./auth.service";
@@ -10,11 +10,26 @@ import { RefreshDto } from "./dto/refresh.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentAdmin } from "../../common/decorators/current-admin.decorator";
 import { AuthenticatedAdmin } from "./types";
+import { AdminsService } from "../admins/admins.service";
 
 @ApiTags("auth")
 @Controller("auth")
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly adminsService: AdminsService,
+  ) {}
+
+  // Deliberately NOT gated by RolesGuard/@Roles like AdminsController's
+  // GET /admins/:id -- every admin, regardless of role, needs to be able
+  // to see and manage their OWN security settings (MFA status), not just
+  // SUPERADMINs managing other admins' accounts.
+  @Get("me")
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  me(@CurrentAdmin() admin: AuthenticatedAdmin) {
+    return this.adminsService.get(admin.sub);
+  }
 
   // Tighter than the global default -- this is the one endpoint on the
   // whole API where an attacker gets to guess a secret (a password)
