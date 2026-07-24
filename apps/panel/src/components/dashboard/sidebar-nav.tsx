@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
@@ -10,6 +10,12 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
   { href: "/overview", label: "Overview", icon: LayoutDashboard },
   { href: "/customers", label: "Customers", icon: Users },
   { href: "/plans", label: "Plans", icon: CreditCard },
+  // Viewable by every role (GET is open to any admin on the backend);
+  // create/delete are SUPERADMIN-only, gated per-page via `canManage`,
+  // same pattern as Plans -- not a nav-level restriction.
+  { href: "/nodes", label: "Nodes", icon: Server },
+  { href: "/protocol-configs", label: "Protocol Configs", icon: Radio },
+  { href: "/routes", label: "Routes", icon: RouteIcon },
   { href: "/admins", label: "Admins", icon: ShieldCheck, roles: ["SUPERADMIN"] },
   // No `roles` restriction -- every admin manages their own account
   // security regardless of role, unlike /admins (managing OTHER admins).
