@@ -2,6 +2,7 @@ import { Processor, WorkerHost } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
 import { Job } from "bullmq";
 import { EmailService } from "../email/email.service";
+import { announcementEmail } from "../email/templates";
 import { ANNOUNCEMENTS_QUEUE } from "./jobs.constants";
 
 export interface AnnouncementJobData {
@@ -31,7 +32,7 @@ export class AnnouncementsProcessor extends WorkerHost {
       const ok = await this.emailService.sendMail({
         to,
         subject,
-        html: `<div style="font-family: sans-serif; font-size: 14px; line-height: 1.6;">${body}</div>`,
+        html: announcementEmail(body),
         text: body,
       });
       if (ok) sent += 1;
