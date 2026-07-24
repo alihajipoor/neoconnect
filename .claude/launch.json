@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "panel-dev",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@neoxify/panel", "run", "dev"],
+      "port": 3000
+    }
+  ]
+}

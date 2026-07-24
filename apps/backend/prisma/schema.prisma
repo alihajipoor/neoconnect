@@ -108,7 +108,12 @@ model AdminUser {
   email        String    @unique
   passwordHash String
   role         AdminRole @default(SUPPORT)
+  // Set as soon as /auth/mfa/setup generates a candidate secret, but not
+  // enforced at login until mfaEnabled flips true via /auth/mfa/enable --
+  // otherwise a QR-scan typo during setup could lock the admin out before
+  // they've ever confirmed the app on their phone actually works.
   mfaSecret    String?
+  mfaEnabled   Boolean   @default(false)
   tokenVersion Int       @default(0)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt

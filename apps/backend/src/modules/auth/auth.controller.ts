@@ -1,8 +1,11 @@
 import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from "@nestjs/common";
-import { ApiTags } from "@nestjs/swagger";
+import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { AuthService } from "./auth.service";
 import { LoginDto } from "./dto/login.dto";
+import { MfaDisableDto } from "./dto/mfa-disable.dto";
+import { MfaEnableDto } from "./dto/mfa-enable.dto";
+import { MfaVerifyDto } from "./dto/mfa-verify.dto";
 import { RefreshDto } from "./dto/refresh.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentAdmin } from "../../common/decorators/current-admin.decorator";
@@ -24,6 +27,15 @@ export class AuthController {
     return this.authService.login(dto.email, dto.password);
   }
 
+  // Same brute-force reasoning as login above -- this is the endpoint that
+  // consumes a 6-digit TOTP code, so it gets the same tight limit.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("mfa/verify")
+  @HttpCode(HttpStatus.OK)
+  verifyMfa(@Body() dto: MfaVerifyDto) {
+    return this.authService.verifyMfaAndLogin(dto.mfaToken, dto.code);
+  }
+
   @Post("refresh")
   @HttpCode(HttpStatus.OK)
   refresh(@Body() dto: RefreshDto) {
@@ -35,5 +47,28 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   async logout(@CurrentAdmin() admin: AuthenticatedAdmin) {
     await this.authService.revokeAllSessions(admin.sub);
+  }
+
+  @Post("mfa/setup")
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  setupMfa(@CurrentAdmin() admin: AuthenticatedAdmin) {
+    return this.authService.setupMfa(admin.sub);
+  }
+
+  @Post("mfa/enable")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  async enableMfa(@CurrentAdmin() admin: AuthenticatedAdmin, @Body() dto: MfaEnableDto) {
+    await this.authService.enableMfa(admin.sub, dto.code);
+  }
+
+  @Post("mfa/disable")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  async disableMfa(@CurrentAdmin() admin: AuthenticatedAdmin, @Body() dto: MfaDisableDto) {
+    await this.authService.disableMfa(admin.sub, dto.password);
   }
 }
