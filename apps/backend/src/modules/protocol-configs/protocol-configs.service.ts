@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateProtocolConfigDto } from "./dto/create-protocol-config.dto";
@@ -23,7 +23,31 @@ export class ProtocolConfigsService {
     return config;
   }
 
-  create(dto: CreateProtocolConfigDto) {
+  async create(dto: CreateProtocolConfigDto) {
+    // The installer's "Install/reconfigure <protocol>" menu wording implies
+    // re-running it is safe, but it isn't at the API level: this would
+    // otherwise hit the (nodeId, protocol, listenPort) unique constraint and
+    // surface as an unhandled Prisma error -- a raw 500 with no indication
+    // of what actually went wrong (this is exactly what happened live: a
+    // node that already had all three protocols registered hit this on a
+    // second OpenVPN install attempt). A pre-check with a clear message is
+    // also the *safer* answer, not just a nicer error: silently overwriting
+    // would be actively dangerous for OpenVPN specifically (a fresh
+    // Object.assign below would mint a brand-new CA, invalidating every
+    // client cert already issued against the old one), and pointless for
+    // Xray/WireGuard (their installers already regenerated fresh node-local
+    // keys on re-run, so the old publicParamsJson here would just go stale
+    // instead of being replaced).
+    const existing = await this.prisma.protocolConfig.findUnique({
+      where: { nodeId_protocol_listenPort: { nodeId: dto.nodeId, protocol: dto.protocol, listenPort: dto.listenPort } },
+    });
+    if (existing) {
+      throw new ConflictException(
+        `A ${dto.protocol} protocol config already exists on this node at port ${dto.listenPort} (id ${existing.id}). ` +
+          "Delete it first if you're genuinely reconfiguring -- note that for OPENVPN this invalidates every client cert already issued against its CA.",
+      );
+    }
+
     const publicParamsJson = dto.publicParamsJson;
 
     // OpenVPN needs a CA + server cert to exist before any client cert
