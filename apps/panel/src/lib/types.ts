@@ -36,6 +36,34 @@ export const ALL_PROTOCOLS: Protocol[] = [
   "OPENVPN",
 ];
 
+export type NodeRole = "RELAY" | "EXIT" | "STANDALONE";
+export type NodeStatus = "PENDING" | "ONLINE" | "OFFLINE" | "DISABLED";
+
+export interface Node {
+  id: string;
+  name: string;
+  role: NodeRole;
+  region: string;
+  publicIp: string;
+  status: NodeStatus;
+  lastHeartbeatAt: string | null;
+  agentVersion: string | null;
+  agentPubKey: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProtocolConfig {
+  id: string;
+  nodeId: string;
+  protocol: Protocol;
+  listenPort: number;
+  publicParamsJson: Record<string, unknown>;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Route {
   id: string;
   name: string;
