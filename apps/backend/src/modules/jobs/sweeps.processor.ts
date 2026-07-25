@@ -2,13 +2,17 @@ import { Processor, WorkerHost } from "@nestjs/bullmq";
 import { Logger } from "@nestjs/common";
 import { Job } from "bullmq";
 import { UsageService } from "../usage/usage.service";
+import { InvoicesService } from "../invoices/invoices.service";
 import { SWEEPS_QUEUE } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
 export class SweepsProcessor extends WorkerHost {
   private readonly logger = new Logger(SweepsProcessor.name);
 
-  constructor(private readonly usageService: UsageService) {
+  constructor(
+    private readonly usageService: UsageService,
+    private readonly invoicesService: InvoicesService,
+  ) {
     super();
   }
 
@@ -32,6 +36,16 @@ export class SweepsProcessor extends WorkerHost {
       case "expiry-warning": {
         const count = await this.usageService.sweepExpiryWarnings();
         this.logger.log(`expiry warning sweep: warned ${count} subscription(s)`);
+        break;
+      }
+      case "invoice-overdue": {
+        // Expected to find nothing almost every run: this product is
+        // prepaid, so invoices are issued already paid and never carry a
+        // due date. Only slow-settling crypto leaves one outstanding.
+        const overdue = await this.invoicesService.markOverdue();
+        if (overdue.length > 0) {
+          this.logger.log(`invoice overdue sweep: marked ${overdue.length} invoice(s) overdue`);
+        }
         break;
       }
       default:

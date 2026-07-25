@@ -225,3 +225,69 @@ export function announcementEmail(body: string) {
       .join(""),
   });
 }
+
+/** Receipt for a payment that has cleared.
+ *
+ * Sent when the invoice is issued, which for this product is the moment
+ * the payment settles -- so it reads as a receipt rather than a demand.
+ * The link opens the invoice document, which the customer's browser can
+ * print to PDF; nothing is attached, since a PDF attachment is the
+ * single most reliable way to get a transactional email into a spam
+ * folder.
+ */
+export function invoiceIssuedEmail(params: {
+  invoiceNumber: string;
+  planName: string;
+  amountUsd: string;
+  currency: string;
+  documentUrl?: string;
+}) {
+  const amount = `$${params.amountUsd} ${params.currency.toUpperCase()}`;
+  return {
+    subject: `Your NeoConnect receipt (${params.invoiceNumber})`,
+    html: shell({
+      preheader: `${amount} for ${params.planName}.`,
+      bodyHtml: `
+        ${heading("Thanks for your payment")}
+        ${paragraph(`We've received ${amount} for your ${params.planName} subscription. It's active now.`)}
+        ${codeBlock(params.invoiceNumber)}
+        ${params.documentUrl ? button(params.documentUrl, "View invoice") : ""}
+        ${fineprint("Keep this for your records. You can view or print your invoices any time from the app.")}
+      `,
+    }),
+    text: `Payment received: ${amount} for ${params.planName}. Invoice ${params.invoiceNumber}.${
+      params.documentUrl ? ` View it: ${params.documentUrl}` : ""
+    }`,
+  };
+}
+
+/** Reminder for an invoice that has gone past its due date.
+ *
+ * Rare by design: almost everything here is paid at issue, so this only
+ * fires for slow-settling crypto or, later, reseller terms. Worded as a
+ * nudge rather than a threat, because the most likely explanation is a
+ * payment still confirming rather than someone refusing to pay.
+ */
+export function invoiceOverdueEmail(params: {
+  invoiceNumber: string;
+  amountUsd: string;
+  currency: string;
+  documentUrl?: string;
+}) {
+  const amount = `$${params.amountUsd} ${params.currency.toUpperCase()}`;
+  return {
+    subject: `Unpaid invoice ${params.invoiceNumber}`,
+    html: shell({
+      preheader: `${amount} is still outstanding.`,
+      bodyHtml: `
+        ${heading("This invoice is still unpaid")}
+        ${paragraph(`We haven't received ${amount} for invoice ${params.invoiceNumber} yet.`)}
+        ${params.documentUrl ? button(params.documentUrl, "View invoice") : ""}
+        ${fineprint("If you've already paid, it may still be confirming -- crypto payments can take a while, and this will clear on its own. Otherwise, reach out and we'll help.")}
+      `,
+    }),
+    text: `Invoice ${params.invoiceNumber} for ${amount} is unpaid.${
+      params.documentUrl ? ` View it: ${params.documentUrl}` : ""
+    }`,
+  };
+}
