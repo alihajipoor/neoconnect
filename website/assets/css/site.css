@@ -1,5 +1,5 @@
 /* ==========================================================================
-   NeoConnect website
+   Neoxify website
    --------------------------------------------------------------------------
    Hand-written CSS, no build step -- this ships as-is to shared hosting.
 
@@ -14,9 +14,10 @@
    separate RTL stylesheet to keep in sync -- please keep it that way and
    avoid left/right properties when adding to this file.
 
-   No @font-face, no @import, no external URL of any kind. The audience is
-   largely on networks where a third-party CDN request is slow at best and
-   blocked at worst, and a blocked font request is a visibly broken page.
+   No @import and no external URL of any kind -- the one @font-face below
+   points at a file in this repository. The audience is largely on networks
+   where a third-party CDN request is slow at best and blocked at worst, and
+   a blocked font request is a visibly broken page.
    ========================================================================== */
 
 /* ==========================================================================

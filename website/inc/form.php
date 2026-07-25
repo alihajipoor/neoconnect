@@ -265,7 +265,7 @@ function nx_form_mail($form, $values)
         'Content-Type: text/plain; charset=UTF-8',
         'Content-Transfer-Encoding: 8bit',
         'From: ' . nx_mail_encode($fromName) . ' <' . $fromAddress . '>',
-        'X-Mailer: NeoConnect Website',
+        'X-Mailer: Neoxify Website',
     );
 
     // Only trust the submitted address in Reply-To after it has passed

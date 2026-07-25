@@ -1,6 +1,6 @@
 <?php
 /**
- * NeoConnect website configuration.
+ * Neoxify website configuration.
  *
  * This is the only file you normally need to edit. Everything here is plain
  * data -- no logic, no secrets that can't be regenerated. Prices live in
@@ -44,7 +44,7 @@ return array(
     // SPF and DMARC but no DKIM, so every bit of alignment matters. The
     // submitter's address goes in Reply-To instead, never in From.
     'mail_from' => 'noreply@neoxify.com',
-    'mail_from_name' => 'NeoConnect Website',
+    'mail_from_name' => 'Neoxify Website',
 
     // Optional public contact channels. Leave any of these as an empty
     // string to hide it from the footer and contact page entirely.
@@ -67,8 +67,15 @@ return array(
     'windows_release_tag' => '',
 
     // Asset filename inside that release. Tauri's NSIS bundle names it after
-    // the app version, so this changes with each release.
-    'windows_asset' => 'NeoConnect_0.1.0_x64-setup.exe',
+    // the app's productName and version, so this changes with each release.
+    //
+    // NOTE: this reads "Neoxify_" because the site was renamed ahead of the
+    // app. The desktop client's tauri.conf.json still has productName
+    // "NeoConnect" at the time of writing, so a release cut today would
+    // actually publish NeoConnect_0.1.0_x64-setup.exe. Whatever the bundle
+    // genuinely produces is what has to go here -- check the release assets
+    // rather than trusting this line.
+    'windows_asset' => 'Neoxify_0.1.0_x64-setup.exe',
 
     // Human-readable version shown on the download page.
     'windows_version' => '0.1.0',
