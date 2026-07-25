@@ -201,3 +201,42 @@ func parseUint(s string) uint64 {
 	n, _ := strconv.ParseUint(strings.TrimSpace(s), 10, 64)
 	return n
 }
+
+// ConnectedAddresses maps each currently-connected client's common name to
+// the virtual address OpenVPN assigned it.
+//
+// Needed because OpenVPN hands out addresses from a server-side pool when
+// a client connects, not when the user is provisioned -- so unlike
+// WireGuard there is nothing to shape at creation time, and the caps can
+// only be applied once someone is actually online. The management
+// interface already reports this in the same `status 2` output StatsSince
+// parses, so discovering it costs one extra command rather than a
+// client-connect script on disk.
+//
+// Clients with no virtual address yet (mid-handshake) are skipped rather
+// than reported with an empty address.
+func (p *Provisioner) ConnectedAddresses() (map[string]string, error) {
+	out, err := p.mgmtCommand("status 2")
+	if err != nil {
+		return nil, fmt.Errorf("mgmt status: %w", err)
+	}
+
+	addresses := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "CLIENT_LIST,") {
+			continue
+		}
+		// CLIENT_LIST,Common Name,Real Address,Virtual Address,...
+		fields := strings.Split(line, ",")
+		if len(fields) < 4 {
+			continue
+		}
+		cn := strings.TrimSpace(fields[1])
+		virtual := strings.TrimSpace(fields[3])
+		if cn == "" || virtual == "" {
+			continue
+		}
+		addresses[cn] = virtual
+	}
+	return addresses, nil
+}

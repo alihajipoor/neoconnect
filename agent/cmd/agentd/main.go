@@ -35,6 +35,7 @@ func main() {
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
 	relayTunInboundTag := flag.String("relay-tun-inbound-tag", "relay-tun-in", "tag of the dormant tun inbound in a relay node's Xray config (see installer/assets/xray-relay-config.json.template)")
 	relayTunInterface := flag.String("relay-tun-interface", "relay-tun", "OS network interface name of that same tun inbound, used for ip route/rule when bridging WireGuard/OpenVPN entries into a Route's exit outbound")
+	openvpnInterface := flag.String("openvpn-interface", "tun0", "OpenVPN server tun interface, shaped for per-plan speed caps")
 	openvpnMgmtAddr := flag.String("openvpn-mgmt-addr", "127.0.0.1:7505", "OpenVPN server's local Management Interface address (see installer/lib/agent.sh's install_openvpn)")
 	openvpnCcdDir := flag.String("openvpn-ccd-dir", "/etc/openvpn/ccd", "OpenVPN client-config-dir this node's server is configured with")
 	flag.Parse()
@@ -66,7 +67,14 @@ func main() {
 	// to target one customer. OpenVPN assigns from a pool at connect time
 	// and Xray has no per-user address at all -- see RegisterShaper.
 	dispatcher.RegisterShaper("WIREGUARD", shaper.New(*wgInterface))
-	dispatcher.Register("OPENVPN", openvpn.New(*openvpnMgmtAddr, *openvpnCcdDir))
+	openvpnProvisioner := openvpn.New(*openvpnMgmtAddr, *openvpnCcdDir)
+	dispatcher.Register("OPENVPN", openvpnProvisioner)
+	// OpenVPN hands out addresses from a pool when a client connects, so
+	// its shaper cannot act at provisioning time -- it needs the address
+	// discovered while the client is online. The tun interface it shapes is
+	// the one OpenVPN was configured with.
+	dispatcher.RegisterShaper("OPENVPN", shaper.New(*openvpnInterface))
+	dispatcher.RegisterAddressDiscoverer("OPENVPN", openvpnProvisioner)
 	// Every node's Xray process can be a relay's exit fabric regardless
 	// of which protocols it terminates -- CONFIGURE_ROUTE/REMOVE_ROUTE
 	// are simply no-ops in practice on nodes that never receive them.

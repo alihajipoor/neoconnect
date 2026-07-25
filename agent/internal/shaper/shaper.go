@@ -184,3 +184,10 @@ func maxUint32(a, b uint32) uint32 {
 	}
 	return b
 }
+
+// NewWithRunner builds a Shaper that executes commands through the given
+// runner instead of tc. Exists so callers in other packages can exercise
+// their own shaping logic without a kernel or root.
+func NewWithRunner(iface string, run Runner) *Shaper {
+	return &Shaper{iface: iface, run: run}
+}
