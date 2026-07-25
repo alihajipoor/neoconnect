@@ -77,7 +77,11 @@ require NX_INC . '/partials/head.php';
         <div class="app">
           <div class="app__head">
             <span class="app__brand">
-              <span class="app__mark"><?php echo nx_icon('zap'); ?></span>
+              <?php /* The real app still ships the old bolt mark -- the site
+                       is deliberately ahead of it here, same as the renamed
+                       windows_asset in config. Update this if the app's own
+                       logo lands as something different. */ ?>
+              <span class="app__mark"><?php echo nx_logo_mark(); ?></span>
               <?php echo nx_e('brand.name'); ?>
             </span>
           </div>

@@ -16,7 +16,7 @@ $nx_telegram = trim((string) nx_cfg('telegram_url', ''));
 
       <div class="site-footer__about">
         <a class="brand" href="<?php echo nx_esc(nx_url('home')); ?>">
-          <span class="brand__mark"><?php echo nx_icon('zap'); ?></span>
+          <span class="brand__mark"><?php echo nx_logo_mark(); ?></span>
           <span><?php echo nx_e('brand.name'); ?></span>
         </a>
         <p><?php echo nx_e('footer.note'); ?></p>
