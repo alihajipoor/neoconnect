@@ -1,0 +1,7 @@
+# Build output from make-zip.sh.
+build/
+
+# Any zip sitting in the site root -- deployment archives belong in build/,
+# and a stray one here would otherwise be committed by `git add website`, or
+# worse, uploaded to the host and served publicly.
+*.zip

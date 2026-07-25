@@ -26,7 +26,21 @@
  *   connections    max simultaneous devices, or null to not mention it.
  *                  Maps to SubscriptionPlan.maxConcurrentConnections, which
  *                  is nullable -- leave null unless the plan really sets one.
+ *   down_mbps      download speed limit in Mbit/s, or null. Maps to
+ *   up_mbps        SubscriptionPlan.maxDownloadMbps / maxUploadMbps.
  *   highlight      true on at most one plan, draws the "most popular" frame
+ *
+ * A word on the speed fields. In the panel these are a *cap* -- the field is
+ * literally labelled "Download limit (Mbit/s)" and the agent enforces it by
+ * shaping traffic. They are optional, and a plan with them unset is not
+ * throttled at all.
+ *
+ * So they are null here, and the pricing cards say nothing about speed unless
+ * you fill them in. Both failure modes are bad: advertising a limit that does
+ * not exist makes your plans look worse than they are, and staying silent
+ * about one that does exist is a complaint waiting to happen. Set these to
+ * match whatever you actually configured on the SubscriptionPlan rows, or
+ * leave them null if you left the plans uncapped.
  */
 
 defined('NX') || exit;
@@ -48,6 +62,8 @@ return array(
             'duration_days' => 30,
             'data_gb' => 100,
             'connections' => 1,
+            'down_mbps' => null,
+            'up_mbps' => null,
             'highlight' => false,
         ),
 
@@ -62,6 +78,8 @@ return array(
             'duration_days' => 30,
             'data_gb' => 300,
             'connections' => 3,
+            'down_mbps' => null,
+            'up_mbps' => null,
             'highlight' => true,
         ),
 
@@ -76,6 +94,8 @@ return array(
             'duration_days' => 30,
             'data_gb' => 1024,
             'connections' => 5,
+            'down_mbps' => null,
+            'up_mbps' => null,
             'highlight' => false,
         ),
     ),

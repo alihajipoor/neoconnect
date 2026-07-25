@@ -177,6 +177,13 @@ return array(
     'home.pricing.data' => ':amount of data',
     'home.pricing.data_period' => ':amount every :days days',
     'home.pricing.connections' => 'Up to :count devices connected at once',
+
+    // Only rendered when a plan actually has a speed cap configured. Worded
+    // as "up to" because that is what these are -- a ceiling the agent
+    // enforces, not a guaranteed throughput we could promise.
+    'home.pricing.speed_both' => 'Up to :down Mbit/s down, :up Mbit/s up',
+    'home.pricing.speed_down' => 'Up to :down Mbit/s download',
+    'home.pricing.speed_up' => 'Up to :up Mbit/s upload',
     // Renamed from all_protocols: the site deliberately does not name the
     // protocols it runs on, and a key called "protocols" invites someone to
     // "fix" the copy by putting them back.
