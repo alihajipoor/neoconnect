@@ -131,8 +131,20 @@ export function welcomeEmail() {
   };
 }
 
-export function verificationEmail(token: string, code: string) {
+/** `publicApiUrl` is where this API answers from a customer's browser.
+ *
+ * When it's set the button points at an https:// page that verifies and
+ * then offers to open the app. Without it the button falls back to the
+ * raw `neoconnect://` link, which webmail clients strip -- Gmail and
+ * Yahoo both rendered it unclickable, confirmed on a real account. The
+ * 6-digit code works in every case, which is why it stays the most
+ * prominent element rather than the button. */
+export function verificationEmail(token: string, code: string, publicApiUrl?: string) {
   const deepLink = `neoconnect://verify-email?token=${encodeURIComponent(token)}`;
+  const link = publicApiUrl
+    ? `${publicApiUrl.replace(/\/$/, "")}/customer-auth/verify-email/open?token=${encodeURIComponent(token)}`
+    : deepLink;
+
   return {
     subject: "Verify your NeoConnect email address",
     html: shell({
@@ -141,12 +153,12 @@ export function verificationEmail(token: string, code: string) {
         ${heading("Verify your email")}
         ${paragraph("Enter this code in the NeoConnect app to activate your account:")}
         ${bigCode(code)}
-        ${fineprint("Or, on a device with the app already installed:")}
-        ${button(deepLink, "Open in NeoConnect")}
+        ${fineprint("Or just click here:")}
+        ${button(link, "Verify my email")}
         ${fineprint("This code expires in 24 hours. If you didn't create a NeoConnect account, you can ignore this email.")}
       `,
     }),
-    text: `Your NeoConnect verification code: ${code} (expires in 24 hours). Or open: ${deepLink}`,
+    text: `Your NeoConnect verification code: ${code} (expires in 24 hours). Or open: ${link}`,
   };
 }
 

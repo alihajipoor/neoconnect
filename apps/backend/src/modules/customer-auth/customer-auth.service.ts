@@ -81,7 +81,10 @@ export class CustomerAuthService {
       },
     });
 
-    await this.emailService.sendMail({ to: email, ...verificationEmail(token, code) });
+    await this.emailService.sendMail({
+      to: email,
+      ...verificationEmail(token, code, this.config.get<string>("publicApiUrl")),
+    });
   }
 
   /** Re-sends the verification email/code by email address -- NOT
