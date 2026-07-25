@@ -24,9 +24,10 @@ use std::process::Child;
 
 use neoconnect_ipc::OpenvpnProfile;
 
-use super::{spawn_hidden, write_config, Engines};
+use super::{confirm_started, spawn_hidden, write_config, Engines};
 
 const CONFIG_FILE: &str = "neoconnect.ovpn";
+const LOG_FILE: &str = "openvpn.log";
 
 fn build_config(p: &OpenvpnProfile) -> Result<String, String> {
     let (host, port) = p
@@ -72,12 +73,16 @@ pub fn connect(engines: &Engines, profile: &OpenvpnProfile) -> Result<Child, Str
         .parent()
         .ok_or_else(|| "could not resolve the engine directory".to_string())?;
 
-    spawn_hidden(
+    let log_path = engines.config_path(LOG_FILE);
+    let child = spawn_hidden(
         &exe,
         &[OsStr::new("--config"), config_path.as_os_str()],
         exe_dir,
+        &log_path,
     )
-    .map_err(|e| format!("could not start openvpn.exe: {e}"))
+    .map_err(|e| format!("could not start openvpn.exe: {e}"))?;
+
+    confirm_started(child, "OpenVPN", &log_path)
 }
 
 #[cfg(test)]

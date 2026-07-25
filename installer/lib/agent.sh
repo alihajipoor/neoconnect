@@ -521,6 +521,14 @@ tls-crypt tls-crypt.key
 topology subnet
 server 10.77.0.0 255.255.255.0
 client-config-dir /etc/openvpn/ccd
+# Without these the client builds a working tunnel and then sends
+# everything except 10.77.0.0/24 out its normal interface -- it reports
+# connected, and the user's public IP never changes. Found in live
+# testing: WireGuard changed the IP, OpenVPN didn't, and this was why.
+# redirect-gateway is a server-pushed directive, so it belongs here
+# rather than in the client config the app generates.
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
 keepalive 10 60
 cipher AES-256-GCM
 persist-key

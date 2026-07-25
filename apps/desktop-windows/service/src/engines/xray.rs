@@ -22,9 +22,10 @@ use std::process::Child;
 use neoconnect_ipc::XrayProfile;
 use serde_json::json;
 
-use super::{spawn_hidden, write_config, Engines};
+use super::{confirm_started, spawn_hidden, write_config, Engines};
 
 const CONFIG_FILE: &str = "xray-client.json";
+const LOG_FILE: &str = "xray.log";
 
 /// Link-local /30 for the TUN adapter itself. Deliberately not inside
 /// any RFC1918 range a customer's LAN or another VPN might already be
@@ -94,12 +95,16 @@ pub fn connect(engines: &Engines, profile: &XrayProfile) -> Result<Child, String
 
     // Working directory is the engine directory so xray.exe finds
     // wintun.dll beside itself.
-    spawn_hidden(
+    let log_path = engines.config_path(LOG_FILE);
+    let child = spawn_hidden(
         &exe,
         &[OsStr::new("run"), OsStr::new("-c"), config_path.as_os_str()],
         exe_dir,
+        &log_path,
     )
-    .map_err(|e| format!("could not start xray.exe: {e}"))
+    .map_err(|e| format!("could not start xray.exe: {e}"))?;
+
+    confirm_started(child, "Xray", &log_path)
 }
 
 #[cfg(test)]
