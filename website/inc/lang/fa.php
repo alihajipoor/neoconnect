@@ -175,6 +175,10 @@ return array(
     'home.pricing.data' => ':amount حجم',
     'home.pricing.data_period' => ':amount در هر :days روز',
     'home.pricing.connections' => 'اتصال هم‌زمان تا :count دستگاه',
+
+    'home.pricing.speed_both' => 'تا :down مگابیت بر ثانیه دانلود و :up مگابیت بر ثانیه آپلود',
+    'home.pricing.speed_down' => 'تا :down مگابیت بر ثانیه دانلود',
+    'home.pricing.speed_up' => 'تا :up مگابیت بر ثانیه آپلود',
     'home.pricing.all_modes' => 'همه گزینه‌های اتصال',
     'home.pricing.all_locations' => 'تمام موقعیت‌های سرور',
     'home.pricing.relay_routes' => 'مسیرهای بهینه‌شده برای شبکه‌های محدودشده',

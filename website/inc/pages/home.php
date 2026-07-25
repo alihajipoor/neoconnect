@@ -84,6 +84,9 @@ require NX_INC . '/partials/head.php';
               <span class="app__mark"><?php echo nx_logo_mark(); ?></span>
               <?php echo nx_e('brand.name'); ?>
             </span>
+            <?php /* Two control pills, matching the settings + sign-out pair
+                     the real Dashboard header now carries. */ ?>
+            <span class="app__head-actions" aria-hidden="true"><i></i><i></i></span>
           </div>
 
           <div class="app__card">
@@ -295,6 +298,28 @@ require NX_INC . '/partials/head.php';
                   <?php echo nx_icon('check'); ?>
                   <span><?php echo nx_e('home.pricing.connections', array(
                       'count' => (int) $nx_plan['connections'])); ?></span>
+                </li>
+              <?php endif; ?>
+
+              <?php
+              // Speed is a throttle in the panel, not a headline number, and
+              // it is optional per plan -- so this line appears only when a
+              // cap is genuinely configured. See inc/content/plans.php.
+              $nx_down = !empty($nx_plan['down_mbps']) ? (int) $nx_plan['down_mbps'] : 0;
+              $nx_up = !empty($nx_plan['up_mbps']) ? (int) $nx_plan['up_mbps'] : 0;
+              if ($nx_down || $nx_up): ?>
+                <li>
+                  <?php echo nx_icon('check'); ?>
+                  <span><?php
+                    if ($nx_down && $nx_up) {
+                        echo nx_e('home.pricing.speed_both',
+                            array('down' => $nx_down, 'up' => $nx_up));
+                    } elseif ($nx_down) {
+                        echo nx_e('home.pricing.speed_down', array('down' => $nx_down));
+                    } else {
+                        echo nx_e('home.pricing.speed_up', array('up' => $nx_up));
+                    }
+                  ?></span>
                 </li>
               <?php endif; ?>
 

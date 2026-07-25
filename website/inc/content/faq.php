@@ -85,6 +85,17 @@ return array(
     ),
 
     array(
+        'q' => array(
+            'en' => 'Do I get an invoice?',
+            'fa' => 'فاکتور دریافت می‌کنم؟',
+        ),
+        'a' => array(
+            'en' => 'Yes. Every payment produces an invoice you can open and print from inside the app, whether you paid by card or with crypto.',
+            'fa' => 'بله. برای هر پرداخت یک فاکتور صادر می‌شود که می‌توانید از داخل برنامه باز و چاپ کنید، چه با کارت پرداخت کرده باشید چه با رمزارز.',
+        ),
+    ),
+
+    array(
         'requires' => 'free_trial',
         'q' => array(
             'en' => 'Is there a free trial?',

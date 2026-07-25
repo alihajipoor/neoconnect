@@ -844,6 +844,19 @@ html[lang="fa"] .eyebrow {
   font-size: 0.58rem;
 }
 
+.app__head-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.app__head-actions i {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 0.25rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+}
+
 .app__card {
   padding: 0.6rem;
   border-radius: 0.55rem;
