@@ -30,11 +30,20 @@ const HELLO_FRESHNESS_SECONDS = 120;
 const HEARTBEAT_STALE_MS = 60_000;
 const SWEEP_INTERVAL_MS = 30_000;
 
+// How often to re-assert provisioning on already-connected nodes. This
+// is the recovery window for an engine restarting under a live agent --
+// a customer is offline for at most this long before the node is put
+// back the way it should be, without anyone noticing or intervening.
+// Ten minutes trades a little recovery latency for not putting a burst
+// of writes on every node every minute.
+const REASSERT_INTERVAL_MS = 10 * 60_000;
+
 @Injectable()
 export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AgentGatewayService.name);
   private server?: grpc.Server;
   private sweepHandle?: NodeJS.Timeout;
+  private reassertHandle?: NodeJS.Timeout;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -95,11 +104,41 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Stale-node sweep failed: ${err}`);
       });
     }, SWEEP_INTERVAL_MS);
+
+    this.reassertHandle = setInterval(() => {
+      this.reassertAllConnectedNodes().catch((err) => {
+        this.logger.warn(`Provisioning re-assert sweep failed: ${err}`);
+      });
+    }, REASSERT_INTERVAL_MS);
   }
 
   onModuleDestroy() {
     if (this.sweepHandle) clearInterval(this.sweepHandle);
+    if (this.reassertHandle) clearInterval(this.reassertHandle);
     this.server?.forceShutdown();
+  }
+
+  /** Periodically re-asserts every connected node's users.
+   *
+   * The on-connect re-assert covers a node rebooting or its agent
+   * restarting. It cannot cover an engine restarting underneath a live
+   * agent -- `systemctl restart xray` leaves the control stream up, so
+   * there is no reconnect to react to, and the users are gone anyway.
+   *
+   * The agent can't detect that either: after Xray restarts its API
+   * answers normally and simply reports no users, which is
+   * indistinguishable from an idle node unless the agent persists its own
+   * copy of what should exist. The backend already knows that, so the
+   * safety net lives here.
+   *
+   * Bounded cost: these are written straight onto the stream rather than
+   * stored as commands. Persisting one row per user per sweep would be
+   * thousands of rows a day on a busy node, all recording that nothing
+   * changed. */
+  private async reassertAllConnectedNodes() {
+    for (const nodeId of this.registry.connectedNodeIds()) {
+      await this.reassertProvisionedUsers(nodeId, { persist: false });
+    }
   }
 
   private async sweepStaleNodes() {
@@ -245,24 +284,44 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * Safe to run when nothing was lost: CREATE_USER is idempotent on the
    * agent side (create-if-not-exists), the same property
    * replayQueuedCommands already relies on. */
-  private async reassertProvisionedUsers(nodeId: string) {
+  private async reassertProvisionedUsers(nodeId: string, opts: { persist: boolean } = { persist: true }) {
     const users = await this.prisma.protocolUser.findMany({
       where: { nodeId, status: "ACTIVE" },
     });
     if (users.length === 0) return;
 
     for (const user of users) {
-      await this.enqueueCommand(nodeId, "CREATE_USER", {
+      const payload = {
         protocol: user.protocol,
         externalUserId: user.externalUserId,
         credentials: decryptCredentials(user.credentialsJson),
-      });
+      };
+      if (opts.persist) {
+        await this.enqueueCommand(nodeId, "CREATE_USER", payload);
+      } else {
+        // Synthetic id: this command has no AgentCommand row, so its ack
+        // is expected to match nothing (see handleCommandAck). Prefixed
+        // so an unmatched ack is recognisable rather than looking like
+        // data loss.
+        this.writeCommand(nodeId, `reassert:${user.id}`, "CREATE_USER", payload);
+      }
     }
-    this.logger.log(`Re-asserted ${users.length} provisioned user(s) on node ${nodeId} after reconnect`);
+
+    const how = opts.persist ? "after reconnect" : "on periodic re-assert";
+    this.logger.log(`Re-asserted ${users.length} provisioned user(s) on node ${nodeId} ${how}`);
   }
 
+  /** Records a command's outcome.
+   *
+   * updateMany rather than update because periodic re-asserts are written
+   * without a stored command (see reassertProvisionedUsers), so their acks
+   * legitimately match nothing. `update` throws on a missing row, which
+   * would turn every one of those acks into a stream error. */
   private async handleCommandAck(ack: { commandId: string; success: boolean; error: string }) {
-    await this.prisma.agentCommand.update({
+    if (!ack.success && ack.commandId.startsWith("reassert:")) {
+      this.logger.warn(`Re-assert of ${ack.commandId} failed on the node: ${ack.error}`);
+    }
+    await this.prisma.agentCommand.updateMany({
       where: { id: ack.commandId },
       data: {
         status: ack.success ? "ACKED" : "FAILED",
