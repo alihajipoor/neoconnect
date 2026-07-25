@@ -214,10 +214,45 @@ function withDecryptedCredentials<T extends { credentialsJson: string }>(
  * app then had a credential set with no server address and failed at the
  * point of connecting, well away from the cause. Keeping one builder
  * means a new customer-facing endpoint can't quietly reintroduce that. */
-function connectionInfo(node: { publicIp: string }, protocolConfig: { listenPort: number; publicParamsJson: unknown }) {
+/** The publicParamsJson keys a client legitimately needs, per protocol.
+ *
+ * A whitelist rather than a blocklist, and deliberately so: this object
+ * is handed to every customer, and it is not in fact all public. OpenVPN
+ * stores its CA private key and the server's own key there, because the
+ * backend signs client certificates and needs them. Returning the whole
+ * object let any customer download the CA and sign themselves unlimited
+ * client certificates -- access that would outlive their subscription
+ * and survive their account being deleted, since nothing about it is
+ * checked again after issuance.
+ *
+ * Anything not named here never reaches a client, so a key added to a
+ * ProtocolConfig later is private by default rather than exposed by
+ * omission. */
+const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
+  XRAY_VLESS_REALITY: ["realityPublicKey", "shortIds", "dest", "serverName"],
+  WIREGUARD: ["serverPublicKey", "endpoint", "subnetCidr", "dns"],
+  // caCertPem is genuinely needed to verify the server, and already
+  // travels in the per-user credentials. caKeyPem and serverKeyPem are
+  // the secrets and are absent on purpose.
+  OPENVPN: ["endpoint", "proto", "tlsCryptKey"],
+};
+
+function connectionInfo(
+  node: { publicIp: string },
+  protocolConfig: { protocol: string; listenPort: number; publicParamsJson: unknown },
+) {
+  const allowed = CLIENT_VISIBLE_PUBLIC_PARAMS[protocolConfig.protocol] ?? [];
+  const source = (protocolConfig.publicParamsJson ?? {}) as Record<string, unknown>;
+  const publicParams: Record<string, unknown> = {};
+  for (const key of allowed) {
+    if (source[key] !== undefined) {
+      publicParams[key] = source[key];
+    }
+  }
+
   return {
     host: node.publicIp,
     port: protocolConfig.listenPort,
-    publicParams: protocolConfig.publicParamsJson,
+    publicParams,
   };
 }
