@@ -5,6 +5,7 @@ import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreatePaymentDto } from "./dto/create-payment.dto";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
 import { StripeProvider } from "./providers/stripe.provider";
+import { InvoicesService } from "../invoices/invoices.service";
 
 @Injectable()
 export class BillingService {
@@ -15,6 +16,7 @@ export class BillingService {
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly stripe: StripeProvider,
     private readonly nowpayments: NowPaymentsProvider,
+    private readonly invoices: InvoicesService,
   ) {}
 
   list() {
@@ -148,6 +150,24 @@ export class BillingService {
 
     if (transaction.subscriptionId) {
       await this.renewSubscription(transaction.subscriptionId);
+    }
+
+    // Issued here, in the same flow that activates the subscription,
+    // rather than by a job that sweeps for un-invoiced payments later.
+    // An invoice that depends on a separate process running is an
+    // invoice that is sometimes missing, and the customer notices that
+    // before the operator does.
+    //
+    // A failure here must not undo a confirmed payment: the money has
+    // moved and the subscription is live. Logged loudly instead, since a
+    // paid-but-uninvoiced transaction is a real bookkeeping gap that
+    // someone has to fix by hand.
+    try {
+      await this.invoices.issueForPayment(transactionId);
+    } catch (err) {
+      this.logger.error(
+        `Payment ${transactionId} confirmed but its invoice could not be issued: ${(err as Error).message}`,
+      );
     }
   }
 
