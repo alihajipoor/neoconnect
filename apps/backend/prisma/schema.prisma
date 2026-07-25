@@ -166,6 +166,15 @@ model SubscriptionPlan {
   durationDays             Int
   priceUsd                 Decimal  @db.Decimal(10, 2)
   maxConcurrentConnections Int?
+  // Per-user speed caps in megabits per second, applied on the node to
+  // every ProtocolUser provisioned on this plan. Null means uncapped,
+  // which is what every existing plan stays.
+  //
+  // Mbit/s rather than bytes/s because that is the unit the operator
+  // thinks and sells in ("100 Mbit plan"), and the unit tc takes.
+  // Up and down are separate because asymmetric plans are normal.
+  maxDownloadMbps          Int?
+  maxUploadMbps            Int?
   protocolsAllowed         Protocol[]
   isActive                 Boolean  @default(true)
   // Which Route a customer purchasing this plan gets provisioned on --

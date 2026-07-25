@@ -3,6 +3,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { decryptCredentials, encryptCredentials } from "./credentials-crypto";
 import { CreateProtocolUserDto } from "./dto/create-protocol-user.dto";
+import { rateLimitFor } from "./rate-limit";
 import { generateCredentials } from "./generate-credentials";
 
 @Injectable()
@@ -64,7 +65,13 @@ export class ProtocolUsersService {
 
   async create(dto: CreateProtocolUserDto) {
     const [subscription, route] = await Promise.all([
-      this.prisma.subscription.findUnique({ where: { id: dto.subscriptionId } }),
+      // The plan comes along for its bandwidth caps: the node needs them
+      // at provisioning time, since a user created without a shaper would
+      // run uncapped until something happened to re-provision them.
+      this.prisma.subscription.findUnique({
+        where: { id: dto.subscriptionId },
+        include: { plan: true },
+      }),
       this.prisma.route.findUnique({
         where: { id: dto.routeId },
         // The node comes along for the `connection` field below -- a
@@ -105,6 +112,7 @@ export class ProtocolUsersService {
       protocol: protocolConfig.protocol,
       externalUserId,
       credentials,
+      ...rateLimitFor(subscription.plan, protocolConfig.protocol),
     });
 
     return {

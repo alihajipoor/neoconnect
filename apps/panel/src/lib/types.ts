@@ -102,6 +102,10 @@ export interface SubscriptionPlan {
   durationDays: number;
   priceUsd: string;
   maxConcurrentConnections: number | null;
+  /** Per-user speed caps in Mbit/s. Null = uncapped. Only enforceable on
+   * WireGuard and OpenVPN -- Xray shares one connection per node. */
+  maxDownloadMbps: number | null;
+  maxUploadMbps: number | null;
   protocolsAllowed: Protocol[];
   isActive: boolean;
   defaultRouteId: string | null;
