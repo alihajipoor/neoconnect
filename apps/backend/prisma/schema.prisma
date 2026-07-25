@@ -320,8 +320,16 @@ model ProtocolUser {
 // ---------------------------------------------------------------------------
 
 model UsageRecord {
-  id             String   @id @default(uuid())
-  protocolUserId String
+  id String @id @default(uuid())
+
+  // Nullable, and cleared rather than cascaded when the ProtocolUser goes
+  // away. A ProtocolUser is torn down routinely -- switching servers
+  // deletes and recreates one -- but the usage it accrued is billing
+  // history and must outlive it. As a required FK this blocked the
+  // delete outright, so switching location failed with a 500 for any
+  // customer who had actually used their connection. subscriptionId and
+  // nodeId still identify who used what and where.
+  protocolUserId String?
   subscriptionId String
   nodeId         String
   periodStart    DateTime
@@ -330,7 +338,7 @@ model UsageRecord {
   bytesDown      BigInt
   reportedAt     DateTime @default(now())
 
-  protocolUser ProtocolUser @relation(fields: [protocolUserId], references: [id])
+  protocolUser ProtocolUser? @relation(fields: [protocolUserId], references: [id], onDelete: SetNull)
   subscription Subscription @relation(fields: [subscriptionId], references: [id])
   node         Node         @relation(fields: [nodeId], references: [id])
 
