@@ -1,4 +1,15 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Header,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Query,
+  UseGuards,
+} from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { CustomerAuthService } from "./customer-auth.service";
@@ -12,6 +23,7 @@ import { VerifyEmailDto } from "./dto/verify-email.dto";
 import { VerifyEmailCodeDto } from "./dto/verify-email-code.dto";
 import { ResendVerificationDto } from "./dto/resend-verification.dto";
 import { ForgotPasswordDto } from "./dto/forgot-password.dto";
+import { verificationFailedPage, verifiedPage } from "./verify-landing-page";
 import { ResetPasswordDto } from "./dto/reset-password.dto";
 
 // This is the API a future native client (Windows/macOS/Android/iOS)
@@ -66,6 +78,43 @@ export class CustomerAuthController {
   @HttpCode(HttpStatus.OK)
   verifyEmail(@Body() dto: VerifyEmailDto) {
     return this.customerAuthService.verifyEmail(dto.token);
+  }
+
+  /** The page the email's button actually points at.
+   *
+   * The button used to link straight to `neoconnect://verify-email?...`.
+   * Webmail strips custom URI schemes, so in Gmail and Yahoo it wasn't
+   * clickable at all -- reported by a real user on a real account. An
+   * https:// link survives every client, so the link comes here and this
+   * does the work.
+   *
+   * Verifies before rendering, so the link works from a phone or a
+   * machine without the app; opening the app is then offered as a
+   * convenience rather than being the mechanism. Returns HTML rather
+   * than redirecting straight to the deep link, because a redirect to an
+   * unhandled scheme shows a browser error page and looks broken to
+   * someone who simply hasn't installed the app yet.
+   *
+   * GET, because mail clients and link scanners issue GETs -- which does
+   * mean a scanner can consume the link before the customer clicks it.
+   * That's tolerable here: the outcome is a verified account, which is
+   * what they asked for, and the same throttle applies.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Get("verify-email/open")
+  @Header("Content-Type", "text/html; charset=utf-8")
+  async verifyEmailLanding(@Query("token") token: string): Promise<string> {
+    const deepLink = `neoconnect://verify-email?token=${encodeURIComponent(token ?? "")}`;
+    if (!token) {
+      return verificationFailedPage("That link is missing its verification token.");
+    }
+    try {
+      const result = await this.customerAuthService.verifyEmail(token);
+      return verifiedPage(deepLink, result.alreadyVerified);
+    } catch (err) {
+      const message = err instanceof BadRequestException ? err.message : "Something went wrong verifying this link.";
+      return verificationFailedPage(message);
+    }
   }
 
   // The short-code alternative to the link/token above -- see
