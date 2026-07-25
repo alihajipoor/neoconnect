@@ -14,11 +14,16 @@ import { getAccessToken } from "@/lib/session";
  * Deliberately outside the (dashboard) route group: it returns a
  * standalone document, not a page that should inherit the panel chrome.
  */
-export async function GET(_request: Request, ctx: RouteContext<"/invoices/[id]/document">) {
+// `params` is spelled out rather than using Next's `RouteContext<...>`
+// helper: that type is generated into .next/types during a build, so it
+// only resolves once the app has been built at least once. Typecheck runs
+// before build on a clean checkout, which made it pass locally (stale
+// artifacts present) and fail in CI. This form needs no codegen.
+export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const token = await getAccessToken();
   if (!token) return new NextResponse("Not signed in", { status: 401 });
 
-  const { id } = await ctx.params;
+  const { id } = await params;
   const res = await fetch(`${backendUrl()}/invoices/${encodeURIComponent(id)}/document`, {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
