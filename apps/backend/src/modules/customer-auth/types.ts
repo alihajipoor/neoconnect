@@ -27,3 +27,13 @@ export interface CustomerPasswordResetTokenPayload {
   sub: string;
   purpose: "password-reset";
 }
+
+// Returned by register()/login() instead of a token pair when the
+// account hasn't verified its email yet -- neither issues a usable
+// session until then (2026-07-24 decision: no login without
+// verification, not just no VPN access). Mirrors the admin side's
+// `{mfaRequired: true, mfaToken}` shape from AuthService.login().
+export interface CustomerRequiresVerification {
+  requiresVerification: true;
+  email: string;
+}

@@ -38,7 +38,10 @@ export class EmailService {
     try {
       const transporter = this.getTransporter(settings);
       await transporter.sendMail({
-        from: settings.fromAddress,
+        // Display name, not a bare address: a raw `noreply@...` in the
+        // sender column reads as machine-generated bulk mail to both the
+        // recipient and to spam filters that score sender presentation.
+        from: { name: "NeoConnect", address: settings.fromAddress },
         to: input.to,
         subject: input.subject,
         html: input.html,

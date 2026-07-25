@@ -9,6 +9,8 @@ import { CreateCustomerDto } from "../customers/dto/create-customer.dto";
 import { LoginDto } from "../auth/dto/login.dto";
 import { RefreshDto } from "../auth/dto/refresh.dto";
 import { VerifyEmailDto } from "./dto/verify-email.dto";
+import { VerifyEmailCodeDto } from "./dto/verify-email-code.dto";
+import { ResendVerificationDto } from "./dto/resend-verification.dto";
 import { ForgotPasswordDto } from "./dto/forgot-password.dto";
 import { ResetPasswordDto } from "./dto/reset-password.dto";
 
@@ -56,8 +58,9 @@ export class CustomerAuthController {
   }
 
   // No guard -- the token itself is the credential (mirrors admin MFA's
-  // mfaToken exchange). This is the actual free-VPN-access gate: no
-  // trial/paid credentials exist for a customer until this succeeds.
+  // mfaToken exchange). This is the actual gate for login/VPN access: no
+  // session or trial/paid credentials exist for a customer until either
+  // this or verify-email-code succeeds.
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post("verify-email")
   @HttpCode(HttpStatus.OK)
@@ -65,12 +68,25 @@ export class CustomerAuthController {
     return this.customerAuthService.verifyEmail(dto.token);
   }
 
+  // The short-code alternative to the link/token above -- see
+  // CustomerAuthService.sendVerificationEmail()'s doc comment for why
+  // both exist. Also unauthenticated: an unverified account has no
+  // session to authenticate this call with in the first place.
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("verify-email-code")
+  @HttpCode(HttpStatus.OK)
+  verifyEmailCode(@Body() dto: VerifyEmailCodeDto) {
+    return this.customerAuthService.verifyEmailByCode(dto.email, dto.code);
+  }
+
+  // Unauthenticated (see CustomerAuthService.resendVerification()'s doc
+  // comment) and always 204 regardless of whether the email exists or is
+  // already verified -- same no-enumeration shape as forgot-password.
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("resend-verification")
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiBearerAuth()
-  @UseGuards(CustomerJwtAuthGuard)
-  async resendVerification(@CurrentCustomer() customer: AuthenticatedCustomer) {
-    await this.customerAuthService.resendVerification(customer.sub);
+  async resendVerification(@Body() dto: ResendVerificationDto) {
+    await this.customerAuthService.resendVerification(dto.email);
   }
 
   // Always returns 204 regardless of whether the email exists -- see

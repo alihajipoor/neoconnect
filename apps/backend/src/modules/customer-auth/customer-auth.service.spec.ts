@@ -20,6 +20,8 @@ function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
     status: "ACTIVE",
     tokenVersion: 0,
     emailVerifiedAt: null,
+    emailVerificationCode: null,
+    emailVerificationCodeExpiresAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -28,7 +30,7 @@ function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
 
 describe("CustomerAuthService", () => {
   let service: CustomerAuthService;
-  let prisma: { customer: { findUnique: jest.Mock; findUniqueOrThrow: jest.Mock; update: jest.Mock } };
+  let prisma: { customer: { findUnique: jest.Mock; update: jest.Mock } };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let config: { get: jest.Mock };
   let customersService: { create: jest.Mock };
@@ -43,7 +45,7 @@ describe("CustomerAuthService", () => {
 
   beforeEach(() => {
     prisma = {
-      customer: { findUnique: jest.fn(), findUniqueOrThrow: jest.fn(), update: jest.fn() },
+      customer: { findUnique: jest.fn(), update: jest.fn() },
     };
     jwt = { signAsync: jest.fn(), verifyAsync: jest.fn() };
     config = { get: jest.fn((key: string) => `config:${key}`) };
@@ -66,29 +68,40 @@ describe("CustomerAuthService", () => {
   });
 
   describe("register", () => {
-    it("creates the customer, issues tokens, and sends welcome + verification emails", async () => {
+    it("creates the customer, sends welcome + verification emails, and never issues a session", async () => {
       customersService.create.mockResolvedValue(buildCustomer());
-      jwt.signAsync.mockResolvedValueOnce("access-token").mockResolvedValueOnce("refresh-token").mockResolvedValue(
-        "verify-token",
-      );
+      jwt.signAsync.mockResolvedValue("verify-token");
 
       const dto = { email: "customer@example.com", password: PASSWORD };
       const result = await service.register(dto as any);
 
       expect(customersService.create).toHaveBeenCalledWith(dto);
-      expect(result.accessToken).toBe("access-token");
-      expect(result.refreshToken).toBe("refresh-token");
+      expect(result).toEqual({ requiresVerification: true, email: "customer@example.com" });
       expect(emailService.sendMail).toHaveBeenCalledTimes(2);
       expect(emailService.sendMail.mock.calls[1][0]).toMatchObject({ to: "customer@example.com" });
     });
 
-    it("never grants a trial at registration time, even when trial mode is enabled", async () => {
+    it("stores a 6-digit verification code alongside the token", async () => {
+      customersService.create.mockResolvedValue(buildCustomer());
+      jwt.signAsync.mockResolvedValue("verify-token");
+
+      await service.register({ email: "a@example.com", password: PASSWORD } as any);
+
+      expect(prisma.customer.update).toHaveBeenCalledWith({
+        where: { id: "customer-1" },
+        data: {
+          emailVerificationCode: expect.stringMatching(/^\d{6}$/),
+          emailVerificationCodeExpiresAt: expect.any(Date),
+        },
+      });
+    });
+
+    it("never grants a trial or contacts free-trial settings at registration time", async () => {
       customersService.create.mockResolvedValue(buildCustomer());
       jwt.signAsync.mockResolvedValue("token");
 
-      const result = await service.register({ email: "a@example.com", password: PASSWORD } as any);
+      await service.register({ email: "a@example.com", password: PASSWORD } as any);
 
-      expect(result.trial).toBeNull();
       expect(freeTrialSettingsService.get).not.toHaveBeenCalled();
       expect(subscriptionsService.create).not.toHaveBeenCalled();
       expect(protocolUsersService.create).not.toHaveBeenCalled();
@@ -106,7 +119,7 @@ describe("CustomerAuthService", () => {
       await expect(service.verifyEmail("token")).rejects.toThrow(BadRequestException);
     });
 
-    it("marks the customer verified and returns trial: null when trial mode is disabled", async () => {
+    it("marks the customer verified, clears the code, and returns trial: null when trial mode is disabled", async () => {
       jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", purpose: "verify-email" });
       prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: null }));
       freeTrialSettingsService.get.mockResolvedValue({ enabled: false, trialPlanId: null, trialRouteId: null });
@@ -115,7 +128,7 @@ describe("CustomerAuthService", () => {
 
       expect(prisma.customer.update).toHaveBeenCalledWith({
         where: { id: "customer-1" },
-        data: { emailVerifiedAt: expect.any(Date) },
+        data: { emailVerifiedAt: expect.any(Date), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
       });
       expect(result.alreadyVerified).toBe(false);
       expect(result.trial).toBeNull();
@@ -154,17 +167,70 @@ describe("CustomerAuthService", () => {
     });
   });
 
-  describe("resendVerification", () => {
-    it("throws when the customer is already verified", async () => {
-      prisma.customer.findUniqueOrThrow.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
-      await expect(service.resendVerification("customer-1")).rejects.toThrow(BadRequestException);
+  describe("verifyEmailByCode", () => {
+    it("rejects when no customer matches the email", async () => {
+      prisma.customer.findUnique.mockResolvedValue(null);
+      await expect(service.verifyEmailByCode("nobody@example.com", "123456")).rejects.toThrow(BadRequestException);
     });
 
-    it("sends a fresh verification email when unverified", async () => {
-      prisma.customer.findUniqueOrThrow.mockResolvedValue(buildCustomer({ emailVerifiedAt: null }));
+    it("rejects a wrong code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        buildCustomer({ emailVerificationCode: "111111", emailVerificationCodeExpiresAt: new Date(Date.now() + 60_000) }),
+      );
+      await expect(service.verifyEmailByCode("customer@example.com", "222222")).rejects.toThrow(BadRequestException);
+    });
+
+    it("rejects an expired code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        buildCustomer({ emailVerificationCode: "111111", emailVerificationCodeExpiresAt: new Date(Date.now() - 1000) }),
+      );
+      await expect(service.verifyEmailByCode("customer@example.com", "111111")).rejects.toThrow(BadRequestException);
+    });
+
+    it("marks the customer verified and grants a trial on a correct, unexpired code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        buildCustomer({
+          emailVerifiedAt: null,
+          emailVerificationCode: "111111",
+          emailVerificationCodeExpiresAt: new Date(Date.now() + 60_000),
+        }),
+      );
+      freeTrialSettingsService.get.mockResolvedValue({
+        enabled: true,
+        trialPlanId: "plan-1",
+        trialRouteId: "route-1",
+      });
+      subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
+      protocolUsersService.create.mockResolvedValue({ id: "pu-1" });
+
+      const result = await service.verifyEmailByCode("customer@example.com", "111111");
+
+      expect(prisma.customer.update).toHaveBeenCalledWith({
+        where: { id: "customer-1" },
+        data: { emailVerifiedAt: expect.any(Date), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
+      });
+      expect(result.trial).toEqual({ subscription: { id: "sub-1" }, protocolUser: { id: "pu-1" } });
+    });
+  });
+
+  describe("resendVerification", () => {
+    it("does nothing (no enumeration) when no customer matches the email", async () => {
+      prisma.customer.findUnique.mockResolvedValue(null);
+      await service.resendVerification("nobody@example.com");
+      expect(emailService.sendMail).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when the customer is already verified", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      await service.resendVerification("customer@example.com");
+      expect(emailService.sendMail).not.toHaveBeenCalled();
+    });
+
+    it("sends a fresh verification email + code when unverified", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: null }));
       jwt.signAsync.mockResolvedValue("verify-token");
 
-      await service.resendVerification("customer-1");
+      await service.resendVerification("customer@example.com");
 
       expect(emailService.sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: "customer@example.com" }));
     });
@@ -240,8 +306,17 @@ describe("CustomerAuthService", () => {
   });
 
   describe("login", () => {
-    it("returns a token pair for valid credentials", async () => {
-      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+    it("returns requiresVerification instead of tokens for an unverified account (2026-07-24 decision)", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: null }));
+
+      const result = await service.login("customer@example.com", PASSWORD);
+
+      expect(result).toEqual({ requiresVerification: true, email: "customer@example.com" });
+      expect(jwt.signAsync).not.toHaveBeenCalled();
+    });
+
+    it("returns a token pair for valid credentials on a verified account", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
       jwt.signAsync.mockResolvedValueOnce("access-token").mockResolvedValueOnce("refresh-token");
 
       const result = await service.login("customer@example.com", PASSWORD);

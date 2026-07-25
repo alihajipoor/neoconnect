@@ -11,6 +11,7 @@ const SAFE_SELECT = {
   telegramId: true,
   referralCode: true,
   status: true,
+  emailVerifiedAt: true,
   createdAt: true,
   updatedAt: true,
 } as const;
