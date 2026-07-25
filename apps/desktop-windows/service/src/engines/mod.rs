@@ -8,8 +8,11 @@
 //! invisibly.
 
 mod openvpn;
+mod routing;
 mod wireguard;
 mod xray;
+
+use routing::InstalledRoutes;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -31,7 +34,15 @@ enum Active {
     /// there is no child process for us to hold -- liveness is queried
     /// from the service manager instead.
     WireguardTunnel,
-    Child { protocol: &'static str, child: Child },
+    Child {
+        protocol: &'static str,
+        child: Child,
+        /// Routes this service installed on the engine's behalf. Empty
+        /// for engines that manage their own (OpenVPN acts on the
+        /// server's pushed directives); populated for Xray, which does
+        /// not route anything by itself.
+        routes: InstalledRoutes,
+    },
 }
 
 pub struct Engines {
@@ -77,12 +88,33 @@ impl Engines {
                 self.active = Some(Active::WireguardTunnel);
             }
             ConnectProfile::XrayVlessReality(p) => {
-                let child = xray::connect(self, p)?;
-                self.active = Some(Active::Child { protocol: "XRAY_VLESS_REALITY", child });
+                let mut child = xray::connect(self, p)?;
+                // Xray creates the adapter but routes nothing into it, so
+                // the tunnel is inert until this succeeds. Failing here
+                // must take the engine down with it rather than leave a
+                // process running that reports connected and carries no
+                // traffic.
+                let routes = match xray::install_routes(p) {
+                    Ok(routes) => routes,
+                    Err(e) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(e);
+                    }
+                };
+                self.active = Some(Active::Child {
+                    protocol: "XRAY_VLESS_REALITY",
+                    child,
+                    routes,
+                });
             }
             ConnectProfile::Openvpn(p) => {
                 let child = openvpn::connect(self, p)?;
-                self.active = Some(Active::Child { protocol: "OPENVPN", child });
+                self.active = Some(Active::Child {
+                    protocol: "OPENVPN",
+                    child,
+                    routes: InstalledRoutes::none(),
+                });
             }
         }
         Ok(())
@@ -99,7 +131,11 @@ impl Engines {
                 Ok(())
             }
             Some(Active::WireguardTunnel) => wireguard::disconnect(self),
-            Some(Active::Child { mut child, .. }) => {
+            Some(Active::Child { mut child, mut routes, .. }) => {
+                // Routes first: leaving them pointed at an adapter that is
+                // about to disappear would black-hole all traffic until
+                // Windows noticed.
+                routes.remove();
                 let _ = child.kill();
                 let _ = child.wait();
                 Ok(())
@@ -142,9 +178,14 @@ impl Engines {
                     (false, None)
                 }
             }
-            Some(Active::Child { protocol, child }) => match child.try_wait() {
+            Some(Active::Child { protocol, child, routes }) => match child.try_wait() {
                 // `Ok(Some(_))` means it has already exited.
                 Ok(Some(_)) | Err(_) => {
+                    // An engine that died on its own leaves its routes
+                    // behind pointing at an adapter that no longer
+                    // exists, which black-holes traffic. Clean up as soon
+                    // as we notice, not only on an explicit disconnect.
+                    routes.remove();
                     self.active = None;
                     (false, None)
                 }
