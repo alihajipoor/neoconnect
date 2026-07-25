@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -34,9 +35,15 @@ type Provisioner struct {
 	conn        *grpc.ClientConn
 	handlerConn hcommand.HandlerServiceClient
 	statsConn   scommand.StatsServiceClient
+	sessions    *SessionCounter
 }
 
-func New(apiAddr, inboundTag string) (*Provisioner, error) {
+// How far back a client address still counts as "currently connected".
+// Long enough to span a quiet period on an idle connection, short enough
+// that a user who genuinely moved networks stops looking like two.
+const sessionWindow = 5 * time.Minute
+
+func New(apiAddr, inboundTag, accessLogPath string) (*Provisioner, error) {
 	conn, err := grpc.NewClient(apiAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("connect to xray api at %s: %w", apiAddr, err)
@@ -47,7 +54,16 @@ func New(apiAddr, inboundTag string) (*Provisioner, error) {
 		conn:        conn,
 		handlerConn: hcommand.NewHandlerServiceClient(conn),
 		statsConn:   scommand.NewStatsServiceClient(conn),
+		sessions:    NewSessionCounter(accessLogPath, sessionWindow),
 	}, nil
+}
+
+// SessionCounts reports how many distinct client addresses each user is
+// active from. Empty when access logging isn't enabled on this node --
+// absent counts mean "unknown" to the server, never "zero", so a node
+// without logging can't cause anyone to be disconnected.
+func (p *Provisioner) SessionCounts() (map[string]int, error) {
+	return p.sessions.Counts()
 }
 
 func (p *Provisioner) Close() error {

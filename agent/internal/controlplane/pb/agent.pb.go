@@ -371,8 +371,13 @@ func (x *Heartbeat) GetActiveConnections() int32 {
 }
 
 type StatsBatch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Deltas        []*UsageDelta          `protobuf:"bytes,1,rep,name=deltas,proto3" json:"deltas,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Deltas []*UsageDelta          `protobuf:"bytes,1,rep,name=deltas,proto3" json:"deltas,omitempty"`
+	// How many distinct client addresses each user is currently active
+	// from. Rides along with usage rather than getting its own message
+	// because it comes from the same poll and is only meaningful next to
+	// it. Empty for protocols that can't report it -- see SessionCount.
+	Sessions      []*SessionCount `protobuf:"bytes,2,rep,name=sessions,proto3" json:"sessions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -414,6 +419,86 @@ func (x *StatsBatch) GetDeltas() []*UsageDelta {
 	return nil
 }
 
+func (x *StatsBatch) GetSessions() []*SessionCount {
+	if x != nil {
+		return x.Sessions
+	}
+	return nil
+}
+
+// Concurrency for one provisioned user, measured as distinct source
+// addresses seen recently.
+//
+// Only Xray reports this, and only Xray needs to. VLESS accepts
+// unlimited concurrent connections for the same UUID, so a shared
+// credential really does multiply into many simultaneous users. The
+// other two engines are already self-limiting: OpenVPN replaces an
+// existing session when the same certificate connects again (no
+// duplicate-cn), and a WireGuard peer tracks a single endpoint, so
+// devices sharing a key fight over it rather than working in parallel.
+type SessionCount struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ExternalUserId string                 `protobuf:"bytes,1,opt,name=external_user_id,json=externalUserId,proto3" json:"external_user_id,omitempty"`
+	Protocol       string                 `protobuf:"bytes,2,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	// Distinct source addresses within the reporting window. A user
+	// roaming between networks briefly shows two, which is why the server
+	// requires this to persist before acting on it.
+	DistinctSources uint32 `protobuf:"varint,3,opt,name=distinct_sources,json=distinctSources,proto3" json:"distinct_sources,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SessionCount) Reset() {
+	*x = SessionCount{}
+	mi := &file_agent_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionCount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionCount) ProtoMessage() {}
+
+func (x *SessionCount) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionCount.ProtoReflect.Descriptor instead.
+func (*SessionCount) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SessionCount) GetExternalUserId() string {
+	if x != nil {
+		return x.ExternalUserId
+	}
+	return ""
+}
+
+func (x *SessionCount) GetProtocol() string {
+	if x != nil {
+		return x.Protocol
+	}
+	return ""
+}
+
+func (x *SessionCount) GetDistinctSources() uint32 {
+	if x != nil {
+		return x.DistinctSources
+	}
+	return 0
+}
+
 type UsageDelta struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	ExternalUserId string                 `protobuf:"bytes,1,opt,name=external_user_id,json=externalUserId,proto3" json:"external_user_id,omitempty"`
@@ -426,7 +511,7 @@ type UsageDelta struct {
 
 func (x *UsageDelta) Reset() {
 	*x = UsageDelta{}
-	mi := &file_agent_proto_msgTypes[4]
+	mi := &file_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -438,7 +523,7 @@ func (x *UsageDelta) String() string {
 func (*UsageDelta) ProtoMessage() {}
 
 func (x *UsageDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[4]
+	mi := &file_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -451,7 +536,7 @@ func (x *UsageDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UsageDelta.ProtoReflect.Descriptor instead.
 func (*UsageDelta) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{4}
+	return file_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *UsageDelta) GetExternalUserId() string {
@@ -493,7 +578,7 @@ type CommandAck struct {
 
 func (x *CommandAck) Reset() {
 	*x = CommandAck{}
-	mi := &file_agent_proto_msgTypes[5]
+	mi := &file_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -505,7 +590,7 @@ func (x *CommandAck) String() string {
 func (*CommandAck) ProtoMessage() {}
 
 func (x *CommandAck) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[5]
+	mi := &file_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -518,7 +603,7 @@ func (x *CommandAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandAck.ProtoReflect.Descriptor instead.
 func (*CommandAck) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{5}
+	return file_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CommandAck) GetCommandId() string {
@@ -551,7 +636,7 @@ type StateSnapshot struct {
 
 func (x *StateSnapshot) Reset() {
 	*x = StateSnapshot{}
-	mi := &file_agent_proto_msgTypes[6]
+	mi := &file_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -563,7 +648,7 @@ func (x *StateSnapshot) String() string {
 func (*StateSnapshot) ProtoMessage() {}
 
 func (x *StateSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[6]
+	mi := &file_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -576,7 +661,7 @@ func (x *StateSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateSnapshot.ProtoReflect.Descriptor instead.
 func (*StateSnapshot) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{6}
+	return file_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StateSnapshot) GetUsers() []*ProtocolUserRef {
@@ -597,7 +682,7 @@ type ProtocolUserRef struct {
 
 func (x *ProtocolUserRef) Reset() {
 	*x = ProtocolUserRef{}
-	mi := &file_agent_proto_msgTypes[7]
+	mi := &file_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -609,7 +694,7 @@ func (x *ProtocolUserRef) String() string {
 func (*ProtocolUserRef) ProtoMessage() {}
 
 func (x *ProtocolUserRef) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[7]
+	mi := &file_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -622,7 +707,7 @@ func (x *ProtocolUserRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtocolUserRef.ProtoReflect.Descriptor instead.
 func (*ProtocolUserRef) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{7}
+	return file_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ProtocolUserRef) GetExternalUserId() string {
@@ -658,7 +743,7 @@ type ControlMessage struct {
 
 func (x *ControlMessage) Reset() {
 	*x = ControlMessage{}
-	mi := &file_agent_proto_msgTypes[8]
+	mi := &file_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -670,7 +755,7 @@ func (x *ControlMessage) String() string {
 func (*ControlMessage) ProtoMessage() {}
 
 func (x *ControlMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[8]
+	mi := &file_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -683,7 +768,7 @@ func (x *ControlMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlMessage.ProtoReflect.Descriptor instead.
 func (*ControlMessage) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{8}
+	return file_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ControlMessage) GetPayload() isControlMessage_Payload {
@@ -723,7 +808,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_agent_proto_msgTypes[9]
+	mi := &file_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -735,7 +820,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[9]
+	mi := &file_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -748,7 +833,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{9}
+	return file_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Command) GetId() string {
@@ -797,10 +882,15 @@ const file_agent_proto_rawDesc = "" +
 	"cpuPercent\x12\x1f\n" +
 	"\vmem_percent\x18\x02 \x01(\x01R\n" +
 	"memPercent\x12-\n" +
-	"\x12active_connections\x18\x03 \x01(\x05R\x11activeConnections\"B\n" +
+	"\x12active_connections\x18\x03 \x01(\x05R\x11activeConnections\"~\n" +
 	"\n" +
 	"StatsBatch\x124\n" +
-	"\x06deltas\x18\x01 \x03(\v2\x1c.neoxify.agent.v1.UsageDeltaR\x06deltas\"\x8c\x01\n" +
+	"\x06deltas\x18\x01 \x03(\v2\x1c.neoxify.agent.v1.UsageDeltaR\x06deltas\x12:\n" +
+	"\bsessions\x18\x02 \x03(\v2\x1e.neoxify.agent.v1.SessionCountR\bsessions\"\x7f\n" +
+	"\fSessionCount\x12(\n" +
+	"\x10external_user_id\x18\x01 \x01(\tR\x0eexternalUserId\x12\x1a\n" +
+	"\bprotocol\x18\x02 \x01(\tR\bprotocol\x12)\n" +
+	"\x10distinct_sources\x18\x03 \x01(\rR\x0fdistinctSources\"\x8c\x01\n" +
 	"\n" +
 	"UsageDelta\x12(\n" +
 	"\x10external_user_id\x18\x01 \x01(\tR\x0eexternalUserId\x12\x1a\n" +
@@ -854,37 +944,39 @@ func file_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_agent_proto_goTypes = []any{
 	(CommandType)(0),        // 0: neoxify.agent.v1.CommandType
 	(*AgentMessage)(nil),    // 1: neoxify.agent.v1.AgentMessage
 	(*Hello)(nil),           // 2: neoxify.agent.v1.Hello
 	(*Heartbeat)(nil),       // 3: neoxify.agent.v1.Heartbeat
 	(*StatsBatch)(nil),      // 4: neoxify.agent.v1.StatsBatch
-	(*UsageDelta)(nil),      // 5: neoxify.agent.v1.UsageDelta
-	(*CommandAck)(nil),      // 6: neoxify.agent.v1.CommandAck
-	(*StateSnapshot)(nil),   // 7: neoxify.agent.v1.StateSnapshot
-	(*ProtocolUserRef)(nil), // 8: neoxify.agent.v1.ProtocolUserRef
-	(*ControlMessage)(nil),  // 9: neoxify.agent.v1.ControlMessage
-	(*Command)(nil),         // 10: neoxify.agent.v1.Command
+	(*SessionCount)(nil),    // 5: neoxify.agent.v1.SessionCount
+	(*UsageDelta)(nil),      // 6: neoxify.agent.v1.UsageDelta
+	(*CommandAck)(nil),      // 7: neoxify.agent.v1.CommandAck
+	(*StateSnapshot)(nil),   // 8: neoxify.agent.v1.StateSnapshot
+	(*ProtocolUserRef)(nil), // 9: neoxify.agent.v1.ProtocolUserRef
+	(*ControlMessage)(nil),  // 10: neoxify.agent.v1.ControlMessage
+	(*Command)(nil),         // 11: neoxify.agent.v1.Command
 }
 var file_agent_proto_depIdxs = []int32{
 	2,  // 0: neoxify.agent.v1.AgentMessage.hello:type_name -> neoxify.agent.v1.Hello
 	3,  // 1: neoxify.agent.v1.AgentMessage.heartbeat:type_name -> neoxify.agent.v1.Heartbeat
 	4,  // 2: neoxify.agent.v1.AgentMessage.stats_batch:type_name -> neoxify.agent.v1.StatsBatch
-	6,  // 3: neoxify.agent.v1.AgentMessage.command_ack:type_name -> neoxify.agent.v1.CommandAck
-	7,  // 4: neoxify.agent.v1.AgentMessage.state_snapshot:type_name -> neoxify.agent.v1.StateSnapshot
-	5,  // 5: neoxify.agent.v1.StatsBatch.deltas:type_name -> neoxify.agent.v1.UsageDelta
-	8,  // 6: neoxify.agent.v1.StateSnapshot.users:type_name -> neoxify.agent.v1.ProtocolUserRef
-	10, // 7: neoxify.agent.v1.ControlMessage.command:type_name -> neoxify.agent.v1.Command
-	0,  // 8: neoxify.agent.v1.Command.type:type_name -> neoxify.agent.v1.CommandType
-	1,  // 9: neoxify.agent.v1.AgentGateway.AgentSync:input_type -> neoxify.agent.v1.AgentMessage
-	9,  // 10: neoxify.agent.v1.AgentGateway.AgentSync:output_type -> neoxify.agent.v1.ControlMessage
-	10, // [10:11] is the sub-list for method output_type
-	9,  // [9:10] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	7,  // 3: neoxify.agent.v1.AgentMessage.command_ack:type_name -> neoxify.agent.v1.CommandAck
+	8,  // 4: neoxify.agent.v1.AgentMessage.state_snapshot:type_name -> neoxify.agent.v1.StateSnapshot
+	6,  // 5: neoxify.agent.v1.StatsBatch.deltas:type_name -> neoxify.agent.v1.UsageDelta
+	5,  // 6: neoxify.agent.v1.StatsBatch.sessions:type_name -> neoxify.agent.v1.SessionCount
+	9,  // 7: neoxify.agent.v1.StateSnapshot.users:type_name -> neoxify.agent.v1.ProtocolUserRef
+	11, // 8: neoxify.agent.v1.ControlMessage.command:type_name -> neoxify.agent.v1.Command
+	0,  // 9: neoxify.agent.v1.Command.type:type_name -> neoxify.agent.v1.CommandType
+	1,  // 10: neoxify.agent.v1.AgentGateway.AgentSync:input_type -> neoxify.agent.v1.AgentMessage
+	10, // 11: neoxify.agent.v1.AgentGateway.AgentSync:output_type -> neoxify.agent.v1.ControlMessage
+	11, // [11:12] is the sub-list for method output_type
+	10, // [10:11] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -899,7 +991,7 @@ func file_agent_proto_init() {
 		(*AgentMessage_CommandAck)(nil),
 		(*AgentMessage_StateSnapshot)(nil),
 	}
-	file_agent_proto_msgTypes[8].OneofWrappers = []any{
+	file_agent_proto_msgTypes[9].OneofWrappers = []any{
 		(*ControlMessage_Command)(nil),
 	}
 	type x struct{}
@@ -908,7 +1000,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

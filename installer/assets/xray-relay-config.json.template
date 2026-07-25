@@ -1,5 +1,8 @@
 {
-  "log": { "loglevel": "warning" },
+  "log": {
+    "loglevel": "warning",
+    "access": "/var/log/xray/access.log"
+  },
   "api": {
     "tag": "api",
     "services": ["HandlerService", "StatsService", "LoggerService", "RoutingService"]

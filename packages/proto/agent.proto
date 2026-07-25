@@ -55,6 +55,30 @@ message Heartbeat {
 
 message StatsBatch {
   repeated UsageDelta deltas = 1;
+  // How many distinct client addresses each user is currently active
+  // from. Rides along with usage rather than getting its own message
+  // because it comes from the same poll and is only meaningful next to
+  // it. Empty for protocols that can't report it -- see SessionCount.
+  repeated SessionCount sessions = 2;
+}
+
+// Concurrency for one provisioned user, measured as distinct source
+// addresses seen recently.
+//
+// Only Xray reports this, and only Xray needs to. VLESS accepts
+// unlimited concurrent connections for the same UUID, so a shared
+// credential really does multiply into many simultaneous users. The
+// other two engines are already self-limiting: OpenVPN replaces an
+// existing session when the same certificate connects again (no
+// duplicate-cn), and a WireGuard peer tracks a single endpoint, so
+// devices sharing a key fight over it rather than working in parallel.
+message SessionCount {
+  string external_user_id = 1;
+  string protocol = 2;
+  // Distinct source addresses within the reporting window. A user
+  // roaming between networks briefly shows two, which is why the server
+  // requires this to persist before acting on it.
+  uint32 distinct_sources = 3;
 }
 
 message UsageDelta {

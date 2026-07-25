@@ -30,6 +30,7 @@ func main() {
 	configPath := flag.String("config", config.DefaultPath, "path to the agent's persisted config")
 	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
 	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
+	xrayAccessLog := flag.String("xray-access-log", "/var/log/xray/access.log", "Xray's access log, read to count how many places each user is connected from -- concurrency is not exposed by Xray's API. Harmless if absent: counts are simply not reported")
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
 	relayTunInboundTag := flag.String("relay-tun-inbound-tag", "relay-tun-in", "tag of the dormant tun inbound in a relay node's Xray config (see installer/assets/xray-relay-config.json.template)")
 	relayTunInterface := flag.String("relay-tun-interface", "relay-tun", "OS network interface name of that same tun inbound, used for ip route/rule when bridging WireGuard/OpenVPN entries into a Route's exit outbound")
@@ -50,7 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	xrayProvisioner, err := xray.New(*xrayAPIAddr, *xrayInboundTag)
+	xrayProvisioner, err := xray.New(*xrayAPIAddr, *xrayInboundTag, *xrayAccessLog)
 	if err != nil {
 		log.Fatalf("connect to xray api: %v", err)
 	}
