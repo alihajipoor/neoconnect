@@ -18,13 +18,14 @@
 
 use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::process::Child;
 
 use neoconnect_ipc::XrayProfile;
 use serde_json::json;
 
 use super::routing::{self, InstalledRoutes};
-use super::{confirm_started, spawn_hidden, write_config, Engines};
+use super::{confirm_started, run_hidden, spawn_hidden, write_config, Engines};
 use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
@@ -53,6 +54,12 @@ const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// went out the physical interface. The tunnel looked connected and
 /// changed nothing.
 const TUN_GATEWAY: &str = "198.18.0.1/30";
+
+/// Resolver handed to the tunnel adapter. The physical link's resolvers
+/// are usually LAN or ISP addresses that stop being reachable once the
+/// default route moves, so the tunnel needs one that works from
+/// anywhere.
+const TUN_DNS: &str = "1.1.1.1";
 
 fn build_config(p: &XrayProfile) -> String {
     // Built through serde_json rather than string formatting so every
@@ -99,6 +106,63 @@ fn build_config(p: &XrayProfile) -> String {
         }]
     });
     config.to_string()
+}
+
+/// Assigns the TUN adapter its address and DNS.
+///
+/// Xray's `gateway` setting does not take effect on Windows -- the
+/// adapter comes up and Windows self-assigns an APIPA address instead,
+/// which was visible in the engine's own log as every packet arriving
+/// from a 169.254.x source. That left the next hop in our routes
+/// (198.18.0.1) not actually present on the interface, so traffic could
+/// reach the tunnel but had no way back.
+///
+/// DNS is set here too. With the default route captured by the tunnel,
+/// the resolvers the physical link advertises are no longer reachable,
+/// so leaving them in place means every lookup fails even once packets
+/// flow -- which reads to a user as "the internet is down".
+fn configure_adapter(tun_ip: Ipv4Addr) -> Result<(), String> {
+    let netsh = PathBuf::from(r"C:\Windows\System32\netsh.exe");
+    let name_arg = format!("name={ADAPTER_NAME}");
+
+    let status = run_hidden(
+        &netsh,
+        &[
+            OsStr::new("interface"),
+            OsStr::new("ipv4"),
+            OsStr::new("set"),
+            OsStr::new("address"),
+            OsStr::new(&name_arg),
+            OsStr::new("static"),
+            OsStr::new(&tun_ip.to_string()),
+            // /30, matching TUN_GATEWAY.
+            OsStr::new("255.255.255.252"),
+        ],
+    )
+    .map_err(|e| format!("could not configure the tunnel adapter: {e}"))?;
+    if !status.success() {
+        return Err(format!("assigning the tunnel adapter's address failed ({status})"));
+    }
+
+    let status = run_hidden(
+        &netsh,
+        &[
+            OsStr::new("interface"),
+            OsStr::new("ipv4"),
+            OsStr::new("set"),
+            OsStr::new("dnsservers"),
+            OsStr::new(&name_arg),
+            OsStr::new("static"),
+            OsStr::new(TUN_DNS),
+            OsStr::new("primary"),
+        ],
+    )
+    .map_err(|e| format!("could not set the tunnel's DNS: {e}"))?;
+    if !status.success() {
+        return Err(format!("setting the tunnel's DNS failed ({status})"));
+    }
+
+    Ok(())
 }
 
 /// Waits for Xray's TUN adapter to appear and returns its interface index.
@@ -163,6 +227,11 @@ pub fn install_routes(profile: &XrayProfile) -> Result<InstalledRoutes, String> 
         .next()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
+
+    // Before the routes: they name this address as their next hop, and a
+    // route to a next hop that isn't on the interface silently goes
+    // nowhere.
+    configure_adapter(tun_gateway)?;
 
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
 }
