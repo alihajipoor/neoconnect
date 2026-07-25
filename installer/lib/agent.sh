@@ -39,31 +39,83 @@ action_install_agent() {
   fetch_agent_binary
   install_agentd_unit
 
-  cat <<'EOF'
-
-Before continuing: in the panel, go to Nodes -> Add Node, fill in this
-node's name/role/region, and copy the enrollment token it gives you
-(shown once). That's what this step needs below.
-
-EOF
   # Must include /api -- nginx only proxies the backend under that
   # prefix (see installer/assets/nginx-panel.conf.template); the bare
   # domain hits the Next.js panel itself and 404s.
   read -r -p "Panel URL, including /api (e.g. https://connect.example.com/api): " panel_url
-  read -r -p "Enrollment token: " enroll_token
 
-  echo "Claiming enrollment token..."
+  cat <<'EOF'
+
+Signing in to the panel. This install registers the node, its engines and
+their routes for you, so there is nothing to copy into the panel by hand
+afterwards -- the login is used for those API calls and is not stored.
+
+EOF
+  local token
+  token="$(get_admin_bearer_token)" || exit 1
+
+  local detected_ip
+  detected_ip="$(curl -fsSL https://api.ipify.org || true)"
+
+  echo
+  read -r -p "Name for this node (e.g. finland-1): " node_name
+  read -r -p "Region label (e.g. fi-finland): " node_region
+  read -r -p "Public IP [$detected_ip]: " node_ip
+  node_ip="${node_ip:-$detected_ip}"
+
+  cat <<'EOF'
+
+Node role:
+  1) STANDALONE -- customers connect to it and it exits to the internet here
+  2) EXIT       -- traffic exits here, fed by relay nodes elsewhere
+  3) RELAY      -- customers connect here, traffic is forwarded to an exit node
+                   (for censored networks; you'll pick the exit node next)
+EOF
+  local role_choice node_role
+  read -r -p "Choice [1]: " role_choice
+  case "${role_choice:-1}" in
+    2) node_role="EXIT" ;;
+    3) node_role="RELAY" ;;
+    *) node_role="STANDALONE" ;;
+  esac
+  # Consulted by create_route_for_config for every engine installed
+  # below, so the exit node is chosen once rather than per protocol.
+  node_is_relay="n"
+  [[ "$node_role" == "RELAY" ]] && node_is_relay="y"
+
+  echo
+  echo "Creating this node in the panel..."
+  local node_response
+  node_response="$(curl -sSL -X POST "$panel_url/nodes" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $token" \
+    -d "$(jq -n --arg name "$node_name" --arg role "$node_role" --arg region "$node_region" --arg ip "$node_ip" \
+      '{name: $name, role: $role, region: $region, publicIp: $ip}')")"
+
+  local node_id
+  node_id="$(echo "$node_response" | jq -r '.id // empty')"
+  if [[ -z "$node_id" ]]; then
+    echo "ERROR: could not create the node in the panel." >&2
+    echo "  Response: $(echo "$node_response" | jq -r '.message // .' 2>/dev/null || echo "$node_response")" >&2
+    exit 1
+  fi
+
+  # The enrollment token is minted here rather than copied out of the
+  # panel by hand. It's still single-use and short-lived -- it just never
+  # has to cross a human's clipboard.
+  local enroll_token
+  enroll_token="$(curl -sSL -X POST "$panel_url/nodes/$node_id/enrollment-tokens" \
+    -H "Authorization: Bearer $token" | jq -r '.token // empty')"
+  if [[ -z "$enroll_token" ]]; then
+    echo "ERROR: could not issue an enrollment token for this node." >&2
+    exit 1
+  fi
+
+  echo "Enrolling agent..."
   /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token"
 
   install -d -m 755 /etc/neoxify
   echo "agent" > /etc/neoxify/role
-
-  # Needed below by install_openvpn (its Protocol Config's nodeId) --
-  # written to the agent's own config by the enroll-init call just
-  # above. Visible to install_xray/install_wireguard/install_openvpn
-  # too since bash functions see their caller's locals.
-  local node_id
-  node_id="$(jq -r '.nodeId' /etc/neoxify/agent.json)"
 
   echo
   read -r -p "Install Xray (VLESS+REALITY) on this node now? [Y/n]: " install_xray_choice
@@ -84,9 +136,17 @@ EOF
   fi
 
   start_agentd
-  echo
-  echo "Enrolled. This node should show as ONLINE in the panel within a"
-  echo "few seconds -- check: systemctl status neoxify-agentd"
+  cat <<EOF
+
+Done. "$node_name" is registered with its engines and routes, and should
+show as ONLINE in the panel within a few seconds.
+
+Nothing further to configure by hand -- customers can select it as soon
+as it reports in. To change ports or parameters later, edit the Protocol
+Config in the panel.
+
+Check the agent with: systemctl status neoxify-agentd
+EOF
 }
 
 # Installs xray-core, generates a REALITY keypair, and writes a config
@@ -127,21 +187,15 @@ install_xray() {
 
   systemctl restart xray
 
-  cat <<EOF
+  echo "Registering Xray in the panel..."
+  local config_id params
+  params="$(jq -n --arg pk "$public_key" --arg sid "$short_id" --arg dest "$dest" --arg sn "$server_name" \
+    '{realityPublicKey: $pk, shortIds: [$sid], dest: $dest, serverName: $sn}')"
+  config_id="$(register_protocol_config "XRAY_VLESS_REALITY" "$listen_port" "$params")" || return 1
+  echo "  Registered (config $config_id)."
+  create_route_for_config "Xray VLESS+REALITY" "$config_id"
 
-Xray is running on port $listen_port. Register this as a Protocol Config
-in the panel (Nodes -> this node -> Add Protocol Config once that UI
-exists; for now, POST /protocol-configs) with:
-
-  protocol:    XRAY_VLESS_REALITY
-  listenPort:  $listen_port
-  publicParamsJson:
-    realityPublicKey: $public_key
-    shortIds:          ["$short_id"]
-    dest:              "$dest"
-    serverName:        "$server_name"
-
-EOF
+  echo "Xray is running on port $listen_port and is ready to use."
 }
 
 # VPS providers use varying primary interface names (eth0/ens3/enX0/...)
@@ -210,21 +264,15 @@ EOF
   systemctl enable --now wg-quick@wg0
   systemctl restart wg-quick@wg0
 
-  cat <<EOF
+  echo "Registering WireGuard in the panel..."
+  local config_id params
+  params="$(jq -n --arg pk "$public_key" --arg ep "${endpoint_host}:${listen_port}" --arg subnet "$subnet" --arg dns "$dns" \
+    '{serverPublicKey: $pk, endpoint: $ep, subnetCidr: $subnet, dns: $dns}')"
+  config_id="$(register_protocol_config "WIREGUARD" "$listen_port" "$params")" || return 1
+  echo "  Registered (config $config_id)."
+  create_route_for_config "WireGuard" "$config_id"
 
-WireGuard is running on port $listen_port. Register this as a Protocol
-Config in the panel (Nodes -> this node -> Add Protocol Config once
-that UI exists; for now, POST /protocol-configs) with:
-
-  protocol:    WIREGUARD
-  listenPort:  $listen_port
-  publicParamsJson:
-    serverPublicKey: $public_key
-    endpoint:         "${endpoint_host}:${listen_port}"
-    subnetCidr:       "$subnet"
-    dns:              "$dns"
-
-EOF
+  echo "WireGuard is running on port $listen_port and is ready to use."
 }
 
 # Prompts for panel admin credentials and exchanges them for a fresh
@@ -234,6 +282,14 @@ EOF
 # to generate the CA (see openvpn-pki.ts). Bash has no string return,
 # so callers do: token="$(get_admin_bearer_token)".
 get_admin_bearer_token() {
+  # Cached for the whole install: every protocol registration and route
+  # creation needs it, and asking for the same password once per engine
+  # was both tedious and an easy way to mistype halfway through.
+  if [[ -n "${admin_token:-}" ]]; then
+    echo "$admin_token"
+    return 0
+  fi
+
   local email password login_response access_token
   read -r -p "Panel admin email: " email
   read -r -s -p "Panel admin password: " password
@@ -259,7 +315,136 @@ get_admin_bearer_token() {
     echo "ERROR: admin login failed -- check the email/password (and code, if MFA is enabled)." >&2
     return 1
   fi
+  admin_token="$access_token"
   echo "$access_token"
+}
+
+# Registers a Protocol Config in the panel and echoes its id.
+#
+# This replaces printing the values and asking an admin to retype them
+# into a JSON textarea. That transcription step was the single biggest
+# source of broken setups: the installer already knows every value, and a
+# node whose params were mistyped or skipped looked completely fine until
+# a customer failed to connect. Everything below is the same data the
+# installer used to print -- it just delivers it itself now.
+register_protocol_config() {
+  local protocol="$1" listen_port="$2" params_json="$3"
+  local token response config_id
+
+  token="$(get_admin_bearer_token)" || return 1
+
+  response="$(curl -sSL -X POST "$panel_url/protocol-configs" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $token" \
+    -d "$(jq -n --arg nodeId "$node_id" --arg protocol "$protocol" \
+      --argjson listenPort "$listen_port" --argjson params "$params_json" \
+      '{nodeId: $nodeId, protocol: $protocol, listenPort: $listenPort, publicParamsJson: $params}')")"
+
+  config_id="$(echo "$response" | jq -r '.id // empty')"
+  if [[ -z "$config_id" ]]; then
+    echo "ERROR: could not register the $protocol Protocol Config in the panel." >&2
+    echo "  Response: $(echo "$response" | jq -r '.message // .' 2>/dev/null || echo "$response")" >&2
+    return 1
+  fi
+
+  echo "$config_id"
+}
+
+# Creates a Route so the newly-registered engine is actually reachable by
+# customers. Without one, a Protocol Config exists but nothing can be
+# provisioned on it -- the panel has no "default route" concept, so this
+# was previously a third manual step after the node and the config.
+#
+# Direct routes are the common case. Relayed routes (client -> Iran relay
+# -> abroad exit) are offered here too, because the exit side is just one
+# more Xray user and the installer is the point where someone actually
+# knows which node this one is meant to relay through.
+create_route_for_config() {
+  local protocol="$1" config_id="$2"
+  local token response route_id
+
+  token="$(get_admin_bearer_token)" || return 1
+
+  local exit_config_id=""
+  if [[ "${node_is_relay:-n}" == "y" ]]; then
+    exit_config_id="$(choose_exit_protocol_config)" || return 1
+  fi
+
+  local route_name="$node_name / $protocol"
+  local payload
+  if [[ -n "$exit_config_id" ]]; then
+    payload="$(jq -n --arg name "$route_name" --arg entry "$config_id" --arg exit "$exit_config_id" \
+      '{name: $name, entryProtocolConfigId: $entry, exitProtocolConfigId: $exit}')"
+  else
+    payload="$(jq -n --arg name "$route_name" --arg entry "$config_id" \
+      '{name: $name, entryProtocolConfigId: $entry}')"
+  fi
+
+  response="$(curl -sSL -X POST "$panel_url/routes" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $token" \
+    -d "$payload")"
+
+  route_id="$(echo "$response" | jq -r '.id // empty')"
+  if [[ -z "$route_id" ]]; then
+    echo "WARNING: registered the $protocol engine, but could not create its Route." >&2
+    echo "  Response: $(echo "$response" | jq -r '.message // .' 2>/dev/null || echo "$response")" >&2
+    echo "  The engine is installed and registered -- add a Route in the panel to make it selectable." >&2
+    return 0
+  fi
+
+  if [[ -n "$exit_config_id" ]]; then
+    echo "  Route created (relayed via the exit node you chose)."
+  else
+    echo "  Route created (direct)."
+  fi
+}
+
+# Lists Xray configs on EXIT nodes and asks which one this relay should
+# forward to. Cached after the first answer so a node installing three
+# engines is asked once, not once per engine.
+choose_exit_protocol_config() {
+  if [[ -n "${chosen_exit_config_id:-}" ]]; then
+    echo "$chosen_exit_config_id"
+    return 0
+  fi
+
+  local token nodes configs candidates count choice
+  token="$(get_admin_bearer_token)" || return 1
+
+  nodes="$(curl -sSL "$panel_url/nodes" -H "Authorization: Bearer $token")"
+  configs="$(curl -sSL "$panel_url/protocol-configs" -H "Authorization: Bearer $token")"
+
+  # The relay->exit hop is always Xray-based by design (see the
+  # Multi-Hop Relay Chaining section in docs/architecture.md), so only
+  # XRAY_VLESS_REALITY configs on EXIT-role nodes are valid targets.
+  candidates="$(jq -n --argjson nodes "$nodes" --argjson configs "$configs" '
+    [ $configs[]
+      | select(.protocol == "XRAY_VLESS_REALITY")
+      | . as $c
+      | ($nodes[] | select(.id == $c.nodeId and .role == "EXIT")) as $n
+      | {id: $c.id, label: ($n.name + " (" + $n.region + ") port " + ($c.listenPort|tostring))}
+    ]')"
+
+  count="$(echo "$candidates" | jq 'length')"
+  if [[ "$count" == "0" ]]; then
+    echo "ERROR: no Xray engine on an EXIT-role node was found to relay through." >&2
+    echo "  Install an exit node first (role EXIT, with Xray), then re-run this on the relay." >&2
+    return 1
+  fi
+
+  echo >&2
+  echo "Which exit node should this relay forward to?" >&2
+  echo "$candidates" | jq -r 'to_entries[] | "  \(.key + 1)) \(.value.label)"' >&2
+  read -r -p "Choice [1]: " choice
+  choice="${choice:-1}"
+
+  chosen_exit_config_id="$(echo "$candidates" | jq -r --argjson i "$((choice - 1))" '.[$i].id // empty')"
+  if [[ -z "$chosen_exit_config_id" ]]; then
+    echo "ERROR: '$choice' isn't one of the listed options." >&2
+    return 1
+  fi
+  echo "$chosen_exit_config_id"
 }
 
 # Installs openvpn, then CREATES its Protocol Config via the panel's
@@ -286,26 +471,29 @@ install_openvpn() {
   endpoint_host="${endpoint_host:-$(curl -fsSL https://api.ipify.org || true)}"
 
   echo
-  echo "Creating this node's OpenVPN Protocol Config in the panel (needs an admin login -- only used for this one API call, not stored)..."
-  local admin_token
-  admin_token="$(get_admin_bearer_token)"
+  echo "Registering OpenVPN in the panel (this is also what generates its CA)..."
+  local token config_json
+  token="$(get_admin_bearer_token)" || return 1
 
-  local config_json
-  config_json="$(curl -fsSL -X POST "$panel_url/protocol-configs" \
+  config_json="$(curl -sSL -X POST "$panel_url/protocol-configs" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $admin_token" \
+    -H "Authorization: Bearer $token" \
     -d "$(jq -n --arg nodeId "$node_id" --argjson listenPort "$listen_port" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" \
       '{nodeId: $nodeId, protocol: "OPENVPN", listenPort: $listenPort, publicParamsJson: {proto: $proto, endpoint: $endpoint}}')")"
 
-  local ca_cert server_cert server_key
+  local ca_cert server_cert server_key config_id
+  config_id="$(echo "$config_json" | jq -r '.id // empty')"
   ca_cert="$(echo "$config_json" | jq -r '.publicParamsJson.caCertPem // empty')"
   server_cert="$(echo "$config_json" | jq -r '.publicParamsJson.serverCertPem // empty')"
   server_key="$(echo "$config_json" | jq -r '.publicParamsJson.serverKeyPem // empty')"
 
   if [[ -z "$ca_cert" ]]; then
-    echo "ERROR: could not create the OpenVPN Protocol Config -- response was: $config_json" >&2
+    echo "ERROR: could not register the OpenVPN Protocol Config." >&2
+    echo "  Response: $(echo "$config_json" | jq -r '.message // .' 2>/dev/null || echo "$config_json")" >&2
     exit 1
   fi
+  echo "  Registered (config $config_id)."
+  create_route_for_config "OpenVPN" "$config_id"
 
   install -d -m 755 /etc/openvpn/server /etc/openvpn/ccd
   printf '%s' "$ca_cert" > /etc/openvpn/server/ca.crt
