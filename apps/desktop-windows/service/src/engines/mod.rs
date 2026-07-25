@@ -167,6 +167,16 @@ fn run_hidden(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<std::process:
     Command::new(exe).args(args).creation_flags(CREATE_NO_WINDOW).status()
 }
 
+/// Runs a short-lived command, hidden, and returns its stdout.
+fn run_hidden_capture(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<String> {
+    use std::os::windows::process::CommandExt;
+    let out = Command::new(exe)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// How long to wait after spawning before deciding the engine is up.
 ///
 /// An engine that rejects its config dies within a few hundred

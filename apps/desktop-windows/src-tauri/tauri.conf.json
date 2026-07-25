@@ -49,6 +49,7 @@
       "resources/libssl-3-x64.dll": "resources/libssl-3-x64.dll",
       "resources/libpkcs11-helper-1.dll": "resources/libpkcs11-helper-1.dll",
       "resources/vcruntime140.dll": "resources/vcruntime140.dll",
+      "resources/tapctl.exe": "resources/tapctl.exe",
       "resources/neoconnect-service.exe": "resources/neoconnect-service.exe"
     },
     "windows": {

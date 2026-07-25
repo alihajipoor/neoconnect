@@ -99,7 +99,11 @@ Copy-Item $ovpnExe.FullName (Join-Path $resourcesDir "openvpn.exe") -Force
 # (STATUS_DLL_NOT_FOUND) with no output at all, which is invisible
 # unless you happen to recognise the code -- so this is checked
 # explicitly rather than assumed to have worked.
-$ovpnDlls = @("libcrypto-3-x64.dll", "libssl-3-x64.dll", "libpkcs11-helper-1.dll", "vcruntime140.dll")
+# tapctl.exe creates the Wintun adapter OpenVPN attaches to. Unlike
+# WireGuard, openvpn.exe does not create one itself -- it claims an
+# existing adapter and fails with "All wintun adapters on this system are
+# currently in use or disabled" when there isn't one.
+$ovpnDlls = @("libcrypto-3-x64.dll", "libssl-3-x64.dll", "libpkcs11-helper-1.dll", "vcruntime140.dll", "tapctl.exe")
 foreach ($dll in $ovpnDlls) {
     $src = Join-Path $ovpnExe.DirectoryName $dll
     if (-not (Test-Path $src)) {
