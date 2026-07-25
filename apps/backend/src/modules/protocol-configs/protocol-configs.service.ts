@@ -2,7 +2,14 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { Protocol, type Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateProtocolConfigDto } from "./dto/create-protocol-config.dto";
+import { UpdateProtocolConfigDto } from "./dto/update-protocol-config.dto";
 import { generateCa, signCert } from "./openvpn-pki";
+
+/** publicParamsJson keys the backend owns, not the admin. An update must
+ * carry these across untouched: they are generated once at create time
+ * and everything already issued against them depends on them staying
+ * exactly as they are. */
+const SERVER_MANAGED_PUBLIC_PARAMS = ["caCertPem", "caKeyPem", "serverCertPem", "serverKeyPem"] as const;
 
 /** The publicParamsJson keys an admin must supply per protocol, and what
  * each one is, so the error can say what to go and find rather than just
@@ -132,6 +139,65 @@ export class ProtocolConfigsService {
         listenPort: dto.listenPort,
         publicParamsJson: publicParamsJson as Prisma.InputJsonValue,
         isEnabled: dto.isEnabled ?? true,
+      },
+    });
+  }
+
+  /** Corrects a config in place -- the repair path for a config that was
+   * registered with wrong or missing publicParamsJson.
+   *
+   * This exists because there was previously no way to fix one: the API
+   * offered only create and delete, and delete is refused while any
+   * customer or route still references the config. A node whose params
+   * were entered wrong was therefore unfixable without tearing down live
+   * customer provisioning first, which is a bad trade for correcting a
+   * typo.
+   *
+   * Server-managed values are preserved rather than overwritten. This
+   * matters most for OPENVPN: its CA lives in publicParamsJson, and
+   * every client certificate ever issued was signed by it, so letting a
+   * PATCH body replace the whole object would invalidate every existing
+   * customer's certificate as a side effect of correcting an endpoint. */
+  async update(id: string, dto: UpdateProtocolConfigDto) {
+    const existing = await this.get(id);
+
+    let publicParamsJson = existing.publicParamsJson as Record<string, unknown>;
+    if (dto.publicParamsJson) {
+      const preserved: Record<string, unknown> = {};
+      for (const key of SERVER_MANAGED_PUBLIC_PARAMS) {
+        if (publicParamsJson?.[key] !== undefined) {
+          preserved[key] = publicParamsJson[key];
+        }
+      }
+      // Caller's values first, preserved keys last: an admin cannot
+      // clobber the CA even by explicitly sending a different one.
+      publicParamsJson = { ...dto.publicParamsJson, ...preserved };
+      assertRequiredPublicParams(existing.protocol, publicParamsJson);
+    }
+
+    if (dto.listenPort !== undefined && dto.listenPort !== existing.listenPort) {
+      const clash = await this.prisma.protocolConfig.findUnique({
+        where: {
+          nodeId_protocol_listenPort: {
+            nodeId: existing.nodeId,
+            protocol: existing.protocol,
+            listenPort: dto.listenPort,
+          },
+        },
+      });
+      if (clash) {
+        throw new ConflictException(
+          `Another ${existing.protocol} config already uses port ${dto.listenPort} on this node (id ${clash.id}).`,
+        );
+      }
+    }
+
+    return this.prisma.protocolConfig.update({
+      where: { id },
+      data: {
+        ...(dto.listenPort !== undefined ? { listenPort: dto.listenPort } : {}),
+        ...(dto.isEnabled !== undefined ? { isEnabled: dto.isEnabled } : {}),
+        ...(dto.publicParamsJson ? { publicParamsJson: publicParamsJson as Prisma.InputJsonValue } : {}),
       },
     });
   }

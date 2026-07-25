@@ -5,6 +5,7 @@ import type { Node, ProtocolConfig } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { deleteProtocolConfig } from "./actions";
 import { ProtocolConfigFormDialog } from "./protocol-config-form-dialog";
+import { ProtocolConfigEditDialog } from "./protocol-config-edit-dialog";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -83,6 +84,10 @@ export function ProtocolConfigsTable({
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          <ProtocolConfigEditDialog
+                            config={pc}
+                            trigger={<DropdownMenuItem onSelect={(e) => e.preventDefault()}>Edit</DropdownMenuItem>}
+                          />
                           <DeleteConfirm
                             trigger={
                               <DropdownMenuItem
