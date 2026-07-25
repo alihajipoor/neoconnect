@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, UnauthorizedException } from "@nestjs/
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import * as argon2 from "argon2";
+import { randomInt } from "node:crypto";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CustomersService } from "../customers/customers.service";
 import { CreateCustomerDto } from "../customers/dto/create-customer.dto";
@@ -15,6 +16,7 @@ import {
   CustomerRefreshTokenPayload,
   CustomerVerifyEmailTokenPayload,
   CustomerPasswordResetTokenPayload,
+  CustomerRequiresVerification,
 } from "./types";
 
 export interface CustomerTokenPair {
@@ -23,6 +25,7 @@ export interface CustomerTokenPair {
 }
 
 const VERIFY_EMAIL_TOKEN_TTL = "24h";
+const VERIFY_EMAIL_CODE_TTL_MS = 24 * 60 * 60 * 1000;
 const PASSWORD_RESET_TOKEN_TTL = "30m";
 
 @Injectable()
@@ -41,39 +44,57 @@ export class CustomerAuthService {
   /** Creates the Customer via the same service/logic the admin-facing
    * CustomersService.create() already uses (argon2 hash, referralCode,
    * duplicate-email ConflictException) -- no separate signup logic to
-   * keep in sync. Deliberately does NOT grant a free trial here even if
-   * trial mode is enabled: per the 2026-07-24 decision, no VPN access
-   * (trial or paid) is granted until the customer verifies their email --
-   * see verifyEmail() below, which is where grantFreeTrialIfEnabled()
-   * actually runs. */
-  async register(dto: CreateCustomerDto) {
+   * keep in sync. Deliberately does NOT issue a usable session or grant a
+   * free trial here: per the 2026-07-24 decision, an account can't log
+   * in -- not just can't get VPN access -- until it verifies its email.
+   * Returns the same `requiresVerification` shape login() does for an
+   * unverified account, so the app has one response shape to branch on
+   * regardless of which endpoint got it there. */
+  async register(dto: CreateCustomerDto): Promise<CustomerRequiresVerification> {
     const customer = await this.customersService.create(dto);
-    // Freshly created -- schema default is 0, no need to re-fetch.
-    const tokens = await this.issueTokenPair({ id: customer.id, email: customer.email, tokenVersion: 0 });
 
     await this.emailService.sendMail({ to: customer.email, ...welcomeEmail() });
     await this.sendVerificationEmail(customer.id, customer.email);
 
-    return { ...tokens, trial: null };
+    return { requiresVerification: true, email: customer.email };
   }
 
+  /** Sends both a deep-link token (for "Open in NeoConnect") and a short
+   * 6-digit code (for typing directly into the app) -- added 2026-07-24
+   * after live testing showed the raw JWT is unusable to hand-type and
+   * broke the email's layout when displayed prominently. The code is
+   * looked up server-side (verifyEmailByCode()), unlike the token which
+   * is self-verifying, so it has to be persisted with its own expiry. */
   private async sendVerificationEmail(customerId: string, email: string) {
     const payload: CustomerVerifyEmailTokenPayload = { sub: customerId, purpose: "verify-email" };
     const token = await this.jwt.signAsync(payload, {
       secret: this.config.get<string>("customerJwt.accessSecret"),
       expiresIn: VERIFY_EMAIL_TOKEN_TTL,
     });
-    await this.emailService.sendMail({ to: email, ...verificationEmail(token) });
+
+    const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
+    await this.prisma.customer.update({
+      where: { id: customerId },
+      data: {
+        emailVerificationCode: code,
+        emailVerificationCodeExpiresAt: new Date(Date.now() + VERIFY_EMAIL_CODE_TTL_MS),
+      },
+    });
+
+    await this.emailService.sendMail({ to: email, ...verificationEmail(token, code) });
   }
 
-  /** Re-sends the verification email for the calling (already
-   * authenticated but unverified) customer -- e.g. the original email
-   * was lost or its 24h token expired. */
-  async resendVerification(customerId: string): Promise<void> {
-    const customer = await this.prisma.customer.findUniqueOrThrow({ where: { id: customerId } });
-    if (customer.emailVerifiedAt) {
-      throw new BadRequestException("This email address is already verified");
-    }
+  /** Re-sends the verification email/code by email address -- NOT
+   * authenticated, unlike the original design. That guard stopped making
+   * sense once register()/login() stopped issuing a session for
+   * unverified accounts (2026-07-24): the app has no token to authenticate
+   * with at exactly the point it needs this. Same no-enumeration shape as
+   * forgotPassword() -- always resolves the same way regardless of
+   * whether the email exists or is already verified, only actually sends
+   * when there's a real, unverified account to send it to. */
+  async resendVerification(email: string): Promise<void> {
+    const customer = await this.prisma.customer.findUnique({ where: { email } });
+    if (!customer || customer.emailVerifiedAt) return;
     await this.sendVerificationEmail(customer.id, customer.email);
   }
 
@@ -98,12 +119,39 @@ export class CustomerAuthService {
     if (!customer) {
       throw new BadRequestException("Invalid or expired verification link");
     }
-    if (customer.emailVerifiedAt) {
+    return this.completeVerification(customer.id, customer.emailVerifiedAt);
+  }
+
+  /** Alternative to the token/link above -- the short code an app can
+   * offer a plain text input for, since a raw JWT is unusable to
+   * hand-type and unreliable to click from many email clients (custom
+   * `neoconnect://` links get stripped by some webmail sanitizers). Looks
+   * the code up by email (not customerId, since the app doesn't have one
+   * yet at this point) and checks it hasn't expired. */
+  async verifyEmailByCode(email: string, code: string) {
+    const customer = await this.prisma.customer.findUnique({ where: { email } });
+    if (
+      !customer ||
+      !customer.emailVerificationCode ||
+      customer.emailVerificationCode !== code ||
+      !customer.emailVerificationCodeExpiresAt ||
+      customer.emailVerificationCodeExpiresAt < new Date()
+    ) {
+      throw new BadRequestException("Invalid or expired verification code");
+    }
+    return this.completeVerification(customer.id, customer.emailVerifiedAt);
+  }
+
+  private async completeVerification(customerId: string, alreadyVerifiedAt: Date | null) {
+    if (alreadyVerifiedAt) {
       return { alreadyVerified: true, trial: null };
     }
 
-    await this.prisma.customer.update({ where: { id: customer.id }, data: { emailVerifiedAt: new Date() } });
-    const trial = await this.grantFreeTrialIfEnabled(customer.id);
+    await this.prisma.customer.update({
+      where: { id: customerId },
+      data: { emailVerifiedAt: new Date(), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
+    });
+    const trial = await this.grantFreeTrialIfEnabled(customerId);
     return { alreadyVerified: false, trial };
   }
 
@@ -140,8 +188,17 @@ export class CustomerAuthService {
     return customer;
   }
 
-  async login(email: string, password: string): Promise<CustomerTokenPair> {
+  /** Blocks unverified accounts from ever getting a usable session
+   * (2026-07-24 decision) -- returns the same `requiresVerification`
+   * shape register() does rather than a token pair, mirroring the admin
+   * side's `{mfaRequired: true, mfaToken}` pattern in AuthService.login().
+   * A stale already-issued token from before this change still works
+   * until it naturally expires; this only gates new logins. */
+  async login(email: string, password: string): Promise<CustomerTokenPair | CustomerRequiresVerification> {
     const customer = await this.validateCredentials(email, password);
+    if (!customer.emailVerifiedAt) {
+      return { requiresVerification: true, email: customer.email };
+    }
     return this.issueTokenPair(customer);
   }
 

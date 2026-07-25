@@ -134,10 +134,17 @@ model Customer {
   // AdminUser.tokenVersion -- bumping it invalidates every outstanding
   // customer refresh token at once (logout-all-sessions).
   tokenVersion  Int            @default(0)
-  // null = unverified. Set by POST /customer-auth/verify-email. No VPN
-  // access (trial or paid) is granted before this is set -- see M16's
-  // "Customer Self-Signup + Free Trial Mode" gating decision, 2026-07-24.
+  // null = unverified. Set by POST /customer-auth/verify-email or
+  // /verify-email-code. No VPN access (trial or paid) is granted before
+  // this is set -- see M16's "Customer Self-Signup + Free Trial Mode"
+  // gating decision, 2026-07-24.
   emailVerifiedAt DateTime?
+  // Short human-enterable alternative to the verify-email link/token --
+  // added 2026-07-24 after live testing showed the token (a full JWT) is
+  // both unusable to type by hand and prone to breaking email HTML
+  // layout when displayed. Cleared once used or superseded by a resend.
+  emailVerificationCode          String?
+  emailVerificationCodeExpiresAt DateTime?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 

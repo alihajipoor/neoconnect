@@ -12,6 +12,7 @@ export interface Customer {
   telegramId: string | null;
   referralCode: string | null;
   status: "ACTIVE" | "DISABLED";
+  emailVerifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -70,7 +71,19 @@ export interface SubscriptionPlan {
   updatedAt: string;
 }
 
-export interface RegisterResponse extends TokenPair {
+// register() never returns a usable session anymore (2026-07-24 decision:
+// no login without email verification, not just no VPN access) -- it
+// always resolves to this shape. login() resolves to either this (account
+// exists but isn't verified yet) or a real TokenPair.
+export interface RequiresVerification {
+  requiresVerification: true;
+  email: string;
+}
+
+export type LoginResult = TokenPair | RequiresVerification;
+
+export interface VerifyResult {
+  alreadyVerified: boolean;
   trial: { subscription: Subscription; protocolUser: ProtocolUser } | null;
 }
 

@@ -22,6 +22,13 @@
       "csp": null
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["neoconnect"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],

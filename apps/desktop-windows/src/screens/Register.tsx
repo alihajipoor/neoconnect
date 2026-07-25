@@ -3,7 +3,13 @@ import { register } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { Logo } from "../components/Logo";
 
-export function Register({ onSuccess, onGoLogin }: { onSuccess: () => void; onGoLogin: () => void }) {
+export function Register({
+  onNeedsVerification,
+  onGoLogin,
+}: {
+  onNeedsVerification: (email: string, password: string) => void;
+  onGoLogin: () => void;
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +26,7 @@ export function Register({ onSuccess, onGoLogin }: { onSuccess: () => void; onGo
     const result = await register(email, password);
     setPending(false);
     if (result.ok) {
-      onSuccess();
+      onNeedsVerification(email, password);
     } else {
       setError(result.error);
     }

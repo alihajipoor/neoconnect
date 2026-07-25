@@ -75,10 +75,27 @@ function button(url: string, label: string): string {
   </table>`;
 }
 
-/** A prominent, letter-spaced token/code display -- used for both the
- * verification code and the password-reset code. */
+/** A prominent, letter-spaced token/code display -- used for the
+ * password-reset link's token. `overflow-wrap`/`word-break` together
+ * (not just one) plus `max-width:100%` is deliberate: a real bug found
+ * live had a raw JWT overflow past the email's visible width in Gmail's
+ * web UI with only `word-break` set -- some renderers need both
+ * properties, and the containing element also needs to be told it's
+ * allowed to shrink rather than grow to fit unbreakable content. */
 function codeBlock(value: string): string {
-  return `<div style="margin:4px 0 20px 0;padding:14px 18px;background:#f6f3ff;border:1px solid #e4dcfb;border-radius:10px;font-family:'SFMono-Regular',Consolas,Menlo,monospace;font-size:15px;font-weight:600;letter-spacing:1px;color:${PRIMARY_DARK};word-break:break-all;">${value}</div>`;
+  return `<div style="margin:4px 0 20px 0;padding:14px 18px;max-width:100%;background:#f6f3ff;border:1px solid #e4dcfb;border-radius:10px;font-family:'SFMono-Regular',Consolas,Menlo,monospace;font-size:14px;font-weight:600;color:${PRIMARY_DARK};word-break:break-all;overflow-wrap:anywhere;white-space:normal;">${value}</div>`;
+}
+
+/** A large, widely-spaced short code for the actual human to type by
+ * hand -- added 2026-07-24 after live testing showed a raw JWT (what
+ * codeBlock() above was originally used for here) is both unusable to
+ * type and prone to overflowing the email's layout. Real digits are
+ * separated by literal spaces, not just CSS letter-spacing, since some
+ * email clients strip letter-spacing -- this is the standard OTP-email
+ * technique for a reason. */
+function bigCode(value: string): string {
+  const spaced = value.split("").join(" ");
+  return `<div style="margin:4px 0 20px 0;padding:18px 12px;max-width:100%;background:#f6f3ff;border:1px solid #e4dcfb;border-radius:12px;text-align:center;font-family:'SFMono-Regular',Consolas,Menlo,monospace;font-size:30px;font-weight:800;letter-spacing:4px;color:${PRIMARY_DARK};word-break:break-all;">${spaced}</div>`;
 }
 
 function fineprint(text: string): string {
@@ -114,21 +131,22 @@ export function welcomeEmail() {
   };
 }
 
-export function verificationEmail(token: string) {
+export function verificationEmail(token: string, code: string) {
   const deepLink = `neoconnect://verify-email?token=${encodeURIComponent(token)}`;
   return {
     subject: "Verify your NeoConnect email address",
     html: shell({
-      preheader: "One quick step before you can connect.",
+      preheader: `Your verification code is ${code}.`,
       bodyHtml: `
         ${heading("Verify your email")}
-        ${paragraph("Confirm your address to activate your account. Open the NeoConnect app and enter this code:")}
-        ${codeBlock(token)}
+        ${paragraph("Enter this code in the NeoConnect app to activate your account:")}
+        ${bigCode(code)}
+        ${fineprint("Or, on a device with the app already installed:")}
         ${button(deepLink, "Open in NeoConnect")}
         ${fineprint("This code expires in 24 hours. If you didn't create a NeoConnect account, you can ignore this email.")}
       `,
     }),
-    text: `Confirm your email address to activate your NeoConnect account. Verification code: ${token} (expires in 24 hours). Or open: ${deepLink}`,
+    text: `Your NeoConnect verification code: ${code} (expires in 24 hours). Or open: ${deepLink}`,
   };
 }
 

@@ -1,23 +1,57 @@
 import { apiRequest, publicRequest } from "./api";
 import { clearTokens, setTokens } from "./session";
-import type { RegisterResponse, TokenPair } from "./types";
+import type { LoginResult, RequiresVerification, VerifyResult } from "./types";
 
+/** Never returns a usable session -- see RequiresVerification's doc
+ * comment. The app must always follow this up by showing the verify
+ * screen, never a dashboard. */
 export async function register(email: string, password: string) {
-  const result = await publicRequest<RegisterResponse>("/customer-auth/register", {
+  return publicRequest<RequiresVerification>("/customer-auth/register", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
-  if (result.ok) await setTokens(result.data);
+}
+
+/** Only stores a session when the account is actually verified --
+ * `requiresVerification` results are never persisted, so an unverified
+ * account can't end up with stray tokens sitting in the store. */
+export async function login(email: string, password: string) {
+  const result = await publicRequest<LoginResult>("/customer-auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+  if (result.ok && !("requiresVerification" in result.data)) {
+    await setTokens(result.data);
+  }
   return result;
 }
 
-export async function login(email: string, password: string) {
-  const result = await publicRequest<TokenPair>("/customer-auth/login", {
+export async function verifyEmailByCode(email: string, code: string) {
+  return publicRequest<VerifyResult>("/customer-auth/verify-email-code", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, code }),
   });
-  if (result.ok) await setTokens(result.data);
-  return result;
+}
+
+/** The token-based counterpart to verifyEmailByCode -- used when the
+ * "Open in NeoConnect" link in the verification email actually launches
+ * the app (see the deep-link handling in App.tsx). No password is ever
+ * available at this point (a cold app launch via a clicked email link,
+ * not a live register/login session), so this can't auto-sign-in the way
+ * the code flow does -- the caller sends the user to a normal sign-in
+ * afterward. */
+export async function verifyEmailByToken(token: string) {
+  return publicRequest<VerifyResult>("/customer-auth/verify-email", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export async function resendVerification(email: string) {
+  return publicRequest<void>("/customer-auth/resend-verification", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
 }
 
 export async function logout(): Promise<void> {
