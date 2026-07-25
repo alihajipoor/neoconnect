@@ -19,6 +19,18 @@ export async function createProtocolConfig(input: {
   return result;
 }
 
+export async function updateProtocolConfig(
+  id: string,
+  input: { listenPort?: number; publicParamsJson?: Record<string, unknown>; isEnabled?: boolean },
+): Promise<MutationResult<ProtocolConfig>> {
+  const result = await apiMutate<ProtocolConfig>(`/protocol-configs/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  if (result.ok) revalidatePath("/protocol-configs");
+  return result;
+}
+
 export async function deleteProtocolConfig(id: string): Promise<MutationResult<void>> {
   const result = await apiMutate<void>(`/protocol-configs/${id}`, { method: "DELETE" });
   if (result.ok) revalidatePath("/protocol-configs");

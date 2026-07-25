@@ -20,8 +20,9 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 
-// Create-only, same reasoning as NodeFormDialog -- the backend has no
-// PATCH /protocol-configs/:id.
+// Create-only; editing an existing config lives in
+// ProtocolConfigEditDialog, which deliberately can't change node or
+// protocol (both are baked into already-provisioned ProtocolUsers).
 export function ProtocolConfigFormDialog({ nodes, trigger }: { nodes: Node[]; trigger: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();

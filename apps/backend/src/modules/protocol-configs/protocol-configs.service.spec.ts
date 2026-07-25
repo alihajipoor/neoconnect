@@ -12,6 +12,7 @@ describe("ProtocolConfigsService", () => {
     protocolConfig: {
       findUnique: jest.Mock;
       create: jest.Mock;
+      update: jest.Mock;
     };
   };
   let service: ProtocolConfigsService;
@@ -21,6 +22,7 @@ describe("ProtocolConfigsService", () => {
       protocolConfig: {
         findUnique: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: "config-1", ...data })),
+        update: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: "config-1", ...data })),
       },
     };
     service = new ProtocolConfigsService(prisma as unknown as PrismaService);
@@ -101,6 +103,110 @@ describe("ProtocolConfigsService", () => {
 
       await expect(promise).rejects.toThrow(/endpoint/);
       expect(prisma.protocolConfig.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("update", () => {
+    /** Stands in for a config already stored, as `get()` would return it. */
+    function existing(overrides: Record<string, unknown> = {}) {
+      prisma.protocolConfig.findUnique.mockResolvedValueOnce({
+        id: "config-1",
+        nodeId: base.nodeId,
+        protocol: Protocol.WIREGUARD,
+        listenPort: 51820,
+        publicParamsJson: {
+          serverPublicKey: "old-key",
+          endpoint: "203.0.113.5:51820",
+          subnetCidr: "10.77.0.0/24",
+        },
+        isEnabled: true,
+        ...overrides,
+      });
+    }
+
+    it("corrects publicParamsJson in place", async () => {
+      // The repair path this method exists for: a config registered with
+      // wrong params, still referenced by live customers so it can't be
+      // deleted and recreated.
+      existing();
+
+      await service.update("config-1", {
+        publicParamsJson: {
+          serverPublicKey: "corrected-key",
+          endpoint: "204.168.161.100:51820",
+          subnetCidr: "10.66.0.0/24",
+        },
+      });
+
+      const written = prisma.protocolConfig.update.mock.calls[0][0].data;
+      expect(written.publicParamsJson.serverPublicKey).toBe("corrected-key");
+      expect(written.publicParamsJson.subnetCidr).toBe("10.66.0.0/24");
+    });
+
+    it("still rejects an update that leaves required params missing", async () => {
+      existing();
+
+      await expect(service.update("config-1", { publicParamsJson: { endpoint: "1.2.3.4:51820" } })).rejects.toThrow(
+        /serverPublicKey/,
+      );
+      expect(prisma.protocolConfig.update).not.toHaveBeenCalled();
+    });
+
+    it("preserves an OpenVPN CA that the update body omits", async () => {
+      // Correcting an endpoint must not invalidate every client
+      // certificate ever signed by this CA.
+      existing({
+        protocol: Protocol.OPENVPN,
+        listenPort: 1194,
+        publicParamsJson: {
+          endpoint: "203.0.113.5:1194",
+          caCertPem: "THE-CA-CERT",
+          caKeyPem: "THE-CA-KEY",
+          serverCertPem: "THE-SERVER-CERT",
+          serverKeyPem: "THE-SERVER-KEY",
+        },
+      });
+
+      await service.update("config-1", { publicParamsJson: { endpoint: "204.168.161.100:1194", proto: "udp" } });
+
+      const written = prisma.protocolConfig.update.mock.calls[0][0].data;
+      expect(written.publicParamsJson.endpoint).toBe("204.168.161.100:1194");
+      expect(written.publicParamsJson.caCertPem).toBe("THE-CA-CERT");
+      expect(written.publicParamsJson.caKeyPem).toBe("THE-CA-KEY");
+      expect(written.publicParamsJson.serverCertPem).toBe("THE-SERVER-CERT");
+    });
+
+    it("refuses to let a caller replace the CA even explicitly", async () => {
+      existing({
+        protocol: Protocol.OPENVPN,
+        listenPort: 1194,
+        publicParamsJson: { endpoint: "203.0.113.5:1194", caCertPem: "THE-CA-CERT", caKeyPem: "THE-CA-KEY" },
+      });
+
+      await service.update("config-1", {
+        publicParamsJson: { endpoint: "203.0.113.5:1194", caCertPem: "ATTACKER-CA", caKeyPem: "ATTACKER-KEY" },
+      });
+
+      const written = prisma.protocolConfig.update.mock.calls[0][0].data;
+      expect(written.publicParamsJson.caCertPem).toBe("THE-CA-CERT");
+      expect(written.publicParamsJson.caKeyPem).toBe("THE-CA-KEY");
+    });
+
+    it("leaves publicParamsJson untouched when the update doesn't mention it", async () => {
+      existing();
+
+      await service.update("config-1", { isEnabled: false });
+
+      const written = prisma.protocolConfig.update.mock.calls[0][0].data;
+      expect(written.isEnabled).toBe(false);
+      expect(written.publicParamsJson).toBeUndefined();
+    });
+
+    it("rejects a port already used by another config on the same node", async () => {
+      existing();
+      prisma.protocolConfig.findUnique.mockResolvedValueOnce({ id: "other-config" });
+
+      await expect(service.update("config-1", { listenPort: 51821 })).rejects.toThrow(/already uses port/);
     });
   });
 });
