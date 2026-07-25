@@ -17,15 +17,27 @@
 //!   loop rather than something improvised here.
 
 use std::ffi::OsStr;
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::process::Child;
 
 use neoconnect_ipc::XrayProfile;
 use serde_json::json;
 
+use super::routing::{self, InstalledRoutes};
 use super::{confirm_started, spawn_hidden, write_config, Engines};
+use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
 const LOG_FILE: &str = "xray.log";
+const ADAPTER_NAME: &str = "neoconnect0";
+
+/// How long to wait for the TUN adapter to show up after Xray starts.
+///
+/// Creating a Wintun adapter involves the driver and Windows' network
+/// stack, so it is not instant and not fixed -- polling until it appears
+/// is more reliable than picking a single sleep long enough to "usually"
+/// work.
+const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Address for the TUN adapter itself, from the RFC 2544 benchmarking
 /// range. That range is reserved, never routed on the public internet,
@@ -87,6 +99,72 @@ fn build_config(p: &XrayProfile) -> String {
         }]
     });
     config.to_string()
+}
+
+/// Waits for Xray's TUN adapter to appear and returns its interface index.
+fn wait_for_adapter() -> Result<u32, String> {
+    let deadline = std::time::Instant::now() + ADAPTER_WAIT;
+    loop {
+        match adapters::find_by_name(ADAPTER_NAME) {
+            Ok(Some(a)) => return Ok(a.index),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Ok(None) => {
+                return Err(format!(
+                    "Xray started but its network adapter ({ADAPTER_NAME}) never appeared"
+                ))
+            }
+            Err(e) => return Err(format!("could not enumerate network adapters: {e}")),
+        }
+    }
+}
+
+/// Resolves the server's address to an IPv4 address for the bypass route.
+///
+/// Nodes are registered by IP today, but a hostname is resolved rather
+/// than rejected so a DNS-named node doesn't silently produce a tunnel
+/// with no escape route for its own uplink.
+fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return Ok(ip);
+    }
+    (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("could not resolve {host}: {e}"))?
+        .find_map(|a| match a.ip() {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        })
+        .ok_or_else(|| format!("{host} has no IPv4 address to route around the tunnel"))
+}
+
+/// Brings up the routes that actually put traffic through the tunnel.
+///
+/// Split out from `connect` so a routing failure can tear down the engine
+/// it belongs to -- a running Xray with no routes is the exact state that
+/// previously looked connected while changing nothing.
+pub fn install_routes(profile: &XrayProfile) -> Result<InstalledRoutes, String> {
+    let server_ip = resolve_server(&profile.host, profile.port)?;
+
+    // Captured before the tunnel takes over: afterwards the best route to
+    // the server would be the tunnel itself, and the bypass would point
+    // into the loop it exists to prevent.
+    let uplink = adapters::physical_uplink(&[ADAPTER_NAME])
+        .map_err(|e| format!("could not enumerate network adapters: {e}"))?
+        .ok_or_else(|| "no network connection with a gateway was found".to_string())?;
+    let gateway = uplink
+        .gateway
+        .ok_or_else(|| "the active network connection has no gateway".to_string())?;
+
+    let tun_index = wait_for_adapter()?;
+    let tun_gateway: Ipv4Addr = TUN_GATEWAY
+        .split('/')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
+
+    routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
 }
 
 pub fn connect(engines: &Engines, profile: &XrayProfile) -> Result<Child, String> {

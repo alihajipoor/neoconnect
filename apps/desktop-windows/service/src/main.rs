@@ -30,6 +30,7 @@
 //! * config files holding private keys live in a directory ACL'd to
 //!   SYSTEM and Administrators only.
 
+mod adapters;
 mod engines;
 mod pipe;
 mod security;

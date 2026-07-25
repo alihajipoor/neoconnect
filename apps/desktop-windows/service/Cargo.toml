@@ -22,4 +22,10 @@ features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
+    # Adapter enumeration for routing -- see src/adapters.rs for why this
+    # is done through the API rather than by parsing localised command output.
+    "Win32_NetworkManagement_IpHelper",
+    # IP_ADAPTER_ADDRESSES_LH is gated behind Ndis as well as WinSock.
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
 ]
