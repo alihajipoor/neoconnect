@@ -18,7 +18,7 @@ return array(
     // Chrome
     // -----------------------------------------------------------------
 
-    'brand.name' => 'NeoConnect',
+    'brand.name' => 'Neoxify',
     'brand.tagline' => 'Fast, hard to block, built for gamers.',
 
     'nav.home' => 'Home',
@@ -36,8 +36,8 @@ return array(
 
     'footer.product' => 'Product',
     'footer.company' => 'Company',
-    'footer.rights' => '© :year NeoConnect. All rights reserved.',
-    'footer.note' => 'NeoConnect is a commercial VPN service. Use it in line with the laws that apply to you.',
+    'footer.rights' => '© :year Neoxify. All rights reserved.',
+    'footer.note' => 'Neoxify is a commercial VPN service. Use it in line with the laws that apply to you.',
 
     'skip_to_content' => 'Skip to content',
 
@@ -45,17 +45,17 @@ return array(
     // Page metadata
     // -----------------------------------------------------------------
 
-    'meta.home.title' => 'NeoConnect — a VPN built for gamers on restricted networks',
+    'meta.home.title' => 'Neoxify — a VPN built for gamers on restricted networks',
     'meta.home.description' => 'Encrypted, low-latency connections built for gaming on networks that filter heavily. One app, several ways to connect, and no configuration files to import.',
 
-    'meta.download.title' => 'Download — NeoConnect',
-    'meta.download.description' => 'Get the NeoConnect app for Windows. macOS, Android and iOS are in development.',
+    'meta.download.title' => 'Download — Neoxify',
+    'meta.download.description' => 'Get the Neoxify app for Windows. macOS, Android and iOS are in development.',
 
-    'meta.contact.title' => 'Contact — NeoConnect',
-    'meta.contact.description' => 'Questions about NeoConnect? Send us a message and we will get back to you.',
+    'meta.contact.title' => 'Contact — Neoxify',
+    'meta.contact.description' => 'Questions about Neoxify? Send us a message and we will get back to you.',
 
-    'meta.reseller.title' => 'Become a reseller — NeoConnect',
-    'meta.reseller.description' => 'Apply to resell NeoConnect. Terms are agreed individually with every partner.',
+    'meta.reseller.title' => 'Become a reseller — Neoxify',
+    'meta.reseller.description' => 'Apply to resell Neoxify. Terms are agreed individually with every partner.',
 
     // -----------------------------------------------------------------
     // Home — hero
@@ -75,7 +75,7 @@ return array(
     // Home — features
     // -----------------------------------------------------------------
 
-    'home.features.eyebrow' => 'Why NeoConnect',
+    'home.features.eyebrow' => 'Why Neoxify',
     'home.features.title' => 'The parts that actually matter when the network is against you',
 
     'home.features.encryption.title' => 'Encrypted before it leaves your device',
@@ -111,10 +111,6 @@ return array(
 
     'home.steps.3.title' => 'Pick a location and connect',
     'home.steps.3.body' => 'Choose the server you want and hit connect. Change location whenever you feel like it.',
-
-    // -----------------------------------------------------------------
-    // Home — technology
-    // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
     // Home — security
@@ -155,7 +151,7 @@ return array(
     'home.assure.noconfig' => 'No config files',
     'home.assure.switch' => 'Switch location anytime',
 
-    'home.mockup.alt' => 'The NeoConnect app running on Windows, with mobile and macOS versions still in development.',
+    'home.mockup.alt' => 'The Neoxify app running on Windows, with mobile and macOS versions still in development.',
     'home.mockup.windows' => 'Windows',
     'home.mockup.mobile' => 'Mobile',
     'home.mockup.macos' => 'macOS',
@@ -200,13 +196,13 @@ return array(
 
     'home.cta.title' => 'Ready when you are',
     'home.cta.body' => 'Install the app, verify your email, pick a server. That is the whole setup.',
-    'home.cta.button' => 'Get NeoConnect',
+    'home.cta.button' => 'Get Neoxify',
 
     // -----------------------------------------------------------------
     // Download
     // -----------------------------------------------------------------
 
-    'download.title' => 'Download NeoConnect',
+    'download.title' => 'Download Neoxify',
     'download.subtitle' => 'One installer. The app handles accounts, plans and connections itself — there is nothing else to install alongside it.',
 
     'download.windows.name' => 'Windows',
@@ -225,7 +221,7 @@ return array(
 
     'download.steps.title' => 'Installing',
     'download.steps.1' => 'Run the installer. It installs for your user account only and does not ask for administrator rights.',
-    'download.steps.2' => 'Open NeoConnect and create your account, or sign in if you already have one.',
+    'download.steps.2' => 'Open Neoxify and create your account, or sign in if you already have one.',
     'download.steps.3' => 'Confirm your email address with the code we send you.',
     'download.steps.4' => 'Choose a location and connect. Windows will ask for permission the first time a tunnel is created.',
 
@@ -322,7 +318,7 @@ return array(
     // Errors
     // -----------------------------------------------------------------
 
-    'meta.404.title' => 'Page not found — NeoConnect',
+    'meta.404.title' => 'Page not found — Neoxify',
     'meta.404.description' => 'That page does not exist.',
     'error.404.code' => '404',
     'error.404.title' => 'That page does not exist',

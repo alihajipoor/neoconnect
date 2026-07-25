@@ -1,4 +1,4 @@
-# NeoConnect website -- Apache / LiteSpeed configuration.
+# Neoxify website -- Apache / LiteSpeed configuration.
 #
 # Every directive is wrapped in <IfModule> so that a host missing any given
 # module serves the site normally instead of returning a 500. Nothing here is

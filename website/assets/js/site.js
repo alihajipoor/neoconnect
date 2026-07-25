@@ -1,4 +1,4 @@
-/* NeoConnect website -- progressive enhancement only.
+/* Neoxify website -- progressive enhancement only.
  *
  * Nothing here is required for the site to work. Navigation, forms and every
  * piece of content function with scripting disabled; this file just makes the

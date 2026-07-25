@@ -1,4 +1,4 @@
-# NeoConnect marketing website
+# Neoxify marketing website
 
 Plain PHP, HTML and CSS. No build step, no Composer, no database, no
 `mod_rewrite` dependency. Zip it, unzip it into `public_html`, and it works.
@@ -39,7 +39,7 @@ assets, set:
 
 ```php
 'windows_release_tag' => 'desktop-v0.1.0',
-'windows_asset' => 'NeoConnect_0.1.0_x64-setup.exe',
+'windows_asset' => 'Neoxify_0.1.0_x64-setup.exe',
 'windows_version' => '0.1.0',
 ```
 
