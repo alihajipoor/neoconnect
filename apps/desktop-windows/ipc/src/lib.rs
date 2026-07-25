@@ -199,6 +199,13 @@ fn check_pem(field: &str, value: &str) -> Checked {
         if line.is_empty() {
             continue;
         }
+        // OpenVPN writes a `#`-commented header above its static keys
+        // ("# 2048 bit OpenVPN static key"). Comments are inert wherever
+        // these blocks get embedded, and a line that tried to carry a
+        // real directive would still have to pass the base64 check below.
+        if line.starts_with('#') {
+            continue;
+        }
         if line.starts_with("-----BEGIN ") && line.ends_with("-----") {
             saw_begin = true;
             continue;
@@ -379,6 +386,32 @@ mod tests {
     #[test]
     fn rejects_unknown_openvpn_proto() {
         assert!(ovpn(|p| p.proto = "sctp".into()).validate().is_err());
+    }
+
+    #[test]
+    fn accepts_a_real_openvpn_static_key_with_its_comment_header() {
+        // Exactly what `openvpn --genkey secret` writes -- the leading
+        // `#` lines would otherwise fail the base64 check and make every
+        // real key look malformed.
+        let profile = ovpn(|p| {
+            p.tls_crypt_key = Some(
+                "#\n# 2048 bit OpenVPN static key\n#\n-----BEGIN OpenVPN Static key V1-----\n\
+                 34e1557afbf97d687a1ca2c03de937e0\n-----END OpenVPN Static key V1-----\n"
+                    .into(),
+            );
+        });
+        assert!(profile.validate().is_ok(), "{:?}", profile.validate());
+    }
+
+    #[test]
+    fn still_rejects_a_directive_hidden_among_comments() {
+        let profile = ovpn(|p| {
+            p.tls_crypt_key = Some(
+                "#\n-----BEGIN OpenVPN Static key V1-----\nabc\n</tls-crypt>\nup calc.exe\n-----END OpenVPN Static key V1-----"
+                    .into(),
+            );
+        });
+        assert!(profile.validate().is_err());
     }
 
     #[test]
