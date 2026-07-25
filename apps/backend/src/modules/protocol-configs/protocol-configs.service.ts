@@ -1,8 +1,65 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
-import type { Prisma } from "@prisma/client";
+import { Protocol, type Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateProtocolConfigDto } from "./dto/create-protocol-config.dto";
 import { generateCa, signCert } from "./openvpn-pki";
+
+/** The publicParamsJson keys an admin must supply per protocol, and what
+ * each one is, so the error can say what to go and find rather than just
+ * naming a key.
+ *
+ * Keys the backend fills in itself are deliberately absent: OpenVPN's
+ * caCertPem/caKeyPem are generated below, and every protocol's server
+ * secrets stay node-local by design (see M3/M4 notes in
+ * docs/architecture.md). */
+const REQUIRED_PUBLIC_PARAMS: Partial<Record<Protocol, Record<string, string>>> = {
+  [Protocol.XRAY_VLESS_REALITY]: {
+    realityPublicKey: "the public key printed by the installer's Xray step",
+    shortIds: "a non-empty array of short IDs, e.g. [\"0123abcd\"]",
+    dest: "the camouflage destination, e.g. \"www.microsoft.com:443\"",
+    serverName: "the SNI, i.e. dest without its port",
+  },
+  [Protocol.WIREGUARD]: {
+    serverPublicKey: "output of `wg show wg0 public-key` on the node",
+    endpoint: "this node's public host:port, e.g. \"203.0.113.5:51820\"",
+    subnetCidr: "the tunnel subnet, e.g. \"10.77.0.0/24\"",
+  },
+  [Protocol.OPENVPN]: {
+    endpoint: "this node's public host:port, e.g. \"203.0.113.5:1194\"",
+  },
+};
+
+/** Rejects a config that would provision fine and then fail at the point
+ * a customer actually tries to connect.
+ *
+ * This validation exists because that is precisely what happened: three
+ * protocol configs were registered with empty publicParamsJson, passed
+ * `@IsObject()`, and produced no error until the client app -- days
+ * later, on someone's desktop -- reported a missing key it could do
+ * nothing about. The cost of the mistake landed as far as possible from
+ * where it was made, so it is worth catching at the only moment the
+ * admin still has the installer output in front of them. */
+function assertRequiredPublicParams(protocol: Protocol, params: Record<string, unknown>): void {
+  const required = REQUIRED_PUBLIC_PARAMS[protocol];
+  if (!required) return;
+
+  const missing = Object.entries(required).filter(([key]) => {
+    const value = params[key];
+    if (value === undefined || value === null || value === "") return true;
+    // shortIds is the one array here, and an empty array is just as
+    // unusable to a client as an absent key.
+    if (Array.isArray(value)) return value.length === 0;
+    return false;
+  });
+
+  if (missing.length > 0) {
+    const details = missing.map(([key, hint]) => `${key} (${hint})`).join("; ");
+    throw new BadRequestException(
+      `This ${protocol} config is missing required publicParamsJson values, and clients can't connect without them: ${details}. ` +
+        "The installer prints these when it sets the protocol up on the node.",
+    );
+  }
+}
 
 @Injectable()
 export class ProtocolConfigsService {
@@ -47,6 +104,8 @@ export class ProtocolConfigsService {
           "Delete it first if you're genuinely reconfiguring -- note that for OPENVPN this invalidates every client cert already issued against its CA.",
       );
     }
+
+    assertRequiredPublicParams(dto.protocol, dto.publicParamsJson);
 
     const publicParamsJson = dto.publicParamsJson;
 
