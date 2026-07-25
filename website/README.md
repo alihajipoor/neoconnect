@@ -22,7 +22,7 @@ say the wrong thing until they are done.
 |---|---|---|
 | **Real prices** | `inc/content/plans.php` | The numbers in there are placeholder structure, not your pricing. They must match the plans in the admin panel, which is what actually bills people. |
 | **Persian review** | `inc/lang/fa.php` | The translation was drafted, not written by a native speaker. Any line you delete falls back to English automatically, so it is safe to remove one you don't like. |
-| **Contact addresses** | `inc/config.php` | `contact_email`, `mail_to` and `mail_from` all currently point at `@neoxify.com` guesses. |
+| **Send a real test message** | — | Submit the contact form once on the live host and confirm it reaches `info@neoxify.com` — including checking the spam folder. See the domain-split note below for why this needs verifying rather than assuming. |
 | **Windows release tag** | `inc/config.php` | See below. |
 
 ## The download page has two real states
@@ -72,7 +72,25 @@ browser request executes it and returns nothing, and `data/.htaccess` denies
 access outright — two independent layers, because a shared host that quietly
 ignores `.htaccess` should not be able to leak anyone's message.
 
-Storing before mailing is deliberate. `neoxify.com` has SPF and DMARC but no
+### The domain split, and why it affects mail
+
+The site is served from **neoxify.net**. Support mail goes to
+**info@neoxify.com**. The admin panel is on **connect.neoxify.com**. Three
+different hosts, one brand.
+
+That matters for one thing: the `From:` address on form notifications is
+`noreply@neoxify.net`, not `.com`. The .net webhost is what actually sends the
+message, and a receiving mail server checks SPF against the `From:` domain — so
+a `.com` sender from a `.net` host fails that check unless you have explicitly
+added the webhost to `neoxify.com`'s SPF record. With no DKIM on the domain
+either, there is no second signal to save it. Mail still *arrives* at
+`info@neoxify.com`; only the sender identity differs, and Reply-To still carries
+the submitter's address so replying works normally.
+
+Change `mail_from` to `@neoxify.com` only after confirming the .net host is in
+`neoxify.com`'s SPF record.
+
+Storing before mailing is deliberate. The mail domain has SPF and DMARC but no
 DKIM, and mail is already known to land in spam — treating a sent email as the
 record of a submission would mean silently losing real reseller applications.
 The file is the source of truth; the email is a notification. A submission is

@@ -4,7 +4,7 @@
  * application: validate -> store -> notify.
  *
  * Storage happens BEFORE mail, and success is reported if either one worked.
- * That ordering is deliberate. neoxify.com has SPF and DMARC but no DKIM and
+ * That ordering is deliberate. The mail domain has SPF and DMARC but no DKIM and
  * mail is already known to land in spam, so treating the sent email as the
  * record of a submission would mean quietly losing real reseller applications.
  * The file in data/ is the source of truth; the email is a notification.
