@@ -109,10 +109,26 @@ four-line page files — no layout is duplicated.
 
 ## Conventions worth keeping
 
+- **Never name the protocols.** The site describes what the service does for
+  the reader — encrypted, stable, hard to block — and never says which VPN
+  protocols or engines are behind it. This is a deliberate product decision,
+  not an oversight, and it is why the pricing string key is `all_modes` rather
+  than `all_protocols` and why the footer has no "source on GitHub" link.
+  (The repo itself is public, so the stack is still discoverable by anyone who
+  looks — making it private again is the only real fix if that matters.)
 - **No external requests.** No CDN, no Google Fonts, no analytics. Everything
-  is local. The audience is largely on networks where a third-party request is
-  slow at best and blocked at worst, and a blocked font is a visibly broken
-  page.
+  is local, including the typeface. The audience is largely on networks where
+  a third-party request is slow at best and blocked at worst, and a blocked
+  font is a visibly broken page.
+- **Typeface: Vazirmatn**, self-hosted in `assets/fonts/` as a single variable
+  woff2 (~110KB) covering weights 100–900 for both languages. SIL OFL — the
+  licence ships beside it and must stay there. It is preloaded in `head.php`
+  with a URL that deliberately carries no `?v=` stamp, so it matches the
+  `@font-face` request exactly and isn't downloaded twice.
+- **Claims stay honest even in illustrations.** The hero mockup is drawn from
+  the real desktop app, and the macOS and phone frames carry visible "Soon"
+  badges because those clients don't exist yet. The encryption diagram stops
+  the protected leg at our servers rather than running it to the destination.
 - **No inline styles or scripts.** The CSP in `.htaccess` has no
   `'unsafe-inline'`. Use the utility classes at the bottom of
   `assets/css/site.css`.

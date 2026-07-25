@@ -38,7 +38,6 @@ return array(
     'footer.company' => 'Company',
     'footer.rights' => '© :year NeoConnect. All rights reserved.',
     'footer.note' => 'NeoConnect is a commercial VPN service. Use it in line with the laws that apply to you.',
-    'footer.github' => 'Source on GitHub',
 
     'skip_to_content' => 'Skip to content',
 
@@ -47,7 +46,7 @@ return array(
     // -----------------------------------------------------------------
 
     'meta.home.title' => 'NeoConnect — a VPN built for gamers on restricted networks',
-    'meta.home.description' => 'WireGuard, VLESS+REALITY and OpenVPN in one app, with relay routes designed for networks that filter VPN traffic. Low latency, no configuration files.',
+    'meta.home.description' => 'Encrypted, low-latency connections built for gaming on networks that filter heavily. One app, several ways to connect, and no configuration files to import.',
 
     'meta.download.title' => 'Download — NeoConnect',
     'meta.download.description' => 'Get the NeoConnect app for Windows. macOS, Android and iOS are in development.',
@@ -62,10 +61,10 @@ return array(
     // Home — hero
     // -----------------------------------------------------------------
 
-    'home.hero.eyebrow' => 'Three protocols. One app.',
+    'home.hero.eyebrow' => 'Encrypted. Stable. Hard to block.',
     'home.hero.title' => 'Low latency. Hard to block.',
     'home.hero.title_accent' => 'Built for gamers.',
-    'home.hero.subtitle' => 'NeoConnect runs WireGuard, VLESS+REALITY and OpenVPN across servers we operate ourselves — with routes designed for networks that actively look for VPN traffic and shut it down.',
+    'home.hero.subtitle' => 'Your traffic is encrypted the moment it leaves your device, carried across servers we run ourselves, and built to keep working on networks that try hard to shut connections like this down.',
     'home.hero.cta_primary' => 'Download for Windows',
     'home.hero.cta_primary_soon' => 'See download options',
     'home.hero.cta_secondary' => 'See plans',
@@ -77,16 +76,16 @@ return array(
     // -----------------------------------------------------------------
 
     'home.features.eyebrow' => 'Why NeoConnect',
-    'home.features.title' => 'The parts that actually matter when a network is against you',
+    'home.features.title' => 'The parts that actually matter when the network is against you',
 
-    'home.features.protocols.title' => 'Three protocols, one account',
-    'home.features.protocols.body' => 'WireGuard for raw speed, VLESS+REALITY for when a network is hunting for VPN traffic, OpenVPN when you need the most compatible option available. Switch between them without buying anything extra.',
+    'home.features.encryption.title' => 'Encrypted before it leaves your device',
+    'home.features.encryption.body' => 'Everything you send is encrypted on your machine and stays that way across the network to our servers. Whoever is sitting in between — your ISP, the café Wi-Fi, whoever runs the network — sees an encrypted stream and nothing they can read.',
 
-    'home.features.reality.title' => 'REALITY camouflage',
-    'home.features.reality.body' => 'Your connection presents itself as an ordinary HTTPS session to a real, unrelated website. There is no distinctive VPN handshake sitting there waiting to be fingerprinted.',
+    'home.features.stealth.title' => 'Designed not to stand out',
+    'home.features.stealth.body' => 'Your connection is built to look like ordinary everyday web traffic rather than announcing itself as something worth blocking. That is the difference between a connection that survives on a filtered network and one that dies in seconds.',
 
-    'home.features.relay.title' => 'Routes built for restricted networks',
-    'home.features.relay.body' => 'Connect to a nearby relay server that chains onward to an exit abroad. You get a first hop your network can actually reach, without giving up the destination you wanted in the first place.',
+    'home.features.access.title' => 'More than one way in',
+    'home.features.access.body' => 'If the route you are on stops working, you are not stuck with it. Switch to a different one from inside the app and carry on — no new purchase, no reinstall, no waiting for us to fix something.',
 
     'home.features.hotupdate.title' => 'Plan changes never drop your session',
     'home.features.hotupdate.body' => 'Renewals, upgrades and server-side changes apply to a live connection. Your match does not end because your subscription renewed in the background.',
@@ -117,18 +116,56 @@ return array(
     // Home — technology
     // -----------------------------------------------------------------
 
-    'home.tech.eyebrow' => 'Under the hood',
-    'home.tech.title' => 'No invented protocols',
-    'home.tech.body' => 'NeoConnect is built on the same proven, open cores the rest of the industry relies on. The engineering effort goes into routing, delivery and keeping your session alive — not into a homemade encryption scheme nobody has reviewed.',
+    // -----------------------------------------------------------------
+    // Home — security
+    //
+    // Deliberately describes what the encryption does for the reader rather
+    // than naming the technology behind it. Note what is NOT claimed: not
+    // "end-to-end" (a VPN protects the leg between you and our servers, not
+    // beyond it), and nothing about logging, which has never been
+    // established as a fact about this service.
+    // -----------------------------------------------------------------
 
-    'home.tech.wireguard.title' => 'WireGuard',
-    'home.tech.wireguard.body' => 'A small, modern, heavily audited tunnel. The fastest option when the network in front of you is not filtering aggressively.',
+    'home.security.eyebrow' => 'Security',
+    'home.security.title' => 'What "encrypted" actually means here',
+    'home.security.body' => 'Plenty of services say "encrypted" and leave it there. Here is the honest version: everything you send is scrambled on your own device before it touches the network, and it stays scrambled the whole way to our servers.',
 
-    'home.tech.reality.title' => 'VLESS + REALITY',
-    'home.tech.reality.body' => 'Built on Xray-core. Borrows a real website\'s TLS identity so the traffic has nothing unusual to detect. This is the option to reach for when everything else gets blocked.',
+    'home.security.point1.title' => 'Proven cryptography, not homemade',
+    'home.security.point1.body' => 'The encryption protecting your connection is the same well-reviewed, industry-standard kind your bank and your messaging apps rely on. We did not invent our own scheme, and you should be suspicious of anyone who did.',
 
-    'home.tech.openvpn.title' => 'OpenVPN',
-    'home.tech.openvpn.body' => 'The most widely supported VPN protocol there is, with per-account certificates. The dependable fallback when a network mishandles anything newer.',
+    'home.security.point2.title' => 'Your network operator learns nothing',
+    'home.security.point2.body' => 'Whoever runs the network you are sitting on can tell that you have an encrypted connection open. What travels inside it — the sites, the games, the messages — is not something they can read.',
+
+    'home.security.point3.title' => 'Nothing to paste, nothing to leak',
+    'home.security.point3.body' => 'There are no configuration files or subscription links to copy around, share by accident, or leave sitting in a chat. Your access lives in your account, inside the official app.',
+
+    'home.security.diagram.you' => 'Your device',
+    'home.security.diagram.network' => 'Your network',
+    'home.security.diagram.tunnel' => 'Encrypted',
+    'home.security.diagram.server' => 'Our servers',
+    'home.security.diagram.internet' => 'The internet',
+    'home.security.diagram.caption' => 'Simplified illustration. Your network can see that traffic is flowing, not what it contains.',
+
+    // -----------------------------------------------------------------
+    // Home — assurance strip and app mockup
+    // -----------------------------------------------------------------
+
+    'home.assure.encrypted' => 'Encrypted connection',
+    'home.assure.stable' => 'Built to stay up',
+    'home.assure.noconfig' => 'No config files',
+    'home.assure.switch' => 'Switch location anytime',
+
+    'home.mockup.alt' => 'The NeoConnect app running on Windows, with mobile and macOS versions still in development.',
+    'home.mockup.windows' => 'Windows',
+    'home.mockup.mobile' => 'Mobile',
+    'home.mockup.macos' => 'macOS',
+    'home.mockup.soon' => 'Soon',
+    'home.mockup.subscription' => 'Subscription',
+    'home.mockup.status' => 'Active',
+    'home.mockup.expires' => 'Renews in 24 days',
+    'home.mockup.used' => '84 GB of 300 GB used',
+    'home.mockup.connected' => 'Connected',
+    'home.mockup.location' => 'Change location',
 
     // -----------------------------------------------------------------
     // Home — pricing
@@ -144,9 +181,12 @@ return array(
     'home.pricing.data' => ':amount of data',
     'home.pricing.data_period' => ':amount every :days days',
     'home.pricing.connections' => 'Up to :count devices connected at once',
-    'home.pricing.all_protocols' => 'All three protocols included',
+    // Renamed from all_protocols: the site deliberately does not name the
+    // protocols it runs on, and a key called "protocols" invites someone to
+    // "fix" the copy by putting them back.
+    'home.pricing.all_modes' => 'Every connection option included',
     'home.pricing.all_locations' => 'Every server location',
-    'home.pricing.relay_routes' => 'Relay routes for restricted networks',
+    'home.pricing.relay_routes' => 'Optimised routes for restricted networks',
     'home.pricing.support' => 'Support directly in the app',
     'home.pricing.trial' => 'New accounts start with a :days-day free trial — no card required.',
     'home.pricing.note' => 'Prices are in US dollars.',

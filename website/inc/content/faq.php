@@ -46,8 +46,8 @@ return array(
             'fa' => 'روی شبکه‌ای که وی‌پی‌ان را مسدود می‌کند کار می‌کند؟',
         ),
         'a' => array(
-            'en' => 'That is what VLESS+REALITY and our relay routes are for: the traffic looks like an ordinary HTTPS connection to a real website, and you can enter through a server your network can still reach. We will be straight with you though — no VPN can promise that any single route stays open forever. That is exactly why you get three protocols and multiple locations to switch between.',
-            'fa' => 'دقیقاً کاری که VLESS+REALITY و مسیرهای رله ما انجام می‌دهند همین است: ترافیک شبیه یک اتصال معمولی HTTPS به یک وب‌سایت واقعی دیده می‌شود و می‌توانید از سروری وارد شوید که شبکه‌تان هنوز به آن دسترسی دارد. اما صادق باشیم — هیچ وی‌پی‌انی نمی‌تواند قول بدهد که یک مسیر مشخص برای همیشه باز می‌ماند. دقیقاً به همین دلیل سه پروتکل و چند موقعیت مختلف در اختیار شماست تا بینشان جابه‌جا شوید.',
+            'en' => 'That is precisely what this is built for. Your connection is designed to blend in with ordinary web traffic instead of advertising itself, and you can come in through a server your network can still reach. We will be straight with you though — no VPN can promise that any single route stays open forever. That is exactly why you get several ways to connect and multiple locations to switch between.',
+            'fa' => 'دقیقاً برای همین ساخته شده است. اتصال شما طوری طراحی شده که به‌جای معرفی کردن خودش، میان ترافیک معمولی وب گم شود، و می‌توانید از سروری وارد شوید که شبکه‌تان هنوز به آن دسترسی دارد. اما صادق باشیم — هیچ وی‌پی‌انی نمی‌تواند قول بدهد که یک مسیر مشخص برای همیشه باز می‌ماند. دقیقاً به همین دلیل چند راه اتصال و چند موقعیت مختلف در اختیار شماست تا بینشان جابه‌جا شوید.',
         ),
     ),
 

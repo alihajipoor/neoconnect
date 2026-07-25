@@ -57,6 +57,17 @@ foreach (array('en', 'fa') as $nx_alt): ?>
 <meta name="twitter:card" content="summary">
 
 <link rel="icon" href="<?php echo nx_esc(nx_asset('img/favicon.svg')); ?>" type="image/svg+xml">
+
+<?php
+// Preloaded because the whole page is set in it, so discovering it only
+// after the stylesheet parses costs a visible reflow.
+//
+// Deliberately NOT nx_asset(): that appends a ?v= cache-busting stamp, and
+// the URL here has to match what the stylesheet's @font-face requests
+// character for character, or the browser downloads the font twice.
+$nx_font = nx_cfg('base_path', '/') . 'assets/fonts/vazirmatn-variable.woff2';
+?>
+<link rel="preload" href="<?php echo nx_esc($nx_font); ?>" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="<?php echo nx_esc(nx_asset('css/site.css')); ?>">
 </head>
 <body>

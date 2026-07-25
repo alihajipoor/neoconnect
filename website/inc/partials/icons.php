@@ -71,6 +71,20 @@ function nx_icon($name, $class = '')
 
         'users' => '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>'
             . '<circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/>',
+
+        'lock' => '<rect x="3" y="11" width="18" height="11" rx="2"/>'
+            . '<path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+
+        'server' => '<rect x="2" y="3" width="20" height="8" rx="2"/>'
+            . '<rect x="2" y="13" width="20" height="8" rx="2"/>'
+            . '<path d="M6 7h.01"/><path d="M6 17h.01"/>',
+
+        'shield-check' => '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'
+            . '<path d="m9 12 2 2 4-4"/>',
+
+        'file-off' => '<path d="M14 2v6h6"/>'
+            . '<path d="M15.5 22H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8l6 6v4"/>'
+            . '<path d="m17 17 4 4"/><path d="m21 17-4 4"/>',
     );
 
     if (!isset($paths[$name])) {

@@ -39,11 +39,11 @@ $nx_telegram = trim((string) nx_cfg('telegram_url', ''));
           <?php if ($nx_telegram !== ''): ?>
             <li><a href="<?php echo nx_esc($nx_telegram); ?>" rel="noopener">Telegram</a></li>
           <?php endif; ?>
-          <li>
-            <a href="<?php echo nx_esc(nx_github_url()); ?>" rel="noopener">
-              <?php echo nx_e('footer.github'); ?>
-            </a>
-          </li>
+          <?php /* No "source on GitHub" link here by design: the site avoids
+                   naming the technology it runs on, and that link led straight
+                   to a public repo where all of it is visible. The repo being
+                   public still makes it discoverable to anyone who goes
+                   looking -- this just stops the site handing it over. */ ?>
         </ul>
       </div>
     </div>
