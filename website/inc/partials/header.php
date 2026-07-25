@@ -24,7 +24,7 @@ $nx_links = array(
   <div class="container site-header__inner">
 
     <a class="brand" href="<?php echo nx_esc(nx_url('home')); ?>">
-      <span class="brand__mark"><?php echo nx_icon('zap'); ?></span>
+      <span class="brand__mark"><?php echo nx_logo_mark(); ?></span>
       <span><?php echo nx_e('brand.name'); ?></span>
     </a>
 

@@ -15,6 +15,41 @@
 defined('NX') || exit;
 
 /**
+ * The brand mark: a broken ring around a solid centre, in the violet-to-cyan
+ * gradient. It deliberately echoes the circular Connect control at the centre
+ * of the desktop app.
+ *
+ * Each call mints a unique gradient id. Inlining the same SVG several times on
+ * one page would otherwise repeat an id, which is invalid HTML and leaves the
+ * rendering at the mercy of which duplicate the browser resolves first.
+ *
+ * @param string $class CSS class for the <svg>
+ * @return string
+ */
+function nx_logo_mark($class = '')
+{
+    static $seq = 0;
+    $seq++;
+    $id = 'nx-brand-' . $seq;
+
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"'
+        . ($class !== '' ? ' class="' . nx_esc($class) . '"' : '')
+        . ' aria-hidden="true" focusable="false">'
+        . '<defs><linearGradient id="' . $id . '" x1="0" y1="0" x2="1" y2="1">'
+        . '<stop offset="0" stop-color="#8b5cf6"/>'
+        . '<stop offset="1" stop-color="#22d3ee"/>'
+        . '</linearGradient></defs>'
+        // r=21 gives a circumference of ~132, so 96 on / 36 off is exactly
+        // one stroke and one gap -- change the radius and this must change
+        // with it or the gap multiplies.
+        . '<circle cx="32" cy="32" r="21" stroke="url(#' . $id . ')" stroke-width="7"'
+        . ' stroke-linecap="round" stroke-dasharray="96 36"'
+        . ' transform="rotate(-58 32 32)"/>'
+        . '<circle cx="32" cy="32" r="8" fill="url(#' . $id . ')"/>'
+        . '</svg>';
+}
+
+/**
  * @param string $name
  * @param string $class optional CSS class
  * @return string SVG markup, safe to echo directly
@@ -22,10 +57,6 @@ defined('NX') || exit;
 function nx_icon($name, $class = '')
 {
     $paths = array(
-
-        // Brand mark -- filled rather than stroked, so it reads as a solid
-        // glyph inside the gradient tile.
-        'zap' => '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
 
         'globe' => '<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/>'
             . '<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
@@ -91,14 +122,12 @@ function nx_icon($name, $class = '')
         return '';
     }
 
-    // The brand mark is the one filled icon; everything else is a stroked
-    // outline at the Lucide default weight.
-    $isFilled = $name === 'zap';
-
-    $attrs = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
-        . ($isFilled
-            ? 'fill="currentColor" stroke="none"'
-            : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"')
+    // Every icon here is a stroked outline at the Lucide default weight. The
+    // brand mark is not one of these -- it has its own gradient and lives in
+    // nx_logo_mark() above.
+    $attrs = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"'
+        . ' fill="none" stroke="currentColor" stroke-width="2"'
+        . ' stroke-linecap="round" stroke-linejoin="round"'
         . ' aria-hidden="true" focusable="false"';
 
     if ($class !== '') {
