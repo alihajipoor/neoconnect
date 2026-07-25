@@ -21,7 +21,11 @@ return array(
     // Public origin, no trailing slash. Used for canonical URLs, hreflang
     // alternates, sitemap entries and Open Graph tags. If you serve the site
     // from a different domain, this is the one place to change it.
-    'site_url' => 'https://neoxify.com',
+    //
+    // Note the website is on .net while the mail and the admin panel
+    // (connect.neoxify.com) are on .com. That split is intentional, but it is
+    // why the sender address below needs care.
+    'site_url' => 'https://neoxify.net',
 
     // Where the site lives relative to the web root. '/' means it was
     // unzipped straight into public_html (the normal case). If you ever put
@@ -34,16 +38,28 @@ return array(
 
     // Shown publicly on the contact page, for people who would rather email
     // than use a form.
-    'contact_email' => 'support@neoxify.com',
+    'contact_email' => 'info@neoxify.com',
 
     // Where form submissions are delivered.
-    'mail_to' => 'support@neoxify.com',
+    'mail_to' => 'info@neoxify.com',
 
-    // Envelope sender. This MUST be an address on your own domain or SPF
-    // alignment breaks and delivery gets worse -- neoxify.com currently has
-    // SPF and DMARC but no DKIM, so every bit of alignment matters. The
-    // submitter's address goes in Reply-To instead, never in From.
-    'mail_from' => 'noreply@neoxify.com',
+    // Envelope sender -- deliberately on neoxify.NET, not .com.
+    //
+    // The site runs on the .net webhost, so that host is what actually hands
+    // the message to the internet. A receiving server checks SPF against the
+    // From domain: if this said @neoxify.com, it would ask whether the .net
+    // webhost is authorised to send for neoxify.com, and unless you have
+    // explicitly added that host to neoxify.com's SPF record, the answer is
+    // no. That is a fast route to the spam folder -- and neoxify.com already
+    // has no DKIM, so there is no second signal to fall back on.
+    //
+    // Using the sending domain here keeps SPF aligned. Mail still lands in
+    // info@neoxify.com (mail_to above), and the submitter's own address goes
+    // in Reply-To, so replying works normally.
+    //
+    // Switch this to @neoxify.com only if you have confirmed the .net host is
+    // included in neoxify.com's SPF record.
+    'mail_from' => 'noreply@neoxify.net',
     'mail_from_name' => 'Neoxify Website',
 
     // Optional public contact channels. Leave any of these as an empty

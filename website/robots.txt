@@ -7,4 +7,4 @@ Disallow: /data/
 # inc/config.php. If you move the site to a different domain, update the line
 # below to match -- it is the one absolute URL on the site that config.php
 # cannot fill in for you.
-Sitemap: https://neoxify.com/sitemap.php
+Sitemap: https://neoxify.net/sitemap.php
