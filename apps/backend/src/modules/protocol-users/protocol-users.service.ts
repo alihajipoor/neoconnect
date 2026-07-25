@@ -48,11 +48,7 @@ export class ProtocolUsersService {
     });
     return users.map(({ node, protocolConfig, ...user }) => ({
       ...withDecryptedCredentials(user),
-      connection: {
-        host: node.publicIp,
-        port: protocolConfig.listenPort,
-        publicParams: protocolConfig.publicParamsJson,
-      },
+      connection: connectionInfo(node, protocolConfig),
     }));
   }
 
@@ -69,7 +65,14 @@ export class ProtocolUsersService {
   async create(dto: CreateProtocolUserDto) {
     const [subscription, route] = await Promise.all([
       this.prisma.subscription.findUnique({ where: { id: dto.subscriptionId } }),
-      this.prisma.route.findUnique({ where: { id: dto.routeId }, include: { entryProtocolConfig: true } }),
+      this.prisma.route.findUnique({
+        where: { id: dto.routeId },
+        // The node comes along for the `connection` field below -- a
+        // caller that just provisioned a user is exactly the caller
+        // about to connect with it, so it must not have to make a second
+        // request to find out where to connect.
+        include: { entryProtocolConfig: { include: { node: true } } },
+      }),
     ]);
     if (!subscription) throw new BadRequestException("Subscription not found");
     if (!route) throw new BadRequestException("Route not found");
@@ -104,7 +107,10 @@ export class ProtocolUsersService {
       credentials,
     });
 
-    return withDecryptedCredentials(protocolUser);
+    return {
+      ...withDecryptedCredentials(protocolUser),
+      connection: connectionInfo(protocolConfig.node, protocolConfig),
+    };
   }
 
   /** Customer-facing: moves a subscription's VPN account from whichever
@@ -195,4 +201,23 @@ function withDecryptedCredentials<T extends { credentialsJson: string }>(
 ): Omit<T, "credentialsJson"> & { credentials: Record<string, string> } {
   const { credentialsJson, ...rest } = user;
   return { ...rest, credentials: decryptCredentials(credentialsJson) };
+}
+
+/** The server-side half of what a native client needs to build a working
+ * tunnel: where to connect, plus the entry ProtocolConfig's public
+ * parameters.
+ *
+ * Shared by every customer-facing path that hands back a ProtocolUser
+ * (list, switch-route, trial grant) rather than living inline in one of
+ * them. It used to be inline in listByCustomer only, which meant
+ * switching servers returned a ProtocolUser with no `connection` -- the
+ * app then had a credential set with no server address and failed at the
+ * point of connecting, well away from the cause. Keeping one builder
+ * means a new customer-facing endpoint can't quietly reintroduce that. */
+function connectionInfo(node: { publicIp: string }, protocolConfig: { listenPort: number; publicParamsJson: unknown }) {
+  return {
+    host: node.publicIp,
+    port: protocolConfig.listenPort,
+    publicParams: protocolConfig.publicParamsJson,
+  };
 }
