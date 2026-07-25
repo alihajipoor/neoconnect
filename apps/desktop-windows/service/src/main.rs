@@ -112,12 +112,42 @@ fn install() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Stops and deregisters the service, waiting for the process to
+/// actually exit.
+///
+/// The wait is the point, not politeness. `stop()` only *requests* a
+/// stop, and the process keeps its own executable locked until it really
+/// exits -- so returning early makes the very next step (overwriting
+/// that executable) fail with "Error opening file for writing". That is
+/// exactly what happened when reinstalling over a running install, and
+/// it would happen on every auto-update too, so this waits rather than
+/// hoping the timing works out.
 fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    let service = manager.open_service(SERVICE_NAME, ServiceAccess::STOP | ServiceAccess::DELETE)?;
-    // Best-effort stop: a service that is already stopped errors here,
-    // which must not stop the uninstall from removing it.
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
+    )?;
+
+    // A service that is already stopped errors here, which must not stop
+    // the uninstall from removing it.
     let _ = service.stop();
+
+    // Generous but bounded: a hung service must not wedge the installer
+    // forever. If it does time out, the delete below still marks it for
+    // removal, and the installer surfaces the file-write error rather
+    // than silently shipping a half-updated install.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        match service.query_status() {
+            Ok(status) if status.current_state == ServiceState::Stopped => break,
+            // Already gone is a fine outcome for a function whose job is
+            // to make it gone.
+            Err(_) => break,
+            Ok(_) => std::thread::sleep(Duration::from_millis(250)),
+        }
+    }
+
     service.delete()?;
     Ok(())
 }
