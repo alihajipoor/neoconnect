@@ -104,6 +104,16 @@ impl ProtocolUserPayload {
                     .and_then(|v| v.as_str())
                     .unwrap_or("udp")
                     .to_string(),
+                // A server-wide value, so it lives on the ProtocolConfig
+                // rather than in the per-customer credentials. Absent for
+                // servers that don't use tls-crypt, and for configs
+                // registered before it was recorded.
+                tls_crypt_key: self
+                    .connection
+                    .public_params
+                    .get("tlsCryptKey")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
             })),
             other => Err(format!("unsupported protocol {other}")),
         }

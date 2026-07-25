@@ -97,6 +97,13 @@ pub struct OpenvpnProfile {
     pub ca_cert_pem: String,
     pub endpoint: String,
     pub proto: String,
+    /// The server's tls-crypt key, when it uses one.
+    ///
+    /// Optional because a server configured without tls-crypt is valid,
+    /// but when the server does use it a client lacking the key isn't
+    /// rejected -- it's silently ignored, and the connection just never
+    /// completes with nothing in the log after the initial send.
+    pub tls_crypt_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -261,6 +268,12 @@ impl ConnectProfile {
                 if p.proto != "udp" && p.proto != "tcp" {
                     return Err(reject("proto", "must be udp or tcp"));
                 }
+                // Same structural check as the certificates: an OpenVPN
+                // static key is a BEGIN/END block wrapping hex, so it
+                // can't smuggle a directive out of its inline tag.
+                if let Some(key) = &p.tls_crypt_key {
+                    check_pem("tlsCryptKey", key)?;
+                }
                 Ok(())
             }
         }
@@ -333,6 +346,9 @@ mod tests {
             ca_cert_pem: pem.into(),
             endpoint: "203.0.113.5:1194".into(),
             proto: "udp".into(),
+            tls_crypt_key: Some(
+                "-----BEGIN OpenVPN Static key V1-----\n1a2b3c4d\n-----END OpenVPN Static key V1-----".into(),
+            ),
         };
         mutate(&mut p);
         ConnectProfile::Openvpn(p)

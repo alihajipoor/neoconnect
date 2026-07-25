@@ -35,6 +35,15 @@ fn build_config(p: &OpenvpnProfile) -> Result<String, String> {
         .rsplit_once(':')
         .ok_or_else(|| "endpoint must be host:port".to_string())?;
 
+    // Only emitted when the server uses tls-crypt. Omitting it against a
+    // server that does use it produces no error at all -- the server
+    // cannot authenticate the control channel, so it drops the client's
+    // packets and the log simply stops after the first send.
+    let tls_crypt = match &p.tls_crypt_key {
+        Some(key) => format!("<tls-crypt>\n{}\n</tls-crypt>\n", key.trim()),
+        None => String::new(),
+    };
+
     Ok(format!(
         "client\n\
          dev tun\n\
@@ -52,13 +61,15 @@ fn build_config(p: &OpenvpnProfile) -> Result<String, String> {
          script-security 0\n\
          <ca>\n{ca}\n</ca>\n\
          <cert>\n{cert}\n</cert>\n\
-         <key>\n{key}\n</key>\n",
+         <key>\n{key}\n</key>\n\
+         {tls_crypt}",
         proto = p.proto,
         host = host,
         port = port,
         ca = p.ca_cert_pem.trim(),
         cert = p.cert_pem.trim(),
         key = p.key_pem.trim(),
+        tls_crypt = tls_crypt,
     ))
 }
 
@@ -96,6 +107,9 @@ mod tests {
             ca_cert_pem: "-----BEGIN CERTIFICATE-----\nQ0E=\n-----END CERTIFICATE-----".into(),
             endpoint: "203.0.113.5:1194".into(),
             proto: "udp".into(),
+            tls_crypt_key: Some(
+                "-----BEGIN OpenVPN Static key V1-----\ndeadbeef\n-----END OpenVPN Static key V1-----".into(),
+            ),
         }
     }
 
@@ -124,5 +138,22 @@ mod tests {
     #[test]
     fn uses_the_shared_wintun_driver() {
         assert!(build_config(&profile()).unwrap().contains("windows-driver wintun"));
+    }
+
+    #[test]
+    fn includes_the_tls_crypt_key_when_the_server_uses_one() {
+        // Omitting this against a tls-crypt server is invisible: the
+        // server drops the client's packets rather than rejecting them,
+        // so the connection hangs with an empty log.
+        let conf = build_config(&profile()).unwrap();
+        assert!(conf.contains("<tls-crypt>\n-----BEGIN OpenVPN Static key V1-----"));
+        assert!(conf.contains("</tls-crypt>"));
+    }
+
+    #[test]
+    fn omits_the_tls_crypt_block_when_the_server_has_no_key() {
+        let mut p = profile();
+        p.tls_crypt_key = None;
+        assert!(!build_config(&p).unwrap().contains("tls-crypt"));
     }
 }
