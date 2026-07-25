@@ -35,9 +35,23 @@ describe("InvoicesService", () => {
           ...overrides,
         }),
       },
+      customer: { findUnique: jest.fn().mockResolvedValue({ id: "cust-1", email: "c@example.com" }) },
       $queryRaw: jest.fn().mockImplementation(() => Promise.resolve([{ nextval: BigInt(++seq) }])),
     };
-    return { prisma, service: new InvoicesService(prisma as unknown as PrismaService) };
+    // Mail is best-effort and never affects the outcome, so it is stubbed
+    // rather than asserted here -- what matters is the invoice, not the
+    // notification about it.
+    const emailService = { sendMail: jest.fn().mockResolvedValue(true) };
+    const config = { get: jest.fn().mockReturnValue(undefined) };
+    return {
+      prisma,
+      emailService,
+      service: new InvoicesService(
+        prisma as unknown as PrismaService,
+        emailService as never,
+        config as never,
+      ),
+    };
   }
 
   describe("issueForPayment", () => {

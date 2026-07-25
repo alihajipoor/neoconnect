@@ -1,6 +1,9 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { InvoiceStatus, Prisma } from "@prisma/client";
+import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../../prisma/prisma.service";
+import { EmailService } from "../email/email.service";
+import { invoiceIssuedEmail, invoiceOverdueEmail } from "../email/templates";
 
 export interface InvoiceLineItem {
   description: string;
@@ -11,7 +14,11 @@ export interface InvoiceLineItem {
 export class InvoicesService {
   private readonly logger = new Logger(InvoicesService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly emailService: EmailService,
+    private readonly config: ConfigService,
+  ) {}
 
   /** Issues the invoice for a payment that has just cleared.
    *
@@ -47,7 +54,7 @@ export class InvoicesService {
       { description: `${planName} subscription`, amountUsd: payment.amountUsd.toString() },
     ];
 
-    return this.prisma.invoice.create({
+    const invoice = await this.prisma.invoice.create({
       data: {
         invoiceNumber: await this.nextInvoiceNumber(),
         customerId: payment.customerId,
@@ -65,6 +72,34 @@ export class InvoicesService {
         lineItemsJson: lineItems as unknown as Prisma.InputJsonValue,
       },
     });
+
+    // Best-effort, like every other send in this codebase: a mail
+    // failure must never unwind a payment that has already cleared.
+    const customer = await this.prisma.customer.findUnique({ where: { id: invoice.customerId } });
+    if (customer) {
+      await this.emailService.sendMail({
+        to: customer.email,
+        ...invoiceIssuedEmail({
+          invoiceNumber: invoice.invoiceNumber,
+          planName: planName,
+          amountUsd: invoice.amountUsd.toString(),
+          currency: invoice.currency,
+          documentUrl: this.documentUrl(invoice.id),
+        }),
+      });
+    }
+
+    return invoice;
+  }
+
+  /** Where a customer can view this invoice, when the public address is
+   * configured. Omitted rather than guessed if it isn't -- a link to the
+   * wrong host is worse than no link, and the email reads fine without
+   * one. */
+  private documentUrl(invoiceId: string): string | undefined {
+    const base = this.config.get<string>("publicApiUrl");
+    if (!base) return undefined;
+    return `${base.replace(/\/$/, "")}/customer/invoices/${invoiceId}/document`;
   }
 
   /** `INV-<year>-<n>`, with the counter coming from a Postgres sequence.
@@ -83,11 +118,18 @@ export class InvoicesService {
     return `INV-${new Date().getFullYear()}-${row.nextval.toString().padStart(6, "0")}`;
   }
 
+  /** Includes the customer's email and how they paid, because an invoice
+   * list that shows only ids is unusable for the one job an operator
+   * opens it to do: find a specific person's invoice. */
   list(filters: { customerId?: string; status?: InvoiceStatus } = {}) {
     return this.prisma.invoice.findMany({
       where: {
         ...(filters.customerId ? { customerId: filters.customerId } : {}),
         ...(filters.status ? { status: filters.status } : {}),
+      },
+      include: {
+        customer: { select: { email: true } },
+        paymentTransaction: { select: { provider: true } },
       },
       orderBy: { issuedAt: "desc" },
     });
@@ -173,6 +215,21 @@ export class InvoicesService {
       where: { id: { in: due.map((i) => i.id) } },
       data: { status: InvoiceStatus.OVERDUE },
     });
+
+    for (const invoice of due) {
+      const customer = await this.prisma.customer.findUnique({ where: { id: invoice.customerId } });
+      if (!customer) continue;
+      await this.emailService.sendMail({
+        to: customer.email,
+        ...invoiceOverdueEmail({
+          invoiceNumber: invoice.invoiceNumber,
+          amountUsd: invoice.amountUsd.toString(),
+          currency: invoice.currency,
+          documentUrl: this.documentUrl(invoice.id),
+        }),
+      });
+    }
+
     this.logger.log(`Marked ${due.length} invoice(s) overdue`);
     return due;
   }

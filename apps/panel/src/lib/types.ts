@@ -108,3 +108,38 @@ export interface SubscriptionPlan {
   createdAt: string;
   updatedAt: string;
 }
+
+export type InvoiceStatus = "DRAFT" | "ISSUED" | "PAID" | "OVERDUE" | "VOID";
+
+export interface InvoiceLineItem {
+  description: string;
+  amountUsd: string;
+}
+
+export interface Invoice {
+  id: string;
+  invoiceNumber: string;
+  customerId: string;
+  subscriptionId: string | null;
+  paymentTransactionId: string | null;
+  planNameSnapshot: string;
+  amountUsd: string;
+  currency: string;
+  status: InvoiceStatus;
+  periodStart: string;
+  periodEnd: string;
+  issuedAt: string;
+  dueAt: string | null;
+  paidAt: string | null;
+  lineItemsJson: InvoiceLineItem[];
+  customer?: { email: string };
+  paymentTransaction?: { provider: string } | null;
+}
+
+export interface InvoiceSummary {
+  since: string;
+  invoiceCount: number;
+  totalUsd: string;
+  byPlan: { name: string; amountUsd: string }[];
+  byProvider: { provider: string; amountUsd: string }[];
+}

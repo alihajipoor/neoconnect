@@ -4,6 +4,7 @@ import { ConfigService } from "@nestjs/config";
 import IORedis from "ioredis";
 import { UsageModule } from "../usage/usage.module";
 import { EmailModule } from "../email/email.module";
+import { InvoicesModule } from "../invoices/invoices.module";
 import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { SweepsProcessor } from "./sweeps.processor";
 import { SweepsSchedulerService } from "./sweeps-scheduler.service";
@@ -32,6 +33,7 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     announcementsQueue,
     UsageModule,
     EmailModule,
+    InvoicesModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

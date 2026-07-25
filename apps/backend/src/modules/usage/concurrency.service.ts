@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
+import { forwardRef, Inject, Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
@@ -54,6 +54,11 @@ export class ConcurrencyService implements OnModuleDestroy {
 
   constructor(
     private readonly prisma: PrismaService,
+    // UsageModule and AgentGatewayModule import each other, so the
+    // parameter needs its own forwardRef as well as the module-level one
+    // -- without it Nest cannot resolve this at boot (UsageService, the
+    // other consumer of the same service, already does this).
+    @Inject(forwardRef(() => AgentGatewayService))
     private readonly agentGateway: AgentGatewayService,
   ) {}
 
