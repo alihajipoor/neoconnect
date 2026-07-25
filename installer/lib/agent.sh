@@ -502,6 +502,25 @@ install_openvpn() {
   chmod 600 /etc/openvpn/server/server.key
 
   openvpn --genkey secret /etc/openvpn/server/tls-crypt.key
+
+  # tls-crypt encrypts and authenticates the whole TLS control channel,
+  # so a client without this exact key is not rejected -- it is silently
+  # ignored, and the connection simply never completes. It therefore has
+  # to reach clients, which means registering it alongside the rest of
+  # this engine's parameters rather than leaving it node-local like the
+  # WireGuard/Xray server secrets.
+  local tls_crypt_key
+  tls_crypt_key="$(cat /etc/openvpn/server/tls-crypt.key)"
+  local update_payload
+  update_payload="$(jq -n --arg k "$tls_crypt_key" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" \
+    '{publicParamsJson: {proto: $proto, endpoint: $endpoint, tlsCryptKey: $k}}')"
+  if ! curl -sSL -X PATCH "$panel_url/protocol-configs/$config_id" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $token" \
+      -d "$update_payload" | jq -e '.id' >/dev/null; then
+    echo "WARNING: could not attach the tls-crypt key to this OpenVPN config -- clients will connect to a server that ignores them." >&2
+  fi
+
   # -dsaparam trades a little cryptographic conservatism for a
   # dramatically faster generation (under a second vs. minutes) --
   # acceptable here since these DH params only protect a supplementary
