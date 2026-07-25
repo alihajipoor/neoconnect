@@ -1,0 +1,182 @@
+//! NeoConnect's privileged helper service.
+//!
+//! # Why this exists
+//!
+//! Bringing up a VPN tunnel on Windows needs administrator rights:
+//! installing a tunnel service, creating a TUN adapter, editing the
+//! system routing table. The obvious approach -- elevate the engine
+//! per-connect from the app, which is what this client originally did --
+//! puts a UAC prompt in front of the user every single time they press
+//! Connect. That fails the product's actual requirement, which is that
+//! connecting is silent and the user never sees an engine at all.
+//!
+//! So elevation happens exactly once, at install time, when the
+//! installer registers this service. From then on the app (running
+//! unelevated, as it should) asks this service to do the privileged
+//! work over a local named pipe, and nothing ever prompts again.
+//!
+//! # Threat model
+//!
+//! This is a LocalSystem process taking instructions over an IPC
+//! endpoint, so it is a privilege-escalation target and is built as one:
+//!
+//! * the pipe is ACL'd to authenticated local users (see `security`),
+//! * the protocol carries credentials only -- never a path, program
+//!   name, or command line, so a caller cannot choose what runs
+//!   (see `neoconnect_ipc` and `Engines::engine_path`),
+//! * every value that reaches a config file is validated first, because
+//!   some engine config formats can execute commands
+//!   (see `neoconnect_ipc::ConnectProfile::validate`), and
+//! * config files holding private keys live in a directory ACL'd to
+//!   SYSTEM and Administrators only.
+
+mod engines;
+mod pipe;
+mod security;
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::Mutex;
+use windows_service::service::{
+    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
+    ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+};
+use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+use windows_service::{define_windows_service, service_dispatcher};
+
+const SERVICE_NAME: &str = "NeoConnectService";
+const SERVICE_DISPLAY_NAME: &str = "NeoConnect VPN Service";
+const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+
+fn config_dir() -> PathBuf {
+    // ProgramData rather than the install directory: config is mutable
+    // per-connection state, and Program Files is meant to be read-only
+    // after install. The ACL is set explicitly at creation -- see
+    // security::create_protected_dir.
+    let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+    PathBuf::from(base).join("NeoConnect")
+}
+
+fn exe_dir() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    exe.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| std::io::Error::other("could not resolve the service's own directory"))
+}
+
+use std::path::Path;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match std::env::args().nth(1).as_deref() {
+        Some("install") => install(),
+        Some("uninstall") => uninstall(),
+        // No argument means the service control manager started us.
+        _ => service_dispatcher::start(SERVICE_NAME, ffi_service_main).map_err(Into::into),
+    }
+}
+
+/// Registers and starts the service. Run by the installer, elevated --
+/// this is the one and only elevation the product asks of the user.
+fn install() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
+    let service_info = ServiceInfo {
+        name: OsString::from(SERVICE_NAME),
+        display_name: OsString::from(SERVICE_DISPLAY_NAME),
+        service_type: SERVICE_TYPE,
+        // Autostart so a reboot doesn't silently leave Connect broken
+        // until the user reinstalls.
+        start_type: ServiceStartType::AutoStart,
+        error_control: ServiceErrorControl::Normal,
+        executable_path: std::env::current_exe()?,
+        launch_arguments: vec![],
+        dependencies: vec![],
+        account_name: None, // LocalSystem
+        account_password: None,
+    };
+
+    let service = match manager.create_service(&service_info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG) {
+        Ok(service) => service,
+        // Reinstalling over an existing install is a normal upgrade
+        // path, not an error worth failing the installer over.
+        Err(_) => {
+            let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+            manager.open_service(SERVICE_NAME, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)?
+        }
+    };
+    service.set_description("Manages NeoConnect VPN tunnels so connecting never requires an administrator prompt.")?;
+    let _ = service.start(&[] as &[&std::ffi::OsStr]);
+    Ok(())
+}
+
+fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(SERVICE_NAME, ServiceAccess::STOP | ServiceAccess::DELETE)?;
+    // Best-effort stop: a service that is already stopped errors here,
+    // which must not stop the uninstall from removing it.
+    let _ = service.stop();
+    service.delete()?;
+    Ok(())
+}
+
+define_windows_service!(ffi_service_main, service_main);
+
+fn service_main(_args: Vec<OsString>) {
+    if let Err(err) = run_service() {
+        eprintln!("service failed: {err}");
+    }
+}
+
+fn run_service() -> Result<(), Box<dyn std::error::Error>> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut shutdown_tx = Some(shutdown_tx);
+
+    let status_handle = service_control_handler::register(SERVICE_NAME, move |control| match control {
+        ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+        ServiceControl::Stop | ServiceControl::Shutdown => {
+            if let Some(tx) = shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            ServiceControlHandlerResult::NoError
+        }
+        _ => ServiceControlHandlerResult::NotImplemented,
+    })?;
+
+    let running = |state: ServiceState, accept: ServiceControlAccept| ServiceStatus {
+        service_type: SERVICE_TYPE,
+        current_state: state,
+        controls_accepted: accept,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    };
+    status_handle.set_service_status(running(ServiceState::Running, ServiceControlAccept::STOP))?;
+
+    let config_dir = config_dir();
+    security::create_protected_dir(&config_dir)?;
+    let engines = Arc::new(Mutex::new(engines::Engines::new(exe_dir()?, config_dir)));
+
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let serving = pipe::serve(Arc::clone(&engines));
+        tokio::select! {
+            result = serving => {
+                if let Err(err) = result {
+                    eprintln!("pipe server stopped: {err}");
+                }
+            }
+            _ = shutdown_rx => {}
+        }
+        // Leaving a tunnel up after the service that manages it has gone
+        // away would strand the machine's routing table pointed at an
+        // engine nothing is tracking.
+        let _ = engines.lock().await.disconnect();
+    });
+
+    status_handle.set_service_status(running(ServiceState::Stopped, ServiceControlAccept::empty()))?;
+    Ok(())
+}

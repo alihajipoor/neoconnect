@@ -1,3 +1,8 @@
+# Cargo build output. Lives here rather than in src-tauri/ because the
+# three Rust crates (src-tauri, service, ipc) share one workspace rooted
+# at this directory, so they also share one target directory.
+/target/
+
 # Logs
 logs
 *.log

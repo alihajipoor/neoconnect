@@ -41,11 +41,16 @@
     ],
     "resources": {
       "resources/wireguard.exe": "resources/wireguard.exe",
-      "resources/wg.exe": "resources/wg.exe"
+      "resources/wg.exe": "resources/wg.exe",
+      "resources/xray.exe": "resources/xray.exe",
+      "resources/wintun.dll": "resources/wintun.dll",
+      "resources/openvpn.exe": "resources/openvpn.exe",
+      "resources/neoconnect-service.exe": "resources/neoconnect-service.exe"
     },
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installerHooks": "nsis-hooks.nsh",
+        "installMode": "perMachine"
       }
     }
   }

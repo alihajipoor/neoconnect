@@ -48,8 +48,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            vpn::connect_wireguard,
-            vpn::disconnect_wireguard,
+            vpn::vpn_connect,
+            vpn::vpn_disconnect,
+            vpn::vpn_status,
             get_launch_deep_link
         ])
         .run(tauri::generate_context!())

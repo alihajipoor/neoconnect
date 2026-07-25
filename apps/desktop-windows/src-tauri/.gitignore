@@ -7,8 +7,10 @@
 /gen/schemas
 
 # Real, official third-party VPN engine binaries (wireguard.exe, wg.exe,
-# and later xray.exe/openvpn.exe) -- fetched by scripts/fetch-binaries.ps1,
-# not committed, same "download the real binary at build/install time,
-# don't vendor it" pattern the bash installer already uses for the
-# server-side agent. See resources/README.md.
+# xray.exe, openvpn.exe, wintun.dll) plus the helper service built from
+# this repo -- all produced by scripts/fetch-binaries.ps1, not committed,
+# same "download/build the real binary at build time, don't vendor it"
+# pattern the bash installer already uses for the server-side agent.
+# See resources/README.md.
 /resources/*.exe
+/resources/*.dll
