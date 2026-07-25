@@ -7,6 +7,7 @@ import { AgentCommandType } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
 import { UsageService } from "../usage/usage.service";
+import { decryptCredentials } from "../protocol-users/credentials-crypto";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
 import { verifyEd25519 } from "./ed25519";
@@ -216,7 +217,48 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Node ${node.id} (${node.name}) authenticated and connected`);
 
     await this.replayQueuedCommands(node.id);
+    await this.reassertProvisionedUsers(node.id);
     return node.id;
+  }
+
+  /** Re-sends a CREATE_USER for every customer who should exist on this
+   * node, whether or not one was ever sent before.
+   *
+   * This is separate from replayQueuedCommands, which only resends
+   * commands that were never acked. After a reboot every past command is
+   * ACKED, so that path replays nothing -- and yet the node has lost
+   * every user, because no engine here keeps them:
+   *
+   * * Xray holds them in memory, added over its gRPC API; a restart
+   *   empties the inbound.
+   * * WireGuard peers are added with `wg set`, which mutates the running
+   *   interface and never touches wg0.conf (see the note in
+   *   agent/internal/protocols/wireguard).
+   *
+   * So an agent that reconnects is an agent whose engines may have just
+   * come up empty, and the only safe assumption is that they did. Before
+   * this, a node reboot silently cut off every customer on it,
+   * permanently, with nothing in the panel indicating anything was
+   * wrong -- confirmed live: restarting Xray left an ACTIVE, correctly
+   * provisioned customer unable to authenticate.
+   *
+   * Safe to run when nothing was lost: CREATE_USER is idempotent on the
+   * agent side (create-if-not-exists), the same property
+   * replayQueuedCommands already relies on. */
+  private async reassertProvisionedUsers(nodeId: string) {
+    const users = await this.prisma.protocolUser.findMany({
+      where: { nodeId, status: "ACTIVE" },
+    });
+    if (users.length === 0) return;
+
+    for (const user of users) {
+      await this.enqueueCommand(nodeId, "CREATE_USER", {
+        protocol: user.protocol,
+        externalUserId: user.externalUserId,
+        credentials: decryptCredentials(user.credentialsJson),
+      });
+    }
+    this.logger.log(`Re-asserted ${users.length} provisioned user(s) on node ${nodeId} after reconnect`);
   }
 
   private async handleCommandAck(ack: { commandId: string; success: boolean; error: string }) {
