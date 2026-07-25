@@ -166,8 +166,25 @@ install_xray() {
 
   read -r -p "Listen port for VLESS+REALITY [443]: " listen_port
   listen_port="${listen_port:-443}"
-  read -r -p "Camouflage destination (a real HTTPS site) [www.microsoft.com:443]: " dest
-  dest="${dest:-www.microsoft.com:443}"
+  # REALITY presents this site's TLS identity to anyone inspecting the
+  # connection, so it has to be a real HTTPS host that is (a) reachable
+  # from where customers are -- google.com is filtered in Iran, which is
+  # the main market -- and (b) not something local security software
+  # intercepts. Traffic to an intercepted domain fails with "received
+  # real certificate", because the interceptor's certificate arrives
+  # instead of the one REALITY expects. Found live: www.microsoft.com is
+  # intercepted by security software on a real user's machine and broke
+  # every connection until the domain was changed.
+  #
+  # Whatever is chosen here must also be set as dest/serverName on the
+  # Protocol Config -- the client takes its SNI from the panel, and a
+  # mismatch fails exactly the same way as interception does.
+  echo
+  echo "REALITY disguises this node's traffic as HTTPS to another site."
+  echo "Pick one that is popular, reachable from your customers' countries,"
+  echo "and supports TLS 1.3 -- avoid placeholder domains like example.com."
+  read -r -p "Camouflage destination [cloudflare.com:443]: " dest
+  dest="${dest:-cloudflare.com:443}"
   local server_name="${dest%%:*}"
 
   local template="$SCRIPT_DIR/assets/xray-config.json.template"
