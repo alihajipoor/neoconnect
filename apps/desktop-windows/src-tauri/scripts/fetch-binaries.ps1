@@ -114,6 +114,47 @@ foreach ($dll in $ovpnDlls) {
 Remove-Item $ovpnTemp -Recurse -Force
 Write-Host "  openvpn.exe + $($ovpnDlls.Count) dependencies"
 
+# --- WinDivert -------------------------------------------------------
+# The packet-interception library behind Custom (per-app split tunnel)
+# mode. Three files matter: WinDivert.dll and WinDivert64.sys at runtime,
+# and WinDivert.lib at build time -- windivert-sys links against the .lib
+# and expects all three in the directory named by WINDIVERT_PATH (see its
+# build/main.rs).
+#
+# Linked as a separate DLL rather than statically fused into our binary.
+# That is both how the crate works by default and what keeps WinDivert's
+# LGPL usable in a closed-source app -- do not switch on its `static`
+# feature without revisiting the licence.
+#
+# The .sys is the kernel driver. It self-installs on the first
+# WinDivertOpen() from a process holding an admin token, which the helper
+# service already does as LocalSystem -- so there is no separate driver
+# install step for the user.
+$divertVersion = "2.2.2"
+$divertTemp = Join-Path $env:TEMP "neoconnect-windivert-fetch"
+if (Test-Path $divertTemp) { Remove-Item $divertTemp -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $divertTemp | Out-Null
+
+$divertZip = Join-Path $divertTemp "windivert.zip"
+$divertUrl = "https://github.com/basil00/WinDivert/releases/download/v$divertVersion/WinDivert-$divertVersion-A.zip"
+Write-Host "Downloading $divertUrl ..."
+Invoke-WebRequest -Uri $divertUrl -OutFile $divertZip
+Expand-Archive -Path $divertZip -DestinationPath (Join-Path $divertTemp "extract") -Force
+
+# Located by search rather than a hardcoded "WinDivert-x.y.z-A\x64\"
+# path, so a version bump doesn't silently stop finding them.
+$divertFiles = @("WinDivert.dll", "WinDivert.lib", "WinDivert64.sys")
+foreach ($file in $divertFiles) {
+    $found = Get-ChildItem -Path (Join-Path $divertTemp "extract") -Filter $file -Recurse |
+        Where-Object { $_.DirectoryName -match "x64" } | Select-Object -First 1
+    if (-not $found) {
+        throw "$file was not found in the WinDivert $divertVersion zip -- Custom mode cannot build or run without it. Check the archive layout before bumping the version."
+    }
+    Copy-Item $found.FullName (Join-Path $resourcesDir $file) -Force
+}
+Remove-Item $divertTemp -Recurse -Force
+Write-Host "  $($divertFiles -join ', ')"
+
 # --- Helper service --------------------------------------------------
 # Built from this repo rather than downloaded, but it belongs in
 # resources/ next to the engines: the service resolves every engine
