@@ -34,6 +34,9 @@ export function CustomerFormDialog({
         ? await updateCustomer(customer!.id, {
             telegramId: String(formData.get("telegramId") ?? "") || undefined,
             status: formData.get("status") as CustomerStatus,
+            // Blank means "leave it alone" -- an edit that didn't touch
+            // this field must not send an empty password.
+            password: String(formData.get("password") ?? "") || undefined,
           })
         : await createCustomer({
             email: String(formData.get("email") ?? ""),
@@ -74,6 +77,23 @@ export function CustomerFormDialog({
             <Label htmlFor="telegramId">Telegram ID (optional)</Label>
             <Input id="telegramId" name="telegramId" defaultValue={customer?.telegramId ?? ""} />
           </div>
+          {isEdit && (
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="password">New password</Label>
+              <Input
+                id="password"
+                name="password"
+                type="password"
+                minLength={8}
+                autoComplete="new-password"
+                placeholder="Leave blank to keep the current one"
+              />
+              <p className="text-xs text-muted-foreground">
+                Signs the customer out everywhere. Use this when someone is locked out of their email
+                and can&apos;t reset it themselves.
+              </p>
+            </div>
+          )}
           {isEdit && (
             <div className="flex flex-col gap-2">
               <Label htmlFor="status">Status</Label>

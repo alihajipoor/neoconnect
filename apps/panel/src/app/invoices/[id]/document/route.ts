@@ -14,11 +14,11 @@ import { getAccessToken } from "@/lib/session";
  * Deliberately outside the (dashboard) route group: it returns a
  * standalone document, not a page that should inherit the panel chrome.
  */
-export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(_request: Request, ctx: RouteContext<"/invoices/[id]/document">) {
   const token = await getAccessToken();
   if (!token) return new NextResponse("Not signed in", { status: 401 });
 
-  const { id } = await params;
+  const { id } = await ctx.params;
   const res = await fetch(`${backendUrl()}/invoices/${encodeURIComponent(id)}/document`, {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",

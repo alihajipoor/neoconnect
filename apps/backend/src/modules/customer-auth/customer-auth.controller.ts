@@ -25,6 +25,7 @@ import { ResendVerificationDto } from "./dto/resend-verification.dto";
 import { ForgotPasswordDto } from "./dto/forgot-password.dto";
 import { verificationFailedPage, verifiedPage } from "./verify-landing-page";
 import { ResetPasswordDto } from "./dto/reset-password.dto";
+import { ChangePasswordDto } from "./dto/change-password.dto";
 
 // This is the API a future native client (Windows/macOS/Android/iOS)
 // signs up and logs in through -- there is deliberately no web UI for
@@ -67,6 +68,21 @@ export class CustomerAuthController {
   @UseGuards(CustomerJwtAuthGuard)
   async logout(@CurrentCustomer() customer: AuthenticatedCustomer) {
     await this.customerAuthService.revokeAllSessions(customer.sub);
+  }
+
+  /** Changes the password of a signed-in customer, and hands back fresh
+   * tokens because the change revokes the caller's own session too.
+   *
+   * Throttled like the other password paths: being authenticated doesn't
+   * make this a good place to let someone guess the current password.
+   */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("change-password")
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @UseGuards(CustomerJwtAuthGuard)
+  changePassword(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: ChangePasswordDto) {
+    return this.customerAuthService.changePassword(customer.sub, dto);
   }
 
   // No guard -- the token itself is the credential (mirrors admin MFA's

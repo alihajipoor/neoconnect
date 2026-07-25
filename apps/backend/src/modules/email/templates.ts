@@ -116,21 +116,6 @@ function statPill(value: string, label: string): string {
   </table>`;
 }
 
-export function welcomeEmail() {
-  return {
-    subject: "Welcome to NeoConnect",
-    html: shell({
-      preheader: "Your account is ready -- verify your email to get connected.",
-      bodyHtml: `
-        ${heading("Welcome aboard ⚡")}
-        ${paragraph("Your NeoConnect account has been created.")}
-        ${paragraph("A separate verification email is on its way -- confirm your address there before you can connect to the VPN.")}
-      `,
-    }),
-    text: "Your NeoConnect account has been created. Check your inbox for a separate verification email -- you'll need to confirm your address before you can connect to the VPN.",
-  };
-}
-
 /** `publicApiUrl` is where this API answers from a customer's browser.
  *
  * When it's set the button points at an https:// page that verifies and
@@ -146,19 +131,19 @@ export function verificationEmail(token: string, code: string, publicApiUrl?: st
     : deepLink;
 
   return {
-    subject: "Verify your NeoConnect email address",
+    subject: "Welcome to NeoConnect -- verify your email",
     html: shell({
       preheader: `Your verification code is ${code}.`,
       bodyHtml: `
-        ${heading("Verify your email")}
-        ${paragraph("Enter this code in the NeoConnect app to activate your account:")}
+        ${heading("Welcome aboard ⚡")}
+        ${paragraph("Your NeoConnect account is created. One step left -- enter this code in the app to activate it:")}
         ${bigCode(code)}
         ${fineprint("Or just click here:")}
         ${button(link, "Verify my email")}
         ${fineprint("This code expires in 24 hours. If you didn't create a NeoConnect account, you can ignore this email.")}
       `,
     }),
-    text: `Your NeoConnect verification code: ${code} (expires in 24 hours). Or open: ${link}`,
+    text: `Welcome to NeoConnect. Your verification code: ${code} (expires in 24 hours). Or open: ${link}`,
   };
 }
 
