@@ -90,6 +90,25 @@ describe("AgentGatewayService reconnect reconciliation", () => {
     expect(enqueue).not.toHaveBeenCalled();
   });
 
+  it("writes periodic re-asserts without storing a command for each", async () => {
+    // The periodic sweep runs on every connected node every few minutes.
+    // Persisting one row per user per sweep would accumulate thousands of
+    // rows a day recording that nothing changed.
+    const { service, enqueue } = build([
+      { protocol: "XRAY_VLESS_REALITY", externalUserId: "uuid-1", credentials: { uuid: "uuid-1" } },
+    ]);
+    const write = jest
+      .spyOn(service as unknown as { writeCommand: () => boolean }, "writeCommand")
+      .mockReturnValue(true);
+
+    await (
+      service as unknown as { reassertProvisionedUsers(id: string, o: { persist: boolean }): Promise<void> }
+    ).reassertProvisionedUsers("node-1", { persist: false });
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
   it("skips users that are disabled rather than restoring their access", async () => {
     // Suspended and over-quota customers are DISABLED, not deleted. A
     // blanket re-create would hand them back working credentials as a
