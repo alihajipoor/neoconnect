@@ -1,0 +1,9 @@
+# Runtime data only: real form submissions, the generated CSRF secret and the
+# rate-limit state. None of it belongs in a public repository.
+#
+# The directory itself is tracked (via this file and .htaccess) so that a
+# fresh unzip already has a writable data/ and the first submission does not
+# depend on PHP being able to create it.
+*
+!.gitignore
+!.htaccess

@@ -1,0 +1,82 @@
+<?php
+/**
+ * ============================================================================
+ *  SET YOUR REAL PRICES HERE BEFORE THE SITE GOES LIVE.
+ *
+ *  The numbers below are a starting structure, NOT your pricing. Nobody has
+ *  confirmed them. Publishing them unchanged would advertise prices your
+ *  panel does not charge.
+ *
+ *  These must match the SubscriptionPlan rows in the admin panel, because
+ *  those are what a customer is actually billed. This file is marketing copy
+ *  describing them -- it does not drive billing and cannot override it.
+ * ============================================================================
+ *
+ * This is the only file to edit to change plans, prices or what each plan
+ * advertises. Names and taglines are inline per locale so adding a plan never
+ * means editing three files.
+ *
+ * Fields:
+ *   id             internal key, used for the CSS hook and nothing else
+ *   name           display name, per locale
+ *   tagline        one line under the name, per locale
+ *   price          number, in the currency below
+ *   duration_days  billing period; 30 renders as "/month"
+ *   data_gb        data cap in GB (1024 renders as "1 TB")
+ *   connections    max simultaneous devices, or null to not mention it.
+ *                  Maps to SubscriptionPlan.maxConcurrentConnections, which
+ *                  is nullable -- leave null unless the plan really sets one.
+ *   highlight      true on at most one plan, draws the "most popular" frame
+ */
+
+defined('NX') || exit;
+
+return array(
+
+    'currency_symbol' => '$',
+
+    'plans' => array(
+
+        array(
+            'id' => 'starter',
+            'name' => array('en' => 'Starter', 'fa' => 'پایه'),
+            'tagline' => array(
+                'en' => 'Enough for regular play sessions.',
+                'fa' => 'برای بازی‌های همیشگی کافی است.',
+            ),
+            'price' => 3.99,
+            'duration_days' => 30,
+            'data_gb' => 100,
+            'connections' => 1,
+            'highlight' => false,
+        ),
+
+        array(
+            'id' => 'pro',
+            'name' => array('en' => 'Pro', 'fa' => 'حرفه‌ای'),
+            'tagline' => array(
+                'en' => 'For daily use across more than one device.',
+                'fa' => 'برای استفاده روزانه روی بیش از یک دستگاه.',
+            ),
+            'price' => 6.99,
+            'duration_days' => 30,
+            'data_gb' => 300,
+            'connections' => 3,
+            'highlight' => true,
+        ),
+
+        array(
+            'id' => 'ultimate',
+            'name' => array('en' => 'Ultimate', 'fa' => 'نامحدود'),
+            'tagline' => array(
+                'en' => 'Headroom you will not have to think about.',
+                'fa' => 'آن‌قدر حجم که دیگر به آن فکر نکنید.',
+            ),
+            'price' => 11.99,
+            'duration_days' => 30,
+            'data_gb' => 1024,
+            'connections' => 5,
+            'highlight' => false,
+        ),
+    ),
+);
