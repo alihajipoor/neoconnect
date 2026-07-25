@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Check, Loader2, MapPin, Repeat, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
 import { PROTOCOL_LABELS } from "../lib/protocol-labels";
-import type { ProtocolUser, RouteOption } from "../lib/types";
+import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
 import { Button } from "./ui";
 
@@ -18,7 +18,10 @@ export function LocationPicker({
   subscriptionId: string;
   currentRouteId: string | undefined;
   onClose: () => void;
-  onSwitched: (protocolUser: ProtocolUser) => void;
+  /** Signals that the switch succeeded. Deliberately carries no payload:
+   * the caller re-reads the provisioned connection itself, so this
+   * component doesn't decide what the switch response is worth trusting. */
+  onSwitched: () => void;
 }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -49,7 +52,7 @@ export function LocationPicker({
     const result = await switchRoute(subscriptionId, route.id);
     setSwitchingId(null);
     if (result.ok) {
-      onSwitched(result.data);
+      onSwitched();
       onClose();
     } else {
       setSwitchError(result.error);

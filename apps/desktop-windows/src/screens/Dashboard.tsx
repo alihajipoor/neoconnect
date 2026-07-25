@@ -190,7 +190,15 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
           subscriptionId={subscription.id}
           currentRouteId={protocolUser?.routeId}
           onClose={() => setShowLocationPicker(false)}
-          onSwitched={(updated) => setProtocolUser(updated)}
+          // Re-reads the provisioned connection rather than adopting the
+          // switch response directly. Two reasons, one of which was a
+          // real bug: the switch endpoint's payload didn't carry the
+          // `connection` field that listing does, so switching servers
+          // left the app holding credentials with no server address and
+          // Connect failed. Re-fetching also means an app running
+          // against an older backend still works, instead of depending
+          // on that endpoint's exact shape.
+          onSwitched={() => void loadAll()}
         />
       ) : null}
     </div>
