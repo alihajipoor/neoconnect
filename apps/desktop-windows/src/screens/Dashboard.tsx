@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MapPin } from "lucide-react";
+import { MapPin, Tag } from "lucide-react";
 import { getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, Subscription } from "../lib/types";
@@ -11,7 +11,13 @@ import { LocationPicker } from "../components/LocationPicker";
 
 type ConnectionState = "disconnected" | "connecting" | "connected" | "disconnecting";
 
-export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
+export function Dashboard({
+  onLoggedOut,
+  onBrowsePlans,
+}: {
+  onLoggedOut: () => void;
+  onBrowsePlans: () => void;
+}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [me, setMe] = useState<Customer | null>(null);
@@ -139,8 +145,18 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
               </p>
             </Card>
           ) : (
-            <Card>
-              <p className="text-sm text-muted-foreground">No active subscription yet.</p>
+            // Previously a dead end: a customer with no subscription --
+            // which is everyone, now that trial mode can be turned off --
+            // was told they had nothing and given no way to get one.
+            <Card className="flex flex-col gap-3">
+              <p className="text-sm font-medium">No active subscription</p>
+              <p className="text-xs text-muted-foreground">
+                Choose a plan to start using NeoConnect.
+              </p>
+              <Button onClick={onBrowsePlans} className="w-full justify-center gap-2">
+                <Tag className="size-4" />
+                View plans
+              </Button>
             </Card>
           )}
 

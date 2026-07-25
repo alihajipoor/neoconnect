@@ -77,6 +77,58 @@ export class BillingService {
     };
   }
 
+  /** Starts a payment the desktop client can complete without handling
+   * card data itself.
+   *
+   * Same PaymentTransaction bookkeeping as create() above -- the only
+   * difference is what the customer is handed: a hosted Checkout URL for
+   * cards, or a pay-to address for crypto. Both are confirmed by the
+   * provider's webhook, so the app never has to be told the outcome; it
+   * just watches its own subscription become active. */
+  async createForClient(dto: CreatePaymentDto, returnUrl: string) {
+    const subscription = await this.prisma.subscription.findUnique({
+      where: { id: dto.subscriptionId },
+      include: { plan: true },
+    });
+    if (!subscription) throw new BadRequestException("Subscription not found");
+
+    const transaction = await this.prisma.paymentTransaction.create({
+      data: {
+        customerId: subscription.customerId,
+        subscriptionId: subscription.id,
+        provider: dto.provider,
+        providerRef: `pending-${subscription.id}-${Date.now()}`,
+        amountUsd: subscription.plan.priceUsd,
+        currency: dto.provider === "STRIPE" ? "usd" : "usdttrc20",
+        status: "PENDING",
+      },
+    });
+
+    if (dto.provider === "STRIPE") {
+      const { providerRef, url } = await this.stripe.createCheckoutSession(
+        Number(subscription.plan.priceUsd),
+        transaction.id,
+        subscription.plan.name,
+        returnUrl,
+      );
+      await this.prisma.paymentTransaction.update({ where: { id: transaction.id }, data: { providerRef } });
+      return { transactionId: transaction.id, provider: "STRIPE" as const, checkoutUrl: url };
+    }
+
+    const payment = await this.nowpayments.createPayment(Number(subscription.plan.priceUsd), transaction.id);
+    await this.prisma.paymentTransaction.update({
+      where: { id: transaction.id },
+      data: { providerRef: payment.paymentId },
+    });
+    return {
+      transactionId: transaction.id,
+      provider: "NOWPAYMENTS" as const,
+      payAddress: payment.payAddress,
+      payAmount: payment.payAmount,
+      payCurrency: payment.payCurrency,
+    };
+  }
+
   /** Called from both webhook handlers once a provider confirms payment.
    * Idempotent (no-ops if the transaction isn't still PENDING) since
    * webhooks legitimately arrive more than once for the same event --

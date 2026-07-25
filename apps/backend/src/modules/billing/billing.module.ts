@@ -4,11 +4,11 @@ import { BillingController } from "./billing.controller";
 import { BillingService } from "./billing.service";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
 import { StripeProvider } from "./providers/stripe.provider";
-import { WebhooksController } from "./webhooks.controller";
+import { CheckoutReturnController, WebhooksController } from "./webhooks.controller";
 
 @Module({
   imports: [ProtocolUsersModule],
-  controllers: [BillingController, WebhooksController],
+  controllers: [BillingController, WebhooksController, CheckoutReturnController],
   providers: [BillingService, StripeProvider, NowPaymentsProvider],
   exports: [BillingService],
 })
