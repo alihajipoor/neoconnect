@@ -1,4 +1,4 @@
-import { ArrayMinSize, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Min } from "class-validator";
+import { ArrayMinSize, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, Min } from "class-validator";
 import { Protocol } from "@prisma/client";
 
 export class CreatePlanDto {
@@ -21,6 +21,24 @@ export class CreatePlanDto {
   @IsInt()
   @IsPositive()
   maxConcurrentConnections?: number;
+
+  /** Per-user download cap in Mbit/s. Omit for uncapped.
+   *
+   * Applied on the node to every user provisioned on this plan, so a few
+   * customers downloading at once can no longer saturate the VPS.
+   */
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  @Max(10_000)
+  maxDownloadMbps?: number;
+
+  /** Per-user upload cap in Mbit/s. Omit for uncapped. */
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  @Max(10_000)
+  maxUploadMbps?: number;
 
   @IsArray()
   @ArrayMinSize(1)
