@@ -1,4 +1,5 @@
 import { BadRequestException, Body, Controller, Get, Param, Post, UseGuards } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { CustomersService } from "../customers/customers.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
@@ -30,6 +31,7 @@ export class CustomerController {
     private readonly plansService: PlansService,
     private readonly routesService: RoutesService,
     private readonly billingService: BillingService,
+    private readonly config: ConfigService,
   ) {}
 
   @Get("me")
@@ -95,6 +97,13 @@ export class CustomerController {
     // (or reconcile the state of) a payment against a subscription that
     // isn't theirs.
     await this.subscriptionsService.getOwned(dto.subscriptionId, customer.sub);
-    return this.billingService.create(dto);
+
+    // Cards go through a hosted Checkout page rather than card fields in
+    // the app -- see StripeProvider.createCheckoutSession. The page the
+    // customer returns to afterwards is served by this API, so it works
+    // without the marketing site existing yet.
+    const returnUrl = `${(this.config.get<string>("publicApiUrl") ?? "").replace(/\/$/, "")}/customer/billing/return`;
+    return this.billingService.createForClient(dto, returnUrl);
   }
+
 }

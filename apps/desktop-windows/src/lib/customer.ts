@@ -1,5 +1,13 @@
 import { apiRequest } from "./api";
-import type { Customer, ProtocolUser, RouteOption, Subscription, SubscriptionPlan } from "./types";
+import type {
+  Customer,
+  PaymentProvider,
+  PaymentStart,
+  ProtocolUser,
+  RouteOption,
+  Subscription,
+  SubscriptionPlan,
+} from "./types";
 
 export const getMe = () => apiRequest<Customer>("/customer/me");
 export const getSubscriptions = () => apiRequest<Subscription[]>("/customer/subscriptions");
@@ -13,4 +21,19 @@ export const switchRoute = (subscriptionId: string, routeId: string) =>
   apiRequest<ProtocolUser>(`/customer/subscriptions/${subscriptionId}/route`, {
     method: "POST",
     body: JSON.stringify({ routeId }),
+  });
+
+/** Creates the subscription row only. It is not usable until a payment
+ * clears -- credentials aren't provisioned until the provider's webhook
+ * confirms, so this on its own grants nothing. */
+export const createSubscription = (planId: string) =>
+  apiRequest<Subscription>("/customer/subscriptions", {
+    method: "POST",
+    body: JSON.stringify({ planId }),
+  });
+
+export const startPayment = (subscriptionId: string, provider: PaymentProvider) =>
+  apiRequest<PaymentStart>("/customer/billing/payments", {
+    method: "POST",
+    body: JSON.stringify({ subscriptionId, provider }),
   });

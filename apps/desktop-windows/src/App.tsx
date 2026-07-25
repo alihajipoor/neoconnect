@@ -7,8 +7,9 @@ import { Login } from "./screens/Login";
 import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
 import { Dashboard } from "./screens/Dashboard";
+import { Plans } from "./screens/Plans";
 
-type Screen = "loading" | "login" | "register" | "verify" | "dashboard";
+type Screen = "loading" | "login" | "register" | "verify" | "dashboard" | "plans";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
@@ -118,5 +119,8 @@ export default function App() {
       />
     );
   }
-  return <Dashboard onLoggedOut={() => setScreen("login")} />;
+  if (screen === "plans") {
+    return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;
+  }
+  return <Dashboard onLoggedOut={() => setScreen("login")} onBrowsePlans={() => setScreen("plans")} />;
 }

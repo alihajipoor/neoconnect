@@ -36,6 +36,25 @@ export interface Subscription {
 
 export type Protocol = "XRAY_VLESS_REALITY" | "XRAY_VMESS" | "XRAY_TROJAN" | "WIREGUARD" | "OPENVPN";
 
+export type PaymentProvider = "STRIPE" | "NOWPAYMENTS";
+
+/** What starting a payment gives back.
+ *
+ * Cards return a hosted Checkout URL to open in the system browser --
+ * card details never enter this app. Crypto returns an address and
+ * amount to display. Neither tells us the payment succeeded: that's
+ * confirmed by the provider's webhook, so the app watches its own
+ * subscription instead of trusting anything here. */
+export type PaymentStart =
+  | { transactionId: string; provider: "STRIPE"; checkoutUrl: string }
+  | {
+      transactionId: string;
+      provider: "NOWPAYMENTS";
+      payAddress: string;
+      payAmount: number;
+      payCurrency: string;
+    };
+
 export interface ProtocolUserConnection {
   host: string;
   port: number;
