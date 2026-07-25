@@ -167,3 +167,45 @@ fn apply_protected_dacl(path: &Path, sd: &SecurityDescriptor) -> io::Result<()> 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts the directory really ends up locked down, by reading the
+    /// permissions back rather than trusting the API call's return value.
+    ///
+    /// Worth testing directly: an earlier version applied the ACL only at
+    /// creation, silently left pre-existing directories with ProgramData's
+    /// default grants, and looked completely fine from inside the process.
+    #[test]
+    fn protects_a_directory_that_already_exists() {
+        let dir = std::env::temp_dir().join(format!("neoconnect-acl-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Create it first with default permissions, which is the case
+        // that regressed -- a directory left over from a previous install.
+        std::fs::create_dir_all(&dir).expect("precondition: plain create");
+
+        create_protected_dir(&dir).expect("should apply the protected ACL");
+
+        let out = std::process::Command::new("icacls")
+            .arg(&dir)
+            .output()
+            .expect("icacls should run");
+        let acl = String::from_utf8_lossy(&out.stdout).to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(acl.contains("NT AUTHORITY\\SYSTEM"), "SYSTEM missing:\n{acl}");
+        assert!(acl.contains("BUILTIN\\Administrators"), "Administrators missing:\n{acl}");
+
+        // The whole point: no ordinary user should retain access. Anything
+        // that isn't SYSTEM, Administrators, or the header/footer lines
+        // means the DACL wasn't actually replaced.
+        let leftovers: Vec<&str> = acl
+            .lines()
+            .filter(|l| l.contains(':') && l.contains('('))
+            .filter(|l| !l.contains("NT AUTHORITY\\SYSTEM") && !l.contains("BUILTIN\\Administrators"))
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected principals still granted:\n{leftovers:#?}\nfull:\n{acl}");
+    }
+}

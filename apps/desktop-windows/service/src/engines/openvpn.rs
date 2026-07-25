@@ -16,8 +16,20 @@
 //! this far (see `neoconnect_ipc::ConnectProfile::validate`); a
 //! certificate that could close its own `<ca>` block and open a
 //! directive would otherwise be a straightforward SYSTEM compromise.
-//! `script-security` is left at its default of 0, which disables those
-//! directives outright, as a second independent layer.
+//!
+//! `script-security 2` is required, not chosen. OpenVPN configures the
+//! adapter's address by invoking `netsh.exe`, and at level 0 that call
+//! is refused -- the tunnel authenticates, imports its routes, opens the
+//! adapter, and then dies with "command failed: disallowed by
+//! script-security setting". Level 0 was originally set here as a second
+//! layer behind the validation above; it turned out to disable the
+//! engine entirely rather than harden it.
+//!
+//! Losing that layer is acceptable because the config is generated
+//! wholly by this service from values that are structurally validated
+//! first: there is no path by which a directive reaches this file. It
+//! would not be acceptable if any part of the config were caller-supplied
+//! text.
 
 use std::ffi::OsStr;
 use std::process::Child;
@@ -108,7 +120,7 @@ fn build_config(p: &OpenvpnProfile) -> Result<String, String> {
          cipher AES-256-GCM\n\
          auth SHA256\n\
          verb 3\n\
-         script-security 0\n\
+         script-security 2\n\
          <ca>\n{ca}\n</ca>\n\
          <cert>\n{cert}\n</cert>\n\
          <key>\n{key}\n</key>\n\
@@ -182,9 +194,12 @@ mod tests {
     }
 
     #[test]
-    fn keeps_script_directives_disabled() {
-        // Second layer behind PEM validation -- see the module doc.
-        assert!(build_config(&profile()).unwrap().contains("script-security 0"));
+    fn allows_openvpn_to_configure_the_adapter() {
+        // OpenVPN shells out to netsh to set the tunnel address. At
+        // script-security 0 that is refused and the connection dies
+        // immediately after opening the adapter -- see the module doc for
+        // why losing that layer is acceptable here.
+        assert!(build_config(&profile()).unwrap().contains("script-security 2"));
     }
 
     #[test]
