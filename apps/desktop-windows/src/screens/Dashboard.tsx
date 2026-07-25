@@ -45,6 +45,18 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
     setSubscription(subsResult.data[0] ?? null);
     setProtocolUser(usersResult.data[0] ?? null);
     setLoading(false);
+
+    // The tunnel outlives the app: the helper service keeps it up if the
+    // window is closed, so on open the UI has to adopt whatever is
+    // actually running rather than assuming disconnected. Failure here is
+    // deliberately silent -- it just means "show disconnected", and the
+    // real error surfaces on the next Connect attempt with context.
+    try {
+      const status = await invoke<{ connected: boolean }>("vpn_status");
+      setConnectionState(status.connected ? "connected" : "disconnected");
+    } catch {
+      setConnectionState("disconnected");
+    }
   }
 
   async function handleConnectToggle() {
@@ -54,7 +66,7 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
     if (connectionState === "connected") {
       setConnectionState("disconnecting");
       try {
-        await invoke("disconnect_wireguard");
+        await invoke("vpn_disconnect");
         setConnectionState("disconnected");
       } catch (err) {
         setConnectionError(String(err));
@@ -65,7 +77,10 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
 
     setConnectionState("connecting");
     try {
-      await invoke("connect_wireguard", { credentials: protocolUser.credentials });
+      // The whole protocol-user row goes to the helper service, which
+      // picks the right engine -- the app deliberately doesn't branch on
+      // protocol here, so adding one later needs no change in the UI.
+      await invoke("vpn_connect", { payload: protocolUser });
       setConnectionState("connected");
     } catch (err) {
       setConnectionError(String(err));
@@ -133,11 +148,6 @@ export function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
             {!protocolUser ? (
               <p className="text-center text-sm text-muted-foreground">
                 No connection provisioned on your subscription yet.
-              </p>
-            ) : protocolUser.protocol !== "WIREGUARD" ? (
-              <p className="text-center text-sm text-muted-foreground">
-                This app version doesn&apos;t support {protocolUser.protocol} connections yet. Try a different
-                location below.
               </p>
             ) : (
               <>
