@@ -168,3 +168,40 @@ mod tests {
         routes.remove();
     }
 }
+
+/// Adds a single `/32` route for `destination` through the tunnel.
+///
+/// Split-tunnel ("Custom") mode's whole mechanism -- see split_tunnel.rs
+/// for why routing is used rather than packet rewriting. Separate from
+/// `install_full_tunnel` because that one owns a fixed set of routes for
+/// the lifetime of a connection, whereas these come and go as the
+/// selected app opens connections to new destinations.
+pub fn add_host_route(
+    destination: &str,
+    gateway: &str,
+    interface_index: u32,
+    metric: u32,
+) -> Result<(), String> {
+    add_route(destination, "255.255.255.255", gateway, interface_index, metric)
+}
+
+/// Removes a single `/32` route. Best-effort by design: the caller is
+/// tearing down, and a route that has already gone with its adapter is
+/// the desired end state rather than a failure.
+pub fn delete_host_route(destination: &str) -> Result<(), String> {
+    let exe = route_exe();
+    let status = run_hidden(
+        &exe,
+        &[
+            OsStr::new("delete"),
+            OsStr::new(destination),
+            OsStr::new("mask"),
+            OsStr::new("255.255.255.255"),
+        ],
+    )
+    .map_err(|e| format!("could not run route.exe: {e}"))?;
+    if !status.success() {
+        return Err(format!("removing the route for {destination} failed ({status})"));
+    }
+    Ok(())
+}
