@@ -27,10 +27,20 @@ use super::{confirm_started, spawn_hidden, write_config, Engines};
 const CONFIG_FILE: &str = "xray-client.json";
 const LOG_FILE: &str = "xray.log";
 
-/// Link-local /30 for the TUN adapter itself. Deliberately not inside
-/// any RFC1918 range a customer's LAN or another VPN might already be
-/// using, so bringing the tunnel up can't collide with their network.
-const TUN_GATEWAY: &str = "169.254.72.1/30";
+/// Address for the TUN adapter itself, from the RFC 2544 benchmarking
+/// range. That range is reserved, never routed on the public internet,
+/// and effectively never used on a home or office LAN, so claiming it
+/// can't collide with a customer's own network the way an RFC1918 pick
+/// might.
+///
+/// This was originally a link-local 169.254.x address, chosen for the
+/// same anti-collision reason -- but that range is Windows' APIPA
+/// space, and Windows would not route through it. The adapter came up,
+/// self-assigned an APIPA address, and only link-local chatter (NetBIOS
+/// broadcasts and the like) ever entered the tunnel while real traffic
+/// went out the physical interface. The tunnel looked connected and
+/// changed nothing.
+const TUN_GATEWAY: &str = "198.18.0.1/30";
 
 fn build_config(p: &XrayProfile) -> String {
     // Built through serde_json rather than string formatting so every

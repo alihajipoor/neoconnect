@@ -93,8 +93,22 @@ if ($proc.ExitCode -ne 0) {
 $ovpnExe = Get-ChildItem -Path $ovpnExtract -Filter "openvpn.exe" -Recurse | Select-Object -First 1
 if (-not $ovpnExe) { throw "openvpn.exe was not found in the extracted OpenVPN MSI" }
 Copy-Item $ovpnExe.FullName (Join-Path $resourcesDir "openvpn.exe") -Force
+
+# openvpn.exe is dynamically linked and will not start without these.
+# Shipping only the .exe produced exit code 0xc0000135
+# (STATUS_DLL_NOT_FOUND) with no output at all, which is invisible
+# unless you happen to recognise the code -- so this is checked
+# explicitly rather than assumed to have worked.
+$ovpnDlls = @("libcrypto-3-x64.dll", "libssl-3-x64.dll", "libpkcs11-helper-1.dll", "vcruntime140.dll")
+foreach ($dll in $ovpnDlls) {
+    $src = Join-Path $ovpnExe.DirectoryName $dll
+    if (-not (Test-Path $src)) {
+        throw "OpenVPN dependency $dll was not in the MSI -- openvpn.exe will fail to start. Check the layout before bumping the version."
+    }
+    Copy-Item $src (Join-Path $resourcesDir $dll) -Force
+}
 Remove-Item $ovpnTemp -Recurse -Force
-Write-Host "  openvpn.exe"
+Write-Host "  openvpn.exe + $($ovpnDlls.Count) dependencies"
 
 # --- Helper service --------------------------------------------------
 # Built from this repo rather than downloaded, but it belongs in

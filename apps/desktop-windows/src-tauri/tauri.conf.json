@@ -45,6 +45,10 @@
       "resources/xray.exe": "resources/xray.exe",
       "resources/wintun.dll": "resources/wintun.dll",
       "resources/openvpn.exe": "resources/openvpn.exe",
+      "resources/libcrypto-3-x64.dll": "resources/libcrypto-3-x64.dll",
+      "resources/libssl-3-x64.dll": "resources/libssl-3-x64.dll",
+      "resources/libpkcs11-helper-1.dll": "resources/libpkcs11-helper-1.dll",
+      "resources/vcruntime140.dll": "resources/vcruntime140.dll",
       "resources/neoconnect-service.exe": "resources/neoconnect-service.exe"
     },
     "windows": {
