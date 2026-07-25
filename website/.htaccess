@@ -1,0 +1,68 @@
+# NeoConnect website -- Apache / LiteSpeed configuration.
+#
+# Every directive is wrapped in <IfModule> so that a host missing any given
+# module serves the site normally instead of returning a 500. Nothing here is
+# required for the site to function: the security headers and caching are
+# improvements, and the deny rules are a second layer over protections that
+# already exist in PHP (see inc/security.php's file guard).
+
+Options -Indexes
+DirectoryIndex index.php
+AddDefaultCharset UTF-8
+
+ErrorDocument 404 /404.php
+
+# ---------------------------------------------------------------------
+# Security headers
+# ---------------------------------------------------------------------
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()"
+
+    # No 'unsafe-inline' anywhere: the site has no inline <script> and no
+    # style="..." attributes -- templates use the utility classes at the
+    # bottom of assets/css/site.css instead. If you ever add an inline style
+    # or script, fix the template rather than weakening this header.
+    #
+    # 'self' only, with data: for images because the favicon and any inline
+    # SVG data URIs need it. There are no third-party origins at all, by
+    # design -- see the note at the top of the stylesheet.
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'"
+</IfModule>
+
+# ---------------------------------------------------------------------
+# Clean sitemap URL
+# ---------------------------------------------------------------------
+
+# Search engines look for /sitemap.xml by convention. Where mod_rewrite is
+# available this serves the generated one; where it is not, robots.txt still
+# points directly at /sitemap.php, so nothing breaks.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^sitemap\.xml$ sitemap.php [L]
+</IfModule>
+
+# ---------------------------------------------------------------------
+# Compression and caching
+# ---------------------------------------------------------------------
+
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/css text/plain text/xml
+    AddOutputFilterByType DEFLATE application/javascript application/xml
+    AddOutputFilterByType DEFLATE image/svg+xml
+</IfModule>
+
+<IfModule mod_expires.c>
+    ExpiresActive On
+    # Safe to cache hard: asset URLs carry a ?v= stamp from the file's own
+    # mtime (see nx_asset() in inc/bootstrap.php), so a redeploy changes the
+    # URL and no visitor can be stuck on a stale stylesheet.
+    ExpiresByType text/css "access plus 1 year"
+    ExpiresByType application/javascript "access plus 1 year"
+    ExpiresByType image/svg+xml "access plus 1 year"
+    # HTML is generated per request and must never be cached by a proxy.
+    ExpiresByType text/html "access plus 0 seconds"
+</IfModule>

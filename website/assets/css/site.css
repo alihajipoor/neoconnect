@@ -1,0 +1,1547 @@
+/* ==========================================================================
+   NeoConnect website
+   --------------------------------------------------------------------------
+   Hand-written CSS, no build step -- this ships as-is to shared hosting.
+
+   Design tokens are lifted from the admin panel (apps/panel/src/app/
+   globals.css) so the marketing site, the panel and the native clients read
+   as one product: dark only, violet primary, cyan reserved as a secondary
+   highlight so it never competes with a primary action.
+
+   Direction: every directional rule uses CSS logical properties
+   (margin-inline, padding-inline, inset-inline, text-align: start), so the
+   Persian pages mirror correctly from <html dir="rtl"> alone. There is no
+   separate RTL stylesheet to keep in sync -- please keep it that way and
+   avoid left/right properties when adding to this file.
+
+   No @font-face, no @import, no external URL of any kind. The audience is
+   largely on networks where a third-party CDN request is slow at best and
+   blocked at worst, and a blocked font request is a visibly broken page.
+   ========================================================================== */
+
+/* ==========================================================================
+   1. Tokens
+   ========================================================================== */
+
+:root {
+  /* Surfaces */
+  --bg: #0a0a10;
+  --bg-soft: #0e0e15;
+  --card: #131319;
+  --card-hover: #17171f;
+  --elevated: #1a1a22;
+
+  /* Text */
+  --fg: #f4f4f8;
+  --fg-muted: #9797a8;
+  --fg-subtle: #6c6c80;
+
+  /* Accents */
+  --primary: #8b5cf6;
+  --primary-soft: #a78bfa;
+  --primary-deep: #6d3fd4;
+  --highlight: #22d3ee;
+  --success: #10b981;
+  --danger: #ef4444;
+
+  /* Lines */
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+
+  /* Shape */
+  --radius: 0.75rem;
+  --radius-lg: 1.25rem;
+  --radius-pill: 999px;
+
+  /* Rhythm */
+  --container: 72rem;
+  --gutter: clamp(1.25rem, 4vw, 2.5rem);
+  --section-y: clamp(4.5rem, 10vw, 8rem);
+
+  /* Type */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* Elevation */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.8);
+  --shadow-glow: 0 0 32px -8px var(--primary);
+}
+
+/* Persian needs a taller line and a font stack that actually has the glyphs.
+   Tahoma and Segoe UI are present on effectively every Windows machine, which
+   is what most of this audience is on -- so this looks right without shipping
+   a single font file. */
+html[lang="fa"] {
+  --font-sans: "Segoe UI", Tahoma, "Iranian Sans", "IRANSans", Vazirmatn,
+    system-ui, "Noto Naskh Arabic", sans-serif;
+  --line-body: 1.95;
+}
+
+html[lang="en"] {
+  --line-body: 1.7;
+}
+
+/* ==========================================================================
+   2. Base
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+  scroll-padding-block-start: 6rem;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: var(--line-body, 1.7);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+/* A soft violet wash at the top of every page, so no page starts as a flat
+   black rectangle. Cheap, and it ties the pages together. */
+body::before {
+  content: "";
+  position: fixed;
+  inset-block-start: -14rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  width: min(70rem, 140vw);
+  height: 32rem;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(139, 92, 246, 0.16),
+    transparent 65%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+img,
+svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary-soft);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: rgba(139, 92, 246, 0.4);
+  color: #fff;
+}
+
+/* ==========================================================================
+   3. Typography
+   ========================================================================== */
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+  font-weight: 650;
+  text-wrap: balance;
+}
+
+/* Persian doesn't take negative tracking well -- it tightens the joins. */
+html[lang="fa"] h1,
+html[lang="fa"] h2,
+html[lang="fa"] h3,
+html[lang="fa"] h4 {
+  letter-spacing: 0;
+  line-height: 1.5;
+}
+
+h1 {
+  font-size: clamp(2.35rem, 6vw, 4rem);
+}
+h2 {
+  font-size: clamp(1.85rem, 4vw, 2.75rem);
+}
+h3 {
+  font-size: clamp(1.1rem, 2vw, 1.3rem);
+}
+
+p {
+  margin: 0;
+}
+
+.lead {
+  font-size: clamp(1.03rem, 1.7vw, 1.2rem);
+  color: var(--fg-muted);
+  max-width: 46ch;
+}
+
+.gradient-text {
+  background: linear-gradient(100deg, var(--primary-soft), var(--highlight));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--highlight);
+  margin-block-end: 1rem;
+}
+
+html[lang="fa"] .eyebrow {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.eyebrow::before {
+  content: "";
+  width: 1.5rem;
+  height: 1px;
+  background: linear-gradient(to right, transparent, var(--highlight));
+}
+
+/* Gradients have no logical-property equivalent, so the one directional rule
+   in this file that can't be expressed logically gets flipped by hand. */
+[dir="rtl"] .eyebrow::before {
+  transform: scaleX(-1);
+}
+
+/* ==========================================================================
+   4. Layout
+   ========================================================================== */
+
+.container {
+  width: 100%;
+  max-width: var(--container);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+  position: relative;
+  z-index: 1;
+}
+
+.section {
+  padding-block: var(--section-y);
+  position: relative;
+}
+
+.section--tight {
+  padding-block: clamp(3rem, 7vw, 5rem);
+}
+
+.section-head {
+  max-width: 44rem;
+  margin-block-end: clamp(2.5rem, 5vw, 4rem);
+}
+
+.section-head--center {
+  margin-inline: auto;
+  text-align: center;
+}
+
+.section-head--center .eyebrow::before {
+  display: none;
+}
+
+.section-head p {
+  color: var(--fg-muted);
+  margin-block-start: 1rem;
+  font-size: 1.05rem;
+}
+
+.grid {
+  display: grid;
+  gap: 1.25rem;
+}
+
+@media (min-width: 40rem) {
+  .grid--2 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .grid--3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 62rem) {
+  .grid--3 {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.skip-link {
+  position: absolute;
+  inset-inline-start: 0.75rem;
+  inset-block-start: -100%;
+  z-index: 100;
+  background: var(--primary);
+  color: #fff;
+  padding: 0.65rem 1rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  inset-block-start: 0.75rem;
+}
+
+/* ==========================================================================
+   5. Buttons
+   ========================================================================== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 0.8rem 1.4rem;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease,
+    border-color 0.2s ease;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+}
+
+.btn:active {
+  transform: translateY(0);
+}
+
+.btn--primary {
+  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
+  color: #fff;
+  box-shadow: 0 6px 20px -8px var(--primary);
+}
+
+.btn--primary:hover {
+  box-shadow: 0 10px 28px -8px var(--primary);
+}
+
+.btn--ghost {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.btn--ghost:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.btn--lg {
+  padding: 0.95rem 1.75rem;
+  font-size: 1rem;
+}
+
+.btn--block {
+  width: 100%;
+}
+
+.btn[aria-disabled="true"],
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* Arrow glyphs have to point the other way when the page is mirrored. */
+[dir="rtl"] .btn .icon-arrow {
+  transform: scaleX(-1);
+}
+
+/* ==========================================================================
+   6. Header
+   ========================================================================== */
+
+.site-header {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 50;
+  background: rgba(10, 10, 16, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-block-end: 1px solid var(--border);
+}
+
+.site-header__inner {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  min-height: 4.25rem;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  font-weight: 650;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  flex-shrink: 0;
+}
+
+.brand__mark {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.6rem;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--primary), var(--highlight));
+  box-shadow: 0 0 20px -4px var(--primary);
+  flex-shrink: 0;
+}
+
+.brand__mark svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: #fff;
+}
+
+.site-nav {
+  display: none;
+  align-items: center;
+  gap: 0.35rem;
+  margin-inline-start: auto;
+}
+
+.site-nav a {
+  padding: 0.5rem 0.8rem;
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  font-size: 0.93rem;
+  font-weight: 500;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.site-nav a:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.site-nav a[aria-current="page"] {
+  color: var(--fg);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-inline-start: auto;
+}
+
+.lang-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.lang-switch:hover {
+  color: var(--fg);
+  border-color: var(--primary);
+}
+
+.lang-switch svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  opacity: 0.8;
+}
+
+.nav-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+.nav-toggle svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.nav-toggle .icon-close {
+  display: none;
+}
+
+.nav-toggle[aria-expanded="true"] .icon-close {
+  display: block;
+}
+
+.nav-toggle[aria-expanded="true"] .icon-menu {
+  display: none;
+}
+
+/* Mobile drawer. Hidden by the `hidden` attribute when JS is present; when JS
+   is absent the nav simply stays visible in the flow, which is a usable
+   fallback rather than a dead button. */
+.mobile-nav {
+  border-block-start: 1px solid var(--border);
+  padding-block: 0.75rem 1.25rem;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.mobile-nav a {
+  padding: 0.7rem 0.6rem;
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+
+.mobile-nav a:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fg);
+}
+
+.mobile-nav .btn {
+  margin-block-start: 0.6rem;
+}
+
+@media (min-width: 56rem) {
+  .site-nav {
+    display: flex;
+  }
+  .header-actions {
+    margin-inline-start: 0;
+  }
+  .nav-toggle,
+  .mobile-nav {
+    display: none !important;
+  }
+}
+
+/* ==========================================================================
+   7. Hero
+   ========================================================================== */
+
+.hero {
+  position: relative;
+  padding-block: clamp(4rem, 11vw, 8.5rem) clamp(3.5rem, 8vw, 6rem);
+  isolation: isolate;
+  overflow: hidden;
+}
+
+/* The panel's glow-backdrop treatment, ported to plain CSS. */
+.hero::before,
+.hero::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  border-radius: var(--radius-pill);
+  filter: blur(120px);
+  opacity: 0.32;
+  pointer-events: none;
+}
+
+.hero::before {
+  width: 32rem;
+  height: 32rem;
+  background: var(--primary);
+  inset-block-start: -12rem;
+  inset-inline-start: -10rem;
+}
+
+.hero::after {
+  width: 26rem;
+  height: 26rem;
+  background: var(--highlight);
+  inset-block-end: -12rem;
+  inset-inline-end: -8rem;
+  opacity: 0.22;
+}
+
+.hero__inner {
+  display: grid;
+  gap: clamp(2.5rem, 6vw, 4rem);
+  align-items: center;
+}
+
+@media (min-width: 62rem) {
+  .hero__inner {
+    grid-template-columns: 1.05fr 0.95fr;
+  }
+}
+
+.hero h1 {
+  margin-block-end: 1.35rem;
+}
+
+.hero h1 span {
+  display: block;
+}
+
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+  margin-block-start: 2rem;
+}
+
+.hero__note {
+  margin-block-start: 1.25rem;
+  font-size: 0.9rem;
+  color: var(--fg-subtle);
+}
+
+/* Decorative protocol panel beside the headline. Purely presentational, so
+   it's aria-hidden in the markup. */
+.hero__visual {
+  position: relative;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: linear-gradient(
+    160deg,
+    rgba(139, 92, 246, 0.12),
+    rgba(19, 19, 25, 0.9) 45%
+  );
+  padding: 1.5rem;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.hero__visual::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+      var(--border) 1px,
+      transparent 1px
+    ),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 2.5rem 2.5rem;
+  mask-image: radial-gradient(ellipse at 50% 0%, #000, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000, transparent 75%);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.hero__rows {
+  position: relative;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.proto-row {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.9rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: rgba(10, 10, 16, 0.65);
+}
+
+.proto-row__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: var(--radius-pill);
+  background: var(--success);
+  box-shadow: 0 0 10px var(--success);
+  flex-shrink: 0;
+}
+
+.proto-row__name {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.proto-row__meta {
+  margin-inline-start: auto;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--fg-subtle);
+}
+
+/* The mono latency figures must stay LTR even on the mirrored page. */
+[dir="rtl"] .proto-row__meta {
+  direction: ltr;
+}
+
+/* ==========================================================================
+   8. Cards
+   ========================================================================== */
+
+.card {
+  position: relative;
+  padding: 1.6rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.2s ease, background 0.2s ease,
+    transform 0.2s ease;
+}
+
+.card:hover {
+  border-color: var(--border-strong);
+  background: var(--card-hover);
+}
+
+.card h3 {
+  margin-block-end: 0.6rem;
+}
+
+.card p {
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+.card__icon {
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  margin-block-end: 1.1rem;
+  background: rgba(34, 211, 238, 0.1);
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  color: var(--highlight);
+}
+
+.card__icon svg {
+  width: 1.3rem;
+  height: 1.3rem;
+}
+
+/* Numbered steps */
+.step {
+  position: relative;
+  padding-block-start: 0.5rem;
+}
+
+.step__num {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--primary-soft);
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.28);
+  margin-block-end: 1.1rem;
+}
+
+[dir="rtl"] .step__num {
+  direction: ltr;
+}
+
+.step h3 {
+  margin-block-end: 0.5rem;
+}
+
+.step p {
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+/* ==========================================================================
+   9. Pricing
+   ========================================================================== */
+
+.plan {
+  display: flex;
+  flex-direction: column;
+  padding: 1.75rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+}
+
+.plan--featured {
+  border-color: rgba(139, 92, 246, 0.45);
+  background: linear-gradient(
+    170deg,
+    rgba(139, 92, 246, 0.12),
+    var(--card) 45%
+  );
+  box-shadow: var(--shadow-card), 0 0 40px -18px var(--primary);
+}
+
+.plan__badge {
+  position: absolute;
+  inset-block-start: -0.75rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  padding: 0.3rem 0.8rem;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(135deg, var(--primary), var(--highlight));
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* translateX(-50%) centres the wrong way once the axis is flipped. */
+[dir="rtl"] .plan__badge {
+  transform: translateX(50%);
+}
+
+.plan-wrap {
+  position: relative;
+}
+
+.plan__name {
+  font-size: 1.15rem;
+  font-weight: 650;
+}
+
+.plan__tagline {
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+  margin-block-start: 0.35rem;
+  min-height: 2.6em;
+}
+
+.plan__price {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-block: 1.25rem 0.25rem;
+  /* Prices read left-to-right in both locales -- "$6.99/month" mirrored
+     would render as nonsense. */
+  direction: ltr;
+}
+
+[dir="rtl"] .plan__price {
+  justify-content: flex-end;
+}
+
+.plan__amount {
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.plan__period {
+  color: var(--fg-subtle);
+  font-size: 0.9rem;
+}
+
+.plan__features {
+  list-style: none;
+  margin: 1.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.7rem;
+  flex: 1;
+}
+
+.plan__features li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  font-size: 0.92rem;
+  color: var(--fg-muted);
+}
+
+.plan__features svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin-block-start: 0.2rem;
+  color: var(--success);
+  flex-shrink: 0;
+}
+
+.plan .btn {
+  margin-block-start: 1.75rem;
+}
+
+.pricing-note {
+  margin-block-start: 2rem;
+  text-align: center;
+  color: var(--fg-subtle);
+  font-size: 0.88rem;
+}
+
+.trial-banner {
+  margin-block-start: 1.5rem;
+  padding: 0.9rem 1.2rem;
+  border-radius: var(--radius);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.08);
+  color: #6ee7b7;
+  font-size: 0.92rem;
+  text-align: center;
+}
+
+/* ==========================================================================
+   10. FAQ
+   ========================================================================== */
+
+.faq {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 48rem;
+  margin-inline: auto;
+}
+
+.faq details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.faq details[open] {
+  border-color: var(--border-strong);
+}
+
+.faq summary {
+  padding: 1.1rem 1.35rem;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  list-style: none;
+}
+
+.faq summary::-webkit-details-marker {
+  display: none;
+}
+
+.faq summary::after {
+  content: "";
+  margin-inline-start: auto;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-inline-end: 2px solid var(--fg-subtle);
+  border-block-end: 2px solid var(--fg-subtle);
+  transform: rotate(45deg);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.faq details[open] summary::after {
+  transform: rotate(-135deg);
+}
+
+.faq__answer {
+  padding: 0 1.35rem 1.25rem;
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+/* ==========================================================================
+   11. Download page
+   ========================================================================== */
+
+.download-hero {
+  padding-block: clamp(3.5rem, 8vw, 5.5rem) 0;
+}
+
+.download-main {
+  display: grid;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (min-width: 56rem) {
+  .download-main {
+    grid-template-columns: 1.2fr 0.8fr;
+  }
+}
+
+.download-card {
+  padding: clamp(1.75rem, 4vw, 2.5rem);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  background: linear-gradient(
+    160deg,
+    rgba(139, 92, 246, 0.1),
+    var(--card) 55%
+  );
+  box-shadow: var(--shadow-card);
+}
+
+.download-card__head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-block-end: 1.5rem;
+}
+
+.download-card__icon {
+  width: 3.25rem;
+  height: 3.25rem;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+
+.download-card__icon svg {
+  width: 1.6rem;
+  height: 1.6rem;
+  color: var(--fg);
+}
+
+.download-card__meta {
+  color: var(--fg-subtle);
+  font-size: 0.88rem;
+  margin-block-start: 0.2rem;
+}
+
+.download-card__links {
+  margin-block-start: 1rem;
+  font-size: 0.85rem;
+  color: var(--fg-subtle);
+}
+
+.download-card__links a {
+  color: var(--highlight);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.badge-soon {
+  display: inline-block;
+  padding: 0.25rem 0.7rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--highlight);
+  background: rgba(34, 211, 238, 0.12);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+}
+
+.notice {
+  padding: 1.25rem 1.4rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.notice--warn {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.notice h3 {
+  font-size: 1rem;
+  margin-block-end: 0.5rem;
+}
+
+.notice p {
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+}
+
+.platform-list {
+  display: grid;
+  gap: 0.75rem;
+  margin-block-start: 1.25rem;
+}
+
+.platform-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.9rem 1.1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--fg-muted);
+}
+
+.platform-row__status {
+  margin-inline-start: auto;
+  font-size: 0.8rem;
+  color: var(--fg-subtle);
+}
+
+.steps-list {
+  counter-reset: step;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+}
+
+.steps-list li {
+  counter-increment: step;
+  display: flex;
+  gap: 0.9rem;
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+.steps-list li::before {
+  content: counter(step);
+  flex-shrink: 0;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: var(--radius-pill);
+  display: grid;
+  place-items: center;
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  color: var(--primary-soft);
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+/* ==========================================================================
+   12. Forms
+   ========================================================================== */
+
+.form-layout {
+  display: grid;
+  gap: 1.75rem;
+  align-items: start;
+}
+
+@media (min-width: 56rem) {
+  .form-layout {
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 2.5rem;
+  }
+}
+
+.form-card {
+  padding: clamp(1.5rem, 4vw, 2.25rem);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+}
+
+.field {
+  display: grid;
+  gap: 0.45rem;
+  margin-block-end: 1.15rem;
+}
+
+.field__label {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.field__flag {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--fg-subtle);
+}
+
+.field__hint {
+  font-size: 0.82rem;
+  color: var(--fg-subtle);
+}
+
+.input,
+.textarea,
+.select {
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: rgba(10, 10, 16, 0.6);
+  color: var(--fg);
+  font-size: 0.95rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--fg-subtle);
+}
+
+.input:focus,
+.textarea:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+}
+
+.textarea {
+  min-height: 9rem;
+  resize: vertical;
+  line-height: 1.65;
+}
+
+.select {
+  appearance: none;
+  cursor: pointer;
+  /* Room for the chevron drawn by the wrapper, on whichever side is "end". */
+  padding-inline-end: 2.5rem;
+}
+
+.select-wrap {
+  position: relative;
+}
+
+.select-wrap::after {
+  content: "";
+  position: absolute;
+  inset-inline-end: 1rem;
+  inset-block-start: 50%;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-block-start: -0.35rem;
+  border-inline-end: 2px solid var(--fg-subtle);
+  border-block-end: 2px solid var(--fg-subtle);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.field--error .input,
+.field--error .textarea,
+.field--error .select {
+  border-color: var(--danger);
+}
+
+.field__error {
+  font-size: 0.83rem;
+  color: #fca5a5;
+}
+
+/* Off-screen rather than display:none -- a bot reading the DOM should still
+   find the honeypot, which is the entire point of it, and a screen reader
+   should still reach .sr-only labels. */
+.honeypot,
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.alert {
+  padding: 1rem 1.2rem;
+  border-radius: var(--radius);
+  margin-block-end: 1.5rem;
+  font-size: 0.93rem;
+}
+
+.alert--success {
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.1);
+  color: #6ee7b7;
+}
+
+.alert--error {
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.09);
+  color: #fca5a5;
+}
+
+.alert h3 {
+  font-size: 1rem;
+  margin-block-end: 0.3rem;
+  color: inherit;
+}
+
+.aside-card {
+  padding: 1.5rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.aside-card + .aside-card {
+  margin-block-start: 1rem;
+}
+
+.aside-card h3 {
+  font-size: 1rem;
+  margin-block-end: 0.5rem;
+}
+
+.aside-card p {
+  color: var(--fg-muted);
+  font-size: 0.93rem;
+}
+
+.aside-card a {
+  color: var(--highlight);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  /* Email addresses stay LTR inside Persian sentences. */
+  unicode-bidi: isolate;
+}
+
+/* ==========================================================================
+   13. CTA band + footer
+   ========================================================================== */
+
+.cta-band {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  background: linear-gradient(
+    140deg,
+    rgba(139, 92, 246, 0.18),
+    rgba(34, 211, 238, 0.08) 60%,
+    var(--card)
+  );
+  padding: clamp(2.25rem, 6vw, 3.5rem);
+  text-align: center;
+}
+
+.cta-band h2 {
+  margin-block-end: 0.75rem;
+}
+
+.cta-band p {
+  color: var(--fg-muted);
+  max-width: 34rem;
+  margin-inline: auto;
+  margin-block-end: 1.75rem;
+}
+
+.site-footer {
+  border-block-start: 1px solid var(--border);
+  padding-block: 3rem 2rem;
+  margin-block-start: var(--section-y);
+}
+
+.site-footer__grid {
+  display: grid;
+  gap: 2rem;
+}
+
+@media (min-width: 48rem) {
+  .site-footer__grid {
+    grid-template-columns: 1.5fr 1fr 1fr;
+  }
+}
+
+.site-footer h4 {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-subtle);
+  margin-block-end: 0.9rem;
+}
+
+html[lang="fa"] .site-footer h4 {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.site-footer ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.site-footer a {
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+}
+
+.site-footer a:hover {
+  color: var(--fg);
+}
+
+.site-footer__about p {
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+  margin-block-start: 0.9rem;
+  max-width: 30rem;
+}
+
+.site-footer__bottom {
+  margin-block-start: 2.5rem;
+  padding-block-start: 1.5rem;
+  border-block-start: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  align-items: center;
+  color: var(--fg-subtle);
+  font-size: 0.85rem;
+}
+
+.site-footer__bottom p {
+  margin-inline-end: auto;
+}
+
+/* ==========================================================================
+   14. Utilities
+   --------------------------------------------------------------------------
+   A deliberately small set. They exist so no template needs a style="..."
+   attribute, which in turn lets the Content-Security-Policy in .htaccess
+   stay strict (no 'unsafe-inline'). If you are tempted to add an inline
+   style to a page, add a class here instead.
+   ========================================================================== */
+
+.u-flush-top {
+  padding-block-start: 0;
+}
+
+.u-center {
+  text-align: center;
+}
+
+.u-center-actions {
+  justify-content: center;
+}
+
+.u-narrow {
+  max-width: 40rem;
+  margin-inline: auto;
+}
+
+.u-push-end {
+  margin-inline-start: auto;
+}
+
+.u-mt-sm {
+  margin-block-start: 1rem;
+}
+.u-mt-md {
+  margin-block-start: 1.5rem;
+}
+.u-mb-xs {
+  margin-block-end: 0.5rem;
+}
+.u-mb-md {
+  margin-block-end: 1.5rem;
+}
+.u-mb-lg {
+  margin-block-end: 2.5rem;
+}
+.u-mb-xl {
+  margin-block-end: 3rem;
+}
+.u-my-lead {
+  margin-block: 1.25rem 2rem;
+}
+
+.h-md {
+  font-size: 1.35rem;
+}
+.h-sm {
+  font-size: 1.2rem;
+}
+.h-xs {
+  font-size: 1.05rem;
+}
+
+.text-body {
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+/* ==========================================================================
+   15. Motion
+   ========================================================================== */
+
+/* Scroll reveal is opt-IN, applied by JavaScript rather than assumed here.
+ *
+ * .reveal on its own hides nothing. assets/js/site.js adds .is-armed only
+ * once it has an IntersectionObserver in hand and is about to observe the
+ * element, then .is-visible when it scrolls into view.
+ *
+ * The ordering matters: if this stylesheet hid .reveal by default, any error
+ * in the script -- or any browser where the observer never fires -- would
+ * leave real content permanently invisible. Done this way, the worst case is
+ * a page that appears without animating.
+ */
+.reveal {
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+
+.reveal.is-armed {
+  opacity: 0;
+  transform: translateY(14px);
+}
+
+.reveal.is-armed.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  /* Never arm the reveal animation for someone who asked for less motion. */
+  .reveal.is-armed {
+    opacity: 1;
+    transform: none;
+  }
+}

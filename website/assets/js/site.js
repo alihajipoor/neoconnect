@@ -1,0 +1,118 @@
+/* NeoConnect website -- progressive enhancement only.
+ *
+ * Nothing here is required for the site to work. Navigation, forms and every
+ * piece of content function with scripting disabled; this file just makes the
+ * result nicer. If you add to it, keep that property: no content should ever
+ * depend on this file having run.
+ *
+ * Plain ES5-compatible syntax and no dependencies, so it runs anywhere the
+ * CSS does without a build step.
+ */
+(function () {
+  "use strict";
+
+  var doc = document;
+
+  // The stylesheet assumes no-JS until told otherwise, so scroll-reveal
+  // elements start visible and only become animatable once we're sure the
+  // observer can actually reveal them again.
+  doc.documentElement.classList.remove("no-js");
+
+  /* ------------------------------------------------------------------
+   * Mobile navigation
+   * ---------------------------------------------------------------- */
+
+  var toggle = doc.querySelector("[data-nav-toggle]");
+  var drawer = doc.querySelector("[data-nav-drawer]");
+
+  if (toggle && drawer) {
+    // Only hide the drawer now that we know we can open it again.
+    drawer.hidden = true;
+    toggle.setAttribute("aria-expanded", "false");
+
+    toggle.addEventListener("click", function () {
+      var open = toggle.getAttribute("aria-expanded") === "true";
+      toggle.setAttribute("aria-expanded", open ? "false" : "true");
+      drawer.hidden = open;
+    });
+
+    // Close on Escape, matching what a keyboard user expects from a menu.
+    doc.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && toggle.getAttribute("aria-expanded") === "true") {
+        toggle.setAttribute("aria-expanded", "false");
+        drawer.hidden = true;
+        toggle.focus();
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------------
+   * Scroll reveal
+   * ---------------------------------------------------------------- */
+
+  var revealables = doc.querySelectorAll(".reveal");
+
+  // Nothing is hidden by the stylesheet on its own -- .is-armed does the
+  // hiding, and it is only ever applied here, immediately before observing
+  // the element. If this block never runs, or the browser has no observer,
+  // the content simply appears without animating. Content must never depend
+  // on a script having succeeded.
+  if (revealables.length && "IntersectionObserver" in window) {
+    var observer = new IntersectionObserver(
+      function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("is-visible");
+            observer.unobserve(entry.target);
+          }
+        });
+      },
+      { rootMargin: "0px 0px -8% 0px", threshold: 0.05 }
+    );
+
+    for (var i = 0; i < revealables.length; i++) {
+      revealables[i].classList.add("is-armed");
+      observer.observe(revealables[i]);
+    }
+
+    // Safety net. An observer can exist and still never deliver an entry --
+    // observed for real in a non-compositing browser context during testing.
+    // On a normal load the elements above the fold intersect immediately and
+    // are revealed within milliseconds, so if nothing at all has been
+    // revealed by now, the observer is not doing its job. Unarm everything:
+    // the animation is worth losing, a page of invisible text is not.
+    window.setTimeout(function () {
+      if (doc.querySelector(".reveal.is-visible")) {
+        return;
+      }
+      for (var k = 0; k < revealables.length; k++) {
+        revealables[k].classList.remove("is-armed");
+      }
+    }, 2000);
+  }
+
+  /* ------------------------------------------------------------------
+   * Form submit feedback
+   * ---------------------------------------------------------------- */
+
+  var forms = doc.querySelectorAll("form[data-form]");
+
+  Array.prototype.forEach.call(forms, function (form) {
+    form.addEventListener("submit", function () {
+      var button = form.querySelector("[data-submit]");
+      if (!button) {
+        return;
+      }
+
+      var busyLabel = button.getAttribute("data-busy-label");
+      if (busyLabel) {
+        button.textContent = busyLabel;
+      }
+
+      // aria-disabled rather than disabled: a genuinely disabled button is
+      // not submitted with the form on some browsers, which would silently
+      // drop the click that got us here.
+      button.setAttribute("aria-disabled", "true");
+    });
+  });
+})();
