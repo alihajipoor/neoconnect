@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
@@ -41,12 +42,27 @@ type Dispatcher struct {
 	// Per-protocol traffic shapers, registered only for protocols whose
 	// users have their own address inside the tunnel. See RegisterShaper.
 	shapers map[string]*shaper.Shaper
+	// Protocols whose addresses only exist while a client is connected.
+	discoverers map[string]AddressDiscoverer
+
+	// mu guards the two maps below, which the reconcile loop reads on the
+	// stats tick while Execute writes to them from the command stream.
+	mu sync.Mutex
+	// What the control plane said each user is allowed, kept because the
+	// address to apply it to may not exist until they connect.
+	rateLimits map[string]rateLimit
+	// protocol -> userID -> the address currently shaped for them, so a
+	// reconnect on a different address does not strand the old rule.
+	shapedAddresses map[string]map[string]string
 }
 
 func New() *Dispatcher {
 	return &Dispatcher{
-		provisioners: make(map[string]common.Provisioner),
-		shapers:      make(map[string]*shaper.Shaper),
+		provisioners:    make(map[string]common.Provisioner),
+		shapers:         make(map[string]*shaper.Shaper),
+		discoverers:     make(map[string]AddressDiscoverer),
+		rateLimits:      make(map[string]rateLimit),
+		shapedAddresses: make(map[string]map[string]string),
 	}
 }
 
@@ -235,6 +251,13 @@ func (d *Dispatcher) applyRateLimit(ctx context.Context, payload commandPayload)
 	if payload.DownloadMbps == 0 && payload.UploadMbps == 0 {
 		return
 	}
+	// Remembered regardless of whether it can be applied right now: for a
+	// protocol that assigns addresses at connect time, this is the only
+	// record of what the user is allowed when they later come online.
+	d.mu.Lock()
+	d.rateLimits[payload.ExternalUserID] = rateLimit{payload.DownloadMbps, payload.UploadMbps}
+	d.mu.Unlock()
+
 	s, ok := d.shapers[payload.Protocol]
 	if !ok {
 		log.Printf("rate limit ignored for %s: this protocol has no per-user address to shape", payload.Protocol)
@@ -252,6 +275,20 @@ func (d *Dispatcher) applyRateLimit(ctx context.Context, payload commandPayload)
 // clearRateLimit removes a user cap. Best-effort for the same reason: a
 // leftover rule must not stop the user being deleted.
 func (d *Dispatcher) clearRateLimit(ctx context.Context, payload commandPayload) {
+	d.mu.Lock()
+	delete(d.rateLimits, payload.ExternalUserID)
+	if byUser, ok := d.shapedAddresses[payload.Protocol]; ok {
+		if address := byUser[payload.ExternalUserID]; address != "" {
+			delete(byUser, payload.ExternalUserID)
+			d.mu.Unlock()
+			if s, ok := d.shapers[payload.Protocol]; ok {
+				_ = s.Remove(ctx, address)
+			}
+			d.mu.Lock()
+		}
+	}
+	d.mu.Unlock()
+
 	s, ok := d.shapers[payload.Protocol]
 	if !ok {
 		return
@@ -262,5 +299,103 @@ func (d *Dispatcher) clearRateLimit(ctx context.Context, payload commandPayload)
 	}
 	if err := s.Remove(ctx, address); err != nil {
 		log.Printf("clearing rate limit for %s: %v", payload.ExternalUserID, err)
+	}
+}
+
+// rateLimit is a user's caps as the control plane sent them.
+type rateLimit struct {
+	downloadMbps uint32
+	uploadMbps   uint32
+}
+
+// AddressDiscoverer is implemented by protocols that assign a user's
+// tunnel address at connect time rather than at provisioning time, so the
+// shaper has to wait and find out. OpenVPN is the only one today.
+type AddressDiscoverer interface {
+	ConnectedAddresses() (map[string]string, error)
+}
+
+// RegisterAddressDiscoverer marks a protocol as needing its addresses
+// looked up while clients are online rather than taken from the command
+// that created them.
+func (d *Dispatcher) RegisterAddressDiscoverer(protocol string, a AddressDiscoverer) {
+	d.discoverers[protocol] = a
+}
+
+// ReconcileShaping applies caps to protocols whose addresses only exist
+// while a client is connected.
+//
+// Called on the same tick as stats collection, because that is already the
+// cadence at which the agent looks at who is online, and a cap that lands
+// one poll after connect is a far better outcome than none at all.
+//
+// Reconciles in both directions: a client that has connected since the
+// last pass gets shaped, and one that has gone gets its rules removed so
+// they are not inherited by whoever the pool hands that address to next.
+func (d *Dispatcher) ReconcileShaping(ctx context.Context) {
+	for protocol, discoverer := range d.discoverers {
+		s, ok := d.shapers[protocol]
+		if !ok {
+			continue
+		}
+		addresses, err := discoverer.ConnectedAddresses()
+		if err != nil {
+			log.Printf("shaping reconcile for %s: %v", protocol, err)
+			continue
+		}
+
+		d.mu.Lock()
+		shaped := d.shapedAddresses[protocol]
+		if shaped == nil {
+			shaped = make(map[string]string)
+			d.shapedAddresses[protocol] = shaped
+		}
+		limits := make(map[string]rateLimit, len(d.rateLimits))
+		for k, v := range d.rateLimits {
+			limits[k] = v
+		}
+		d.mu.Unlock()
+
+		rootReady := false
+		for userID, address := range addresses {
+			limit, capped := limits[userID]
+			if !capped || (limit.downloadMbps == 0 && limit.uploadMbps == 0) {
+				continue
+			}
+			// Already shaped at this address -- re-applying every poll
+			// would churn tc rules for no reason.
+			if shaped[userID] == address {
+				continue
+			}
+			if !rootReady {
+				if err := s.EnsureRoot(ctx); err != nil {
+					log.Printf("shaping reconcile for %s: %v", protocol, err)
+					break
+				}
+				rootReady = true
+			}
+			// A client that reconnected on a different address leaves a
+			// rule behind on the old one.
+			if old := shaped[userID]; old != "" && old != address {
+				_ = s.Remove(ctx, old)
+			}
+			if err := s.Apply(ctx, address, limit.downloadMbps, limit.uploadMbps); err != nil {
+				log.Printf("shaping %s: %v", userID, err)
+				continue
+			}
+			d.mu.Lock()
+			d.shapedAddresses[protocol][userID] = address
+			d.mu.Unlock()
+		}
+
+		// Anyone shaped who is no longer connected.
+		d.mu.Lock()
+		for userID, address := range d.shapedAddresses[protocol] {
+			if _, online := addresses[userID]; !online {
+				_ = s.Remove(ctx, address)
+				delete(d.shapedAddresses[protocol], userID)
+			}
+		}
+		d.mu.Unlock()
 	}
 }

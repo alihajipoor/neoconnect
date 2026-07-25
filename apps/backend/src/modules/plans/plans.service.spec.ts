@@ -27,10 +27,12 @@ const baseDto = {
 
 describe("PlansService", () => {
   let service: PlansService;
+  let agentGateway: { enqueueCommand: jest.Mock };
   let prisma: {
     subscriptionPlan: { findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock };
     subscription: { count: jest.Mock };
     freeTrialSettings: { findFirst: jest.Mock };
+    protocolUser: { findMany: jest.Mock };
   };
 
   beforeEach(() => {
@@ -44,8 +46,10 @@ describe("PlansService", () => {
       },
       subscription: { count: jest.fn() },
       freeTrialSettings: { findFirst: jest.fn() },
+      protocolUser: { findMany: jest.fn().mockResolvedValue([]) },
     };
-    service = new PlansService(prisma as any);
+    agentGateway = { enqueueCommand: jest.fn() };
+    service = new PlansService(prisma as any, agentGateway as any);
   });
 
   describe("list", () => {
@@ -142,6 +146,54 @@ describe("PlansService", () => {
       prisma.freeTrialSettings.findFirst.mockResolvedValue({ id: "settings-1", trialPlanId: "plan-1" });
       await expect(service.remove("plan-1")).rejects.toThrow(BadRequestException);
       expect(prisma.subscriptionPlan.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("changing a plan speed cap", () => {
+    const existing = { id: "plan-1", maxDownloadMbps: 100, maxUploadMbps: 20 };
+
+    it("pushes the new cap to customers already on the plan", async () => {
+      // Without this an admin edits the plan, sees the new number, and no
+      // existing customer is affected -- only future ones.
+      prisma.subscriptionPlan.findUnique.mockResolvedValue(existing);
+      prisma.subscriptionPlan.update.mockResolvedValue({ ...existing, maxDownloadMbps: 50 });
+      prisma.protocolUser.findMany.mockResolvedValue([
+        { nodeId: "node-1", protocol: "WIREGUARD", externalUserId: "wg-1" },
+      ]);
+
+      await service.update("plan-1", { maxDownloadMbps: 50 } as any);
+
+      expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "UPDATE_USER", {
+        protocol: "WIREGUARD",
+        externalUserId: "wg-1",
+        downloadMbps: 50,
+        uploadMbps: 20,
+      });
+    });
+
+    it("does not disturb anyone when the caps did not change", async () => {
+      // Renaming a plan should not re-shape every customer on it.
+      prisma.subscriptionPlan.findUnique.mockResolvedValue(existing);
+      prisma.subscriptionPlan.update.mockResolvedValue({ ...existing, name: "Renamed" });
+
+      await service.update("plan-1", { name: "Renamed" } as any);
+
+      expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    });
+
+    it("sends no limit to Xray users, who cannot be shaped per user", async () => {
+      prisma.subscriptionPlan.findUnique.mockResolvedValue(existing);
+      prisma.subscriptionPlan.update.mockResolvedValue({ ...existing, maxDownloadMbps: 50 });
+      prisma.protocolUser.findMany.mockResolvedValue([
+        { nodeId: "node-1", protocol: "XRAY_VLESS_REALITY", externalUserId: "x-1" },
+      ]);
+
+      await service.update("plan-1", { maxDownloadMbps: 50 } as any);
+
+      expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "UPDATE_USER", {
+        protocol: "XRAY_VLESS_REALITY",
+        externalUserId: "x-1",
+      });
     });
   });
 });
