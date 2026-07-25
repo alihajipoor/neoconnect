@@ -146,16 +146,66 @@ fn run_hidden(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<std::process:
     Command::new(exe).args(args).creation_flags(CREATE_NO_WINDOW).status()
 }
 
+/// How long to wait after spawning before deciding the engine is up.
+///
+/// An engine that rejects its config dies within a few hundred
+/// milliseconds. Without this the service reported success the instant
+/// it had spawned a process, so the app said "Connected" for an engine
+/// that had already exited -- which is exactly how OpenVPN and Xray
+/// looked connected while the user's IP never changed.
+const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// Spawns a long-running engine, hidden, and hands back the child so the
 /// service keeps ownership of its lifetime.
-fn spawn_hidden(exe: &Path, args: &[&std::ffi::OsStr], working_dir: &Path) -> io::Result<Child> {
+///
+/// Output goes to a log file rather than being discarded. These engines
+/// explain their failures on stderr, and throwing that away meant a
+/// failed tunnel left nothing behind to diagnose -- the whole reason
+/// Xray's misbehaviour was invisible.
+fn spawn_hidden(
+    exe: &Path,
+    args: &[&std::ffi::OsStr],
+    working_dir: &Path,
+    log_path: &Path,
+) -> io::Result<Child> {
     use std::os::windows::process::CommandExt;
+
+    let log = std::fs::File::create(log_path)?;
+    let log_err = log.try_clone()?;
+
     Command::new(exe)
         .args(args)
         .current_dir(working_dir)
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err))
         .spawn()
+}
+
+/// Confirms the engine is still alive shortly after starting, and
+/// surfaces whatever it logged if it isn't.
+///
+/// This is deliberately a liveness check, not a proof that traffic
+/// flows -- but it turns the most common failure (bad config, missing
+/// driver, unreachable server) from a silent false "Connected" into a
+/// real error with the engine's own explanation attached.
+fn confirm_started(mut child: Child, engine: &str, log_path: &Path) -> Result<Child, String> {
+    std::thread::sleep(STARTUP_GRACE);
+
+    match child.try_wait() {
+        Ok(None) => Ok(child),
+        Ok(Some(status)) => {
+            let detail = std::fs::read_to_string(log_path)
+                .ok()
+                .map(|s| s.lines().rev().take(6).collect::<Vec<_>>().join(" | "))
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "no output".to_string());
+            Err(format!("{engine} exited immediately ({status}): {detail}"))
+        }
+        Err(e) => {
+            let _ = child.kill();
+            Err(format!("could not check whether {engine} started: {e}"))
+        }
+    }
 }
