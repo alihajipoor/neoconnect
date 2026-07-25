@@ -10,7 +10,8 @@ import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { FreeTrialSettingsService } from "../free-trial-settings/free-trial-settings.service";
 import { EmailService } from "../email/email.service";
-import { welcomeEmail, verificationEmail, passwordResetEmail } from "../email/templates";
+import { verificationEmail, passwordResetEmail } from "../email/templates";
+import { ChangePasswordDto } from "./dto/change-password.dto";
 import {
   CustomerAccessTokenPayload,
   CustomerRefreshTokenPayload,
@@ -53,7 +54,10 @@ export class CustomerAuthService {
   async register(dto: CreateCustomerDto): Promise<CustomerRequiresVerification> {
     const customer = await this.customersService.create(dto);
 
-    await this.emailService.sendMail({ to: customer.email, ...welcomeEmail() });
+    // One email, not two. The welcome used to be its own send whose
+    // entire content was "a separate verification email is on its way" --
+    // nothing actionable, arriving before the customer could do anything,
+    // and doubling how much of our mail a spam filter got to judge.
     await this.sendVerificationEmail(customer.id, customer.email);
 
     return { requiresVerification: true, email: customer.email };
@@ -284,5 +288,38 @@ export class CustomerAuthService {
       where: { id: payload.sub },
       data: { passwordHash, tokenVersion: { increment: 1 } },
     });
+  }
+
+  /** Changes the password of an already-signed-in customer.
+   *
+   * Distinct from resetPassword above: that one proves identity with an
+   * emailed token because the customer is locked out, this one proves it
+   * with the current password because they aren't. Re-checking the
+   * current password matters precisely because the caller is already
+   * authenticated -- otherwise anyone who got hold of a session could
+   * change the password and lock the real owner out permanently.
+   *
+   * Returns fresh tokens. Bumping tokenVersion revokes every session
+   * including the caller's own, so without new ones the app would
+   * silently log itself out on the very next request.
+   */
+  async changePassword(customerId: string, dto: ChangePasswordDto) {
+    const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) {
+      throw new BadRequestException("Account not found");
+    }
+
+    const valid = await argon2.verify(customer.passwordHash, dto.currentPassword);
+    if (!valid) {
+      throw new BadRequestException("Your current password is incorrect");
+    }
+
+    const passwordHash = await argon2.hash(dto.newPassword);
+    const updated = await this.prisma.customer.update({
+      where: { id: customerId },
+      data: { passwordHash, tokenVersion: { increment: 1 } },
+    });
+
+    return this.issueTokenPair(updated);
   }
 }

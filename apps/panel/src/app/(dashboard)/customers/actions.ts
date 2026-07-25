@@ -19,7 +19,7 @@ export async function createCustomer(input: {
 
 export async function updateCustomer(
   id: string,
-  input: { telegramId?: string; status?: CustomerStatus },
+  input: { telegramId?: string; status?: CustomerStatus; password?: string },
 ): Promise<MutationResult<Customer>> {
   const result = await apiMutate<Customer>(`/customers/${id}`, {
     method: "PATCH",

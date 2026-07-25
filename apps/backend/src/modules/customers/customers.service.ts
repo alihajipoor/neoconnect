@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { randomBytes } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
@@ -54,9 +55,26 @@ export class CustomersService {
     });
   }
 
+  /** A password in the DTO is hashed and swapped for the raw value before
+   * it can reach the database, and every existing session for that
+   * customer is revoked via tokenVersion.
+   *
+   * The revocation is the point, not a side effect: an admin resetting a
+   * password is usually responding to "someone else may be in my
+   * account", and leaving already-issued refresh tokens working would
+   * defeat the reset entirely. Same reason the self-serve reset bumps it.
+   */
   async update(id: string, dto: UpdateCustomerDto) {
     await this.get(id);
-    return this.prisma.customer.update({ where: { id }, data: dto, select: SAFE_SELECT });
+
+    const { password, ...rest } = dto;
+    const data: Prisma.CustomerUpdateInput = { ...rest };
+    if (password) {
+      data.passwordHash = await argon2.hash(password);
+      data.tokenVersion = { increment: 1 };
+    }
+
+    return this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
   }
 
   /** Deletes a customer along with everything that exists solely to serve

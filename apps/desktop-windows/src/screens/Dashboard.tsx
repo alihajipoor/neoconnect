@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MapPin, Tag } from "lucide-react";
+import { MapPin, Settings as SettingsIcon, Tag } from "lucide-react";
 import { getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, Subscription } from "../lib/types";
@@ -14,9 +14,11 @@ type ConnectionState = "disconnected" | "connecting" | "connected" | "disconnect
 export function Dashboard({
   onLoggedOut,
   onBrowsePlans,
+  onOpenSettings,
 }: {
   onLoggedOut: () => void;
   onBrowsePlans: () => void;
+  onOpenSettings: () => void;
 }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -107,9 +109,20 @@ export function Dashboard({
     <div className="relative flex h-full flex-col gap-4 p-5">
       <div className="flex items-center justify-between">
         <Logo />
-        <Button variant="ghost" onClick={handleLogout} className="h-7 px-2 text-xs">
-          Sign out
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            onClick={onOpenSettings}
+            aria-label="Settings"
+            title="Settings"
+            className="size-7 justify-center px-0"
+          >
+            <SettingsIcon className="size-4" />
+          </Button>
+          <Button variant="ghost" onClick={handleLogout} className="h-7 px-2 text-xs">
+            Sign out
+          </Button>
+        </div>
       </div>
 
       {error ? (
