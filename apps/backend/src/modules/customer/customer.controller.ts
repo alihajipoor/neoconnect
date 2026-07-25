@@ -1,4 +1,5 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Header, Param, Post, UseGuards } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { CustomersService } from "../customers/customers.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
@@ -6,6 +7,8 @@ import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { PlansService } from "../plans/plans.service";
 import { RoutesService } from "../routes/routes.service";
 import { BillingService } from "../billing/billing.service";
+import { InvoicesService } from "../invoices/invoices.service";
+import { renderInvoiceHtml } from "../invoices/invoice-document";
 import { CreatePaymentDto } from "../billing/dto/create-payment.dto";
 import { CreateOwnSubscriptionDto } from "./dto/create-own-subscription.dto";
 import { SwitchRouteDto } from "./dto/switch-route.dto";
@@ -30,6 +33,8 @@ export class CustomerController {
     private readonly plansService: PlansService,
     private readonly routesService: RoutesService,
     private readonly billingService: BillingService,
+    private readonly config: ConfigService,
+    private readonly invoicesService: InvoicesService,
   ) {}
 
   @Get("me")
@@ -89,12 +94,38 @@ export class CustomerController {
     return this.protocolUsersService.switchRoute(subscription.id, dto.routeId);
   }
 
+  @Get("invoices")
+  invoices(@CurrentCustomer() customer: AuthenticatedCustomer) {
+    return this.invoicesService.list({ customerId: customer.sub });
+  }
+
+  /** The printable invoice. Scoped by ownership in the lookup itself, so
+   * another customer's id is indistinguishable from one that doesn't
+   * exist rather than confirming it belongs to someone. */
+  @Get("invoices/:id/document")
+  @Header("Content-Type", "text/html; charset=utf-8")
+  async invoiceDocument(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Param("id") id: string,
+  ): Promise<string> {
+    const invoice = await this.invoicesService.getOwned(id, customer.sub);
+    const me = await this.customersService.get(customer.sub);
+    return renderInvoiceHtml(invoice, me.email);
+  }
+
   @Post("billing/payments")
   async createPayment(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: CreatePaymentDto) {
     // Ownership check first -- a customer must not be able to kick off
     // (or reconcile the state of) a payment against a subscription that
     // isn't theirs.
     await this.subscriptionsService.getOwned(dto.subscriptionId, customer.sub);
-    return this.billingService.create(dto);
+
+    // Cards go through a hosted Checkout page rather than card fields in
+    // the app -- see StripeProvider.createCheckoutSession. The page the
+    // customer returns to afterwards is served by this API, so it works
+    // without the marketing site existing yet.
+    const returnUrl = `${(this.config.get<string>("publicApiUrl") ?? "").replace(/\/$/, "")}/customer/billing/return`;
+    return this.billingService.createForClient(dto, returnUrl);
   }
+
 }

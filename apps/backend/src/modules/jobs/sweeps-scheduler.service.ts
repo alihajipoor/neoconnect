@@ -10,6 +10,10 @@ const EXPIRY_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 // the expiry sweep's.
 const LOW_DATA_WARNING_INTERVAL_MS = QUOTA_SWEEP_INTERVAL_MS;
 const EXPIRY_WARNING_INTERVAL_MS = EXPIRY_SWEEP_INTERVAL_MS;
+// Once a day is plenty: an invoice's due date is a date, not a moment,
+// so checking it hourly would only mean marking something overdue a few
+// hours sooner while sending the customer the same reminder.
+const INVOICE_OVERDUE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -31,6 +35,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "expiry-warning",
       {},
       { repeat: { every: EXPIRY_WARNING_INTERVAL_MS }, jobId: "expiry-warning-sweep" },
+    );
+    await this.queue.add(
+      "invoice-overdue",
+      {},
+      { repeat: { every: INVOICE_OVERDUE_INTERVAL_MS }, jobId: "invoice-overdue-sweep" },
     );
   }
 }

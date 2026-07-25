@@ -8,6 +8,7 @@
 //! invisibly.
 
 mod openvpn;
+mod split_tunnel;
 mod routing;
 mod wireguard;
 mod xray;

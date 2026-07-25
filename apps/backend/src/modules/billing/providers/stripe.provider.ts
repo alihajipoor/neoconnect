@@ -21,11 +21,60 @@ export class StripeProvider {
     return this.client;
   }
 
-  /** Creates a PaymentIntent, not a hosted Checkout Session -- headless
-   * by design, so a customer confirms payment inside the app/website's
-   * own UI (Stripe's PaymentSheet/Elements against this client_secret)
-   * instead of being redirected out to a Stripe-hosted page. See the
-   * in-app-purchase requirement in project memory. */
+  /** Creates a hosted Checkout Session and returns the URL to send the
+   * customer to.
+   *
+   * The desktop client uses this rather than the PaymentIntent below.
+   * Confirming a PaymentIntent in-app means rendering card fields inside
+   * our own process, which puts card data in a VPN client's memory and
+   * makes us responsible for 3-D Secure. A hosted page opened in the
+   * system browser keeps all of that at Stripe, and the app just waits
+   * for the subscription to activate -- the webhook confirms payment
+   * either way, so nothing depends on the app seeing the result.
+   *
+   * `transactionId` rides in metadata so the webhook can match the
+   * payment back to our own record, exactly as the PaymentIntent path
+   * does. */
+  async createCheckoutSession(
+    amountUsd: number,
+    transactionId: string,
+    planName: string,
+    returnUrl: string,
+  ): Promise<{ providerRef: string; url: string }> {
+    const session = await this.requireClient().checkout.sessions.create({
+      mode: "payment",
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: "usd",
+            unit_amount: Math.round(amountUsd * 100),
+            product_data: { name: `NeoConnect ${planName}` },
+          },
+        },
+      ],
+      // Both land back on our own page, which explains what to do next
+      // rather than dumping the customer on a Stripe URL.
+      success_url: `${returnUrl}?status=success`,
+      cancel_url: `${returnUrl}?status=cancelled`,
+      metadata: { paymentTransactionId: transactionId },
+      payment_intent_data: { metadata: { paymentTransactionId: transactionId } },
+    });
+    if (!session.url) {
+      throw new Error("Stripe did not return a Checkout URL for the created session");
+    }
+    // The PaymentIntent usually doesn't exist yet -- Stripe creates it
+    // when the customer actually pays -- so the session id is normally
+    // what gets recorded. Either way the webhook matches on the metadata
+    // above rather than on this reference, so it only has to be
+    // something meaningful to look at later.
+    const paymentIntentId = typeof session.payment_intent === "string" ? session.payment_intent : null;
+    return { providerRef: paymentIntentId ?? session.id, url: session.url };
+  }
+
+  /** Creates a PaymentIntent for callers that render their own payment
+   * UI. Retained for the admin/panel path; the desktop client uses
+   * createCheckoutSession above. */
   async createPaymentIntent(amountUsd: number, transactionId: string): Promise<{ providerRef: string; clientSecret: string }> {
     const intent = await this.requireClient().paymentIntents.create({
       amount: Math.round(amountUsd * 100),

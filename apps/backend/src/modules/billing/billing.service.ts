@@ -5,6 +5,7 @@ import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreatePaymentDto } from "./dto/create-payment.dto";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
 import { StripeProvider } from "./providers/stripe.provider";
+import { InvoicesService } from "../invoices/invoices.service";
 
 @Injectable()
 export class BillingService {
@@ -15,6 +16,7 @@ export class BillingService {
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly stripe: StripeProvider,
     private readonly nowpayments: NowPaymentsProvider,
+    private readonly invoices: InvoicesService,
   ) {}
 
   list() {
@@ -77,6 +79,58 @@ export class BillingService {
     };
   }
 
+  /** Starts a payment the desktop client can complete without handling
+   * card data itself.
+   *
+   * Same PaymentTransaction bookkeeping as create() above -- the only
+   * difference is what the customer is handed: a hosted Checkout URL for
+   * cards, or a pay-to address for crypto. Both are confirmed by the
+   * provider's webhook, so the app never has to be told the outcome; it
+   * just watches its own subscription become active. */
+  async createForClient(dto: CreatePaymentDto, returnUrl: string) {
+    const subscription = await this.prisma.subscription.findUnique({
+      where: { id: dto.subscriptionId },
+      include: { plan: true },
+    });
+    if (!subscription) throw new BadRequestException("Subscription not found");
+
+    const transaction = await this.prisma.paymentTransaction.create({
+      data: {
+        customerId: subscription.customerId,
+        subscriptionId: subscription.id,
+        provider: dto.provider,
+        providerRef: `pending-${subscription.id}-${Date.now()}`,
+        amountUsd: subscription.plan.priceUsd,
+        currency: dto.provider === "STRIPE" ? "usd" : "usdttrc20",
+        status: "PENDING",
+      },
+    });
+
+    if (dto.provider === "STRIPE") {
+      const { providerRef, url } = await this.stripe.createCheckoutSession(
+        Number(subscription.plan.priceUsd),
+        transaction.id,
+        subscription.plan.name,
+        returnUrl,
+      );
+      await this.prisma.paymentTransaction.update({ where: { id: transaction.id }, data: { providerRef } });
+      return { transactionId: transaction.id, provider: "STRIPE" as const, checkoutUrl: url };
+    }
+
+    const payment = await this.nowpayments.createPayment(Number(subscription.plan.priceUsd), transaction.id);
+    await this.prisma.paymentTransaction.update({
+      where: { id: transaction.id },
+      data: { providerRef: payment.paymentId },
+    });
+    return {
+      transactionId: transaction.id,
+      provider: "NOWPAYMENTS" as const,
+      payAddress: payment.payAddress,
+      payAmount: payment.payAmount,
+      payCurrency: payment.payCurrency,
+    };
+  }
+
   /** Called from both webhook handlers once a provider confirms payment.
    * Idempotent (no-ops if the transaction isn't still PENDING) since
    * webhooks legitimately arrive more than once for the same event --
@@ -96,6 +150,24 @@ export class BillingService {
 
     if (transaction.subscriptionId) {
       await this.renewSubscription(transaction.subscriptionId);
+    }
+
+    // Issued here, in the same flow that activates the subscription,
+    // rather than by a job that sweeps for un-invoiced payments later.
+    // An invoice that depends on a separate process running is an
+    // invoice that is sometimes missing, and the customer notices that
+    // before the operator does.
+    //
+    // A failure here must not undo a confirmed payment: the money has
+    // moved and the subscription is live. Logged loudly instead, since a
+    // paid-but-uninvoiced transaction is a real bookkeeping gap that
+    // someone has to fix by hand.
+    try {
+      await this.invoices.issueForPayment(transactionId);
+    } catch (err) {
+      this.logger.error(
+        `Payment ${transactionId} confirmed but its invoice could not be issued: ${(err as Error).message}`,
+      );
     }
   }
 

@@ -1,6 +1,6 @@
 import { apiRequest, publicRequest } from "./api";
 import { clearTokens, setTokens } from "./session";
-import type { LoginResult, RequiresVerification, VerifyResult } from "./types";
+import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from "./types";
 
 /** Never returns a usable session -- see RequiresVerification's doc
  * comment. The app must always follow this up by showing the verify
@@ -57,4 +57,21 @@ export async function resendVerification(email: string) {
 export async function logout(): Promise<void> {
   await apiRequest<void>("/customer-auth/logout", { method: "POST" });
   await clearTokens();
+}
+
+/** Changes the password of the signed-in customer.
+ *
+ * The backend revokes every session on success, including this app's own,
+ * so it hands back a fresh pair -- storing them immediately is what keeps
+ * the user signed in instead of being bounced to the login screen on
+ * their next request. */
+export async function changePassword(currentPassword: string, newPassword: string) {
+  const result = await apiRequest<TokenPair>("/customer-auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (result.ok) {
+    await setTokens(result.data);
+  }
+  return result;
 }

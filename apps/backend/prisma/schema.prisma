@@ -150,6 +150,7 @@ model Customer {
 
   subscriptions Subscription[]
   transactions  PaymentTransaction[]
+  invoices      Invoice[]
 
   @@map("customers")
 }
@@ -165,6 +166,15 @@ model SubscriptionPlan {
   durationDays             Int
   priceUsd                 Decimal  @db.Decimal(10, 2)
   maxConcurrentConnections Int?
+  // Per-user speed caps in megabits per second, applied on the node to
+  // every ProtocolUser provisioned on this plan. Null means uncapped,
+  // which is what every existing plan stays.
+  //
+  // Mbit/s rather than bytes/s because that is the unit the operator
+  // thinks and sells in ("100 Mbit plan"), and the unit tc takes.
+  // Up and down are separate because asymmetric plans are normal.
+  maxDownloadMbps          Int?
+  maxUploadMbps            Int?
   protocolsAllowed         Protocol[]
   isActive                 Boolean  @default(true)
   // Which Route a customer purchasing this plan gets provisioned on --
@@ -211,6 +221,7 @@ model Subscription {
   protocolUsers ProtocolUser[]
   usageRecords  UsageRecord[]
   transactions  PaymentTransaction[]
+  invoices      Invoice[]
 
   @@index([customerId])
   @@index([status])
@@ -371,6 +382,55 @@ model EnrollmentToken {
 // Billing
 // ---------------------------------------------------------------------------
 
+enum InvoiceStatus {
+  ISSUED
+  PAID
+  OVERDUE
+  VOID
+}
+
+/// A billing document, issued when a charge becomes due.
+///
+/// Deliberately not a view over PaymentTransaction: an invoice is a
+/// historical record and must not change when the thing it describes
+/// does. planNameSnapshot and lineItemsJson are copied at issue time so
+/// renaming or deleting a plan later cannot silently rewrite what a
+/// customer was billed.
+///
+/// Most invoices here are paid the moment they're issued -- this product
+/// is prepaid and settles at purchase, so an invoice is closer to a
+/// receipt than a demand for payment. dueAt is null for those. A
+/// genuinely outstanding invoice only arises for slow-settling crypto or,
+/// later, reseller terms.
+model Invoice {
+  id                   String        @id @default(uuid())
+  /// Human-readable and gapless, from a Postgres sequence rather than a
+  /// count of existing rows -- concurrent issuance would otherwise hand
+  /// two invoices the same number.
+  invoiceNumber        String        @unique
+  customerId           String
+  subscriptionId       String?
+  paymentTransactionId String?       @unique
+  planNameSnapshot     String
+  amountUsd            Decimal       @db.Decimal(10, 2)
+  currency             String
+  status               InvoiceStatus @default(ISSUED)
+  periodStart          DateTime
+  periodEnd            DateTime
+  issuedAt             DateTime      @default(now())
+  dueAt                DateTime?
+  paidAt               DateTime?
+  lineItemsJson        Json
+
+  customer           Customer            @relation(fields: [customerId], references: [id])
+  subscription       Subscription?       @relation(fields: [subscriptionId], references: [id])
+  paymentTransaction PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id])
+
+  @@index([customerId])
+  @@index([status])
+  @@map("invoices")
+}
+
 model PaymentTransaction {
   id                 String          @id @default(uuid())
   customerId         String
@@ -386,6 +446,7 @@ model PaymentTransaction {
 
   customer     Customer      @relation(fields: [customerId], references: [id])
   subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+  invoice      Invoice?
 
   @@unique([provider, providerRef])
   @@index([customerId])

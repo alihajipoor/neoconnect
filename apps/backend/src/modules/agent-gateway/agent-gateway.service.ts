@@ -7,6 +7,7 @@ import { AgentCommandType } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
 import { UsageService } from "../usage/usage.service";
+import { ConcurrencyService } from "../usage/concurrency.service";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
@@ -52,6 +53,8 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     private readonly config: ConfigService,
     @Inject(forwardRef(() => UsageService))
     private readonly usageService: UsageService,
+    @Inject(forwardRef(() => ConcurrencyService))
+    private readonly concurrencyService: ConcurrencyService,
   ) {}
 
   onModuleInit() {
@@ -204,6 +207,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               return;
             }
             await this.usageService.recordDeltas(nodeId, msg.statsBatch?.deltas ?? []);
+            // Concurrency rides along with usage: same poll, and only
+            // meaningful next to it. Absent for engines that can't
+            // measure it, which is treated as unknown rather than zero.
+            await this.concurrencyService.handleSessionCounts(nodeId, msg.statsBatch?.sessions ?? []);
           }
           // stateSnapshot: no handling yet -- full reconciliation is later work.
         } catch (err) {

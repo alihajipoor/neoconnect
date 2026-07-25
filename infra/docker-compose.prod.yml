@@ -77,6 +77,8 @@ services:
       NOWPAYMENTS_IPN_SECRET: ${NOWPAYMENTS_IPN_SECRET:-}
       CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?CREDENTIALS_ENCRYPTION_KEY is required}
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      # Public address of this API, used to build links inside emails.
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-}
     volumes:
       - /etc/neoxify/certs:/etc/neoxify/certs:ro
     ports:
