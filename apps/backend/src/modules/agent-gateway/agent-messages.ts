@@ -24,8 +24,20 @@ export interface UsageDeltaMessage {
   bytesDown: string;
 }
 
+/** How many distinct places one user is currently connected from.
+ *
+ * `distinctSources` is a uint32 in the proto, so unlike the byte counters
+ * above it arrives as a plain number rather than a string. Only sent by
+ * engines that can measure concurrency -- in practice just Xray. */
+export interface SessionCountMessage {
+  externalUserId: string;
+  protocol: string;
+  distinctSources: number;
+}
+
 export interface StatsBatchMessage {
   deltas: UsageDeltaMessage[];
+  sessions?: SessionCountMessage[];
 }
 
 export interface AgentMessageEnvelope {

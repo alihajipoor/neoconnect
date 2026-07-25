@@ -202,6 +202,22 @@ install_xray() {
     -e "s/__SHORT_ID__/$short_id/g" \
     "$template" > /usr/local/etc/xray/config.json
 
+  # Xray exposes no way to ask how many connections a user has, so the
+  # agent counts distinct client addresses from the access log instead --
+  # without this, concurrent-connection limits can't be enforced at all.
+  # Rotated so it can't fill the disk on a busy node.
+  install -d -m 755 /var/log/xray
+  cat > /etc/logrotate.d/xray <<'EOF'
+/var/log/xray/*.log {
+  daily
+  rotate 7
+  compress
+  missingok
+  notifempty
+  copytruncate
+}
+EOF
+
   systemctl restart xray
 
   echo "Registering Xray in the panel..."

@@ -31,6 +31,7 @@ describe("AgentGatewayService reconnect reconciliation", () => {
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     const enqueue = jest.spyOn(service, "enqueueCommand").mockResolvedValue({} as never);
     return { service, prisma, enqueue };

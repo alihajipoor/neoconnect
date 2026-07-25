@@ -69,6 +69,54 @@ func (d *Dispatcher) CollectStats(ctx context.Context) ([]common.UsageDelta, []e
 	return deltas, errs
 }
 
+// SessionReporter is implemented by provisioners that can say how many
+// distinct places each user is connected from.
+//
+// Optional on purpose: only Xray both needs this and can answer it. The
+// other engines are already self-limiting -- OpenVPN replaces a session
+// when the same certificate reconnects, and a WireGuard peer holds one
+// endpoint at a time -- so a shared credential doesn't buy real
+// concurrency there and there's nothing to report.
+type SessionReporter interface {
+	SessionCounts() (map[string]int, error)
+}
+
+// SessionCount pairs a user with how many distinct sources they're
+// currently active from.
+type SessionCount struct {
+	ExternalUserID  string
+	Protocol        string
+	DistinctSources uint32
+}
+
+// CollectSessionCounts asks every provisioner that can report
+// concurrency. Errors are returned rather than swallowed so the caller
+// can log them, but they never stop the other protocols from reporting --
+// same contract as CollectStats.
+func (d *Dispatcher) CollectSessionCounts() ([]SessionCount, []error) {
+	var counts []SessionCount
+	var errs []error
+	for protocol, provisioner := range d.provisioners {
+		reporter, ok := provisioner.(SessionReporter)
+		if !ok {
+			continue
+		}
+		perUser, err := reporter.SessionCounts()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s SessionCounts: %w", protocol, err))
+			continue
+		}
+		for user, n := range perUser {
+			counts = append(counts, SessionCount{
+				ExternalUserID:  user,
+				Protocol:        protocol,
+				DistinctSources: uint32(n),
+			})
+		}
+	}
+	return counts, errs
+}
+
 // Execute runs the given command against the right provisioner and
 // returns the outcome for a CommandAck. Never returns a Go error itself --
 // every failure mode (bad payload, unknown protocol, provisioner error)
