@@ -18,7 +18,15 @@ function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
 
 describe("CustomersService", () => {
   let service: CustomersService;
-  let prisma: { customer: { findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock } };
+  let prisma: {
+    customer: { findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock };
+    paymentTransaction: { count: jest.Mock };
+    protocolUser: { findMany: jest.Mock; deleteMany: jest.Mock };
+    subscription: { deleteMany: jest.Mock };
+    usageRecord: { deleteMany: jest.Mock };
+    $transaction: jest.Mock;
+  };
+  let agentGateway: { enqueueCommand: jest.Mock };
 
   beforeEach(() => {
     prisma = {
@@ -29,8 +37,17 @@ describe("CustomersService", () => {
         update: jest.fn(),
         delete: jest.fn(),
       },
+      paymentTransaction: { count: jest.fn().mockResolvedValue(0) },
+      protocolUser: { findMany: jest.fn().mockResolvedValue([]), deleteMany: jest.fn() },
+      subscription: { deleteMany: jest.fn() },
+      usageRecord: { deleteMany: jest.fn() },
+      // The real $transaction takes an array of prepared operations; the
+      // mocked members above are plain jest.fn()s, so simply resolving is
+      // enough to assert which ones were queued.
+      $transaction: jest.fn().mockResolvedValue([]),
     };
-    service = new CustomersService(prisma as any);
+    agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
+    service = new CustomersService(prisma as any, agentGateway as any);
   });
 
   describe("get", () => {
@@ -69,7 +86,9 @@ describe("CustomersService", () => {
       await service.create({ email: "a@example.com", password: "password123" });
       await service.create({ email: "b@example.com", password: "password123" });
 
-      const codes = prisma.customer.create.mock.calls.map((call) => call[0].data.referralCode);
+      const codes = (prisma.customer.create.mock.calls as { data: { referralCode: string } }[][]).map(
+        (call) => call[0].data.referralCode,
+      );
       expect(codes[0]).not.toEqual(codes[1]);
     });
   });
@@ -104,6 +123,47 @@ describe("CustomersService", () => {
       prisma.customer.findUnique.mockResolvedValue(buildCustomer());
       await service.remove("customer-1");
       expect(prisma.customer.delete).toHaveBeenCalledWith({ where: { id: "customer-1" } });
+    });
+
+    it("clears the subscriptions and credentials that blocked the delete", async () => {
+      // A bare customer.delete() hit a foreign key violation for any
+      // customer who had ever had a subscription -- i.e. every real one --
+      // and surfaced as a raw 500 in the panel.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.remove("customer-1");
+
+      expect(prisma.usageRecord.deleteMany).toHaveBeenCalled();
+      expect(prisma.protocolUser.deleteMany).toHaveBeenCalled();
+      expect(prisma.subscription.deleteMany).toHaveBeenCalled();
+      expect(prisma.$transaction).toHaveBeenCalled();
+    });
+
+    it("tells the node to drop each credential before deleting it", async () => {
+      // Removing only the database rows would leave the credential
+      // working on the engine while the panel shows the customer gone.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.protocolUser.findMany.mockResolvedValue([
+        { id: "pu-1", nodeId: "node-1", protocol: "WIREGUARD", externalUserId: "peer-key" },
+      ]);
+
+      await service.remove("customer-1");
+
+      expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "DELETE_USER", {
+        protocol: "WIREGUARD",
+        externalUserId: "peer-key",
+      });
+    });
+
+    it("refuses to delete a customer who has payment history", async () => {
+      // Financial records must survive, and deletion must not become a
+      // way to erase an audit trail.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.paymentTransaction.count.mockResolvedValue(3);
+
+      await expect(service.remove("customer-1")).rejects.toThrow(/payment transaction/i);
+      expect(prisma.customer.delete).not.toHaveBeenCalled();
+      expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
     });
   });
 });
