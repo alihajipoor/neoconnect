@@ -89,7 +89,7 @@ impl Engines {
     }
 
     pub fn disconnect(&mut self) -> Result<(), String> {
-        match self.active.take() {
+        let result = match self.active.take() {
             None => {
                 // Still ask wireguard.exe to remove the tunnel service:
                 // it outlives this process, so a service restart (or a
@@ -104,6 +104,27 @@ impl Engines {
                 let _ = child.wait();
                 Ok(())
             }
+        };
+
+        self.wipe_generated_configs();
+        result
+    }
+
+    /// Removes the generated engine configs once nothing is using them.
+    ///
+    /// These files contain live credentials -- a WireGuard private key, an
+    /// OpenVPN client certificate and key, an Xray UUID -- each of which is
+    /// enough on its own to connect as that customer from any client. The
+    /// directory ACL keeps non-administrators out, but there is no reason
+    /// for the material to sit on disk between sessions at all, so the
+    /// window it exists in is narrowed to the time a tunnel is actually up.
+    ///
+    /// Failures are ignored deliberately: a file that can't be removed
+    /// must not turn a successful disconnect into an error the user can do
+    /// nothing about.
+    fn wipe_generated_configs(&self) {
+        for name in ["neoconnect.conf", "xray-client.json", "neoconnect.ovpn"] {
+            let _ = std::fs::remove_file(self.config_path(name));
         }
     }
 

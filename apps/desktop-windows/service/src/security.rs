@@ -17,9 +17,14 @@ use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{LocalFree, ERROR_ALREADY_EXISTS};
-use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows_sys::Win32::Foundation::{BOOL, LocalFree, ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+};
+use windows_sys::Win32::Security::{
+    GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+};
 use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 
 const SDDL_REVISION_1: u32 = 1;
@@ -96,10 +101,19 @@ pub const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
 /// another user's tunnel credentials.
 const CONFIG_DIR_SDDL: &str = "D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)";
 
-/// Creates a directory that only SYSTEM and Administrators can read.
-/// Succeeds if it already exists -- but note that an existing directory
-/// keeps whatever ACL it already had, which is why nothing else in this
-/// service ever creates this path.
+/// Creates the config directory, and enforces its ACL whether or not it
+/// already existed.
+///
+/// Applying the ACL only at creation time was a real hole: a directory
+/// left behind by an earlier install kept ProgramData's default grants,
+/// under which any local user can read its contents. Since that is where
+/// generated tunnel configs live -- WireGuard private keys, OpenVPN
+/// client certificates -- anyone with a login could lift a customer's
+/// credentials and connect with their own client. Found by inspection of
+/// a real install, not theory.
+///
+/// So the permissions are re-asserted on every service start rather than
+/// assumed from the moment of creation.
 pub fn create_protected_dir(path: &Path) -> io::Result<()> {
     let sd = SecurityDescriptor::from_sddl(CONFIG_DIR_SDDL)?;
     let mut attrs = sd.attributes();
@@ -112,6 +126,44 @@ pub fn create_protected_dir(path: &Path) -> io::Result<()> {
         if err.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) {
             return Err(err);
         }
+    }
+
+    apply_protected_dacl(path, &sd)
+}
+
+/// Replaces the directory's DACL with the one from `sd`, and marks it
+/// protected so ProgramData's inheritable grants can't reappear.
+fn apply_protected_dacl(path: &Path, sd: &SecurityDescriptor) -> io::Result<()> {
+    let mut dacl_present: BOOL = 0;
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut dacl_defaulted: BOOL = 0;
+
+    // SAFETY: `sd.psd` is a valid descriptor built from our own SDDL,
+    // which always includes a DACL, and the out-params are valid.
+    let ok = unsafe { GetSecurityDescriptorDacl(sd.psd, &mut dacl_present, &mut dacl, &mut dacl_defaulted) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if dacl_present == 0 {
+        return Err(io::Error::other("config directory ACL is missing a DACL"));
+    }
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().chain(once(0)).collect();
+    // SAFETY: `wide` is a valid NUL-terminated path and `dacl` points
+    // into the descriptor owned by `sd`, alive for this call.
+    let status = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status as i32));
     }
     Ok(())
 }
