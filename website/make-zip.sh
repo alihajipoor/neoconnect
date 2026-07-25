@@ -36,10 +36,15 @@ cd "$SITE_DIR"
 #                 The directory and its .htaccess ARE included (so a fresh
 #                 install is writable and protected from the first request),
 #                 but never anyone's real submitted data.
+#   .gitignore    repository bookkeeping, no business being on a webserver
+#   *.zip         a previous archive left in the docroot
 zip -r -q "$ARCHIVE" . \
     -x 'build/*' \
     -x 'README.md' \
     -x 'make-zip.sh' \
+    -x '.gitignore' \
+    -x '*/.gitignore' \
+    -x '*.zip' \
     -x 'data/secret.php' \
     -x 'data/ratelimit.php' \
     -x 'data/submissions-*.php'
