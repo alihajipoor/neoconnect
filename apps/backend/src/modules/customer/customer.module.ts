@@ -6,9 +6,10 @@ import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
 import { PlansModule } from "../plans/plans.module";
 import { RoutesModule } from "../routes/routes.module";
 import { BillingModule } from "../billing/billing.module";
+import { InvoicesModule } from "../invoices/invoices.module";
 
 @Module({
-  imports: [CustomersModule, SubscriptionsModule, ProtocolUsersModule, PlansModule, RoutesModule, BillingModule],
+  imports: [CustomersModule, SubscriptionsModule, ProtocolUsersModule, PlansModule, RoutesModule, BillingModule, InvoicesModule],
   controllers: [CustomerController],
 })
 export class CustomerModule {}
