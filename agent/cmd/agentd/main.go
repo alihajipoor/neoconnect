@@ -20,6 +20,7 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/wireguard"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
 	"github.com/neoxify/neoxify-hub/agent/internal/relay"
+	"github.com/neoxify/neoxify-hub/agent/internal/shaper"
 )
 
 func main() {
@@ -60,6 +61,11 @@ func main() {
 	dispatcher := dispatch.New()
 	dispatcher.Register("XRAY_VLESS_REALITY", xrayProvisioner)
 	dispatcher.Register("WIREGUARD", wireguard.New(*wgInterface))
+	// Per-user speed caps, WireGuard only for now: each peer has its own
+	// address assigned at provisioning time, which is what a tc rule needs
+	// to target one customer. OpenVPN assigns from a pool at connect time
+	// and Xray has no per-user address at all -- see RegisterShaper.
+	dispatcher.RegisterShaper("WIREGUARD", shaper.New(*wgInterface))
 	dispatcher.Register("OPENVPN", openvpn.New(*openvpnMgmtAddr, *openvpnCcdDir))
 	// Every node's Xray process can be a relay's exit fabric regardless
 	// of which protocols it terminates -- CONFIGURE_ROUTE/REMOVE_ROUTE
