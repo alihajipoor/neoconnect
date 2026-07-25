@@ -20,6 +20,31 @@
    ========================================================================== */
 
 /* ==========================================================================
+   0. Typeface
+   --------------------------------------------------------------------------
+   Vazirmatn, self-hosted. One variable file (~110KB) covers weights 100-900
+   for BOTH languages -- it has a genuine Latin set alongside the Persian, so
+   English and Persian share one typeface and the brand reads as one thing.
+
+   Self-hosted, never a CDN: a webfont fetched from a third party is exactly
+   the kind of request that fails on the networks this audience is on, and a
+   failed font request is a visibly broken page.
+
+   SIL Open Font Licence 1.1 -- see assets/fonts/OFL.txt, which ships with the
+   site because the licence requires the copyright notice to travel with it.
+   ========================================================================== */
+
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("../fonts/vazirmatn-variable.woff2") format("woff2");
+  /* Single variable file serving the whole range, rather than one request
+     per weight. */
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ==========================================================================
    1. Tokens
    ========================================================================== */
 
@@ -59,8 +84,8 @@
   --section-y: clamp(4.5rem, 10vw, 8rem);
 
   /* Type */
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-    Arial, "Noto Sans", sans-serif;
+  --font-sans: "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
 
@@ -69,12 +94,11 @@
   --shadow-glow: 0 0 32px -8px var(--primary);
 }
 
-/* Persian needs a taller line and a font stack that actually has the glyphs.
-   Tahoma and Segoe UI are present on effectively every Windows machine, which
-   is what most of this audience is on -- so this looks right without shipping
-   a single font file. */
+/* Persian needs a noticeably taller line than Latin to stay readable. The
+   fallbacks after Vazirmatn only matter for the moment before the webfont
+   lands (font-display: swap) or if it fails to load entirely. */
 html[lang="fa"] {
-  --font-sans: "Segoe UI", Tahoma, "Iranian Sans", "IRANSans", Vazirmatn,
+  --font-sans: "Vazirmatn", "Segoe UI", Tahoma, "Iranian Sans", "IRANSans",
     system-ui, "Noto Naskh Arabic", sans-serif;
   --line-body: 1.95;
 }
@@ -635,78 +659,317 @@ html[lang="fa"] .eyebrow {
   color: var(--fg-subtle);
 }
 
-/* Decorative protocol panel beside the headline. Purely presentational, so
-   it's aria-hidden in the markup. */
-.hero__visual {
+/* ==========================================================================
+   7b. App mockup
+   --------------------------------------------------------------------------
+   A CSS recreation of the real desktop app -- same header, subscription card,
+   circular Connect button and "Change location" control as
+   apps/desktop-windows/src/screens/Dashboard.tsx. It is a drawing, not a
+   screenshot, but it is drawn from the actual product rather than invented.
+
+   The macOS window and the phone carry visible "Soon" badges because those
+   clients genuinely do not exist yet, and the download page says so. The
+   hero must not contradict it.
+
+   Whole thing is aria-hidden with a text alternative on the wrapper: it is
+   an illustration, and reading out two dozen fake UI labels helps nobody.
+   ========================================================================== */
+
+.mockup {
   position: relative;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: linear-gradient(
-    160deg,
-    rgba(139, 92, 246, 0.12),
-    rgba(19, 19, 25, 0.9) 45%
-  );
-  padding: 1.5rem;
-  box-shadow: var(--shadow-card);
+  width: 100%;
+  max-width: 30rem;
+  margin-inline: auto;
+  aspect-ratio: 1 / 1;
+  /* Keeps the mirrored layout from flipping the composition into an
+     arrangement the shadows were not designed for. */
+  direction: ltr;
+}
+
+.device {
+  position: absolute;
+  border-radius: 0.9rem;
+  border: 1px solid var(--border-strong);
+  background: var(--card);
+  box-shadow: 0 24px 48px -20px rgba(0, 0, 0, 0.9),
+    0 2px 8px rgba(0, 0, 0, 0.5);
   overflow: hidden;
 }
 
-.hero__visual::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image: linear-gradient(
-      var(--border) 1px,
-      transparent 1px
-    ),
-    linear-gradient(90deg, var(--border) 1px, transparent 1px);
-  background-size: 2.5rem 2.5rem;
-  mask-image: radial-gradient(ellipse at 50% 0%, #000, transparent 75%);
-  -webkit-mask-image: radial-gradient(ellipse at 50% 0%, #000, transparent 75%);
-  opacity: 0.6;
-  pointer-events: none;
-}
+/* Window chrome ---------------------------------------------------------- */
 
-.hero__rows {
-  position: relative;
-  display: grid;
-  gap: 0.75rem;
-}
-
-.proto-row {
+.device__bar {
   display: flex;
   align-items: center;
-  gap: 0.85rem;
-  padding: 0.9rem 1rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: rgba(10, 10, 16, 0.65);
+  gap: 0.4rem;
+  padding: 0.5rem 0.7rem;
+  background: rgba(255, 255, 255, 0.04);
+  border-block-end: 1px solid var(--border);
 }
 
-.proto-row__dot {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: var(--radius-pill);
-  background: var(--success);
-  box-shadow: 0 0 10px var(--success);
-  flex-shrink: 0;
+.device__dots {
+  display: flex;
+  gap: 0.25rem;
 }
 
-.proto-row__name {
+.device__dots i {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.device__title {
+  font-size: 0.62rem;
   font-weight: 600;
-  font-size: 0.92rem;
-}
-
-.proto-row__meta {
-  margin-inline-start: auto;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
   color: var(--fg-subtle);
+  margin-inline-start: auto;
 }
 
-/* The mono latency figures must stay LTR even on the mirrored page. */
-[dir="rtl"] .proto-row__meta {
-  direction: ltr;
+.device__soon {
+  position: absolute;
+  inset-block-end: 0.55rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: rgba(34, 211, 238, 0.16);
+  border: 1px solid rgba(34, 211, 238, 0.4);
+  color: var(--highlight);
+  font-size: 0.58rem;
+  font-weight: 700;
+  white-space: nowrap;
+  backdrop-filter: blur(4px);
+}
+
+/* macOS window, behind and dimmed ---------------------------------------- */
+
+.device--mac {
+  inset-block-start: 0;
+  inset-inline-end: 0;
+  width: 58%;
+  z-index: 1;
+  opacity: 0.55;
+}
+
+.device--mac .device__body {
+  height: 7.5rem;
+  background: linear-gradient(
+    170deg,
+    rgba(139, 92, 246, 0.14),
+    rgba(19, 19, 25, 0.95)
+  );
+}
+
+/* Windows app, front and full ------------------------------------------- */
+
+.device--win {
+  inset-block-start: 12%;
+  inset-inline-start: 0;
+  width: 74%;
+  z-index: 2;
+}
+
+/* Phone ------------------------------------------------------------------ */
+
+.device--phone {
+  inset-block-end: 0;
+  inset-inline-end: 1%;
+  width: 27%;
+  z-index: 3;
+  border-radius: 1.4rem;
+  padding: 0.35rem;
+  background: #1b1b24;
+}
+
+.device--phone .phone__screen {
+  border-radius: 1.1rem;
+  background: linear-gradient(170deg, rgba(139, 92, 246, 0.16), var(--bg) 60%);
+  aspect-ratio: 9 / 17;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+}
+
+.phone__notch {
+  position: absolute;
+  inset-block-start: 0.35rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  width: 32%;
+  height: 0.5rem;
+  border-radius: var(--radius-pill);
+  background: #1b1b24;
+  z-index: 2;
+}
+
+/* The app interface ------------------------------------------------------ */
+
+.app {
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.55rem;
+  font-size: 0.62rem;
+}
+
+.app__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 650;
+  font-size: 0.66rem;
+}
+
+.app__mark {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 0.3rem;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--primary), var(--highlight));
+}
+
+.app__mark svg {
+  width: 0.6rem;
+  height: 0.6rem;
+  fill: #fff;
+}
+
+.app__muted {
+  color: var(--fg-subtle);
+  font-size: 0.58rem;
+}
+
+.app__card {
+  padding: 0.6rem;
+  border-radius: 0.55rem;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  gap: 0.3rem;
+}
+
+.app__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.app__pill {
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--radius-pill);
+  background: rgba(16, 185, 129, 0.18);
+  color: #6ee7b7;
+  font-size: 0.55rem;
+  font-weight: 700;
+}
+
+.app__meter {
+  height: 0.25rem;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  margin-block-start: 0.15rem;
+}
+
+.app__meter i {
+  display: block;
+  height: 100%;
+  /* 84 of 300 GB, matching the label beside it. */
+  width: 28%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--highlight));
+}
+
+.app__connect {
+  display: grid;
+  place-items: center;
+  padding-block: 0.5rem;
+}
+
+.app__orb {
+  position: relative;
+  width: 4.4rem;
+  height: 4.4rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 0.6rem;
+  color: #6ee7b7;
+  background: rgba(16, 185, 129, 0.16);
+  box-shadow: 0 0 40px -8px var(--success);
+}
+
+.app__orb--sm {
+  width: 2.6rem;
+  height: 2.6rem;
+  font-size: 0.42rem;
+}
+
+/* Slow breathing ring, to suggest a live connection without animating
+   anything that implies a measured figure. */
+.app__orb::after {
+  content: "";
+  position: absolute;
+  inset: -0.35rem;
+  border-radius: 50%;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  animation: nx-pulse 3.2s ease-out infinite;
+}
+
+@keyframes nx-pulse {
+  0% {
+    transform: scale(0.92);
+    opacity: 0.9;
+  }
+  70% {
+    transform: scale(1.14);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.app__loc {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.4rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-strong);
+  color: var(--fg-muted);
+  font-size: 0.58rem;
+}
+
+.app__loc svg {
+  width: 0.7rem;
+  height: 0.7rem;
+}
+
+/* On narrow screens the composition gets cramped, so the two supporting
+   devices step back and the real app takes the full width. */
+@media (max-width: 30rem) {
+  .device--mac {
+    display: none;
+  }
+  .device--win {
+    width: 82%;
+    inset-block-start: 6%;
+  }
+  .device--phone {
+    width: 30%;
+  }
 }
 
 /* ==========================================================================
@@ -724,9 +987,31 @@ html[lang="fa"] .eyebrow {
     transform 0.2s ease;
 }
 
+.card {
+  overflow: hidden;
+}
+
 .card:hover {
   border-color: var(--border-strong);
   background: var(--card-hover);
+  transform: translateY(-2px);
+}
+
+/* A violet filament along the top edge on hover. Subtle enough that a grid
+   of six doesn't turn into a light show. */
+.card::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.card:hover::after {
+  opacity: 0.9;
 }
 
 .card h3 {
@@ -1430,6 +1715,207 @@ html[lang="fa"] .site-footer h4 {
 
 .site-footer__bottom p {
   margin-inline-end: auto;
+}
+
+/* ==========================================================================
+   13b. Assurance strip
+   ========================================================================== */
+
+.assurance {
+  border-block: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.assurance__inner {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.85rem 2.75rem;
+  padding-block: 1.15rem;
+}
+
+.assurance__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+
+.assurance__item svg {
+  width: 1rem;
+  height: 1rem;
+  color: var(--highlight);
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   13c. Encryption flow diagram
+   --------------------------------------------------------------------------
+   Conceptual, and captioned as such. It shows where the encryption sits --
+   between the device and our servers -- rather than implying the tunnel
+   extends all the way to the destination, which would be untrue.
+   ========================================================================== */
+
+.flow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: clamp(1.25rem, 3vw, 2rem);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.flow__node {
+  display: grid;
+  place-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  min-width: 6.5rem;
+  padding: 1rem 0.75rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--card);
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.flow__node svg {
+  width: 1.4rem;
+  height: 1.4rem;
+  color: var(--primary-soft);
+}
+
+.flow__node--end svg {
+  color: var(--fg-subtle);
+}
+
+.flow__link {
+  flex: 1 1 3rem;
+  display: grid;
+  place-items: center;
+  gap: 0.45rem;
+}
+
+.flow__line {
+  width: 100%;
+  height: 2px;
+  border-radius: 2px;
+  background-image: linear-gradient(
+    90deg,
+    var(--primary) 0 6px,
+    transparent 6px 12px
+  );
+  background-size: 12px 2px;
+  animation: nx-flow 0.9s linear infinite;
+}
+
+/* The unencrypted leg beyond our servers is deliberately grey and static --
+   it is not part of what we protect. */
+.flow__link--plain .flow__line {
+  background-image: linear-gradient(
+    90deg,
+    var(--border-strong) 0 6px,
+    transparent 6px 12px
+  );
+  animation: none;
+}
+
+@keyframes nx-flow {
+  to {
+    background-position: 12px 0;
+  }
+}
+
+.flow__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: var(--radius-pill);
+  background: rgba(139, 92, 246, 0.14);
+  border: 1px solid rgba(139, 92, 246, 0.38);
+  color: var(--primary-soft);
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.flow__tag svg {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.flow__caption {
+  margin-block-start: 1rem;
+  font-size: 0.83rem;
+  color: var(--fg-subtle);
+  text-align: center;
+}
+
+@media (max-width: 48rem) {
+  .flow {
+    flex-direction: column;
+  }
+  .flow__node {
+    width: 100%;
+  }
+  .flow__link {
+    flex: 0 0 auto;
+  }
+  .flow__line {
+    width: 2px;
+    height: 2rem;
+    background-image: linear-gradient(
+      180deg,
+      var(--primary) 0 6px,
+      transparent 6px 12px
+    );
+    background-size: 2px 12px;
+    animation-name: nx-flow-v;
+  }
+  .flow__link--plain .flow__line {
+    background-image: linear-gradient(
+      180deg,
+      var(--border-strong) 0 6px,
+      transparent 6px 12px
+    );
+  }
+}
+
+@keyframes nx-flow-v {
+  to {
+    background-position: 0 12px;
+  }
+}
+
+/* ==========================================================================
+   13d. Step connectors
+   ========================================================================== */
+
+@media (min-width: 62rem) {
+  .steps-grid .step {
+    position: relative;
+  }
+
+  /* Hairline joining each step's number to the next, so the three read as a
+     sequence rather than three unrelated cards. */
+  .steps-grid .step:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    inset-block-start: 1.75rem;
+    inset-inline-start: 3.5rem;
+    inset-inline-end: -1.25rem;
+    height: 1px;
+    background: linear-gradient(to right, var(--border-strong), transparent);
+  }
+
+  [dir="rtl"] .steps-grid .step:not(:last-child)::after {
+    background: linear-gradient(to left, var(--border-strong), transparent);
+  }
 }
 
 /* ==========================================================================

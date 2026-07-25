@@ -47,29 +47,92 @@ require NX_INC . '/partials/head.php';
       </p>
     </div>
 
-    <!-- Decorative only: it illustrates "three protocols, one app" without
-         claiming any specific measured figure. -->
-    <div class="hero__visual" aria-hidden="true">
-      <div class="hero__rows">
-        <div class="proto-row">
-          <span class="proto-row__dot"></span>
-          <span class="proto-row__name">WireGuard</span>
-          <span class="proto-row__meta">UDP</span>
+    <!--
+      The app, drawn in CSS from the real desktop UI. The macOS window and
+      the phone are badged "Soon" on purpose: those clients do not exist yet
+      and the download page says so, so the hero must not suggest otherwise.
+
+      One text alternative on the wrapper, everything inside aria-hidden --
+      it is an illustration, and reading out two dozen mock UI labels would
+      help nobody.
+    -->
+    <div class="mockup" role="img" aria-label="<?php echo nx_e('home.mockup.alt'); ?>">
+
+      <div class="device device--mac" aria-hidden="true">
+        <div class="device__bar">
+          <span class="device__dots"><i></i><i></i><i></i></span>
         </div>
-        <div class="proto-row">
-          <span class="proto-row__dot"></span>
-          <span class="proto-row__name">VLESS + REALITY</span>
-          <span class="proto-row__meta">TCP / TLS</span>
+        <div class="device__body"></div>
+        <span class="device__soon">
+          <?php echo nx_e('home.mockup.macos'); ?> · <?php echo nx_e('home.mockup.soon'); ?>
+        </span>
+      </div>
+
+      <div class="device device--win" aria-hidden="true">
+        <div class="device__bar">
+          <span class="device__dots"><i></i><i></i><i></i></span>
+          <span class="device__title"><?php echo nx_e('home.mockup.windows'); ?></span>
         </div>
-        <div class="proto-row">
-          <span class="proto-row__dot"></span>
-          <span class="proto-row__name">OpenVPN</span>
-          <span class="proto-row__meta">UDP / TCP</span>
+
+        <div class="app">
+          <div class="app__head">
+            <span class="app__brand">
+              <span class="app__mark"><?php echo nx_icon('zap'); ?></span>
+              <?php echo nx_e('brand.name'); ?>
+            </span>
+          </div>
+
+          <div class="app__card">
+            <div class="app__row">
+              <span><?php echo nx_e('home.mockup.subscription'); ?></span>
+              <span class="app__pill"><?php echo nx_e('home.mockup.status'); ?></span>
+            </div>
+            <p class="app__muted"><?php echo nx_e('home.mockup.expires'); ?></p>
+            <p class="app__muted"><?php echo nx_e('home.mockup.used'); ?></p>
+            <div class="app__meter"><i></i></div>
+          </div>
+
+          <div class="app__connect">
+            <div class="app__orb"><?php echo nx_e('home.mockup.connected'); ?></div>
+          </div>
+
+          <div class="app__loc">
+            <?php echo nx_icon('map-pin'); ?>
+            <?php echo nx_e('home.mockup.location'); ?>
+          </div>
         </div>
       </div>
+
+      <div class="device device--phone" aria-hidden="true">
+        <span class="phone__notch"></span>
+        <div class="phone__screen">
+          <div class="app__orb app__orb--sm"><?php echo nx_e('home.mockup.connected'); ?></div>
+        </div>
+        <span class="device__soon"><?php echo nx_e('home.mockup.soon'); ?></span>
+      </div>
+
     </div>
   </div>
 </section>
+
+<!-- ======================== Assurance strip ===================== -->
+<div class="assurance">
+  <div class="container assurance__inner">
+    <?php
+    $nx_assurances = array(
+        'encrypted' => 'lock',
+        'stable'    => 'activity',
+        'noconfig'  => 'file-off',
+        'switch'    => 'map-pin',
+    );
+    foreach ($nx_assurances as $nx_key => $nx_glyph): ?>
+      <span class="assurance__item">
+        <?php echo nx_icon($nx_glyph); ?>
+        <?php echo nx_e('home.assure.' . $nx_key); ?>
+      </span>
+    <?php endforeach; ?>
+  </div>
+</div>
 
 <!-- ========================== Features ========================== -->
 <section class="section" id="features">
@@ -82,9 +145,9 @@ require NX_INC . '/partials/head.php';
     <div class="grid grid--3">
       <?php
       $nx_features = array(
-          'protocols'  => 'layers',
-          'reality'    => 'shield',
-          'relay'      => 'route',
+          'encryption' => 'lock',
+          'stealth'    => 'shield',
+          'access'     => 'route',
           'hotupdate'  => 'activity',
           'locations'  => 'map-pin',
           'usage'      => 'chart',
@@ -108,7 +171,7 @@ require NX_INC . '/partials/head.php';
       <h2><?php echo nx_e('home.steps.title'); ?></h2>
     </div>
 
-    <div class="grid grid--3">
+    <div class="grid grid--3 steps-grid">
       <?php for ($nx_i = 1; $nx_i <= 3; $nx_i++): ?>
         <div class="step reveal">
           <div class="step__num"><?php echo $nx_i; ?></div>
@@ -120,20 +183,59 @@ require NX_INC . '/partials/head.php';
   </div>
 </section>
 
-<!-- ========================== Technology ======================== -->
-<section class="section">
+<!-- =========================== Security ========================= -->
+<section class="section" id="security">
   <div class="container">
     <div class="section-head">
-      <span class="eyebrow"><?php echo nx_e('home.tech.eyebrow'); ?></span>
-      <h2><?php echo nx_e('home.tech.title'); ?></h2>
-      <p><?php echo nx_e('home.tech.body'); ?></p>
+      <span class="eyebrow"><?php echo nx_e('home.security.eyebrow'); ?></span>
+      <h2><?php echo nx_e('home.security.title'); ?></h2>
+      <p><?php echo nx_e('home.security.body'); ?></p>
     </div>
 
-    <div class="grid grid--3">
-      <?php foreach (array('wireguard', 'reality', 'openvpn') as $nx_key): ?>
+    <!-- Shows the encrypted leg ending at our servers rather than running
+         all the way to the destination, because that is where a VPN's
+         protection actually stops. -->
+    <div class="reveal">
+      <div class="flow">
+        <div class="flow__node">
+          <?php echo nx_icon('monitor'); ?>
+          <span><?php echo nx_e('home.security.diagram.you'); ?></span>
+        </div>
+
+        <div class="flow__link">
+          <span class="flow__line"></span>
+          <span class="flow__tag">
+            <?php echo nx_icon('lock'); ?>
+            <?php echo nx_e('home.security.diagram.tunnel'); ?>
+          </span>
+        </div>
+
+        <div class="flow__node">
+          <?php echo nx_icon('server'); ?>
+          <span><?php echo nx_e('home.security.diagram.server'); ?></span>
+        </div>
+
+        <div class="flow__link flow__link--plain">
+          <span class="flow__line"></span>
+        </div>
+
+        <div class="flow__node flow__node--end">
+          <?php echo nx_icon('globe'); ?>
+          <span><?php echo nx_e('home.security.diagram.internet'); ?></span>
+        </div>
+      </div>
+
+      <p class="flow__caption"><?php echo nx_e('home.security.diagram.caption'); ?></p>
+    </div>
+
+    <div class="grid grid--3 u-mt-md">
+      <?php foreach (array('point1', 'point2', 'point3') as $nx_i => $nx_key):
+        $nx_glyphs = array('shield-check', 'lock', 'file-off');
+        ?>
         <article class="card reveal">
-          <h3><?php echo nx_e('home.tech.' . $nx_key . '.title'); ?></h3>
-          <p><?php echo nx_e('home.tech.' . $nx_key . '.body'); ?></p>
+          <div class="card__icon"><?php echo nx_icon($nx_glyphs[$nx_i]); ?></div>
+          <h3><?php echo nx_e('home.security.' . $nx_key . '.title'); ?></h3>
+          <p><?php echo nx_e('home.security.' . $nx_key . '.body'); ?></p>
         </article>
       <?php endforeach; ?>
     </div>
@@ -192,7 +294,7 @@ require NX_INC . '/partials/head.php';
                 </li>
               <?php endif; ?>
 
-              <?php foreach (array('all_protocols', 'all_locations', 'relay_routes', 'support') as $nx_perk): ?>
+              <?php foreach (array('all_modes', 'all_locations', 'relay_routes', 'support') as $nx_perk): ?>
                 <li>
                   <?php echo nx_icon('check'); ?>
                   <span><?php echo nx_e('home.pricing.' . $nx_perk); ?></span>
