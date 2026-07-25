@@ -84,6 +84,21 @@ EOF
   ensure_env_key "NOWPAYMENTS_API_KEY" ""
   ensure_env_key "NOWPAYMENTS_IPN_SECRET" ""
   ensure_env_key "ALERT_WEBHOOK_URL" ""
+
+  # Where this API answers from a customer's browser. Emails put links
+  # here, so it has to be the public address including the /api prefix
+  # nginx proxies under -- not the container's own port. Derived from the
+  # panel's own domain, which is the same host by definition.
+  local domain
+  domain="$(get_panel_domain)"
+  if [[ -n "$domain" ]]; then
+    ensure_env_key "PUBLIC_API_URL" "https://$domain/api"
+  else
+    # Left empty rather than guessed: the verification email falls back to
+    # its 6-digit code, which works regardless, instead of shipping a link
+    # pointing at the wrong host.
+    ensure_env_key "PUBLIC_API_URL" ""
+  fi
 }
 
 configure_nginx_and_tls() {

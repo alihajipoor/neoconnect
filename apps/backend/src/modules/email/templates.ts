@@ -116,37 +116,34 @@ function statPill(value: string, label: string): string {
   </table>`;
 }
 
-export function welcomeEmail() {
-  return {
-    subject: "Welcome to NeoConnect",
-    html: shell({
-      preheader: "Your account is ready -- verify your email to get connected.",
-      bodyHtml: `
-        ${heading("Welcome aboard ⚡")}
-        ${paragraph("Your NeoConnect account has been created.")}
-        ${paragraph("A separate verification email is on its way -- confirm your address there before you can connect to the VPN.")}
-      `,
-    }),
-    text: "Your NeoConnect account has been created. Check your inbox for a separate verification email -- you'll need to confirm your address before you can connect to the VPN.",
-  };
-}
-
-export function verificationEmail(token: string, code: string) {
+/** `publicApiUrl` is where this API answers from a customer's browser.
+ *
+ * When it's set the button points at an https:// page that verifies and
+ * then offers to open the app. Without it the button falls back to the
+ * raw `neoconnect://` link, which webmail clients strip -- Gmail and
+ * Yahoo both rendered it unclickable, confirmed on a real account. The
+ * 6-digit code works in every case, which is why it stays the most
+ * prominent element rather than the button. */
+export function verificationEmail(token: string, code: string, publicApiUrl?: string) {
   const deepLink = `neoconnect://verify-email?token=${encodeURIComponent(token)}`;
+  const link = publicApiUrl
+    ? `${publicApiUrl.replace(/\/$/, "")}/customer-auth/verify-email/open?token=${encodeURIComponent(token)}`
+    : deepLink;
+
   return {
-    subject: "Verify your NeoConnect email address",
+    subject: "Welcome to NeoConnect -- verify your email",
     html: shell({
       preheader: `Your verification code is ${code}.`,
       bodyHtml: `
-        ${heading("Verify your email")}
-        ${paragraph("Enter this code in the NeoConnect app to activate your account:")}
+        ${heading("Welcome aboard ⚡")}
+        ${paragraph("Your NeoConnect account is created. One step left -- enter this code in the app to activate it:")}
         ${bigCode(code)}
-        ${fineprint("Or, on a device with the app already installed:")}
-        ${button(deepLink, "Open in NeoConnect")}
+        ${fineprint("Or just click here:")}
+        ${button(link, "Verify my email")}
         ${fineprint("This code expires in 24 hours. If you didn't create a NeoConnect account, you can ignore this email.")}
       `,
     }),
-    text: `Your NeoConnect verification code: ${code} (expires in 24 hours). Or open: ${deepLink}`,
+    text: `Welcome to NeoConnect. Your verification code: ${code} (expires in 24 hours). Or open: ${link}`,
   };
 }
 
@@ -212,4 +209,70 @@ export function announcementEmail(body: string) {
       .map((para) => paragraph(para.replace(/\n/g, "<br>")))
       .join(""),
   });
+}
+
+/** Receipt for a payment that has cleared.
+ *
+ * Sent when the invoice is issued, which for this product is the moment
+ * the payment settles -- so it reads as a receipt rather than a demand.
+ * The link opens the invoice document, which the customer's browser can
+ * print to PDF; nothing is attached, since a PDF attachment is the
+ * single most reliable way to get a transactional email into a spam
+ * folder.
+ */
+export function invoiceIssuedEmail(params: {
+  invoiceNumber: string;
+  planName: string;
+  amountUsd: string;
+  currency: string;
+  documentUrl?: string;
+}) {
+  const amount = `$${params.amountUsd} ${params.currency.toUpperCase()}`;
+  return {
+    subject: `Your NeoConnect receipt (${params.invoiceNumber})`,
+    html: shell({
+      preheader: `${amount} for ${params.planName}.`,
+      bodyHtml: `
+        ${heading("Thanks for your payment")}
+        ${paragraph(`We've received ${amount} for your ${params.planName} subscription. It's active now.`)}
+        ${codeBlock(params.invoiceNumber)}
+        ${params.documentUrl ? button(params.documentUrl, "View invoice") : ""}
+        ${fineprint("Keep this for your records. You can view or print your invoices any time from the app.")}
+      `,
+    }),
+    text: `Payment received: ${amount} for ${params.planName}. Invoice ${params.invoiceNumber}.${
+      params.documentUrl ? ` View it: ${params.documentUrl}` : ""
+    }`,
+  };
+}
+
+/** Reminder for an invoice that has gone past its due date.
+ *
+ * Rare by design: almost everything here is paid at issue, so this only
+ * fires for slow-settling crypto or, later, reseller terms. Worded as a
+ * nudge rather than a threat, because the most likely explanation is a
+ * payment still confirming rather than someone refusing to pay.
+ */
+export function invoiceOverdueEmail(params: {
+  invoiceNumber: string;
+  amountUsd: string;
+  currency: string;
+  documentUrl?: string;
+}) {
+  const amount = `$${params.amountUsd} ${params.currency.toUpperCase()}`;
+  return {
+    subject: `Unpaid invoice ${params.invoiceNumber}`,
+    html: shell({
+      preheader: `${amount} is still outstanding.`,
+      bodyHtml: `
+        ${heading("This invoice is still unpaid")}
+        ${paragraph(`We haven't received ${amount} for invoice ${params.invoiceNumber} yet.`)}
+        ${params.documentUrl ? button(params.documentUrl, "View invoice") : ""}
+        ${fineprint("If you've already paid, it may still be confirming -- crypto payments can take a while, and this will clear on its own. Otherwise, reach out and we'll help.")}
+      `,
+    }),
+    text: `Invoice ${params.invoiceNumber} for ${amount} is unpaid.${
+      params.documentUrl ? ` View it: ${params.documentUrl}` : ""
+    }`,
+  };
 }

@@ -194,7 +194,17 @@ func statsLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, disp
 			for _, err := range errs {
 				log.Printf("stats collection error: %v", err)
 			}
-			if len(deltas) == 0 {
+
+			sessions, sessionErrs := dispatcher.CollectSessionCounts()
+			for _, err := range sessionErrs {
+				log.Printf("session count error: %v", err)
+			}
+
+			// Concurrency counts are worth sending even on a poll with no
+			// usage to report: a credential being used from several places
+			// is exactly the case where traffic may be flat while the
+			// number of users is not.
+			if len(deltas) == 0 && len(sessions) == 0 {
 				continue
 			}
 
@@ -207,8 +217,18 @@ func statsLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, disp
 					BytesDown:      d.BytesDown,
 				}
 			}
+			pbSessions := make([]*pb.SessionCount, len(sessions))
+			for i, s := range sessions {
+				pbSessions[i] = &pb.SessionCount{
+					ExternalUserId:  s.ExternalUserID,
+					Protocol:        s.Protocol,
+					DistinctSources: s.DistinctSources,
+				}
+			}
 			if err := stream.Send(&pb.AgentMessage{
-				Payload: &pb.AgentMessage_StatsBatch{StatsBatch: &pb.StatsBatch{Deltas: pbDeltas}},
+				Payload: &pb.AgentMessage_StatsBatch{
+					StatsBatch: &pb.StatsBatch{Deltas: pbDeltas, Sessions: pbSessions},
+				},
 			}); err != nil {
 				return fmt.Errorf("send stats batch: %w", err)
 			}

@@ -1,6 +1,10 @@
 export default () => ({
   port: parseInt(process.env.PORT ?? "4000", 10),
   databaseUrl: process.env.DATABASE_URL,
+  // Where this API is reachable from a customer's browser, used to build
+  // links that go in emails. Must be the public address including any
+  // path prefix nginx proxies under (/api), not the container's own port.
+  publicApiUrl: process.env.PUBLIC_API_URL,
   redis: {
     url: process.env.REDIS_URL ?? "redis://localhost:6379",
   },

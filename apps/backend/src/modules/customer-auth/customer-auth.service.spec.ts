@@ -68,7 +68,11 @@ describe("CustomerAuthService", () => {
   });
 
   describe("register", () => {
-    it("creates the customer, sends welcome + verification emails, and never issues a session", async () => {
+    it("creates the customer, sends exactly one email, and never issues a session", async () => {
+      // One, not two. Signup used to also send a standalone welcome whose
+      // whole content was "a separate verification email is on its way" --
+      // no action for the customer, and twice as much mail for a spam
+      // filter to judge. The welcome now lives inside this one.
       customersService.create.mockResolvedValue(buildCustomer());
       jwt.signAsync.mockResolvedValue("verify-token");
 
@@ -77,8 +81,8 @@ describe("CustomerAuthService", () => {
 
       expect(customersService.create).toHaveBeenCalledWith(dto);
       expect(result).toEqual({ requiresVerification: true, email: "customer@example.com" });
-      expect(emailService.sendMail).toHaveBeenCalledTimes(2);
-      expect(emailService.sendMail.mock.calls[1][0]).toMatchObject({ to: "customer@example.com" });
+      expect(emailService.sendMail).toHaveBeenCalledTimes(1);
+      expect(emailService.sendMail.mock.calls[0][0]).toMatchObject({ to: "customer@example.com" });
     });
 
     it("stores a 6-digit verification code alongside the token", async () => {
@@ -273,6 +277,56 @@ describe("CustomerAuthService", () => {
         where: { id: "customer-1" },
         data: { passwordHash: expect.any(String), tokenVersion: { increment: 1 } },
       });
+    });
+  });
+
+  describe("changePassword", () => {
+    it("refuses when the current password is wrong", async () => {
+      // The caller is already authenticated, which is exactly why this
+      // check exists: a borrowed or stolen session must not be enough to
+      // lock the real owner out of their own account.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await expect(
+        service.changePassword("customer-1", {
+          currentPassword: "not-the-right-one",
+          newPassword: "a-brand-new-password",
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(prisma.customer.update).not.toHaveBeenCalled();
+    });
+
+    it("stores a new hash and revokes every existing session", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+
+      await service.changePassword("customer-1", {
+        currentPassword: PASSWORD,
+        newPassword: "a-brand-new-password",
+      });
+
+      const { data } = prisma.customer.update.mock.calls[0][0];
+      expect(data.tokenVersion).toEqual({ increment: 1 });
+      // The raw password must never reach the database.
+      expect(data.passwordHash).not.toBe("a-brand-new-password");
+      expect(data.passwordHash).toEqual(expect.stringContaining("$argon2"));
+    });
+
+    it("returns fresh tokens, since the change signs the caller out too", async () => {
+      // Without these the app would log itself out on its very next
+      // request -- the tokenVersion bump kills the caller's own session
+      // along with everyone else's.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      jwt.signAsync.mockResolvedValue("fresh-token");
+
+      const result = await service.changePassword("customer-1", {
+        currentPassword: PASSWORD,
+        newPassword: "a-brand-new-password",
+      });
+
+      expect(result).toEqual({ accessToken: "fresh-token", refreshToken: "fresh-token" });
     });
   });
 

@@ -18,3 +18,17 @@ binaries out. `wireguard.exe` is what the app's Rust side spawns
 (`/installtunnelservice` / `/uninstalltunnelservice`) to manage the real
 tunnel; `wg.exe` is bundled alongside for future use (status queries,
 `wg show`) even though v1 doesn't call it yet.
+
+**WinDivert** (`WinDivert.dll`, `WinDivert.lib`, `WinDivert64.sys`) comes
+from the official release at `https://github.com/basil00/WinDivert` and
+backs Custom (per-app split tunnel) mode. Three files rather than one
+because `windivert-sys` links against the `.lib` at build time and needs
+all three in the directory named by `WINDIVERT_PATH`; the `.dll` and the
+`.sys` kernel driver are what actually ship.
+
+It is linked as a **separate DLL, never statically**. That is what keeps
+WinDivert's LGPL usable in this closed-source app, so do not enable the
+crate's `static`/`vendored` features without revisiting the licence
+first. The `.sys` driver self-installs on the first `WinDivertOpen()`
+from a process holding an admin token -- which the helper service already
+has as LocalSystem -- so the end user never sees a driver install step.

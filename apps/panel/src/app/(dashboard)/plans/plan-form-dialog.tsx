@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { createPlan, updatePlan } from "./actions";
 import type { Protocol, Route, SubscriptionPlan } from "@/lib/types";
@@ -33,6 +33,14 @@ export function PlanFormDialog({
   trigger: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const downRef = useRef<HTMLInputElement>(null);
+  const upRef = useRef<HTMLInputElement>(null);
+  const [caps, setCaps] = useState(Boolean(plan?.maxDownloadMbps || plan?.maxUploadMbps));
+  const [protocols, setProtocols] = useState<Protocol[]>(plan?.protocolsAllowed ?? []);
+  // Xray multiplexes every user through one process with no per-user
+  // address, so there is nothing to shape per customer. Saying so beats
+  // showing a cap that quietly does nothing on those protocols.
+  const unshapeable = protocols.filter((p) => p.startsWith("XRAY"));
   const [pending, startTransition] = useTransition();
   const isEdit = Boolean(plan);
 
@@ -51,6 +59,8 @@ export function PlanFormDialog({
     }
 
     const maxConn = String(formData.get("maxConcurrentConnections") ?? "").trim();
+    const downMbps = String(formData.get("maxDownloadMbps") ?? "").trim();
+    const upMbps = String(formData.get("maxUploadMbps") ?? "").trim();
     const defaultRouteId = String(formData.get("defaultRouteId") ?? "");
 
     startTransition(async () => {
@@ -60,6 +70,10 @@ export function PlanFormDialog({
         durationDays: Number(formData.get("durationDays")),
         priceUsd: Number(formData.get("priceUsd")),
         maxConcurrentConnections: maxConn ? Number(maxConn) : undefined,
+        // Blank means uncapped. Sent as undefined rather than 0, which the
+        // node would read as a limit of zero and cut the customer off.
+        maxDownloadMbps: downMbps ? Number(downMbps) : undefined,
+        maxUploadMbps: upMbps ? Number(upMbps) : undefined,
         protocolsAllowed,
         isActive: formData.get("isActive") === "on",
         defaultRouteId: defaultRouteId === NO_DEFAULT_ROUTE ? undefined : defaultRouteId,
@@ -135,6 +149,41 @@ export function PlanFormDialog({
               />
             </div>
           </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="maxDownloadMbps">Download limit (Mbit/s)</Label>
+              <Input
+                id="maxDownloadMbps"
+                name="maxDownloadMbps"
+                ref={downRef}
+                type="number"
+                min={1}
+                placeholder="Unlimited"
+                defaultValue={plan?.maxDownloadMbps ?? ""}
+                onChange={(e) => setCaps(Boolean(e.target.value) || Boolean(upRef.current?.value))}
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="maxUploadMbps">Upload limit (Mbit/s)</Label>
+              <Input
+                id="maxUploadMbps"
+                name="maxUploadMbps"
+                type="number"
+                min={1}
+                placeholder="Unlimited"
+                defaultValue={plan?.maxUploadMbps ?? ""}
+                ref={upRef}
+                onChange={(e) => setCaps(Boolean(e.target.value) || Boolean(downRef.current?.value))}
+              />
+            </div>
+          </div>
+          {caps && unshapeable.length > 0 ? (
+            <p className="rounded-md border border-highlight/30 bg-highlight/10 px-3 py-2 text-xs text-highlight">
+              Speed limits won&apos;t apply to {unshapeable.join(", ")}. Those protocols share a single
+              connection on the server with no per-customer address to limit, so a cap there would slow
+              every customer on the node at once. WireGuard and OpenVPN are limited normally.
+            </p>
+          ) : null}
           <div className="flex flex-col gap-2">
             <Label>Protocols</Label>
             <div className="flex flex-col gap-2">
@@ -144,6 +193,11 @@ export function PlanFormDialog({
                     name="protocolsAllowed"
                     value={protocol}
                     defaultChecked={plan?.protocolsAllowed.includes(protocol)}
+                    onCheckedChange={(checked) =>
+                      setProtocols((current) =>
+                        checked ? [...current, protocol] : current.filter((p) => p !== protocol),
+                      )
+                    }
                   />
                   {PROTOCOL_LABELS[protocol]}
                 </label>
