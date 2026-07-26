@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ArrowLeft, Check, Copy, CreditCard, Loader2, Wallet } from "lucide-react";
+import { ArrowLeft, Check, Copy, CreditCard, Gauge, HardDrive, Loader2, MonitorSmartphone, Wallet } from "lucide-react";
 import { createSubscription, getPlans, getSubscriptions, startPayment } from "../lib/customer";
 import type { PaymentProvider, PaymentStart, SubscriptionPlan } from "../lib/types";
 import { formatBytes } from "../lib/utils";
@@ -21,6 +21,26 @@ type Stage =
  * is the only honest way to know, and it's also what makes the flow work
  * when the customer pays from a different device entirely. */
 const POLL_MS = 4000;
+
+/** One "what you get" row. Icon, label, value -- the value right-aligned
+ * so the numbers line up down the card and can be compared at a glance. */
+function PlanFact({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: typeof HardDrive;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <Icon className="size-3.5 shrink-0 text-highlight" />
+      <span className="text-muted-foreground">{label}</span>
+      <span className="ms-auto font-medium tabular-nums">{value}</span>
+    </div>
+  );
+}
 
 export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack: () => void }) {
   const { t } = useI18n();
@@ -163,14 +183,64 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
             </p>
           </Card>
         ) : (
-          plans.map((plan) => (
-            <Card key={plan.id} className="flex flex-col gap-3">
-              <div className="flex items-baseline justify-between">
-                <span className="font-semibold">{plan.name}</span>
-                <span className="text-lg font-semibold text-primary">${plan.priceUsd}</span>
+          plans.map((plan, index) => (
+            <Card
+              key={plan.id}
+              className={
+                // The first plan carries a gradient hairline instead of a
+                // heavier border -- it draws the eye without shouting, and
+                // a plain list of identical cards gives the eye nowhere to
+                // land, which is most of why this screen felt flat.
+                index === 0
+                  ? "ring-brand surface surface-interactive relative flex flex-col gap-4 overflow-hidden"
+                  : "surface surface-interactive flex flex-col gap-4"
+              }
+            >
+              {index === 0 ? (
+                <span className="absolute end-0 top-0 rounded-bl-lg bg-gradient-to-r from-primary to-highlight px-2 py-0.5 text-[10px] font-semibold text-white">
+                  {t("plans.bestValue")}
+                </span>
+              ) : null}
+
+              <div>
+                <p className="text-sm font-semibold">{plan.name}</p>
+                <div className="mt-1 flex items-baseline gap-1.5">
+                  <span className="text-brand-gradient text-3xl font-bold tracking-tight tabular-nums">
+                    ${plan.priceUsd}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {t("plans.perDays", { days: plan.durationDays })}
+                  </span>
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground">
-                {formatBytes(plan.dataCapBytes)} for {plan.durationDays} days
+
+              {/* What you actually get, as scannable rows rather than one
+                  buried sentence. Speed is here because it is the second
+                  thing anyone asks after price. */}
+              <div className="flex flex-col gap-2 rounded-lg bg-black/20 p-3">
+                <PlanFact icon={HardDrive} label={t("plans.data")} value={formatBytes(plan.dataCapBytes)} />
+                <PlanFact
+                  icon={Gauge}
+                  label={t("plans.speed")}
+                  value={
+                    plan.maxDownloadMbps
+                      ? t("plans.upTo", { n: plan.maxDownloadMbps })
+                      : t("plans.unlimited")
+                  }
+                />
+                <PlanFact
+                  icon={MonitorSmartphone}
+                  label={t("plans.devices")}
+                  value={
+                    plan.maxConcurrentConnections
+                      ? t("plans.devicesAtOnce", { n: plan.maxConcurrentConnections })
+                      : t("plans.unlimited")
+                  }
+                />
+              </div>
+
+              <p className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+                {t("plans.payWith")}
               </p>
               <div className="flex gap-2">
                 <Button

@@ -83,6 +83,10 @@ export interface SubscriptionPlan {
   durationDays: number;
   priceUsd: string;
   maxConcurrentConnections: number | null;
+  /** Per-user speed caps in Mbit/s, null = uncapped. Worth showing on the
+   * plan card: "how fast" is the second thing anyone asks after price. */
+  maxDownloadMbps: number | null;
+  maxUploadMbps: number | null;
   protocolsAllowed: Protocol[];
   isActive: boolean;
   defaultRouteId: string | null;
