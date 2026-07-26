@@ -527,6 +527,36 @@ model FreeTrialSettings {
 // scheme (see modules/protocol-users/credentials-crypto.ts) rather than a
 // new crypto scheme; the raw password is never logged or returned by any
 // API response.
+/// Payment provider credentials, entered in the panel rather than baked
+/// into environment variables at deploy time.
+///
+/// Same lazily-initialised singleton shape as EmailSettings: the service
+/// findFirst()s and creates one default row if none exists.
+///
+/// Secrets are encrypted at rest with the same AES-256-GCM helper that
+/// protects VPN credentials -- an API key that can move money is at least
+/// as sensitive as one that grants a tunnel. Only the publishable key is
+/// stored in the clear, because it is published by definition.
+model PaymentSettings {
+  id String @id @default(uuid())
+
+  /// Cards. Disabled until a secret key is present, so a half-filled form
+  /// never leaves customers with a button that fails.
+  stripeEnabled                Boolean @default(false)
+  stripePublishableKey         String?
+  stripeSecretKeyEncrypted     String?
+  stripeWebhookSecretEncrypted String?
+
+  /// Crypto.
+  nowPaymentsEnabled          Boolean @default(false)
+  nowPaymentsApiKeyEncrypted  String?
+  nowPaymentsIpnSecretEncrypted String?
+
+  updatedAt DateTime @updatedAt
+
+  @@map("payment_settings")
+}
+
 model EmailSettings {
   id                String   @id @default(uuid())
   enabled           Boolean  @default(false)
