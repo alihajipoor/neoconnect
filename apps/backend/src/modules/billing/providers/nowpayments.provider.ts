@@ -1,5 +1,5 @@
 import { PaymentSettingsService } from "../../payment-settings/payment-settings.service";
-import { Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -14,6 +14,8 @@ export interface NowPaymentsPayment {
 
 @Injectable()
 export class NowPaymentsProvider {
+  private readonly logger = new Logger(NowPaymentsProvider.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly paymentSettings: PaymentSettingsService,
@@ -71,7 +73,34 @@ export class NowPaymentsProvider {
       }),
     });
     if (!res.ok) {
-      throw new Error(`NowPayments createPayment failed: ${res.status} ${await res.text()}`);
+      const raw = await res.text();
+      // The customer-facing messages below deliberately drop the
+      // provider's wording, so keep the real response here or the only
+      // record of why a payment failed is gone.
+      this.logger.error(`NowPayments createPayment failed: ${res.status} ${raw}`);
+
+      // NowPayments enforces a per-currency minimum that sits above some
+      // plan prices, and its rejection is a normal business outcome, not
+      // a server fault. Left as a bare Error it surfaced to customers as
+      // "Internal server error" with no hint that the answer is simply
+      // "pay by card or pick a bigger plan" -- observed in production on
+      // the $10 plan, where the crypto equivalent lands just under the
+      // limit once conversion is applied.
+      let code: string | undefined;
+      try {
+        code = (JSON.parse(raw) as { code?: string }).code;
+      } catch {
+        // Not JSON -- fall through to the generic message below.
+      }
+      if (code === "AMOUNT_MINIMAL_ERROR") {
+        throw new BadRequestException(
+          "This plan costs less than the minimum we can accept in crypto. Please pay by card, or choose a larger plan.",
+        );
+      }
+
+      throw new ServiceUnavailableException(
+        "Crypto payments are temporarily unavailable. Please try again shortly, or pay by card.",
+      );
     }
     const body = (await res.json()) as {
       payment_id: number | string;

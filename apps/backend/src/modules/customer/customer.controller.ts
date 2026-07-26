@@ -1,4 +1,14 @@
-import { BadRequestException, Body, Controller, Get, Header, Param, Post, UseGuards } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Header,
+  Param,
+  Post,
+  ServiceUnavailableException,
+  UseGuards,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { SubscriptionStatus } from "@prisma/client";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
@@ -145,7 +155,19 @@ export class CustomerController {
     // the app -- see StripeProvider.createCheckoutSession. The page the
     // customer returns to afterwards is served by this API, so it works
     // without the marketing site existing yet.
-    const returnUrl = `${(this.config.get<string>("publicApiUrl") ?? "").replace(/\/$/, "")}/customer/billing/return`;
+    //
+    // PUBLIC_API_URL must be set: without it this built a relative
+    // success_url, Stripe rejected the session with "Not a valid URL",
+    // and the customer saw that raw provider message with nothing
+    // pointing at the actual cause -- a deployment missing one variable.
+    // Observed in production. Failing here names the problem instead.
+    const publicApiUrl = this.config.get<string>("publicApiUrl");
+    if (!publicApiUrl) {
+      throw new ServiceUnavailableException(
+        "Payments are not fully configured on this server (PUBLIC_API_URL is unset).",
+      );
+    }
+    const returnUrl = `${publicApiUrl.replace(/\/$/, "")}/customer/billing/return`;
     return this.billingService.createForClient(dto, returnUrl);
   }
 
