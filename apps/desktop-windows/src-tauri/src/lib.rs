@@ -1,5 +1,6 @@
 mod vpn;
 
+use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 // Holds the neoconnect:// URL this instance was launched with, if any --
@@ -26,6 +27,30 @@ pub fn run() {
     let launch_url = std::env::args().find(|a| a.starts_with("neoconnect://"));
 
     tauri::Builder::default()
+        // Must be registered first, so a duplicate launch is turned away
+        // before it initialises anything else.
+        //
+        // A second window is not merely untidy here: each instance polls
+        // the same subscription and drives the same helper service, which
+        // owns exactly one tunnel. Two of them disagreeing about whether
+        // to connect means one silently tears down the other's tunnel.
+        // Reported after a customer found they could open the app as many
+        // times as they liked.
+        //
+        // The existing instance is focused instead, and any deep link the
+        // duplicate was launched with is forwarded to it -- otherwise
+        // clicking a verification link while the app was already open
+        // would do nothing at all.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            if let Some(url) = argv.iter().find(|a| a.starts_with("neoconnect://")) {
+                let _ = app.emit("deep-link-received", url.clone());
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_http::init())

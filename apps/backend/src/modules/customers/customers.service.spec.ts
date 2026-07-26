@@ -20,7 +20,8 @@ describe("CustomersService", () => {
   let service: CustomersService;
   let prisma: {
     customer: { findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock };
-    paymentTransaction: { count: jest.Mock };
+    paymentTransaction: { count: jest.Mock; deleteMany: jest.Mock };
+    invoice: { deleteMany: jest.Mock };
     protocolUser: { findMany: jest.Mock; deleteMany: jest.Mock };
     subscription: { deleteMany: jest.Mock };
     usageRecord: { deleteMany: jest.Mock };
@@ -37,7 +38,8 @@ describe("CustomersService", () => {
         update: jest.fn(),
         delete: jest.fn(),
       },
-      paymentTransaction: { count: jest.fn().mockResolvedValue(0) },
+      paymentTransaction: { count: jest.fn().mockResolvedValue(0), deleteMany: jest.fn() },
+      invoice: { deleteMany: jest.fn() },
       protocolUser: { findMany: jest.fn().mockResolvedValue([]), deleteMany: jest.fn() },
       subscription: { deleteMany: jest.fn() },
       usageRecord: { deleteMany: jest.fn() },
@@ -155,15 +157,30 @@ describe("CustomersService", () => {
       });
     });
 
-    it("refuses to delete a customer who has payment history", async () => {
+    it("refuses to delete a customer who has completed payments", async () => {
       // Financial records must survive, and deletion must not become a
       // way to erase an audit trail.
       prisma.customer.findUnique.mockResolvedValue(buildCustomer());
       prisma.paymentTransaction.count.mockResolvedValue(3);
 
-      await expect(service.remove("customer-1")).rejects.toThrow(/payment transaction/i);
+      await expect(service.remove("customer-1")).rejects.toThrow(/completed payment/i);
       expect(prisma.customer.delete).not.toHaveBeenCalled();
       expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    });
+
+    it("counts only settled payments, so an abandoned checkout is still deletable", async () => {
+      // Reported from real use: pressing a payment button and not
+      // finishing left a PENDING row that made the account permanently
+      // undeletable. Nothing financial happened, so nothing needs
+      // preserving.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.paymentTransaction.count.mockResolvedValue(0);
+
+      await service.remove("customer-1");
+
+      const where = prisma.paymentTransaction.count.mock.calls[0][0].where;
+      expect(where.status.in).toEqual(["CONFIRMED", "REFUNDED"]);
+      expect(prisma.customer.delete).toHaveBeenCalled();
     });
   });
 });

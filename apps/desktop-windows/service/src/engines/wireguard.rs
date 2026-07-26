@@ -76,6 +76,15 @@ pub fn remove_tunnel_if_present(engines: &Engines) {
 /// merely idle. Shorter would flag healthy idle tunnels as dead.
 const HANDSHAKE_STALE_AFTER_SECS: u64 = 180;
 
+/// The `wg show` subcommand that reports per-peer handshake times.
+///
+/// Named as a constant so the plural is stated once and guarded by a
+/// test. The singular reads more naturally and is wrong: wg.exe rejects
+/// it, writes usage to stderr, and prints nothing to stdout -- which the
+/// parser then reads as "no peers" and reports as Unknown for every
+/// tunnel, working or not.
+const HANDSHAKES_SUBCOMMAND: &str = "latest-handshakes";
+
 /// Whether the far end is actually answering, as opposed to whether we
 /// managed to create an interface.
 ///
@@ -94,10 +103,20 @@ pub fn handshake_health(engines: &Engines) -> HandshakeHealth {
         return HandshakeHealth::Unknown;
     };
 
-    // `wg show <iface> latest-handshake` prints "<peer>\t<unix seconds>",
+    // `wg show <iface> latest-handshakes` prints "<peer>\t<unix seconds>",
     // one line per peer. Zero means "never handshaked since the interface
     // came up", which is precisely the failed-connection case.
-    let out = match run_hidden_capture(&exe, &[OsStr::new("show"), OsStr::new(TUNNEL_NAME), OsStr::new("latest-handshake")]) {
+    //
+    // The subcommand is plural. Singular is not an alias: wg.exe rejects
+    // it, prints usage to stderr, and writes nothing to stdout -- which
+    // parsed as "no peers" and reported Unknown for every tunnel,
+    // healthy or not. Unit tests could not catch that, since they feed
+    // the parser text directly; only running it against a real interface
+    // showed it.
+    let out = match run_hidden_capture(
+        &exe,
+        &[OsStr::new("show"), OsStr::new(TUNNEL_NAME), OsStr::new(HANDSHAKES_SUBCOMMAND)],
+    ) {
         Ok(out) => out,
         Err(_) => return HandshakeHealth::Unknown,
     };
@@ -144,6 +163,14 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_700_000_000;
+
+    /// Guards the actual command, which the parser tests cannot: they
+    /// feed text in directly, so they passed for a build that asked
+    /// wg.exe the wrong question and never got an answer.
+    #[test]
+    fn the_handshakes_subcommand_is_the_plural_one_wg_accepts() {
+        assert_eq!(HANDSHAKES_SUBCOMMAND, "latest-handshakes");
+    }
 
     #[test]
     fn a_recent_handshake_means_the_peer_is_answering() {
