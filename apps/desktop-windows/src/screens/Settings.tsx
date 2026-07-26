@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { ArrowLeft, Check, KeyRound, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, KeyRound, Languages, Loader2 } from "lucide-react";
 import { changePassword } from "../lib/auth";
+import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { Button, Card, Input, Label } from "../components/ui";
 
 /** The app's settings surface.
@@ -10,6 +11,7 @@ import { Button, Card, Input, Label } from "../components/ui";
  * update preferences both land here next, and the Dashboard is meant to
  * stay a single Connect button rather than accumulating controls. */
 export function Settings({ onBack }: { onBack: () => void }) {
+  const { t, language, setLanguage } = useI18n();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -46,25 +48,49 @@ export function Settings({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex h-full flex-col gap-4 p-5">
       <div>
-        <h1 className="text-base font-semibold">Settings</h1>
-        <p className="text-xs text-muted-foreground">Manage your account.</p>
+        <h1 className="text-base font-semibold">{t("settings.title")}</h1>
+        <p className="text-xs text-muted-foreground">{t("settings.subtitle")}</p>
       </div>
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto">
+        <Card className="flex flex-col gap-3">
+          <div className="flex items-center gap-2">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-highlight/15 text-highlight">
+              <Languages className="size-4" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold">{t("settings.language")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.languageHint")}</p>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {(Object.keys(LANGUAGES) as Language[]).map((code) => (
+              <Button
+                key={code}
+                variant={code === language ? "default" : "ghost"}
+                onClick={() => setLanguage(code)}
+                className={code === language ? "flex-1 justify-center" : "flex-1 justify-center border border-white/10"}
+              >
+                {LANGUAGES[code].nativeLabel}
+              </Button>
+            ))}
+          </div>
+        </Card>
+
         <Card className="flex flex-col gap-3">
           <div className="flex items-center gap-2">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
               <KeyRound className="size-4" />
             </div>
             <div>
-              <p className="text-sm font-semibold">Change password</p>
-              <p className="text-xs text-muted-foreground">You&apos;ll stay signed in on this device.</p>
+              <p className="text-sm font-semibold">{t("settings.changePassword")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.changePasswordHint")}</p>
             </div>
           </div>
 
           <form onSubmit={submit} className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="current">Current password</Label>
+              <Label htmlFor="current">{t("settings.currentPassword")}</Label>
               <Input
                 id="current"
                 type="password"
@@ -75,7 +101,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="next">New password</Label>
+              <Label htmlFor="next">{t("settings.newPassword")}</Label>
               <Input
                 id="next"
                 type="password"
@@ -84,12 +110,12 @@ export function Settings({ onBack }: { onBack: () => void }) {
                 onChange={(e) => setNext(e.target.value)}
               />
               {tooShort ? (
-                <p className="text-xs text-muted-foreground">At least 8 characters.</p>
+                <p className="text-xs text-muted-foreground">{t("settings.tooShort")}</p>
               ) : null}
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="confirm">Confirm new password</Label>
+              <Label htmlFor="confirm">{t("settings.confirmPassword")}</Label>
               <Input
                 id="confirm"
                 type="password"
@@ -98,7 +124,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
                 onChange={(e) => setConfirm(e.target.value)}
               />
               {mismatch ? (
-                <p className="text-xs text-destructive">These don&apos;t match.</p>
+                <p className="text-xs text-destructive">{t("settings.mismatch")}</p>
               ) : null}
             </div>
 
@@ -111,13 +137,13 @@ export function Settings({ onBack }: { onBack: () => void }) {
             {done ? (
               <p className="flex items-center gap-1.5 rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success">
                 <Check className="size-3.5" />
-                Password changed. Any other devices have been signed out.
+                {t("settings.passwordChanged")}
               </p>
             ) : null}
 
             <Button type="submit" disabled={!canSubmit} className="justify-center gap-2">
               {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-              {busy ? "Changing..." : "Change password"}
+              {busy ? t("settings.changing") : t("settings.changePassword")}
             </Button>
           </form>
         </Card>
@@ -125,7 +151,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
 
       <Button variant="ghost" onClick={onBack} className="w-full justify-center gap-2 border border-white/10">
         <ArrowLeft className="size-4" />
-        Back
+        {t("nav.back")}
       </Button>
     </div>
   );

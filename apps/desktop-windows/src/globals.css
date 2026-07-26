@@ -1,6 +1,23 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Vazirmatn, bundled rather than linked: this is an offline desktop app,
+   and a webfont fetched at runtime would leave Persian text falling back
+   to whatever Windows picks -- usually Tahoma, which looks dated and sets
+   Persian noticeably worse than Latin.
+
+   The variable weight axis means one 109KB file covers every weight the
+   UI uses. Listed first for both languages so Latin text renders in it
+   too, which keeps a mixed screen (an email address beside Persian
+   labels) visually consistent instead of switching typeface mid-line.
+   SIL OFL, licence shipped alongside in src/assets. */
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("./assets/Vazirmatn-variable.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 /* Same design tokens as apps/panel/src/app/globals.css -- deliberately
    kept in sync by hand for now (no shared package yet) so the native
    client and the admin panel read as the same product. Dark-only,
@@ -75,10 +92,36 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* Vazirmatn first, then the platform default. It carries a full Latin
+       set, so English renders in it too rather than switching typeface
+       between an email address and the Persian label beside it. */
+    font-family:
+      "Vazirmatn",
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      system-ui,
+      sans-serif;
     /* Native app window, not a scrollable page -- v1 screens are all
        designed to fit the fixed 400x640 window (see tauri.conf.json). */
     overflow: hidden;
     user-select: none;
+  }
+}
+
+@layer base {
+  /* Persian ascenders and diacritics need more vertical room than Latin,
+     and at the default line height they collide with the line above. */
+  html[lang="fa"] body {
+    line-height: 1.75;
+  }
+
+  /* Numbers, dates and data sizes stay left-to-right even inside an RTL
+     sentence -- otherwise "1.5 GB" renders as "GB 1.5". */
+  html[dir="rtl"] .tabular-nums,
+  html[dir="rtl"] [data-ltr] {
+    direction: ltr;
+    unicode-bidi: embed;
   }
 }
 
