@@ -49,7 +49,7 @@ export class StripeProvider {
           price_data: {
             currency: "usd",
             unit_amount: Math.round(amountUsd * 100),
-            product_data: { name: `NeoConnect ${planName}` },
+            product_data: { name: `Neoxify ${planName}` },
           },
         },
       ],

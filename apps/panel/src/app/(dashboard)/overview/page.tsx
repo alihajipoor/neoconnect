@@ -20,7 +20,7 @@ export default async function OverviewPage() {
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-xl font-semibold">Overview</h1>
-        <p className="text-sm text-muted-foreground">What&apos;s happening across NeoConnect right now.</p>
+        <p className="text-sm text-muted-foreground">What&apos;s happening across Neoxify right now.</p>
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard label="Customers" value={customers.length} icon={Users} accent="primary" />

@@ -46,7 +46,7 @@ const LOG_FILE: &str = "openvpn.log";
 /// Distinct from the one Xray creates ("neoconnect0"), so the two
 /// engines can never contend for the same adapter when switching
 /// between them.
-const ADAPTER_NAME: &str = "NeoConnect-OpenVPN";
+const ADAPTER_NAME: &str = "Neoxify-OpenVPN";
 
 /// Makes sure a Wintun adapter exists for OpenVPN to attach to.
 ///
@@ -212,7 +212,7 @@ mod tests {
         // Without naming an adapter, OpenVPN searches for any free
         // Wintun device and fails when Xray is holding the only one.
         let conf = build_config(&profile()).unwrap();
-        assert!(conf.contains("dev-node NeoConnect-OpenVPN"));
+        assert!(conf.contains("dev-node Neoxify-OpenVPN"));
     }
 
     #[test]

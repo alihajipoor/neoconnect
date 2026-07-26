@@ -46,7 +46,7 @@ export class InvoicesService {
     if (!payment) throw new NotFoundException("Payment transaction not found");
 
     const plan = payment.subscription?.plan;
-    const planName = plan?.name ?? "NeoConnect subscription";
+    const planName = plan?.name ?? "Neoxify subscription";
     const periodStart = payment.subscription?.startAt ?? payment.createdAt;
     const periodEnd = payment.subscription?.expireAt ?? payment.createdAt;
 

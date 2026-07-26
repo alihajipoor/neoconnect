@@ -35,7 +35,7 @@ function formatDate(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
 
-export function renderInvoiceHtml(invoice: Invoice, customerEmail: string, businessName = "NeoConnect"): string {
+export function renderInvoiceHtml(invoice: Invoice, customerEmail: string, businessName = "Neoxify"): string {
   const lineItems = (invoice.lineItemsJson as unknown as LineItem[]) ?? [];
   const rows = lineItems
     .map(

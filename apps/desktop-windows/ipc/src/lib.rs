@@ -1,4 +1,4 @@
-//! Wire contract between the NeoConnect desktop app and its privileged
+//! Wire contract between the Neoxify desktop app and its privileged
 //! helper service, plus the validation every field must survive before
 //! the service will act on it.
 //!

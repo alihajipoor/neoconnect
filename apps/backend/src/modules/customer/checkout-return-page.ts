@@ -13,15 +13,15 @@
 export function checkoutReturnPage(cancelled: boolean): string {
   const headline = cancelled ? "Payment cancelled" : "Almost there";
   const detail = cancelled
-    ? "Nothing was charged. You can start again from the NeoConnect app whenever you're ready."
-    : "Thanks &mdash; we're confirming your payment now. Head back to the NeoConnect app; your subscription activates there automatically, usually within a few seconds.";
+    ? "Nothing was charged. You can start again from the Neoxify app whenever you're ready."
+    : "Thanks &mdash; we're confirming your payment now. Head back to the Neoxify app; your subscription activates there automatically, usually within a few seconds.";
 
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NeoConnect</title>
+<title>Neoxify</title>
 <style>
   :root { color-scheme: light; }
   body {
@@ -39,7 +39,7 @@ export function checkoutReturnPage(cancelled: boolean): string {
   .muted { color:#6b7280; font-size:13px; }
 </style>
 </head>
-<body><div class="card"><div class="bar">&#9889; NeoConnect</div><div class="body">
+<body><div class="card"><div class="bar">&#9889; Neoxify</div><div class="body">
   <h1>${headline}</h1>
   <p>${detail}</p>
   <p class="muted">You can close this tab.</p>

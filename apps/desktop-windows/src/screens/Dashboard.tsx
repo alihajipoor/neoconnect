@@ -164,7 +164,7 @@ export function Dashboard({
             <Card className="flex flex-col gap-3">
               <p className="text-sm font-medium">No active subscription</p>
               <p className="text-xs text-muted-foreground">
-                Choose a plan to start using NeoConnect.
+                Choose a plan to start using Neoxify.
               </p>
               <Button onClick={onBrowsePlans} className="w-full justify-center gap-2">
                 <Tag className="size-4" />

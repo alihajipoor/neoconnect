@@ -19,7 +19,7 @@ const FONT_STACK =
   "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 /** Wraps a template's body content in the shared branded shell: a
- * gradient header with the NeoConnect mark, a white card, and a muted
+ * gradient header with the Neoxify mark, a white card, and a muted
  * footer. `preheader` is the short hidden preview text most mail clients
  * show next to the subject line in the inbox list. */
 function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string }): string {
@@ -34,7 +34,7 @@ function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string })
             <tr>
               <td style="background-color:${PRIMARY};background-image:linear-gradient(135deg,${PRIMARY} 0%,${PRIMARY_DARK} 60%,#5b21b6 100%);padding:28px 32px;">
                 <span style="font-size:22px;line-height:1;vertical-align:middle;">&#9889;</span>
-                <span style="font-size:19px;font-weight:700;color:#ffffff;letter-spacing:0.2px;vertical-align:middle;margin-left:8px;">NeoConnect</span>
+                <span style="font-size:19px;font-weight:700;color:#ffffff;letter-spacing:0.2px;vertical-align:middle;margin-left:8px;">Neoxify</span>
               </td>
             </tr>
             <tr>
@@ -45,7 +45,7 @@ function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string })
             <tr>
               <td style="padding:20px 32px;border-top:1px solid ${BORDER};background:#fbfaff;">
                 <p style="margin:0;font-size:12px;color:${MUTED};">
-                  You're receiving this because you have a NeoConnect account. If something here looks wrong, ignore this email or reach out to support.
+                  You're receiving this because you have a Neoxify account. If something here looks wrong, ignore this email or reach out to support.
                 </p>
               </td>
             </tr>
@@ -131,44 +131,44 @@ export function verificationEmail(token: string, code: string, publicApiUrl?: st
     : deepLink;
 
   return {
-    subject: "Welcome to NeoConnect -- verify your email",
+    subject: "Welcome to Neoxify -- verify your email",
     html: shell({
       preheader: `Your verification code is ${code}.`,
       bodyHtml: `
         ${heading("Welcome aboard ⚡")}
-        ${paragraph("Your NeoConnect account is created. One step left -- enter this code in the app to activate it:")}
+        ${paragraph("Your Neoxify account is created. One step left -- enter this code in the app to activate it:")}
         ${bigCode(code)}
         ${fineprint("Or just click here:")}
         ${button(link, "Verify my email")}
-        ${fineprint("This code expires in 24 hours. If you didn't create a NeoConnect account, you can ignore this email.")}
+        ${fineprint("This code expires in 24 hours. If you didn't create a Neoxify account, you can ignore this email.")}
       `,
     }),
-    text: `Welcome to NeoConnect. Your verification code: ${code} (expires in 24 hours). Or open: ${link}`,
+    text: `Welcome to Neoxify. Your verification code: ${code} (expires in 24 hours). Or open: ${link}`,
   };
 }
 
 export function passwordResetEmail(token: string) {
   const deepLink = `neoconnect://reset-password?token=${encodeURIComponent(token)}`;
   return {
-    subject: "Reset your NeoConnect password",
+    subject: "Reset your Neoxify password",
     html: shell({
       preheader: "Use this code to reset your password.",
       bodyHtml: `
         ${heading("Reset your password")}
         ${paragraph("A password reset was requested for your account. Enter this code in the app to continue:")}
         ${codeBlock(token)}
-        ${button(deepLink, "Open in NeoConnect")}
+        ${button(deepLink, "Open in Neoxify")}
         ${fineprint("This code expires in 30 minutes. If you didn't request this, you can safely ignore this email -- your password won't change.")}
       `,
     }),
-    text: `A password reset was requested for your NeoConnect account. Code: ${token} (expires in 30 minutes). Or open: ${deepLink}. If you didn't request this, ignore this email.`,
+    text: `A password reset was requested for your Neoxify account. Code: ${token} (expires in 30 minutes). Or open: ${deepLink}. If you didn't request this, ignore this email.`,
   };
 }
 
 export function lowDataWarningEmail(remainingGb: number) {
   const remaining = remainingGb.toFixed(1);
   return {
-    subject: "Your NeoConnect data is running low",
+    subject: "Your Neoxify data is running low",
     html: shell({
       preheader: `About ${remaining} GB left on your current plan.`,
       bodyHtml: `
@@ -184,7 +184,7 @@ export function lowDataWarningEmail(remainingGb: number) {
 export function expiringSoonEmail(daysRemaining: number) {
   const unit = daysRemaining === 1 ? "day" : "days";
   return {
-    subject: "Your NeoConnect subscription is expiring soon",
+    subject: "Your Neoxify subscription is expiring soon",
     html: shell({
       preheader: `Your subscription expires in about ${daysRemaining} ${unit}.`,
       bodyHtml: `
@@ -229,7 +229,7 @@ export function invoiceIssuedEmail(params: {
 }) {
   const amount = `$${params.amountUsd} ${params.currency.toUpperCase()}`;
   return {
-    subject: `Your NeoConnect receipt (${params.invoiceNumber})`,
+    subject: `Your Neoxify receipt (${params.invoiceNumber})`,
     html: shell({
       preheader: `${amount} for ${params.planName}.`,
       bodyHtml: `

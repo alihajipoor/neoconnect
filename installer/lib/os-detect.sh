@@ -34,7 +34,7 @@ detect_os() {
       esac
       ;;
     *)
-      echo "ERROR: Unsupported OS '$OS_ID'. NeoConnect agent supports Ubuntu 20.04-26.04 and Debian 11-12." >&2
+      echo "ERROR: Unsupported OS '$OS_ID'. Neoxify agent supports Ubuntu 20.04-26.04 and Debian 11-12." >&2
       exit 1
       ;;
   esac
