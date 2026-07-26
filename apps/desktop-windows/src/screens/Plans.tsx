@@ -93,9 +93,31 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
     // never touch this process, and 3-D Secure is Stripe's problem
     // rather than ours.
     if (payment.data.provider === "STRIPE") {
-      await openUrl(payment.data.checkoutUrl);
+      // A failure here must not stop the screen advancing. The payment
+      // is already created and the URL is valid -- only the browser
+      // handoff failed -- and the waiting screen is where "Reopen
+      // payment page" lives. Letting this reject left the app on the
+      // spinner forever with no error and no way back.
+      try {
+        await openUrl(payment.data.checkoutUrl);
+      } catch {
+        setError(t("plans.browserFailed"));
+      }
     }
     setStage({ name: "awaiting", payment: payment.data });
+  }
+
+  /** Retry the browser handoff, reporting failure instead of swallowing
+   * it -- a `void`-ed rejection here meant the button appeared to do
+   * nothing at all, which is indistinguishable from the app being
+   * broken. */
+  async function reopenCheckout(url: string) {
+    setError(null);
+    try {
+      await openUrl(url);
+    } catch {
+      setError(t("plans.browserFailed"));
+    }
   }
 
   async function copyAddress(address: string) {
@@ -111,12 +133,23 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
         <Logo />
         <Card className="flex flex-1 flex-col gap-3">
           <h1 className="text-base font-semibold">{t("plans.waiting")}</h1>
+          {/* Reachable now that a failed browser handoff still lands
+              here rather than stalling on the spinner. */}
+          {error ? (
+            <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {error}
+            </p>
+          ) : null}
           {payment.provider === "STRIPE" ? (
             <>
               <p className="text-sm text-muted-foreground">
                 Finish the payment in your browser. This screen updates on its own once it clears.
               </p>
-              <Button variant="ghost" onClick={() => void openUrl(payment.checkoutUrl)} className="border border-white/10">
+              <Button
+                variant="outline"
+                onClick={() => void reopenCheckout(payment.checkoutUrl)}
+                className="w-full justify-center"
+              >
                 Reopen payment page
               </Button>
             </>
