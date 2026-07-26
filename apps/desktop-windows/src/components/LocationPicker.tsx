@@ -5,6 +5,7 @@ import { PROTOCOL_LABELS } from "../lib/protocol-labels";
 import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
 import { Button } from "./ui";
+import { useI18n } from "../lib/i18n";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
 // fixed 400x640 (see tauri.conf.json), so "sheet slides over the whole
@@ -23,6 +24,7 @@ export function LocationPicker({
    * component doesn't decide what the switch response is worth trusting. */
   onSwitched: () => void;
 }) {
+  const { t } = useI18n();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
@@ -63,8 +65,8 @@ export function LocationPicker({
     <div className="absolute inset-0 z-20 flex flex-col bg-background">
       <div className="flex items-center justify-between border-b border-border px-5 py-4">
         <div>
-          <h2 className="text-sm font-semibold">Choose location</h2>
-          <p className="text-xs text-muted-foreground">Disconnect first to switch servers</p>
+          <h2 className="text-sm font-semibold">{t("loc.title")}</h2>
+          <p className="text-xs text-muted-foreground">{t("loc.disconnectFirst")}</p>
         </div>
         <button
           onClick={onClose}
@@ -82,7 +84,7 @@ export function LocationPicker({
         ) : error ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center">
             <p className="text-sm text-destructive">{error}</p>
-            <Button onClick={() => void load()}>Retry</Button>
+            <Button onClick={() => void load()}>{t("loc.retry")}</Button>
           </div>
         ) : routes.length === 0 ? (
           <p className="px-2 py-6 text-center text-sm text-muted-foreground">

@@ -24,6 +24,12 @@ export type Language = keyof typeof LANGUAGES;
  */
 const en = {
   "app.tagline": "Private, fast, yours.",
+  "auth.signInToConnect": "Sign in to connect.",
+  "auth.noCardRequired": "No credit card required to get started.",
+  "verify.noCode": "Didn't get a code? Resend it",
+  "loc.title": "Choose location",
+  "loc.disconnectFirst": "Disconnect first to switch servers",
+  "loc.retry": "Retry",
 
   "nav.settings": "Settings",
   "nav.signOut": "Sign out",
@@ -46,6 +52,7 @@ const en = {
   "verify.confirm": "Confirm",
   "verify.confirming": "Confirming...",
   "verify.resend": "Send it again",
+  "verify.sending": "Sending...",
 
   "dash.connect": "Connect",
   "dash.connecting": "Connecting...",
@@ -81,6 +88,19 @@ const en = {
   "settings.tooShort": "At least 8 characters.",
   "settings.mismatch": "These don't match.",
 
+  "dash.subscription": "Subscription",
+  "dash.retry": "Retry",
+  "dash.loadFailed": "Could not load your account.",
+  "dash.changeLocation": "Change location",
+  "dash.status.active": "ACTIVE",
+
+  "plans.back": "Back",
+  "plans.amount": "Amount",
+  "plans.toAddress": "To this address",
+  "plans.openCheckout": "Open checkout",
+  "plans.copied": "Copied",
+  "plans.copyAddress": "Copy address",
+
   "common.loading": "Loading...",
 } as const;
 
@@ -92,6 +112,12 @@ export type TranslationKey = keyof typeof en;
  * unfinished. */
 const fa: Record<TranslationKey, string> = {
   "app.tagline": "خصوصی، سریع، مال شما.",
+  "auth.signInToConnect": "برای اتصال وارد شوید.",
+  "auth.noCardRequired": "برای شروع نیازی به کارت بانکی نیست.",
+  "verify.noCode": "کد را دریافت نکردید؟ ارسال دوباره",
+  "loc.title": "انتخاب موقعیت",
+  "loc.disconnectFirst": "برای تغییر سرور ابتدا قطع کنید",
+  "loc.retry": "تلاش دوباره",
 
   "nav.settings": "تنظیمات",
   "nav.signOut": "خروج",
@@ -114,6 +140,7 @@ const fa: Record<TranslationKey, string> = {
   "verify.confirm": "تأیید",
   "verify.confirming": "در حال تأیید...",
   "verify.resend": "ارسال دوباره",
+  "verify.sending": "در حال ارسال...",
 
   "dash.connect": "اتصال",
   "dash.connecting": "در حال اتصال...",
@@ -148,6 +175,19 @@ const fa: Record<TranslationKey, string> = {
   "settings.changing": "در حال تغییر...",
   "settings.tooShort": "حداقل ۸ کاراکتر.",
   "settings.mismatch": "یکسان نیستند.",
+
+  "dash.subscription": "اشتراک",
+  "dash.retry": "تلاش دوباره",
+  "dash.loadFailed": "بارگذاری حساب کاربری ممکن نشد.",
+  "dash.changeLocation": "تغییر موقعیت",
+  "dash.status.active": "فعال",
+
+  "plans.back": "بازگشت",
+  "plans.amount": "مبلغ",
+  "plans.toAddress": "به این آدرس",
+  "plans.openCheckout": "باز کردن صفحه پرداخت",
+  "plans.copied": "کپی شد",
+  "plans.copyAddress": "کپی آدرس",
 
   "common.loading": "در حال بارگذاری...",
 };

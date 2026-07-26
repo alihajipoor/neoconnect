@@ -6,6 +6,7 @@ import type { PaymentProvider, PaymentStart, SubscriptionPlan } from "../lib/typ
 import { formatBytes } from "../lib/utils";
 import { Button, Card } from "../components/ui";
 import { Logo } from "../components/Logo";
+import { useI18n } from "../lib/i18n";
 
 type Stage =
   | { name: "choosing" }
@@ -22,6 +23,7 @@ type Stage =
 const POLL_MS = 4000;
 
 export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack: () => void }) {
+  const { t } = useI18n();
   const [plans, setPlans] = useState<SubscriptionPlan[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stage, setStage] = useState<Stage>({ name: "choosing" });
@@ -88,7 +90,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
       <div className="flex h-full flex-col gap-4 p-5">
         <Logo />
         <Card className="flex flex-1 flex-col gap-3">
-          <h1 className="text-base font-semibold">Waiting for payment</h1>
+          <h1 className="text-base font-semibold">{t("plans.waiting")}</h1>
           {payment.provider === "STRIPE" ? (
             <>
               <p className="text-sm text-muted-foreground">
@@ -105,13 +107,13 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
                 confirms it.
               </p>
               <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                <p className="text-xs text-muted-foreground">Amount</p>
+                <p className="text-xs text-muted-foreground">{t("plans.amount")}</p>
                 <p className="font-mono text-sm">
                   {payment.payAmount} {payment.payCurrency.toUpperCase()}
                 </p>
               </div>
               <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                <p className="text-xs text-muted-foreground">To this address</p>
+                <p className="text-xs text-muted-foreground">{t("plans.toAddress")}</p>
                 <p className="break-all font-mono text-xs">{payment.payAddress}</p>
               </div>
               <Button
@@ -120,7 +122,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
                 className="gap-2 border border-white/10"
               >
                 {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-                {copied ? "Copied" : "Copy address"}
+                {copied ? t("plans.copied") : t("plans.copyAddress")}
               </Button>
             </>
           )}
@@ -131,7 +133,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
         </Card>
         <Button variant="ghost" onClick={onBack} className="w-full justify-center gap-2 border border-white/10">
           <ArrowLeft className="size-4" />
-          Back
+          {t("plans.back")}
         </Button>
       </div>
     );
@@ -141,8 +143,8 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
     <div className="flex h-full flex-col gap-4 p-5">
       <Logo />
       <div>
-        <h1 className="text-base font-semibold">Choose a plan</h1>
-        <p className="text-xs text-muted-foreground">Pick a plan to start connecting.</p>
+        <h1 className="text-base font-semibold">{t("plans.title")}</h1>
+        <p className="text-xs text-muted-foreground">{t("plans.subtitle")}</p>
       </div>
 
       {error ? (
@@ -153,7 +155,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto">
         {plans === null ? (
-          <p className="text-sm text-muted-foreground">Loading plans...</p>
+          <p className="text-sm text-muted-foreground">{t("plans.loading")}</p>
         ) : plans.length === 0 ? (
           <Card>
             <p className="text-sm text-muted-foreground">
@@ -177,7 +179,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
                   className="flex-1 gap-2"
                 >
                   <Wallet className="size-4" />
-                  Crypto
+                  {t("plans.crypto")}
                 </Button>
                 <Button
                   variant="ghost"
@@ -186,7 +188,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
                   className="flex-1 gap-2 border border-white/10"
                 >
                   <CreditCard className="size-4" />
-                  Card
+                  {t("plans.card")}
                 </Button>
               </div>
             </Card>
@@ -196,7 +198,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
 
       <Button variant="ghost" onClick={onBack} className="w-full justify-center gap-2 border border-white/10">
         <ArrowLeft className="size-4" />
-        Back
+        {t("plans.back")}
       </Button>
     </div>
   );
