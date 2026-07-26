@@ -14,7 +14,8 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, OpenvpnProfile, Request, Response, WireguardProfile, XrayProfile, PIPE_NAME,
+    ConnectProfile, OpenvpnProfile, Request, Response, TunnelHealth, WireguardProfile, XrayProfile,
+    PIPE_NAME,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -190,14 +191,19 @@ pub async fn vpn_disconnect() -> Result<(), String> {
 
 #[derive(Debug, serde::Serialize)]
 pub struct VpnStatus {
+    /// An engine is running. Weaker than it sounds -- see `health`.
     connected: bool,
     protocol: Option<String>,
+    /// Whether the far end is actually answering. Carried separately
+    /// because `connected` alone was being shown to customers as
+    /// "Connected" while no traffic was flowing.
+    health: TunnelHealth,
 }
 
 #[tauri::command]
 pub async fn vpn_status() -> Result<VpnStatus, String> {
     match call(&Request::Status).await? {
-        Response::State { connected, protocol } => Ok(VpnStatus { connected, protocol }),
+        Response::State { connected, protocol, health } => Ok(VpnStatus { connected, protocol, health }),
         Response::Error { message } => Err(message),
         Response::Ok => Err("the background service returned an unexpected reply".into()),
     }

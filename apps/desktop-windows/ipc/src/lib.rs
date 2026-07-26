@@ -46,8 +46,44 @@ pub enum Response {
     /// Reports what is actually running, re-derived from live process /
     /// service state rather than from a remembered flag, so a
     /// crashed-engine case surfaces as disconnected instead of lying.
-    State { connected: bool, protocol: Option<String> },
+    ///
+    /// `connected` answers "is an engine up", which is a weaker claim
+    /// than most callers assume; `health` answers "is the far end
+    /// actually answering". Both are reported because they genuinely
+    /// differ: a WireGuard tunnel whose peer never replies has
+    /// `connected: true` and `health: NeverHandshaked`, and calling that
+    /// state "Connected" is what told customers they were protected when
+    /// they were not.
+    State {
+        connected: bool,
+        protocol: Option<String>,
+        #[serde(default)]
+        health: TunnelHealth,
+    },
     Error { message: String },
+}
+
+/// Whether the far end is answering, separate from whether an engine is
+/// running locally.
+///
+/// Deliberately has an explicit "unknown" rather than defaulting to
+/// either healthy or broken: for protocols or situations where no
+/// trustworthy evidence is available, saying so lets the UI stay quiet
+/// instead of inventing reassurance or alarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum TunnelHealth {
+    /// Positive evidence the peer is responding.
+    Alive { age_secs: u64 },
+    /// It responded once but has gone quiet.
+    Stale { age_secs: u64 },
+    /// An engine is up but the peer has never responded: wrong key,
+    /// unreachable host, or a blocked port.
+    NeverHandshaked,
+    /// Nothing is running, so there is nothing to assess.
+    Down,
+    #[default]
+    Unknown,
 }
 
 /// The credentials for one connection, in exactly the shape the backend

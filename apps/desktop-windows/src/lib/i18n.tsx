@@ -102,6 +102,9 @@ const en = {
   "dash.protectedHint": "Your traffic is encrypted and routed through Neoxify.",
   "dash.notProtected": "You're not protected",
   "dash.notProtectedHint": "Connect to encrypt your traffic and hide your IP.",
+  "dash.degraded": "Not carrying traffic",
+  "dash.degradedHint": "The tunnel is up but the server isn't responding. Your traffic is NOT protected. Try reconnecting or pick another server.",
+  "dash.verifying": "Checking connection...",
 
   "plans.back": "Back",
   "plans.perDays": "for {days} days",
@@ -209,6 +212,9 @@ const fa: Record<TranslationKey, string> = {
   "dash.protectedHint": "ترافیک شما رمزگذاری شده و از طریق نئوکسیفای عبور می‌کند.",
   "dash.notProtected": "شما محافظت نمی‌شوید",
   "dash.notProtectedHint": "برای رمزگذاری ترافیک و پنهان‌کردن آی‌پی خود متصل شوید.",
+  "dash.degraded": "ترافیک عبور نمی‌کند",
+  "dash.degradedHint": "تونل برقرار است اما سرور پاسخ نمی‌دهد. ترافیک شما محافظت نمی‌شود. دوباره وصل شوید یا سرور دیگری انتخاب کنید.",
+  "dash.verifying": "در حال بررسی اتصال...",
 
   "plans.back": "بازگشت",
   "plans.perDays": "برای {days} روز",

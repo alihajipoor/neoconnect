@@ -19,7 +19,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use neoconnect_ipc::ConnectProfile;
+use neoconnect_ipc::{ConnectProfile, TunnelHealth};
 
 /// Suppresses the console window a child process would otherwise flash
 /// on screen. Every spawn in this service sets it -- the user must never
@@ -168,15 +168,25 @@ impl Engines {
     /// Reports live state rather than a remembered flag, so an engine
     /// that died on its own is reported as disconnected instead of the
     /// UI showing a tunnel that isn't there.
-    pub fn status(&mut self) -> (bool, Option<String>) {
+    /// The third element is the honest answer to "is traffic actually
+    /// getting through", which the first two cannot give. A running
+    /// engine is necessary but nowhere near sufficient -- see
+    /// [`wireguard::handshake_health`].
+    pub fn status(&mut self) -> (bool, Option<String>, TunnelHealth) {
         match &mut self.active {
-            None => (false, None),
+            None => (false, None, TunnelHealth::Down),
             Some(Active::WireguardTunnel) => {
                 if wireguard::tunnel_is_running() {
-                    (true, Some("WIREGUARD".into()))
+                    let health = match wireguard::handshake_health(self) {
+                        wireguard::HandshakeHealth::Alive { age_secs } => TunnelHealth::Alive { age_secs },
+                        wireguard::HandshakeHealth::Stale { age_secs } => TunnelHealth::Stale { age_secs },
+                        wireguard::HandshakeHealth::NeverHandshaked => TunnelHealth::NeverHandshaked,
+                        wireguard::HandshakeHealth::Unknown => TunnelHealth::Unknown,
+                    };
+                    (true, Some("WIREGUARD".into()), health)
                 } else {
                     self.active = None;
-                    (false, None)
+                    (false, None, TunnelHealth::Down)
                 }
             }
             Some(Active::Child { protocol, child, routes }) => match child.try_wait() {
@@ -188,9 +198,13 @@ impl Engines {
                     // as we notice, not only on an explicit disconnect.
                     routes.remove();
                     self.active = None;
-                    (false, None)
+                    (false, None, TunnelHealth::Down)
                 }
-                Ok(None) => (true, Some((*protocol).to_string())),
+                // Xray and OpenVPN have no equivalent of WireGuard's
+                // handshake timestamp available this cheaply, so this
+                // reports Unknown rather than implying evidence that was
+                // never gathered. The app's egress check covers them.
+                Ok(None) => (true, Some((*protocol).to_string()), TunnelHealth::Unknown),
             },
         }
     }

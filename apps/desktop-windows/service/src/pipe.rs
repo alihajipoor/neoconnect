@@ -200,8 +200,8 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             Err(message) => Response::Error { message },
         },
         Request::Status => {
-            let (connected, protocol) = engines.status();
-            Response::State { connected, protocol }
+            let (connected, protocol, health) = engines.status();
+            Response::State { connected, protocol, health }
         }
     }
 }
