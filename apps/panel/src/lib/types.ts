@@ -147,3 +147,18 @@ export interface InvoiceSummary {
   byPlan: { name: string; amountUsd: string }[];
   byProvider: { provider: string; amountUsd: string }[];
 }
+
+/** Payment provider configuration. Secrets are never sent to the browser
+ * -- the API returns only whether each one is set, so the form can show
+ * "configured" without ever holding a live key. */
+export interface PaymentSettings {
+  id: string;
+  stripeEnabled: boolean;
+  stripePublishableKey: string | null;
+  stripeSecretKeySet: boolean;
+  stripeWebhookSecretSet: boolean;
+  nowPaymentsEnabled: boolean;
+  nowPaymentsApiKeySet: boolean;
+  nowPaymentsIpnSecretSet: boolean;
+  updatedAt: string;
+}

@@ -60,3 +60,22 @@ export async function updateEmailSettingsAction(input: {
   if (result.ok) revalidatePath("/settings");
   return result;
 }
+
+export async function updatePaymentSettingsAction(input: {
+  stripeEnabled: boolean;
+  stripePublishableKey?: string;
+  stripeSecretKey?: string;
+  stripeWebhookSecret?: string;
+  nowPaymentsEnabled: boolean;
+  nowPaymentsApiKey?: string;
+  nowPaymentsIpnSecret?: string;
+}): Promise<MutationResult<void>> {
+  const result = await apiMutate<void>("/payment-settings", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  // Every settings section lives under /settings, so the whole subtree is
+  // revalidated rather than just the page that submitted.
+  if (result.ok) revalidatePath("/settings", "layout");
+  return result;
+}
