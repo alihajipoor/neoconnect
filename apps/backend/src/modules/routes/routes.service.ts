@@ -45,7 +45,8 @@ export class RoutesService {
         entryProtocolConfig: {
           select: {
             protocol: true,
-            node: { select: { name: true, region: true } },
+            listenPort: true,
+            node: { select: { name: true, region: true, publicIp: true, status: true, lastHeartbeatAt: true } },
           },
         },
       },
@@ -57,6 +58,20 @@ export class RoutesService {
       protocol: entryProtocolConfig.protocol,
       isRelay: exitProtocolConfigId !== null,
       location: { region: entryProtocolConfig.node.region, nodeName: entryProtocolConfig.node.name },
+      // The address the client dials, so the app can measure its own
+      // latency to each option rather than showing a number measured
+      // from this server, which is irrelevant to the customer.
+      //
+      // Only the *entry* endpoint. A relayed route's exit node stays
+      // hidden, per the same reasoning that keeps uplinkCredentialsJson
+      // out of this response -- and the entry is what the client
+      // connects to anyway, so it is also the honest thing to time.
+      endpoint: { host: entryProtocolConfig.node.publicIp, port: entryProtocolConfig.listenPort },
+      // Availability as the control plane sees it (agent heartbeats,
+      // M2). Answers a different question from latency -- "is it up" vs
+      // "is it fast for me" -- and a node that is down should be marked
+      // so before the client wastes time probing it.
+      nodeStatus: entryProtocolConfig.node.status,
     }));
   }
 

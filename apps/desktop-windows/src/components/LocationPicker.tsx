@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Check, Loader2, MapPin, Repeat, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
 import { PROTOCOL_LABELS } from "../lib/protocol-labels";
 import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
 import { Button } from "./ui";
+import { Latency } from "./Latency";
 import { useI18n } from "../lib/i18n";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
@@ -30,6 +32,10 @@ export function LocationPicker({
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [switchError, setSwitchError] = useState<string | null>(null);
+  /** Measured round-trip per route. Absent means "not measured yet",
+   * which renders as "--" -- distinct from a measured failure, which is
+   * an explicit null. Both are honest; neither invents a number. */
+  const [latencies, setLatencies] = useState<Record<string, number | null>>({});
 
   useEffect(() => {
     void load();
@@ -41,10 +47,35 @@ export function LocationPicker({
     const result = await getAvailableRoutes(subscriptionId);
     if (result.ok) {
       setRoutes(result.data);
+      void measureAll(result.data);
     } else {
       setError(result.error);
     }
     setLoading(false);
+  }
+
+  /** Times every server at once and fills each in as it lands.
+   *
+   * Deliberately not awaited by the caller: the list must render
+   * immediately and populate, rather than making the customer wait on the
+   * slowest server before seeing anything. A node the control plane
+   * already knows is offline is skipped rather than timed out against --
+   * there is no useful number for a server that is down.
+   */
+  async function measureAll(options: RouteOption[]) {
+    await Promise.all(
+      options.map(async (route) => {
+        if (route.nodeStatus !== "ONLINE") {
+          setLatencies((prev) => ({ ...prev, [route.id]: null }));
+          return;
+        }
+        const ms = await invoke<number | null>("measure_latency", {
+          host: route.endpoint.host,
+          port: route.endpoint.port,
+        }).catch(() => null);
+        setLatencies((prev) => ({ ...prev, [route.id]: ms }));
+      }),
+    );
   }
 
   async function handlePick(route: RouteOption) {
@@ -121,6 +152,7 @@ export function LocationPicker({
                       {route.location.region} &middot; {PROTOCOL_LABELS[route.protocol]}
                     </span>
                   </div>
+                  <Latency ms={route.id in latencies ? latencies[route.id] : null} />
                   {route.isRelay ? (
                     <span className="flex shrink-0 items-center gap-1 rounded-full bg-highlight/15 px-2 py-0.5 text-[10px] font-medium text-highlight">
                       <Repeat className="size-3" />

@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { formatBytes } from "../lib/utils";
+import { captureBaselineIp, verifyEgress, type EgressVerdict } from "../lib/egress";
+import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
@@ -93,6 +95,34 @@ async function confirmReachable(): Promise<ConnectionState> {
   return last;
 }
 
+/** Combines the two independent pieces of evidence.
+ *
+ * They answer different questions and neither alone is enough: the
+ * handshake proves the *server* is talking to us, the egress check proves
+ * *our traffic* is going through it. A tunnel can pass the first and fail
+ * the second -- the interface is healthy but the routing table never sent
+ * anything into it -- which looks perfect locally while the customer is
+ * completely unprotected.
+ *
+ * Egress therefore wins where they disagree: it is the one measured from
+ * the far side of the whole path.
+ */
+function combineEvidence(fromHandshake: ConnectionState, egress: EgressVerdict): ConnectionState {
+  if (fromHandshake === "disconnected") return "disconnected";
+
+  switch (egress.state) {
+    case "throughTunnel":
+      return "connected";
+    case "bypassingTunnel":
+    case "unreachable":
+      return "degraded";
+    case "indeterminate":
+      // No baseline to compare against, so fall back to whatever the
+      // handshake said rather than inventing a verdict.
+      return fromHandshake;
+  }
+}
+
 /** Turns the service's two facts into the one thing to display.
  *
  * `stale` and `neverHandshaked` both become "degraded" rather than
@@ -143,7 +173,7 @@ export function Dashboard({
   const [protocolUser, setProtocolUser] = useState<ProtocolUser | null>(null);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
-  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
 
   // Only set when *this* app instance brought the tunnel up. The helper
@@ -152,6 +182,13 @@ export function Dashboard({
   // inventing one from the moment the window opened.
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
+
+  /** The address the world saw before connecting. Captured while still
+   * disconnected -- taken afterwards it would be the tunnel's own exit
+   * address and the comparison would be meaningless. A ref rather than
+   * state because nothing renders from it. */
+  const baselineIpRef = useRef<string | null>(null);
+  const [exitIp, setExitIp] = useState<string | null>(null);
 
   useEffect(() => {
     void loadAll();
@@ -204,11 +241,21 @@ export function Dashboard({
     // actually running rather than assuming disconnected. Failure here is
     // deliberately silent -- it just means "show disconnected", and the
     // real error surfaces on the next Connect attempt with context.
+    let adopted: ConnectionState = "disconnected";
     try {
       const status = await invoke<VpnStatus>("vpn_status");
-      setConnectionState(stateFromStatus(status));
+      adopted = stateFromStatus(status);
+      setConnectionState(adopted);
     } catch {
       setConnectionState("disconnected");
+    }
+
+    // Only meaningful while nothing is up: taken through a live tunnel
+    // this would record the exit address as the "before" value and every
+    // later comparison would wrongly read as a leak.
+    if (adopted === "disconnected") {
+      baselineIpRef.current = await captureBaselineIp();
+      setExitIp(null);
     }
   }
 
@@ -240,7 +287,7 @@ export function Dashboard({
         setConnectionState("disconnected");
         setConnectedAt(null);
       } catch (err) {
-        setConnectionError(String(err));
+        setConnectionError(classifyConnectionError(err));
         setConnectionState("connected");
       }
       return;
@@ -257,10 +304,17 @@ export function Dashboard({
       // does no session setup, so the tunnel can exist with a peer that
       // never answers -- confirming the far end replied is what stops
       // the app claiming "Connected" for a connection that isn't.
-      setConnectionState(await confirmReachable());
+      const fromHandshake = await confirmReachable();
+
+      // ...and confirming our traffic actually leaves via that server is
+      // what catches the other half: a tunnel that is up and healthy but
+      // carrying nothing.
+      const egress = await verifyEgress(baselineIpRef.current);
+      setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
+      setConnectionState(combineEvidence(fromHandshake, egress));
       setConnectedAt(Date.now());
     } catch (err) {
-      setConnectionError(String(err));
+      setConnectionError(classifyConnectionError(err));
       setConnectionState("disconnected");
     }
   }
@@ -399,11 +453,38 @@ export function Dashboard({
                             ? t("dash.degradedHint")
                             : t("dash.notProtectedHint")}
                       </p>
+                      {/* The proof, shown rather than just acted on: this
+                          is the address the outside world actually saw,
+                          which is what makes "protected" verifiable
+                          instead of a claim. */}
+                      {connectionState === "connected" && exitIp ? (
+                        <p className="mt-1.5 text-xs text-muted-foreground">
+                          {t("dash.yourIp")}{" "}
+                          <span className="tabular-nums font-medium text-foreground">{exitIp}</span>
+                        </p>
+                      ) : null}
                     </div>
 
                     {/* Reserved space either way, so the layout doesn't
                         jump when an error appears or clears. */}
-                    <p className="min-h-4 px-2 text-center text-xs text-destructive">{connectionError}</p>
+                    <div className="min-h-4 px-2 text-center">
+                      {connectionError ? (
+                        <>
+                          <p className="text-xs text-destructive">{t(connectionError.messageKey)}</p>
+                          {/* The raw engine text stays available but out
+                              of the way: useless to a customer, essential
+                              to whoever they send it to. */}
+                          <details className="mt-1">
+                            <summary className="cursor-pointer text-[10px] text-muted-foreground select-none">
+                              {t("err.showDetail")}
+                            </summary>
+                            <p className="mt-1 font-mono text-[10px] break-words text-muted-foreground" data-ltr>
+                              {connectionError.detail}
+                            </p>
+                          </details>
+                        </>
+                      ) : null}
+                    </div>
                   </>
                 )}
               </div>

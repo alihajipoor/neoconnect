@@ -51,6 +51,7 @@ pub fn run() {
             vpn::vpn_connect,
             vpn::vpn_disconnect,
             vpn::vpn_status,
+            vpn::measure_latency,
             get_launch_deep_link
         ])
         .run(tauri::generate_context!())
