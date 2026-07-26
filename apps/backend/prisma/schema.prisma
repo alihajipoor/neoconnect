@@ -23,6 +23,10 @@ enum CustomerStatus {
 }
 
 enum SubscriptionStatus {
+  /// Created but not paid for yet. A customer who picks a plan and then
+  /// abandons the payment sits here -- not ACTIVE, which would show them
+  /// to the operator as a paying customer and start their clock running.
+  PENDING
   ACTIVE
   SUSPENDED
   EXPIRED
