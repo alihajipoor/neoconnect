@@ -33,7 +33,7 @@ export default function App() {
     getTokens().then((tokens) => setScreen(tokens ? "dashboard" : "login"));
   }, []);
 
-  // Handles the "Open in NeoConnect" link from the verification email --
+  // Handles the "Open in Neoxify" link from the verification email --
   // `neoconnect://verify-email?token=...`. No password is available at
   // this point (a launch via a clicked link, not a live register/login
   // session in this same app instance), so this can't auto-sign-in the

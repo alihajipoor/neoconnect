@@ -37,7 +37,7 @@
     ; reach the background service" message on Connect. Failing the whole
     ; install here would be a worse outcome than a working app that can't
     ; tunnel yet.
-    DetailPrint "Warning: could not register the NeoConnect background service (code $0). Connecting will not work until this is resolved."
+    DetailPrint "Warning: could not register the Neoxify background service (code $0). Connecting will not work until this is resolved."
   ${EndIf}
 !macroend
 

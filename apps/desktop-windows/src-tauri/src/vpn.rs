@@ -144,7 +144,7 @@ async fn call(request: &Request) -> Result<Response, String> {
             }
             Err(e) => {
                 return Err(format!(
-                    "Could not reach the NeoConnect background service ({e}). Try restarting the app, or reinstalling if this keeps happening."
+                    "Could not reach the Neoxify background service ({e}). Try restarting the app, or reinstalling if this keeps happening."
                 ))
             }
         }

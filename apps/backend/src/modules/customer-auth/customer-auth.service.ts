@@ -63,7 +63,7 @@ export class CustomerAuthService {
     return { requiresVerification: true, email: customer.email };
   }
 
-  /** Sends both a deep-link token (for "Open in NeoConnect") and a short
+  /** Sends both a deep-link token (for "Open in Neoxify") and a short
    * 6-digit code (for typing directly into the app) -- added 2026-07-24
    * after live testing showed the raw JWT is unusable to hand-type and
    * broke the email's layout when displayed prominently. The code is

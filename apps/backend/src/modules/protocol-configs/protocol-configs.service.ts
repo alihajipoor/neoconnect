@@ -122,7 +122,7 @@ export class ProtocolConfigsService {
     // signed -- see openvpn-pki.ts. Generated once, here, automatically,
     // rather than requiring an admin to run a separate setup step.
     if (dto.protocol === "OPENVPN") {
-      const ca = generateCa(`NeoConnect OpenVPN CA ${dto.nodeId}`);
+      const ca = generateCa(`Neoxify OpenVPN CA ${dto.nodeId}`);
       const server = signCert(ca, "server", true);
       Object.assign(publicParamsJson, {
         caCertPem: ca.caCertPem,

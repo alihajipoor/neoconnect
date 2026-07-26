@@ -29,7 +29,7 @@ async function bootstrap() {
   );
 
   const config = new DocumentBuilder()
-    .setTitle("NeoConnect Control Plane API")
+    .setTitle("Neoxify Control Plane API")
     .setDescription("Admin panel + agent orchestration backend")
     .setVersion("0.1.0")
     .addBearerAuth()
@@ -39,7 +39,7 @@ async function bootstrap() {
 
   const port = process.env.PORT ? Number(process.env.PORT) : 4000;
   await app.listen(port);
-  console.log(`NeoConnect backend listening on port ${port}`);
+  console.log(`Neoxify backend listening on port ${port}`);
 }
 
 void bootstrap();

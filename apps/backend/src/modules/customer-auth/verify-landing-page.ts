@@ -24,7 +24,7 @@ function shell(inner: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NeoConnect</title>
+<title>Neoxify</title>
 <style>
   :root { color-scheme: light; }
   body {
@@ -53,7 +53,7 @@ function shell(inner: string): string {
   .bad { color: #b42318; }
 </style>
 </head>
-<body><div class="card"><div class="bar">&#9889; NeoConnect</div><div class="body">${inner}</div></div></body>
+<body><div class="card"><div class="bar">&#9889; Neoxify</div><div class="body">${inner}</div></div></body>
 </html>`;
 }
 
@@ -66,8 +66,8 @@ export function verifiedPage(deepLink: string, alreadyVerified: boolean): string
   return shell(`
     <h1>${headline}</h1>
     <p>${detail}</p>
-    <p><a class="btn" href="${deepLink}">Open NeoConnect</a></p>
-    <p class="muted">If nothing happens, open the NeoConnect app and sign in normally &mdash; you're verified either way.</p>
+    <p><a class="btn" href="${deepLink}">Open Neoxify</a></p>
+    <p class="muted">If nothing happens, open the Neoxify app and sign in normally &mdash; you're verified either way.</p>
   `);
 }
 
@@ -76,7 +76,7 @@ export function verificationFailedPage(reason: string): string {
     <h1 class="bad">Couldn't verify this link</h1>
     <p>${reason}</p>
     <p class="muted">
-      Verification links expire after 24 hours. Open the NeoConnect app and request a new one,
+      Verification links expire after 24 hours. Open the Neoxify app and request a new one,
       or enter the 6-digit code from your email instead.
     </p>
   `);

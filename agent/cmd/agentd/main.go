@@ -1,4 +1,4 @@
-// Command agentd is the NeoConnect node agent: it runs on each VPS node,
+// Command agentd is the Neoxify node agent: it runs on each VPS node,
 // manages local VPN protocol engines, and syncs state with the control plane.
 package main
 

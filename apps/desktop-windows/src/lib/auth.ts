@@ -34,7 +34,7 @@ export async function verifyEmailByCode(email: string, code: string) {
 }
 
 /** The token-based counterpart to verifyEmailByCode -- used when the
- * "Open in NeoConnect" link in the verification email actually launches
+ * "Open in Neoxify" link in the verification email actually launches
  * the app (see the deep-link handling in App.tsx). No password is ever
  * available at this point (a cold app launch via a clicked email link,
  * not a live register/login session), so this can't auto-sign-in the way
