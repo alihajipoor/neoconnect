@@ -29,6 +29,8 @@
   --background: #0a0a10;
   --foreground: #f4f4f8;
   --card: #131319;
+  --card-hover: #17171f;
+  --elevated: #1a1a22;
   --card-foreground: #f4f4f8;
   --popover: #15151c;
   --popover-foreground: #f4f4f8;
@@ -110,6 +112,34 @@
 }
 
 @layer base {
+  /* A soft violet wash behind every screen, taken from the site, so no
+     screen starts as a flat black rectangle. Fixed rather than scrolled
+     -- the app window does not scroll, and a wash that moved with content
+     would read as a bug. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset-block-start: -10rem;
+    inset-inline-start: 50%;
+    transform: translateX(-50%);
+    width: min(34rem, 160vw);
+    height: 22rem;
+    background: radial-gradient(ellipse at center, rgba(139, 92, 246, 0.18), transparent 65%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Everything the app draws sits above the wash. */
+  #root {
+    position: relative;
+    z-index: 1;
+  }
+
+  ::selection {
+    background: rgba(139, 92, 246, 0.4);
+    color: #fff;
+  }
+
   /* Persian ascenders and diacritics need more vertical room than Latin,
      and at the default line height they collide with the line above. */
   html[lang="fa"] body {
@@ -126,6 +156,55 @@
 }
 
 @layer utilities {
+  /* The site's card treatment: a lifted surface with a hairline edge and
+     a shadow that reads as depth rather than a drawn border. */
+  .surface {
+    background: var(--card);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.4),
+      0 8px 24px -12px rgba(0, 0, 0, 0.8);
+  }
+  .surface-interactive {
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      transform 150ms ease;
+  }
+  .surface-interactive:hover {
+    background: var(--card-hover);
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+
+  /* Violet-to-cyan text, the site's treatment for figures worth reading
+     first -- a price, a plan name. */
+  .text-brand-gradient {
+    background-image: linear-gradient(120deg, var(--primary) 0%, var(--highlight) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* A hairline gradient edge. Used to make the recommended plan the thing
+     the eye lands on without resorting to a heavier border. */
+  .ring-brand {
+    position: relative;
+  }
+  .ring-brand::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(140deg, var(--primary), var(--highlight));
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
   .glow-backdrop {
     position: relative;
     isolation: isolate;
