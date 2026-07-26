@@ -92,10 +92,12 @@ export class CustomerController {
     // PENDING until the payment actually clears. BillingService
     // .confirmPayment -> renewSubscription() flips it to ACTIVE, which is
     // also where the VPN credentials get provisioned.
-    return this.subscriptionsService.create(
-      { customerId: customer.sub, planId: dto.planId },
-      SubscriptionStatus.PENDING,
-    );
+    //
+    // Reuses an unpaid attempt at the same plan instead of creating a new
+    // one per press: the app calls this before every payment attempt, so
+    // a customer who retries -- or switches from Card to Crypto -- was
+    // leaving a PENDING subscription behind each time.
+    return this.subscriptionsService.createOrReusePending(customer.sub, dto.planId);
   }
 
   // Location picker: which servers this subscription's plan allows
