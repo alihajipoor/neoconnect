@@ -1,16 +1,40 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { MapPin, Settings as SettingsIcon, Tag } from "lucide-react";
-import { getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
+import { Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
+import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
-import type { Customer, ProtocolUser, Subscription } from "../lib/types";
+import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { formatBytes } from "../lib/utils";
-import { Button, Card } from "../components/ui";
+import { Button, Card, Stat } from "../components/ui";
+import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
 import { LocationPicker } from "../components/LocationPicker";
 import { useI18n } from "../lib/i18n";
 
-type ConnectionState = "disconnected" | "connecting" | "connected" | "disconnecting";
+/** How each protocol is named to a customer.
+ *
+ * The wire values are internal (XRAY_VLESS_REALITY means nothing to
+ * anyone buying a VPN), and showing them raw was part of why the app
+ * read as an internal tool.
+ */
+const PROTOCOL_LABEL: Record<string, string> = {
+  XRAY_VLESS_REALITY: "Reality",
+  XRAY_VMESS: "VMess",
+  XRAY_TROJAN: "Trojan",
+  WIREGUARD: "WireGuard",
+  OPENVPN: "OpenVPN",
+};
+
+function formatDuration(totalSeconds: number) {
+  // Clamped so a clock adjustment mid-session can never render a
+  // negative duration -- the sign would leak into every field.
+  const seconds = Math.max(0, totalSeconds);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
 
 export function Dashboard({
   onLoggedOut,
@@ -27,12 +51,31 @@ export function Dashboard({
   const [me, setMe] = useState<Customer | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [protocolUser, setProtocolUser] = useState<ProtocolUser | null>(null);
+  const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
 
+  // Only set when *this* app instance brought the tunnel up. The helper
+  // service doesn't report a start time, so a tunnel adopted on launch
+  // has no honest duration to show and the timer stays blank rather than
+  // inventing one from the moment the window opened.
+  const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
   useEffect(() => {
     void loadAll();
+  }, []);
+
+  // Ticks for as long as the screen is mounted, not just while connected.
+  // Two reasons: the days-remaining badge would otherwise freeze at
+  // whatever it was when the screen loaded, and gating the interval on
+  // connectedAt left `now` older than the connection start for a full
+  // second, which rendered the session as "-1:-51".
+  useEffect(() => {
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
   }, []);
 
   async function loadAll() {
@@ -52,9 +95,19 @@ export function Dashboard({
     }
 
     setMe(meResult.data);
-    setSubscription(subsResult.data[0] ?? null);
+    const sub = subsResult.data[0] ?? null;
+    setSubscription(sub);
     setProtocolUser(usersResult.data[0] ?? null);
     setLoading(false);
+
+    // Purely to name the server the customer is actually on -- the
+    // protocol-user row carries a routeId but no human-readable
+    // location. Best-effort: a failure here costs a label, not the
+    // screen, so it must never surface as an error.
+    if (sub) {
+      const routesResult = await getAvailableRoutes(sub.id);
+      if (routesResult.ok) setRoutes(routesResult.data);
+    }
 
     // The tunnel outlives the app: the helper service keeps it up if the
     // window is closed, so on open the UI has to adopt whatever is
@@ -78,6 +131,7 @@ export function Dashboard({
       try {
         await invoke("vpn_disconnect");
         setConnectionState("disconnected");
+        setConnectedAt(null);
       } catch (err) {
         setConnectionError(String(err));
         setConnectionState("connected");
@@ -92,6 +146,7 @@ export function Dashboard({
       // protocol here, so adding one later needs no change in the UI.
       await invoke("vpn_connect", { payload: protocolUser });
       setConnectionState("connected");
+      setConnectedAt(Date.now());
     } catch (err) {
       setConnectionError(String(err));
       setConnectionState("disconnected");
@@ -103,13 +158,48 @@ export function Dashboard({
     onLoggedOut();
   }
 
+  const currentRoute = useMemo(
+    () => routes.find((r) => r.id === protocolUser?.routeId) ?? null,
+    [routes, protocolUser],
+  );
+
+  const usage = useMemo(() => {
+    if (!subscription) return null;
+    const used = Number(subscription.dataUsedBytes);
+    const cap = Number(subscription.dataCapBytes);
+    if (!Number.isFinite(used) || !Number.isFinite(cap) || cap <= 0) return null;
+    return { used, cap, percent: Math.min(100, (used / cap) * 100) };
+  }, [subscription]);
+
+  const daysLeft = useMemo(() => {
+    if (!subscription) return null;
+    const ms = new Date(subscription.expireAt).getTime() - now;
+    return Math.max(0, Math.ceil(ms / 86_400_000));
+  }, [subscription, now]);
+
+  const connectLabel =
+    connectionState === "connected"
+      ? t("dash.connected")
+      : connectionState === "connecting"
+        ? t("dash.connecting")
+        : connectionState === "disconnecting"
+          ? t("dash.disconnecting")
+          : t("dash.connect");
+
   if (loading) {
-    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t("common.loading")}</div>;
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3">
+        <div className="animate-breathe">
+          <Logo />
+        </div>
+        <p className="text-xs text-muted-foreground">{t("common.loading")}</p>
+      </div>
+    );
   }
 
   return (
-    <div className="relative flex h-full flex-col gap-4 p-5">
-      <div className="flex items-center justify-between">
+    <div className="relative flex h-full flex-col gap-3 p-4">
+      <header className="flex items-center justify-between">
         <Logo />
         <div className="flex items-center gap-1">
           <Button
@@ -117,18 +207,18 @@ export function Dashboard({
             onClick={onOpenSettings}
             aria-label={t("nav.settings")}
             title={t("nav.settings")}
-            className="size-7 justify-center px-0"
+            className="size-8 justify-center px-0"
           >
             <SettingsIcon className="size-4" />
           </Button>
-          <Button variant="ghost" onClick={handleLogout} className="h-7 px-2 text-xs">
+          <Button variant="ghost" onClick={handleLogout} className="h-8 px-2 text-xs">
             {t("nav.signOut")}
           </Button>
         </div>
-      </div>
+      </header>
 
       {error ? (
-        <Card>
+        <Card className="animate-rise">
           <p className="text-sm text-destructive">{error}</p>
           <Button onClick={() => void loadAll()} className="mt-3">
             {t("dash.retry")}
@@ -136,86 +226,174 @@ export function Dashboard({
         </Card>
       ) : (
         <>
-          <p className="text-xs text-muted-foreground">{me?.email}</p>
+          {/* Identity strip: a live status dot beside the account, so the
+              single most important fact is legible before reading a word. */}
+          <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
+            <span
+              className={
+                connectionState === "connected"
+                  ? "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]"
+                  : "size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
+              }
+            />
+            <span className="truncate">{me?.email}</span>
+          </div>
 
           {subscription ? (
-            <Card className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">{t("dash.subscription")}</span>
-                <span
-                  className={
-                    subscription.status === "ACTIVE"
-                      ? "rounded-full bg-success/15 px-2 py-0.5 text-xs text-success"
-                      : "rounded-full bg-destructive/15 px-2 py-0.5 text-xs text-destructive"
-                  }
-                >
-                  {subscription.status}
-                </span>
+            <>
+              <div className="flex flex-1 flex-col items-center justify-center gap-4">
+                {!protocolUser ? (
+                  <Card className="w-full text-center">
+                    <p className="text-sm text-muted-foreground">
+                      No connection provisioned on your subscription yet.
+                    </p>
+                  </Card>
+                ) : (
+                  <>
+                    <ConnectOrb
+                      state={connectionState}
+                      onToggle={() => void handleConnectToggle()}
+                      label={connectLabel}
+                    />
+
+                    {/* Says in words what the orb says in colour. The
+                        orb alone leaves "am I actually protected right
+                        now?" to be inferred from a hue, which is the one
+                        question this screen exists to answer. */}
+                    <div className="px-4 text-center">
+                      <p
+                        className={
+                          connectionState === "connected"
+                            ? "text-sm font-semibold text-success"
+                            : "text-sm font-semibold text-foreground"
+                        }
+                      >
+                        {connectionState === "connected" ? t("dash.protected") : t("dash.notProtected")}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {connectionState === "connected" ? t("dash.protectedHint") : t("dash.notProtectedHint")}
+                      </p>
+                    </div>
+
+                    {/* Reserved space either way, so the layout doesn't
+                        jump when an error appears or clears. */}
+                    <p className="min-h-4 px-2 text-center text-xs text-destructive">{connectionError}</p>
+                  </>
+                )}
               </div>
-              <p className="text-xs text-muted-foreground">
-                {t("dash.expires")} <span className="tabular-nums">{new Date(subscription.expireAt).toLocaleDateString()}</span>
-              </p>
-              <p className="text-xs text-muted-foreground">
-                <span className="tabular-nums">
-                  {formatBytes(subscription.dataUsedBytes)} / {formatBytes(subscription.dataCapBytes)}
-                </span>{" "}
-                {t("dash.dataUsed")}
-              </p>
-            </Card>
+
+              {/* What the connection actually is. These three answer the
+                  questions a customer asks while looking at the orb. */}
+              <div className="animate-rise grid grid-cols-3 gap-2">
+                <Stat
+                  icon={<Globe className="size-3" />}
+                  label={t("dash.server")}
+                  value={currentRoute ? currentRoute.location.region : "—"}
+                />
+                <Stat
+                  icon={<Shield className="size-3" />}
+                  label={t("dash.protocol")}
+                  value={protocolUser ? (PROTOCOL_LABEL[protocolUser.protocol] ?? protocolUser.protocol) : "—"}
+                />
+                <Stat
+                  icon={<Clock className="size-3" />}
+                  label={t("dash.session")}
+                  value={
+                    connectedAt !== null ? (
+                      <span className="tabular-nums">{formatDuration(Math.floor((now - connectedAt) / 1000))}</span>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
+              </div>
+
+              <Card className="animate-rise flex flex-col gap-2.5 py-3">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">{t("dash.dataUsed")}</span>
+                  <span className="tabular-nums text-xs font-semibold">
+                    {usage ? (
+                      <>
+                        {formatBytes(usage.used)}{" "}
+                        <span className="font-normal text-muted-foreground">/ {formatBytes(usage.cap)}</span>
+                      </>
+                    ) : (
+                      formatBytes(Number(subscription.dataUsedBytes))
+                    )}
+                  </span>
+                </div>
+
+                {/* A bar rather than a second line of text: proportion is
+                    the whole point of a quota, and it's the one thing a
+                    number alone can't show at a glance. Turns amber past
+                    80% so running low is noticed before it bites. */}
+                {usage ? (
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/8">
+                    <div
+                      className="h-full rounded-full transition-[width] duration-700"
+                      style={{
+                        width: `${Math.max(usage.percent, 1.5)}%`,
+                        background:
+                          usage.percent >= 80
+                            ? "linear-gradient(90deg, #f59e0b, #ef4444)"
+                            : "linear-gradient(90deg, var(--primary), var(--highlight))",
+                      }}
+                    />
+                  </div>
+                ) : null}
+
+                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>
+                    {t("dash.expires")}{" "}
+                    <span className="tabular-nums text-foreground">
+                      {new Date(subscription.expireAt).toLocaleDateString()}
+                    </span>
+                  </span>
+                  {daysLeft !== null ? (
+                    <span
+                      className={
+                        daysLeft <= 3
+                          ? "rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-semibold text-destructive"
+                          : "rounded-full bg-white/6 px-2 py-0.5 text-[10px] font-semibold text-muted-foreground"
+                      }
+                    >
+                      <span className="tabular-nums">{daysLeft}</span> {t("dash.daysLeft")}
+                    </span>
+                  ) : null}
+                </div>
+              </Card>
+
+              <Button
+                variant="outline"
+                onClick={() => setShowLocationPicker(true)}
+                disabled={connectionState !== "disconnected"}
+                className="w-full justify-between px-3"
+              >
+                <span className="flex items-center gap-2">
+                  <MapPin className="size-4 text-primary" />
+                  {currentRoute ? currentRoute.location.region : t("dash.changeLocation")}
+                </span>
+                <span className="text-xs text-muted-foreground">{t("dash.change")}</span>
+              </Button>
+            </>
           ) : (
             // Previously a dead end: a customer with no subscription --
             // which is everyone, now that trial mode can be turned off --
             // was told they had nothing and given no way to get one.
-            <Card className="flex flex-col gap-3">
-              <p className="text-sm font-medium">{t("dash.noSubscription")}</p>
-              <p className="text-xs text-muted-foreground">
-                Choose a plan to start using Neoxify.
-              </p>
-              <Button onClick={onBrowsePlans} className="w-full justify-center gap-2">
-                <Tag className="size-4" />
-                {t("dash.viewPlans")}
-              </Button>
-            </Card>
+            <div className="flex flex-1 flex-col items-center justify-center gap-4">
+              <Card className="ring-brand w-full text-center">
+                <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full bg-primary/15 text-primary">
+                  <Tag className="size-5" />
+                </div>
+                <p className="text-sm font-semibold">{t("dash.noSubscription")}</p>
+                <p className="mt-1 text-xs text-muted-foreground">Choose a plan to start using Neoxify.</p>
+                <Button onClick={onBrowsePlans} className="mt-4 w-full justify-center gap-2">
+                  <Tag className="size-4" />
+                  {t("dash.viewPlans")}
+                </Button>
+              </Card>
+            </div>
           )}
-
-          <Card className="flex flex-1 flex-col items-center justify-center gap-4">
-            {!protocolUser ? (
-              <p className="text-center text-sm text-muted-foreground">
-                No connection provisioned on your subscription yet.
-              </p>
-            ) : (
-              <>
-                <button
-                  onClick={() => void handleConnectToggle()}
-                  disabled={connectionState === "connecting" || connectionState === "disconnecting"}
-                  className={
-                    "flex size-28 items-center justify-center rounded-full text-sm font-semibold transition-colors disabled:opacity-60 " +
-                    (connectionState === "connected"
-                      ? "bg-success/20 text-success shadow-[0_0_40px_-8px_var(--success)]"
-                      : "bg-primary/20 text-primary shadow-[0_0_40px_-8px_var(--primary)]")
-                  }
-                >
-                  {connectionState === "connected" && t("dash.connected")}
-                  {connectionState === "disconnected" && t("dash.connect")}
-                  {connectionState === "connecting" && t("dash.connecting")}
-                  {connectionState === "disconnecting" && t("dash.disconnecting")}
-                </button>
-                {connectionError ? <p className="text-xs text-destructive">{connectionError}</p> : null}
-              </>
-            )}
-          </Card>
-
-          {subscription ? (
-            <Button
-              variant="ghost"
-              onClick={() => setShowLocationPicker(true)}
-              disabled={connectionState !== "disconnected"}
-              className="w-full justify-center gap-2 border border-white/10"
-            >
-              <MapPin className="size-4" />
-              {t("dash.changeLocation")}
-            </Button>
-          ) : null}
         </>
       )}
 

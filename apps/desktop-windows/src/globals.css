@@ -135,6 +135,29 @@
     z-index: 1;
   }
 
+  /* Tailwind v4 dropped the browser default of cursor:pointer on buttons,
+     so every control in the app showed a plain arrow -- the app felt dead
+     under the mouse before anything was even clicked. Restored here rather
+     than per-component so nothing can be missed. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  label:has(input[type="checkbox"]),
+  summary {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  /* Text inputs should still say "you can type here". */
+  input:not([type="checkbox"]):not([type="radio"]),
+  textarea {
+    cursor: text;
+  }
+
   ::selection {
     background: rgba(139, 92, 246, 0.4);
     color: #fff;
@@ -203,6 +226,112 @@
     -webkit-mask-composite: xor;
     mask-composite: exclude;
     pointer-events: none;
+  }
+
+  /* --- Motion -------------------------------------------------------
+     The app had no animation at all, which is most of why it read as
+     static and unfinished even though the colours were right. Everything
+     below is short and purposeful: state changes get feedback, the
+     connect control has a life of its own, nothing loops distractingly
+     while idle. */
+
+  /* Rings that expand outward from the connect button while connected --
+     the one ambient animation in the app, and the thing that makes
+     "connected" feel like a live state rather than a changed label. */
+  @keyframes ping-ring {
+    0% {
+      transform: scale(1);
+      opacity: 0.5;
+    }
+    80%,
+    100% {
+      transform: scale(1.9);
+      opacity: 0;
+    }
+  }
+  .animate-ping-ring {
+    animation: ping-ring 2.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+
+  @keyframes spin-slow {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .animate-spin-slow {
+    animation: spin-slow 3s linear infinite;
+  }
+
+  /* A highlight that travels across a surface, for genuinely-busy states
+     (connecting, loading) where a static skeleton would look frozen. */
+  @keyframes shimmer {
+    100% {
+      transform: translateX(200%);
+    }
+  }
+  .animate-shimmer::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.09), transparent);
+    animation: shimmer 1.6s ease-in-out infinite;
+  }
+
+  /* Screens and cards arrive rather than appearing. 14px is enough to
+     register as movement without feeling like the layout is settling. */
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .animate-rise {
+    animation: rise 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes breathe {
+    0%,
+    100% {
+      opacity: 0.45;
+    }
+    50% {
+      opacity: 0.85;
+    }
+  }
+  .animate-breathe {
+    animation: breathe 3.5s ease-in-out infinite;
+  }
+
+  /* Respect the OS setting -- a VPN client is a utility, and someone who
+     has asked their machine to stop animating means it. */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-ping-ring,
+    .animate-spin-slow,
+    .animate-shimmer::after,
+    .animate-rise,
+    .animate-breathe {
+      animation: none;
+    }
+  }
+
+  /* --- Interaction --------------------------------------------------
+     Press feedback the app was missing entirely: nothing moved when
+     clicked, so every control felt like a picture of a button. */
+  .press {
+    transition:
+      transform 120ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 160ms ease,
+      background-color 160ms ease,
+      border-color 160ms ease,
+      opacity 160ms ease;
+  }
+  .press:active:not(:disabled) {
+    transform: translateY(1px) scale(0.985);
   }
 
   .glow-backdrop {
