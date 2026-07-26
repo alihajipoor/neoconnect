@@ -65,6 +65,36 @@ describe("NowPaymentsProvider.createPayment", () => {
     await build(undefined).createPayment(10, "txn-1");
     expect(sentBody(fetchMock)).not.toHaveProperty("ipn_callback_url");
   });
+
+  // Seen in production on the $10 plan: NowPayments rejected the payment
+  // because the converted crypto amount fell under its minimum, and the
+  // bare Error surfaced to the customer as "Internal server error" with
+  // nothing to act on.
+  it("explains a below-minimum price instead of failing as a server error", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () =>
+        JSON.stringify({ code: "AMOUNT_MINIMAL_ERROR", message: "Crypto amount 9.98 is less than minimal" }),
+    }) as never;
+
+    await expect(build("https://x/api").createPayment(10, "txn-1")).rejects.toMatchObject({
+      status: 400,
+      response: { message: expect.stringContaining("minimum") },
+    });
+  });
+
+  it("reports an unexpected provider failure as unavailable, not as a bad request", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => "upstream exploded",
+    }) as never;
+
+    // 503 rather than 400: the customer did nothing wrong, and the
+    // difference decides whether "try again" is sensible advice.
+    await expect(build("https://x/api").createPayment(10, "txn-1")).rejects.toMatchObject({ status: 503 });
+  });
 });
 
 describe("NowPaymentsProvider.verifyIpnSignature", () => {
