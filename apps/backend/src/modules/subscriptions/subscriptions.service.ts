@@ -1,3 +1,4 @@
+import { SubscriptionStatus } from "@prisma/client";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateSubscriptionDto } from "./dto/create-subscription.dto";
@@ -43,7 +44,13 @@ export class SubscriptionsService {
     return subscription;
   }
 
-  async create(dto: CreateSubscriptionDto) {
+  /** `status` is explicit because the three callers mean different
+   * things. A customer picking a plan has not paid yet and must start
+   * PENDING; a free trial and an admin-created subscription are live
+   * immediately. The column default was ACTIVE, which silently made
+   * "clicked a plan and closed the payment window" look identical to
+   * "paying customer" in the panel. */
+  async create(dto: CreateSubscriptionDto, status: SubscriptionStatus = SubscriptionStatus.ACTIVE) {
     const [customer, plan] = await Promise.all([
       this.prisma.customer.findUnique({ where: { id: dto.customerId } }),
       this.prisma.subscriptionPlan.findUnique({ where: { id: dto.planId } }),
@@ -62,6 +69,7 @@ export class SubscriptionsService {
         expireAt,
         dataCapBytes: plan.dataCapBytes,
         autoRenew: dto.autoRenew ?? false,
+        status,
       },
     });
   }

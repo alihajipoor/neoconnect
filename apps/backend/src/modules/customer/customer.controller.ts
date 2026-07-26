@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Header, Param, Post, UseGuards } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { SubscriptionStatus } from "@prisma/client";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { CustomersService } from "../customers/customers.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
@@ -64,7 +65,13 @@ export class CustomerController {
   // paying just by hitting this endpoint.
   @Post("subscriptions")
   createSubscription(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: CreateOwnSubscriptionDto) {
-    return this.subscriptionsService.create({ customerId: customer.sub, planId: dto.planId });
+    // PENDING until the payment actually clears. BillingService
+    // .confirmPayment -> renewSubscription() flips it to ACTIVE, which is
+    // also where the VPN credentials get provisioned.
+    return this.subscriptionsService.create(
+      { customerId: customer.sub, planId: dto.planId },
+      SubscriptionStatus.PENDING,
+    );
   }
 
   // Location picker: which servers this subscription's plan allows
