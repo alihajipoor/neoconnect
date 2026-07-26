@@ -7,9 +7,10 @@ import { PlansModule } from "../plans/plans.module";
 import { RoutesModule } from "../routes/routes.module";
 import { BillingModule } from "../billing/billing.module";
 import { InvoicesModule } from "../invoices/invoices.module";
+import { PaymentSettingsModule } from "../payment-settings/payment-settings.module";
 
 @Module({
-  imports: [CustomersModule, SubscriptionsModule, ProtocolUsersModule, PlansModule, RoutesModule, BillingModule, InvoicesModule],
+  imports: [CustomersModule, SubscriptionsModule, ProtocolUsersModule, PlansModule, RoutesModule, BillingModule, InvoicesModule, PaymentSettingsModule],
   controllers: [CustomerController],
 })
 export class CustomerModule {}

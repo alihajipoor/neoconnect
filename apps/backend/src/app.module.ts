@@ -20,6 +20,7 @@ import { UsageModule } from "./modules/usage/usage.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { BillingModule } from "./modules/billing/billing.module";
 import { InvoicesModule } from "./modules/invoices/invoices.module";
+import { PaymentSettingsModule } from "./modules/payment-settings/payment-settings.module";
 import { CustomerAuthModule } from "./modules/customer-auth/customer-auth.module";
 import { CustomerModule } from "./modules/customer/customer.module";
 import { FreeTrialSettingsModule } from "./modules/free-trial-settings/free-trial-settings.module";
@@ -56,6 +57,7 @@ import { AnnouncementsModule } from "./modules/announcements/announcements.modul
     JobsModule,
     BillingModule,
     InvoicesModule,
+    PaymentSettingsModule,
     CustomerAuthModule,
     CustomerModule,
     FreeTrialSettingsModule,

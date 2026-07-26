@@ -51,7 +51,7 @@ export class WebhooksController {
       throw new BadRequestException("Missing raw body or Stripe-Signature header");
     }
 
-    const event = this.stripe.constructEvent(req.rawBody, signature);
+    const event = await this.stripe.constructEvent(req.rawBody, signature);
 
     if (event.type === "payment_intent.succeeded" || event.type === "payment_intent.payment_failed") {
       const intent = event.data.object as { metadata?: { paymentTransactionId?: string } };
@@ -71,7 +71,7 @@ export class WebhooksController {
   @Post("nowpayments")
   async nowPaymentsWebhook(@Req() req: Request, @Headers("x-nowpayments-sig") signature?: string) {
     const body = req.body as { order_id?: string; payment_status?: string };
-    if (!signature || !this.nowpayments.verifyIpnSignature(body, signature)) {
+    if (!signature || !(await this.nowpayments.verifyIpnSignature(body, signature))) {
       throw new BadRequestException("Invalid or missing IPN signature");
     }
 

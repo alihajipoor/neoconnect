@@ -9,6 +9,7 @@ import { PlansService } from "../plans/plans.service";
 import { RoutesService } from "../routes/routes.service";
 import { BillingService } from "../billing/billing.service";
 import { InvoicesService } from "../invoices/invoices.service";
+import { PaymentSettingsService } from "../payment-settings/payment-settings.service";
 import { renderInvoiceHtml } from "../invoices/invoice-document";
 import { CreatePaymentDto } from "../billing/dto/create-payment.dto";
 import { CreateOwnSubscriptionDto } from "./dto/create-own-subscription.dto";
@@ -36,6 +37,7 @@ export class CustomerController {
     private readonly billingService: BillingService,
     private readonly config: ConfigService,
     private readonly invoicesService: InvoicesService,
+    private readonly paymentSettings: PaymentSettingsService,
   ) {}
 
   @Get("me")
@@ -56,6 +58,18 @@ export class CustomerController {
   @Get("plans")
   plans() {
     return this.plansService.listActive();
+  }
+
+  /** Which payment methods are actually usable right now.
+   *
+   * The app used to show Card and Crypto unconditionally, so a customer
+   * pressed one and got an error because no keys had ever been configured
+   * -- reported from real use. Offering only what can work turns a broken
+   * button into an absent one.
+   */
+  @Get("billing/providers")
+  paymentProviders() {
+    return this.paymentSettings.availableProviders();
   }
 
   // Creates the Subscription row only -- NOT a working VPN account yet.

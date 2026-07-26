@@ -1,3 +1,4 @@
+import { PaymentSettingsService } from "../../payment-settings/payment-settings.service";
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { createHmac } from "node:crypto";
@@ -13,11 +14,20 @@ export interface NowPaymentsPayment {
 
 @Injectable()
 export class NowPaymentsProvider {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly paymentSettings: PaymentSettingsService,
+  ) {}
 
-  private requireApiKey(): string {
-    const apiKey = this.config.get<string>("billing.nowpaymentsApiKey");
-    if (!apiKey) throw new Error("NOWPAYMENTS_API_KEY is not configured");
+  /** Panel first, environment second -- the env fallback keeps the
+   * already-deployed configuration working rather than taking crypto
+   * payments down until someone retypes the key into the panel. */
+  private async requireApiKey(): Promise<string> {
+    const configured = await this.paymentSettings.nowPayments();
+    const apiKey = configured?.apiKey ?? this.config.get<string>("billing.nowpaymentsApiKey");
+    if (!apiKey) {
+      throw new Error("NowPayments is not configured -- add an API key in Settings > Payments");
+    }
     return apiKey;
   }
 
@@ -29,7 +39,7 @@ export class NowPaymentsProvider {
   async createPayment(amountUsd: number, orderId: string): Promise<NowPaymentsPayment> {
     const res = await fetch(`${NOWPAYMENTS_API_BASE}/payment`, {
       method: "POST",
-      headers: { "x-api-key": this.requireApiKey(), "Content-Type": "application/json" },
+      headers: { "x-api-key": (await this.requireApiKey()), "Content-Type": "application/json" },
       body: JSON.stringify({
         price_amount: amountUsd,
         price_currency: "usd",
@@ -56,7 +66,7 @@ export class NowPaymentsProvider {
 
   async getPaymentStatus(paymentId: string): Promise<{ paymentStatus: string }> {
     const res = await fetch(`${NOWPAYMENTS_API_BASE}/payment/${paymentId}`, {
-      headers: { "x-api-key": this.requireApiKey() },
+      headers: { "x-api-key": (await this.requireApiKey()) },
     });
     if (!res.ok) {
       throw new Error(`NowPayments getPaymentStatus failed: ${res.status} ${await res.text()}`);
@@ -69,9 +79,12 @@ export class NowPaymentsProvider {
    * with keys sorted alphabetically at every nesting level -- computed
    * from the parsed payload, unlike Stripe's raw-byte signature, since
    * that's what NowPayments' own IPN spec defines. */
-  verifyIpnSignature(body: unknown, signature: string): boolean {
-    const ipnSecret = this.config.get<string>("billing.nowpaymentsIpnSecret");
-    if (!ipnSecret) throw new Error("NOWPAYMENTS_IPN_SECRET is not configured");
+  async verifyIpnSignature(body: unknown, signature: string): Promise<boolean> {
+    const configured = await this.paymentSettings.nowPayments();
+    const ipnSecret = configured?.ipnSecret ?? this.config.get<string>("billing.nowpaymentsIpnSecret");
+    if (!ipnSecret) {
+      throw new Error("No NowPayments IPN secret configured -- add one in Settings > Payments");
+    }
     const sorted = sortKeysDeep(body);
     const expected = createHmac("sha512", ipnSecret).update(JSON.stringify(sorted)).digest("hex");
     return expected === signature;
