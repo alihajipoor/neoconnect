@@ -24,6 +24,31 @@
     nsExec::ExecToLog '"$INSTDIR\resources\neoconnect-service.exe" uninstall'
     Pop $0
   ${EndIf}
+
+  ; The product was renamed from NeoConnect to Neoxify, which moved
+  ; $INSTDIR from "Program Files\NeoConnect" to "Program Files\Neoxify".
+  ; Anyone upgrading from a pre-rename build therefore has a running
+  ; service registered from a directory the check above never looks at:
+  ; it would be left running, holding the old binary open, while this
+  ; install tries to register a service under the same name.
+  ;
+  ; Handled by name rather than by path, via sc.exe, so it works no matter
+  ; where the old build put itself. The service name is deliberately
+  ; unchanged across the rename (see the branding notes) precisely so this
+  ; still finds it.
+  ;
+  ; Both calls are expected to fail harmlessly on a clean machine where
+  ; there is nothing to stop or delete.
+  nsExec::ExecToLog 'sc.exe stop neoconnect-service'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete neoconnect-service'
+  Pop $0
+
+  ; The old install directory is left in place rather than deleted here.
+  ; Removing files from a path this installer does not own is the kind of
+  ; thing that goes badly wrong if the assumption is ever off, and a stale
+  ; directory is harmless once its service is gone -- the user can remove
+  ; the old entry from Add/Remove Programs.
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
