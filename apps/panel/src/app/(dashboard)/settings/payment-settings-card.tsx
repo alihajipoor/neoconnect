@@ -42,7 +42,15 @@ function SecretField({
         id={id}
         name={id}
         type="password"
-        autoComplete="off"
+        // Browsers widely ignore autoComplete="off" on password fields and
+        // autofill a saved site password anyway. That is genuinely
+        // dangerous here: the field would look filled while the label still
+        // read "Not set", and saving would store the browser's password as
+        // a live payment key. "new-password" is the value password managers
+        // actually honour as "do not offer a saved credential".
+        autoComplete="new-password"
+        data-1p-ignore
+        data-lpignore="true"
         placeholder={isSet ? "Leave blank to keep the current key" : "Paste the key"}
       />
       {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
