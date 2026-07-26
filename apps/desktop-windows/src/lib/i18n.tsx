@@ -117,6 +117,7 @@ const en = {
   "plans.toAddress": "To this address",
   "plans.openCheckout": "Open checkout",
   "plans.copied": "Copied",
+  "plans.browserFailed": "We could not open your browser. Use the button below to try again.",
   "plans.copyAddress": "Copy address",
 
   "common.loading": "Loading...",
@@ -223,6 +224,7 @@ const fa: Record<TranslationKey, string> = {
   "plans.toAddress": "به این آدرس",
   "plans.openCheckout": "باز کردن صفحه پرداخت",
   "plans.copied": "کپی شد",
+  "plans.browserFailed": "مرورگر باز نشد. با دکمه زیر دوباره تلاش کنید.",
   "plans.copyAddress": "کپی آدرس",
 
   "common.loading": "در حال بارگذاری...",
