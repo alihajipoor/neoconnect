@@ -120,4 +120,12 @@ export interface RouteOption {
   protocol: Protocol;
   isRelay: boolean;
   location: { region: string; nodeName: string };
+  /** Entry endpoint the client dials. Used to measure latency locally --
+   * a figure measured on the backend would describe the backend's
+   * network, not the customer's. Only the entry is exposed; a relay's
+   * exit node stays hidden. */
+  endpoint: { host: string; port: number };
+  /** What the control plane knows from agent heartbeats. Distinct from
+   * latency: "is it up" rather than "is it fast for me". */
+  nodeStatus: "ONLINE" | "OFFLINE" | "PENDING" | "DISABLED";
 }

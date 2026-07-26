@@ -200,6 +200,42 @@ pub struct VpnStatus {
     health: TunnelHealth,
 }
 
+/// How long to wait for a server to answer before calling it unreachable.
+///
+/// Generous enough that a genuinely distant server (Iran to Finland, say)
+/// still measures rather than timing out, short enough that a dead one
+/// does not hold up the whole list.
+const LATENCY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// Round-trip time to a server, measured by how long a TCP connection
+/// takes to establish.
+///
+/// TCP rather than ICMP on purpose. ICMP echo needs raw sockets (so,
+/// administrator) or the Win32 IcmpSendEcho API, and is widely filtered
+/// -- including by exactly the sort of network a customer in a censored
+/// region is on. A TCP handshake against the port the VPN actually
+/// listens on is both privilege-free and a truer measure: it tests the
+/// path that matters rather than a different protocol that may be
+/// deprioritised or dropped.
+///
+/// Returns None rather than a sentinel number when the server does not
+/// answer, so the UI can show "--" instead of inventing a value.
+#[tauri::command]
+pub async fn measure_latency(host: String, port: u16) -> Option<u32> {
+    use tokio::net::TcpStream;
+
+    let started = std::time::Instant::now();
+    // Resolution is included in the measurement on purpose: a customer
+    // waiting to connect waits for that too.
+    let connect = TcpStream::connect((host.as_str(), port));
+
+    match tokio::time::timeout(LATENCY_TIMEOUT, connect).await {
+        Ok(Ok(_stream)) => Some(started.elapsed().as_millis() as u32),
+        // Refused or unreachable: no honest number to report.
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
 #[tauri::command]
 pub async fn vpn_status() -> Result<VpnStatus, String> {
     match call(&Request::Status).await? {
