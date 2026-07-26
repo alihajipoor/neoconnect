@@ -1,7 +1,7 @@
 import { PaymentSettingsService } from "../../payment-settings/payment-settings.service";
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 const NOWPAYMENTS_API_BASE = "https://api.nowpayments.io/v1";
 
@@ -87,7 +87,18 @@ export class NowPaymentsProvider {
     }
     const sorted = sortKeysDeep(body);
     const expected = createHmac("sha512", ipnSecret).update(JSON.stringify(sorted)).digest("hex");
-    return expected === signature;
+
+    // Constant-time comparison: `===` on strings returns as soon as two
+    // bytes differ, which leaks how much of a forged signature was
+    // correct and makes the rest guessable one byte at a time. This
+    // guards the endpoint that decides whether a payment is real, so it
+    // is worth the care. timingSafeEqual throws on a length mismatch,
+    // hence the explicit check -- and length is not a secret here, since
+    // a SHA-512 hex digest is always 128 characters.
+    const expectedBuf = Buffer.from(expected, "utf8");
+    const givenBuf = Buffer.from(signature, "utf8");
+    if (expectedBuf.length !== givenBuf.length) return false;
+    return timingSafeEqual(expectedBuf, givenBuf);
   }
 }
 
