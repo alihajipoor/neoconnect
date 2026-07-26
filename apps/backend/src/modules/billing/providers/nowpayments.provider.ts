@@ -31,12 +31,27 @@ export class NowPaymentsProvider {
     return apiKey;
   }
 
+  /** Where NowPayments should post payment status callbacks.
+   *
+   * Derived from the same PUBLIC_API_URL that already builds the links in
+   * verification emails, so there is one public address to configure per
+   * deployment instead of two that can silently disagree. Returns
+   * undefined when unset -- a local dev box has no address NowPayments
+   * could reach anyway, and sending a localhost URL would be worse than
+   * sending none. */
+  private ipnCallbackUrl(): string | undefined {
+    const base = this.config.get<string>("publicApiUrl");
+    if (!base) return undefined;
+    return `${base.replace(/\/$/, "")}/billing/webhooks/nowpayments`;
+  }
+
   /** Creates a crypto payment (USDT/TRC20) via NowPayments' API -- a
    * pay-to address and amount the app/website can render directly (QR
    * code, copy button), not a hosted invoice page redirect. Iranian
    * customers who can't use international cards are the reason this
    * provider exists at all -- see project scope notes. */
   async createPayment(amountUsd: number, orderId: string): Promise<NowPaymentsPayment> {
+    const callbackUrl = this.ipnCallbackUrl();
     const res = await fetch(`${NOWPAYMENTS_API_BASE}/payment`, {
       method: "POST",
       headers: { "x-api-key": (await this.requireApiKey()), "Content-Type": "application/json" },
@@ -45,6 +60,14 @@ export class NowPaymentsProvider {
         price_currency: "usd",
         pay_currency: "usdttrc20",
         order_id: orderId,
+        // Sent per payment rather than relying on the IPN URL configured
+        // in the NowPayments dashboard. Whether that dashboard setting is
+        // applied as a fallback for API-created payments is not something
+        // we can confirm without a real crypto payment, and the failure
+        // mode if it isn't is the worst one available: the customer pays,
+        // no callback ever arrives, and the subscription silently never
+        // activates. Naming it explicitly removes the question.
+        ...(callbackUrl ? { ipn_callback_url: callbackUrl } : {}),
       }),
     });
     if (!res.ok) {
