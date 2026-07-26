@@ -20,6 +20,53 @@ function signLikeNowPayments(body: Record<string, unknown>): string {
   return createHmac("sha512", IPN_SECRET).update(JSON.stringify(sortDeep(body))).digest("hex");
 }
 
+describe("NowPaymentsProvider.createPayment", () => {
+  const settings = { nowPayments: jest.fn().mockResolvedValue({ apiKey: "k", ipnSecret: IPN_SECRET }) };
+
+  function build(publicApiUrl?: string) {
+    const config = { get: jest.fn((key: string) => (key === "publicApiUrl" ? publicApiUrl : undefined)) };
+    return new NowPaymentsProvider(config as never, settings as never);
+  }
+
+  function mockFetch() {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ payment_id: 1, pay_address: "T...", pay_amount: 10, pay_currency: "usdttrc20" }),
+    });
+    global.fetch = fetchMock as never;
+    return fetchMock;
+  }
+
+  function sentBody(fetchMock: jest.Mock) {
+    return JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+  }
+
+  // The regression this guards: without ipn_callback_url, a customer can
+  // pay and no callback ever arrives, so the subscription never activates
+  // and nothing anywhere reports an error.
+  it("tells NowPayments where to send the IPN callback", async () => {
+    const fetchMock = mockFetch();
+    await build("https://connect.neoxify.com/api").createPayment(10, "txn-1");
+    expect(sentBody(fetchMock).ipn_callback_url).toBe(
+      "https://connect.neoxify.com/api/billing/webhooks/nowpayments",
+    );
+  });
+
+  it("does not double up the slash when the base URL has a trailing one", async () => {
+    const fetchMock = mockFetch();
+    await build("https://connect.neoxify.com/api/").createPayment(10, "txn-1");
+    expect(sentBody(fetchMock).ipn_callback_url).toBe(
+      "https://connect.neoxify.com/api/billing/webhooks/nowpayments",
+    );
+  });
+
+  it("omits the callback entirely when no public URL is configured", async () => {
+    const fetchMock = mockFetch();
+    await build(undefined).createPayment(10, "txn-1");
+    expect(sentBody(fetchMock)).not.toHaveProperty("ipn_callback_url");
+  });
+});
+
 describe("NowPaymentsProvider.verifyIpnSignature", () => {
   let provider: NowPaymentsProvider;
 
