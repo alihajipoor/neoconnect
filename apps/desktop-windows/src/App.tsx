@@ -30,7 +30,12 @@ export default function App() {
   const handledDeepLinkUrls = useRef(new Set<string>());
 
   useEffect(() => {
-    getTokens().then((tokens) => setScreen(tokens ? "dashboard" : "login"));
+    // getTokens() swallows its own read failures, but a catch here too
+    // means no future change to it can strand the app on "Loading..."
+    // with no way forward.
+    getTokens()
+      .then((tokens) => setScreen(tokens ? "dashboard" : "login"))
+      .catch(() => setScreen("login"));
   }, []);
 
   // Handles the "Open in Neoxify" link from the verification email --

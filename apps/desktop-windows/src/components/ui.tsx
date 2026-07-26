@@ -10,16 +10,26 @@ export function Button({
   className,
   variant = "default",
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "default" | "destructive" | "ghost" }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "default" | "destructive" | "ghost" | "outline";
+}) {
+  // `default` is the site's violet-to-cyan gradient rather than a flat
+  // fill, and lifts on hover -- a solid rectangle was the single biggest
+  // reason the app read as a generic template. The glow uses colour-mix
+  // so it stays tied to the token instead of a hardcoded rgba that
+  // silently drifts if --primary ever changes.
   const variants = {
-    default: "bg-primary text-primary-foreground hover:bg-primary/90",
+    default:
+      "bg-[linear-gradient(120deg,var(--primary),color-mix(in_oklab,var(--primary)_55%,var(--highlight)))] text-primary-foreground shadow-[0_4px_16px_-6px_var(--primary)] hover:shadow-[0_8px_26px_-8px_var(--primary)] hover:brightness-110",
     destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-    ghost: "bg-transparent text-foreground hover:bg-white/5",
+    ghost: "bg-transparent text-foreground hover:bg-white/8",
+    outline:
+      "border border-white/12 bg-white/[0.02] text-foreground hover:border-white/20 hover:bg-white/6",
   };
   return (
     <button
       className={cn(
-        "inline-flex h-9 items-center justify-center gap-2 rounded-md px-4 text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50",
+        "press inline-flex h-9 items-center justify-center gap-2 rounded-lg px-4 text-sm font-medium disabled:pointer-events-none disabled:opacity-50",
         variants[variant],
         className,
       )}
@@ -32,7 +42,7 @@ export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElem
   return (
     <input
       className={cn(
-        "h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50",
+        "h-10 w-full rounded-lg border border-input bg-white/[0.03] px-3 text-sm outline-none transition-[border-color,box-shadow,background-color] placeholder:text-muted-foreground hover:border-white/16 focus-visible:border-ring focus-visible:bg-white/[0.05] focus-visible:ring-[3px] focus-visible:ring-ring/25",
         className,
       )}
       {...props}
@@ -45,10 +55,50 @@ export function Label({ className, ...props }: LabelHTMLAttributes<HTMLLabelElem
 }
 
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+  // The top hairline is what separates a "surface" from a "box with a
+  // border": it reads as light catching an edge, which is the treatment
+  // the website uses on its own cards.
   return (
     <div
-      className={cn("rounded-lg border border-white/10 bg-card/80 p-4 shadow-2xl shadow-black/40", className)}
+      className={cn(
+        "relative overflow-hidden rounded-xl border border-white/10 bg-card/70 p-4 shadow-[0_1px_2px_rgba(0,0,0,0.4),0_12px_32px_-16px_rgba(0,0,0,0.9)] backdrop-blur-sm",
+        "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-white/15 before:to-transparent",
+        className,
+      )}
       {...props}
     />
+  );
+}
+
+/** A labelled figure -- the app's unit of "one fact worth glancing at".
+ *
+ * Exists so the Dashboard's stat row is one component repeated rather
+ * than three hand-built divs that drift apart, and so any later screen
+ * showing a metric gets the same treatment for free.
+ */
+export function Stat({
+  icon,
+  label,
+  value,
+  className,
+}: {
+  icon?: React.ReactNode;
+  label: string;
+  value: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "surface-interactive flex min-w-0 flex-col gap-1 rounded-lg border border-white/8 bg-white/[0.025] px-2.5 py-2",
+        className,
+      )}
+    >
+      <span className="flex items-center gap-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+        {icon}
+        <span className="truncate">{label}</span>
+      </span>
+      <span className="truncate text-xs font-semibold text-foreground">{value}</span>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { login } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
-import { Logo } from "../components/Logo";
+import { LogoMark } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
 
 export function Login({
@@ -39,9 +39,16 @@ export function Login({
   }
 
   return (
-    <div className="glow-backdrop flex h-full flex-col items-center justify-center gap-8 overflow-hidden p-6">
-      <Logo className="scale-110" />
-      <Card className="w-full max-w-xs">
+    <div className="glow-backdrop flex h-full flex-col items-center justify-center gap-7 overflow-hidden p-6">
+      {/* The mark at hero scale rather than the small nav lockup -- this
+          is the first screen anyone sees, and it was previously carrying
+          the same 32px logo used in a toolbar. */}
+      <div className="animate-rise flex flex-col items-center gap-3">
+        <LogoMark className="size-16" />
+        <span className="text-brand-gradient text-2xl font-semibold tracking-tight">Neoxify</span>
+      </div>
+
+      <Card className="animate-rise w-full max-w-xs" style={{ animationDelay: "90ms" }}>
         <h1 className="mb-1 text-lg font-semibold">{t("auth.welcomeBack")}</h1>
         <p className="mb-4 text-sm text-muted-foreground">{t("auth.signInToConnect")}</p>
         {notice ? (
@@ -82,13 +89,18 @@ export function Login({
             {pending ? t("auth.signingIn") : t("auth.signIn")}
           </Button>
         </form>
-        <button
-          type="button"
-          onClick={onGoRegister}
-          className="mt-4 w-full text-center text-xs text-muted-foreground hover:text-foreground"
-        >
-          New here? Create an account
-        </button>
+        {/* Was hardcoded English, so it stayed English in Persian mode --
+            the keys for both halves already existed. */}
+        <p className="mt-4 text-center text-xs text-muted-foreground">
+          {t("auth.noAccount")}{" "}
+          <button
+            type="button"
+            onClick={onGoRegister}
+            className="font-medium text-primary underline-offset-2 transition-colors hover:text-highlight hover:underline"
+          >
+            {t("auth.register")}
+          </button>
+        </p>
       </Card>
     </div>
   );
