@@ -191,6 +191,29 @@ describe("CustomerAuthService", () => {
       await expect(service.verifyEmailByCode("customer@example.com", "111111")).rejects.toThrow(BadRequestException);
     });
 
+    // Reported from real use: verified by clicking the emailed link on a
+    // phone, then typed the code into the app and was told it had
+    // expired -- because verifying clears the code. The account was fine;
+    // only the message was wrong, and it sent the customer chasing codes
+    // that could never work.
+    it("reports an already-verified account as verified, not as an expired code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        buildCustomer({
+          emailVerifiedAt: new Date(),
+          // Cleared by the earlier verification, which is exactly why the
+          // code check alone reported failure.
+          emailVerificationCode: null,
+          emailVerificationCodeExpiresAt: null,
+        }),
+      );
+
+      const result = await service.verifyEmailByCode("customer@example.com", "111111");
+
+      expect(result.alreadyVerified).toBe(true);
+      // No second trial for an account that already got one.
+      expect(result.trial).toBeNull();
+    });
+
     it("marks the customer verified and grants a trial on a correct, unexpired code", async () => {
       prisma.customer.findUnique.mockResolvedValue(
         buildCustomer({

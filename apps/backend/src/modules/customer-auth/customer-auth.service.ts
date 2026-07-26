@@ -137,6 +137,17 @@ export class CustomerAuthService {
    * yet at this point) and checks it hasn't expired. */
   async verifyEmailByCode(email: string, code: string) {
     const customer = await this.prisma.customer.findUnique({ where: { email } });
+
+    // Already-verified is checked before the code, because verifying
+    // clears the code. Someone who clicked the emailed link on their
+    // phone and then typed the code into the app was told the code had
+    // expired -- while their account was in fact verified and fine. The
+    // account is what matters, not which route confirmed it, and saying
+    // "expired" sent people off to request codes that would never help.
+    if (customer?.emailVerifiedAt) {
+      return { alreadyVerified: true, trial: null };
+    }
+
     if (
       !customer ||
       !customer.emailVerificationCode ||

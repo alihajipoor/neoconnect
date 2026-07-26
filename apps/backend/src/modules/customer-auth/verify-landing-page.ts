@@ -63,11 +63,22 @@ export function verifiedPage(deepLink: string, alreadyVerified: boolean): string
     ? "This address was already confirmed, so there's nothing more to do."
     : "Your address is confirmed and your account is ready to use.";
 
+  // The instruction comes before the button on purpose. This link is
+  // usually opened on a phone, because that is where the email was read
+  // -- and a phone has no Neoxify app, so the neoconnect:// button can
+  // only fail there. Leading with it produced a browser error about a
+  // missing app, which reads as "verification failed" when in fact it
+  // had already succeeded before this page was rendered. Reported by a
+  // customer who then went back to the app and was told their code had
+  // expired.
   return shell(`
     <h1>${headline}</h1>
     <p>${detail}</p>
-    <p><a class="btn" href="${deepLink}">Open Neoxify</a></p>
-    <p class="muted">If nothing happens, open the Neoxify app and sign in normally &mdash; you're verified either way.</p>
+    <p><strong>You can close this page.</strong> Go back to the Neoxify app on your computer &mdash;
+       it will pick this up on its own within a few seconds.</p>
+    <p class="muted">On the computer where Neoxify is installed, you can also
+       <a href="${deepLink}">open the app directly</a>. That link does nothing on a phone,
+       which is fine &mdash; your email is confirmed either way.</p>
   `);
 }
 
