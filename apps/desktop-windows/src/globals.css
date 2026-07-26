@@ -46,6 +46,12 @@
   --destructive-foreground: #ffffff;
   --success: #10b981;
   --success-foreground: #ffffff;
+  /* For states that are neither working nor failed -- chiefly a tunnel
+     that is up but not actually carrying traffic. Distinct from
+     destructive on purpose: nothing is broken enough to be an error, but
+     calling it success would be a lie. */
+  --warning: #f59e0b;
+  --warning-foreground: #1f1300;
   --highlight: #22d3ee;
   --highlight-foreground: #06282e;
   --border: rgba(255, 255, 255, 0.08);
@@ -76,6 +82,8 @@
   --color-destructive-foreground: var(--destructive-foreground);
   --color-success: var(--success);
   --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
   --color-highlight: var(--highlight);
   --color-highlight-foreground: var(--highlight-foreground);
   --color-border: var(--border);

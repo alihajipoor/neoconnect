@@ -25,6 +25,96 @@ const PROTOCOL_LABEL: Record<string, string> = {
   OPENVPN: "OpenVPN",
 };
 
+/** What the helper service reports about the far end.
+ *
+ * `connected` only means an engine is running locally. `health` is the
+ * part that required the server to participate, so it is what decides
+ * what the customer is told.
+ */
+type VpnStatus = {
+  connected: boolean;
+  protocol: string | null;
+  health:
+    | { state: "alive"; age_secs: number }
+    | { state: "stale"; age_secs: number }
+    | { state: "neverHandshaked" }
+    | { state: "down" }
+    | { state: "unknown" };
+};
+
+/** How often to re-check a live tunnel.
+ *
+ * WireGuard rehandshakes roughly every two minutes, so this is frequent
+ * enough to notice a dead tunnel well inside one cycle without polling
+ * the service pointlessly hard. */
+const HEALTH_POLL_MS = 15_000;
+
+/** How long to give a fresh tunnel to prove itself before calling it
+ * degraded.
+ *
+ * A WireGuard handshake normally completes within a second or two, but
+ * it is not instant, and checking the moment vpn_connect returns would
+ * report every healthy connection as broken. Eight seconds is far longer
+ * than a working handshake needs and still short enough that a genuinely
+ * dead tunnel is called out while the customer is still looking. */
+const CONFIRM_TIMEOUT_MS = 8_000;
+const CONFIRM_INTERVAL_MS = 700;
+
+/** Waits for the far end to answer, then reports what is actually true.
+ *
+ * Returns as soon as there is a definite answer rather than always
+ * burning the full timeout, so a working connection still feels instant.
+ */
+async function confirmReachable(): Promise<ConnectionState> {
+  const deadline = Date.now() + CONFIRM_TIMEOUT_MS;
+  let last: ConnectionState = "degraded";
+
+  while (Date.now() < deadline) {
+    let status: VpnStatus;
+    try {
+      status = await invoke<VpnStatus>("vpn_status");
+    } catch {
+      // The service being briefly unreachable is not evidence about the
+      // tunnel, so keep waiting rather than concluding anything.
+      await new Promise((r) => setTimeout(r, CONFIRM_INTERVAL_MS));
+      continue;
+    }
+
+    if (!status.connected) return "disconnected";
+
+    // "unknown" means no handshake evidence exists for this protocol
+    // (Xray, OpenVPN) -- there is nothing more to wait for, so don't.
+    if (status.health.state === "alive" || status.health.state === "unknown") return "connected";
+
+    last = stateFromStatus(status);
+    await new Promise((r) => setTimeout(r, CONFIRM_INTERVAL_MS));
+  }
+
+  return last;
+}
+
+/** Turns the service's two facts into the one thing to display.
+ *
+ * `stale` and `neverHandshaked` both become "degraded" rather than
+ * "connected": in both cases an interface exists and nothing is reaching
+ * the other end, which is precisely the situation that used to render as
+ * a confident "Connected".
+ *
+ * `unknown` stays optimistic deliberately -- it is what Xray and OpenVPN
+ * report, where no cheap handshake evidence exists. Showing those as
+ * degraded would cry wolf on every connection of those protocols.
+ */
+function stateFromStatus(status: VpnStatus): ConnectionState {
+  if (!status.connected) return "disconnected";
+  switch (status.health.state) {
+    case "stale":
+    case "neverHandshaked":
+      return "degraded";
+    default:
+      return "connected";
+  }
+}
+
 function formatDuration(totalSeconds: number) {
   // Clamped so a clock adjustment mid-session can never render a
   // negative duration -- the sign would leak into every field.
@@ -115,18 +205,35 @@ export function Dashboard({
     // deliberately silent -- it just means "show disconnected", and the
     // real error surfaces on the next Connect attempt with context.
     try {
-      const status = await invoke<{ connected: boolean }>("vpn_status");
-      setConnectionState(status.connected ? "connected" : "disconnected");
+      const status = await invoke<VpnStatus>("vpn_status");
+      setConnectionState(stateFromStatus(status));
     } catch {
       setConnectionState("disconnected");
     }
   }
 
+  // Keeps checking a live tunnel. Without this the app showed whatever
+  // was true at connect time forever, so a tunnel that died an hour ago
+  // still read as "Connected".
+  useEffect(() => {
+    if (connectionState !== "connected" && connectionState !== "degraded") return;
+    const id = setInterval(async () => {
+      try {
+        const status = await invoke<VpnStatus>("vpn_status");
+        setConnectionState(stateFromStatus(status));
+      } catch {
+        // Leave the last known state alone: failing to ask is not the
+        // same as learning the tunnel is down.
+      }
+    }, HEALTH_POLL_MS);
+    return () => clearInterval(id);
+  }, [connectionState]);
+
   async function handleConnectToggle() {
     if (!protocolUser) return;
     setConnectionError(null);
 
-    if (connectionState === "connected") {
+    if (connectionState === "connected" || connectionState === "degraded") {
       setConnectionState("disconnecting");
       try {
         await invoke("vpn_disconnect");
@@ -145,7 +252,12 @@ export function Dashboard({
       // picks the right engine -- the app deliberately doesn't branch on
       // protocol here, so adding one later needs no change in the UI.
       await invoke("vpn_connect", { payload: protocolUser });
-      setConnectionState("connected");
+
+      // vpn_connect returning only means an engine started. WireGuard
+      // does no session setup, so the tunnel can exist with a peer that
+      // never answers -- confirming the far end replied is what stops
+      // the app claiming "Connected" for a connection that isn't.
+      setConnectionState(await confirmReachable());
       setConnectedAt(Date.now());
     } catch (err) {
       setConnectionError(String(err));
@@ -180,11 +292,13 @@ export function Dashboard({
   const connectLabel =
     connectionState === "connected"
       ? t("dash.connected")
-      : connectionState === "connecting"
-        ? t("dash.connecting")
-        : connectionState === "disconnecting"
-          ? t("dash.disconnecting")
-          : t("dash.connect");
+      : connectionState === "degraded"
+        ? t("dash.degraded")
+        : connectionState === "connecting"
+          ? t("dash.connecting")
+          : connectionState === "disconnecting"
+            ? t("dash.disconnecting")
+            : t("dash.connect");
 
   if (loading) {
     return (
@@ -233,6 +347,8 @@ export function Dashboard({
               className={
                 connectionState === "connected"
                   ? "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]"
+                  : connectionState === "degraded"
+                    ? "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]"
                   : "size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
               }
             />
@@ -265,13 +381,23 @@ export function Dashboard({
                         className={
                           connectionState === "connected"
                             ? "text-sm font-semibold text-success"
-                            : "text-sm font-semibold text-foreground"
+                            : connectionState === "degraded"
+                              ? "text-sm font-semibold text-warning"
+                              : "text-sm font-semibold text-foreground"
                         }
                       >
-                        {connectionState === "connected" ? t("dash.protected") : t("dash.notProtected")}
+                        {connectionState === "connected"
+                          ? t("dash.protected")
+                          : connectionState === "degraded"
+                            ? t("dash.degraded")
+                            : t("dash.notProtected")}
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        {connectionState === "connected" ? t("dash.protectedHint") : t("dash.notProtectedHint")}
+                        {connectionState === "connected"
+                          ? t("dash.protectedHint")
+                          : connectionState === "degraded"
+                            ? t("dash.degradedHint")
+                            : t("dash.notProtectedHint")}
                       </p>
                     </div>
 

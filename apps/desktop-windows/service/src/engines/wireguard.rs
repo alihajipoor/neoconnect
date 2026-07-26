@@ -14,7 +14,7 @@ use neoconnect_ipc::WireguardProfile;
 use windows_service::service::ServiceAccess;
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-use super::{run_hidden, write_config, Engines};
+use super::{run_hidden, run_hidden_capture, write_config, Engines};
 
 const TUNNEL_NAME: &str = "neoconnect";
 const CONF_FILE: &str = "neoconnect.conf";
@@ -69,9 +69,156 @@ pub fn remove_tunnel_if_present(engines: &Engines) {
     let _ = disconnect(engines);
 }
 
+/// A handshake older than this means the peer has stopped answering.
+///
+/// WireGuard rehandshakes about every two minutes while traffic flows,
+/// so three minutes is one missed cycle plus room for a link that is
+/// merely idle. Shorter would flag healthy idle tunnels as dead.
+const HANDSHAKE_STALE_AFTER_SECS: u64 = 180;
+
+/// Whether the far end is actually answering, as opposed to whether we
+/// managed to create an interface.
+///
+/// This is the distinction the UI was missing. WireGuard is UDP and does
+/// no session setup at connect time, so `wireguard.exe` happily creates a
+/// tunnel service whose peer is unreachable, whose key is wrong, or whose
+/// port is blocked -- and every local check (service exists, interface
+/// up) still says yes. Reporting that as "Connected" tells someone they
+/// are protected when they are not.
+///
+/// `latest-handshake` cannot be faked locally: a non-zero value means the
+/// server completed a cryptographic handshake with us. That makes it the
+/// one piece of real evidence available, so it is what this reports on.
+pub fn handshake_health(engines: &Engines) -> HandshakeHealth {
+    let Ok(exe) = engines.engine_path("wg.exe") else {
+        return HandshakeHealth::Unknown;
+    };
+
+    // `wg show <iface> latest-handshake` prints "<peer>\t<unix seconds>",
+    // one line per peer. Zero means "never handshaked since the interface
+    // came up", which is precisely the failed-connection case.
+    let out = match run_hidden_capture(&exe, &[OsStr::new("show"), OsStr::new(TUNNEL_NAME), OsStr::new("latest-handshake")]) {
+        Ok(out) => out,
+        Err(_) => return HandshakeHealth::Unknown,
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    parse_handshake(&out, now)
+}
+
+/// Split out from the process call so the decision itself can be tested.
+/// This is the judgement that decides whether a customer is told they are
+/// protected, so it should not only be exercisable by having a real
+/// tunnel up.
+fn parse_handshake(out: &str, now: u64) -> HandshakeHealth {
+    let latest = out
+        .lines()
+        .filter_map(|line| line.split('\t').nth(1))
+        .filter_map(|secs| secs.trim().parse::<u64>().ok())
+        .max();
+
+    match latest {
+        // No peer line at all -- the interface is not there in the way we
+        // expect, so claiming anything about the peer would be invention.
+        None => HandshakeHealth::Unknown,
+        Some(0) => HandshakeHealth::NeverHandshaked,
+        Some(ts) => {
+            // Saturating: a clock adjustment must not wrap into a huge
+            // age and report a healthy tunnel as dead.
+            let age = now.saturating_sub(ts);
+            if age <= HANDSHAKE_STALE_AFTER_SECS {
+                HandshakeHealth::Alive { age_secs: age }
+            } else {
+                HandshakeHealth::Stale { age_secs: age }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn a_recent_handshake_means_the_peer_is_answering() {
+        let out = "abc123=\t{}\n".replace("{}", &(NOW - 30).to_string());
+        assert_eq!(parse_handshake(&out, NOW), HandshakeHealth::Alive { age_secs: 30 });
+    }
+
+    /// The case this whole milestone exists for: wireguard.exe created
+    /// the tunnel, every local check says "up", and the server has never
+    /// replied. Reporting this as connected is what told customers they
+    /// were protected when they were not.
+    #[test]
+    fn a_zero_timestamp_means_the_server_never_replied() {
+        assert_eq!(parse_handshake("abc123=\t0\n", NOW), HandshakeHealth::NeverHandshaked);
+    }
+
+    #[test]
+    fn a_handshake_older_than_the_window_is_stale() {
+        let out = format!("abc123=\t{}\n", NOW - 600);
+        assert_eq!(parse_handshake(&out, NOW), HandshakeHealth::Stale { age_secs: 600 });
+    }
+
+    /// WireGuard rehandshakes about every two minutes, so an idle-but-fine
+    /// tunnel must not be flagged.
+    #[test]
+    fn a_tunnel_between_rehandshakes_is_still_alive() {
+        let out = format!("abc123=\t{}\n", NOW - 150);
+        assert_eq!(parse_handshake(&out, NOW), HandshakeHealth::Alive { age_secs: 150 });
+    }
+
+    #[test]
+    fn no_peer_line_is_unknown_rather_than_a_guess() {
+        assert_eq!(parse_handshake("", NOW), HandshakeHealth::Unknown);
+        assert_eq!(parse_handshake("garbage without a tab", NOW), HandshakeHealth::Unknown);
+    }
+
+    /// A clock that jumped backwards must not turn a live tunnel into a
+    /// wrapped, enormous age that reads as long-dead.
+    #[test]
+    fn a_timestamp_in_the_future_does_not_wrap_into_stale() {
+        let out = format!("abc123=\t{}\n", NOW + 500);
+        assert_eq!(parse_handshake(&out, NOW), HandshakeHealth::Alive { age_secs: 0 });
+    }
+
+    /// Multiple peers can be listed; the tunnel is alive if any of them
+    /// answered recently.
+    #[test]
+    fn the_most_recent_peer_decides() {
+        let out = format!("old=\t0\nnew=\t{}\n", NOW - 10);
+        assert_eq!(parse_handshake(&out, NOW), HandshakeHealth::Alive { age_secs: 10 });
+    }
+}
+
+/// What the peer's handshake says about the tunnel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeHealth {
+    /// The server answered recently. The tunnel is genuinely carrying.
+    Alive { age_secs: u64 },
+    /// It answered once, but not lately -- the server or the path died.
+    Stale { age_secs: u64 },
+    /// The interface exists but the server has never answered: wrong key,
+    /// unreachable host, or a blocked port. The case that used to render
+    /// as "Connected".
+    NeverHandshaked,
+    /// wg.exe missing or unreadable output. Reported as its own state
+    /// rather than guessed either way.
+    Unknown,
+}
+
 /// Asks the service manager whether the tunnel service exists at all.
 /// Opening it is enough -- a tunnel service that exists is one
 /// wireguard.exe created and has not torn down.
+///
+/// Note this says nothing about whether the tunnel works; see
+/// [`handshake_health`] for that.
 pub fn tunnel_is_running() -> bool {
     let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else {
         return false;
