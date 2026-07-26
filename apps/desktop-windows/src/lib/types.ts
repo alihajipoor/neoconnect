@@ -17,7 +17,11 @@ export interface Customer {
   updatedAt: string;
 }
 
-export type SubscriptionStatus = "ACTIVE" | "SUSPENDED" | "EXPIRED" | "CANCELLED";
+// PENDING was added backend-side when self-purchase landed (a
+// subscription exists before the payment clears) but never mirrored
+// here, so the app had no way to express "created, not paid for" and
+// treated one as a real subscription.
+export type SubscriptionStatus = "PENDING" | "ACTIVE" | "SUSPENDED" | "EXPIRED" | "CANCELLED";
 
 export interface Subscription {
   id: string;

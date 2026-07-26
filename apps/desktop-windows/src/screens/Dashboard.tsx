@@ -145,6 +145,25 @@ function stateFromStatus(status: VpnStatus): ConnectionState {
   }
 }
 
+/** The subscription worth showing, out of everything the account has.
+ *
+ * The list includes every subscription ever created, newest first, and
+ * simply taking the first one was wrong in a way customers hit: starting
+ * a purchase and not finishing it leaves a PENDING row, which then
+ * rendered as a real subscription -- an expiry date, a data allowance,
+ * "no connection provisioned yet" -- while nothing had been paid for.
+ * Worse, it hid the "choose a plan" screen, so there was no way back:
+ * the app insisted you had a subscription you could not use.
+ *
+ * PENDING and CANCELLED are excluded because neither entitles anyone to
+ * anything. SUSPENDED and EXPIRED are kept: those are real subscriptions
+ * in a bad state, and hiding them would be its own lie.
+ */
+function usableSubscription(all: Subscription[]): Subscription | null {
+  const real = all.filter((s) => s.status !== "PENDING" && s.status !== "CANCELLED");
+  return real.find((s) => s.status === "ACTIVE") ?? real[0] ?? null;
+}
+
 function formatDuration(totalSeconds: number) {
   // Clamped so a clock adjustment mid-session can never render a
   // negative duration -- the sign would leak into every field.
@@ -222,7 +241,7 @@ export function Dashboard({
     }
 
     setMe(meResult.data);
-    const sub = subsResult.data[0] ?? null;
+    const sub = usableSubscription(subsResult.data);
     setSubscription(sub);
     setProtocolUser(usersResult.data[0] ?? null);
     setLoading(false);
