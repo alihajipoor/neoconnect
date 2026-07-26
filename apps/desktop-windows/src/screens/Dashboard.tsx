@@ -8,6 +8,7 @@ import { formatBytes } from "../lib/utils";
 import { Button, Card } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { LocationPicker } from "../components/LocationPicker";
+import { useI18n } from "../lib/i18n";
 
 type ConnectionState = "disconnected" | "connecting" | "connected" | "disconnecting";
 
@@ -20,6 +21,7 @@ export function Dashboard({
   onBrowsePlans: () => void;
   onOpenSettings: () => void;
 }) {
+  const { t } = useI18n();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [me, setMe] = useState<Customer | null>(null);
@@ -44,7 +46,7 @@ export function Dashboard({
         onLoggedOut();
         return;
       }
-      setError(!meResult.ok ? meResult.error : !subsResult.ok ? subsResult.error : "Could not load your account.");
+      setError(!meResult.ok ? meResult.error : !subsResult.ok ? subsResult.error : t("dash.loadFailed"));
       setLoading(false);
       return;
     }
@@ -102,7 +104,7 @@ export function Dashboard({
   }
 
   if (loading) {
-    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading...</div>;
+    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t("common.loading")}</div>;
   }
 
   return (
@@ -113,14 +115,14 @@ export function Dashboard({
           <Button
             variant="ghost"
             onClick={onOpenSettings}
-            aria-label="Settings"
-            title="Settings"
+            aria-label={t("nav.settings")}
+            title={t("nav.settings")}
             className="size-7 justify-center px-0"
           >
             <SettingsIcon className="size-4" />
           </Button>
           <Button variant="ghost" onClick={handleLogout} className="h-7 px-2 text-xs">
-            Sign out
+            {t("nav.signOut")}
           </Button>
         </div>
       </div>
@@ -129,7 +131,7 @@ export function Dashboard({
         <Card>
           <p className="text-sm text-destructive">{error}</p>
           <Button onClick={() => void loadAll()} className="mt-3">
-            Retry
+            {t("dash.retry")}
           </Button>
         </Card>
       ) : (
@@ -139,7 +141,7 @@ export function Dashboard({
           {subscription ? (
             <Card className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">Subscription</span>
+                <span className="text-sm font-medium">{t("dash.subscription")}</span>
                 <span
                   className={
                     subscription.status === "ACTIVE"
@@ -151,10 +153,13 @@ export function Dashboard({
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">
-                Expires {new Date(subscription.expireAt).toLocaleDateString()}
+                {t("dash.expires")} <span className="tabular-nums">{new Date(subscription.expireAt).toLocaleDateString()}</span>
               </p>
               <p className="text-xs text-muted-foreground">
-                {formatBytes(subscription.dataUsedBytes)} / {formatBytes(subscription.dataCapBytes)} used
+                <span className="tabular-nums">
+                  {formatBytes(subscription.dataUsedBytes)} / {formatBytes(subscription.dataCapBytes)}
+                </span>{" "}
+                {t("dash.dataUsed")}
               </p>
             </Card>
           ) : (
@@ -162,13 +167,13 @@ export function Dashboard({
             // which is everyone, now that trial mode can be turned off --
             // was told they had nothing and given no way to get one.
             <Card className="flex flex-col gap-3">
-              <p className="text-sm font-medium">No active subscription</p>
+              <p className="text-sm font-medium">{t("dash.noSubscription")}</p>
               <p className="text-xs text-muted-foreground">
                 Choose a plan to start using Neoxify.
               </p>
               <Button onClick={onBrowsePlans} className="w-full justify-center gap-2">
                 <Tag className="size-4" />
-                View plans
+                {t("dash.viewPlans")}
               </Button>
             </Card>
           )}
@@ -190,10 +195,10 @@ export function Dashboard({
                       : "bg-primary/20 text-primary shadow-[0_0_40px_-8px_var(--primary)]")
                   }
                 >
-                  {connectionState === "connected" && "Connected"}
-                  {connectionState === "disconnected" && "Connect"}
-                  {connectionState === "connecting" && "Connecting..."}
-                  {connectionState === "disconnecting" && "Disconnecting..."}
+                  {connectionState === "connected" && t("dash.connected")}
+                  {connectionState === "disconnected" && t("dash.connect")}
+                  {connectionState === "connecting" && t("dash.connecting")}
+                  {connectionState === "disconnecting" && t("dash.disconnecting")}
                 </button>
                 {connectionError ? <p className="text-xs text-destructive">{connectionError}</p> : null}
               </>
@@ -208,7 +213,7 @@ export function Dashboard({
               className="w-full justify-center gap-2 border border-white/10"
             >
               <MapPin className="size-4" />
-              Change location
+              {t("dash.changeLocation")}
             </Button>
           ) : null}
         </>

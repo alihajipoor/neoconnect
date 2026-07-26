@@ -2,6 +2,7 @@ import { useState } from "react";
 import { register } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { Logo } from "../components/Logo";
+import { useI18n } from "../lib/i18n";
 
 export function Register({
   onNeedsVerification,
@@ -10,6 +11,7 @@ export function Register({
   onNeedsVerification: (email: string, password: string) => void;
   onGoLogin: () => void;
 }) {
+  const { t } = useI18n();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -36,11 +38,11 @@ export function Register({
     <div className="glow-backdrop flex h-full flex-col items-center justify-center gap-8 overflow-hidden p-6">
       <Logo className="scale-110" />
       <Card className="w-full max-w-xs">
-        <h1 className="mb-1 text-lg font-semibold">Create your account</h1>
-        <p className="mb-4 text-sm text-muted-foreground">No credit card required to get started.</p>
+        <h1 className="mb-1 text-lg font-semibold">{t("auth.createAccount")}</h1>
+        <p className="mb-4 text-sm text-muted-foreground">{t("auth.noCardRequired")}</p>
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="email">Email</Label>
+            <Label htmlFor="email">{t("auth.email")}</Label>
             <Input
               id="email"
               type="email"
@@ -52,7 +54,7 @@ export function Register({
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="password">Password</Label>
+            <Label htmlFor="password">{t("auth.password")}</Label>
             <Input
               id="password"
               type="password"
@@ -69,7 +71,7 @@ export function Register({
             </p>
           ) : null}
           <Button type="submit" disabled={pending} className="mt-1 w-full">
-            {pending ? "Creating account..." : "Create account"}
+            {pending ? t("auth.registering") : t("auth.createAccount")}
           </Button>
         </form>
         <button

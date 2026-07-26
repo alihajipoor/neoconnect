@@ -33,15 +33,26 @@
   ; install tries to register a service under the same name.
   ;
   ; Handled by name rather than by path, via sc.exe, so it works no matter
-  ; where the old build put itself. The service name is deliberately
-  ; unchanged across the rename (see the branding notes) precisely so this
-  ; still finds it.
+  ; where the old build put itself.
   ;
-  ; Both calls are expected to fail harmlessly on a clean machine where
-  ; there is nothing to stop or delete.
-  nsExec::ExecToLog 'sc.exe stop neoconnect-service'
+  ; BOTH names are removed. The rename changed the registered service from
+  ; NeoConnectService to NeoxifyService, so a machine upgrading from a
+  ; pre-rename build has the old one still registered, running, and holding
+  ; a binary open in a directory this installer never looks at. Only
+  ; removing the new name would leave it there forever.
+  ;
+  ; (An earlier version of this hook used "neoconnect-service", which is
+  ; the executable's filename and was never the service name -- it matched
+  ; nothing on any machine.)
+  ;
+  ; All four calls fail harmlessly on a clean machine.
+  nsExec::ExecToLog 'sc.exe stop NeoConnectService'
   Pop $0
-  nsExec::ExecToLog 'sc.exe delete neoconnect-service'
+  nsExec::ExecToLog 'sc.exe delete NeoConnectService'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe stop NeoxifyService'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete NeoxifyService'
   Pop $0
 
   ; The old install directory is left in place rather than deleted here.
@@ -57,12 +68,31 @@
   ; is (ServiceInfo in main.rs) instead of two that can drift.
   nsExec::ExecToLog '"$INSTDIR\resources\neoconnect-service.exe" install'
   Pop $0
-  ${If} $0 != 0
-    ; Not fatal: the app installs fine and will show a clear "could not
-    ; reach the background service" message on Connect. Failing the whole
-    ; install here would be a worse outcome than a working app that can't
-    ; tunnel yet.
-    DetailPrint "Warning: could not register the Neoxify background service (code $0). Connecting will not work until this is resolved."
+
+  ; Verified rather than trusted. A real install of this build left the app
+  ; unable to connect at all: the service was simply not registered, and
+  ; because the failure only produced a DetailPrint on a page nobody reads,
+  ; the installer finished looking completely successful. Asking Windows
+  ; whether the service actually exists is the only honest check.
+  nsExec::ExecToLog 'sc.exe query NeoxifyService'
+  Pop $1
+  ${If} $1 != 0
+    ; Retried once before giving up -- registration can lose a race with
+    ; the Service Control Manager still releasing a just-deleted name.
+    Sleep 2000
+    nsExec::ExecToLog '"$INSTDIR\resources\neoconnect-service.exe" install'
+    Pop $0
+    nsExec::ExecToLog 'sc.exe query NeoxifyService'
+    Pop $1
+  ${EndIf}
+
+  ${If} $1 != 0
+    ; Deliberately a MessageBox, not a DetailPrint. Without the service the
+    ; app installs and launches but cannot connect to anything, which reads
+    ; to the user as a broken product rather than a failed step -- they
+    ; should find out now, while they still have the installer open, not on
+    ; their first attempt to use it.
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Neoxify installed, but its background service could not be registered (code $0).$\r$\n$\r$\nConnecting will not work until this is fixed. Try running the installer again as administrator."
   ${EndIf}
 !macroend
 
