@@ -10,7 +10,6 @@ import {
   UseGuards,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { SubscriptionStatus } from "@prisma/client";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { CustomersService } from "../customers/customers.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";

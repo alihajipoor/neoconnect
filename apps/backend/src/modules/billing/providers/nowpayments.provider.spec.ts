@@ -31,7 +31,7 @@ describe("NowPaymentsProvider.createPayment", () => {
   function mockFetch() {
     const fetchMock = jest.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ payment_id: 1, pay_address: "T...", pay_amount: 10, pay_currency: "usdttrc20" }),
+      json: () => Promise.resolve({ payment_id: 1, pay_address: "T...", pay_amount: 10, pay_currency: "usdttrc20" }),
     });
     global.fetch = fetchMock as never;
     return fetchMock;
@@ -74,8 +74,10 @@ describe("NowPaymentsProvider.createPayment", () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: false,
       status: 400,
-      text: async () =>
-        JSON.stringify({ code: "AMOUNT_MINIMAL_ERROR", message: "Crypto amount 9.98 is less than minimal" }),
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({ code: "AMOUNT_MINIMAL_ERROR", message: "Crypto amount 9.98 is less than minimal" }),
+        ),
     }) as never;
 
     await expect(build("https://x/api").createPayment(10, "txn-1")).rejects.toMatchObject({
@@ -88,7 +90,7 @@ describe("NowPaymentsProvider.createPayment", () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: false,
       status: 500,
-      text: async () => "upstream exploded",
+      text: () => Promise.resolve("upstream exploded"),
     }) as never;
 
     // 503 rather than 400: the customer did nothing wrong, and the

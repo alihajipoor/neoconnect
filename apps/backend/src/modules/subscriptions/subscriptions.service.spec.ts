@@ -82,7 +82,9 @@ describe("SubscriptionsService.createOrReusePending", () => {
 
     // It was never paid for, so it should not carry terms captured
     // whenever the abandoned attempt happened.
-    const data = prisma.subscription.update.mock.calls[0][0].data;
+    const { data } = prisma.subscription.update.mock.calls[0][0] as {
+      data: { dataCapBytes: number; expireAt: Date };
+    };
     expect(data.dataCapBytes).toBe(PLAN.dataCapBytes);
     expect(data.expireAt.getTime()).toBeGreaterThan(Date.now());
   });
@@ -114,7 +116,9 @@ describe("SubscriptionsService.createOrReusePending", () => {
     const count = await service.cancelStalePending(6 * 60 * 60 * 1000);
 
     expect(count).toBe(3);
-    const where = prisma.subscription.updateMany.mock.calls[0][0].where;
+    const { where } = prisma.subscription.updateMany.mock.calls[0][0] as {
+      where: { status: SubscriptionStatus; createdAt: { lt: Date } };
+    };
     expect(where.status).toBe(SubscriptionStatus.PENDING);
     // Crypto can sit unconfirmed a long time; cancelling one still in
     // flight is far worse than leaving a dead row an extra hour.
