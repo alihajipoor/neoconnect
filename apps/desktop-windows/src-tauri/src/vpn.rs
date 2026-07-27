@@ -230,9 +230,82 @@ pub async fn measure_latency(host: String, port: u16) -> Option<u32> {
     let connect = TcpStream::connect((host.as_str(), port));
 
     match tokio::time::timeout(LATENCY_TIMEOUT, connect).await {
-        Ok(Ok(_stream)) => Some(started.elapsed().as_millis() as u32),
-        // Refused or unreachable: no honest number to report.
-        Ok(Err(_)) | Err(_) => None,
+        Ok(Ok(_stream)) => return Some(started.elapsed().as_millis() as u32),
+        // A TCP connect can only ever succeed against a TCP listener.
+        // WireGuard (51820) and OpenVPN (1194) are UDP, so this failed
+        // for both every time and they showed no latency at all while
+        // Xray -- which listens on 443/TCP -- showed a real number.
+        // Reported from the server list looking exactly like that.
+        //
+        // Falling back to ICMP rather than reporting nothing: it measures
+        // the same path, and is the only option that works regardless of
+        // the protocol's transport.
+        Ok(Err(_)) | Err(_) => {}
+    }
+
+    tokio::task::spawn_blocking(move || icmp_latency(&host)).await.ok().flatten()
+}
+
+/// Round-trip time by ICMP echo, for endpoints that do not answer TCP.
+///
+/// Uses Windows' IcmpSendEcho rather than a raw socket: raw ICMP needs
+/// administrator, which this app deliberately does not have (the whole
+/// reason the privileged helper service exists), while this API is
+/// available to any process.
+///
+/// Returns None when the host does not answer -- ICMP is filtered on
+/// plenty of networks, and "we could not measure this" has to stay
+/// distinguishable from a number, since the UI shows "--" for it rather
+/// than inventing one.
+fn icmp_latency(host: &str) -> Option<u32> {
+    use std::net::{IpAddr, ToSocketAddrs};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, ICMP_ECHO_REPLY,
+    };
+
+    // The endpoint may be a hostname; ICMP needs an address. Port is
+    // irrelevant here and only satisfies the resolver.
+    let addr = (host, 0u16).to_socket_addrs().ok()?.find_map(|a| match a.ip() {
+        IpAddr::V4(v4) => Some(v4),
+        // IcmpSendEcho is IPv4-only; Icmp6SendEcho2 would be needed for
+        // v6, which no node uses today.
+        IpAddr::V6(_) => None,
+    })?;
+
+    unsafe {
+        let handle = IcmpCreateFile();
+        if handle.is_null() {
+            return None;
+        }
+
+        let payload = [0u8; 32];
+        // Reply buffer must hold the reply struct plus the echoed payload;
+        // Microsoft's guidance is to add 8 bytes of slack for an error
+        // message the API may append.
+        let mut reply = vec![0u8; std::mem::size_of::<ICMP_ECHO_REPLY>() + payload.len() + 8];
+
+        let replies = IcmpSendEcho(
+            handle,
+            u32::from_ne_bytes(addr.octets()),
+            payload.as_ptr() as *const _,
+            payload.len() as u16,
+            std::ptr::null_mut(),
+            reply.as_mut_ptr() as *mut _,
+            reply.len() as u32,
+            LATENCY_TIMEOUT.as_millis() as u32,
+        );
+        IcmpCloseHandle(handle);
+
+        if replies == 0 {
+            return None;
+        }
+        let echo = &*(reply.as_ptr() as *const ICMP_ECHO_REPLY);
+        // Status 0 is IP_SUCCESS; anything else is a failure reply whose
+        // RoundTripTime means nothing.
+        if echo.Status != 0 {
+            return None;
+        }
+        Some(echo.RoundTripTime)
     }
 }
 

@@ -13,9 +13,12 @@
     "windows": [
       {
         "title": "Neoxify",
-        "width": 400,
-        "height": 640,
-        "resizable": false
+        "width": 940,
+        "height": 700,
+        "resizable": true,
+        "minWidth": 720,
+        "minHeight": 600,
+        "center": true
       }
     ],
     "security": {

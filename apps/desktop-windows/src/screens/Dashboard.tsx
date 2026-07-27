@@ -385,7 +385,7 @@ export function Dashboard({
   }
 
   return (
-    <div className="relative flex h-full flex-col gap-3 p-4">
+    <div className="relative mx-auto flex h-full w-full max-w-xl flex-col gap-3 p-4">
       <header className="flex items-center justify-between">
         <Logo />
         <div className="flex items-center gap-1">
