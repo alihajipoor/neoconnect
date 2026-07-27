@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn builds_config_xray_can_parse() {
-        let parsed: serde_json::Value = serde_json::from_str(&build_config(&profile())).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()))).unwrap();
         let outbound = &parsed["outbounds"][0];
         assert_eq!(outbound["protocol"], "vless");
         assert_eq!(outbound["settings"]["vnext"][0]["address"], "203.0.113.5");
@@ -351,11 +351,41 @@ mod tests {
         assert_eq!(outbound["streamSettings"]["realitySettings"]["serverName"], "example.com");
     }
 
+    fn trojan_profile() -> TrojanProfile {
+        TrojanProfile {
+            password: "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MEFCQ0RFRg".into(),
+            host: "203.0.113.5".into(),
+            port: 8443,
+            server_name: "fi1.example.com".into(),
+        }
+    }
+
+    #[test]
+    fn builds_a_trojan_config_xray_can_parse() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_config_for(&Outbound::Trojan(&trojan_profile()))).unwrap();
+        let outbound = &parsed["outbounds"][0];
+        assert_eq!(outbound["protocol"], "trojan");
+        assert_eq!(outbound["settings"]["servers"][0]["address"], "203.0.113.5");
+        assert_eq!(outbound["settings"]["servers"][0]["port"], 8443);
+        assert_eq!(outbound["streamSettings"]["security"], "tls");
+        assert_eq!(outbound["streamSettings"]["tlsSettings"]["serverName"], "fi1.example.com");
+    }
+
+    /// A client that accepts any certificate can be read by whoever is on
+    /// the path. The absence of this setting is the security property, so
+    /// it is worth a test rather than a comment.
+    #[test]
+    fn trojan_never_disables_certificate_verification() {
+        let json = build_config_for(&Outbound::Trojan(&trojan_profile()));
+        assert!(!json.contains("allowInsecure"));
+    }
+
     #[test]
     fn tun_inbound_enables_the_anti_loop_helpers() {
         // Without these two, routing 0.0.0.0/0 into the TUN loops
         // forever -- see this module's doc comment.
-        let parsed: serde_json::Value = serde_json::from_str(&build_config(&profile())).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()))).unwrap();
         let settings = &parsed["inbounds"][0]["settings"];
         assert_eq!(settings["autoSystemRoutingTable"], true);
         assert_eq!(settings["autoOutboundsInterface"], true);
