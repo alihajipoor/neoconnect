@@ -274,35 +274,63 @@ install_xray() {
   echo "Installing Xray-core..."
   bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-  local keys private_key public_key
-  keys="$(/usr/local/bin/xray x25519)"
-  private_key="$(echo "$keys" | grep '^PrivateKey:' | awk '{print $2}')"
-  public_key="$(echo "$keys" | grep '(PublicKey):' | awk '{print $3}')"
-  local short_id
-  short_id="$(openssl rand -hex 8)"
+  # Menu option 5 runs this against nodes that are already serving
+  # customers, which makes rotating the REALITY identity actively
+  # destructive: the key and shortId are what every provisioned client
+  # authenticates with, and the panel would still be handing out the old
+  # ones. Nobody would connect, and nothing would say why. So an existing
+  # identity is kept, and only a node with no Xray config generates one.
+  local config_path="/usr/local/etc/xray/config.json"
+  local reality_is_new="y"
+  local private_key public_key="" short_id listen_port dest server_name
+  local existing_key=""
+  if [[ -f "$config_path" ]]; then
+    existing_key="$(jq -r '.inbounds[]? | select(.tag=="vless-in") | .streamSettings.realitySettings.privateKey // empty' "$config_path" 2>/dev/null)"
+  fi
 
-  read -r -p "Listen port for VLESS+REALITY [443]: " listen_port
-  listen_port="${listen_port:-443}"
-  # REALITY presents this site's TLS identity to anyone inspecting the
-  # connection, so it has to be a real HTTPS host that is (a) reachable
-  # from where customers are -- google.com is filtered in Iran, which is
-  # the main market -- and (b) not something local security software
-  # intercepts. Traffic to an intercepted domain fails with "received
-  # real certificate", because the interceptor's certificate arrives
-  # instead of the one REALITY expects. Found live: www.microsoft.com is
-  # intercepted by security software on a real user's machine and broke
-  # every connection until the domain was changed.
-  #
-  # Whatever is chosen here must also be set as dest/serverName on the
-  # Protocol Config -- the client takes its SNI from the panel, and a
-  # mismatch fails exactly the same way as interception does.
-  echo
-  echo "REALITY disguises this node's traffic as HTTPS to another site."
-  echo "Pick one that is popular, reachable from your customers' countries,"
-  echo "and supports TLS 1.3 -- avoid placeholder domains like example.com."
-  read -r -p "Camouflage destination [cloudflare.com:443]: " dest
-  dest="${dest:-cloudflare.com:443}"
-  local server_name="${dest%%:*}"
+  if [[ -n "$existing_key" ]]; then
+    reality_is_new="n"
+    private_key="$existing_key"
+    local vless
+    vless="$(jq -c '.inbounds[] | select(.tag=="vless-in")' "$config_path")"
+    short_id="$(echo "$vless" | jq -r '.streamSettings.realitySettings.shortIds[0]')"
+    listen_port="$(echo "$vless" | jq -r '.port')"
+    dest="$(echo "$vless" | jq -r '.streamSettings.realitySettings.dest')"
+    server_name="$(echo "$vless" | jq -r '.streamSettings.realitySettings.serverNames[0]')"
+    echo
+    echo "This node already runs VLESS+REALITY on port $listen_port, disguised as $server_name."
+    echo "Keeping its existing keys -- rotating them would disconnect every customer"
+    echo "provisioned here, since the panel would still be advertising the old ones."
+  else
+    local keys
+    keys="$(/usr/local/bin/xray x25519)"
+    private_key="$(echo "$keys" | grep '^PrivateKey:' | awk '{print $2}')"
+    public_key="$(echo "$keys" | grep '(PublicKey):' | awk '{print $3}')"
+    short_id="$(openssl rand -hex 8)"
+
+    read -r -p "Listen port for VLESS+REALITY [443]: " listen_port
+    listen_port="${listen_port:-443}"
+    # REALITY presents this site's TLS identity to anyone inspecting the
+    # connection, so it has to be a real HTTPS host that is (a) reachable
+    # from where customers are -- google.com is filtered in Iran, which is
+    # the main market -- and (b) not something local security software
+    # intercepts. Traffic to an intercepted domain fails with "received
+    # real certificate", because the interceptor's certificate arrives
+    # instead of the one REALITY expects. Found live: www.microsoft.com is
+    # intercepted by security software on a real user's machine and broke
+    # every connection until the domain was changed.
+    #
+    # Whatever is chosen here must also be set as dest/serverName on the
+    # Protocol Config -- the client takes its SNI from the panel, and a
+    # mismatch fails exactly the same way as interception does.
+    echo
+    echo "REALITY disguises this node's traffic as HTTPS to another site."
+    echo "Pick one that is popular, reachable from your customers' countries,"
+    echo "and supports TLS 1.3 -- avoid placeholder domains like example.com."
+    read -r -p "Camouflage destination [cloudflare.com:443]: " dest
+    dest="${dest:-cloudflare.com:443}"
+    server_name="${dest%%:*}"
+  fi
 
   # Trojan over TLS on a second port -- the same "looks like an ordinary
   # HTTPS site" property REALITY gives, but presenting a real certificate
@@ -312,11 +340,36 @@ install_xray() {
   # and proxies anything failing its authentication to the site it
   # imitates, leaving no room behind it for a second TLS service. With one
   # IPv4 that means a second port; with two, both can sit on 443.
-  echo
-  echo "Trojan over TLS (optional) adds a second stealth protocol on this node."
-  echo "It needs a domain already pointing here, and a certificate for it."
-  read -r -p "Enable Trojan over TLS? [y/N]: " enable_trojan
   local trojan_port="" tls_cert="" tls_key="" trojan_fallback="" trojan_domain=""
+  local trojan_is_new="y"
+
+  # Same reasoning as the REALITY identity above: re-running this on a
+  # node that already serves Trojan must not ask for the port and domain
+  # again, and must not register a second Protocol Config for an inbound
+  # the panel already knows about.
+  if [[ -f "$config_path" ]]; then
+    local existing_trojan
+    existing_trojan="$(jq -c '.inbounds[]? | select(.tag=="trojan-in")' "$config_path" 2>/dev/null)"
+    if [[ -n "$existing_trojan" ]]; then
+      trojan_is_new="n"
+      trojan_port="$(echo "$existing_trojan" | jq -r '.port')"
+      tls_cert="$(echo "$existing_trojan" | jq -r '.streamSettings.tlsSettings.certificates[0].certificateFile')"
+      tls_key="$(echo "$existing_trojan" | jq -r '.streamSettings.tlsSettings.certificates[0].keyFile')"
+      trojan_fallback="$(echo "$existing_trojan" | jq -r '.settings.fallbacks[0].dest')"
+      echo
+      echo "Trojan over TLS is already configured on port $trojan_port -- keeping it."
+    fi
+  fi
+
+  if [[ "$trojan_is_new" == "y" ]]; then
+    echo
+    echo "Trojan over TLS (optional) adds a second stealth protocol on this node."
+    echo "It needs a domain already pointing here, and a certificate for it."
+    read -r -p "Enable Trojan over TLS? [y/N]: " enable_trojan
+  else
+    enable_trojan="n"
+  fi
+
   if [[ "${enable_trojan,,}" == "y" ]]; then
     # 8443 by default. Less unblockable than 443, but so is every
     # commonly-open alternative (2053/2083/2087/2096) -- the operator can
@@ -400,15 +453,39 @@ EOF
 
   systemctl restart xray
 
-  echo "Registering Xray in the panel..."
   local config_id params
-  params="$(jq -n --arg pk "$public_key" --arg sid "$short_id" --arg dest "$dest" --arg sn "$server_name" \
-    '{realityPublicKey: $pk, shortIds: [$sid], dest: $dest, serverName: $sn}')"
-  config_id="$(register_protocol_config "XRAY_VLESS_REALITY" "$listen_port" "$params")" || return 1
-  echo "  Registered (config $config_id)."
-  create_route_for_config "Xray VLESS+REALITY" "$config_id"
+  if [[ "$reality_is_new" == "y" ]]; then
+    echo "Registering Xray in the panel..."
+    params="$(jq -n --arg pk "$public_key" --arg sid "$short_id" --arg dest "$dest" --arg sn "$server_name" \
+      '{realityPublicKey: $pk, shortIds: [$sid], dest: $dest, serverName: $sn}')"
+    config_id="$(register_protocol_config "XRAY_VLESS_REALITY" "$listen_port" "$params" \
+      '{"transport": "TCP", "security": "REALITY"}')" || return 1
+    echo "  Registered (config $config_id)."
+    create_route_for_config "Xray VLESS+REALITY" "$config_id"
+  else
+    echo "VLESS+REALITY is already registered in the panel -- left untouched."
+  fi
+
+  # An inbound the panel does not know about is an inbound no customer can
+  # ever be provisioned on: the whole node-side setup succeeds, Trojan
+  # listens, and nothing can use it. This step was missing, which is why
+  # the first Trojan node had to have its Protocol Config created by hand.
+  if [[ -n "$trojan_port" && "$trojan_is_new" == "y" ]]; then
+    echo "Registering Trojan in the panel..."
+    # serverName is the whole reason this needs registering rather than
+    # being inferred: the client verifies the certificate against it and
+    # sends it as SNI. Given the node's IP instead, the name never matches
+    # the certificate and the handshake fails.
+    params="$(jq -n --arg sn "$trojan_domain" '{serverName: $sn}')"
+    config_id="$(register_protocol_config "XRAY_TROJAN" "$trojan_port" "$params" \
+      '{"transport": "TCP", "security": "TLS"}')" || return 1
+    echo "  Registered (config $config_id)."
+    create_route_for_config "Xray Trojan (TLS)" "$config_id"
+  fi
 
   echo "Xray is running on port $listen_port and is ready to use."
+  [[ -n "$trojan_port" ]] && echo "Trojan over TLS is running on port $trojan_port."
+  return 0
 }
 
 # VPS providers use varying primary interface names (eth0/ens3/enX0/...)
@@ -542,6 +619,10 @@ get_admin_bearer_token() {
 # installer used to print -- it just delivers it itself now.
 register_protocol_config() {
   local protocol="$1" listen_port="$2" params_json="$3"
+  # Extra top-level fields (transport/security), as a JSON object. These
+  # are real columns rather than publicParamsJson entries, so they cannot
+  # be smuggled in through the params argument.
+  local extra_json="${4:-{\}}"
   local token response config_id
 
   token="$(get_admin_bearer_token)" || return 1
@@ -551,7 +632,8 @@ register_protocol_config() {
     -H "Authorization: Bearer $token" \
     -d "$(jq -n --arg nodeId "$node_id" --arg protocol "$protocol" \
       --argjson listenPort "$listen_port" --argjson params "$params_json" \
-      '{nodeId: $nodeId, protocol: $protocol, listenPort: $listenPort, publicParamsJson: $params}')")"
+      --argjson extra "$extra_json" \
+      '{nodeId: $nodeId, protocol: $protocol, listenPort: $listenPort, publicParamsJson: $params} + $extra')")"
 
   config_id="$(echo "$response" | jq -r '.id // empty')"
   if [[ -z "$config_id" ]]; then

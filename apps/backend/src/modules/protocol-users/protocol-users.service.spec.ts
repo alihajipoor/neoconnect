@@ -100,6 +100,23 @@ describe("ProtocolUsersService.listByCustomer", () => {
     });
   });
 
+  // The whitelist had no XRAY_TROJAN entry at all, so publicParams came
+  // back empty and the client fell back to using the node's IP as the
+  // SNI. The certificate is issued for a domain, so it never matches an
+  // IP -- every Trojan connection would have died in the TLS handshake,
+  // with nothing in the app pointing at a missing server-side field.
+  it("passes through the certificate's domain a Trojan client must send as SNI", async () => {
+    const service = serviceReturning(
+      "XRAY_TROJAN",
+      { serverName: "fi1.neoxify.com" },
+      { password: "shared-secret" },
+    );
+
+    const [item] = await service.listByCustomer("customer-1");
+
+    expect(item.connection.publicParams).toEqual({ serverName: "fi1.neoxify.com" });
+  });
+
   it("drops any key not explicitly allowed, so new ones are private by default", async () => {
     const service = serviceReturning(
       "WIREGUARD",
