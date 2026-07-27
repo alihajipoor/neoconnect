@@ -50,6 +50,10 @@ describe("InvoicesService", () => {
         prisma as unknown as PrismaService,
         emailService as never,
         config as never,
+        // Signs the emailed invoice link. These tests leave publicApiUrl
+        // unset, so no link is built and it is never called -- but the
+        // dependency has to exist for the service to construct.
+        { sign: jest.fn().mockReturnValue("tok"), verifyAsync: jest.fn() } as never,
       ),
     };
   }
