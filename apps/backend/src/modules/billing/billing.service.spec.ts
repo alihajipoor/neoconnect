@@ -37,7 +37,7 @@ describe("BillingService.confirmPayment expiry", () => {
   }
 
   function newExpiryDays(prisma: { subscription: { update: jest.Mock } }) {
-    const data = prisma.subscription.update.mock.calls[0][0].data;
+    const { data } = prisma.subscription.update.mock.calls[0][0] as { data: { expireAt: Date } };
     return Math.round((data.expireAt.getTime() - Date.now()) / DAY_MS);
   }
 
