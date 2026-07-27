@@ -319,19 +319,36 @@ export function Dashboard({
       // protocol here, so adding one later needs no change in the UI.
       await invoke("vpn_connect", { payload: protocolUser });
 
-      // vpn_connect returning only means an engine started. WireGuard
-      // does no session setup, so the tunnel can exist with a peer that
-      // never answers -- confirming the far end replied is what stops
-      // the app claiming "Connected" for a connection that isn't.
-      const fromHandshake = await confirmReachable();
+      setConnectedAt(Date.now());
 
-      // ...and confirming our traffic actually leaves via that server is
-      // what catches the other half: a tunnel that is up and healthy but
-      // carrying nothing.
+      // Egress first, and the order is the whole point. WireGuard does
+      // not handshake until it has something to send, so immediately
+      // after connect there is no handshake to find -- checking for one
+      // first meant every healthy connection sat on "Not carrying
+      // traffic" for the best part of a minute and only went green when
+      // the customer opened a website and generated traffic themselves.
+      // Reported exactly that way.
+      //
+      // This request *is* that traffic. It forces the handshake and
+      // answers the stronger question at the same time: did our packets
+      // actually leave via the server.
       const egress = await verifyEgress(baselineIpRef.current);
       setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
+
+      // Proof the tunnel carries traffic needs no second opinion, and
+      // returning here is what makes a working connection feel instant.
+      if (egress.state === "throughTunnel") {
+        setConnectionState("connected");
+        return;
+      }
+
+      // Otherwise ask the far end whether it is answering at all, which
+      // separates "server is dead" from "server is fine but our traffic
+      // is going around it". The request above has already given
+      // WireGuard a reason to handshake, so this now sees the truth
+      // rather than an interface that has simply never spoken yet.
+      const fromHandshake = await confirmReachable();
       setConnectionState(combineEvidence(fromHandshake, egress));
-      setConnectedAt(Date.now());
     } catch (err) {
       setConnectionError(classifyConnectionError(err));
       setConnectionState("disconnected");
