@@ -129,7 +129,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
   if (stage.name === "awaiting") {
     const payment = stage.payment;
     return (
-      <div className="flex h-full flex-col gap-4 p-5">
+      <div className="mx-auto flex h-full w-full max-w-4xl flex-col gap-4 p-5">
         <Logo />
         <Card className="flex flex-1 flex-col gap-3">
           <h1 className="text-base font-semibold">{t("plans.waiting")}</h1>
@@ -193,7 +193,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
   }
 
   return (
-    <div className="flex h-full flex-col gap-4 p-5">
+    <div className="mx-auto flex h-full w-full max-w-4xl flex-col gap-4 p-5">
       <Logo />
       <div>
         <h1 className="text-base font-semibold">{t("plans.title")}</h1>
@@ -206,7 +206,13 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
         </p>
       ) : null}
 
-      <div className="flex flex-1 flex-col gap-3 overflow-y-auto">
+      {/* A grid, not a column. Plans are meant to be compared, and on a
+          desktop-width window putting them side by side does that in one
+          glance -- while also removing the scrolling that made a second
+          plan push content out of sight. auto-fit means the column count
+          follows the window rather than being fixed, so this still reads
+          correctly at the minimum size. */}
+      <div className="grid flex-1 content-start gap-3 overflow-y-auto [grid-template-columns:repeat(auto-fit,minmax(260px,1fr))]">
         {plans === null ? (
           <p className="text-sm text-muted-foreground">{t("plans.loading")}</p>
         ) : plans.length === 0 ? (

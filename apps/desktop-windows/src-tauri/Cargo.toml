@@ -31,5 +31,7 @@ tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 
 [dependencies.windows-sys]
 version = "0.59"
-features = ["Win32_Storage_FileSystem"]
+# IpHelper brings IcmpSendEcho, which is how latency is measured for the
+# UDP protocols. It needs no elevation, unlike a raw socket.
+features = ["Win32_Storage_FileSystem", "Win32_NetworkManagement_IpHelper", "Win32_Foundation"]
 

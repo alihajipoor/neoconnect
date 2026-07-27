@@ -46,7 +46,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div className="flex h-full flex-col gap-4 p-5">
+    <div className="mx-auto flex h-full w-full max-w-xl flex-col gap-4 p-5">
       <div>
         <h1 className="text-base font-semibold">{t("settings.title")}</h1>
         <p className="text-xs text-muted-foreground">{t("settings.subtitle")}</p>

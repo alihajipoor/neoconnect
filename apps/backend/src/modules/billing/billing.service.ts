@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import { Prisma, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreatePaymentDto } from "./dto/create-payment.dto";
@@ -205,7 +205,20 @@ export class BillingService {
     });
     if (!subscription) return;
 
-    const base = subscription.expireAt > new Date() ? subscription.expireAt : new Date();
+    // Extending from the existing expiry is right for a renewal -- time
+    // already paid for should not be thrown away -- but wrong for a first
+    // activation. A self-serve purchase creates the subscription PENDING
+    // with a provisional expireAt already a full term out, so treating
+    // that as time the customer owns handed them two terms for one
+    // payment: a 30-day plan activated as 60 days. Reported after a real
+    // purchase.
+    //
+    // Status is the discriminator rather than the date, because the date
+    // cannot distinguish "provisional, never paid for" from "genuinely
+    // owned".
+    const firstActivation = subscription.status === SubscriptionStatus.PENDING;
+    const base =
+      !firstActivation && subscription.expireAt > new Date() ? subscription.expireAt : new Date();
     const newExpireAt = new Date(base.getTime() + subscription.plan.durationDays * 24 * 60 * 60 * 1000);
 
     await this.prisma.subscription.update({
