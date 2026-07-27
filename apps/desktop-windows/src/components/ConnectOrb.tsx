@@ -5,6 +5,12 @@ import { cn } from "../lib/utils";
 export type ConnectionState =
   | "disconnected"
   | "connecting"
+  /** The engine is up and we are establishing whether traffic actually
+   * flows. Its own state because the answer is genuinely not known yet,
+   * and the two neighbouring states both assert something false:
+   * "connected" would be the original lie, and "degraded" alarms a
+   * customer about a connection that is merely still negotiating. */
+  | "verifying"
   | "connected"
   /** An engine is running but the far end is not answering, so traffic
    * is not actually protected. Its own state because the alternative --
@@ -46,7 +52,7 @@ export function ConnectOrb({
   // so the id has to be per-instance.
   const gradientId = useId();
 
-  const busy = state === "connecting" || state === "disconnecting";
+  const busy = state === "connecting" || state === "disconnecting" || state === "verifying";
   const on = state === "connected";
   const degraded = state === "degraded";
 

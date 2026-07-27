@@ -82,6 +82,44 @@ async function confirmReachable(): Promise<ConnectionState> {
   return last;
 }
 
+/** How long a tunnel gets to start carrying traffic before the app is
+ * willing to say something is wrong.
+ *
+ * The helper service reports success 1.5s after spawning an engine, but
+ * OpenVPN spends ten to twenty seconds negotiating and installing routes
+ * after that. Judging it immediately produced a red warning -- "your
+ * traffic is NOT protected" -- over a connection that was simply still
+ * coming up, which is exactly the thing that makes someone give up and
+ * assume the product is broken. Reported that way.
+ *
+ * Thirty seconds is longer than any of the three protocols needs and
+ * still short enough that a genuinely dead server is called out while
+ * the customer is watching. */
+const VERIFY_TIMEOUT_MS = 30_000;
+const VERIFY_INTERVAL_MS = 1_500;
+
+/** Waits for traffic to actually start flowing, rather than asking once.
+ *
+ * Retries even on a definite-looking "bypassing" answer, because early in
+ * a connection it is not definite at all: OpenVPN's routes arrive from
+ * the server partway through negotiation, so traffic genuinely does go
+ * around the tunnel for a moment before it goes through it.
+ *
+ * Returns as soon as it has proof, so a fast protocol stays fast.
+ */
+async function confirmEgress(baselineIp: string | null): Promise<EgressVerdict> {
+  const deadline = Date.now() + VERIFY_TIMEOUT_MS;
+  let last: EgressVerdict = { state: "unreachable" };
+
+  while (Date.now() < deadline) {
+    const verdict = await verifyEgress(baselineIp);
+    if (verdict.state === "throughTunnel") return verdict;
+    last = verdict;
+    await new Promise((r) => setTimeout(r, VERIFY_INTERVAL_MS));
+  }
+  return last;
+}
+
 /** Combines the two independent pieces of evidence.
  *
  * They answer different questions and neither alone is enough: the
@@ -319,7 +357,13 @@ export function Dashboard({
       // This request *is* that traffic. It forces the handshake and
       // answers the stronger question at the same time: did our packets
       // actually leave via the server.
-      const egress = await verifyEgress(baselineIpRef.current);
+      //
+      // Shown as its own state while it runs. The honest answer during
+      // these seconds is "we do not know yet", and both neighbouring
+      // states assert something false -- which is why a still-negotiating
+      // OpenVPN tunnel was being reported as unprotected.
+      setConnectionState("verifying");
+      const egress = await confirmEgress(baselineIpRef.current);
       setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
       // Proof the tunnel carries traffic needs no second opinion, and
@@ -373,9 +417,11 @@ export function Dashboard({
         ? t("dash.degraded")
         : connectionState === "connecting"
           ? t("dash.connecting")
-          : connectionState === "disconnecting"
-            ? t("dash.disconnecting")
-            : t("dash.connect");
+          : connectionState === "verifying"
+            ? t("dash.verifying")
+            : connectionState === "disconnecting"
+              ? t("dash.disconnecting")
+              : t("dash.connect");
 
   if (loading) {
     return (
@@ -467,13 +513,17 @@ export function Dashboard({
                           ? t("dash.protected")
                           : connectionState === "degraded"
                             ? t("dash.degraded")
-                            : t("dash.notProtected")}
+                            : connectionState === "connecting" || connectionState === "verifying"
+                              ? t("dash.verifying")
+                              : t("dash.notProtected")}
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
                         {connectionState === "connected"
                           ? t("dash.protectedHint")
                           : connectionState === "degraded"
                             ? t("dash.degradedHint")
+                            : connectionState === "connecting" || connectionState === "verifying"
+                              ? t("dash.verifyingHint")
                             : t("dash.notProtectedHint")}
                       </p>
                       {/* The proof, shown rather than just acted on: this
