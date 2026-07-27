@@ -224,26 +224,56 @@ const LATENCY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(25
 pub async fn measure_latency(host: String, port: u16) -> Option<u32> {
     use tokio::net::TcpStream;
 
-    let started = std::time::Instant::now();
-    // Resolution is included in the measurement on purpose: a customer
-    // waiting to connect waits for that too.
-    let connect = TcpStream::connect((host.as_str(), port));
+    // TCP and ICMP are raced rather than tried in turn.
+    //
+    // A TCP connect can only ever succeed against a TCP listener, so for
+    // WireGuard (51820/udp) and OpenVPN (1194/udp) it always fails --
+    // and running it first meant waiting out the full timeout before
+    // even starting the ICMP that would answer. Measured at 2661ms for
+    // both UDP protocols against 176ms for Xray on 443/tcp, so their
+    // rows sat on "--" for about three seconds and read as broken.
+    //
+    // Whichever answers first is the answer: both measure the same path,
+    // and neither can report a number without the far end responding.
+    let tcp = async {
+        let started = std::time::Instant::now();
+        // Resolution is inside the measurement on purpose: a customer
+        // waiting to connect waits for that too.
+        match tokio::time::timeout(LATENCY_TIMEOUT, TcpStream::connect((host.as_str(), port))).await {
+            Ok(Ok(_stream)) => Some(started.elapsed().as_millis() as u32),
+            Ok(Err(_)) | Err(_) => None,
+        }
+    };
 
-    match tokio::time::timeout(LATENCY_TIMEOUT, connect).await {
-        Ok(Ok(_stream)) => return Some(started.elapsed().as_millis() as u32),
-        // A TCP connect can only ever succeed against a TCP listener.
-        // WireGuard (51820) and OpenVPN (1194) are UDP, so this failed
-        // for both every time and they showed no latency at all while
-        // Xray -- which listens on 443/TCP -- showed a real number.
-        // Reported from the server list looking exactly like that.
-        //
-        // Falling back to ICMP rather than reporting nothing: it measures
-        // the same path, and is the only option that works regardless of
-        // the protocol's transport.
-        Ok(Err(_)) | Err(_) => {}
+    let icmp_host = host.clone();
+    let icmp = async move {
+        tokio::task::spawn_blocking(move || icmp_latency(&icmp_host)).await.ok().flatten()
+    };
+
+    tokio::pin!(tcp);
+    tokio::pin!(icmp);
+
+    // Take the first *successful* answer. A method failing says nothing
+    // about the host -- ICMP is filtered on plenty of networks, and TCP
+    // cannot work against a UDP port -- so a failure must not cancel the
+    // other side.
+    let mut remaining = 2;
+    loop {
+        tokio::select! {
+            result = &mut tcp, if remaining > 0 => {
+                if result.is_some() { return result; }
+                remaining -= 1;
+            }
+            result = &mut icmp, if remaining > 0 => {
+                if result.is_some() { return result; }
+                remaining -= 1;
+            }
+            else => return None,
+        }
+        if remaining == 0 {
+            return None;
+        }
     }
-
-    tokio::task::spawn_blocking(move || icmp_latency(&host)).await.ok().flatten()
 }
 
 /// Round-trip time by ICMP echo, for endpoints that do not answer TCP.
@@ -399,5 +429,22 @@ mod tests {
             .into_profile()
             .expect_err("should fail");
         assert!(err.contains("unsupported protocol"));
+    }
+}
+
+#[cfg(test)]
+mod latency_probe {
+    /// Not a unit test: a live probe against the real node, run by hand
+    /// with `cargo test latency_probe -- --nocapture --ignored`, to find
+    /// out why one protocol's row shows no latency while the others on
+    /// the same host do.
+    #[tokio::test]
+    #[ignore]
+    async fn measures_every_protocol_port_on_fi1() {
+        for (label, port) in [("XRAY/tcp", 443u16), ("WIREGUARD/udp", 51820), ("OPENVPN/udp", 1194)] {
+            let started = std::time::Instant::now();
+            let result = super::measure_latency("204.168.161.100".into(), port).await;
+            println!("{label:>14} port {port:<6} -> {result:?}  (took {}ms)", started.elapsed().as_millis());
+        }
     }
 }
