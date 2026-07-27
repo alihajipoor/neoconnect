@@ -54,6 +54,35 @@ enum Protocol {
   OPENVPN
 }
 
+/// How a protocol's bytes travel. Only meaningful for the Xray-based
+/// protocols; WireGuard and OpenVPN carry themselves.
+enum Transport {
+  TCP
+  /// Inside a WebSocket, which on the wire is an ordinary HTTP upgrade
+  /// followed by a long-lived connection -- the shape Windscribe sells as
+  /// "WStunnel". Needs a path and a real certificate to be convincing.
+  WS
+  /// gRPC over HTTP/2. Survives some CDNs and HTTP/2-aware middleboxes
+  /// that mangle raw WebSockets.
+  GRPC
+}
+
+/// What the transport is wrapped in.
+enum TransportSecurity {
+  /// No TLS of its own. Correct for WireGuard and OpenVPN, whose own
+  /// protocols handle this, and for an Xray inbound behind a terminator.
+  NONE
+  /// A real certificate for a real domain. The basis of anything that
+  /// should look like an ordinary HTTPS site -- Windscribe's "Stealth"
+  /// shape.
+  TLS
+  /// Borrows a third-party site's certificate rather than presenting its
+  /// own, so there is no certificate of ours to fingerprint. Cannot share
+  /// a port with a TLS service: it intercepts the handshake and proxies
+  /// non-matching clients to the site it is imitating.
+  REALITY
+}
+
 enum ProtocolUserStatus {
   ACTIVE
   DISABLED
@@ -264,6 +293,23 @@ model ProtocolConfig {
   nodeId           String
   protocol         Protocol
   listenPort       Int
+  // How the protocol is carried, and what it is wrapped in.
+  //
+  // Separate from `protocol` because they are genuinely independent: the
+  // same VLESS can run raw over TCP, inside a WebSocket, or over gRPC,
+  // and be secured by REALITY, a real certificate, or nothing. Encoding
+  // each combination as its own Protocol member would multiply the enum
+  // for no gain -- XRAY_VLESS_REALITY already conflates two of these
+  // three dimensions, which is why adding a WebSocket variant had
+  // nowhere to go.
+  //
+  // Defaults reproduce exactly what every existing row already does, so
+  // this migration changes no behaviour: WireGuard and OpenVPN are
+  // TCP/NONE as far as this model is concerned (their own transports are
+  // not configurable here), and the one Xray config in production is
+  // TCP + REALITY.
+  transport        Transport      @default(TCP)
+  security         TransportSecurity @default(NONE)
   publicParamsJson Json
   isEnabled        Boolean  @default(true)
   createdAt        DateTime @default(now())
