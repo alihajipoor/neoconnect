@@ -97,6 +97,8 @@ pub enum ConnectProfile {
     Wireguard(WireguardProfile),
     #[serde(rename = "XRAY_VLESS_REALITY")]
     XrayVlessReality(XrayProfile),
+    #[serde(rename = "XRAY_TROJAN")]
+    XrayTrojan(TrojanProfile),
     Openvpn(OpenvpnProfile),
 }
 
@@ -122,6 +124,26 @@ pub struct XrayProfile {
     pub port: u16,
     pub reality_public_key: String,
     pub short_id: String,
+    pub server_name: String,
+}
+
+/// Trojan over TLS.
+///
+/// Shorter than the REALITY profile because there is less to describe:
+/// the server presents an ordinary certificate for a real domain, so
+/// there are no borrowed-certificate parameters to carry -- only which
+/// name to expect on it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrojanProfile {
+    /// The shared secret. On a wrong one the server answers exactly like
+    /// the web server it imitates, which is the entire disguise.
+    pub password: String,
+    pub host: String,
+    pub port: u16,
+    /// The name to expect on the certificate, and the SNI to send. Kept
+    /// separate from `host` because a node is reached by address while
+    /// its certificate is issued for a domain.
     pub server_name: String,
 }
 
@@ -303,6 +325,19 @@ impl ConnectProfile {
                 check_single_line("serverName", &p.server_name, 300)?;
                 Ok(())
             }
+            ConnectProfile::XrayTrojan(p) => {
+                // The password is a base64url secret from the control
+                // plane, so it is key-like: no separators, no spaces.
+                // Checking it here means a mangled credential is rejected
+                // with a clear message rather than becoming a connection
+                // that simply never authenticates -- which, for Trojan,
+                // is indistinguishable from the server being a plain web
+                // server, and so gives the customer nothing to go on.
+                check_key_like("password", &p.password, 128)?;
+                check_endpoint("host", &format!("{}:{}", p.host, p.port))?;
+                check_single_line("serverName", &p.server_name, 300)?;
+                Ok(())
+            }
             ConnectProfile::Openvpn(p) => {
                 check_pem("certPem", &p.cert_pem)?;
                 check_pem("keyPem", &p.key_pem)?;
@@ -326,6 +361,7 @@ impl ConnectProfile {
         match self {
             ConnectProfile::Wireguard(_) => "WIREGUARD",
             ConnectProfile::XrayVlessReality(_) => "XRAY_VLESS_REALITY",
+            ConnectProfile::XrayTrojan(_) => "XRAY_TROJAN",
             ConnectProfile::Openvpn(_) => "OPENVPN",
         }
     }

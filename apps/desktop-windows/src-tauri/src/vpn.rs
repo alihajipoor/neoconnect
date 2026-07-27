@@ -14,7 +14,8 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, OpenvpnProfile, Request, Response, TunnelHealth, WireguardProfile, XrayProfile,
+    ConnectProfile, OpenvpnProfile, Request, Response, TrojanProfile, TunnelHealth, WireguardProfile,
+    XrayProfile,
     PIPE_NAME,
 };
 use serde::Deserialize;
@@ -92,6 +93,29 @@ impl ProtocolUserPayload {
                     reality_public_key: field(params, "realityPublicKey")?.to_string(),
                     short_id: short_id.to_string(),
                     server_name: field(params, "serverName")?.to_string(),
+                }))
+            }
+            "XRAY_TROJAN" => {
+                // The certificate name lives on the node's ProtocolConfig
+                // rather than in the per-user credentials, the same split
+                // REALITY uses: the password is this customer's, the
+                // domain is the server's.
+                //
+                // Falls back to the host only when the node did not
+                // record one, which is an operator misconfiguration --
+                // sending no SNI at all would be worse, since a TLS
+                // handshake without one stands out immediately.
+                let params = &self.connection.public_params;
+                let server_name = params
+                    .get("serverName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&self.connection.host)
+                    .to_string();
+                Ok(ConnectProfile::XrayTrojan(TrojanProfile {
+                    password: field(&self.credentials, "password")?.to_string(),
+                    host: self.connection.host.clone(),
+                    port: self.connection.port,
+                    server_name,
                 }))
             }
             "OPENVPN" => Ok(ConnectProfile::Openvpn(OpenvpnProfile {
@@ -378,6 +402,45 @@ mod tests {
         .expect("should map");
         assert_eq!(profile.protocol_name(), "WIREGUARD");
         assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn maps_a_trojan_protocol_user() {
+        let profile = payload(
+            "XRAY_TROJAN",
+            serde_json::json!({ "password": "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MEFCQ0RFRg" }),
+            serde_json::json!({ "serverName": "fi1.neoxify.com" }),
+        )
+        .into_profile()
+        .expect("should map");
+        assert_eq!(profile.protocol_name(), "XRAY_TROJAN");
+        assert!(profile.validate().is_ok());
+    }
+
+    /// The certificate name is the server's, not the customer's, so it
+    /// comes from the node's config -- but a node that never recorded one
+    /// must still produce a usable profile rather than an empty SNI,
+    /// which would stand out on the wire far more than the wrong name.
+    #[test]
+    fn trojan_falls_back_to_the_host_when_the_node_records_no_server_name() {
+        let profile = payload(
+            "XRAY_TROJAN",
+            serde_json::json!({ "password": "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MEFCQ0RFRg" }),
+            serde_json::json!({}),
+        )
+        .into_profile()
+        .expect("should map");
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn trojan_without_a_password_is_rejected() {
+        // Silently connecting with an empty password would be
+        // indistinguishable from the server being a plain web server,
+        // leaving the customer nothing to act on.
+        assert!(payload("XRAY_TROJAN", serde_json::json!({}), serde_json::json!({}))
+            .into_profile()
+            .is_err());
     }
 
     #[test]
