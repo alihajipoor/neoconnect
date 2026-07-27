@@ -58,10 +58,23 @@ export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElemen
   // The top hairline is what separates a "surface" from a "box with a
   // border": it reads as light catching an edge, which is the treatment
   // the website uses on its own cards.
+  // shrink-0 matters more than it looks. A flex item shrinks by default,
+  // and these sit in scrolling flex columns, so once the content is
+  // taller than the window every card gets squeezed -- and because of
+  // the overflow-hidden below, whatever ends up past the new shorter
+  // edge is simply clipped away rather than scrolled to.
+  //
+  // That silently ate the Crypto and Card buttons on the plans screen as
+  // soon as a second plan existed: the cards rendered 65px shorter than
+  // their content and the buttons sat 50px below the visible edge, still
+  // in the DOM, invisible and unclickable. It looked like the buttons
+  // were missing rather than like a layout problem, and it came and went
+  // with the number of plans. A card should be its content's height and
+  // let the container scroll.
   return (
     <div
       className={cn(
-        "relative overflow-hidden rounded-xl border border-white/10 bg-card/70 p-4 shadow-[0_1px_2px_rgba(0,0,0,0.4),0_12px_32px_-16px_rgba(0,0,0,0.9)] backdrop-blur-sm",
+        "relative shrink-0 overflow-hidden rounded-xl border border-white/10 bg-card/70 p-4 shadow-[0_1px_2px_rgba(0,0,0,0.4),0_12px_32px_-16px_rgba(0,0,0,0.9)] backdrop-blur-sm",
         "before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-white/15 before:to-transparent",
         className,
       )}
