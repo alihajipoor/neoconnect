@@ -238,6 +238,13 @@ function withDecryptedCredentials<T extends { credentialsJson: string }>(
  * omission. */
 const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
   XRAY_VLESS_REALITY: ["realityPublicKey", "shortIds", "dest", "serverName"],
+  // Trojan's certificate is a real one for a real domain, and the client
+  // verifies it with no allowInsecure escape hatch. So the domain has to
+  // reach the client: without it the client falls back to the node's IP
+  // as SNI, the certificate does not match that, and every connection
+  // fails at the TLS handshake. The password is the customer's and lives
+  // in credentials; the domain is the server's and lives here.
+  XRAY_TROJAN: ["serverName"],
   WIREGUARD: ["serverPublicKey", "endpoint", "subnetCidr", "dns"],
   // caCertPem is genuinely needed to verify the server, and already
   // travels in the per-user credentials. caKeyPem and serverKeyPem are
