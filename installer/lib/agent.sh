@@ -222,15 +222,45 @@ issue_tls_certificate() {
     return 1
   fi
 
-  # Xray reads the certificate once at startup, so a renewal that nobody
-  # tells it about means the tunnel serves an expired certificate until
-  # someone notices -- roughly three months after this runs, long after
-  # anyone would connect the two events.
+  install_cert_for_xray "$domain" || return 1
+}
+
+# Copies the certificate somewhere Xray can actually read it.
+#
+# Xray's unit runs as User=nobody while certbot keeps /etc/letsencrypt
+# at 0700 root, so Xray cannot open the live files -- and an unreadable
+# certificate fails the entire config, taking every other inbound on the
+# node down with it. Copying is the narrow fix; loosening
+# /etc/letsencrypt would hand every key on the box to every process
+# running as nobody.
+install_cert_for_xray() {
+  local domain="$1"
+
+  install -d -m 755 /usr/local/etc/xray/certs
+  cat > /usr/local/bin/neoxify-sync-certs <<SYNC
+#!/bin/sh
+set -e
+DEST="/usr/local/etc/xray/certs"
+install -d -m 755 "\$DEST"
+cp "/etc/letsencrypt/live/$domain/fullchain.pem" "\$DEST/fullchain.pem"
+cp "/etc/letsencrypt/live/$domain/privkey.pem" "\$DEST/privkey.pem"
+chown nobody:nogroup "\$DEST/fullchain.pem" "\$DEST/privkey.pem"
+chmod 644 "\$DEST/fullchain.pem"
+chmod 400 "\$DEST/privkey.pem"
+SYNC
+  chmod +x /usr/local/bin/neoxify-sync-certs
+  /usr/local/bin/neoxify-sync-certs || return 1
+
+  # Xray reads its certificate once at startup, so a renewal it is never
+  # told about means serving an expired certificate roughly three months
+  # from now -- long after anyone would connect the two events. The copy
+  # has to be refreshed first, or the reload just re-reads the old one.
   install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
   cat > /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh <<'HOOK'
 #!/bin/sh
-# Reload rather than restart: restarting drops every connected customer,
-# and a certificate renewal is no reason to do that.
+/usr/local/bin/neoxify-sync-certs
+# Reload rather than restart: a certificate renewal is no reason to drop
+# every connected customer.
 systemctl reload xray 2>/dev/null || systemctl restart xray
 HOOK
   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh
@@ -299,8 +329,15 @@ install_xray() {
       return 1
     fi
     issue_tls_certificate "$trojan_domain" || return 1
-    tls_cert="/etc/letsencrypt/live/$trojan_domain/fullchain.pem"
-    tls_key="/etc/letsencrypt/live/$trojan_domain/privkey.pem"
+    # Not certbot's own paths: Xray runs as `nobody` and
+    # /etc/letsencrypt/live is 0700 root, so pointing at it directly
+    # makes Xray fail to start -- and because a bad certificate fails the
+    # whole config, that takes the working VLESS inbound down with it.
+    # Found exactly that way on a live node. install_cert_for_xray copies
+    # to somewhere Xray can read; widening /etc/letsencrypt instead would
+    # expose every key on the box to every process running as nobody.
+    tls_cert="/usr/local/etc/xray/certs/fullchain.pem"
+    tls_key="/usr/local/etc/xray/certs/privkey.pem"
     # Where a wrong password goes. This is the disguise: a prober who
     # guesses wrong gets a real web server rather than a protocol error,
     # which is the whole difference between "an HTTPS site" and
