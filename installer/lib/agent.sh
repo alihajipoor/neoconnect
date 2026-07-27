@@ -149,6 +149,93 @@ Check the agent with: systemctl status neoxify-agentd
 EOF
 }
 
+# The site a wrong Trojan password is handed to.
+#
+# This is the disguise, not decoration. Without a fallback, a prober who
+# guesses wrong gets a connection reset, which says "something that is
+# not a web server is listening here". With one, they get a real page and
+# a real certificate, and the port is indistinguishable from any other
+# small HTTPS site.
+#
+# Bound to loopback because it is only ever reached through Xray. Nothing
+# on the public internet should be able to fetch it directly and notice
+# an unused nginx sitting on a high port.
+ensure_fallback_site() {
+  if ! command -v nginx >/dev/null 2>&1; then
+    echo "Installing nginx for the Trojan fallback site..."
+    apt-get install -y -qq nginx || return 1
+  fi
+
+  install -d -m 755 /var/www/neoxify-fallback
+  # Deliberately dull and impersonal. A page claiming to be some real
+  # organisation would be a lie told to whoever looks, and a page saying
+  # "VPN" would undo the entire point.
+  cat > /var/www/neoxify-fallback/index.html <<'HTML'
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>It works</title></head>
+<body><h1>It works</h1><p>This server is up.</p></body>
+</html>
+HTML
+
+  cat > /etc/nginx/sites-available/neoxify-fallback <<'CONF'
+server {
+    listen 127.0.0.1:8080;
+    server_name _;
+    root /var/www/neoxify-fallback;
+    index index.html;
+    # No server tokens: the version string is a fingerprint of its own.
+    server_tokens off;
+}
+CONF
+  ln -sf /etc/nginx/sites-available/neoxify-fallback /etc/nginx/sites-enabled/neoxify-fallback
+  nginx -t >/dev/null 2>&1 || { echo "nginx rejected the fallback site config" >&2; return 1; }
+  systemctl reload nginx 2>/dev/null || systemctl restart nginx
+}
+
+# Obtains a certificate for the Trojan inbound's domain.
+#
+# certbot standalone rather than the nginx plugin the panel installer
+# uses: a node has no public web server to hook into, and the fallback
+# site above is loopback-only on purpose. Standalone binds port 80 for
+# the duration of the challenge, which is why this runs before Xray is
+# reconfigured rather than alongside it.
+issue_tls_certificate() {
+  local domain="$1"
+
+  if ! command -v certbot >/dev/null 2>&1; then
+    echo "Installing certbot..."
+    apt-get update -qq && apt-get install -y -qq certbot || return 1
+  fi
+
+  if [[ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
+    echo "Certificate for $domain already present -- reusing it."
+    return 0
+  fi
+
+  echo "Requesting a certificate for $domain..."
+  echo "Port 80 must be free and $domain must already resolve to this server."
+  read -r -p "Email for expiry notices: " le_email
+  if ! certbot certonly --standalone -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
+    echo "Could not obtain a certificate for $domain." >&2
+    echo "Check that its DNS record points here and that nothing else holds port 80." >&2
+    return 1
+  fi
+
+  # Xray reads the certificate once at startup, so a renewal that nobody
+  # tells it about means the tunnel serves an expired certificate until
+  # someone notices -- roughly three months after this runs, long after
+  # anyone would connect the two events.
+  install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh <<'HOOK'
+#!/bin/sh
+# Reload rather than restart: restarting drops every connected customer,
+# and a certificate renewal is no reason to do that.
+systemctl reload xray 2>/dev/null || systemctl restart xray
+HOOK
+  chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh
+}
+
 # Installs xray-core, generates a REALITY keypair, and writes a config
 # with an empty client list -- users are hot-added/removed entirely
 # through the agent's HandlerService calls (see
@@ -187,6 +274,41 @@ install_xray() {
   dest="${dest:-cloudflare.com:443}"
   local server_name="${dest%%:*}"
 
+  # Trojan over TLS on a second port -- the same "looks like an ordinary
+  # HTTPS site" property REALITY gives, but presenting a real certificate
+  # for a real domain instead of borrowing someone else's.
+  #
+  # It cannot share REALITY's port: REALITY intercepts the TLS handshake
+  # and proxies anything failing its authentication to the site it
+  # imitates, leaving no room behind it for a second TLS service. With one
+  # IPv4 that means a second port; with two, both can sit on 443.
+  echo
+  echo "Trojan over TLS (optional) adds a second stealth protocol on this node."
+  echo "It needs a domain already pointing here, and a certificate for it."
+  read -r -p "Enable Trojan over TLS? [y/N]: " enable_trojan
+  local trojan_port="" tls_cert="" tls_key="" trojan_fallback="" trojan_domain=""
+  if [[ "${enable_trojan,,}" == "y" ]]; then
+    # 8443 by default. Less unblockable than 443, but so is every
+    # commonly-open alternative (2053/2083/2087/2096) -- the operator can
+    # name one of those here instead.
+    read -r -p "Trojan port [8443]: " trojan_port
+    trojan_port="${trojan_port:-8443}"
+    read -r -p "Domain for the certificate (e.g. fi1.example.com): " trojan_domain
+    if [[ -z "$trojan_domain" ]]; then
+      echo "A domain is required: without a real certificate this protocol is more conspicuous than the one you already have, not less." >&2
+      return 1
+    fi
+    issue_tls_certificate "$trojan_domain" || return 1
+    tls_cert="/etc/letsencrypt/live/$trojan_domain/fullchain.pem"
+    tls_key="/etc/letsencrypt/live/$trojan_domain/privkey.pem"
+    # Where a wrong password goes. This is the disguise: a prober who
+    # guesses wrong gets a real web server rather than a protocol error,
+    # which is the whole difference between "an HTTPS site" and
+    # "something hiding on 8443".
+    trojan_fallback="127.0.0.1:8080"
+    ensure_fallback_site
+  fi
+
   local template="$SCRIPT_DIR/assets/xray-config.json.template"
   read -r -p "Will this node relay other protocols (WireGuard/OpenVPN) to an exit node? [y/N]: " is_relay
   if [[ "${is_relay,,}" == "y" ]]; then
@@ -200,7 +322,28 @@ install_xray() {
     -e "s/__SERVER_NAME__/$server_name/g" \
     -e "s/__REALITY_PRIVATE_KEY__/$private_key/g" \
     -e "s/__SHORT_ID__/$short_id/g" \
+    -e "s/__TROJAN_PORT__/${trojan_port:-0}/g" \
+    -e "s#__TLS_CERT_PATH__#${tls_cert:-/dev/null}#g" \
+    -e "s#__TLS_KEY_PATH__#${tls_key:-/dev/null}#g" \
+    -e "s/__TROJAN_FALLBACK__/${trojan_fallback:-127.0.0.1:8080}/g" \
     "$template" > /usr/local/etc/xray/config.json
+
+  # A declined Trojan inbound is removed rather than left listening on
+  # port 0 with a /dev/null certificate. Xray refuses to start when a
+  # configured certificate is unreadable, and that would take the whole
+  # node down -- including the VLESS inbound that was working perfectly.
+  if [[ -z "$trojan_port" ]]; then
+    python3 - <<'PY' || echo "warning: could not remove the unused Trojan inbound -- edit /usr/local/etc/xray/config.json by hand" >&2
+import json
+
+path = "/usr/local/etc/xray/config.json"
+with open(path) as handle:
+    config = json.load(handle)
+config["inbounds"] = [i for i in config["inbounds"] if i.get("tag") != "trojan-in"]
+with open(path, "w") as handle:
+    json.dump(config, handle, indent=2)
+PY
+  fi
 
   # Xray exposes no way to ask how many connections a user has, so the
   # agent counts distinct client addresses from the access log instead --
