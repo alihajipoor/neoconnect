@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Check, Loader2, MapPin, Repeat, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
-import { PROTOCOL_LABELS } from "../lib/protocol-labels";
+import { CUSTOMER_PROTOCOL_LABELS } from "../lib/protocol-labels";
 import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
 import { Button } from "./ui";
@@ -149,7 +149,7 @@ export function LocationPicker({
                   <div className="flex min-w-0 flex-1 flex-col">
                     <span className="truncate text-sm font-medium">{route.location.nodeName}</span>
                     <span className="truncate text-xs text-muted-foreground">
-                      {route.location.region} &middot; {PROTOCOL_LABELS[route.protocol]}
+                      {route.location.region} &middot; {CUSTOMER_PROTOCOL_LABELS[route.protocol]}
                     </span>
                   </div>
                   <Latency ms={route.id in latencies ? latencies[route.id] : null} />

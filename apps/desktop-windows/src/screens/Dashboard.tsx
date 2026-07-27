@@ -5,6 +5,7 @@ import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from ".
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { formatBytes } from "../lib/utils";
+import { CUSTOMER_PROTOCOL_LABELS } from "../lib/protocol-labels";
 import { captureBaselineIp, verifyEgress, type EgressVerdict } from "../lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { Button, Card, Stat } from "../components/ui";
@@ -12,20 +13,6 @@ import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
 import { LocationPicker } from "../components/LocationPicker";
 import { useI18n } from "../lib/i18n";
-
-/** How each protocol is named to a customer.
- *
- * The wire values are internal (XRAY_VLESS_REALITY means nothing to
- * anyone buying a VPN), and showing them raw was part of why the app
- * read as an internal tool.
- */
-const PROTOCOL_LABEL: Record<string, string> = {
-  XRAY_VLESS_REALITY: "Reality",
-  XRAY_VMESS: "VMess",
-  XRAY_TROJAN: "Trojan",
-  WIREGUARD: "WireGuard",
-  OPENVPN: "OpenVPN",
-};
 
 /** What the helper service reports about the far end.
  *
@@ -536,7 +523,7 @@ export function Dashboard({
                 <Stat
                   icon={<Shield className="size-3" />}
                   label={t("dash.protocol")}
-                  value={protocolUser ? (PROTOCOL_LABEL[protocolUser.protocol] ?? protocolUser.protocol) : "—"}
+                  value={protocolUser ? (CUSTOMER_PROTOCOL_LABELS[protocolUser.protocol] ?? protocolUser.protocol) : "—"}
                 />
                 <Stat
                   icon={<Clock className="size-3" />}
