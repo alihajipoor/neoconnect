@@ -88,14 +88,24 @@ impl Engines {
                 wireguard::connect(self, p)?;
                 self.active = Some(Active::WireguardTunnel);
             }
-            ConnectProfile::XrayVlessReality(p) => {
-                let mut child = xray::connect(self, p)?;
+            // Both Xray protocols take the same path: one engine, one
+            // adapter, one set of routes -- only the outbound differs.
+            ConnectProfile::XrayVlessReality(_) | ConnectProfile::XrayTrojan(_) => {
+                let (outbound, protocol) = match profile {
+                    ConnectProfile::XrayVlessReality(p) => {
+                        (xray::Outbound::VlessReality(p), "XRAY_VLESS_REALITY")
+                    }
+                    ConnectProfile::XrayTrojan(p) => (xray::Outbound::Trojan(p), "XRAY_TROJAN"),
+                    _ => unreachable!("outer match restricts this to the Xray protocols"),
+                };
+
+                let mut child = xray::connect(self, &outbound)?;
                 // Xray creates the adapter but routes nothing into it, so
                 // the tunnel is inert until this succeeds. Failing here
                 // must take the engine down with it rather than leave a
                 // process running that reports connected and carries no
                 // traffic.
-                let routes = match xray::install_routes(p) {
+                let routes = match xray::install_routes(&outbound) {
                     Ok(routes) => routes,
                     Err(e) => {
                         let _ = child.kill();
@@ -103,11 +113,7 @@ impl Engines {
                         return Err(e);
                     }
                 };
-                self.active = Some(Active::Child {
-                    protocol: "XRAY_VLESS_REALITY",
-                    child,
-                    routes,
-                });
+                self.active = Some(Active::Child { protocol, child, routes });
             }
             ConnectProfile::Openvpn(p) => {
                 let child = openvpn::connect(self, p)?;

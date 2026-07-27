@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Child;
 
-use neoconnect_ipc::XrayProfile;
+use neoconnect_ipc::{TrojanProfile, XrayProfile};
 use serde_json::json;
 
 use super::routing::{self, InstalledRoutes};
@@ -61,10 +61,93 @@ const TUN_GATEWAY: &str = "198.18.0.1/30";
 /// anywhere.
 const TUN_DNS: &str = "1.1.1.1";
 
-fn build_config(p: &XrayProfile) -> String {
-    // Built through serde_json rather than string formatting so every
-    // value is escaped by construction -- config injection through a
-    // credential field isn't possible here even before validation.
+/// Which proxy the generated config dials out through.
+///
+/// Everything else about the client -- the TUN inbound, the adapter
+/// address, the routes -- is identical between protocols, so only the
+/// outbound varies.
+pub enum Outbound<'a> {
+    VlessReality(&'a XrayProfile),
+    /// Trojan over ordinary TLS. No borrowed certificate, so the client
+    /// simply verifies the name it was told to expect.
+    Trojan(&'a TrojanProfile),
+}
+
+impl Outbound<'_> {
+    fn host(&self) -> &str {
+        match self {
+            Outbound::VlessReality(p) => &p.host,
+            Outbound::Trojan(p) => &p.host,
+        }
+    }
+
+    fn port(&self) -> u16 {
+        match self {
+            Outbound::VlessReality(p) => p.port,
+            Outbound::Trojan(p) => p.port,
+        }
+    }
+
+    /// The outbound block. Built through serde_json rather than string
+    /// formatting so every value is escaped by construction.
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Outbound::VlessReality(p) => json!({
+                "tag": "proxy",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": p.host,
+                        "port": p.port,
+                        "users": [{ "id": p.uuid, "encryption": "none", "flow": p.flow }]
+                    }]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "serverName": p.server_name,
+                        "fingerprint": "chrome",
+                        "publicKey": p.reality_public_key,
+                        "shortId": p.short_id
+                    }
+                }
+            }),
+            Outbound::Trojan(p) => json!({
+                "tag": "proxy",
+                "protocol": "trojan",
+                "settings": {
+                    "servers": [{
+                        "address": p.host,
+                        "port": p.port,
+                        "password": p.password
+                    }]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "tls",
+                    "tlsSettings": {
+                        // The certificate is a real one for a real
+                        // domain, so it is verified normally -- there is
+                        // deliberately no allowInsecure escape hatch. A
+                        // client that accepts any certificate is a client
+                        // whose traffic can be read by whoever is on the
+                        // path, which is the opposite of the point.
+                        "serverName": p.server_name,
+                        // Presenting Chrome's TLS fingerprint matters as
+                        // much as the certificate: a handshake that looks
+                        // like no browser on earth is itself the signal a
+                        // censor looks for.
+                        "fingerprint": "chrome",
+                        "alpn": ["h2", "http/1.1"]
+                    }
+                }
+            }),
+        }
+    }
+}
+
+fn build_config_for(outbound: &Outbound) -> String {
     let config = json!({
         "log": { "loglevel": "warning" },
         "inbounds": [{
@@ -79,34 +162,11 @@ fn build_config(p: &XrayProfile) -> String {
                 "autoOutboundsInterface": true
             }
         }],
-        "outbounds": [{
-            "tag": "proxy",
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": p.host,
-                    "port": p.port,
-                    "users": [{
-                        "id": p.uuid,
-                        "encryption": "none",
-                        "flow": p.flow
-                    }]
-                }]
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "serverName": p.server_name,
-                    "fingerprint": "chrome",
-                    "publicKey": p.reality_public_key,
-                    "shortId": p.short_id
-                }
-            }
-        }]
+        "outbounds": [outbound.to_json()]
     });
     config.to_string()
 }
+
 
 /// Assigns the TUN adapter its address and DNS.
 ///
@@ -208,8 +268,8 @@ fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
 /// Split out from `connect` so a routing failure can tear down the engine
 /// it belongs to -- a running Xray with no routes is the exact state that
 /// previously looked connected while changing nothing.
-pub fn install_routes(profile: &XrayProfile) -> Result<InstalledRoutes, String> {
-    let server_ip = resolve_server(&profile.host, profile.port)?;
+pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
+    let server_ip = resolve_server(outbound.host(), outbound.port())?;
 
     // Captured before the tunnel takes over: afterwards the best route to
     // the server would be the tunnel itself, and the bypass would point
@@ -236,7 +296,7 @@ pub fn install_routes(profile: &XrayProfile) -> Result<InstalledRoutes, String> 
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
 }
 
-pub fn connect(engines: &Engines, profile: &XrayProfile) -> Result<Child, String> {
+pub fn connect(engines: &Engines, outbound: &Outbound) -> Result<Child, String> {
     let exe = engines.engine_path("xray.exe")?;
     // Checked explicitly because xray.exe starts fine without it and
     // only fails when the TUN adapter is created, which would surface to
@@ -244,7 +304,7 @@ pub fn connect(engines: &Engines, profile: &XrayProfile) -> Result<Child, String
     engines.engine_path("wintun.dll")?;
 
     let config_path = engines.config_path(CONFIG_FILE);
-    write_config(&config_path, &build_config(profile))?;
+    write_config(&config_path, &build_config_for(outbound))?;
 
     let exe_dir = exe
         .parent()
