@@ -1,5 +1,5 @@
 import { BadRequestException } from "@nestjs/common";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Protocol } from "@prisma/client";
 import { signCert } from "../protocol-configs/openvpn-pki";
 import { generateWireGuardKeypair } from "./wireguard-keys";
@@ -64,6 +64,20 @@ export function generateCredentials(
     case Protocol.XRAY_VLESS_REALITY: {
       const uuid = randomUUID();
       return { externalUserId: uuid, credentials: { uuid, flow: "xtls-rprx-vision" } };
+    }
+    case Protocol.XRAY_TROJAN: {
+      // Trojan authenticates with a shared secret rather than a UUID, and
+      // the secret is the only thing standing between a prober and the
+      // tunnel: get it wrong and the server answers like a web server,
+      // get it right and you are through. So this is 32 bytes of CSPRNG
+      // output, not a UUID -- a UUID has far less entropy than its length
+      // suggests, and there is no reason to accept that here.
+      //
+      // The externalUserId doubles as Xray's per-user stat key ("email"),
+      // which must not be the password itself: it appears in logs and in
+      // stats queries. A separate random id keeps the secret out of both.
+      const password = randomBytes(32).toString("base64url");
+      return { externalUserId: randomUUID(), credentials: { password } };
     }
     case Protocol.WIREGUARD: {
       if (!isWireGuardPublicParams(protocolConfig.publicParamsJson)) {

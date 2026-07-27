@@ -31,6 +31,7 @@ func main() {
 	configPath := flag.String("config", config.DefaultPath, "path to the agent's persisted config")
 	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
 	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
+	xrayTrojanTag := flag.String("xray-trojan-inbound-tag", "trojan-in", "tag of the Trojan+TLS inbound in Xray's config. Registered unconditionally: a tag that does not exist simply nacks any Trojan command with Xray's own error, which is clearer than the node silently not offering the protocol")
 	xrayAccessLog := flag.String("xray-access-log", "/var/log/xray/access.log", "Xray's access log, read to count how many places each user is connected from -- concurrency is not exposed by Xray's API. Harmless if absent: counts are simply not reported")
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
 	relayTunInboundTag := flag.String("relay-tun-inbound-tag", "relay-tun-in", "tag of the dormant tun inbound in a relay node's Xray config (see installer/assets/xray-relay-config.json.template)")
@@ -61,6 +62,10 @@ func main() {
 
 	dispatcher := dispatch.New()
 	dispatcher.Register("XRAY_VLESS_REALITY", xrayProvisioner)
+	// Same Xray process, different inbound and a different credential
+	// shape -- so it shares the connection rather than dialing a second
+	// one. See Provisioner.ForTrojan.
+	dispatcher.Register("XRAY_TROJAN", xrayProvisioner.ForTrojan(*xrayTrojanTag, *xrayAccessLog))
 	dispatcher.Register("WIREGUARD", wireguard.New(*wgInterface))
 	// Per-user speed caps, WireGuard only for now: each peer has its own
 	// address assigned at provisioning time, which is what a tc rule needs
