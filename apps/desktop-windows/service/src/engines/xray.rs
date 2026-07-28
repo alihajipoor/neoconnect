@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Child;
 
-use neoconnect_ipc::{TrojanProfile, XrayProfile};
+use neoconnect_ipc::{TrojanProfile, VlessTlsProfile, XrayProfile};
 use serde_json::json;
 
 use super::routing::{self, InstalledRoutes};
@@ -68,6 +68,8 @@ const TUN_DNS: &str = "1.1.1.1";
 /// outbound varies.
 pub enum Outbound<'a> {
     VlessReality(&'a XrayProfile),
+    /// VLESS over an ordinary certificate rather than a borrowed one.
+    VlessTls(&'a VlessTlsProfile),
     /// Trojan over ordinary TLS. No borrowed certificate, so the client
     /// simply verifies the name it was told to expect.
     Trojan(&'a TrojanProfile),
@@ -77,6 +79,7 @@ impl Outbound<'_> {
     fn host(&self) -> &str {
         match self {
             Outbound::VlessReality(p) => &p.host,
+            Outbound::VlessTls(p) => &p.host,
             Outbound::Trojan(p) => &p.host,
         }
     }
@@ -84,6 +87,7 @@ impl Outbound<'_> {
     fn port(&self) -> u16 {
         match self {
             Outbound::VlessReality(p) => p.port,
+            Outbound::VlessTls(p) => p.port,
             Outbound::Trojan(p) => p.port,
         }
     }
@@ -110,6 +114,33 @@ impl Outbound<'_> {
                         "fingerprint": "chrome",
                         "publicKey": p.reality_public_key,
                         "shortId": p.short_id
+                    }
+                }
+            }),
+            // Same vnext/users block as the REALITY variant -- only the
+            // wrapping differs, which is the entire distinction between
+            // the two.
+            Outbound::VlessTls(p) => json!({
+                "tag": "proxy",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": p.host,
+                        "port": p.port,
+                        "users": [{ "id": p.uuid, "encryption": "none", "flow": p.flow }]
+                    }]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "tls",
+                    "tlsSettings": {
+                        // Verified normally, and with no allowInsecure
+                        // escape hatch, for the same reason as Trojan
+                        // below: a client that accepts any certificate
+                        // hands its traffic to whoever is on the path.
+                        "serverName": p.server_name,
+                        "fingerprint": "chrome",
+                        "alpn": ["h2", "http/1.1"]
                     }
                 }
             }),

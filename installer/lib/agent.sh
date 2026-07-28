@@ -332,56 +332,65 @@ install_xray() {
     server_name="${dest%%:*}"
   fi
 
-  # Trojan over TLS on a second port -- the same "looks like an ordinary
-  # HTTPS site" property REALITY gives, but presenting a real certificate
-  # for a real domain instead of borrowing someone else's.
+  # The certificate-presenting stealth protocols: Trojan, and VLESS over
+  # ordinary TLS. Both give REALITY's "looks like an HTTPS site" property
+  # by presenting a real certificate for a real domain rather than
+  # borrowing someone else's, so they share one certificate and one
+  # fallback site and are set up together.
   #
-  # It cannot share REALITY's port: REALITY intercepts the TLS handshake
-  # and proxies anything failing its authentication to the site it
-  # imitates, leaving no room behind it for a second TLS service. With one
-  # IPv4 that means a second port; with two, both can sit on 443.
-  local trojan_port="" tls_cert="" tls_key="" trojan_fallback="" trojan_domain=""
-  local trojan_is_new="y"
+  # Neither can share REALITY's port: REALITY intercepts the TLS
+  # handshake and proxies anything failing its authentication to the site
+  # it imitates, leaving no room behind it for another TLS service. With
+  # one IPv4 that means further ports; with two, one of them can have 443.
+  #
+  # They also cannot share a port with each other -- each terminates its
+  # own TLS -- so they get one each.
+  local trojan_port="" vless_tls_port="" tls_cert="" tls_key="" trojan_fallback="" tls_domain=""
+  local trojan_is_new="y" vless_tls_is_new="y"
 
   # Same reasoning as the REALITY identity above: re-running this on a
-  # node that already serves Trojan must not ask for the port and domain
+  # node that already serves these must not ask for ports and a domain
   # again, and must not register a second Protocol Config for an inbound
   # the panel already knows about.
   if [[ -f "$config_path" ]]; then
-    local existing_trojan
-    existing_trojan="$(jq -c '.inbounds[]? | select(.tag=="trojan-in")' "$config_path" 2>/dev/null)"
-    if [[ -n "$existing_trojan" ]]; then
+    local existing
+    existing="$(jq -c '.inbounds[]? | select(.tag=="trojan-in")' "$config_path" 2>/dev/null)"
+    if [[ -n "$existing" ]]; then
       trojan_is_new="n"
-      trojan_port="$(echo "$existing_trojan" | jq -r '.port')"
-      tls_cert="$(echo "$existing_trojan" | jq -r '.streamSettings.tlsSettings.certificates[0].certificateFile')"
-      tls_key="$(echo "$existing_trojan" | jq -r '.streamSettings.tlsSettings.certificates[0].keyFile')"
-      trojan_fallback="$(echo "$existing_trojan" | jq -r '.settings.fallbacks[0].dest')"
+      trojan_port="$(echo "$existing" | jq -r '.port')"
+      tls_cert="$(echo "$existing" | jq -r '.streamSettings.tlsSettings.certificates[0].certificateFile')"
+      tls_key="$(echo "$existing" | jq -r '.streamSettings.tlsSettings.certificates[0].keyFile')"
+      trojan_fallback="$(echo "$existing" | jq -r '.settings.fallbacks[0].dest')"
       echo
       echo "Trojan over TLS is already configured on port $trojan_port -- keeping it."
     fi
+    existing="$(jq -c '.inbounds[]? | select(.tag=="vless-tls-in")' "$config_path" 2>/dev/null)"
+    if [[ -n "$existing" ]]; then
+      vless_tls_is_new="n"
+      vless_tls_port="$(echo "$existing" | jq -r '.port')"
+      tls_cert="$(echo "$existing" | jq -r '.streamSettings.tlsSettings.certificates[0].certificateFile')"
+      tls_key="$(echo "$existing" | jq -r '.streamSettings.tlsSettings.certificates[0].keyFile')"
+      trojan_fallback="$(echo "$existing" | jq -r '.settings.fallbacks[0].dest')"
+      echo
+      echo "VLESS over TLS is already configured on port $vless_tls_port -- keeping it."
+    fi
   fi
 
-  if [[ "$trojan_is_new" == "y" ]]; then
+  local enable_tls_protocols="n"
+  if [[ "$trojan_is_new" == "y" || "$vless_tls_is_new" == "y" ]]; then
     echo
-    echo "Trojan over TLS (optional) adds a second stealth protocol on this node."
-    echo "It needs a domain already pointing here, and a certificate for it."
-    read -r -p "Enable Trojan over TLS? [y/N]: " enable_trojan
-  else
-    enable_trojan="n"
+    echo "Certificate-based stealth protocols (optional) add listeners that look"
+    echo "like ordinary HTTPS sites. They need a domain already pointing here."
+    read -r -p "Set them up? [y/N]: " enable_tls_protocols
   fi
 
-  if [[ "${enable_trojan,,}" == "y" ]]; then
-    # 8443 by default. Less unblockable than 443, but so is every
-    # commonly-open alternative (2053/2083/2087/2096) -- the operator can
-    # name one of those here instead.
-    read -r -p "Trojan port [8443]: " trojan_port
-    trojan_port="${trojan_port:-8443}"
-    read -r -p "Domain for the certificate (e.g. fi1.example.com): " trojan_domain
-    if [[ -z "$trojan_domain" ]]; then
-      echo "A domain is required: without a real certificate this protocol is more conspicuous than the one you already have, not less." >&2
+  if [[ "${enable_tls_protocols,,}" == "y" ]]; then
+    read -r -p "Domain for the certificate (e.g. fi1.example.com): " tls_domain
+    if [[ -z "$tls_domain" ]]; then
+      echo "A domain is required: without a real certificate these protocols are more conspicuous than the one you already have, not less." >&2
       return 1
     fi
-    issue_tls_certificate "$trojan_domain" || return 1
+    issue_tls_certificate "$tls_domain" || return 1
     # Not certbot's own paths: Xray runs as `nobody` and
     # /etc/letsencrypt/live is 0700 root, so pointing at it directly
     # makes Xray fail to start -- and because a bad certificate fails the
@@ -391,12 +400,35 @@ install_xray() {
     # expose every key on the box to every process running as nobody.
     tls_cert="/usr/local/etc/xray/certs/fullchain.pem"
     tls_key="/usr/local/etc/xray/certs/privkey.pem"
-    # Where a wrong password goes. This is the disguise: a prober who
-    # guesses wrong gets a real web server rather than a protocol error,
-    # which is the whole difference between "an HTTPS site" and
-    # "something hiding on 8443".
+    # Where a failed authentication goes. This is the disguise: a prober
+    # who guesses wrong gets a real web server rather than a protocol
+    # error, which is the whole difference between "an HTTPS site" and
+    # "something hiding on a high port".
     trojan_fallback="127.0.0.1:8080"
-    ensure_fallback_site
+    ensure_fallback_site || return 1
+
+    # VLESS+TLS is offered first because xray-core marks Trojan
+    # deprecated on every config load and tells operators to move to
+    # VLESS. Both are kept -- an existing Trojan deployment should not be
+    # broken by that -- but a new node has no reason to prefer the one
+    # upstream is walking away from.
+    if [[ "$vless_tls_is_new" == "y" ]]; then
+      read -r -p "Port for VLESS over TLS, or 'skip' [2053]: " vless_tls_port
+      vless_tls_port="${vless_tls_port:-2053}"
+      [[ "${vless_tls_port,,}" == "skip" ]] && vless_tls_port=""
+    fi
+    if [[ "$trojan_is_new" == "y" ]]; then
+      # 8443, 2053, 2083, 2087 and 2096 are the commonly-open choices.
+      # None is as unblockable as 443, which REALITY is holding.
+      read -r -p "Port for Trojan over TLS, or 'skip' [skip]: " trojan_port
+      trojan_port="${trojan_port:-skip}"
+      [[ "${trojan_port,,}" == "skip" ]] && trojan_port=""
+    fi
+
+    if [[ -n "$vless_tls_port" && "$vless_tls_port" == "$trojan_port" ]]; then
+      echo "VLESS and Trojan cannot share a port -- each terminates its own TLS." >&2
+      return 1
+    fi
   fi
 
   local template="$SCRIPT_DIR/assets/xray-config.json.template"
@@ -413,6 +445,7 @@ install_xray() {
     -e "s/__REALITY_PRIVATE_KEY__/$private_key/g" \
     -e "s/__SHORT_ID__/$short_id/g" \
     -e "s/__TROJAN_PORT__/${trojan_port:-0}/g" \
+    -e "s/__VLESS_TLS_PORT__/${vless_tls_port:-0}/g" \
     -e "s#__TLS_CERT_PATH__#${tls_cert:-/dev/null}#g" \
     -e "s#__TLS_KEY_PATH__#${tls_key:-/dev/null}#g" \
     -e "s/__TROJAN_FALLBACK__/${trojan_fallback:-127.0.0.1:8080}/g" \
@@ -422,14 +455,19 @@ install_xray() {
   # port 0 with a /dev/null certificate. Xray refuses to start when a
   # configured certificate is unreadable, and that would take the whole
   # node down -- including the VLESS inbound that was working perfectly.
-  if [[ -z "$trojan_port" ]]; then
-    python3 - <<'PY' || echo "warning: could not remove the unused Trojan inbound -- edit /usr/local/etc/xray/config.json by hand" >&2
+  local unused_tags=""
+  [[ -z "$trojan_port" ]] && unused_tags="trojan-in"
+  [[ -z "$vless_tls_port" ]] && unused_tags="$unused_tags vless-tls-in"
+  if [[ -n "${unused_tags// /}" ]]; then
+    UNUSED_INBOUND_TAGS="$unused_tags" python3 - <<'PY' || echo "warning: could not remove the unused TLS inbounds -- edit /usr/local/etc/xray/config.json by hand" >&2
 import json
+import os
 
+drop = set(os.environ["UNUSED_INBOUND_TAGS"].split())
 path = "/usr/local/etc/xray/config.json"
 with open(path) as handle:
     config = json.load(handle)
-config["inbounds"] = [i for i in config["inbounds"] if i.get("tag") != "trojan-in"]
+config["inbounds"] = [i for i in config["inbounds"] if i.get("tag") not in drop]
 with open(path, "w") as handle:
     json.dump(config, handle, indent=2)
 PY
@@ -476,14 +514,24 @@ EOF
     # being inferred: the client verifies the certificate against it and
     # sends it as SNI. Given the node's IP instead, the name never matches
     # the certificate and the handshake fails.
-    params="$(jq -n --arg sn "$trojan_domain" '{serverName: $sn}')"
+    params="$(jq -n --arg sn "$tls_domain" '{serverName: $sn}')"
     config_id="$(register_protocol_config "XRAY_TROJAN" "$trojan_port" "$params" \
       '{"transport": "TCP", "security": "TLS"}')" || return 1
     echo "  Registered (config $config_id)."
     create_route_for_config "Xray Trojan (TLS)" "$config_id"
   fi
 
+  if [[ -n "$vless_tls_port" && "$vless_tls_is_new" == "y" ]]; then
+    echo "Registering VLESS+TLS in the panel..."
+    params="$(jq -n --arg sn "$tls_domain" '{serverName: $sn}')"
+    config_id="$(register_protocol_config "XRAY_VLESS_TLS" "$vless_tls_port" "$params" \
+      '{"transport": "TCP", "security": "TLS"}')" || return 1
+    echo "  Registered (config $config_id)."
+    create_route_for_config "Xray VLESS+TLS" "$config_id"
+  fi
+
   echo "Xray is running on port $listen_port and is ready to use."
+  [[ -n "$vless_tls_port" ]] && echo "VLESS over TLS is running on port $vless_tls_port."
   [[ -n "$trojan_port" ]] && echo "Trojan over TLS is running on port $trojan_port."
   return 0
 }

@@ -44,6 +44,34 @@
     },
     {
       "listen": "0.0.0.0",
+      "port": __VLESS_TLS_PORT__,
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none",
+        "fallbacks": [
+          {
+            "dest": "__TROJAN_FALLBACK__"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": ["h2", "http/1.1"],
+          "certificates": [
+            {
+              "certificateFile": "__TLS_CERT_PATH__",
+              "keyFile": "__TLS_KEY_PATH__"
+            }
+          ]
+        }
+      },
+      "tag": "vless-tls-in"
+    },
+    {
+      "listen": "0.0.0.0",
       "port": __TROJAN_PORT__,
       "protocol": "trojan",
       "settings": {

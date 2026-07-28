@@ -65,6 +65,20 @@ export function generateCredentials(
       const uuid = randomUUID();
       return { externalUserId: uuid, credentials: { uuid, flow: "xtls-rprx-vision" } };
     }
+    case Protocol.XRAY_VLESS_TLS: {
+      // Same account shape as the REALITY variant -- what differs is
+      // entirely in how the connection is wrapped, which is the server's
+      // business and travels in `connection`, not the customer's
+      // credentials.
+      //
+      // XTLS Vision needs a TLS-like transport underneath it to splice
+      // into, which ordinary TLS over TCP is. It is left on here for the
+      // same reason it is on for REALITY: it removes a layer of double
+      // encryption. A WebSocket transport would have to clear this, since
+      // there is no TLS record stream for Vision to work with.
+      const uuid = randomUUID();
+      return { externalUserId: uuid, credentials: { uuid, flow: "xtls-rprx-vision" } };
+    }
     case Protocol.XRAY_TROJAN: {
       // Trojan authenticates with a shared secret rather than a UUID, and
       // the secret is the only thing standing between a prober and the

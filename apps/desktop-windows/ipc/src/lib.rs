@@ -97,6 +97,8 @@ pub enum ConnectProfile {
     Wireguard(WireguardProfile),
     #[serde(rename = "XRAY_VLESS_REALITY")]
     XrayVlessReality(XrayProfile),
+    #[serde(rename = "XRAY_VLESS_TLS")]
+    XrayVlessTls(VlessTlsProfile),
     #[serde(rename = "XRAY_TROJAN")]
     XrayTrojan(TrojanProfile),
     Openvpn(OpenvpnProfile),
@@ -124,6 +126,25 @@ pub struct XrayProfile {
     pub port: u16,
     pub reality_public_key: String,
     pub short_id: String,
+    pub server_name: String,
+}
+
+/// VLESS over ordinary TLS.
+///
+/// The same account as the REALITY variant reached a different way: the
+/// server presents its own certificate instead of borrowing one, so
+/// there is no public key or shortId to carry and the client simply
+/// verifies the name it was told to expect. Structurally this is the
+/// Trojan profile with a UUID in place of a password, which is exactly
+/// what the two protocols differ by.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VlessTlsProfile {
+    pub uuid: String,
+    pub flow: String,
+    pub host: String,
+    pub port: u16,
+    /// The name to expect on the certificate, and the SNI to send.
     pub server_name: String,
 }
 
@@ -325,6 +346,21 @@ impl ConnectProfile {
                 check_single_line("serverName", &p.server_name, 300)?;
                 Ok(())
             }
+            ConnectProfile::XrayVlessTls(p) => {
+                check_key_like("uuid", &p.uuid, 64)?;
+                check_single_line("flow", &p.flow, 64)?;
+                check_endpoint("host", &format!("{}:{}", p.host, p.port))?;
+                // Not optional the way it arguably is for REALITY, where a
+                // missing name only weakens the disguise. Here the
+                // certificate is verified against it, so an empty one
+                // cannot connect at all -- reject it with a message rather
+                // than as a TLS error from xray.exe.
+                check_single_line("serverName", &p.server_name, 300)?;
+                if p.server_name.trim().is_empty() {
+                    return Err(reject("serverName", "is required to verify the server's certificate"));
+                }
+                Ok(())
+            }
             ConnectProfile::XrayTrojan(p) => {
                 // The password is a base64url secret from the control
                 // plane, so it is key-like: no separators, no spaces.
@@ -361,6 +397,7 @@ impl ConnectProfile {
         match self {
             ConnectProfile::Wireguard(_) => "WIREGUARD",
             ConnectProfile::XrayVlessReality(_) => "XRAY_VLESS_REALITY",
+            ConnectProfile::XrayVlessTls(_) => "XRAY_VLESS_TLS",
             ConnectProfile::XrayTrojan(_) => "XRAY_TROJAN",
             ConnectProfile::Openvpn(_) => "OPENVPN",
         }
