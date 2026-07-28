@@ -210,18 +210,25 @@ issue_tls_certificate() {
 
   if [[ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
     echo "Certificate for $domain already present -- reusing it."
-    return 0
+  else
+    echo "Requesting a certificate for $domain..."
+    echo "Port 80 must be free and $domain must already resolve to this server."
+    read -r -p "Email for expiry notices: " le_email
+    if ! certbot certonly --standalone -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
+      echo "Could not obtain a certificate for $domain." >&2
+      echo "Check that its DNS record points here and that nothing else holds port 80." >&2
+      return 1
+    fi
   fi
 
-  echo "Requesting a certificate for $domain..."
-  echo "Port 80 must be free and $domain must already resolve to this server."
-  read -r -p "Email for expiry notices: " le_email
-  if ! certbot certonly --standalone -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
-    echo "Could not obtain a certificate for $domain." >&2
-    echo "Check that its DNS record points here and that nothing else holds port 80." >&2
-    return 1
-  fi
-
+  # Unconditionally, not only on a fresh issue. Returning early when
+  # certbot already had the certificate skipped the copy into a place
+  # Xray can read, so a node with an existing certificate and no copy
+  # got a config pointing at files Xray cannot open -- and an unreadable
+  # certificate fails the whole config, taking the working VLESS inbound
+  # down with it. That is the outage this function's comments already
+  # describe; the early return reintroduced it for a different reason.
+  # Safe to repeat: the copy and the renewal hook are both idempotent.
   install_cert_for_xray "$domain" || return 1
 }
 
