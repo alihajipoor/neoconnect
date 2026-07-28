@@ -313,21 +313,27 @@ pub async fn measure_latency(host: String, port: u16) -> Option<u32> {
     // about the host -- ICMP is filtered on plenty of networks, and TCP
     // cannot work against a UDP port -- so a failure must not cancel the
     // other side.
-    let mut remaining = 2;
+    //
+    // The guards are per-branch, and have to be: a single shared counter
+    // disabled neither branch in particular, so once one side failed the
+    // loop could come back round and poll that finished future again,
+    // which is not allowed. Latent rather than observed -- a live probe
+    // against the node returns a number for every port either way -- but
+    // it is real, and cheap to close.
+    let mut tcp_done = false;
+    let mut icmp_done = false;
     loop {
         tokio::select! {
-            result = &mut tcp, if remaining > 0 => {
+            result = &mut tcp, if !tcp_done => {
                 if result.is_some() { return result; }
-                remaining -= 1;
+                tcp_done = true;
             }
-            result = &mut icmp, if remaining > 0 => {
+            result = &mut icmp, if !icmp_done => {
                 if result.is_some() { return result; }
-                remaining -= 1;
+                icmp_done = true;
             }
+            // Both branches disabled: neither method could measure it.
             else => return None,
-        }
-        if remaining == 0 {
-            return None;
         }
     }
 }
