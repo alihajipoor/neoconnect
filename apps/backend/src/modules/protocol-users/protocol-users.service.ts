@@ -245,6 +245,11 @@ const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
   // fails at the TLS handshake. The password is the customer's and lives
   // in credentials; the domain is the server's and lives here.
   XRAY_TROJAN: ["serverName"],
+  // Same reasoning as Trojan: an ordinary certificate is verified against
+  // a name, so the name has to travel. There is deliberately nothing
+  // REALITY-shaped here -- no borrowed key, no shortId -- because this
+  // variant presents a certificate of its own.
+  XRAY_VLESS_TLS: ["serverName"],
   WIREGUARD: ["serverPublicKey", "endpoint", "subnetCidr", "dns"],
   // caCertPem is genuinely needed to verify the server, and already
   // travels in the per-user credentials. caKeyPem and serverKeyPem are

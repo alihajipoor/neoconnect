@@ -90,10 +90,15 @@ impl Engines {
             }
             // Both Xray protocols take the same path: one engine, one
             // adapter, one set of routes -- only the outbound differs.
-            ConnectProfile::XrayVlessReality(_) | ConnectProfile::XrayTrojan(_) => {
+            ConnectProfile::XrayVlessReality(_)
+            | ConnectProfile::XrayVlessTls(_)
+            | ConnectProfile::XrayTrojan(_) => {
                 let (outbound, protocol) = match profile {
                     ConnectProfile::XrayVlessReality(p) => {
                         (xray::Outbound::VlessReality(p), "XRAY_VLESS_REALITY")
+                    }
+                    ConnectProfile::XrayVlessTls(p) => {
+                        (xray::Outbound::VlessTls(p), "XRAY_VLESS_TLS")
                     }
                     ConnectProfile::XrayTrojan(p) => (xray::Outbound::Trojan(p), "XRAY_TROJAN"),
                     _ => unreachable!("outer match restricts this to the Xray protocols"),

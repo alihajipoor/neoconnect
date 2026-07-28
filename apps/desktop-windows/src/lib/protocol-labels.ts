@@ -7,6 +7,7 @@ import type { Protocol } from "./types";
  * they are configuring. */
 export const PROTOCOL_LABELS: Record<Protocol, string> = {
   XRAY_VLESS_REALITY: "Xray VLESS+REALITY",
+  XRAY_VLESS_TLS: "Xray VLESS+TLS",
   XRAY_VMESS: "Xray VMess",
   XRAY_TROJAN: "Xray Trojan",
   WIREGUARD: "WireGuard",
@@ -22,6 +23,7 @@ export const PROTOCOL_LABELS: Record<Protocol, string> = {
  */
 export const CUSTOMER_PROTOCOL_LABELS: Record<Protocol, string> = {
   XRAY_VLESS_REALITY: "Stealth",
+  XRAY_VLESS_TLS: "Stealth HTTPS",
   XRAY_VMESS: "Stealth (legacy)",
   XRAY_TROJAN: "Stealth Lite",
   WIREGUARD: "Fast",
@@ -32,8 +34,9 @@ export const CUSTOMER_PROTOCOL_LABELS: Record<Protocol, string> = {
  * name. Without it the labels are just different jargon. */
 export const CUSTOMER_PROTOCOL_HINTS: Record<Protocol, string> = {
   XRAY_VLESS_REALITY: "Hardest to block. Best on restricted networks.",
+  XRAY_VLESS_TLS: "Looks exactly like a normal HTTPS website.",
   XRAY_VMESS: "Older stealth option, kept for compatibility.",
-  XRAY_TROJAN: "Looks like ordinary web traffic.",
+  XRAY_TROJAN: "Also looks like a website. Older method than Stealth HTTPS.",
   WIREGUARD: "Fastest. Best when nothing is blocking you.",
   OPENVPN: "Slower, but works almost everywhere.",
 };

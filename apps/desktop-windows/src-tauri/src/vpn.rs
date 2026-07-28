@@ -14,7 +14,8 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, OpenvpnProfile, Request, Response, TrojanProfile, TunnelHealth, WireguardProfile,
+    ConnectProfile, OpenvpnProfile, Request, Response, TrojanProfile, TunnelHealth, VlessTlsProfile,
+    WireguardProfile,
     XrayProfile,
     PIPE_NAME,
 };
@@ -93,6 +94,37 @@ impl ProtocolUserPayload {
                     reality_public_key: field(params, "realityPublicKey")?.to_string(),
                     short_id: short_id.to_string(),
                     server_name: field(params, "serverName")?.to_string(),
+                }))
+            }
+            "XRAY_VLESS_TLS" => {
+                // No borrowed-certificate parameters to read: this
+                // variant presents its own, so the only server-side thing
+                // needed is the name to verify it against.
+                //
+                // Unlike Trojan below there is no host fallback. A wrong
+                // SNI here fails the certificate check outright, so
+                // guessing would turn a fixable misconfiguration into a
+                // TLS error with nothing pointing at the cause.
+                let server_name = self
+                    .connection
+                    .public_params
+                    .get("serverName")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        "this server's TLS settings are missing 'serverName' -- ask support to re-provision it"
+                            .to_string()
+                    })?;
+                Ok(ConnectProfile::XrayVlessTls(VlessTlsProfile {
+                    uuid: field(&self.credentials, "uuid")?.to_string(),
+                    flow: self
+                        .credentials
+                        .get("flow")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("xtls-rprx-vision")
+                        .to_string(),
+                    host: self.connection.host.clone(),
+                    port: self.connection.port,
+                    server_name: server_name.to_string(),
                 }))
             }
             "XRAY_TROJAN" => {
@@ -441,6 +473,34 @@ mod tests {
         assert!(payload("XRAY_TROJAN", serde_json::json!({}), serde_json::json!({}))
             .into_profile()
             .is_err());
+    }
+
+    #[test]
+    fn maps_a_vless_over_tls_protocol_user() {
+        let profile = payload(
+            "XRAY_VLESS_TLS",
+            serde_json::json!({ "uuid": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "flow": "xtls-rprx-vision" }),
+            serde_json::json!({ "serverName": "fi1.neoxify.com" }),
+        )
+        .into_profile()
+        .expect("should map");
+        assert_eq!(profile.protocol_name(), "XRAY_VLESS_TLS");
+        assert!(profile.validate().is_ok());
+    }
+
+    /// Deliberately unlike Trojan, which falls back to the host. Here the
+    /// certificate is checked against this name, so guessing produces a
+    /// TLS failure with nothing pointing at the missing field -- exactly
+    /// the shape of bug that made Trojan unusable from the app.
+    #[test]
+    fn vless_over_tls_without_a_server_name_is_rejected() {
+        assert!(payload(
+            "XRAY_VLESS_TLS",
+            serde_json::json!({ "uuid": "3f2504e0-4f89-11d3-9a0c-0305e82c3301" }),
+            serde_json::json!({}),
+        )
+        .into_profile()
+        .is_err());
     }
 
     #[test]

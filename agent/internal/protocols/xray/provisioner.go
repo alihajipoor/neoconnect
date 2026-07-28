@@ -88,7 +88,7 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 	return p.sessions.Counts()
 }
 
-// ForTrojan returns a provisioner for a Trojan inbound running in the
+// ForInbound returns a provisioner for another inbound running in the
 // same Xray process, sharing this one's connection.
 //
 // Sharing rather than dialling again is the same reasoning behind Conn()
@@ -101,17 +101,31 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 // access log, which records the inbound tag, so a Trojan inbound needs
 // its own counter keyed to its own tag. Passing the same one would
 // attribute Trojan sessions to VLESS users.
-func (p *Provisioner) ForTrojan(inboundTag, accessLogPath string) *Provisioner {
+func (p *Provisioner) ForInbound(kind accountKind, inboundTag, accessLogPath string) *Provisioner {
 	return &Provisioner{
 		apiAddr:     p.apiAddr,
 		inboundTag:  inboundTag,
-		kind:        kindTrojan,
+		kind:        kind,
 		ownsConn:    false,
 		conn:        p.conn,
 		handlerConn: p.handlerConn,
 		statsConn:   p.statsConn,
 		sessions:    NewSessionCounter(accessLogPath, sessionWindow),
 	}
+}
+
+// ForTrojan is the Trojan inbound on this same process.
+func (p *Provisioner) ForTrojan(inboundTag, accessLogPath string) *Provisioner {
+	return p.ForInbound(kindTrojan, inboundTag, accessLogPath)
+}
+
+// ForVless is a second VLESS inbound on this same process -- the
+// certificate-presenting one, alongside the REALITY inbound this
+// provisioner was built for. Same account shape, different listener:
+// what differs between the two is entirely in how the inbound wraps the
+// connection, which is the config file's business and not this code's.
+func (p *Provisioner) ForVless(inboundTag, accessLogPath string) *Provisioner {
+	return p.ForInbound(kindVLESS, inboundTag, accessLogPath)
 }
 
 func (p *Provisioner) Close() error {

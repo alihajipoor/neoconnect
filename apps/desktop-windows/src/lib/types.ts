@@ -38,7 +38,13 @@ export interface Subscription {
   updatedAt: string;
 }
 
-export type Protocol = "XRAY_VLESS_REALITY" | "XRAY_VMESS" | "XRAY_TROJAN" | "WIREGUARD" | "OPENVPN";
+export type Protocol =
+  | "XRAY_VLESS_REALITY"
+  | "XRAY_VLESS_TLS"
+  | "XRAY_VMESS"
+  | "XRAY_TROJAN"
+  | "WIREGUARD"
+  | "OPENVPN";
 
 export type PaymentProvider = "STRIPE" | "NOWPAYMENTS";
 

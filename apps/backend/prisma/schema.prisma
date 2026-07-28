@@ -48,6 +48,13 @@ enum NodeStatus {
 
 enum Protocol {
   XRAY_VLESS_REALITY
+  /// VLESS presenting a real certificate for a real domain, rather than
+  /// borrowing a third party's the way REALITY does. Separate from
+  /// XRAY_VLESS_REALITY because a client builds a genuinely different
+  /// outbound for it -- there are no borrowed-certificate parameters,
+  /// only a name to verify. The `transport` column, not another enum
+  /// member, is what distinguishes carrying it over TCP from WebSocket.
+  XRAY_VLESS_TLS
   XRAY_VMESS
   XRAY_TROJAN
   WIREGUARD
