@@ -51,8 +51,21 @@ export class UsageService {
     const bytesDown = BigInt(delta.bytesDown || "0");
     if (bytesUp === 0n && bytesDown === 0n) return;
 
+    // Matched on the external id alone, not on the reported protocol.
+    //
+    // A node running several inbounds in one engine cannot always say
+    // which of them a byte belongs to: Xray keeps usage per user, so the
+    // agent reports every Xray user under whichever Xray protocol
+    // happens to be doing the reporting. Requiring the label to match
+    // meant those deltas found no row and were dropped in silence --
+    // customers using a second Xray protocol accrued no usage at all
+    // against their cap.
+    //
+    // The label is still worth carrying for diagnostics, but it earns
+    // nothing here: externalUserId is a UUID, a WireGuard public key or
+    // a certificate name, so it identifies the row on its own.
     const protocolUser = await this.prisma.protocolUser.findFirst({
-      where: { nodeId, protocol: delta.protocol, externalUserId: delta.externalUserId },
+      where: { nodeId, externalUserId: delta.externalUserId },
     });
     if (!protocolUser) {
       // Most commonly a relay's shared uplink identity (route:<id>),

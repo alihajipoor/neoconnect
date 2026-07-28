@@ -31,14 +31,17 @@ import (
 // exactly one inbound, identified by tag, which is where the actual
 // VLESS+REALITY listener lives.
 type Provisioner struct {
-	apiAddr     string
-	inboundTag  string
-	kind        accountKind
-	ownsConn    bool
-	conn        *grpc.ClientConn
-	handlerConn hcommand.HandlerServiceClient
-	statsConn   scommand.StatsServiceClient
-	sessions    *SessionCounter
+	apiAddr    string
+	inboundTag string
+	kind       accountKind
+	ownsConn   bool
+	// Whether this provisioner reports the Xray process's usage stats.
+	// Exactly one may -- see StatsSince.
+	reportsStats bool
+	conn         *grpc.ClientConn
+	handlerConn  hcommand.HandlerServiceClient
+	statsConn    scommand.StatsServiceClient
+	sessions     *SessionCounter
 }
 
 // Which credential shape an inbound authenticates with.
@@ -69,14 +72,15 @@ func New(apiAddr, inboundTag, accessLogPath string) (*Provisioner, error) {
 		return nil, fmt.Errorf("connect to xray api at %s: %w", apiAddr, err)
 	}
 	return &Provisioner{
-		apiAddr:     apiAddr,
-		inboundTag:  inboundTag,
-		kind:        kindVLESS,
-		ownsConn:    true,
-		conn:        conn,
-		handlerConn: hcommand.NewHandlerServiceClient(conn),
-		statsConn:   scommand.NewStatsServiceClient(conn),
-		sessions:    NewSessionCounter(accessLogPath, sessionWindow),
+		apiAddr:      apiAddr,
+		inboundTag:   inboundTag,
+		kind:         kindVLESS,
+		ownsConn:     true,
+		reportsStats: true,
+		conn:         conn,
+		handlerConn:  hcommand.NewHandlerServiceClient(conn),
+		statsConn:    scommand.NewStatsServiceClient(conn),
+		sessions:     NewSessionCounter(accessLogPath, sessionWindow),
 	}, nil
 }
 
@@ -103,14 +107,16 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 // attribute Trojan sessions to VLESS users.
 func (p *Provisioner) ForInbound(kind accountKind, inboundTag, accessLogPath string) *Provisioner {
 	return &Provisioner{
-		apiAddr:     p.apiAddr,
-		inboundTag:  inboundTag,
-		kind:        kind,
-		ownsConn:    false,
-		conn:        p.conn,
-		handlerConn: p.handlerConn,
-		statsConn:   p.statsConn,
-		sessions:    NewSessionCounter(accessLogPath, sessionWindow),
+		apiAddr:    p.apiAddr,
+		inboundTag: inboundTag,
+		kind:       kind,
+		ownsConn:   false,
+		// Deliberately false: stats are per-process, not per-inbound.
+		reportsStats: false,
+		conn:         p.conn,
+		handlerConn:  p.handlerConn,
+		statsConn:    p.statsConn,
+		sessions:     NewSessionCounter(accessLogPath, sessionWindow),
 	}
 }
 
@@ -236,6 +242,22 @@ func (p *Provisioner) SetEnabled(ctx context.Context, externalUserID string, ena
 }
 
 func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, error) {
+	// Xray keeps usage per user, not per inbound: the "user>>>" pattern
+	// below matches every user in the process whichever inbound they
+	// belong to, and the query drains the counters as it reads them. So
+	// exactly one provisioner may report, no matter how many inbounds
+	// this process serves.
+	//
+	// With more than one reporting, each poll a different one won the
+	// map-iteration race, drained everything, and labelled all of it
+	// with its own protocol -- and the control plane dropped every delta
+	// whose label did not match the user's real protocol. Roughly half
+	// the node's traffic disappeared, at random, with nothing logged.
+	// Found after registering a second Xray inbound for Trojan.
+	if !p.reportsStats {
+		return nil, nil
+	}
+
 	byUser := make(map[string]*common.UsageDelta)
 
 	// A single "user>>>" pattern query matches every stat name of the
