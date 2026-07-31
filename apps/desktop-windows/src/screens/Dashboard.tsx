@@ -8,6 +8,8 @@ import { formatBytes } from "../lib/utils";
 import { CUSTOMER_PROTOCOL_LABELS } from "../lib/protocol-labels";
 import { captureBaselineIp, verifyEgress, type EgressVerdict } from "../lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
+import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
+import { loadLastGood, saveLastGood } from "../lib/failover-store";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
@@ -215,6 +217,22 @@ export function Dashboard({
   const [me, setMe] = useState<Customer | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [protocolUser, setProtocolUser] = useState<ProtocolUser | null>(null);
+  /** Every credential this subscription holds -- one per route its plan
+   * allows. The list is the failover ladder; `protocolUser` is whichever
+   * rung is currently in use. */
+  const [protocolUsers, setProtocolUsers] = useState<ProtocolUser[]>([]);
+  /** Set when the customer chose a server themselves. A deliberate
+   * choice is not something to quietly override, so it disables
+   * failover until they clear it. */
+  const [pinnedRouteId, setPinnedRouteId] = useState<string | null>(null);
+  /** Which network we are on, so "what worked here last time" means
+   * here and not somewhere else. Null when it cannot be determined. */
+  const [networkId, setNetworkId] = useState<string | null>(null);
+  const [lastGood, setLastGood] = useState<LastGoodMap>({});
+  /** Names the protocol we ended up on when it is not the one we
+   * started with. Landing somewhere else without saying so is the same
+   * dishonesty as a false "Connected". */
+  const [failedOverTo, setFailedOverTo] = useState<string | null>(null);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
@@ -268,8 +286,17 @@ export function Dashboard({
     setMe(meResult.data);
     const sub = usableSubscription(subsResult.data);
     setSubscription(sub);
+    setProtocolUsers(usersResult.data);
     setProtocolUser(usersResult.data[0] ?? null);
     setLoading(false);
+
+    // Best-effort, and deliberately not awaited together with the rest:
+    // a machine whose gateway cannot be identified simply shares one
+    // memory bucket, which is worse than per-network but not broken.
+    void invoke<string | null>("network_fingerprint")
+      .then(setNetworkId)
+      .catch(() => setNetworkId(null));
+    void loadLastGood().then(setLastGood);
 
     // Purely to name the server the customer is actually on -- the
     // protocol-user row carries a routeId but no human-readable
@@ -338,52 +365,94 @@ export function Dashboard({
     }
 
     setConnectionState("connecting");
-    try {
-      // The whole protocol-user row goes to the helper service, which
-      // picks the right engine -- the app deliberately doesn't branch on
-      // protocol here, so adding one later needs no change in the UI.
-      await invoke("vpn_connect", { payload: protocolUser });
+    setFailedOverTo(null);
 
-      setConnectedAt(Date.now());
+    // The ladder, not a single credential. Everything the subscription
+    // holds is already provisioned, so moving to another protocol needs
+    // no server contact -- which is the point, since on a filtered
+    // network the control plane is a plausible thing to lose first.
+    const candidates = orderCandidates(protocolUsers.length > 0 ? protocolUsers : [protocolUser], {
+      pinnedRouteId,
+      lastGoodRouteId: lastGoodFor(lastGood, networkId),
+      preferredRouteId: null,
+    });
 
-      // Egress first, and the order is the whole point. WireGuard does
-      // not handshake until it has something to send, so immediately
-      // after connect there is no handshake to find -- checking for one
-      // first meant every healthy connection sat on "Not carrying
-      // traffic" for the best part of a minute and only went green when
-      // the customer opened a website and generated traffic themselves.
-      // Reported exactly that way.
-      //
-      // This request *is* that traffic. It forces the handshake and
-      // answers the stronger question at the same time: did our packets
-      // actually leave via the server.
-      //
-      // Shown as its own state while it runs. The honest answer during
-      // these seconds is "we do not know yet", and both neighbouring
-      // states assert something false -- which is why a still-negotiating
-      // OpenVPN tunnel was being reported as unprotected.
-      setConnectionState("verifying");
-      const egress = await confirmEgress(baselineIpRef.current);
-      setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
+    let lastError: ClassifiedError | null = null;
 
-      // Proof the tunnel carries traffic needs no second opinion, and
-      // returning here is what makes a working connection feel instant.
-      if (egress.state === "throughTunnel") {
-        setConnectionState("connected");
-        return;
+    for (const [index, candidate] of candidates.entries()) {
+      try {
+        // The whole protocol-user row goes to the helper service, which
+        // picks the right engine -- the app deliberately doesn't branch
+        // on protocol here, so adding one later needs no change in the
+        // UI.
+        await invoke("vpn_connect", { payload: candidate });
+        setProtocolUser(candidate);
+        setConnectedAt(Date.now());
+
+        // Egress first, and the order is the whole point. WireGuard does
+        // not handshake until it has something to send, so immediately
+        // after connect there is no handshake to find -- checking for
+        // one first meant every healthy connection sat on "Not carrying
+        // traffic" for the best part of a minute and only went green
+        // when the customer opened a website and generated traffic
+        // themselves. Reported exactly that way.
+        //
+        // This request *is* that traffic. It forces the handshake and
+        // answers the stronger question at the same time: did our
+        // packets actually leave via the server.
+        setConnectionState("verifying");
+        const egress = await confirmEgress(baselineIpRef.current);
+        setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
+
+        let verdict: ConnectionState;
+        if (egress.state === "throughTunnel") {
+          verdict = "connected";
+        } else {
+          // Otherwise ask the far end whether it is answering at all,
+          // which separates "server is dead" from "server is fine but
+          // our traffic is going around it". The request above has
+          // already given WireGuard a reason to handshake, so this now
+          // sees the truth rather than an interface that has simply
+          // never spoken yet.
+          verdict = combineEvidence(await confirmReachable(), egress);
+        }
+
+        if (verdict === "connected") {
+          setConnectionState("connected");
+          if (index > 0) {
+            setFailedOverTo(CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol);
+          }
+          // Remembered only on proof it carried traffic. Recording a
+          // merely-started engine would teach the app to lead with a
+          // protocol that does not actually work here.
+          const updated = rememberLastGood(lastGood, networkId, candidate.routeId);
+          setLastGood(updated);
+          void saveLastGood(updated);
+          return;
+        }
+
+        // Up but not carrying traffic. That is precisely the case a
+        // plain connect-succeeded check calls a success, and precisely
+        // the one worth moving on from -- so tear it down before trying
+        // the next, or two engines end up fighting over the routes.
+        lastError = {
+          kind: "serverUnreachable",
+          messageKey: "err.notCarryingTraffic",
+          detail: `${candidate.protocol}: connected but no traffic reached the internet`,
+        };
+        await invoke("vpn_disconnect").catch(() => undefined);
+      } catch (err) {
+        lastError = classifyConnectionError(err);
+        await invoke("vpn_disconnect").catch(() => undefined);
       }
 
-      // Otherwise ask the far end whether it is answering at all, which
-      // separates "server is dead" from "server is fine but our traffic
-      // is going around it". The request above has already given
-      // WireGuard a reason to handshake, so this now sees the truth
-      // rather than an interface that has simply never spoken yet.
-      const fromHandshake = await confirmReachable();
-      setConnectionState(combineEvidence(fromHandshake, egress));
-    } catch (err) {
-      setConnectionError(classifyConnectionError(err));
-      setConnectionState("disconnected");
+      // A pinned route is the only candidate, so there is nothing to
+      // fall through to; the loop ends and reports honestly.
+      if (index < candidates.length - 1) setConnectionState("connecting");
     }
+
+    setConnectionError(lastError);
+    setConnectionState("disconnected");
   }
 
   async function handleLogout() {
@@ -534,6 +603,19 @@ export function Dashboard({
                         <p className="mt-1.5 text-xs text-muted-foreground">
                           {t("dash.yourIp")}{" "}
                           <span className="tabular-nums font-medium text-foreground">{exitIp}</span>
+                        </p>
+                      ) : null}
+
+                      {/* Says so when the protocol in use is not the one
+                          we set out to use. Quietly landing somewhere
+                          else is the same class of dishonesty as a false
+                          "Connected" -- and a customer who is told which
+                          transport got through has something useful to
+                          report when none of them do. */}
+                      {connectionState === "connected" && failedOverTo ? (
+                        <p className="mt-1 text-xs text-amber-400/90">
+                          {t("dash.switchedTo")}{" "}
+                          <span className="font-medium">{failedOverTo}</span>
                         </p>
                       ) : null}
                     </div>
@@ -690,7 +772,13 @@ export function Dashboard({
           // Connect failed. Re-fetching also means an app running
           // against an older backend still works, instead of depending
           // on that endpoint's exact shape.
-          onSwitched={() => void loadAll()}
+          onSwitched={(routeId) => {
+            // A deliberate choice disables failover: being silently
+            // moved off the server you just picked is worse than being
+            // told the one you picked did not work.
+            setPinnedRouteId(routeId ?? null);
+            void loadAll();
+          }}
         />
       ) : null}
     </div>
