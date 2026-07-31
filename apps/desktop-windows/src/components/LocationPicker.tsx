@@ -24,7 +24,10 @@ export function LocationPicker({
   /** Signals that the switch succeeded. Deliberately carries no payload:
    * the caller re-reads the provisioned connection itself, so this
    * component doesn't decide what the switch response is worth trusting. */
-  onSwitched: () => void;
+  /** Reports which route the customer chose, so the dashboard can
+   * pin it -- picking a server deliberately should not be quietly
+   * overridden by failover. */
+  onSwitched: (routeId: string) => void;
 }) {
   const { t } = useI18n();
   const [loading, setLoading] = useState(true);
@@ -85,7 +88,7 @@ export function LocationPicker({
     const result = await switchRoute(subscriptionId, route.id);
     setSwitchingId(null);
     if (result.ok) {
-      onSwitched();
+      onSwitched(route.id);
       onClose();
     } else {
       setSwitchError(result.error);

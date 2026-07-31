@@ -577,3 +577,58 @@ mod latency_probe {
         }
     }
 }
+
+/// A stable identifier for the network this machine is currently on.
+///
+/// Failover remembers which protocol worked so the next connect starts
+/// with it instead of walking the list again. That memory has to be
+/// per-network to be worth anything: the whole point is that the answer
+/// differs between a home connection where everything works and a
+/// filtered one where only a disguised transport does. Remembered
+/// globally, moving between the two would mean a wrong first attempt
+/// every time -- precisely the delay it exists to remove.
+///
+/// The default gateway's MAC is the identifier, because it distinguishes
+/// two networks that both hand out 192.168.1.x, which its IP does not.
+///
+/// Returns None when it cannot be determined -- no gateway, or ARP
+/// fails. Callers treat that as one shared unknown network rather than
+/// inventing an identity, since a fabricated one would attach the memory
+/// to the wrong place.
+#[tauri::command]
+pub fn network_fingerprint() -> Option<String> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute, SendARP, MIB_IPFORWARDROW};
+
+    unsafe {
+        // Asking for the route to a public address gets the default
+        // route without walking the whole table and re-implementing
+        // Windows' own metric comparison.
+        let mut route: MIB_IPFORWARDROW = std::mem::zeroed();
+        let probe = u32::from_ne_bytes([1, 1, 1, 1]);
+        if GetBestRoute(probe, 0, &mut route) != 0 {
+            return None;
+        }
+
+        // Zero means the destination is on-link -- a point-to-point
+        // adapter with no next hop to ARP for, which is what a live VPN
+        // tunnel looks like. Nothing stable to fingerprint.
+        let gateway = route.dwForwardNextHop;
+        if gateway == 0 {
+            return None;
+        }
+
+        let mut mac = [0u8; 6];
+        let mut mac_len: u32 = mac.len() as u32;
+        if SendARP(gateway, 0, mac.as_mut_ptr() as *mut _, &mut mac_len) != 0 || mac_len == 0 {
+            return None;
+        }
+
+        Some(
+            mac[..mac_len.min(6) as usize]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(":"),
+        )
+    }
+}
