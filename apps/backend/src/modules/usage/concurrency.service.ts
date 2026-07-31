@@ -27,6 +27,10 @@ const COOLDOWN_MS = 60_000;
 
 /** Enforces a plan's concurrent-connection limit.
  *
+ * The limit is evaluated per subscription, not per credential -- see
+ * handleSessionCounts for why that distinction is what makes it
+ * enforceable at all.
+ *
  * Only Xray is enforced here, because only Xray needs it. VLESS accepts
  * unlimited simultaneous connections for one UUID, so a shared credential
  * genuinely multiplies into many users. The other engines are already
@@ -41,7 +45,7 @@ const COOLDOWN_MS = 60_000;
 export class ConcurrencyService implements OnModuleDestroy {
   private readonly logger = new Logger(ConcurrencyService.name);
 
-  /** Consecutive over-limit readings per protocol user. Held in memory
+  /** Consecutive over-limit readings per subscription. Held in memory
    * on purpose: it is a debounce, not a record. Losing it on restart
    * costs at most a couple of extra polls before a real sharer trips it
    * again, which is cheaper than writing to the database every 30s. */
@@ -62,26 +66,59 @@ export class ConcurrencyService implements OnModuleDestroy {
     private readonly agentGateway: AgentGatewayService,
   ) {}
 
+  /** One node's report, aggregated per subscription before judging it.
+   *
+   * Aggregation is the point. The limit belongs to the customer, not to
+   * a credential, and since every subscription is now provisioned on
+   * every route its plan allows, judging each credential separately gave
+   * a sharer the limit once per protocol -- five times over on a node
+   * running five inbounds, with nothing anywhere reporting it.
+   *
+   * Summing is sound because a device connects on one protocol at a
+   * time, so a legitimate customer contributes one source however many
+   * credentials they hold.
+   *
+   * Scope is one node's batch. A customer spread across two nodes is
+   * still counted separately per node -- that needs short-lived
+   * cross-node state and is not what provisioning-everywhere introduced,
+   * so it stays a known gap rather than a guess.
+   */
   async handleSessionCounts(nodeId: string, counts: SessionCountInput[]) {
+    const bySubscription = new Map<string, { sources: number; protocol: string }>();
+
     for (const count of counts) {
-      await this.evaluate(nodeId, count);
+      const user = await this.prisma.protocolUser.findFirst({
+        where: { nodeId, externalUserId: count.externalUserId },
+        select: { status: true, protocol: true, subscriptionId: true },
+      });
+      // Unknown to us, or already switched off -- a disabled credential's
+      // lingering sessions must not count against the customer.
+      if (!user || user.status !== 'ACTIVE') continue;
+
+      const seen = bySubscription.get(user.subscriptionId);
+      bySubscription.set(user.subscriptionId, {
+        sources: (seen?.sources ?? 0) + count.distinctSources,
+        protocol: seen?.protocol ?? user.protocol,
+      });
+    }
+
+    for (const [subscriptionId, { sources }] of bySubscription) {
+      await this.evaluate(subscriptionId, sources);
     }
   }
 
-  private async evaluate(nodeId: string, count: SessionCountInput) {
-    const user = await this.prisma.protocolUser.findFirst({
-      where: { nodeId, externalUserId: count.externalUserId },
-      include: { subscription: { include: { plan: true } } },
+  private async evaluate(subscriptionId: string, distinctSources: number) {
+    const subscription = await this.prisma.subscription.findUnique({
+      where: { id: subscriptionId },
+      include: { plan: true },
     });
-    // Unknown to us, already disabled, or on a plan with no limit set --
-    // an unset limit means unlimited, not zero.
-    if (!user || user.status !== "ACTIVE") return;
-    const limit = user.subscription?.plan?.maxConcurrentConnections;
+    // An unset limit means unlimited, not zero.
+    const limit = subscription?.plan?.maxConcurrentConnections;
     if (!limit || limit <= 0) return;
 
-    const key = `${nodeId}:${count.externalUserId}`;
+    const key = subscriptionId;
 
-    if (count.distinctSources <= limit) {
+    if (distinctSources <= limit) {
       // Back within the limit: forget the history rather than letting
       // strikes accumulate across unrelated incidents hours apart.
       this.strikes.delete(key);
@@ -95,7 +132,7 @@ export class ConcurrencyService implements OnModuleDestroy {
     this.strikes.set(key, strikes);
     if (strikes < STRIKES_BEFORE_ACTION) {
       this.logger.debug(
-        `${count.externalUserId} on node ${nodeId} is at ${count.distinctSources}/${limit} connections (${strikes}/${STRIKES_BEFORE_ACTION})`,
+        `Subscription ${subscriptionId} is at ${distinctSources}/${limit} connections (${strikes}/${STRIKES_BEFORE_ACTION})`,
       );
       return;
     }
@@ -103,9 +140,16 @@ export class ConcurrencyService implements OnModuleDestroy {
     this.strikes.delete(key);
     this.cooldownUntil.set(key, Date.now() + COOLDOWN_MS);
 
+    // Every credential, not only the one that reported over the limit.
+    // Dropping just that one would move the sharer onto the next
+    // protocol they already hold -- the same hole one step along.
+    const users = await this.prisma.protocolUser.findMany({
+      where: { subscriptionId, status: 'ACTIVE' },
+    });
+
     this.logger.warn(
-      `Disconnecting ${count.externalUserId} on node ${nodeId}: ` +
-        `${count.distinctSources} simultaneous sources exceeds the plan's limit of ${limit}`,
+      `Disconnecting subscription ${subscriptionId}: ${distinctSources} simultaneous sources ` +
+        `exceeds the plan's limit of ${limit} (${users.length} credentials dropped)`,
     );
 
     // Dropping the user from the engine is the only lever available:
@@ -113,10 +157,12 @@ export class ConcurrencyService implements OnModuleDestroy {
     // connections, so a single session can't be singled out. Everything
     // for that credential drops and legitimate clients reconnect --
     // which is also what makes the cooldown necessary.
-    await this.agentGateway.enqueueCommand(nodeId, "DISABLE_USER", {
-      protocol: user.protocol,
-      externalUserId: count.externalUserId,
-    });
+    for (const user of users) {
+      await this.agentGateway.enqueueCommand(user.nodeId, 'DISABLE_USER', {
+        protocol: user.protocol,
+        externalUserId: user.externalUserId,
+      });
+    }
 
     // Re-enabled after the cooldown, not immediately -- otherwise the
     // disconnect achieves nothing. The subscription itself is untouched:
@@ -124,17 +170,19 @@ export class ConcurrencyService implements OnModuleDestroy {
     // customer's row stays ACTIVE throughout.
     //
     // If this process restarts mid-cooldown the timer is lost, and the
-    // periodic re-assert restores the user on its next pass instead.
+    // periodic re-assert restores the users on its next pass instead.
     // Later than intended, but never permanent.
     const timer = setTimeout(() => {
       this.pendingReenables.delete(key);
-      this.agentGateway
-        .enqueueCommand(nodeId, "ENABLE_USER", {
-          protocol: user.protocol,
-          externalUserId: count.externalUserId,
-          credentials: decryptCredentials(user.credentialsJson),
-        })
-        .catch((err) => this.logger.error(`Failed to restore ${count.externalUserId}: ${err}`));
+      for (const user of users) {
+        this.agentGateway
+          .enqueueCommand(user.nodeId, 'ENABLE_USER', {
+            protocol: user.protocol,
+            externalUserId: user.externalUserId,
+            credentials: decryptCredentials(user.credentialsJson),
+          })
+          .catch((err) => this.logger.error(`Failed to restore ${user.externalUserId}: ${err}`));
+      }
     }, COOLDOWN_MS);
     // Unref'd so a pending re-enable can't keep the process alive during
     // a shutdown.

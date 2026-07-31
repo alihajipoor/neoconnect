@@ -35,7 +35,7 @@ describe("CustomerAuthService", () => {
   let config: { get: jest.Mock };
   let customersService: { create: jest.Mock };
   let subscriptionsService: { create: jest.Mock };
-  let protocolUsersService: { create: jest.Mock };
+  let protocolUsersService: { create: jest.Mock; provisionAll: jest.Mock };
   let freeTrialSettingsService: { get: jest.Mock };
   let emailService: { sendMail: jest.Mock };
 
@@ -51,7 +51,7 @@ describe("CustomerAuthService", () => {
     config = { get: jest.fn((key: string) => `config:${key}`) };
     customersService = { create: jest.fn() };
     subscriptionsService = { create: jest.fn() };
-    protocolUsersService = { create: jest.fn() };
+    protocolUsersService = { create: jest.fn(), provisionAll: jest.fn().mockResolvedValue([]) };
     freeTrialSettingsService = { get: jest.fn() };
     emailService = { sendMail: jest.fn().mockResolvedValue(true) };
 
@@ -109,6 +109,7 @@ describe("CustomerAuthService", () => {
       expect(freeTrialSettingsService.get).not.toHaveBeenCalled();
       expect(subscriptionsService.create).not.toHaveBeenCalled();
       expect(protocolUsersService.create).not.toHaveBeenCalled();
+      expect(protocolUsersService.provisionAll).not.toHaveBeenCalled();
     });
   });
 
@@ -147,15 +148,25 @@ describe("CustomerAuthService", () => {
         trialRouteId: "route-1",
       });
       subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
-      protocolUsersService.create.mockResolvedValue({ id: "pu-1", credentials: { uuid: "x" } });
+      // Every route the plan allows, so the client can fail over without
+      // asking us. The operator's chosen trial route must still come
+      // first in the response.
+      protocolUsersService.provisionAll.mockResolvedValue([
+        { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
+        { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
+      ]);
 
       const result = await service.verifyEmail("token");
 
       expect(subscriptionsService.create).toHaveBeenCalledWith({ customerId: "customer-1", planId: "plan-1" });
-      expect(protocolUsersService.create).toHaveBeenCalledWith({ subscriptionId: "sub-1", routeId: "route-1" });
+      expect(protocolUsersService.provisionAll).toHaveBeenCalledWith("sub-1");
       expect(result.trial).toEqual({
         subscription: { id: "sub-1" },
-        protocolUser: { id: "pu-1", credentials: { uuid: "x" } },
+        protocolUsers: [
+          { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
+          { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
+        ],
+        protocolUser: { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
       });
     });
 
@@ -228,7 +239,7 @@ describe("CustomerAuthService", () => {
         trialRouteId: "route-1",
       });
       subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
-      protocolUsersService.create.mockResolvedValue({ id: "pu-1" });
+      protocolUsersService.provisionAll.mockResolvedValue([{ id: "pu-1", routeId: "route-1" }]);
 
       const result = await service.verifyEmailByCode("customer@example.com", "111111");
 
@@ -236,7 +247,11 @@ describe("CustomerAuthService", () => {
         where: { id: "customer-1" },
         data: { emailVerifiedAt: expect.any(Date), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
       });
-      expect(result.trial).toEqual({ subscription: { id: "sub-1" }, protocolUser: { id: "pu-1" } });
+      expect(result.trial).toEqual({
+        subscription: { id: "sub-1" },
+        protocolUsers: [{ id: "pu-1", routeId: "route-1" }],
+        protocolUser: { id: "pu-1", routeId: "route-1" },
+      });
     });
   });
 
