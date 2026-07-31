@@ -236,19 +236,23 @@ export class BillingService {
       },
     });
 
+    // Re-enable before provisioning: a renewal after a quota suspension
+    // has users that exist but are switched off, and provisionAll only
+    // fills gaps -- it would leave a disabled row disabled.
     const existingUsers = await this.prisma.protocolUser.findMany({ where: { subscriptionId } });
-    if (existingUsers.length === 0) {
-      if (subscription.plan.defaultRouteId) {
-        await this.protocolUsersService.create({ subscriptionId, routeId: subscription.plan.defaultRouteId });
-      } else {
-        this.logger.warn(
-          `Subscription ${subscriptionId} (plan ${subscription.planId}) had a payment confirmed but the plan has no defaultRouteId configured -- no protocol user was provisioned`,
-        );
-      }
-    } else {
-      for (const user of existingUsers.filter((u) => u.status === "DISABLED")) {
-        await this.protocolUsersService.setEnabled(user.id, true);
-      }
+    for (const user of existingUsers.filter((u) => u.status === "DISABLED")) {
+      await this.protocolUsersService.setEnabled(user.id, true);
+    }
+
+    // Every route the plan allows, not just the plan's default one, so
+    // the client can fail over between protocols without needing to
+    // reach us. defaultRouteId still decides which the client tries
+    // first; it no longer decides which exist.
+    const provisioned = await this.protocolUsersService.provisionAll(subscriptionId);
+    if (existingUsers.length === 0 && provisioned.length === 0) {
+      this.logger.warn(
+        `Subscription ${subscriptionId} (plan ${subscription.planId}) had a payment confirmed but no enabled route matches its allowed protocols -- no protocol user was provisioned`,
+      );
     }
 
     this.logger.log(`Subscription ${subscriptionId} renewed through ${newExpireAt.toISOString()}`);

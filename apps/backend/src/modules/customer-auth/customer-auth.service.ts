@@ -183,12 +183,20 @@ export class CustomerAuthService {
       customerId,
       planId: settings.trialPlanId,
     });
-    const protocolUser = await this.protocolUsersService.create({
-      subscriptionId: subscription.id,
-      routeId: settings.trialRouteId,
-    });
+    // Every route the trial plan allows, so a trial customer gets the
+    // same failover the paid one does -- they are the likeliest to be on
+    // a network that blocks something, and the likeliest to give up if
+    // the first attempt fails.
+    const protocolUsers = await this.protocolUsersService.provisionAll(subscription.id);
 
-    return { subscription, protocolUser };
+    // trialRouteId stays the preferred one, and stays first in the
+    // response so an older client reading only the first entry still
+    // gets the route the operator chose.
+    protocolUsers.sort((a, b) =>
+      a.routeId === settings.trialRouteId ? -1 : b.routeId === settings.trialRouteId ? 1 : 0,
+    );
+
+    return { subscription, protocolUsers, protocolUser: protocolUsers[0] ?? null };
   }
 
   async validateCredentials(email: string, password: string) {
