@@ -45,13 +45,32 @@ describe("orderCandidates", () => {
     expect(order[1]).toBe("r-tls");
   });
 
-  it("offers only the pinned route, because a deliberate choice is not a suggestion", () => {
-    expect(ids(orderCandidates(ALL, { pinnedRouteId: "r-openvpn" }))).toEqual(["r-openvpn"]);
+  it("puts the customer's chosen server first", () => {
+    expect(ids(orderCandidates(ALL, { pinnedRouteId: "r-openvpn" }))[0]).toBe("r-openvpn");
   });
 
-  it("ignores a pin for a route the customer no longer has", () => {
+  /** The regression this exists to prevent, found in live testing.
+   *
+   * Choosing a server used to make it the *only* candidate, so the most
+   * ordinary action in the app -- picking from the server list --
+   * silently disabled failover, and the run then reported "every
+   * protocol was tried" after trying exactly one. A choice means "start
+   * here", not "give up if this fails". */
+  it("still offers the others after the chosen one, so failover is not silently disabled", () => {
+    const order = ids(orderCandidates(ALL, { pinnedRouteId: "r-openvpn" }));
+    expect(order).toHaveLength(ALL.length);
+    expect(order.slice(1)).toEqual(["r-wg", "r-reality", "r-tls", "r-trojan"]);
+  });
+
+  it("ignores a choice for a route the customer no longer has", () => {
     // A stale preference must never leave someone with nothing to try.
     expect(ids(orderCandidates(ALL, { pinnedRouteId: "r-deleted" }))).toHaveLength(ALL.length);
+  });
+
+  it("lets the customer's choice outrank what merely worked last time", () => {
+    const order = ids(orderCandidates(ALL, { pinnedRouteId: "r-openvpn", lastGoodRouteId: "r-trojan" }));
+    expect(order[0]).toBe("r-openvpn");
+    expect(order[1]).toBe("r-trojan");
   });
 
   it("keeps a stable order between runs so a failure can be reproduced", () => {

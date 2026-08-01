@@ -34,9 +34,9 @@ function rank(protocol: Protocol): number {
  *
  * Three inputs, in descending authority:
  *
- * 1. `pinnedRouteId` — the customer chose this one in the picker. A
- *    deliberate choice is not something to quietly override, so when it
- *    is set it is the only candidate.
+ * 1. `chosenRouteId` — the customer picked this one in the server list,
+ *    so it is tried first. It is deliberately not the *only* candidate:
+ *    see the note in the body.
  * 2. `lastGoodRouteId` — what actually worked on this network last time.
  *    Evidence beats a guess, so it leads.
  * 3. `preferredRouteId` — the plan's default, as set by the operator.
@@ -51,15 +51,20 @@ export function orderCandidates(
 ): ProtocolUser[] {
   const { pinnedRouteId, lastGoodRouteId, preferredRouteId } = opts;
 
-  if (pinnedRouteId) {
-    const pinned = users.filter((u) => u.routeId === pinnedRouteId);
-    // Falls through to the normal order if the pin refers to a route the
-    // customer no longer has -- a stale preference must not leave them
-    // with nothing to connect to.
-    if (pinned.length > 0) return pinned;
-  }
-
+  // A chosen route leads; it does not exclude the others.
+  //
+  // This used to return only the pinned route, disabling failover
+  // entirely. That was wrong in the way that matters: picking a server
+  // from the list is the most ordinary thing a customer does, and it
+  // silently switched off the feature that protects them -- then
+  // reported "every protocol was tried" after trying one. Choosing a
+  // server should mean "start here", not "and give up if it fails".
+  //
+  // Locking to a single protocol is a reasonable thing to want, but it
+  // should be an explicit setting, not a side effect of browsing the
+  // server list.
   const priority = (u: ProtocolUser): number => {
+    if (pinnedRouteId && u.routeId === pinnedRouteId) return -3;
     if (lastGoodRouteId && u.routeId === lastGoodRouteId) return -2;
     if (preferredRouteId && u.routeId === preferredRouteId) return -1;
     return 0;
