@@ -122,6 +122,45 @@ async function confirmEgress(baselineIp: string | null): Promise<EgressVerdict> 
   return last;
 }
 
+/** How long to wait for ordinary networking to come back after tearing
+ * an engine down.
+ *
+ * `wireguard.exe /uninstalltunnelservice` returns as soon as the command
+ * completes, but Windows removes the service and its adapter
+ * asynchronously -- and while that is happening the default route can
+ * still point into a tunnel that no longer carries anything. An engine
+ * started inside that window has its packets black-holed and fails for a
+ * reason that has nothing to do with the protocol it was testing. */
+const SETTLE_TIMEOUT_MS = 6_000;
+const SETTLE_INTERVAL_MS = 400;
+
+/** Waits until the machine can reach the outside world unaided, and
+ * returns the address the world sees.
+ *
+ * Serves two purposes at once, which is why it is one function. It
+ * proves the previous engine's routes are really gone before the next
+ * one is tried -- without this, one failed attempt poisoned every
+ * attempt after it, and a whole failover run reported "no traffic got
+ * through" while the server never saw so much as a connection. And the
+ * moment it succeeds is the only correct moment to take a baseline: an
+ * address captured through a live tunnel makes the next comparison read
+ * every working connection as a leak.
+ *
+ * Null means we could not reach our own API even unprotected. That is
+ * not a reason to refuse to connect -- their network may be fine and
+ * ours may not be -- so the caller proceeds without a baseline and falls
+ * back to handshake evidence.
+ */
+async function settleAndCaptureBaseline(): Promise<string | null> {
+  const deadline = Date.now() + SETTLE_TIMEOUT_MS;
+  for (;;) {
+    const ip = await captureBaselineIp();
+    if (ip !== null) return ip;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, SETTLE_INTERVAL_MS));
+  }
+}
+
 /** Combines the two independent pieces of evidence.
  *
  * They answer different questions and neither alone is enough: the
@@ -378,13 +417,23 @@ export function Dashboard({
     });
 
     let lastError: ClassifiedError | null = null;
+    // Why each attempt failed, in order. Kept because diagnosing the
+    // first version of this needed a firewall rule and the server's own
+    // logs -- the app knew and said nothing.
+    const attempts: string[] = [];
 
     for (const [index, candidate] of candidates.entries()) {
+      const label = CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol;
+
+      // Fresh every attempt, and taken only once plain networking is
+      // confirmed working. See settleAndCaptureBaseline -- doing this
+      // once at app start was what made a whole run fail.
+      baselineIpRef.current = await settleAndCaptureBaseline();
+
       try {
         // The whole protocol-user row goes to the helper service, which
         // picks the right engine -- the app deliberately doesn't branch
-        // on protocol here, so adding one later needs no change in the
-        // UI.
+        // on protocol here, so adding one later needs no change here.
         await invoke("vpn_connect", { payload: candidate });
         setProtocolUser(candidate);
         setConnectedAt(Date.now());
@@ -394,8 +443,8 @@ export function Dashboard({
         // after connect there is no handshake to find -- checking for
         // one first meant every healthy connection sat on "Not carrying
         // traffic" for the best part of a minute and only went green
-        // when the customer opened a website and generated traffic
-        // themselves. Reported exactly that way.
+        // when the customer opened a website themselves. Reported
+        // exactly that way.
         //
         // This request *is* that traffic. It forces the handshake and
         // answers the stronger question at the same time: did our
@@ -404,24 +453,17 @@ export function Dashboard({
         const egress = await confirmEgress(baselineIpRef.current);
         setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
-        let verdict: ConnectionState;
-        if (egress.state === "throughTunnel") {
-          verdict = "connected";
-        } else {
-          // Otherwise ask the far end whether it is answering at all,
-          // which separates "server is dead" from "server is fine but
-          // our traffic is going around it". The request above has
-          // already given WireGuard a reason to handshake, so this now
-          // sees the truth rather than an interface that has simply
-          // never spoken yet.
-          verdict = combineEvidence(await confirmReachable(), egress);
-        }
+        const verdict =
+          egress.state === "throughTunnel"
+            ? "connected"
+            : // Otherwise ask the far end whether it is answering at
+              // all, which separates "server is dead" from "server is
+              // fine but our traffic is going around it".
+              combineEvidence(await confirmReachable(), egress);
 
         if (verdict === "connected") {
           setConnectionState("connected");
-          if (index > 0) {
-            setFailedOverTo(CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol);
-          }
+          if (index > 0) setFailedOverTo(label);
           // Remembered only on proof it carried traffic. Recording a
           // merely-started engine would teach the app to lead with a
           // protocol that does not actually work here.
@@ -431,23 +473,23 @@ export function Dashboard({
           return;
         }
 
-        // Up but not carrying traffic. That is precisely the case a
-        // plain connect-succeeded check calls a success, and precisely
-        // the one worth moving on from -- so tear it down before trying
-        // the next, or two engines end up fighting over the routes.
+        attempts.push(`${label}: up but ${egress.state}`);
         lastError = {
           kind: "serverUnreachable",
           messageKey: "err.notCarryingTraffic",
-          detail: `${candidate.protocol}: connected but no traffic reached the internet`,
+          detail: attempts.join(" | "),
         };
-        await invoke("vpn_disconnect").catch(() => undefined);
       } catch (err) {
-        lastError = classifyConnectionError(err);
-        await invoke("vpn_disconnect").catch(() => undefined);
+        const classified = classifyConnectionError(err);
+        attempts.push(`${label}: ${classified.detail}`);
+        lastError = { ...classified, detail: attempts.join(" | ") };
       }
 
-      // A pinned route is the only candidate, so there is nothing to
-      // fall through to; the loop ends and reports honestly.
+      // Always tear down before moving on, or the next engine inherits
+      // this one's routes and fails for a reason that has nothing to do
+      // with it. The settle at the top of the next iteration is what
+      // waits for that teardown to actually take effect.
+      await invoke("vpn_disconnect").catch(() => undefined);
       if (index < candidates.length - 1) setConnectionState("connecting");
     }
 
