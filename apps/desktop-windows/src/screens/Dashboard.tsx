@@ -109,8 +109,11 @@ const VERIFY_INTERVAL_MS = 1_500;
  *
  * Returns as soon as it has proof, so a fast protocol stays fast.
  */
-async function confirmEgress(baselineIp: string | null): Promise<EgressVerdict> {
-  const deadline = Date.now() + VERIFY_TIMEOUT_MS;
+async function confirmEgress(
+  baselineIp: string | null,
+  budgetMs = VERIFY_TIMEOUT_MS,
+): Promise<EgressVerdict> {
+  const deadline = Date.now() + budgetMs;
   let last: EgressVerdict = { state: "unreachable" };
 
   while (Date.now() < deadline) {
@@ -134,6 +137,25 @@ async function confirmEgress(baselineIp: string | null): Promise<EgressVerdict> 
 const SETTLE_TIMEOUT_MS = 6_000;
 const SETTLE_INTERVAL_MS = 400;
 
+/** The budgets that apply while there is another protocol to fall back
+ * to, as opposed to the patient ones used for a lone connection.
+ *
+ * The patient budgets exist for a good reason: with nowhere else to go,
+ * waiting 30 seconds for a slow OpenVPN negotiation beats declaring
+ * failure on something that was about to work. Inside a loop that same
+ * patience is ruinous -- worst case per rejected candidate was a 6s
+ * settle, a 1.5s start, a 30s egress wait and an 8s reachability check,
+ * about 45 seconds each, so a customer whose first protocol was blocked
+ * could wait minutes. Nobody waits minutes for a VPN; they conclude it
+ * is broken and close it, which is the correct conclusion about a
+ * product that behaves that way.
+ *
+ * A candidate that has not proven it carries traffic within a few
+ * seconds is not worth more time when another one is sitting right
+ * there untried. Being wrong is cheap: the ladder comes back round. */
+const FAILOVER_VERIFY_TIMEOUT_MS = 4_000;
+const FAILOVER_SETTLE_TIMEOUT_MS = 2_500;
+
 /** Waits until the machine can reach the outside world unaided, and
  * returns the address the world sees.
  *
@@ -151,8 +173,8 @@ const SETTLE_INTERVAL_MS = 400;
  * ours may not be -- so the caller proceeds without a baseline and falls
  * back to handshake evidence.
  */
-async function settleAndCaptureBaseline(): Promise<string | null> {
-  const deadline = Date.now() + SETTLE_TIMEOUT_MS;
+async function settleAndCaptureBaseline(budgetMs = SETTLE_TIMEOUT_MS): Promise<string | null> {
+  const deadline = Date.now() + budgetMs;
   for (;;) {
     const ip = await captureBaselineIp();
     if (ip !== null) return ip;
@@ -445,10 +467,16 @@ export function Dashboard({
     for (const [index, candidate] of candidates.entries()) {
       const label = CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol;
 
+      // Whether anything is left to fall back to decides how patient
+      // this attempt gets to be.
+      const hasFallback = index < candidates.length - 1;
+
       // Fresh every attempt, and taken only once plain networking is
       // confirmed working. See settleAndCaptureBaseline -- doing this
       // once at app start was what made a whole run fail.
-      baselineIpRef.current = await settleAndCaptureBaseline();
+      baselineIpRef.current = await settleAndCaptureBaseline(
+        hasFallback ? FAILOVER_SETTLE_TIMEOUT_MS : SETTLE_TIMEOUT_MS,
+      );
 
       try {
         // The whole protocol-user row goes to the helper service, which
@@ -470,16 +498,27 @@ export function Dashboard({
         // answers the stronger question at the same time: did our
         // packets actually leave via the server.
         setConnectionState("verifying");
-        const egress = await confirmEgress(baselineIpRef.current);
+        const egress = await confirmEgress(
+          baselineIpRef.current,
+          hasFallback ? FAILOVER_VERIFY_TIMEOUT_MS : VERIFY_TIMEOUT_MS,
+        );
         setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
-        const verdict =
-          egress.state === "throughTunnel"
-            ? "connected"
-            : // Otherwise ask the far end whether it is answering at
-              // all, which separates "server is dead" from "server is
-              // fine but our traffic is going around it".
-              combineEvidence(await confirmReachable(), egress);
+        let verdict: ConnectionState;
+        if (egress.state === "throughTunnel") {
+          verdict = "connected";
+        } else if (hasFallback) {
+          // Skipped while a fallback exists. Asking the far end whether
+          // it is answering separates "server is dead" from "server is
+          // fine but our traffic goes around it" -- worth knowing when
+          // this is the only option, worth nothing when the answer
+          // either way is "try the next one". It also costs eight
+          // seconds, which is most of the budget for the protocol that
+          // might actually work.
+          verdict = "degraded";
+        } else {
+          verdict = combineEvidence(await confirmReachable(), egress);
+        }
 
         if (verdict === "connected") {
           setConnectionState("connected");
