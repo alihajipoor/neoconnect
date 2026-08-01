@@ -317,7 +317,7 @@ export function Dashboard({
     return () => clearInterval(id);
   }, []);
 
-  async function loadAll() {
+  async function loadAll(preferRouteId?: string) {
     setLoading(true);
     setError(null);
     const [meResult, subsResult, usersResult] = await Promise.all([getMe(), getSubscriptions(), getProtocolUsers()]);
@@ -337,7 +337,16 @@ export function Dashboard({
     const sub = usableSubscription(subsResult.data);
     setSubscription(sub);
     setProtocolUsers(usersResult.data);
-    setProtocolUser(usersResult.data[0] ?? null);
+    // Which credential the screen represents. It used to be whichever
+    // the API happened to list first, so choosing a server from the list
+    // changed nothing visible: the protocol tile kept naming the old one
+    // and the tick in the picker stayed on the wrong row. It also made
+    // that row unclickable, since the picker skips one already marked
+    // current. Reported as "clicking a location doesn't show that the
+    // change worked" -- and it hadn't, on screen; only the connect
+    // itself honoured the choice.
+    const chosen = preferRouteId ?? chosenRouteId;
+    setProtocolUser(usersResult.data.find((u) => u.routeId === chosen) ?? usersResult.data[0] ?? null);
     setLoading(false);
 
     // Best-effort, and deliberately not awaited together with the rest:
@@ -837,7 +846,10 @@ export function Dashboard({
             // candidate, which quietly disabled failover for anyone who
             // had ever opened this list.
             setChosenRouteId(routeId ?? null);
-            void loadAll();
+            // Passed explicitly: the state set above has not landed yet
+            // when loadAll reads it, which is why the screen kept
+            // showing the previous choice.
+            void loadAll(routeId);
           }}
         />
       ) : null}
