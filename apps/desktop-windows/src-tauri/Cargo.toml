@@ -1,6 +1,6 @@
 [package]
 name = "neoconnect-desktop"
-version = "0.3.1"
+version = "0.3.2"
 description = "NeoConnect VPN client"
 authors = ["NeoConnect"]
 edition = "2021"

@@ -161,6 +161,18 @@ async function settleAndCaptureBaseline(): Promise<string | null> {
   }
 }
 
+/** What was tried, and how much of what was available.
+ *
+ * The count is there because its absence cost a whole debugging round:
+ * the app reported "every protocol was tried" after trying exactly one,
+ * and nothing on screen contradicted it. A run that considered one
+ * candidate out of five is a different bug from five that all failed,
+ * and the difference has to be visible without a server log.
+ */
+function describeAttempts(attempts: string[], considered: number): string {
+  return `tried ${attempts.length} of ${considered} available\n${attempts.join("\n")}`;
+}
+
 /** Combines the two independent pieces of evidence.
  *
  * They answer different questions and neither alone is enough: the
@@ -260,10 +272,9 @@ export function Dashboard({
    * allows. The list is the failover ladder; `protocolUser` is whichever
    * rung is currently in use. */
   const [protocolUsers, setProtocolUsers] = useState<ProtocolUser[]>([]);
-  /** Set when the customer chose a server themselves. A deliberate
-   * choice is not something to quietly override, so it disables
-   * failover until they clear it. */
-  const [pinnedRouteId, setPinnedRouteId] = useState<string | null>(null);
+  /** The server the customer picked from the list, if any. Tried
+   * first; deliberately does not disable the others. */
+  const [chosenRouteId, setChosenRouteId] = useState<string | null>(null);
   /** Which network we are on, so "what worked here last time" means
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
@@ -411,7 +422,7 @@ export function Dashboard({
     // no server contact -- which is the point, since on a filtered
     // network the control plane is a plausible thing to lose first.
     const candidates = orderCandidates(protocolUsers.length > 0 ? protocolUsers : [protocolUser], {
-      pinnedRouteId,
+      pinnedRouteId: chosenRouteId,
       lastGoodRouteId: lastGoodFor(lastGood, networkId),
       preferredRouteId: null,
     });
@@ -476,13 +487,14 @@ export function Dashboard({
         attempts.push(`${label}: up but ${egress.state}`);
         lastError = {
           kind: "serverUnreachable",
-          messageKey: "err.notCarryingTraffic",
-          detail: attempts.join(" | "),
+          messageKey:
+            candidates.length > 1 ? "err.allProtocolsFailed" : "err.notCarryingTraffic",
+          detail: describeAttempts(attempts, candidates.length),
         };
       } catch (err) {
         const classified = classifyConnectionError(err);
         attempts.push(`${label}: ${classified.detail}`);
-        lastError = { ...classified, detail: attempts.join(" | ") };
+        lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
       }
 
       // Always tear down before moving on, or the next engine inherits
@@ -493,6 +505,12 @@ export function Dashboard({
       if (index < candidates.length - 1) setConnectionState("connecting");
     }
 
+    // The clock is set on each engine start, so a run that ultimately
+    // failed leaves it running against nothing -- the app sat there
+    // counting a session that did not exist while saying "not
+    // protected". Reported from real use.
+    setConnectedAt(null);
+    setExitIp(null);
     setConnectionError(lastError);
     setConnectionState("disconnected");
   }
@@ -815,10 +833,10 @@ export function Dashboard({
           // against an older backend still works, instead of depending
           // on that endpoint's exact shape.
           onSwitched={(routeId) => {
-            // A deliberate choice disables failover: being silently
-            // moved off the server you just picked is worse than being
-            // told the one you picked did not work.
-            setPinnedRouteId(routeId ?? null);
+            // Their choice leads the order. It used to be the only
+            // candidate, which quietly disabled failover for anyone who
+            // had ever opened this list.
+            setChosenRouteId(routeId ?? null);
             void loadAll();
           }}
         />
