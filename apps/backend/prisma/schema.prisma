@@ -185,6 +185,15 @@ model Customer {
   // layout when displayed. Cleared once used or superseded by a resend.
   emailVerificationCode          String?
   emailVerificationCodeExpiresAt DateTime?
+
+  // Same reasoning as the verification code above, for the same reason.
+  // Reset used to be a link carrying a JWT, which a desktop app cannot
+  // receive reliably -- webmail strips custom URI schemes, which is the
+  // bug that gave verification its code path in the first place. A
+  // locked-out customer needs something they can read off the screen and
+  // type. Cleared once used or superseded by another request.
+  passwordResetCode              String?
+  passwordResetCodeExpiresAt     DateTime?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 

@@ -6,11 +6,12 @@ import { verifyEmailByToken } from "./lib/auth";
 import { Login } from "./screens/Login";
 import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
+import { ForgotPassword } from "./screens/ForgotPassword";
 import { Dashboard } from "./screens/Dashboard";
 import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
 
-type Screen = "loading" | "login" | "register" | "verify" | "dashboard" | "plans" | "settings";
+type Screen = "loading" | "login" | "register" | "forgot" | "verify" | "dashboard" | "plans" | "settings";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
@@ -102,10 +103,25 @@ export default function App() {
         onSuccess={() => setScreen("dashboard")}
         onNeedsVerification={goToVerify}
         onGoRegister={() => setScreen("register")}
+        onGoForgotPassword={() => setScreen("forgot")}
         notice={loginNotice}
       />
     );
   }
+  if (screen === "forgot") {
+    return (
+      <ForgotPassword
+        // Reuses the same notice slot a verification success uses, so a
+        // reset lands the customer on sign-in already knowing it worked.
+        onDone={(notice) => {
+          setLoginNotice(notice);
+          setScreen("login");
+        }}
+        onCancel={() => setScreen("login")}
+      />
+    );
+  }
+
   if (screen === "register") {
     return <Register onNeedsVerification={goToVerify} onGoLogin={() => setScreen("login")} />;
   }

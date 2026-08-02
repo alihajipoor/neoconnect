@@ -22,6 +22,8 @@ function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
     emailVerifiedAt: null,
     emailVerificationCode: null,
     emailVerificationCodeExpiresAt: null,
+    passwordResetCode: null,
+    passwordResetCodeExpiresAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -293,6 +295,21 @@ describe("CustomerAuthService", () => {
 
       expect(emailService.sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: "customer@example.com" }));
     });
+
+    /** The code is looked up server-side, so unlike the self-verifying
+     * token it only works if it was actually stored. */
+    it("stores a six-digit code the customer can type", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      jwt.signAsync.mockResolvedValue("reset-token");
+
+      await service.forgotPassword("customer@example.com");
+
+      const { data } = prisma.customer.update.mock.calls[0][0] as {
+        data: { passwordResetCode: string; passwordResetCodeExpiresAt: Date };
+      };
+      expect(data.passwordResetCode).toMatch(/^\d{6}$/);
+      expect(data.passwordResetCodeExpiresAt.getTime()).toBeGreaterThan(Date.now());
+    });
   });
 
   describe("resetPassword", () => {
@@ -313,8 +330,95 @@ describe("CustomerAuthService", () => {
 
       expect(prisma.customer.update).toHaveBeenCalledWith({
         where: { id: "customer-1" },
-        data: { passwordHash: expect.any(String), tokenVersion: { increment: 1 } },
+        data: {
+          passwordHash: expect.any(String),
+          tokenVersion: { increment: 1 },
+          // Cleared here too: a used code that still works is a second
+          // key left under the mat for the rest of its lifetime.
+          passwordResetCode: null,
+          passwordResetCodeExpiresAt: null,
+        },
       });
+    });
+  });
+
+  /** The route the desktop app uses.
+   *
+   * It exists because the token route cannot reach a desktop client
+   * reliably -- the token only ever arrived in a link, and webmail
+   * strips the custom URI scheme those links used. Without this a
+   * customer who forgot their password had no way back in at all.
+   */
+  describe("resetPasswordByCode", () => {
+    const withCode = (overrides = {}) =>
+      buildCustomer({
+        passwordResetCode: "123456",
+        passwordResetCodeExpiresAt: new Date(Date.now() + 60_000),
+        ...overrides,
+      });
+
+    it("resets the password when the code matches and is current", async () => {
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+
+      await service.resetPasswordByCode("customer@example.com", "123456", "new-password");
+
+      expect(prisma.customer.update).toHaveBeenCalledWith({
+        where: { id: "customer-1" },
+        data: {
+          passwordHash: expect.any(String),
+          tokenVersion: { increment: 1 },
+          passwordResetCode: null,
+          passwordResetCodeExpiresAt: null,
+        },
+      });
+    });
+
+    it("rejects the wrong code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+      await expect(
+        service.resetPasswordByCode("customer@example.com", "000000", "new-password"),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.customer.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects a code that has expired", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        withCode({ passwordResetCodeExpiresAt: new Date(Date.now() - 1) }),
+      );
+      await expect(
+        service.resetPasswordByCode("customer@example.com", "123456", "new-password"),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("rejects when no reset was ever requested", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      await expect(
+        service.resetPasswordByCode("customer@example.com", "123456", "new-password"),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("refuses a disabled account even with the right code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(withCode({ status: "DISABLED" }));
+      await expect(
+        service.resetPasswordByCode("customer@example.com", "123456", "new-password"),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    /** Every failure has to look the same. A distinct "no such account"
+     * would turn this endpoint into the account-enumeration oracle that
+     * forgotPassword() goes to lengths to avoid being. */
+    it("says the same thing whether the account exists or the code is wrong", async () => {
+      prisma.customer.findUnique.mockResolvedValue(null);
+      const missing = await service
+        .resetPasswordByCode("nobody@example.com", "123456", "new-password")
+        .catch((e: Error) => e.message);
+
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+      const wrong = await service
+        .resetPasswordByCode("customer@example.com", "999999", "new-password")
+        .catch((e: Error) => e.message);
+
+      expect(missing).toBe(wrong);
     });
   });
 

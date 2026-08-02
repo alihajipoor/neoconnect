@@ -25,6 +25,7 @@ import { ResendVerificationDto } from "./dto/resend-verification.dto";
 import { ForgotPasswordDto } from "./dto/forgot-password.dto";
 import { verificationFailedPage, verifiedPage } from "./verify-landing-page";
 import { ResetPasswordDto } from "./dto/reset-password.dto";
+import { ResetPasswordCodeDto } from "./dto/reset-password-code.dto";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 
 // This is the API a future native client (Windows/macOS/Android/iOS)
@@ -163,10 +164,33 @@ export class CustomerAuthController {
     await this.customerAuthService.forgotPassword(dto.email);
   }
 
+  /** Reset by emailed token.
+   *
+   * Correct and tested, but currently unreachable: forgotPassword() no
+   * longer issues a token, because the only way to deliver one is a link
+   * and nothing can receive it -- see its comment. Kept for the website,
+   * which is the surface a link makes sense for. */
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post("reset-password")
   @HttpCode(HttpStatus.NO_CONTENT)
   async resetPassword(@Body() dto: ResetPasswordDto) {
     await this.customerAuthService.resetPassword(dto.token, dto.newPassword);
+  }
+
+  /** Reset by the emailed code rather than the emailed link.
+   *
+   * This is the one the desktop app uses: it is where a locked-out
+   * customer already is, and it needs no link to survive a mail client.
+   *
+   * Throttled harder than the token route. Six digits is a small space,
+   * and unlike the token there is no signature to forge -- the limit is
+   * what keeps guessing impractical, so it is part of the design rather
+   * than boilerplate.
+   */
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("reset-password-code")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async resetPasswordByCode(@Body() dto: ResetPasswordCodeDto) {
+    await this.customerAuthService.resetPasswordByCode(dto.email, dto.code, dto.newPassword);
   }
 }
