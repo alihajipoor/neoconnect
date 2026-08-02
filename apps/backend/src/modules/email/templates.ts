@@ -22,9 +22,32 @@ const FONT_STACK =
  * gradient header with the Neoxify mark, a white card, and a muted
  * footer. `preheader` is the short hidden preview text most mail clients
  * show next to the subject line in the inbox list. */
-function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string }): string {
+function shell({
+  preheader,
+  bodyHtml,
+  footerHtml,
+}: {
+  preheader: string;
+  bodyHtml: string;
+  /** Replaces the default closing sentence. Bulk mail needs to say how
+   * to stop receiving it; transactional mail must not, since there is
+   * nothing to opt out of. */
+  footerHtml?: string;
+}): string {
   return `<!doctype html>
 <html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <!-- Declares this design as light-only. Without it, clients that
+         auto-invert for dark mode (Outlook and Gmail both do) recolour
+         the card and the code block by their own rules, and the violet
+         text on the pale violet panel is exactly the combination that
+         comes out illegible. Better to render as designed in both modes
+         than to be re-interpreted in one. -->
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+  </head>
   <body style="margin:0;padding:0;background:${BG};font-family:${FONT_STACK};">
     <div style="display:none;max-height:0;overflow:hidden;opacity:0;">${preheader}</div>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BG};padding:32px 16px;">
@@ -45,7 +68,8 @@ function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string })
             <tr>
               <td style="padding:20px 32px;border-top:1px solid ${BORDER};background:#fbfaff;">
                 <p style="margin:0;font-size:12px;color:${MUTED};">
-                  You're receiving this because you have a Neoxify account. If something here looks wrong, ignore this email or reach out to support.
+                  You're receiving this because you have a Neoxify account.
+                  ${footerHtml ?? "If something here looks wrong, you can safely ignore this email."}
                 </p>
               </td>
             </tr>
@@ -216,6 +240,15 @@ export function announcementEmail(body: string) {
       .split(/\n{2,}/)
       .map((para) => paragraph(para.replace(/\n/g, "<br>")))
       .join(""),
+    // The visible half of the opt-out. EmailService sets the
+    // List-Unsubscribe header, because it knows the from-address; this
+    // line is for the human, who does not read headers.
+    //
+    // Worded as a reply because that is what actually happens. There is
+    // no unsubscribe endpoint yet, and a link that does nothing is worse
+    // than an instruction that works.
+    footerHtml:
+      'This is an announcement from Neoxify. To stop receiving them, reply with "Unsubscribe".',
   });
 }
 
