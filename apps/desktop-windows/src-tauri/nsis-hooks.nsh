@@ -55,6 +55,42 @@
   nsExec::ExecToLog 'sc.exe delete NeoxifyService'
   Pop $0
 
+  ; None of the above waits for anything. sc.exe stop returns once the
+  ; Service Control Manager has *accepted* the request, and sc.exe delete
+  ; only marks the service for removal -- the executable stays open until
+  ; the process itself exits. So the installer could start writing while
+  ; the old binary was still locked, which fails the whole install with
+  ; "Error opening file for writing".
+  ;
+  ; Usually the process exits fast enough to hide this. It stops hiding
+  ; when the service is mid-operation -- observed after the app was killed
+  ; from Task Manager during a connection attempt, leaving the service
+  ; holding an engine and taking its time.
+  ;
+  ; So: wait for it to actually be gone, and stop asking politely if it
+  ; will not go. Ten seconds is far longer than a clean shutdown needs.
+  StrCpy $2 0
+  ${Do}
+    nsExec::ExecToLog 'cmd /c tasklist /FI "IMAGENAME eq neoconnect-service.exe" /NH | find /I "neoconnect-service.exe"'
+    Pop $0
+    ${If} $0 != 0
+      ${ExitDo}
+    ${EndIf}
+    Sleep 500
+    IntOp $2 $2 + 1
+    ${If} $2 >= 20
+      ; Killing a LocalSystem service process is not something to do
+      ; lightly, but the alternative here is a failed install that leaves
+      ; the customer on a half-written directory. The service holds no
+      ; state worth preserving across an upgrade -- it is about to be
+      ; replaced and re-registered either way.
+      nsExec::ExecToLog 'taskkill /F /IM neoconnect-service.exe'
+      Pop $0
+      Sleep 1000
+      ${ExitDo}
+    ${EndIf}
+  ${Loop}
+
   ; The old install directory is left in place rather than deleted here.
   ; Removing files from a path this installer does not own is the kind of
   ; thing that goes badly wrong if the assumption is ever off, and a stale
