@@ -330,6 +330,10 @@ export function Dashboard({
   const strikesRef = useRef(0);
   /** Earliest time an automatic attempt may run again. */
   const cooldownUntilRef = useRef(0);
+  /** Set when the customer asks to stop a ladder in progress. Checked
+   * between steps rather than interrupting one, so the engine is never
+   * left half-started. */
+  const cancelRef = useRef(false);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
@@ -509,6 +513,16 @@ export function Dashboard({
     if (!protocolUser) return;
     setConnectionError(null);
 
+    // Pressing it during a pass means stop. The ladder checks this
+    // between steps and unwinds itself; the tunnel teardown below is
+    // what actually makes the machine usable again.
+    if (ladderRunningRef.current) {
+      cancelRef.current = true;
+      setConnectionState("disconnecting");
+      await invoke("vpn_disconnect").catch(() => undefined);
+      return;
+    }
+
     if (connectionState === "connected" || connectionState === "degraded") {
       setConnectionState("disconnecting");
       try {
@@ -537,9 +551,21 @@ export function Dashboard({
   async function runLadder(): Promise<boolean> {
     if (!protocolUser || ladderRunningRef.current) return false;
     ladderRunningRef.current = true;
+    cancelRef.current = false;
     try {
       setConnectionState("connecting");
       setFailedOverTo(null);
+
+      // Whatever is up comes down first, and this is not a formality.
+      // Run from the health poll, the tunnel that just stopped working
+      // is still installed and still holding the default route, so every
+      // probe below would be fired into a black hole and burn its full
+      // timeout rather than answering. That turned a pass that should
+      // take seconds into minutes of "Checking connection..." -- observed
+      // exactly that way when a live WireGuard tunnel was blocked.
+      //
+      // Harmless from the Connect button, where nothing is up.
+      await invoke("vpn_disconnect").catch(() => undefined);
 
       // The ladder, not a single credential. Everything the subscription
       // holds is already provisioned, so moving to another protocol
@@ -559,6 +585,7 @@ export function Dashboard({
       const attempts: string[] = [];
 
       for (const [index, candidate] of candidates.entries()) {
+        if (cancelRef.current) break;
         const label = CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol;
         const isLast = index === candidates.length - 1;
 
@@ -583,6 +610,8 @@ export function Dashboard({
           // the same time -- did our packets actually leave via the
           // server.
           setConnectionState("verifying");
+          if (cancelRef.current) break;
+
           const egress = await confirmEgress(baselineIpRef.current, verifyBudget);
           setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
@@ -635,8 +664,11 @@ export function Dashboard({
       // failed leaves it running against nothing.
       setConnectedAt(null);
       setExitIp(null);
-      setConnectionError(lastError);
+      // A pass the customer stopped is not a failure and must not be
+      // reported as one.
+      setConnectionError(cancelRef.current ? null : lastError);
       setConnectionState("disconnected");
+      await invoke("vpn_disconnect").catch(() => undefined);
       return false;
     } finally {
       ladderRunningRef.current = false;

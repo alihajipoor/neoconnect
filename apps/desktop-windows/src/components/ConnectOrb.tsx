@@ -116,7 +116,12 @@ export function ConnectOrb({
 
       <button
         onClick={onToggle}
-        disabled={disabled || busy}
+        // Deliberately NOT disabled while busy. A failover pass can take
+        // tens of seconds, and disabling the only control for its
+        // duration left no way to stop it -- reported from real use by
+        // someone who had to kill the app from Task Manager. An action
+        // the customer cannot cancel is worse than one that fails.
+        disabled={disabled || state === "disconnecting"}
         aria-label={label}
         className={cn(
           "press relative flex size-28 flex-col items-center justify-center gap-1.5 rounded-full border backdrop-blur-md",
