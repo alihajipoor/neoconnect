@@ -7,6 +7,33 @@
 ; and in exchange, pressing Connect never raises a UAC prompt for the
 ; life of the installation. See service/src/main.rs for the reasoning.
 
+; Waits for a process to actually exit, then stops asking politely.
+;
+; Every "Error opening file for writing" this installer has produced came
+; from writing over a binary something still had open, and each time it
+; was a different binary. So this is a macro rather than a special case:
+; the next one is cheap to add.
+;
+; Ten seconds is far longer than any clean shutdown here needs.
+!macro WaitForProcessGone _exe
+  StrCpy $2 0
+  ${Do}
+    nsExec::ExecToLog 'cmd /c tasklist /FI "IMAGENAME eq ${_exe}" /NH | find /I "${_exe}"'
+    Pop $0
+    ${If} $0 != 0
+      ${ExitDo}
+    ${EndIf}
+    Sleep 500
+    IntOp $2 $2 + 1
+    ${If} $2 >= 20
+      nsExec::ExecToLog 'taskkill /F /IM ${_exe}'
+      Pop $0
+      Sleep 1000
+      ${ExitDo}
+    ${EndIf}
+  ${Loop}
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   ; A running service holds its own executable open, so installing over
   ; an existing install fails with "Error opening file for writing"
@@ -64,32 +91,38 @@
   ;
   ; Usually the process exits fast enough to hide this. It stops hiding
   ; when the service is mid-operation -- observed after the app was killed
-  ; from Task Manager during a connection attempt, leaving the service
-  ; holding an engine and taking its time.
+  ; from Task Manager during a connection attempt.
+
+  ; The helper service is not the only thing holding a file. wireguard.exe
+  ; /installtunnelservice registers a Windows service of its own, running
+  ; that same executable, and the helper service normally removes it on
+  ; disconnect. A helper that was killed rather than stopped never got
+  ; there, so the tunnel outlives it and keeps wireguard.exe open --
+  ; which is exactly the second failure this installer hit, one build
+  ; after the first was fixed.
   ;
-  ; So: wait for it to actually be gone, and stop asking politely if it
-  ; will not go. Ten seconds is far longer than a clean shutdown needs.
-  StrCpy $2 0
-  ${Do}
-    nsExec::ExecToLog 'cmd /c tasklist /FI "IMAGENAME eq neoconnect-service.exe" /NH | find /I "neoconnect-service.exe"'
+  ; Asked nicely first, because /uninstalltunnelservice also tears the
+  ; network adapter down cleanly, which killing the process does not.
+  ${If} ${FileExists} "$INSTDIR\resources\wireguard.exe"
+    nsExec::ExecToLog '"$INSTDIR\resources\wireguard.exe" /uninstalltunnelservice neoconnect'
     Pop $0
-    ${If} $0 != 0
-      ${ExitDo}
-    ${EndIf}
-    Sleep 500
-    IntOp $2 $2 + 1
-    ${If} $2 >= 20
-      ; Killing a LocalSystem service process is not something to do
-      ; lightly, but the alternative here is a failed install that leaves
-      ; the customer on a half-written directory. The service holds no
-      ; state worth preserving across an upgrade -- it is about to be
-      ; replaced and re-registered either way.
-      nsExec::ExecToLog 'taskkill /F /IM neoconnect-service.exe'
-      Pop $0
-      Sleep 1000
-      ${ExitDo}
-    ${EndIf}
-  ${Loop}
+  ${EndIf}
+  ; By name as well, so it still works when the executable is missing or
+  ; refuses. $$ is a literal dollar -- the service really is called
+  ; WireGuardTunnel$neoconnect.
+  nsExec::ExecToLog 'sc.exe stop WireGuardTunnel$$neoconnect'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete WireGuardTunnel$$neoconnect'
+  Pop $0
+
+  ; Xray and OpenVPN are plain child processes of the helper service, so a
+  ; killed helper orphans them holding their own binaries open too. Same
+  ; problem, same treatment -- and cheaper to handle now than to discover
+  ; one build at a time.
+  !insertmacro WaitForProcessGone "neoconnect-service.exe"
+  !insertmacro WaitForProcessGone "wireguard.exe"
+  !insertmacro WaitForProcessGone "xray.exe"
+  !insertmacro WaitForProcessGone "openvpn.exe"
 
   ; The old install directory is left in place rather than deleted here.
   ; Removing files from a path this installer does not own is the kind of
@@ -138,4 +171,21 @@
   ; directory undeletable.
   nsExec::ExecToLog '"$INSTDIR\resources\neoconnect-service.exe" uninstall'
   Pop $0
+
+  ; And the tunnel service, for the same reason it matters on install: it
+  ; is registered by wireguard.exe rather than by us, and outlives a
+  ; helper that was killed rather than stopped.
+  ${If} ${FileExists} "$INSTDIR\resources\wireguard.exe"
+    nsExec::ExecToLog '"$INSTDIR\resources\wireguard.exe" /uninstalltunnelservice neoconnect'
+    Pop $0
+  ${EndIf}
+  nsExec::ExecToLog 'sc.exe stop WireGuardTunnel$$neoconnect'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete WireGuardTunnel$$neoconnect'
+  Pop $0
+
+  !insertmacro WaitForProcessGone "neoconnect-service.exe"
+  !insertmacro WaitForProcessGone "wireguard.exe"
+  !insertmacro WaitForProcessGone "xray.exe"
+  !insertmacro WaitForProcessGone "openvpn.exe"
 !macroend
