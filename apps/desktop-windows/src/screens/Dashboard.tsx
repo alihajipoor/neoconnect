@@ -40,6 +40,23 @@ type VpnStatus = {
  * the service pointlessly hard. */
 const HEALTH_POLL_MS = 15_000;
 
+/** Consecutive bad polls before the app moves a live connection itself.
+ *
+ * One bad reading is not evidence: a laptop waking, a moment of packet
+ * loss, or a network handover all produce one. Two in a row about thirty
+ * seconds apart distinguishes "briefly unlucky" from "this protocol has
+ * stopped working", which is the distinction that matters before
+ * tearing down a tunnel someone is using. */
+const MID_SESSION_STRIKES = 2;
+
+/** How long to leave a live connection alone after an automatic attempt
+ * has already failed its way through every protocol.
+ *
+ * Without this, a customer whose internet has simply gone down would
+ * have the app rebuilding tunnels every thirty seconds forever, which
+ * burns battery and makes the real problem harder to see. */
+const MID_SESSION_COOLDOWN_MS = 120_000;
+
 /** How long to give a fresh tunnel to prove itself before calling it
  * degraded.
  *
@@ -305,6 +322,14 @@ export function Dashboard({
    * started with. Landing somewhere else without saying so is the same
    * dishonesty as a false "Connected". */
   const [failedOverTo, setFailedOverTo] = useState<string | null>(null);
+  /** Guards the ladder against running twice at once. The health poll
+   * and the Connect button can both start one, and two of them
+   * interleaving would have each tearing down the other's engine. */
+  const ladderRunningRef = useRef(false);
+  /** Consecutive polls that found a live tunnel not carrying traffic. */
+  const strikesRef = useRef(0);
+  /** Earliest time an automatic attempt may run again. */
+  const cooldownUntilRef = useRef(0);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
@@ -411,20 +436,72 @@ export function Dashboard({
     }
   }
 
-  // Keeps checking a live tunnel. Without this the app showed whatever
-  // was true at connect time forever, so a tunnel that died an hour ago
-  // still read as "Connected".
+  // Keeps checking a live tunnel, and moves it if it has stopped
+  // working.
+  //
+  // Two signals, because neither is enough alone. The service's own
+  // health answers "is the far end talking to us", which only WireGuard
+  // can cheaply prove -- Xray and OpenVPN report `unknown`, and
+  // stateFromStatus treats that optimistically so they do not cry wolf.
+  // That optimism is exactly why a blocked Xray tunnel would sit green
+  // forever, so the second signal is a real request through the tunnel:
+  // the same evidence the connect path uses, and the only one that works
+  // for every protocol.
   useEffect(() => {
     if (connectionState !== "connected" && connectionState !== "degraded") return;
+
     const id = setInterval(async () => {
+      // A ladder already running will decide the state itself; polling
+      // underneath it would fight over the same fields.
+      if (ladderRunningRef.current) return;
+
+      let fromStatus: ConnectionState;
       try {
-        const status = await invoke<VpnStatus>("vpn_status");
-        setConnectionState(stateFromStatus(status));
+        fromStatus = stateFromStatus(await invoke<VpnStatus>("vpn_status"));
       } catch {
-        // Leave the last known state alone: failing to ask is not the
-        // same as learning the tunnel is down.
+        // Failing to ask is not the same as learning the tunnel is
+        // down, so the last known state stands and no strike is counted.
+        return;
       }
+
+      if (fromStatus === "disconnected") {
+        setConnectionState("disconnected");
+        setConnectedAt(null);
+        strikesRef.current = 0;
+        return;
+      }
+
+      // Proof rather than inference: did a packet just make the round
+      // trip through this tunnel.
+      const egress = await verifyEgress(baselineIpRef.current);
+      const carrying = egress.state === "throughTunnel" || egress.state === "indeterminate";
+      const live = carrying && fromStatus === "connected";
+
+      if (live) {
+        strikesRef.current = 0;
+        setConnectionState("connected");
+        if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
+        return;
+      }
+
+      setConnectionState("degraded");
+      strikesRef.current += 1;
+
+      // Below the threshold, or too soon after a full pass already
+      // failed, this only reports -- it does not act.
+      if (strikesRef.current < MID_SESSION_STRIKES) return;
+      if (Date.now() < cooldownUntilRef.current) return;
+
+      // A tunnel that is up and carrying nothing is the case a customer
+      // cannot fix themselves and should not have to: the old behaviour
+      // was to sit yellow advising them to reconnect by hand, which on a
+      // network that has just started filtering is the least useful
+      // moment to ask anything of them.
+      strikesRef.current = 0;
+      cooldownUntilRef.current = Date.now() + MID_SESSION_COOLDOWN_MS;
+      await runLadder();
     }, HEALTH_POLL_MS);
+
     return () => clearInterval(id);
   }, [connectionState]);
 
@@ -445,122 +522,125 @@ export function Dashboard({
       return;
     }
 
-    setConnectionState("connecting");
-    setFailedOverTo(null);
+    await runLadder();
+  }
 
-    // The ladder, not a single credential. Everything the subscription
-    // holds is already provisioned, so moving to another protocol needs
-    // no server contact -- which is the point, since on a filtered
-    // network the control plane is a plausible thing to lose first.
-    const candidates = orderCandidates(protocolUsers.length > 0 ? protocolUsers : [protocolUser], {
-      pinnedRouteId: chosenRouteId,
-      lastGoodRouteId: lastGoodFor(lastGood, networkId),
-      preferredRouteId: null,
-    });
+  /** Works down the protocols this subscription holds until one is
+   * proven to be carrying traffic.
+   *
+   * Shared by the Connect button and by the health poll below, which is
+   * the whole reason it is a function: a connection that stops working
+   * mid-session should recover the same way one that never started
+   * does, using the same order, the same evidence and the same memory.
+   * Duplicating it would mean two ladders drifting apart.
+   */
+  async function runLadder(): Promise<boolean> {
+    if (!protocolUser || ladderRunningRef.current) return false;
+    ladderRunningRef.current = true;
+    try {
+      setConnectionState("connecting");
+      setFailedOverTo(null);
 
-    let lastError: ClassifiedError | null = null;
-    // Why each attempt failed, in order. Kept because diagnosing the
-    // first version of this needed a firewall rule and the server's own
-    // logs -- the app knew and said nothing.
-    const attempts: string[] = [];
+      // The ladder, not a single credential. Everything the subscription
+      // holds is already provisioned, so moving to another protocol
+      // needs no server contact -- which is the point, since on a
+      // filtered network the control plane is a plausible thing to lose
+      // first.
+      const candidates = orderCandidates(protocolUsers.length > 0 ? protocolUsers : [protocolUser], {
+        pinnedRouteId: chosenRouteId,
+        lastGoodRouteId: lastGoodFor(lastGood, networkId),
+        preferredRouteId: null,
+      });
 
-    for (const [index, candidate] of candidates.entries()) {
-      const label = CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol;
+      let lastError: ClassifiedError | null = null;
+      // Why each attempt failed, in order. Kept because diagnosing the
+      // first version of this needed a firewall rule and the server's
+      // own logs -- the app knew and said nothing.
+      const attempts: string[] = [];
 
-      // Whether anything is left to fall back to decides how patient
-      // this attempt gets to be.
-      const hasFallback = index < candidates.length - 1;
+      for (const [index, candidate] of candidates.entries()) {
+        const label = CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol;
+        const isLast = index === candidates.length - 1;
 
-      // Fresh every attempt, and taken only once plain networking is
-      // confirmed working. See settleAndCaptureBaseline -- doing this
-      // once at app start was what made a whole run fail.
-      baselineIpRef.current = await settleAndCaptureBaseline(
-        hasFallback ? FAILOVER_SETTLE_TIMEOUT_MS : SETTLE_TIMEOUT_MS,
-      );
+        // Patient only for the last candidate. With another protocol
+        // sitting untried, waiting out a long budget on this one is
+        // ruinous; with nowhere left to go, it is the right call.
+        const settleBudget = isLast ? SETTLE_TIMEOUT_MS : FAILOVER_SETTLE_TIMEOUT_MS;
+        const verifyBudget = isLast ? VERIFY_TIMEOUT_MS : FAILOVER_VERIFY_TIMEOUT_MS;
 
-      try {
-        // The whole protocol-user row goes to the helper service, which
-        // picks the right engine -- the app deliberately doesn't branch
-        // on protocol here, so adding one later needs no change here.
-        await invoke("vpn_connect", { payload: candidate });
-        setProtocolUser(candidate);
-        setConnectedAt(Date.now());
+        // Fresh every attempt, and taken only once plain networking is
+        // confirmed working. See settleAndCaptureBaseline.
+        baselineIpRef.current = await settleAndCaptureBaseline(settleBudget);
 
-        // Egress first, and the order is the whole point. WireGuard does
-        // not handshake until it has something to send, so immediately
-        // after connect there is no handshake to find -- checking for
-        // one first meant every healthy connection sat on "Not carrying
-        // traffic" for the best part of a minute and only went green
-        // when the customer opened a website themselves. Reported
-        // exactly that way.
-        //
-        // This request *is* that traffic. It forces the handshake and
-        // answers the stronger question at the same time: did our
-        // packets actually leave via the server.
-        setConnectionState("verifying");
-        const egress = await confirmEgress(
-          baselineIpRef.current,
-          hasFallback ? FAILOVER_VERIFY_TIMEOUT_MS : VERIFY_TIMEOUT_MS,
-        );
-        setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
+        try {
+          await invoke("vpn_connect", { payload: candidate });
+          setProtocolUser(candidate);
+          setConnectedAt(Date.now());
 
-        let verdict: ConnectionState;
-        if (egress.state === "throughTunnel") {
-          verdict = "connected";
-        } else if (hasFallback) {
-          // Skipped while a fallback exists. Asking the far end whether
-          // it is answering separates "server is dead" from "server is
-          // fine but our traffic goes around it" -- worth knowing when
-          // this is the only option, worth nothing when the answer
-          // either way is "try the next one". It also costs eight
-          // seconds, which is most of the budget for the protocol that
-          // might actually work.
-          verdict = "degraded";
-        } else {
-          verdict = combineEvidence(await confirmReachable(), egress);
+          // Egress first. WireGuard does not handshake until it has
+          // something to send, so this request *is* that traffic: it
+          // forces the handshake and answers the stronger question at
+          // the same time -- did our packets actually leave via the
+          // server.
+          setConnectionState("verifying");
+          const egress = await confirmEgress(baselineIpRef.current, verifyBudget);
+          setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
+
+          // The reachability check is worth its eight seconds only when
+          // this is the last hope: it distinguishes "server is dead"
+          // from "server is fine but our traffic goes around it", which
+          // is a distinction for the error message, not for deciding
+          // whether to try the next protocol. Another candidate waiting
+          // makes moving on strictly better than diagnosing.
+          const verdict =
+            egress.state === "throughTunnel"
+              ? "connected"
+              : isLast
+                ? combineEvidence(await confirmReachable(), egress)
+                : "degraded";
+
+          if (verdict === "connected") {
+            setConnectionState("connected");
+            if (index > 0) setFailedOverTo(label);
+            // Remembered only on proof it carried traffic. Recording a
+            // merely-started engine would teach the app to lead with a
+            // protocol that does not actually work here.
+            const updated = rememberLastGood(lastGood, networkId, candidate.routeId);
+            setLastGood(updated);
+            void saveLastGood(updated);
+            strikesRef.current = 0;
+            return true;
+          }
+
+          attempts.push(`${label}: up but ${egress.state}`);
+          lastError = {
+            kind: "serverUnreachable",
+            messageKey: candidates.length > 1 ? "err.allProtocolsFailed" : "err.notCarryingTraffic",
+            detail: describeAttempts(attempts, candidates.length),
+          };
+        } catch (err) {
+          const classified = classifyConnectionError(err);
+          attempts.push(`${label}: ${classified.detail}`);
+          lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
         }
 
-        if (verdict === "connected") {
-          setConnectionState("connected");
-          if (index > 0) setFailedOverTo(label);
-          // Remembered only on proof it carried traffic. Recording a
-          // merely-started engine would teach the app to lead with a
-          // protocol that does not actually work here.
-          const updated = rememberLastGood(lastGood, networkId, candidate.routeId);
-          setLastGood(updated);
-          void saveLastGood(updated);
-          return;
-        }
-
-        attempts.push(`${label}: up but ${egress.state}`);
-        lastError = {
-          kind: "serverUnreachable",
-          messageKey:
-            candidates.length > 1 ? "err.allProtocolsFailed" : "err.notCarryingTraffic",
-          detail: describeAttempts(attempts, candidates.length),
-        };
-      } catch (err) {
-        const classified = classifyConnectionError(err);
-        attempts.push(`${label}: ${classified.detail}`);
-        lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
+        // Always tear down before moving on, or the next engine inherits
+        // this one's routes and fails for a reason that has nothing to
+        // do with it.
+        await invoke("vpn_disconnect").catch(() => undefined);
+        if (!isLast) setConnectionState("connecting");
       }
 
-      // Always tear down before moving on, or the next engine inherits
-      // this one's routes and fails for a reason that has nothing to do
-      // with it. The settle at the top of the next iteration is what
-      // waits for that teardown to actually take effect.
-      await invoke("vpn_disconnect").catch(() => undefined);
-      if (index < candidates.length - 1) setConnectionState("connecting");
+      // The clock is set on each engine start, so a run that ultimately
+      // failed leaves it running against nothing.
+      setConnectedAt(null);
+      setExitIp(null);
+      setConnectionError(lastError);
+      setConnectionState("disconnected");
+      return false;
+    } finally {
+      ladderRunningRef.current = false;
     }
-
-    // The clock is set on each engine start, so a run that ultimately
-    // failed leaves it running against nothing -- the app sat there
-    // counting a session that did not exist while saying "not
-    // protected". Reported from real use.
-    setConnectedAt(null);
-    setExitIp(null);
-    setConnectionError(lastError);
-    setConnectionState("disconnected");
   }
 
   async function handleLogout() {
