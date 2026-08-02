@@ -7,6 +7,33 @@ export interface SendMailInput {
   subject: string;
   html: string;
   text: string;
+  /** Marks this as bulk rather than transactional, which adds the
+   * unsubscribe headers below. Transactional mail must NOT set it: there
+   * is nothing to opt out of when the message is a code the customer
+   * just asked for, and offering one there invites them to unsubscribe
+   * from their own password resets. */
+  bulk?: boolean;
+}
+
+/** What Gmail and Yahoo look for on bulk mail.
+ *
+ * Both have expected List-Unsubscribe on bulk senders since their 2024
+ * rules, and its absence counts against the sending domain -- which
+ * matters more here than for an established sender, since this domain
+ * has no reputation banked.
+ *
+ * A mailto rather than the one-click URL form on purpose: honouring a
+ * click needs an endpoint and somewhere to record the preference, and
+ * neither exists yet. Advertising an action nobody handles would be
+ * worse than this, which at least lands where a human reads it. Add
+ * List-Unsubscribe-Post alongside a real endpoint when there is one.
+ */
+function bulkHeaders(fromAddress: string): Record<string, string> {
+  const domain = fromAddress.split("@")[1] ?? "neoxify.com";
+  return {
+    "List-Unsubscribe": `<mailto:${fromAddress}?subject=Unsubscribe>`,
+    "List-Id": `Neoxify announcements <announcements.${domain}>`,
+  };
 }
 
 /** Sends real customer-facing email via the operator's own SMTP server
@@ -46,6 +73,7 @@ export class EmailService {
         subject: input.subject,
         html: input.html,
         text: input.text,
+        ...(input.bulk ? { headers: bulkHeaders(settings.fromAddress) } : {}),
       });
       return true;
     } catch (err) {
