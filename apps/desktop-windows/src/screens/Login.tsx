@@ -8,11 +8,13 @@ export function Login({
   onSuccess,
   onNeedsVerification,
   onGoRegister,
+  onGoForgotPassword,
   notice,
 }: {
   onSuccess: () => void;
   onNeedsVerification: (email: string, password: string) => void;
   onGoRegister: () => void;
+  onGoForgotPassword: () => void;
   notice?: string | null;
 }) {
   const { t } = useI18n();
@@ -89,6 +91,18 @@ export function Login({
             {pending ? t("auth.signingIn") : t("auth.signIn")}
           </Button>
         </form>
+        {/* Below the button rather than beside the password field: it is
+            the exit for a failed sign-in, so it belongs where someone
+            looks after one, not where they look while typing. */}
+        <p className="mt-3 text-center text-xs">
+          <button
+            type="button"
+            onClick={onGoForgotPassword}
+            className="text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+          >
+            {t("forgot.link")}
+          </button>
+        </p>
         {/* Was hardcoded English, so it stayed English in Persian mode --
             the keys for both halves already existed. */}
         <p className="mt-4 text-center text-xs text-muted-foreground">

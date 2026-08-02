@@ -27,7 +27,9 @@ export interface CustomerTokenPair {
 
 const VERIFY_EMAIL_TOKEN_TTL = "24h";
 const VERIFY_EMAIL_CODE_TTL_MS = 24 * 60 * 60 * 1000;
-const PASSWORD_RESET_TOKEN_TTL = "30m";
+// Thirty minutes, the same window the token flow used. Short because a
+// reset code is a live credential sitting in an inbox.
+const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
 
 @Injectable()
 export class CustomerAuthService {
@@ -278,12 +280,58 @@ export class CustomerAuthService {
     const customer = await this.prisma.customer.findUnique({ where: { email } });
     if (!customer || customer.status !== "ACTIVE") return;
 
-    const payload: CustomerPasswordResetTokenPayload = { sub: customer.id, purpose: "password-reset" };
-    const token = await this.jwt.signAsync(payload, {
-      secret: this.config.get<string>("customerJwt.accessSecret"),
-      expiresIn: PASSWORD_RESET_TOKEN_TTL,
+    // A code, not a token. The email used to carry a signed JWT behind
+    // an "enter this code" instruction, which is neither typeable nor
+    // something any client here accepts -- the flow read as available
+    // while being unusable.
+    //
+    // resetPassword() and its token still exist and are still correct;
+    // nothing issues a token now, because the only place one could be
+    // delivered is a link, and no surface can receive one. A website
+    // would reinstate that path by signing a token here and linking to
+    // its own reset page, the way verification's https bounce page
+    // works. Until then this is the whole flow.
+    const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
+    await this.prisma.customer.update({
+      where: { id: customer.id },
+      data: {
+        passwordResetCode: code,
+        passwordResetCodeExpiresAt: new Date(Date.now() + PASSWORD_RESET_CODE_TTL_MS),
+      },
     });
-    await this.emailService.sendMail({ to: customer.email, ...passwordResetEmail(token) });
+
+    await this.emailService.sendMail({ to: customer.email, ...passwordResetEmail(code) });
+  }
+
+  /** Resets by emailed code rather than by token.
+   *
+   * The token route stays for anything that can receive a link; this is
+   * the one a desktop client can use, and mirrors verifyEmailByCode.
+   *
+   * The email address is part of the credential here, unlike the token
+   * which identifies the account by itself. Six digits alone would be a
+   * million-guess space shared across every customer; tied to one
+   * address, and rate-limited at the controller, it is the same strength
+   * as the verification code already in use.
+   */
+  async resetPasswordByCode(email: string, code: string, newPassword: string): Promise<void> {
+    const customer = await this.prisma.customer.findUnique({ where: { email } });
+
+    if (
+      !customer ||
+      customer.status !== "ACTIVE" ||
+      !customer.passwordResetCode ||
+      customer.passwordResetCode !== code ||
+      !customer.passwordResetCodeExpiresAt ||
+      customer.passwordResetCodeExpiresAt < new Date()
+    ) {
+      // Deliberately identical whatever went wrong -- a distinct "no such
+      // account" would turn this into an account-enumeration oracle, which
+      // is the very thing forgotPassword() goes to lengths to avoid.
+      throw new BadRequestException("Invalid or expired reset code");
+    }
+
+    await this.applyNewPassword(customer.id, newPassword);
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {
@@ -299,13 +347,27 @@ export class CustomerAuthService {
       throw new BadRequestException("Invalid or expired reset link");
     }
 
+    await this.applyNewPassword(payload.sub, newPassword);
+  }
+
+  /** The part both reset routes share.
+   *
+   * Bumping tokenVersion invalidates every outstanding refresh token --
+   * a password reset should end any session an attacker (or the user on
+   * another device) already had open. Clearing the code matters just as
+   * much: a used code that still works is a second key left under the
+   * mat for thirty minutes.
+   */
+  private async applyNewPassword(customerId: string, newPassword: string): Promise<void> {
     const passwordHash = await argon2.hash(newPassword);
-    // Bumping tokenVersion invalidates every outstanding refresh token --
-    // a password reset should end any session an attacker (or the user
-    // on another device) already had open.
     await this.prisma.customer.update({
-      where: { id: payload.sub },
-      data: { passwordHash, tokenVersion: { increment: 1 } },
+      where: { id: customerId },
+      data: {
+        passwordHash,
+        tokenVersion: { increment: 1 },
+        passwordResetCode: null,
+        passwordResetCodeExpiresAt: null,
+      },
     });
   }
 

@@ -147,21 +147,29 @@ export function verificationEmail(token: string, code: string, publicApiUrl?: st
   };
 }
 
-export function passwordResetEmail(token: string) {
-  const deepLink = `neoconnect://reset-password?token=${encodeURIComponent(token)}`;
+/** Code only, no link.
+ *
+ * There used to be an "Open in Neoxify" button pointing at
+ * neoconnect://reset-password, and nothing in the app has ever handled
+ * that scheme -- it launched the app to no effect. Webmail strips custom
+ * schemes anyway, which is the same reason verification grew a code.
+ *
+ * The token-based reset endpoint stays: it is still the right shape for
+ * a website, which does not exist yet. When one does, this can carry an
+ * https link the way the verification email does. */
+export function passwordResetEmail(code: string) {
   return {
     subject: "Reset your Neoxify password",
     html: shell({
-      preheader: "Use this code to reset your password.",
+      preheader: `Your password reset code is ${code}.`,
       bodyHtml: `
         ${heading("Reset your password")}
         ${paragraph("A password reset was requested for your account. Enter this code in the app to continue:")}
-        ${codeBlock(token)}
-        ${button(deepLink, "Open in Neoxify")}
+        ${bigCode(code)}
         ${fineprint("This code expires in 30 minutes. If you didn't request this, you can safely ignore this email -- your password won't change.")}
       `,
     }),
-    text: `A password reset was requested for your Neoxify account. Code: ${token} (expires in 30 minutes). Or open: ${deepLink}. If you didn't request this, ignore this email.`,
+    text: `A password reset was requested for your Neoxify account. Your code: ${code} (expires in 30 minutes). If you didn't request this, ignore this email.`,
   };
 }
 

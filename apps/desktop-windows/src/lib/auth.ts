@@ -75,3 +75,31 @@ export async function changePassword(currentPassword: string, newPassword: strin
   }
   return result;
 }
+
+/** Asks for a reset code by email.
+ *
+ * Always succeeds from the caller's point of view, whether or not the
+ * address belongs to an account -- the server deliberately answers the
+ * same either way so this cannot be used to find out who has one. The UI
+ * must therefore say "if that address is registered", never "sent".
+ */
+export async function forgotPassword(email: string) {
+  return publicRequest<void>("/customer-auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Completes the reset with the emailed code.
+ *
+ * The code rather than the token, for the same reason verifyEmailByCode
+ * exists: the token only ever arrives inside a link, and webmail strips
+ * the custom URI scheme those links use, so a desktop client cannot rely
+ * on receiving one.
+ */
+export async function resetPasswordByCode(email: string, code: string, newPassword: string) {
+  return publicRequest<void>("/customer-auth/reset-password-code", {
+    method: "POST",
+    body: JSON.stringify({ email, code, newPassword }),
+  });
+}
