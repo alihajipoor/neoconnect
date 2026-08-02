@@ -169,8 +169,27 @@ const SETTLE_INTERVAL_MS = 400;
  *
  * A candidate that has not proven it carries traffic within a few
  * seconds is not worth more time when another one is sitting right
- * there untried. Being wrong is cheap: the ladder comes back round. */
-const FAILOVER_VERIFY_TIMEOUT_MS = 4_000;
+ * there untried.
+ *
+ * Six seconds, not the four this started at, and the difference was
+ * measured rather than guessed. In a live mid-session test REALITY came
+ * up, carried real traffic including a DNS lookup, and was abandoned
+ * eight seconds later because it had not finished proving itself inside
+ * four -- an Xray protocol whose TUN adapter is still being created,
+ * over a 155ms round trip, does not always make that. The customer
+ * ended up on the next protocol down instead of the best one available.
+ *
+ * That also corrects the reasoning this comment used to carry. "Being
+ * wrong is cheap, the ladder comes back round" is false: the ladder does
+ * not come back round. It moves on and settles wherever it first
+ * succeeds, so rejecting a working candidate is not a retry, it is a
+ * worse outcome that looks like success.
+ *
+ * The cost of the extra two seconds falls only on protocols that really
+ * are blocked -- worst case across five goes from about twenty seconds
+ * to thirty. Being too impatient costs the right answer; being too
+ * patient costs a few seconds. */
+const FAILOVER_VERIFY_TIMEOUT_MS = 6_000;
 const FAILOVER_SETTLE_TIMEOUT_MS = 2_500;
 
 /** Waits until the machine can reach the outside world unaided, and
