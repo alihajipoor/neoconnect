@@ -1,0 +1,9 @@
+# Keeps this directory in git.
+#
+# It is currently empty -- the favicon moved to src/app/icon.svg and the
+# create-next-app placeholder SVGs were unused -- but the panel
+# Dockerfile does `COPY --from=build /repo/apps/panel/public`, which
+# fails the build outright if the path does not exist. Git does not
+# track empty directories, so without this file a fresh clone has no
+# public/ and the image cannot be built. Deleting this file breaks
+# production, not just this app's dev server.
