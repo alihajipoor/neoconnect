@@ -207,10 +207,11 @@ model Customer {
   transactions  PaymentTransaction[]
   invoices      Invoice[]
 
-  referredBy      Customer?        @relation("CustomerReferrals", fields: [referredByCustomerId], references: [id])
-  referrals       Customer[]       @relation("CustomerReferrals")
-  referralRewards ReferralReward[] @relation("ReferralRewardsEarned")
-  referralCredits ReferralCredit[] @relation("ReferralCreditsGiven")
+  referredBy         Customer?           @relation("CustomerReferrals", fields: [referredByCustomerId], references: [id])
+  referrals          Customer[]          @relation("CustomerReferrals")
+  referralRewards    ReferralReward[]    @relation("ReferralRewardsEarned")
+  referralCredits    ReferralCredit[]    @relation("ReferralCreditsGiven")
+  voucherRedemptions VoucherRedemption[]
 
   @@index([referredByCustomerId])
   @@map("customers")
@@ -252,6 +253,7 @@ model SubscriptionPlan {
   freeTrialSettings FreeTrialSettings[]
   referralSettings  ReferralSettings[]
   defaultRoute      Route?              @relation(fields: [defaultRouteId], references: [id])
+  Voucher           Voucher[]
 
   @@map("subscription_plans")
 }
@@ -277,14 +279,15 @@ model Subscription {
   createdAt            DateTime           @default(now())
   updatedAt            DateTime           @updatedAt
 
-  customer       Customer             @relation(fields: [customerId], references: [id])
-  plan           SubscriptionPlan     @relation(fields: [planId], references: [id])
-  primaryNode    Node?                @relation(fields: [primaryNodeId], references: [id])
-  protocolUsers  ProtocolUser[]
-  usageRecords   UsageRecord[]
-  transactions   PaymentTransaction[]
-  invoices       Invoice[]
-  referralReward ReferralReward?
+  customer          Customer             @relation(fields: [customerId], references: [id])
+  plan              SubscriptionPlan     @relation(fields: [planId], references: [id])
+  primaryNode       Node?                @relation(fields: [primaryNodeId], references: [id])
+  protocolUsers     ProtocolUser[]
+  usageRecords      UsageRecord[]
+  transactions      PaymentTransaction[]
+  invoices          Invoice[]
+  referralReward    ReferralReward?
+  voucherRedemption VoucherRedemption?
 
   @@index([customerId])
   @@index([status])
@@ -739,4 +742,73 @@ model ReferralCredit {
   updatedAt          DateTime @updatedAt
 
   @@map("referral_credits")
+}
+
+// ---------------------------------------------------------------------------
+// Vouchers
+// ---------------------------------------------------------------------------
+
+/// A code that grants a plan without payment.
+///
+/// The three kinds the operator asked for are not an enum, because they
+/// are two independent limits that compose: a one-time code is
+/// `maxRedemptions = 1`, an expiring one sets `expiresAt`, an unlimited
+/// one leaves both open -- and a code can be both limited and expiring,
+/// which an enum would have made impossible to express.
+model Voucher {
+  id     String           @id @default(uuid())
+  /// Uppercased on write so redeeming is not case-sensitive to the
+  /// customer while the unique constraint still means what it says.
+  code   String           @unique
+  planId String
+  plan   SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  /// null = no limit on how many people may redeem it.
+  maxRedemptions Int?
+  /// Kept as a counter as well as a row count, because the check that
+  /// stops a one-time code being used twice has to be a single
+  /// conditional update -- counting rows first and inserting after is
+  /// exactly the race that lets two people redeem the last use.
+  redeemedCount  Int  @default(0)
+
+  /// null = never expires.
+  expiresAt DateTime?
+  /// Lets the operator stop a code immediately without deleting it and
+  /// losing the record of who already redeemed it.
+  isActive  Boolean   @default(true)
+  /// Operator-facing label: which campaign or person it was cut for.
+  note      String?
+
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  redemptions VoucherRedemption[]
+
+  @@index([planId])
+  @@map("vouchers")
+}
+
+/// One customer's use of one voucher.
+///
+/// Recorded rather than inferred from the counter, so "who used this
+/// code" is answerable -- and so the unique constraint below can stop
+/// the same person redeeming the same code twice, which a counter alone
+/// cannot express.
+model VoucherRedemption {
+  id         String   @id @default(uuid())
+  voucherId  String
+  voucher    Voucher  @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  /// The subscription it granted. Nullable because the redemption is
+  /// recorded first: losing the record would let the same code be spent
+  /// again if provisioning failed halfway.
+  subscriptionId String?       @unique
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  redeemedAt DateTime @default(now())
+
+  @@unique([voucherId, customerId])
+  @@index([customerId])
+  @@map("voucher_redemptions")
 }

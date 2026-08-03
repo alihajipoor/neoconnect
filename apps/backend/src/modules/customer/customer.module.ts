@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ReferralsModule } from "../referrals/referrals.module";
+import { VouchersModule } from "../vouchers/vouchers.module";
 import { CustomerController } from "./customer.controller";
 import { CustomersModule } from "../customers/customers.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";

@@ -172,6 +172,27 @@ pub(super) fn sleep_unless_stopped(
     }
 }
 
+/// The machine's IPv4 default routes, one line each.
+///
+/// `route print` rather than an API call because its data rows are
+/// numbers and addresses in fixed columns -- readable regardless of the
+/// Windows display language, which a parsed `netsh` heading would not
+/// be. Only 0.0.0.0 destinations are kept: this is asked when a pinned
+/// socket says a host is unreachable, and the default route is the one
+/// that was supposed to carry it.
+fn default_routes() -> Vec<String> {
+    let exe = std::path::PathBuf::from(r"C:\Windows\System32\route.exe");
+    let Ok(out) = crate::engines::run_hidden_capture(&exe, &[std::ffi::OsStr::new("print"), std::ffi::OsStr::new("-4")])
+    else {
+        return vec!["could not read the routing table".to_string()];
+    };
+    out.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("0.0.0.0"))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
 /// Keeps the log from growing without bound across many attempts.
 ///
 /// Reconnect churn writes a session header plus a line every ten
@@ -257,7 +278,8 @@ impl SplitTunnel {
         let route = routing::install_passive_default(tunnel_address, tunnel_adapter.index)?;
 
         let nat = Arc::new(flows::Nat::new());
-        let tunnel = Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index));
+        let tunnel =
+            Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
         let relays = match proxy::start(nat.clone(), tunnel.clone()) {
             Ok(relays) => relays,
             Err(e) => {
@@ -319,13 +341,22 @@ impl SplitTunnel {
         // ladder keeps this protocol or moves to the next one. Without
         // it the log showed a tunnel that looked healthy and gave no
         // hint why the app had abandoned it.
-        append(
-            &active.log_path,
-            &match &outcome {
-                Ok(()) => "probe: the tunnel carried a test connection".to_string(),
-                Err(e) => format!("probe FAILED: {e}"),
-            },
-        );
+        match &outcome {
+            Ok(()) => append(&active.log_path, "probe: the tunnel carried a test connection"),
+            Err(e) => {
+                append(&active.log_path, &format!("probe FAILED: {e}"));
+                // The routing table, at the moment it mattered.
+                //
+                // Three rounds were spent reasoning about why a pinned
+                // socket could not reach anything, each guess costing
+                // the customer another build. What the guessing needed
+                // and never had was the table the stack was actually
+                // consulting, so it is written down here instead.
+                for line in default_routes() {
+                    append(&active.log_path, &format!("  route  {line}"));
+                }
+            }
+        }
         outcome
     }
 
@@ -333,7 +364,7 @@ impl SplitTunnel {
     /// unprotected instead of failing. See the fail-open note above.
     pub fn detach_tunnel(&self) {
         if let Some(active) = &self.active {
-            active.tunnel.set(0);
+            active.tunnel.clear();
         }
     }
 

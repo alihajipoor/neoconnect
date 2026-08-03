@@ -180,3 +180,27 @@ export interface PaymentSettings {
   nowPaymentsIpnSecretSet: boolean;
   updatedAt: string;
 }
+
+/** A code that grants a plan without payment.
+ *
+ * The three kinds the operator asked for are two independent limits
+ * that compose rather than an enum: `maxRedemptions: 1` is a one-time
+ * code, `expiresAt` makes it expiring, both null makes it unlimited --
+ * and a code can be both capped and expiring. */
+export interface Voucher {
+  id: string;
+  code: string;
+  planId: string;
+  plan: Pick<SubscriptionPlan, "id" | "name"> & {
+    durationDays?: number;
+    priceUsd?: string;
+  };
+  maxRedemptions: number | null;
+  redeemedCount: number;
+  expiresAt: string | null;
+  isActive: boolean;
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
+  _count?: { redemptions: number };
+}
