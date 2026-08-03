@@ -1,8 +1,8 @@
 //! Running the installer this executable carries.
 
 use std::io;
-use std::path::PathBuf;
-use std::process::Command;
+use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 /// The real NSIS installer, baked in at build time by build.rs.
@@ -34,24 +34,82 @@ fn run_payload() -> io::Result<()> {
     let target = temp_path();
     std::fs::write(&target, PAYLOAD)?;
 
-    let status = Command::new(&target).arg("/S").status()?;
+    let outcome = shell_execute_and_wait(&target, "/S");
 
     // Best-effort: the installer has exited, so the file is free, but a
     // scanner holding it open is not worth failing an otherwise
     // successful install over.
     let _ = std::fs::remove_file(&target);
 
-    if status.success() {
-        return Ok(());
+    match outcome? {
+        0 => Ok(()),
+        code => Err(io::Error::other(format!("The installer stopped with code {code}."))),
     }
-    // Cancelling at the UAC prompt lands here. It is the one failure a
-    // customer causes deliberately, so it is worth naming rather than
-    // reporting as an error code they cannot act on.
-    Err(io::Error::other(match status.code() {
-        Some(1223) => "Installation was cancelled.".to_string(),
-        Some(code) => format!("The installer stopped with code {code}."),
-        None => "The installer stopped unexpectedly.".to_string(),
-    }))
+}
+
+/// Starts a program through the shell and waits for it to finish.
+///
+/// `std::process::Command` cannot do this. It goes through
+/// `CreateProcess`, which refuses outright -- ERROR_ELEVATION_REQUIRED,
+/// error 740 -- when the target's manifest asks for administrator, and
+/// it never shows a UAC prompt. Our NSIS installer is `perMachine`, so
+/// it always asks. `ShellExecuteEx` is the only call that raises the
+/// prompt and then hands back a process to wait on.
+fn shell_execute_and_wait(program: &Path, parameters: &str) -> io::Result<u32> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, WaitForSingleObject, INFINITE,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let file: Vec<u16> = program.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let verb = wide("runas");
+    let params = wide(parameters);
+
+    // SAFETY: a zeroed SHELLEXECUTEINFOW is the documented starting
+    // point; every pointer below outlives the call.
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    // NOCLOSEPROCESS is what makes hProcess valid afterwards, which is
+    // the only way to wait for it. NOASYNC is required because this
+    // runs on a worker thread rather than the one pumping messages.
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = SW_HIDE;
+
+    // SAFETY: `info` is fully initialised and its pointers are alive.
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        let err = io::Error::last_os_error();
+        // 1223 is ERROR_CANCELLED: the customer chose No at the UAC
+        // prompt. The one failure here somebody causes on purpose, so
+        // it is named rather than shown as a number they cannot act on.
+        if err.raw_os_error() == Some(1223) {
+            return Err(io::Error::other("Installation was cancelled."));
+        }
+        return Err(err);
+    }
+
+    if info.hProcess.is_null() {
+        return Err(io::Error::other("The installer did not start."));
+    }
+
+    // SAFETY: a live process handle from a successful ShellExecuteEx.
+    unsafe {
+        WaitForSingleObject(info.hProcess, INFINITE);
+        let mut code: u32 = 0;
+        let ok = GetExitCodeProcess(info.hProcess, &mut code);
+        CloseHandle(info.hProcess);
+        if ok == 0 {
+            return Err(io::Error::other("The installer's result could not be read."));
+        }
+        Ok(code)
+    }
 }
 
 /// A unique path per run, so two copies started at once cannot overwrite

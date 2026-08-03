@@ -6,8 +6,8 @@
 //! laptops.
 
 use tiny_skia::{
-    Color, FillRule, Paint, PathBuilder, Pixmap, Point, RadialGradient, Rect, Shader,
-    SpreadMode, Transform,
+    Color, FillRule, Paint, PathBuilder, Pixmap, Point, RadialGradient, Rect, SpreadMode,
+    Transform,
 };
 
 use crate::text::{Fonts, Weight};
@@ -233,22 +233,24 @@ fn cross(pixmap: &mut Pixmap, rect: Rect, colour: Color32, thickness: f32) {
 }
 
 /// Blits the mark, scaled to `size`, honouring its alpha.
+///
+/// `draw_pixmap` rather than a pattern-filled rectangle. The first
+/// attempt used a Pattern shader carrying a scale *and* passed a
+/// translate to `fill_rect`, which composes the two -- the image landed
+/// scaled off its own rectangle and nothing appeared at all. This takes
+/// the offset and the transform as separate arguments, which is what
+/// they are.
 fn draw_image(pixmap: &mut Pixmap, image: &Pixmap, x: f32, y: f32, size: f32) {
     let scale = size / image.width() as f32;
-    let mut paint = Paint::default();
-    paint.shader = Shader::SolidColor(Color::TRANSPARENT);
-
-    let pattern = tiny_skia::Pattern::new(
+    pixmap.draw_pixmap(
+        x as i32,
+        y as i32,
         image.as_ref(),
-        SpreadMode::Pad,
-        tiny_skia::FilterQuality::Bicubic,
-        1.0,
+        &tiny_skia::PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bicubic,
+            ..Default::default()
+        },
         Transform::from_scale(scale, scale),
+        None,
     );
-    paint.shader = pattern;
-    paint.anti_alias = true;
-
-    if let Some(area) = Rect::from_xywh(x, y, size, size) {
-        pixmap.fill_rect(area, &paint, Transform::from_translate(x, y), None);
-    }
 }
