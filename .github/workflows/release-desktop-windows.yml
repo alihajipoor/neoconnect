@@ -90,7 +90,11 @@ jobs:
         working-directory: apps/desktop-windows
         shell: bash
         run: |
-          setup=$(ls target/release/bundle/nsis/*_x64-setup.exe | head -1)
+          # Absolute, because build.rs resolves NEOXIFY_SETUP relative to
+          # the bootstrapper crate directory rather than the workspace
+          # root -- a relative path here looks for
+          # bootstrapper/target/... and is not there.
+          setup=$(ls "$PWD"/target/release/bundle/nsis/*_x64-setup.exe | head -1)
           echo "Embedding $setup"
           NEOXIFY_SETUP="$setup" cargo build --release -p neoxify-bootstrapper
           cp target/release/neoxify-bootstrapper.exe target/release/bundle/nsis/Neoxify-Setup.exe
