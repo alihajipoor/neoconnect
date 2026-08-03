@@ -31,7 +31,8 @@ export interface Subscription {
   status: SubscriptionStatus;
   startAt: string;
   expireAt: string;
-  dataCapBytes: string;
+  /** Null means unlimited traffic. */
+  dataCapBytes: string | null;
   dataUsedBytes: string;
   autoRenew: boolean;
   createdAt: string;
@@ -89,7 +90,8 @@ export interface ProtocolUser {
 export interface SubscriptionPlan {
   id: string;
   name: string;
-  dataCapBytes: string;
+  /** Null means unlimited traffic. */
+  dataCapBytes: string | null;
   durationDays: number;
   priceUsd: string;
   maxConcurrentConnections: number | null;

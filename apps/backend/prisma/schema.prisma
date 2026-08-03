@@ -225,7 +225,15 @@ model Customer {
 model SubscriptionPlan {
   id                       String     @id @default(uuid())
   name                     String
-  dataCapBytes             BigInt
+  /// Null means unlimited traffic.
+  ///
+  /// Nullable rather than a sentinel like 0 or a huge number: the whole
+  /// product now has two shapes of plan, and a relay through an Iranian
+  /// VPS is metered precisely because that VPS's own traffic allowance
+  /// is small. "No cap" and "a cap that happens to be big" are
+  /// different facts, and a sentinel makes every comparison site
+  /// silently answer the wrong one.
+  dataCapBytes             BigInt?
   durationDays             Int
   priceUsd                 Decimal    @db.Decimal(10, 2)
   maxConcurrentConnections Int?
@@ -267,7 +275,10 @@ model Subscription {
   status               SubscriptionStatus @default(ACTIVE)
   startAt              DateTime           @default(now())
   expireAt             DateTime
-  dataCapBytes         BigInt
+  /// Snapshot of the plan's cap at purchase, so editing a plan later
+  /// does not rewrite what an existing customer bought. Null means
+  /// unlimited, same as on the plan.
+  dataCapBytes         BigInt?
   dataUsedBytes        BigInt             @default(0)
   autoRenew            Boolean            @default(false)
   // Set once the low-data-remaining warning email has been sent for the

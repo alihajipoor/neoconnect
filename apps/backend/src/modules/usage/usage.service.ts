@@ -100,7 +100,15 @@ export class UsageService {
       });
     });
 
-    if (subscription.status === "ACTIVE" && subscription.dataUsedBytes >= subscription.dataCapBytes) {
+    // A null cap is unlimited, so there is nothing to cross. Checked
+    // explicitly rather than relying on the comparison: `x >= null`
+    // coerces to `x >= 0` in JS and would suspend every unlimited
+    // subscription on its first byte.
+    if (
+      subscription.status === "ACTIVE" &&
+      subscription.dataCapBytes !== null &&
+      subscription.dataUsedBytes >= subscription.dataCapBytes
+    ) {
       await this.suspendForQuota(subscription.id);
     }
   }
@@ -145,8 +153,12 @@ export class UsageService {
    * single Prisma where-clause, so it's filtered in code after fetching
    * ACTIVE subscriptions -- fine at this data scale. */
   async sweepQuota(): Promise<number> {
-    const active = await this.prisma.subscription.findMany({ where: { status: "ACTIVE" } });
-    const overCap = active.filter((s) => s.dataUsedBytes >= s.dataCapBytes);
+    const active = await this.prisma.subscription.findMany({
+      // Unlimited subscriptions can never be over cap, so they do not
+      // even need fetching.
+      where: { status: "ACTIVE", dataCapBytes: { not: null } },
+    });
+    const overCap = active.filter((s) => s.dataCapBytes !== null && s.dataUsedBytes >= s.dataCapBytes);
     for (const s of overCap) {
       await this.suspendForQuota(s.id);
     }
@@ -169,14 +181,18 @@ export class UsageService {
    * BillingService.renewSubscription()) so this fires exactly once. */
   async sweepLowDataWarnings(): Promise<number> {
     const candidates = await this.prisma.subscription.findMany({
-      where: { status: "ACTIVE", lowDataWarningSentAt: null },
+      // No cap, no "running low" -- there is nothing to run low on.
+      where: { status: "ACTIVE", lowDataWarningSentAt: null, dataCapBytes: { not: null } },
       include: { customer: true },
     });
     const nearCap = candidates.filter(
-      (s) => s.dataUsedBytes < s.dataCapBytes && s.dataCapBytes - s.dataUsedBytes <= LOW_DATA_WARNING_THRESHOLD_BYTES,
+      (s) =>
+        s.dataCapBytes !== null &&
+        s.dataUsedBytes < s.dataCapBytes &&
+        s.dataCapBytes - s.dataUsedBytes <= LOW_DATA_WARNING_THRESHOLD_BYTES,
     );
     for (const s of nearCap) {
-      const remainingGb = Number(s.dataCapBytes - s.dataUsedBytes) / Number(BYTES_PER_GB);
+      const remainingGb = Number(s.dataCapBytes! - s.dataUsedBytes) / Number(BYTES_PER_GB);
       await this.emailService.sendMail({ to: s.customer.email, ...lowDataWarningEmail(remainingGb) });
       await this.prisma.subscription.update({ where: { id: s.id }, data: { lowDataWarningSentAt: new Date() } });
     }

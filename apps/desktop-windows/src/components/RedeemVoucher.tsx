@@ -76,7 +76,10 @@ export function RedeemVoucher({ onRedeemed }: { onRedeemed: () => void }) {
             </p>
             <p className="mt-1 text-sm font-semibold">{found.plan.name}</p>
             <p className="text-xs text-muted-foreground">
-              {formatBytes(Number(found.plan.dataCapBytes))} · {found.plan.durationDays}{" "}
+              {found.plan.dataCapBytes === null
+                ? t("dash.unlimited")
+                : formatBytes(Number(found.plan.dataCapBytes))}{" "}
+              · {found.plan.durationDays}{" "}
               {t("voucher.days")}
             </p>
           </div>

@@ -1,13 +1,20 @@
-import { ArrayMinSize, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, Min } from "class-validator";
+import { ArrayMinSize, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, Min, ValidateIf } from "class-validator";
 import { Protocol } from "@prisma/client";
 
 export class CreatePlanDto {
   @IsString()
   name!: string;
 
-  /** Data cap in bytes, as a decimal string to avoid JS number precision loss at large sizes. */
+  /** Data cap in bytes, as a decimal string to avoid JS number
+   * precision loss at large sizes.
+   *
+   * Null means unlimited. Metered and unmetered plans have to coexist:
+   * a relay through an Iranian VPS is capped because that VPS's own
+   * allowance is small, while a direct foreign route need not be. */
+  @IsOptional()
+  @ValidateIf((_object, value) => value !== null)
   @IsString()
-  dataCapBytes!: string;
+  dataCapBytes?: string | null;
 
   @IsInt()
   @IsPositive()
