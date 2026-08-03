@@ -1052,47 +1052,77 @@ FunctionEnd
 
 
 ; ---------------------------------------------------------------------
+; ---------------------------------------------------------------------
 ; Neoxify's single-page installer UI.
 ;
 ; Everything below this line is ours. It adds a page and repaints the
 ; window; it does not change what gets installed.
+;
+; What NSIS can and cannot be made to look like, so the next person does
+; not rediscover it: this is a Win32 dialog with a system title bar and
+; common controls. It can be made dark, rounded, centred and given a
+; flat branded progress bar -- all done below. It cannot be made
+; borderless or animated. An installer like Windscribe's is a separate
+; custom-drawn application that runs this one silently underneath.
 ; ---------------------------------------------------------------------
 
-; The app's own palette, so the installer looks like the thing it is
-; installing rather than like a generic setup wizard.
 !define NX_BG        0x0B0A14  ; near-black violet, the app's canvas
 !define NX_TEXT      0xFFFFFF
 !define NX_MUTED     0x8B87A3
 !define NX_ACCENT    0x22D3EE  ; cyan, used only for the one link
-!define NX_BTN_BG    0xFFFFFF
-!define NX_BTN_TEXT  0x0B0A14
+!define NX_BTN_BG    0x6D4AFF  ; the app's own primary violet
+!define NX_BTN_TEXT  0xFFFFFF
+
+; COLORREF is 0x00BBGGRR, the reverse of the RRGGBB above. Written out
+; separately rather than derived, because getting this backwards yields
+; a plausible-looking wrong colour rather than an error.
+!define NX_BAR_BGR    0xFF4A6D  ; NX_BTN_BG, byte-reversed
+!define NX_TROUGH_BGR 0x2E1A18  ; a dark violet-grey trough
 
 Var NxTitleFont
 Var NxTaglineFont
 Var NxButtonFont
 Var NxSmallFont
 Var NxInstallButton
+Var NxWidth
+Var NxHeight
 
-; Hides one control on the parent window, by dialog id.
-;
-; A macro rather than a loop because the ids are a fixed list and a loop
-; over them needed more scaffolding than it saved. Hiding an id that
-; does not exist on a given Windows version is a no-op, so the list can
-; be generous.
 !macro NxHideParent id
   GetDlgItem $R1 $HWNDPARENT ${id}
   ShowWindow $R1 ${SW_HIDE}
 !macroend
 
-; Repaints the window once, before the first page is shown. Called by
-; MUI through MUI_CUSTOMFUNCTION_GUIINIT, declared above the pages.
+; Measures a window's client area into $NxWidth / $NxHeight, in pixels.
 ;
-; MUI's chrome is a white header band with a title, a subtitle, an icon,
-; and a rule above the buttons. On a dark page that reads as a rendering
-; fault rather than a design, so it goes. These controls live on the
-; parent window, so hiding them here hides them for every page.
+; Everything is centred against this rather than against a hardcoded
+; dialog width. The first version assumed 499 dialog units, the real
+; dialog is nearer 327, and the result was a logo and a button sitting
+; visibly right of the labels above them -- which is what made the page
+; look wrong even though every element was individually fine.
+!macro NxMeasure hwnd
+  System::Call "*(i,i,i,i) p .r1"
+  System::Call "user32::GetClientRect(p ${hwnd}, p r1)"
+  System::Call "*$1(i, i, i .r2, i .r3)"
+  System::Free $1
+  StrCpy $NxWidth $2
+  StrCpy $NxHeight $3
+!macroend
+
+; Repaints the window once, before the first page is shown. Called by
+; MUI through MUI_CUSTOMFUNCTION_GUIINIT, declared above the pages --
+; `.onGUIInit` itself belongs to MUI and cannot be defined twice.
 Function NeoxifyGuiInit
   SetCtlColors $HWNDPARENT ${NX_TEXT} ${NX_BG}
+
+  ; A dark body under a white system title bar was the first thing that
+  ; read as broken. Attribute 20 is DWMWA_USE_IMMERSIVE_DARK_MODE on
+  ; Windows 10 20H1 and later; 19 was its number in earlier builds, so
+  ; both are set and whichever is not understood is ignored.
+  System::Call "dwmapi::DwmSetWindowAttribute(p $HWNDPARENT, i 20, *i 1, i 4)"
+  System::Call "dwmapi::DwmSetWindowAttribute(p $HWNDPARENT, i 19, *i 1, i 4)"
+  ; DWMWA_WINDOW_CORNER_PREFERENCE, rounded. Windows 11 only, and a
+  ; harmless no-op elsewhere.
+  System::Call "dwmapi::DwmSetWindowAttribute(p $HWNDPARENT, i 33, *i 2, i 4)"
 
   !insertmacro NxHideParent 1034  ; branding text
   !insertmacro NxHideParent 1035
@@ -1106,39 +1136,35 @@ Function NeoxifyGuiInit
   !insertmacro NxHideParent 1028  ; "Nullsoft Install System", which NSIS
                                   ; substitutes when COPYRIGHT is empty
 
-  ; Back and Next are replaced by the page's own Install button. Cancel
-  ; stays: someone who opened this by mistake needs a way out, and it is
-  ; the control people look for.
+  ; Every system button goes. Themed grey buttons cannot be recoloured
+  ; and were the last obviously-a-wizard thing on the page; the title
+  ; bar's close button is the way out, which is what a window of this
+  ; shape already looks like it offers.
   !insertmacro NxHideParent 3     ; Back
   !insertmacro NxHideParent 1     ; Next
+  !insertmacro NxHideParent 2     ; Cancel
 
-  CreateFont $NxTitleFont   "$(^Font)" 22 700
+  CreateFont $NxTitleFont   "$(^Font)" 24 700
   CreateFont $NxTaglineFont "$(^Font)" 10 400
-  CreateFont $NxButtonFont  "$(^Font)" 12 600
+  CreateFont $NxButtonFont  "$(^Font)" 11 600
   CreateFont $NxSmallFont   "$(^Font)"  8 400
 FunctionEnd
 
-; A centred, non-interactive line of text.
+; A centred, non-interactive line of text, positioned in pixels.
 !macro NxLabel var y h text font colour
   nsDialogs::CreateControl STATIC \
     "${DEFAULT_STYLES}|${SS_CENTER}|${SS_CENTERIMAGE}" 0 \
-    0 ${y} 100% ${h} "${text}"
+    0 ${y} $NxWidth ${h} "${text}"
   Pop ${var}
   SetCtlColors ${var} ${colour} ${NX_BG}
   SendMessage ${var} ${WM_SETFONT} ${font} 1
 !macroend
 
-; The one screen a customer sees.
 Function NeoxifyWelcome
-  ; 1044, not 1018. 1018 is MUI's inner page -- the area below the header
-  ; band -- so with the header hidden the content sat in the top two
-  ; thirds and the Install button fell off the bottom edge. 1044 is what
-  ; MUI's own welcome page uses: the full window above the button row.
-  ;
-  ; That gives roughly 499x198 dialog units, measured off a real render
-  ; rather than assumed. Everything below is laid out inside it; there is
-  ; no scrolling, and anything past the bottom is simply invisible --
-  ; which is how the first attempt lost its "change location" link.
+  ; 1044, not 1018. 1018 is MUI's inner page -- the area below the
+  ; header band -- so with the header hidden the content bunched into
+  ; the top two thirds and the Install button fell off the bottom edge.
+  ; 1044 is what MUI's own welcome page uses: the full window.
   nsDialogs::Create 1044
   Pop $R9
   ${If} $R9 == error
@@ -1146,33 +1172,41 @@ Function NeoxifyWelcome
   ${EndIf}
   ${IfThen} $(^RTL) = 1 ${|} nsDialogs::SetRTL $(^RTL) ${|}
   SetCtlColors $R9 ${NX_TEXT} ${NX_BG}
+  !insertmacro NxMeasure $R9
 
   ; The mark, composited onto NX_BG at build time: NSIS bitmaps carry no
   ; alpha, so a transparent PNG arrives with a black box around it.
-  ${NSD_CreateBitmap} 221u 16u 56u 56u ""
+  IntOp $R2 $NxWidth - 80
+  IntOp $R2 $R2 / 2
+  ${NSD_CreateBitmap} $R2 34 80 80 ""
   Pop $R0
   ${NSD_SetImage} $R0 "$PLUGINSDIR\installer-logo.bmp" $R1
 
-  !insertmacro NxLabel $R0 80u 22u "${PRODUCTNAME}" $NxTitleFont ${NX_TEXT}
-  !insertmacro NxLabel $R0 105u 13u "$(NxTagline)" $NxTaglineFont ${NX_MUTED}
+  !insertmacro NxLabel $R0 132 40 "${PRODUCTNAME}" $NxTitleFont ${NX_TEXT}
+  !insertmacro NxLabel $R0 174 22 "$(NxTagline)" $NxTaglineFont ${NX_MUTED}
 
   ; A static rather than a real button. A themed Windows button ignores
-  ; SetCtlColors -- it would sit on this page as a grey rectangle -- and
-  ; a white block with dark text is both on-brand and unmistakably the
-  ; thing to press. SS_NOTIFY is what makes a static clickable at all.
+  ; SetCtlColors -- it would sit on this page as a grey rectangle -- so
+  ; the one control that has to look deliberate is drawn as a filled
+  ; block in the app's own violet. SS_NOTIFY makes a static clickable.
+  IntOp $R2 $NxWidth - 200
+  IntOp $R2 $R2 / 2
+  IntOp $R3 $NxHeight - 118
   nsDialogs::CreateControl STATIC \
     "${DEFAULT_STYLES}|${SS_CENTER}|${SS_CENTERIMAGE}|${SS_NOTIFY}" 0 \
-    184u 134u 130u 26u "$(NxInstall)"
+    $R2 $R3 200 44 "$(NxInstall)"
   Pop $NxInstallButton
   SetCtlColors $NxInstallButton ${NX_BTN_TEXT} ${NX_BTN_BG}
   SendMessage $NxInstallButton ${WM_SETFONT} $NxButtonFont 1
   ${NSD_OnClick} $NxInstallButton NeoxifyInstallClicked
 
-  !insertmacro NxLabel $NeoxifyDirLabel 172u 10u "$INSTDIR" $NxSmallFont ${NX_MUTED}
+  IntOp $R3 $NxHeight - 56
+  !insertmacro NxLabel $NeoxifyDirLabel $R3 18 "$INSTDIR" $NxSmallFont ${NX_MUTED}
 
+  IntOp $R3 $NxHeight - 36
   nsDialogs::CreateControl STATIC \
     "${DEFAULT_STYLES}|${SS_CENTER}|${SS_CENTERIMAGE}|${SS_NOTIFY}" 0 \
-    0 182u 100% 10u "$(NxChangeLocation)"
+    0 $R3 $NxWidth 18 "$(NxChangeLocation)"
   Pop $R0
   SetCtlColors $R0 ${NX_ACCENT} ${NX_BG}
   SendMessage $R0 ${WM_SETFONT} $NxSmallFont 1
@@ -1181,10 +1215,9 @@ Function NeoxifyWelcome
   nsDialogs::Show
 FunctionEnd
 
-; Where it installs, for the minority who care. Deliberately a quiet
-; link rather than a page of its own: almost nobody changes this, and
-; walking everybody past a directory picker to reach the Install button
-; is the wizard this replaced.
+; Where it installs, for the minority who care. A quiet link rather than
+; a page of its own: almost nobody changes this, and walking everybody
+; past a directory picker to reach Install is the wizard this replaced.
 Function NeoxifyChooseFolder
   Pop $R0
   nsDialogs::SelectFolderDialog "$(NxChooseFolderTitle)" "$INSTDIR"
@@ -1221,28 +1254,43 @@ Function NeoxifyWelcomeLeave
   StrCpy $R2 0
 FunctionEnd
 
-; The progress page, stripped to match the page before it.
+; The progress page, made to match the one before it.
 ;
-; MUI shows a log listbox and a "show details" button. The log is
-; invaluable when diagnosing an install and means nothing to a customer,
-; so it is hidden rather than removed -- it is still written, and a
-; failure still surfaces through the message box the post-install hook
-; raises. The line above the bar says what is happening.
+; Left alone this is the most dated screen in the product: a green
+; themed progress bar, a log listbox, and a "show details" button. The
+; log is hidden rather than removed -- it is still written, and a real
+; failure still surfaces through the post-install hook's message box.
 Function NeoxifyInstFilesShow
   FindWindow $R0 "#32770" "" $HWNDPARENT
   SetCtlColors $R0 ${NX_TEXT} ${NX_BG}
+  !insertmacro NxMeasure $R0
 
   GetDlgItem $R1 $R0 1016  ; the log listbox
   ShowWindow $R1 ${SW_HIDE}
   GetDlgItem $R1 $R0 1027  ; "show details"
   ShowWindow $R1 ${SW_HIDE}
 
-  GetDlgItem $R1 $R0 1006  ; the current-action line
+  ; The bar is green because the visual style draws it, and a themed
+  ; progress bar ignores any colour asked of it. Detaching it from the
+  ; theme is what makes PBM_SETBARCOLOR take effect at all -- without
+  ; the first call the next two are silently ignored and it stays green.
+  GetDlgItem $R1 $R0 1004
+  System::Call "uxtheme::SetWindowTheme(p $R1, w 0, w '')"
+  SendMessage $R1 ${PBM_SETBKCOLOR} 0 ${NX_TROUGH_BGR}
+  SendMessage $R1 ${PBM_SETBARCOLOR} 0 ${NX_BAR_BGR}
+
+  ; Slimmed and centred, sitting where the Install button was, so the
+  ; two screens read as one window continuing rather than two dialogs.
+  IntOp $R2 $NxWidth - 240
+  IntOp $R2 $R2 / 2
+  IntOp $R3 $NxHeight / 2
+  System::Call "user32::SetWindowPos(p $R1, p 0, i $R2, i $R3, i 240, i 6, i 0x0004)"
+
+  ; The current-action line, under the bar rather than above it.
+  GetDlgItem $R1 $R0 1006
   SetCtlColors $R1 ${NX_MUTED} ${NX_BG}
   SendMessage $R1 ${WM_SETFONT} $NxSmallFont 1
-
-  ; Cancel is meaningless once files are being written, and a customer
-  ; who presses it mid-install leaves a half-installed machine.
-  GetDlgItem $R1 $HWNDPARENT 2
-  EnableWindow $R1 0
+  ${NSD_AddStyle} $R1 ${SS_CENTER}
+  IntOp $R3 $R3 + 22
+  System::Call "user32::SetWindowPos(p $R1, p 0, i 0, i $R3, i $NxWidth, i 18, i 0x0004)"
 FunctionEnd
