@@ -88,6 +88,7 @@ struct Active {
     tunnel: Arc<proxy::TunnelInterface>,
     route: InstalledRoutes,
     logger: Logger,
+    log_path: PathBuf,
 }
 
 /// How often the counters are written out.
@@ -119,10 +120,14 @@ impl Logger {
         let thread = {
             let stop = stop.clone();
             std::thread::spawn(move || {
-                // Truncated on start: the interesting session is this
-                // one, and an ever-growing file in a directory the user
-                // cannot easily reach is its own small problem.
-                let _ = std::fs::write(&path, format!("{header}\n"));
+                // Appended, not truncated. Truncating lost exactly the
+                // session worth reading: when a protocol fails, the
+                // ladder starts the next one immediately, and that
+                // second session's header wiped the first. The customer
+                // was then asked for a log that could only ever show
+                // the attempt which worked.
+                trim_if_large(&path);
+                append(&path, &format!("--- {header}"));
                 while sleep_unless_stopped(&stop, LOG_INTERVAL) {
                     append(&path, &stats.summary());
                 }
@@ -164,6 +169,19 @@ pub(super) fn sleep_unless_stopped(
             return true;
         }
         std::thread::sleep(STEP.min(deadline - now));
+    }
+}
+
+/// Keeps the log from growing without bound across many attempts.
+///
+/// Reconnect churn writes a session header plus a line every ten
+/// seconds, so a long troubleshooting evening adds up. A quarter of a
+/// megabyte is far more history than any diagnosis needs and small
+/// enough to paste.
+fn trim_if_large(path: &Path) {
+    const LIMIT: u64 = 256 * 1024;
+    if std::fs::metadata(path).map(|m| m.len() > LIMIT).unwrap_or(false) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -269,10 +287,10 @@ impl SplitTunnel {
 
         match redirect::start(redirect, nat, self.selection.clone()) {
             Ok(running) => {
-                let logger =
-                    Logger::start(log_dir.join(LOG_FILE), running.stats.clone(), header);
+                let log_path = log_dir.join(LOG_FILE);
+                let logger = Logger::start(log_path.clone(), running.stats.clone(), header);
                 self.active =
-                    Some(Active { redirect: running, relays, tunnel, route, logger });
+                    Some(Active { redirect: running, relays, tunnel, route, logger, log_path });
                 Ok(())
             }
             Err(e) => {
@@ -295,7 +313,20 @@ impl SplitTunnel {
         let Some(active) = &self.active else {
             return Err("custom mode is not running".into());
         };
-        proxy::probe(&active.tunnel)
+        let outcome = proxy::probe(&active.tunnel);
+
+        // Written down because this verdict is what decides whether the
+        // ladder keeps this protocol or moves to the next one. Without
+        // it the log showed a tunnel that looked healthy and gave no
+        // hint why the app had abandoned it.
+        append(
+            &active.log_path,
+            &match &outcome {
+                Ok(()) => "probe: the tunnel carried a test connection".to_string(),
+                Err(e) => format!("probe FAILED: {e}"),
+            },
+        );
+        outcome
     }
 
     /// Marks that no tunnel is available, so redirected traffic goes out

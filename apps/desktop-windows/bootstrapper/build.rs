@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=NEOXIFY_SETUP");
+    embed_icon_and_version();
 
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is always set")).join("payload.exe");
 
@@ -34,5 +35,34 @@ fn main() {
             );
             std::fs::write(&out, b"").expect("could not write the placeholder payload");
         }
+    }
+}
+
+/// Gives the downloaded file an icon and real file properties.
+///
+/// An installer is judged before it is run: a blank default icon and an
+/// empty Properties tab are what an unknown program from nowhere looks
+/// like, which is the opposite of the impression this window exists to
+/// make. Signing will add the publisher name later; this is the part
+/// that costs nothing.
+fn embed_icon_and_version() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let icon = "../src-tauri/icons/icon.ico";
+    println!("cargo:rerun-if-changed={icon}");
+
+    let mut resource = winresource::WindowsResource::new();
+    resource.set_icon(icon);
+    resource.set("ProductName", "Neoxify");
+    resource.set("FileDescription", "Neoxify Setup");
+    resource.set("CompanyName", "Neoxify");
+    resource.set("LegalCopyright", "Neoxify");
+    resource.set("OriginalFilename", "Neoxify-Setup.exe");
+
+    // A failure here costs an icon, not the build -- and on a
+    // non-Windows host there is no resource compiler to find.
+    if let Err(e) = resource.compile() {
+        println!("cargo:warning=could not embed the icon or version info: {e}");
     }
 }
