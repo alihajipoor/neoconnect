@@ -67,13 +67,7 @@ impl Layout {
     }
 }
 
-pub fn paint(
-    pixmap: &mut Pixmap,
-    fonts: &Fonts,
-    layout: &Layout,
-    phase: &Phase,
-    logo: Option<&Pixmap>,
-) {
+pub fn paint(pixmap: &mut Pixmap, fonts: &Fonts, layout: &Layout, phase: &Phase) {
     let s = layout.scale;
     pixmap.fill(BG.to_color(1.0));
 
@@ -83,11 +77,8 @@ pub fn paint(
     glow(pixmap, WIDTH / 2.0 * s, 150.0 * s, 260.0 * s, VIOLET, 0.30);
     glow(pixmap, WIDTH * 0.82 * s, 470.0 * s, 200.0 * s, CYAN, 0.07);
 
-    if let Some(logo) = logo {
-        let size = 88.0 * s;
-        let x = ((WIDTH * s) - size) / 2.0;
-        draw_image(pixmap, logo, x, 84.0 * s, size);
-    }
+    let mark = 92.0 * s;
+    draw_mark(pixmap, (WIDTH * s - mark) / 2.0, 80.0 * s, mark);
 
     let title = "Neoxify";
     let title_size = 30.0 * s;
@@ -232,25 +223,78 @@ fn cross(pixmap: &mut Pixmap, rect: Rect, colour: Color32, thickness: f32) {
     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
 }
 
-/// Blits the mark, scaled to `size`, honouring its alpha.
+/// The Neoxify mark: a broken ring around a solid centre.
 ///
-/// `draw_pixmap` rather than a pattern-filled rectangle. The first
-/// attempt used a Pattern shader carrying a scale *and* passed a
-/// translate to `fill_rect`, which composes the two -- the image landed
-/// scaled off its own rectangle and nothing appeared at all. This takes
-/// the offset and the transform as separate arguments, which is what
-/// they are.
-fn draw_image(pixmap: &mut Pixmap, image: &Pixmap, x: f32, y: f32, size: f32) {
-    let scale = size / image.width() as f32;
-    pixmap.draw_pixmap(
-        x as i32,
-        y as i32,
-        image.as_ref(),
-        &tiny_skia::PixmapPaint {
-            quality: tiny_skia::FilterQuality::Bicubic,
-            ..Default::default()
-        },
-        Transform::from_scale(scale, scale),
-        None,
-    );
+/// Drawn rather than blitted from the app icon, and that is not
+/// gold-plating -- the icon is a Windows tile, so it carries its own
+/// dark rounded square, which on this gradient looked like a sticker
+/// stuck over the window. It is also a raster at one size, so it went
+/// soft the moment it was scaled.
+///
+/// The geometry is the app's own `LogoMark` component, unit for unit,
+/// so the installer and the app show the same mark rather than two
+/// drawings of it. Its viewBox is 64 wide, which is what `k` converts.
+fn draw_mark(pixmap: &mut Pixmap, x: f32, y: f32, size: f32) {
+    let k = size / 64.0;
+    let (cx, cy) = (x + 32.0 * k, y + 32.0 * k);
+    let radius = 21.0 * k;
+
+    // The source dasharray is "96 36" against a circumference of 2*pi*21,
+    // which is 131.9 -- so the stroke covers 96/131.9 of the circle, and
+    // the rotation is where it starts. Expressed as the arithmetic
+    // rather than a baked-in 262 degrees, so changing the radius in the
+    // component and here cannot silently disagree.
+    let circumference = std::f32::consts::TAU * 21.0;
+    let sweep = 360.0 * (96.0 / circumference);
+    let start = -58.0_f32;
+
+    // A polyline at one-degree steps. At the sizes this is drawn the
+    // segments are well under a pixel, and it avoids approximating an
+    // arc with cubics for a shape nobody will inspect that closely.
+    let mut path = PathBuilder::new();
+    let steps = sweep.ceil() as i32;
+    for step in 0..=steps {
+        let angle = (start + sweep * (step as f32 / steps as f32)).to_radians();
+        let (px, py) = (cx + radius * angle.cos(), cy + radius * angle.sin());
+        if step == 0 {
+            path.move_to(px, py);
+        } else {
+            path.line_to(px, py);
+        }
+    }
+
+    let Some(ring) = path.finish() else { return };
+    let mut paint = Paint::default();
+    paint.anti_alias = true;
+    paint.shader = match brand_gradient(x, y, size) {
+        Some(shader) => shader,
+        None => return,
+    };
+
+    let stroke = tiny_skia::Stroke {
+        width: 7.0 * k,
+        line_cap: tiny_skia::LineCap::Round,
+        ..Default::default()
+    };
+    pixmap.stroke_path(&ring, &paint, &stroke, Transform::identity(), None);
+
+    let mut centre = PathBuilder::new();
+    centre.push_circle(cx, cy, 8.0 * k);
+    if let Some(centre) = centre.finish() {
+        pixmap.fill_path(&centre, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+/// Violet to cyan across the mark, the same ramp the app uses.
+fn brand_gradient(x: f32, y: f32, size: f32) -> Option<tiny_skia::Shader<'static>> {
+    tiny_skia::LinearGradient::new(
+        Point::from_xy(x, y),
+        Point::from_xy(x + size, y + size),
+        vec![
+            tiny_skia::GradientStop::new(0.0, Color::from_rgba8(0x8B, 0x5C, 0xF6, 255)),
+            tiny_skia::GradientStop::new(1.0, Color::from_rgba8(0x22, 0xD3, 0xEE, 255)),
+        ],
+        SpreadMode::Pad,
+        Transform::identity(),
+    )
 }

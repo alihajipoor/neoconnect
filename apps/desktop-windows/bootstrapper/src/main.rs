@@ -41,9 +41,6 @@ use winit::window::{Window, WindowId, WindowLevel};
 use installer::Progress;
 use ui::{Layout, Phase};
 
-/// The mark, from the same icon set the app itself ships.
-const LOGO_PNG: &[u8] = include_bytes!("../../src-tauri/icons/128x128@2x.png");
-
 fn main() {
     // A build with no installer inside it is a developer artifact and
     // must never be mistaken for a broken download. See build.rs.
@@ -70,7 +67,6 @@ fn main() {
 
 struct App {
     fonts: text::Fonts,
-    logo: Option<Pixmap>,
     window: Option<std::rc::Rc<Window>>,
     surface: Option<Surface<std::rc::Rc<Window>, std::rc::Rc<Window>>>,
     phase: Phase,
@@ -84,7 +80,6 @@ impl App {
     fn new(fonts: text::Fonts) -> Self {
         Self {
             fonts,
-            logo: decode_logo(),
             window: None,
             surface: None,
             phase: Phase::Idle { hovering: false, pressing: false },
@@ -122,7 +117,7 @@ impl App {
         let Some(mut pixmap) = Pixmap::new(size.width, size.height) else { return };
 
         let layout = Layout { scale: window.scale_factor() as f32 };
-        ui::paint(&mut pixmap, &self.fonts, &layout, &self.phase, self.logo.as_ref());
+        ui::paint(&mut pixmap, &self.fonts, &layout, &self.phase);
 
         let Ok(mut buffer) = surface.buffer_mut() else { return };
         // softbuffer wants 0RGB; tiny-skia hands back premultiplied
@@ -300,32 +295,6 @@ fn round_corners(window: &Window) {
             4,
         );
     }
-}
-
-fn decode_logo() -> Option<Pixmap> {
-    let decoder = png::Decoder::new(LOGO_PNG);
-    let mut reader = decoder.read_info().ok()?;
-    let mut raw = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut raw).ok()?;
-
-    // Both channel counts are handled rather than only RGBA. Which one
-    // an icon export produces depends on the tool that made it, and a
-    // silent `None` here is invisible until someone notices the window
-    // has no logo on it -- which is exactly how the first build shipped.
-    let channels = match info.color_type {
-        png::ColorType::Rgba => 4,
-        png::ColorType::Rgb => 3,
-        _ => return None,
-    };
-
-    let mut pixmap = Pixmap::new(info.width, info.height)?;
-    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(raw.chunks_exact(channels)) {
-        // tiny-skia stores premultiplied alpha; PNG does not.
-        let a = if channels == 4 { src[3] as u32 } else { 255 };
-        let p = |c: u8| ((c as u32 * a) / 255) as u8;
-        *dst = tiny_skia::PremultipliedColorU8::from_rgba(p(src[0]), p(src[1]), p(src[2]), a as u8)?;
-    }
-    Some(pixmap)
 }
 
 /// The last-resort way to say something when there is no window yet.

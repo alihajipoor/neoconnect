@@ -28,8 +28,6 @@ tiny-skia = "0.11"
 # version, and shipping a copy of it would be both larger and a
 # licensing question nobody needs.
 fontdue = "0.9"
-# Decodes the app icon for the mark at the top of the window.
-png = "0.17"
 raw-window-handle = "0.6"
 
 [dependencies.windows-sys]
