@@ -10,10 +10,11 @@
 //! 1. The engine brings its tunnel up **passively**: an adapter exists
 //!    and will encrypt anything, but no routes are installed, so the
 //!    machine's traffic carries on exactly as before.
-//! 2. [`engines::routing::install_passive_default`] adds one route
-//!    through that adapter at a metric nothing will ever prefer. This is
-//!    what makes the tunnel reachable to a socket that asks for it by
-//!    name, without making it attractive to anything that does not.
+//! 2. One route through that adapter, at a metric nothing will ever
+//!    prefer, makes the tunnel reachable to a socket that asks for it by
+//!    name without making it attractive to anything that does not. Which
+//!    *shape* of route that has to be is adapter-dependent and is
+//!    settled by trying it -- see [`install_verified_route`].
 //! 3. [`redirect`] intercepts outbound packets, works out which
 //!    application each belongs to, and rewrites the selected ones to a
 //!    local proxy.
@@ -193,6 +194,99 @@ fn default_routes() -> Vec<String> {
         .collect()
 }
 
+/// Installs the passive default route in whichever shape the tunnel
+/// actually works with.
+///
+/// Three rounds were spent predicting this and all three were wrong,
+/// because the prediction is unfalsifiable from where it was made:
+/// `route add` succeeds for both shapes, so an install that "worked"
+/// tells you nothing about whether a socket can use it. WireGuard was
+/// fine on on-link and every Xray and OpenVPN attempt failed with
+/// WSAEHOSTUNREACH on the same machine, which is the signature of a
+/// route the stack has but cannot resolve a next hop over.
+///
+/// So this stops predicting. It installs a shape, opens a real pinned
+/// socket to a real host -- the same probe the ladder uses, over the
+/// exact path a selected app's traffic takes -- and keeps the first
+/// shape that carries it.
+///
+/// If none do, the first shape is reinstalled and the session continues.
+/// That is deliberately no worse than the previous behaviour: the app's
+/// own probe still decides whether to keep this protocol, and failing
+/// the session here would turn a tunnel that works on a network where
+/// the probe hosts happen to be blocked into a protocol that can never
+/// be selected.
+fn install_verified_route(
+    tunnel_address: Ipv4Addr,
+    tunnel_index: u32,
+    tunnel: &proxy::TunnelInterface,
+    log_path: &Path,
+) -> Result<InstalledRoutes, String> {
+    let mut last_error = String::new();
+
+    for shape in routing::PassiveRouteShape::ALL {
+        let mut installed =
+            match routing::install_passive_default_shaped(tunnel_address, tunnel_index, shape) {
+                Ok(installed) => installed,
+                Err(e) => {
+                    last_error = e;
+                    continue;
+                }
+            };
+
+        match proxy::probe(tunnel) {
+            Ok(()) => {
+                append(log_path, &format!("route {}: carries traffic", shape.label()));
+                return Ok(installed);
+            }
+            Err(e) => {
+                append(log_path, &format!("route {}: no traffic ({e})", shape.label()));
+                last_error = e;
+                installed.remove();
+            }
+        }
+    }
+
+    // Nothing carried. Say so loudly, with the state that would explain
+    // it, and fall back to the shape that at least works for WireGuard.
+    append(log_path, &format!("no route shape carried traffic ({last_error})"));
+    for line in default_routes() {
+        append(log_path, &format!("  route  {line}"));
+    }
+    for line in adapter_diagnostics(tunnel_index) {
+        append(log_path, &format!("  adapter  {line}"));
+    }
+
+    routing::install_passive_default_shaped(
+        tunnel_address,
+        tunnel_index,
+        routing::PassiveRouteShape::OnLink,
+    )
+}
+
+/// What the tunnel adapter actually looks like to Windows.
+///
+/// Logged only when every route shape has failed, because that is the
+/// point at which the remaining question is about the adapter rather
+/// than the routing table -- whether the address being bound is really
+/// on it, and whether it is the kind of interface that needs a next hop
+/// resolved at all.
+fn adapter_diagnostics(index: u32) -> Vec<String> {
+    match adapters::list() {
+        Ok(list) => list
+            .into_iter()
+            .filter(|a| a.index == index)
+            .map(|a| {
+                format!(
+                    "{} index {} ipv4 {:?}",
+                    a.name, a.index, a.ipv4
+                )
+            })
+            .collect(),
+        Err(e) => vec![format!("could not enumerate adapters: {e}")],
+    }
+}
+
 /// Keeps the log from growing without bound across many attempts.
 ///
 /// Reconnect churn writes a session header plus a line every ten
@@ -263,6 +357,10 @@ impl SplitTunnel {
             return Ok(());
         }
 
+        // Needed before the session is assembled, because choosing the
+        // route writes to it.
+        let log_path = log_dir.join(LOG_FILE);
+
         let tunnel_adapter = wait_for_addressed_adapter(adapter_name)?;
         let tunnel_address = tunnel_adapter
             .ipv4
@@ -275,11 +373,18 @@ impl SplitTunnel {
             .ipv4
             .ok_or_else(|| "the physical network connection has no address".to_string())?;
 
-        let route = routing::install_passive_default(tunnel_address, tunnel_adapter.index)?;
-
         let nat = Arc::new(flows::Nat::new());
         let tunnel =
             Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
+
+        // The route is chosen by trying it, not by predicting it. See
+        // install_verified_route.
+        let route = install_verified_route(
+            tunnel_address,
+            tunnel_adapter.index,
+            &tunnel,
+            &log_path,
+        )?;
         let relays = match proxy::start(nat.clone(), tunnel.clone()) {
             Ok(relays) => relays,
             Err(e) => {
@@ -309,7 +414,6 @@ impl SplitTunnel {
 
         match redirect::start(redirect, nat, self.selection.clone()) {
             Ok(running) => {
-                let log_path = log_dir.join(LOG_FILE);
                 let logger = Logger::start(log_path.clone(), running.stats.clone(), header);
                 self.active =
                     Some(Active { redirect: running, relays, tunnel, route, logger, log_path });

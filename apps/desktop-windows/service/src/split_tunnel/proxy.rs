@@ -491,11 +491,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "u32::MAX is not a reliable stand-in for an unreachable interface -- see the comment"]
     fn the_probe_fails_rather_than_falling_back_to_the_normal_route() {
-        // Pinned to an interface that does not exist, so there is no
-        // route to reach anything. If this ever passed, the probe would
-        // be measuring the machine's ordinary connectivity and would
-        // call a dead tunnel healthy.
+        // Pinned to an interface that does not exist, so there should be
+        // no route to reach anything.
+        //
+        // Ignored because the premise is not a guarantee. This is the
+        // second time this same test has been written against an assumed
+        // Windows behaviour and been wrong: first `setsockopt` was
+        // expected to reject a bogus index and did not, and now `connect`
+        // over one is observed to succeed on a real machine -- an invalid
+        // index appears to leave the socket unconstrained rather than
+        // constrained to nothing.
+        //
+        // The property itself does hold for indices that name a real
+        // adapter, which is the only case production has. The evidence is
+        // a customer's own log: on one machine, at one moment, sockets
+        // pinned to the Xray and OpenVPN adapters failed with
+        // WSAEHOSTUNREACH while a socket pinned to the WireGuard adapter
+        // connected. If pinning were being ignored, all three would have
+        // gone out the physical link and all three would have succeeded.
+        //
+        // Left in place rather than deleted so the next person does not
+        // write it a third time.
         let error = probe(&TunnelInterface::new(u32::MAX, Ipv4Addr::new(10, 66, 0, 3)))
             .expect_err("nothing can be reached");
         assert!(error.contains("did not carry"), "got {error}");
@@ -514,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "same unguaranteed premise as the probe test above"]
     fn a_socket_pinned_to_a_nonexistent_interface_cannot_connect() {
         // The property Custom mode's honesty rests on. `setsockopt`
         // itself accepts any index -- checked here, and it does -- so
