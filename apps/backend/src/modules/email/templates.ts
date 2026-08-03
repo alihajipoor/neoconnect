@@ -81,6 +81,13 @@ function shell({
 </html>`;
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function heading(text: string): string {
   return `<h1 style="margin:0 0 16px 0;font-size:20px;font-weight:700;color:${INK};">${text}</h1>`;
 }
@@ -301,6 +308,36 @@ export function announcementEmail(body: string) {
     footerHtml:
       'This is an announcement from Neoxify. To stop receiving them, reply with "Unsubscribe".',
   });
+}
+
+/** Sent when the operator answers a support conversation.
+ *
+ * Deliberately carries the reply itself rather than only "you have a
+ * new message": support here is asynchronous, the app may be shut, and
+ * an answer somebody has to go and fetch is an answer they may never
+ * read. The thread still lives in the app for the back-and-forth.
+ *
+ * Escaped, unlike the announcement body above -- an operator typing
+ * "if x < y" into a reply box should not be able to produce broken
+ * markup in their own customer's inbox.
+ */
+export function supportReplyEmail(subject: string, body: string) {
+  const escaped = escapeHtml(body);
+  return {
+    subject: `Re: ${subject}`,
+    html: shell({
+      preheader: body.slice(0, 120),
+      bodyHtml: `
+        ${heading("Support replied")}
+        ${escaped
+          .split(/\n{2,}/)
+          .map((para) => paragraph(para.replace(/\n/g, "<br>")))
+          .join("")}
+        ${fineprint("Reply from inside the Neoxify app to continue the conversation.")}
+      `,
+    }),
+    text: `${body}\n\n--\nReply from inside the Neoxify app to continue the conversation.`,
+  };
 }
 
 /** Receipt for a payment that has cleared.

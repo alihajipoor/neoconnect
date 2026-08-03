@@ -26,6 +26,9 @@ import { SwitchRouteDto } from "./dto/switch-route.dto";
 import { ReferralsService } from "../referrals/referrals.service";
 import { VouchersService } from "../vouchers/vouchers.service";
 import { AppLinksService } from "../app-links/app-links.service";
+import { SupportService } from "../support/support.service";
+import { OpenTicketDto } from "../support/dto/open-ticket.dto";
+import { ReplyTicketDto } from "../support/dto/reply-ticket.dto";
 import { RedeemVoucherDto } from "../vouchers/dto/redeem-voucher.dto";
 import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
@@ -48,6 +51,7 @@ export class CustomerController {
     private readonly plansService: PlansService,
     private readonly referralsService: ReferralsService,
     private readonly vouchersService: VouchersService,
+    private readonly supportService: SupportService,
     private readonly appLinksService: AppLinksService,
     private readonly routesService: RoutesService,
     private readonly billingService: BillingService,
@@ -109,6 +113,41 @@ export class CustomerController {
     @Body() dto: RedeemVoucherDto,
   ) {
     return this.vouchersService.redeem(customer.sub, dto.code);
+  }
+
+  /** Everything the support screen needs in one call: whether new
+   * conversations are open, and the ones this customer already has. */
+  @Get("support")
+  support(@CurrentCustomer() customer: AuthenticatedCustomer) {
+    return this.supportService.overviewFor(customer.sub);
+  }
+
+  @Post("support/tickets")
+  openTicket(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Body() dto: OpenTicketDto,
+  ) {
+    return this.supportService.openTicket(customer.sub, dto.subject, dto.body);
+  }
+
+  /** Fetching a thread also marks it read -- opening it is reading it,
+   * and a separate call the client has to remember is a client that
+   * eventually forgets. */
+  @Get("support/tickets/:id")
+  supportThread(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Param("id") id: string,
+  ) {
+    return this.supportService.threadFor(customer.sub, id);
+  }
+
+  @Post("support/tickets/:id/messages")
+  replyToTicket(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Param("id") id: string,
+    @Body() dto: ReplyTicketDto,
+  ) {
+    return this.supportService.replyAsCustomer(customer.sub, id, dto.body);
   }
 
   @Get("referrals")

@@ -9,6 +9,8 @@ import type {
   RouteOption,
   Subscription,
   SubscriptionPlan,
+  SupportOverview,
+  SupportThread,
 } from "./types";
 
 export const getMe = () => apiRequest<Customer>("/customer/me");
@@ -58,4 +60,23 @@ export const startPayment = (subscriptionId: string, provider: PaymentProvider) 
   apiRequest<PaymentStart>("/customer/billing/payments", {
     method: "POST",
     body: JSON.stringify({ subscriptionId, provider }),
+  });
+
+/** Whether support is open, plus this customer's own conversations. */
+export const getSupportOverview = () => apiRequest<SupportOverview>("/customer/support");
+
+export const openSupportTicket = (subject: string, body: string) =>
+  apiRequest<SupportThread>("/customer/support/tickets", {
+    method: "POST",
+    body: JSON.stringify({ subject, body }),
+  });
+
+/** Fetching a thread also marks it read -- opening it is reading it. */
+export const getSupportThread = (id: string) =>
+  apiRequest<SupportThread>(`/customer/support/tickets/${id}`);
+
+export const replyToSupportTicket = (id: string, body: string) =>
+  apiRequest<SupportThread>(`/customer/support/tickets/${id}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
   });

@@ -213,3 +213,41 @@ export interface AppLinks {
   instagramUrl: string | null;
   telegramUrl: string | null;
 }
+
+/** Async support conversations, rendered in the app as a chat.
+ *
+ * Deliberately not live chat: the operator has an away switch, so
+ * promising presence would be a promise the product cannot keep. */
+export type SupportTicketStatus = "OPEN" | "ANSWERED" | "RESOLVED";
+
+export interface SupportMessage {
+  id: string;
+  ticketId: string;
+  /** Which side wrote it. The customer only ever sees "Support", never
+   * which admin answered. */
+  fromAdmin: boolean;
+  body: string;
+  createdAt: string;
+}
+
+export interface SupportTicket {
+  id: string;
+  customerId: string;
+  customer?: Pick<Customer, "id" | "email">;
+  subject: string;
+  status: SupportTicketStatus;
+  lastMessageAt: string;
+  createdAt: string;
+  updatedAt: string;
+  messages?: SupportMessage[];
+  _count?: { messages: number };
+}
+
+export interface SupportSettings {
+  /** Off closes new conversations only. Threads already running stay
+   * open, so nobody gets cut off mid-sentence. */
+  acceptingTickets: boolean;
+  awayMessage: string | null;
+  replyWithinHours: number | null;
+  updatedAt: string;
+}

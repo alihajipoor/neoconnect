@@ -212,6 +212,7 @@ model Customer {
   referralRewards    ReferralReward[]    @relation("ReferralRewardsEarned")
   referralCredits    ReferralCredit[]    @relation("ReferralCreditsGiven")
   voucherRedemptions VoucherRedemption[]
+  supportTickets     SupportTicket[]
 
   @@index([referredByCustomerId])
   @@map("customers")
@@ -835,4 +836,83 @@ model AppLinks {
   updatedAt    DateTime @updatedAt
 
   @@map("app_links")
+}
+
+// ---------------------------------------------------------------------------
+// Support
+// ---------------------------------------------------------------------------
+
+/// Whether the operator is taking new conversations.
+///
+/// Async tickets rather than live chat, deliberately. This is a
+/// one-person operation with an away switch, so presence is a promise
+/// that could not be kept -- a thread that looks like chat and does not
+/// claim anyone is watching is the honest version of the same feature.
+///
+/// Same lazily-created singleton shape as the other settings models.
+model SupportSettings {
+  id String @id @default(uuid())
+  /// Off means no *new* conversations. Existing ones stay open on
+  /// purpose: cutting somebody off mid-conversation is worse than
+  /// declining to start one.
+  acceptingTickets Boolean @default(false)
+  /// What the app says when new conversations are closed. Null falls
+  /// back to wording the app ships, so an empty setting cannot produce
+  /// a blank explanation.
+  awayMessage      String?
+  /// Roughly how long a reply takes, shown when opening a ticket so
+  /// nobody sits watching an empty thread expecting an instant answer.
+  replyWithinHours Int?    @default(24)
+  updatedAt        DateTime @updatedAt
+
+  @@map("support_settings")
+}
+
+enum SupportTicketStatus {
+  /// Waiting on the operator.
+  OPEN
+  /// The operator has replied; waiting on the customer.
+  ANSWERED
+  /// Done. Either side can reopen by writing again.
+  RESOLVED
+}
+
+model SupportTicket {
+  id         String              @id @default(uuid())
+  customerId String
+  customer   Customer            @relation(fields: [customerId], references: [id])
+  subject    String
+  status     SupportTicketStatus @default(OPEN)
+
+  /// Denormalised so the inbox can sort and the app can show an unread
+  /// dot without loading every message of every thread.
+  lastMessageAt      DateTime  @default(now())
+  /// Drives the app's unread marker: a reply is unread when it is newer
+  /// than this. Held per side because each reads independently.
+  customerLastReadAt DateTime?
+
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  messages  SupportMessage[]
+
+  @@index([customerId])
+  @@index([status, lastMessageAt])
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id       String        @id @default(uuid())
+  ticketId String
+  ticket   SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  /// Which side wrote it, rather than a relation to AdminUser. An admin
+  /// account can be deleted and the conversation still has to read
+  /// correctly afterwards -- and the customer is only ever shown
+  /// "Support", never which person answered.
+  fromAdmin Boolean
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+  @@map("support_messages")
 }
