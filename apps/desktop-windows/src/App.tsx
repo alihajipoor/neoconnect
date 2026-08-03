@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
 import { verifyEmailByToken } from "./lib/auth";
@@ -14,7 +13,7 @@ import { Settings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
 import { UpdateBanner } from "./components/UpdateBanner";
-import { applyStagedUpdate, startUpdateChecks, stagedUpdate, type UpdateState } from "./lib/updates";
+import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 
 type Screen =
   | "loading"
@@ -107,36 +106,24 @@ export default function App() {
     };
   }, []);
 
-  // Background update checking, and applying it on the way out.
-  //
-  // The install is held until quit because replacing the binaries --
-  // the helper service among them -- under a live tunnel would drop the
-  // connection. For someone who cannot reach anything without it, being
-  // cut off without warning is worse than running a version behind.
+  // Background update checking. Downloading is automatic; applying is
+  // not -- see the note below on why there is no install-on-close.
   useEffect(() => startUpdateChecks(setUpdateState), []);
 
-  useEffect(() => {
-    const window = getCurrentWindow();
-    const unlisten = window.onCloseRequested(async (event) => {
-      if (!stagedUpdate()) return;
-      event.preventDefault();
-      try {
-        // Only when nothing is running. The check is cheap and the
-        // consequence of skipping it is a dropped tunnel, so it is
-        // worth making even though the customer is quitting.
-        const status = await invoke<{ connected: boolean }>("vpn_status");
-        if (!status.connected) await applyStagedUpdate(false);
-      } catch {
-        // An update that cannot be applied must never be a window that
-        // cannot be closed. Whatever went wrong, the next launch tries
-        // again.
-      }
-      void window.destroy();
-    });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
-  }, []);
+  // There is deliberately no install-on-close handler here.
+  //
+  // There was one, and it made the app impossible to close. It called
+  // `preventDefault()` and then awaited the install, but the NSIS
+  // installer waits for the app to exit before it can replace the
+  // files -- so the app waited for the installer and the installer
+  // waited for the app. The X button did nothing and the only way out
+  // was Task Manager, on every launch, because the update re-staged
+  // itself twenty seconds later.
+  //
+  // Closing an app is the one interaction that must never be
+  // negotiable. The update now applies only through the explicit
+  // Restart button, which exits first and lets the installer own the
+  // rest -- the path that actually works.
 
   function goToVerify(email: string, password: string) {
     setPendingAuth({ email, password });
@@ -148,8 +135,9 @@ export default function App() {
     try {
       const status = await invoke<{ connected: boolean }>("vpn_status");
       if (status.connected) {
-        // Refusing rather than silently dropping their tunnel. It will
-        // install on quit regardless, so nothing is lost by waiting.
+        // Refusing rather than silently dropping their tunnel:
+        // replacing the binaries under a live VPN -- the helper service
+        // among them -- cuts the connection with no warning.
         setUpdateBlocked(true);
         return;
       }
