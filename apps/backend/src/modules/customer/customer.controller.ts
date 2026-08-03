@@ -23,6 +23,7 @@ import { renderInvoiceHtml } from "../invoices/invoice-document";
 import { CreatePaymentDto } from "../billing/dto/create-payment.dto";
 import { CreateOwnSubscriptionDto } from "./dto/create-own-subscription.dto";
 import { SwitchRouteDto } from "./dto/switch-route.dto";
+import { ReferralsService } from "../referrals/referrals.service";
 import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
 import { AuthenticatedCustomer } from "../customer-auth/types";
@@ -42,6 +43,7 @@ export class CustomerController {
     private readonly subscriptionsService: SubscriptionsService,
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly plansService: PlansService,
+    private readonly referralsService: ReferralsService,
     private readonly routesService: RoutesService,
     private readonly billingService: BillingService,
     private readonly config: ConfigService,
@@ -67,6 +69,19 @@ export class CustomerController {
   @Get("plans")
   plans() {
     return this.plansService.listActive();
+  }
+
+  /** The calling customer's own referral standing: their code, who has
+   * joined with it, and how close the next free month is.
+   *
+   * Invited friends appear by masked address only. The inviter is
+   * entitled to know their invite worked and whether that person became
+   * a paying customer; a readable list of other people's email
+   * addresses is a different thing, and a referral link posted publicly
+   * would turn this into a way to collect them. */
+  @Get("referrals")
+  referrals(@CurrentCustomer() customer: AuthenticatedCustomer) {
+    return this.referralsService.overviewFor(customer.sub);
   }
 
   /** Which payment methods are actually usable right now.

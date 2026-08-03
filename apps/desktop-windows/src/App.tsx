@@ -10,8 +10,18 @@ import { ForgotPassword } from "./screens/ForgotPassword";
 import { Dashboard } from "./screens/Dashboard";
 import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
+import { Referrals } from "./screens/Referrals";
 
-type Screen = "loading" | "login" | "register" | "forgot" | "verify" | "dashboard" | "plans" | "settings";
+type Screen =
+  | "loading"
+  | "login"
+  | "register"
+  | "forgot"
+  | "verify"
+  | "dashboard"
+  | "plans"
+  | "settings"
+  | "referrals";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
@@ -142,7 +152,18 @@ export default function App() {
     );
   }
   if (screen === "settings") {
-    return <Settings onBack={() => setScreen("dashboard")} />;
+    return (
+      <Settings
+        onBack={() => setScreen("dashboard")}
+        onOpenReferrals={() => setScreen("referrals")}
+      />
+    );
+  }
+  if (screen === "referrals") {
+    // Back to Settings rather than the Dashboard: that is where the
+    // customer came from, and dropping them somewhere else is how a
+    // two-tap detour starts feeling like getting lost.
+    return <Referrals onBack={() => setScreen("settings")} />;
   }
   if (screen === "plans") {
     return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;

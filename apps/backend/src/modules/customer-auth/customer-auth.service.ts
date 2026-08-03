@@ -5,11 +5,12 @@ import * as argon2 from "argon2";
 import { randomInt } from "node:crypto";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CustomersService } from "../customers/customers.service";
-import { CreateCustomerDto } from "../customers/dto/create-customer.dto";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { FreeTrialSettingsService } from "../free-trial-settings/free-trial-settings.service";
 import { EmailService } from "../email/email.service";
+import { ReferralsService } from "../referrals/referrals.service";
+import { RegisterCustomerDto } from "./dto/register-customer.dto";
 import { verificationEmail, passwordResetEmail } from "../email/templates";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 import {
@@ -41,6 +42,7 @@ export class CustomerAuthService {
     private readonly subscriptionsService: SubscriptionsService,
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly freeTrialSettingsService: FreeTrialSettingsService,
+    private readonly referralsService: ReferralsService,
     private readonly emailService: EmailService,
   ) {}
 
@@ -53,8 +55,20 @@ export class CustomerAuthService {
    * Returns the same `requiresVerification` shape login() does for an
    * unverified account, so the app has one response shape to branch on
    * regardless of which endpoint got it there. */
-  async register(dto: CreateCustomerDto): Promise<CustomerRequiresVerification> {
+  async register(dto: RegisterCustomerDto): Promise<CustomerRequiresVerification> {
+    // Resolved before the account exists, so a wrong code fails the
+    // signup outright instead of silently creating an account that
+    // credits nobody. A typo here costs the inviter their reward and
+    // neither party would ever find out.
+    const referredByCustomerId = await this.referralsService.resolveReferralCode(dto.referralCode);
+
     const customer = await this.customersService.create(dto);
+    if (referredByCustomerId) {
+      await this.prisma.customer.update({
+        where: { id: customer.id },
+        data: { referredByCustomerId },
+      });
+    }
 
     // One email, not two. The welcome used to be its own send whose
     // entire content was "a separate verification email is on its way" --
@@ -172,6 +186,13 @@ export class CustomerAuthService {
       data: { emailVerifiedAt: new Date(), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
     });
     const trial = await this.grantFreeTrialIfEnabled(customerId);
+
+    // Only now, not at signup. An unverified account is not a person
+    // yet, and mailing on an unconfirmed address would turn a shared
+    // referral link into a way to send mail to strangers. Best-effort
+    // inside, so a notification cannot fail the verification.
+    await this.referralsService.notifyReferrerOfActivation(customerId);
+
     return { alreadyVerified: false, trial };
   }
 

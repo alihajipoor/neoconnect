@@ -14,6 +14,7 @@ export function Register({
   const { t } = useI18n();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [referralCode, setReferralCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -25,7 +26,7 @@ export function Register({
     }
     setError(null);
     setPending(true);
-    const result = await register(email, password);
+    const result = await register(email, password, referralCode.trim() || undefined);
     setPending(false);
     if (result.ok) {
       onNeedsVerification(email, password);
@@ -63,6 +64,24 @@ export function Register({
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          {/* Optional, and labelled as such. It is the only field here
+              somebody can get wrong without knowing -- a mistyped code
+              is refused by the server rather than silently ignored,
+              because losing a friend their reward invisibly is worse
+              than one more thing to correct. */}
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="referralCode">{t("auth.referralCode")}</Label>
+            <Input
+              id="referralCode"
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              dir="ltr"
+              placeholder={t("auth.referralCodeHint")}
+              value={referralCode}
+              onChange={(e) => setReferralCode(e.target.value)}
             />
           </div>
           {error ? (

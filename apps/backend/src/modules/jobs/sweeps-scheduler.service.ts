@@ -17,6 +17,11 @@ const INVOICE_OVERDUE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // Hourly is ample for tidying abandoned purchase attempts -- they are
 // clutter, not a live problem, and the age threshold does the real work.
 const STALE_PENDING_INTERVAL_MS = 60 * 60 * 1000;
+// Referral rewards are earned by accumulating whole months of paid
+// subscription, so nothing can change more than once a day. Running it
+// hourly would only mean a customer hears about their free month a few
+// hours sooner, at the cost of a table scan every hour forever.
+const REFERRAL_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -48,6 +53,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "stale-pending",
       {},
       { repeat: { every: STALE_PENDING_INTERVAL_MS }, jobId: "stale-pending-sweep" },
+    );
+    await this.queue.add(
+      "referral",
+      {},
+      { repeat: { every: REFERRAL_INTERVAL_MS }, jobId: "referral-sweep" },
     );
   }
 }

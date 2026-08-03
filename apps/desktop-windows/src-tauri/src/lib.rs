@@ -58,6 +58,11 @@ pub fn run() {
         // compromised webview cannot write files or raise dialogs of its
         // own.
         .plugin(tauri_plugin_dialog::init())
+        // Copying a referral code. Write-only in the capability below:
+        // the app has no reason to read whatever the customer last
+        // copied, and asking for it would be the kind of permission a
+        // VPN client should never hold.
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_deep_link::init())

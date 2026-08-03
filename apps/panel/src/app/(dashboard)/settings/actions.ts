@@ -44,6 +44,22 @@ export async function updateFreeTrialSettingsAction(input: {
   return result;
 }
 
+export async function updateReferralSettingsAction(input: {
+  enabled: boolean;
+  rewardPlanId?: string;
+  loyalFriendMonths: number;
+  friendsRequired: number;
+  friendMonths: number;
+  rewardDays: number;
+}): Promise<MutationResult<void>> {
+  const result = await apiMutate<void>("/referral-settings", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  if (result.ok) revalidatePath("/settings");
+  return result;
+}
+
 export async function updateEmailSettingsAction(input: {
   enabled: boolean;
   secure: boolean;

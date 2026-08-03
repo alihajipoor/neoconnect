@@ -39,6 +39,7 @@ describe("CustomerAuthService", () => {
   let subscriptionsService: { create: jest.Mock };
   let protocolUsersService: { create: jest.Mock; provisionAll: jest.Mock };
   let freeTrialSettingsService: { get: jest.Mock };
+  let referralsService: { resolveReferralCode: jest.Mock; notifyReferrerOfActivation: jest.Mock };
   let emailService: { sendMail: jest.Mock };
 
   beforeAll(async () => {
@@ -55,6 +56,12 @@ describe("CustomerAuthService", () => {
     subscriptionsService = { create: jest.fn() };
     protocolUsersService = { create: jest.fn(), provisionAll: jest.fn().mockResolvedValue([]) };
     freeTrialSettingsService = { get: jest.fn() };
+    // Resolves to "no referrer" by default, which is what the existing
+    // cases here describe. A test that cares supplies its own.
+    referralsService = {
+      resolveReferralCode: jest.fn().mockResolvedValue(null),
+      notifyReferrerOfActivation: jest.fn().mockResolvedValue(undefined),
+    };
     emailService = { sendMail: jest.fn().mockResolvedValue(true) };
 
     service = new CustomerAuthService(
@@ -65,6 +72,7 @@ describe("CustomerAuthService", () => {
       subscriptionsService as any,
       protocolUsersService as any,
       freeTrialSettingsService as any,
+      referralsService as any,
       emailService as any,
     );
   });
