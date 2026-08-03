@@ -11,6 +11,7 @@ import { Dashboard } from "./screens/Dashboard";
 import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
+import { Support } from "./screens/Support";
 
 type Screen =
   | "loading"
@@ -21,7 +22,8 @@ type Screen =
   | "dashboard"
   | "plans"
   | "settings"
-  | "referrals";
+  | "referrals"
+  | "support";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
@@ -156,6 +158,7 @@ export default function App() {
       <Settings
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
+        onOpenSupport={() => setScreen("support")}
       />
     );
   }
@@ -164,6 +167,10 @@ export default function App() {
     // customer came from, and dropping them somewhere else is how a
     // two-tap detour starts feeling like getting lost.
     return <Referrals onBack={() => setScreen("settings")} />;
+  }
+  if (screen === "support") {
+    // Same reasoning as Referrals: back where they came from.
+    return <Support onBack={() => setScreen("settings")} />;
   }
   if (screen === "plans") {
     return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;

@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ReferralsModule } from "../referrals/referrals.module";
 import { VouchersModule } from "../vouchers/vouchers.module";
 import { AppLinksModule } from "../app-links/app-links.module";
+import { SupportModule } from "../support/support.module";
 import { CustomerController } from "./customer.controller";
 import { CustomersModule } from "../customers/customers.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
@@ -25,6 +26,7 @@ import { PaymentSettingsModule } from "../payment-settings/payment-settings.modu
     ReferralsModule,
     VouchersModule,
     AppLinksModule,
+    SupportModule,
   ],
   controllers: [CustomerController],
 })

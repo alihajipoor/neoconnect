@@ -27,6 +27,7 @@ import { FreeTrialSettingsModule } from "./modules/free-trial-settings/free-tria
 import { ReferralsModule } from "./modules/referrals/referrals.module";
 import { VouchersModule } from "./modules/vouchers/vouchers.module";
 import { AppLinksModule } from "./modules/app-links/app-links.module";
+import { SupportModule } from "./modules/support/support.module";
 import { EmailModule } from "./modules/email/email.module";
 import { AnnouncementsModule } from "./modules/announcements/announcements.module";
 
@@ -67,6 +68,7 @@ import { AnnouncementsModule } from "./modules/announcements/announcements.modul
     ReferralsModule,
     VouchersModule,
     AppLinksModule,
+    SupportModule,
     EmailModule,
     AnnouncementsModule,
   ],

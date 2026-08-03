@@ -179,3 +179,46 @@ export interface AppLinks {
   instagramUrl: string | null;
   telegramUrl: string | null;
 }
+
+/** Support conversations.
+ *
+ * Async tickets, shown as a chat. The distinction matters for what the
+ * UI is allowed to promise: there is nobody watching a socket, so the
+ * screen says when a reply is likely rather than implying one is
+ * coming right now. */
+export type SupportTicketStatus = "OPEN" | "ANSWERED" | "RESOLVED";
+
+export interface SupportMessage {
+  id: string;
+  fromAdmin: boolean;
+  body: string;
+  createdAt: string;
+}
+
+export interface SupportTicketSummary {
+  id: string;
+  subject: string;
+  status: SupportTicketStatus;
+  lastMessageAt: string;
+  createdAt: string;
+  /** Computed by the backend so the app and any future client cannot
+   * disagree about what counts as unread. */
+  unread: boolean;
+}
+
+export interface SupportThread {
+  id: string;
+  subject: string;
+  status: SupportTicketStatus;
+  lastMessageAt: string;
+  messages: SupportMessage[];
+}
+
+export interface SupportOverview {
+  /** Off means no new conversations. Existing ones stay open, so the
+   * app still shows the reply box inside a thread. */
+  acceptingTickets: boolean;
+  awayMessage: string | null;
+  replyWithinHours: number | null;
+  tickets: SupportTicketSummary[];
+}

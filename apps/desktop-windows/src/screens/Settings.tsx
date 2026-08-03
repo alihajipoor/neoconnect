@@ -7,6 +7,7 @@ import {
   Gift,
   KeyRound,
   Languages,
+  LifeBuoy,
   Loader2,
 } from "lucide-react";
 import { changePassword } from "../lib/auth";
@@ -32,9 +33,11 @@ type SectionId = "custom" | "general" | "account";
 export function Settings({
   onBack,
   onOpenReferrals,
+  onOpenSupport,
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
+  onOpenSupport: () => void;
 }) {
   const { t } = useI18n();
   const [section, setSection] = useState<SectionId>("custom");
@@ -103,6 +106,15 @@ export function Settings({
           >
             <Gift className="size-4" />
             <span className="flex-1 text-left">{t("referrals.title")}</span>
+            <ChevronRight className="hidden size-3.5 shrink-0 sm:block" />
+          </button>
+          <button
+            type="button"
+            onClick={onOpenSupport}
+            className="press flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors hover:bg-white/6 hover:text-foreground"
+          >
+            <LifeBuoy className="size-4" />
+            <span className="flex-1 text-left">{t("support.title")}</span>
             <ChevronRight className="hidden size-3.5 shrink-0 sm:block" />
           </button>
         </nav>
