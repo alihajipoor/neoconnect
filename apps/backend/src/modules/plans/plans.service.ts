@@ -38,7 +38,8 @@ export class PlansService {
     return this.prisma.subscriptionPlan.create({
       data: {
         name: dto.name,
-        dataCapBytes: BigInt(dto.dataCapBytes),
+        // Null (or omitted) means unlimited.
+        dataCapBytes: dto.dataCapBytes == null ? null : BigInt(dto.dataCapBytes),
         durationDays: dto.durationDays,
         priceUsd: dto.priceUsd,
         maxConcurrentConnections: dto.maxConcurrentConnections,
@@ -57,7 +58,13 @@ export class PlansService {
       where: { id },
       data: {
         name: dto.name,
-        dataCapBytes: dto.dataCapBytes !== undefined ? BigInt(dto.dataCapBytes) : undefined,
+        // undefined leaves it alone; explicit null makes it unlimited.
+        dataCapBytes:
+          dto.dataCapBytes === undefined
+            ? undefined
+            : dto.dataCapBytes === null
+              ? null
+              : BigInt(dto.dataCapBytes),
         durationDays: dto.durationDays,
         priceUsd: dto.priceUsd,
         maxConcurrentConnections: dto.maxConcurrentConnections,

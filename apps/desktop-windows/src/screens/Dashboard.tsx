@@ -808,11 +808,18 @@ export function Dashboard({
     [routes, protocolUser],
   );
 
+  /** Null cap means unlimited, and that is a different thing from a
+   * cap we could not read. Both end up without a bar -- there is no
+   * proportion to draw -- but only one of them should say "unlimited",
+   * so the two cases stay distinguishable rather than collapsing into
+   * one silent fallback. */
   const usage = useMemo(() => {
     if (!subscription) return null;
     const used = Number(subscription.dataUsedBytes);
+    if (!Number.isFinite(used)) return null;
+    if (subscription.dataCapBytes === null) return { used, cap: null as number | null, percent: 0 };
     const cap = Number(subscription.dataCapBytes);
-    if (!Number.isFinite(used) || !Number.isFinite(cap) || cap <= 0) return null;
+    if (!Number.isFinite(cap) || cap <= 0) return null;
     return { used, cap, percent: Math.min(100, (used / cap) * 100) };
   }, [subscription]);
 
@@ -1033,7 +1040,9 @@ export function Dashboard({
                     {usage ? (
                       <>
                         {formatBytes(usage.used)}{" "}
-                        <span className="font-normal text-muted-foreground">/ {formatBytes(usage.cap)}</span>
+                        <span className="font-normal text-muted-foreground">
+                          / {usage.cap === null ? t("dash.unlimited") : formatBytes(usage.cap)}
+                        </span>
                       </>
                     ) : (
                       formatBytes(Number(subscription.dataUsedBytes))
@@ -1045,7 +1054,7 @@ export function Dashboard({
                     the whole point of a quota, and it's the one thing a
                     number alone can't show at a glance. Turns amber past
                     80% so running low is noticed before it bites. */}
-                {usage ? (
+                {usage && usage.cap !== null ? (
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/8">
                     <div
                       className="h-full rounded-full transition-[width] duration-700"

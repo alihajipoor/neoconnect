@@ -263,7 +263,15 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
                   buried sentence. Speed is here because it is the second
                   thing anyone asks after price. */}
               <div className="flex flex-col gap-2 rounded-lg bg-black/20 p-3">
-                <PlanFact icon={HardDrive} label={t("plans.data")} value={formatBytes(plan.dataCapBytes)} />
+                <PlanFact
+                  icon={HardDrive}
+                  label={t("plans.data")}
+                  value={
+                    plan.dataCapBytes === null
+                      ? t("dash.unlimited")
+                      : formatBytes(plan.dataCapBytes)
+                  }
+                />
                 <PlanFact
                   icon={Gauge}
                   label={t("plans.speed")}

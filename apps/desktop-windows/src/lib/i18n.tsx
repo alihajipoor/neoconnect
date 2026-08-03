@@ -92,6 +92,7 @@ const en = {
 
   "auth.referralCode": "Referral code (optional)",
   "auth.referralCodeHint": "From a friend who invited you",
+  "dash.unlimited": "Unlimited",
   "support.title": "Support",
   "support.subtitle": "Ask us anything — we answer as soon as we can.",
   "support.new": "New message",
@@ -300,6 +301,7 @@ const fa: Record<TranslationKey, string> = {
 
   "auth.referralCode": "کد معرف (اختیاری)",
   "auth.referralCodeHint": "از دوستی که شما را دعوت کرده",
+  "dash.unlimited": "نامحدود",
   "support.title": "پشتیبانی",
   "support.subtitle": "هر سوالی دارید بپرسید — در اولین فرصت پاسخ می‌دهیم.",
   "support.new": "پیام جدید",

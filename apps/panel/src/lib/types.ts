@@ -116,7 +116,8 @@ export type SubscriptionStatus = "ACTIVE" | "SUSPENDED" | "EXPIRED" | "CANCELLED
 export interface SubscriptionPlan {
   id: string;
   name: string;
-  dataCapBytes: string;
+  /** Null means unlimited traffic. */
+  dataCapBytes: string | null;
   durationDays: number;
   priceUsd: string;
   maxConcurrentConnections: number | null;
