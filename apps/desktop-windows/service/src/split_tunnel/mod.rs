@@ -123,8 +123,7 @@ impl Logger {
                 // one, and an ever-growing file in a directory the user
                 // cannot easily reach is its own small problem.
                 let _ = std::fs::write(&path, format!("{header}\n"));
-                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    std::thread::sleep(LOG_INTERVAL);
+                while sleep_unless_stopped(&stop, LOG_INTERVAL) {
                     append(&path, &stats.summary());
                 }
                 append(&path, &format!("stopped {}", stats.summary()));
@@ -138,6 +137,33 @@ impl Logger {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+/// Waits, unless asked to stop first. Returns whether the wait ran to
+/// completion rather than being cut short.
+///
+/// A plain `sleep` is what made Disconnect appear to hang. Both the
+/// logger and the flow-expiry thread are joined during teardown, so a
+/// ten-second sleep between log lines meant up to ten seconds of the app
+/// sitting on "Disconnecting..." with the tunnel already gone --
+/// reported as exactly that. Waiting in short steps costs nothing and
+/// bounds the delay at one step.
+pub(super) fn sleep_unless_stopped(
+    stop: &std::sync::atomic::AtomicBool,
+    total: std::time::Duration,
+) -> bool {
+    const STEP: std::time::Duration = std::time::Duration::from_millis(200);
+    let deadline = std::time::Instant::now() + total;
+    loop {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        std::thread::sleep(STEP.min(deadline - now));
     }
 }
 

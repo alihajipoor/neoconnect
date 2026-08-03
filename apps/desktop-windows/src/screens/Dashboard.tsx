@@ -513,14 +513,34 @@ export function Dashboard({
 
       // Proof rather than inference: did a packet just make the round
       // trip through this tunnel.
-      const egress = await verifyEgress(baselineIpRef.current);
-      const carrying = egress.state === "throughTunnel" || egress.state === "indeterminate";
+      //
+      // Which packet depends on the mode, and getting that wrong is not
+      // cosmetic. In Custom mode this app is deliberately not one of the
+      // selected apps, so asking a server what address it sees us from
+      // correctly reports the tunnel bypassed -- and the code below
+      // correctly concluded the tunnel was dead, went yellow, and then
+      // tore down a tunnel that was carrying the customer's game
+      // perfectly well. Confirmed from the split-tunnel log: 328 flows
+      // matched and 703 packets redirected while the UI said "not
+      // carrying traffic".
+      //
+      // The same fix as the connect path, which had this corrected
+      // already -- this poll was simply missed.
+      let carrying: boolean;
+      if (splitTunnelActive) {
+        carrying = await invoke("vpn_probe_split_tunnel")
+          .then(() => true)
+          .catch(() => false);
+      } else {
+        const egress = await verifyEgress(baselineIpRef.current);
+        carrying = egress.state === "throughTunnel" || egress.state === "indeterminate";
+        if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
+      }
       const live = carrying && fromStatus === "connected";
 
       if (live) {
         strikesRef.current = 0;
         setConnectionState("connected");
-        if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
         return;
       }
 
@@ -543,7 +563,11 @@ export function Dashboard({
     }, HEALTH_POLL_MS);
 
     return () => clearInterval(id);
-  }, [connectionState]);
+    // splitTunnelActive is a dependency, not incidental: the poll picks
+    // its evidence from it, and a stale `false` would send a Custom-mode
+    // session straight back down the egress-check path this exists to
+    // avoid.
+  }, [connectionState, splitTunnelActive]);
 
   async function handleConnectToggle() {
     if (!protocolUser) return;

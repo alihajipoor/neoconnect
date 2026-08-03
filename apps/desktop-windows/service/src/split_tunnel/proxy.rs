@@ -401,8 +401,10 @@ fn read_udp_replies(
 
 /// Retires idle flows and closes the sockets that served them.
 fn expire_flows(nat: Arc<Nat>, stop: Arc<AtomicBool>, upstreams: Arc<UdpUpstreams>) {
-    while !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(EXPIRY_INTERVAL);
+    // Interruptible, because this thread is joined during teardown: a
+    // plain five-second sleep between sweeps meant Disconnect could sit
+    // for five seconds after everything else was already torn down.
+    while super::sleep_unless_stopped(&stop, EXPIRY_INTERVAL) {
         for nat_port in nat.expire_idle() {
             upstreams.close(nat_port);
         }
