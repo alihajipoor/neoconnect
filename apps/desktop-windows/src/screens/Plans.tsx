@@ -6,6 +6,7 @@ import type { PaymentProvider, PaymentStart, SubscriptionPlan } from "../lib/typ
 import { formatBytes } from "../lib/utils";
 import { Button, Card } from "../components/ui";
 import { Logo } from "../components/Logo";
+import { RedeemVoucher } from "../components/RedeemVoucher";
 import { useI18n } from "../lib/i18n";
 
 type Stage =
@@ -205,6 +206,11 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
           {error}
         </p>
       ) : null}
+
+      {/* Above the plans, because somebody holding a code is not
+          shopping -- making them scan the list first to find the one
+          thing that does not involve paying is the wrong way round. */}
+      <RedeemVoucher onRedeemed={onActivated} />
 
       {/* A grid, not a column. Plans are meant to be compared, and on a
           desktop-width window putting them side by side does that in one

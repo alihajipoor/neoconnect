@@ -12,7 +12,18 @@ import { InvoicesModule } from "../invoices/invoices.module";
 import { PaymentSettingsModule } from "../payment-settings/payment-settings.module";
 
 @Module({
-  imports: [CustomersModule, SubscriptionsModule, ProtocolUsersModule, PlansModule, RoutesModule, BillingModule, InvoicesModule, PaymentSettingsModule, ReferralsModule],
+  imports: [
+    CustomersModule,
+    SubscriptionsModule,
+    ProtocolUsersModule,
+    PlansModule,
+    RoutesModule,
+    BillingModule,
+    InvoicesModule,
+    PaymentSettingsModule,
+    ReferralsModule,
+    VouchersModule,
+  ],
   controllers: [CustomerController],
 })
 export class CustomerModule {}
