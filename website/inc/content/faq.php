@@ -9,9 +9,12 @@
  * guarantee. Please keep it that way.
  *
  * Optional key:
- *   requires  'free_trial' hides the entry unless free_trial_enabled is on in
- *             config.php, so the site never advertises a trial you have
- *             turned off in the panel.
+ *   requires  Hides the entry unless the matching switch is on in config.php.
+ *             'free_trial' and 'referrals' are both admin-gated features
+ *             whose panel settings default to OFF, so the site stays quiet
+ *             about them until you have actually turned them on. Advertising
+ *             a reward scheme that isn't running is a support ticket, not a
+ *             feature.
  */
 
 defined('NX') || exit;
@@ -92,6 +95,29 @@ return array(
         'a' => array(
             'en' => 'Yes. Every payment produces an invoice you can open and print from inside the app, whether you paid by card or with crypto.',
             'fa' => 'بله. برای هر پرداخت یک فاکتور صادر می‌شود که می‌توانید از داخل برنامه باز و چاپ کنید، چه با کارت پرداخت کرده باشید چه با رمزارز.',
+        ),
+    ),
+
+    array(
+        'q' => array(
+            'en' => 'I have a voucher code — where do I use it?',
+            'fa' => 'کد ووچر دارم — کجا واردش کنم؟',
+        ),
+        'a' => array(
+            'en' => 'Inside the app. Sign in, redeem the code, and a valid one activates your plan straight away — there is no payment step to go through.',
+            'fa' => 'داخل خود برنامه. وارد حساب شوید و کد را وارد کنید؛ کد معتبر بلافاصله پلن شما را فعال می‌کند و نیازی به مرحله پرداخت نیست.',
+        ),
+    ),
+
+    array(
+        'requires' => 'referrals',
+        'q' => array(
+            'en' => 'Is there a referral programme?',
+            'fa' => 'برنامه دعوت از دوستان دارید؟',
+        ),
+        'a' => array(
+            'en' => 'Yes. Invite friends from inside the app and you earn free time once they subscribe. The app shows who has joined through your link and how close you are to the next reward.',
+            'fa' => 'بله. از داخل برنامه دوستانتان را دعوت کنید و وقتی مشترک شوند زمان رایگان دریافت می‌کنید. برنامه نشان می‌دهد چه کسانی با لینک شما عضو شده‌اند و تا پاداش بعدی چقدر مانده است.',
         ),
     ),
 

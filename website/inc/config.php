@@ -72,29 +72,36 @@ return array(
 
     'github_repo' => 'alihajipoor/neoconnect',
 
-    // The Windows client's published release tag, e.g. 'desktop-v0.1.0'.
+    // The Windows client's published release tag.
     //
-    // Leave this EMPTY until a desktop-v* tag has actually been pushed and
-    // .github/workflows/release-desktop-windows.yml has published its assets.
-    // While it is empty the download page honestly says the Windows app is
-    // not downloadable yet, instead of linking to a URL that 404s. Fill it in
-    // and the real download button, version number and checksum link all
-    // switch on -- no other edit needed.
-    'windows_release_tag' => '',
+    // Empty means "not released yet", and the download page says so rather
+    // than linking to a URL that 404s. It is filled in now: desktop-v0.9.0
+    // is published and all of its asset URLs were checked for a real 200
+    // before this was set.
+    //
+    // Pinned to a tag on purpose, rather than using GitHub's
+    // /releases/latest/download/ shortcut. "Latest" means the newest release
+    // in the whole repository, and this repo also cuts agent releases (v0.2.1
+    // and friends). The moment an agent release is newer than the desktop
+    // one, that shortcut would resolve to a release with no installer in it
+    // and start 404ing silently. Since the app updates itself after the first
+    // install, a pinned tag going a version stale costs nothing.
+    'windows_release_tag' => 'desktop-v0.9.0',
 
-    // Asset filename inside that release. Tauri's NSIS bundle names it after
-    // the app's productName and version, so this changes with each release.
+    // Asset filename inside that release.
     //
-    // NOTE: this reads "Neoxify_" because the site was renamed ahead of the
-    // app. The desktop client's tauri.conf.json still has productName
-    // "NeoConnect" at the time of writing, so a release cut today would
-    // actually publish NeoConnect_0.1.0_x64-setup.exe. Whatever the bundle
-    // genuinely produces is what has to go here -- check the release assets
-    // rather than trusting this line.
-    'windows_asset' => 'Neoxify_0.1.0_x64-setup.exe',
+    // This is the bootstrapper, which has a STABLE name across releases --
+    // unlike the NSIS bundle beside it (Neoxify_0.8.0_x64-setup.exe), which
+    // carries the version and so changes every time. Prefer the stable name:
+    // it means bumping the tag above is usually the only edit a release needs.
+    'windows_asset' => 'Neoxify-Setup.exe',
 
     // Human-readable version shown on the download page.
-    'windows_version' => '0.1.0',
+    //
+    // This is the APP's version (tauri.conf.json), which is not the same as
+    // the release tag -- desktop-v0.9.0 ships an app that reports 0.8.0. What
+    // a user sees in the app is what belongs here.
+    'windows_version' => '0.8.0',
 
     // The Windows installer is not code-signed yet (a deliberate decision --
     // signing is deferred until closer to public launch). While this is true,
@@ -121,6 +128,16 @@ return array(
     // plan's own duration.
     'free_trial_enabled' => false,
     'free_trial_days' => 30,
+
+    // ---------------------------------------------------------------
+    // Referral programme
+    // ---------------------------------------------------------------
+
+    // Same reasoning as the free trial above: ReferralSettings.enabled
+    // defaults to false in the panel, so the site says nothing about
+    // referrals until you have actually switched it on there. Advertising a
+    // reward scheme that isn't running is a support ticket, not a feature.
+    'referrals_enabled' => false,
 
     // ---------------------------------------------------------------
     // Forms

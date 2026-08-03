@@ -79,6 +79,16 @@ require NX_INC . '/partials/head.php';
           <?php endif; ?>
         </div>
 
+        <?php if ($nx_available): ?>
+          <div class="notice u-mt-md">
+            <h3>
+              <?php echo nx_icon('refresh'); ?>
+              <?php echo nx_e('download.autoupdate.title'); ?>
+            </h3>
+            <p><?php echo nx_e('download.autoupdate.body'); ?></p>
+          </div>
+        <?php endif; ?>
+
         <?php if (nx_cfg('windows_unsigned', true)): ?>
           <div class="notice notice--warn u-mt-md">
             <h3><?php echo nx_e('download.unsigned.title'); ?></h3>

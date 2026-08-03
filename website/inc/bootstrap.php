@@ -320,6 +320,12 @@ function nx_free_trial_enabled()
     return (bool) nx_cfg('free_trial_enabled', false);
 }
 
+/** Whether the site should advertise the referral programme. */
+function nx_referrals_enabled()
+{
+    return (bool) nx_cfg('referrals_enabled', false);
+}
+
 /**
  * Render a data allowance. Whole multiples of 1024 GB read better as TB.
  *
