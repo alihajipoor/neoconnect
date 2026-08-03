@@ -155,8 +155,11 @@ require NX_INC . '/partials/head.php';
           'encryption' => 'lock',
           'stealth'    => 'shield',
           'access'     => 'route',
-          'hotupdate'  => 'activity',
+          'custom'     => 'layers',
           'locations'  => 'map-pin',
+          'hotupdate'  => 'activity',
+          'updates'    => 'refresh',
+          'support'    => 'message',
           'usage'      => 'chart',
       );
       foreach ($nx_features as $nx_key => $nx_glyph): ?>
@@ -285,11 +288,17 @@ require NX_INC . '/partials/head.php';
               <li>
                 <?php echo nx_icon('check'); ?>
                 <span><?php
-                  $nx_amount = nx_format_data($nx_plan['data_gb']);
-                  echo $nx_monthly
-                      ? nx_e('home.pricing.data', array('amount' => $nx_amount))
-                      : nx_e('home.pricing.data_period', array(
-                            'amount' => $nx_amount, 'days' => $nx_days));
+                  // A null cap means an unlimited plan, matching the backend's
+                  // nullable dataCapBytes -- not a missing value.
+                  if (!isset($nx_plan['data_gb']) || $nx_plan['data_gb'] === null) {
+                      echo nx_e('home.pricing.data_unlimited');
+                  } else {
+                      $nx_amount = nx_format_data($nx_plan['data_gb']);
+                      echo $nx_monthly
+                          ? nx_e('home.pricing.data', array('amount' => $nx_amount))
+                          : nx_e('home.pricing.data_period', array(
+                                'amount' => $nx_amount, 'days' => $nx_days));
+                  }
                 ?></span>
               </li>
 
@@ -360,13 +369,22 @@ require NX_INC . '/partials/head.php';
     </div>
 
     <div class="faq">
-      <?php foreach ($nx_faq as $nx_item):
-        // Entries can declare a requirement so the site never advertises
-        // something that is switched off -- see inc/content/faq.php.
-        if (isset($nx_item['requires'])
-            && $nx_item['requires'] === 'free_trial'
-            && !nx_free_trial_enabled()) {
-            continue;
+      <?php
+      // Entries can declare a requirement so the site never advertises
+      // something that is switched off in the panel -- see inc/content/faq.php.
+      $nx_switches = array(
+          'free_trial' => nx_free_trial_enabled(),
+          'referrals'  => nx_referrals_enabled(),
+      );
+      foreach ($nx_faq as $nx_item):
+        if (isset($nx_item['requires'])) {
+            $nx_req = $nx_item['requires'];
+            // An unknown requirement hides the entry rather than showing it:
+            // failing closed is the safe direction when the claim might not
+            // be true.
+            if (empty($nx_switches[$nx_req])) {
+                continue;
+            }
         }
         ?>
         <details>

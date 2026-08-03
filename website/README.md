@@ -23,29 +23,40 @@ say the wrong thing until they are done.
 | **Real prices** | `inc/content/plans.php` | The numbers in there are placeholder structure, not your pricing. They must match the plans in the admin panel, which is what actually bills people. |
 | **Persian review** | `inc/lang/fa.php` | The translation was drafted, not written by a native speaker. Any line you delete falls back to English automatically, so it is safe to remove one you don't like. |
 | **Send a real test message** | — | Submit the contact form once on the live host and confirm it reaches `info@neoxify.com` — including checking the spam folder. See the domain-split note below for why this needs verifying rather than assuming. |
-| **Windows release tag** | `inc/config.php` | See below. |
+| **Feature switches** | `inc/config.php` | `free_trial_enabled` and `referrals_enabled` both default to **off**, because their panel settings do too. Turn each on here only once it is genuinely running in the panel. |
 
-## The download page has two real states
+## The download page
 
-`windows_release_tag` in `inc/config.php` is empty, because no `desktop-v*`
-tag has ever been pushed — `gh release list` shows only the agent's `v0.1.0`.
-There is no published installer to link to.
+Live, pointing at `desktop-v0.9.0`. Every asset URL was checked for a real
+`200` before being wired up.
 
-While it is empty, the download page honestly says the app is not out yet and
-offers a "tell me when it's ready" link. It never shows a button that 404s.
-
-Once you push a `desktop-v*` tag and the release workflow publishes its
-assets, set:
+The link goes to **`Neoxify-Setup.exe`**, the bootstrapper, whose filename is
+stable across releases — unlike the NSIS bundle beside it
+(`Neoxify_0.8.0_x64-setup.exe`), which carries the version and so changes
+every time. That means a new release is usually a one-line edit:
 
 ```php
-'windows_release_tag' => 'desktop-v0.1.0',
-'windows_asset' => 'Neoxify_0.1.0_x64-setup.exe',
-'windows_version' => '0.1.0',
+'windows_release_tag' => 'desktop-v0.9.0',   // bump this
+'windows_asset' => 'Neoxify-Setup.exe',      // stable, leave alone
+'windows_version' => '0.8.0',                // the APP version, not the tag
 ```
 
-and the real download button, version line and checksum link all switch on.
-Set `windows_unsigned` to `false` once a signing certificate exists, which
-removes the SmartScreen explainer.
+Note the tag and the app version genuinely differ — `desktop-v0.9.0` ships an
+app that reports `0.8.0`. What the user sees inside the app is what belongs in
+`windows_version`.
+
+**Why a pinned tag and not `/releases/latest/download/`.** "Latest" means the
+newest release in the whole repository, and this repo also cuts agent releases
+(`v0.2.1` and friends). The first time an agent release is newer than the
+desktop one, that shortcut resolves to a release containing no installer and
+starts 404ing silently. Pinning avoids that, and since **the app updates
+itself after the first install**, a tag going a version stale costs nothing —
+bumping it is housekeeping, not urgent.
+
+Leaving `windows_release_tag` empty flips the page back to an honest "not
+released yet" panel with a "tell me when it's ready" link, rather than a button
+that 404s. Set `windows_unsigned` to `false` once a signing certificate exists,
+which removes the SmartScreen explainer.
 
 ## Deploying
 

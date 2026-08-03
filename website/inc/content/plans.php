@@ -22,7 +22,10 @@
  *   tagline        one line under the name, per locale
  *   price          number, in the currency below
  *   duration_days  billing period; 30 renders as "/month"
- *   data_gb        data cap in GB (1024 renders as "1 TB")
+ *   data_gb        data cap in GB (1024 renders as "1 TB"), or null for an
+ *                  unlimited plan. Mirrors SubscriptionPlan.dataCapBytes,
+ *                  which is nullable now that plans can be metered or
+ *                  unlimited per plan.
  *   connections    max simultaneous devices, or null to not mention it.
  *                  Maps to SubscriptionPlan.maxConcurrentConnections, which
  *                  is nullable -- leave null unless the plan really sets one.

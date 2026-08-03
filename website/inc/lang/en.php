@@ -93,6 +93,18 @@ return array(
     'home.features.locations.title' => 'Choose where you come out',
     'home.features.locations.body' => 'Pick a location in the app and change it whenever you like. Server addresses are delivered by our backend, so they can be rotated without you reinstalling or re-importing anything.',
 
+    // Mirrors the app's own wording for the feature ("Custom mode"), so
+    // someone who reads this here recognises the switch when they find it in
+    // Settings.
+    'home.features.custom.title' => 'Choose what goes through it',
+    'home.features.custom.body' => 'Custom mode sends only the apps you pick through the tunnel — your game, say — while everything else carries on over your normal connection. Chosen per application, not per website.',
+
+    'home.features.support.title' => 'Help without leaving the app',
+    'home.features.support.body' => 'Support is a conversation inside the app, where we can already see your account instead of asking you to describe it. Ask, get on with your day, and pick up the reply when it lands.',
+
+    'home.features.updates.title' => 'It keeps itself current',
+    'home.features.updates.body' => 'Install it once. From then on the app updates itself, so you are never hunting a download page for a fix you did not know you needed.',
+
     'home.features.usage.title' => 'Your data, counted openly',
     'home.features.usage.body' => 'Usage is measured per account and shown in the app, so you always know exactly where you stand against your plan instead of guessing.',
 
@@ -175,6 +187,8 @@ return array(
     'home.pricing.per_days' => 'per :days days',
     'home.pricing.cta' => 'Get started',
     'home.pricing.data' => ':amount of data',
+    // Matches the app's own "Unlimited" label for a plan with no cap.
+    'home.pricing.data_unlimited' => 'Unlimited data',
     'home.pricing.data_period' => ':amount every :days days',
     'home.pricing.connections' => 'Up to :count devices connected at once',
 
@@ -222,6 +236,9 @@ return array(
     'download.unreleased.title' => 'The Windows installer is not published yet',
     'download.unreleased.body' => 'The app is built and tested — we are finishing the release packaging. If you would like to be told the moment it goes out, send us a message and we will let you know.',
     'download.unreleased.cta' => 'Tell me when it is out',
+
+    'download.autoupdate.title' => 'This is the only download you will need',
+    'download.autoupdate.body' => 'Once it is installed, the app keeps itself up to date — it checks for new versions and installs them on its own. You will not have to come back to this page for the next release.',
 
     'download.unsigned.title' => 'About the warning Windows will show you',
     'download.unsigned.body' => 'The installer is not code-signed yet, so Windows SmartScreen may show a blue "Windows protected your PC" screen the first time you run it. Choose More info, then Run anyway. A signing certificate is on the list before public launch; until then you can verify the download yourself against the published SHA-256 checksum.',
