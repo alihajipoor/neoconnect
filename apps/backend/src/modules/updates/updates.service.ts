@@ -39,46 +39,29 @@ export interface UpdateManifest {
 @Injectable()
 export class UpdatesService {
   private readonly logger = new Logger(UpdatesService.name);
-  private cache: { at: number; release: GithubRelease | null } | null = null;
+  private cache: { at: number; build: NewestBuild | null } | null = null;
 
   constructor(private readonly config: ConfigService) {}
 
   /** The manifest Tauri's updater expects, or null when the caller is
    * already on the newest version. */
   async manifestFor(currentVersion: string): Promise<UpdateManifest | null> {
-    const release = await this.latestRelease();
-    if (!release) return null;
+    const newest = await this.newestBuild();
+    if (!newest) return null;
+    if (compareVersions(newest.version, currentVersion) <= 0) return null;
 
-    const version = release.tag_name.slice(TAG_PREFIX.length);
-    if (compareVersions(version, currentVersion) <= 0) return null;
-
-    // Find the payload via its signature rather than by guessing the
-    // installer's filename. Tauri's Windows updater artifact has been
-    // named several different ways across versions; the one invariant
-    // is that the thing to download is whatever the `.sig` sits beside.
-    const signatureAsset = release.assets.find((asset) => asset.name.endsWith(".sig"));
-    if (!signatureAsset) {
-      this.logger.warn(`Release ${release.tag_name} has no .sig asset -- no update offered`);
-      return null;
-    }
-    const payloadName = signatureAsset.name.slice(0, -".sig".length);
-    if (!release.assets.some((asset) => asset.name === payloadName)) {
-      this.logger.warn(`Release ${release.tag_name} has ${signatureAsset.name} but no ${payloadName}`);
-      return null;
-    }
-
-    const signature = await fetchText(signatureAsset.browser_download_url);
+    const signature = await fetchText(newest.signatureUrl);
     if (!signature) return null;
 
     const base = (this.config.get<string>("publicApiUrl") ?? "").replace(/\/$/, "");
 
     return {
-      version,
+      version: newest.version,
       // Release notes are generated from commit messages, which are
       // written for other developers. Better to say nothing than to
       // show a customer a changelog about Prisma migrations.
-      notes: release.name && release.name !== release.tag_name ? release.name : "",
-      pub_date: release.published_at,
+      notes: newest.name && newest.name !== newest.tag ? newest.name : "",
+      pub_date: newest.publishedAt,
       platforms: {
         "windows-x86_64": {
           signature: signature.trim(),
@@ -86,32 +69,46 @@ export class UpdatesService {
           // matters: if GitHub becomes unreachable for the customers
           // who most need fixes, the payload host changes here, with
           // no new client release.
-          url: `${base}/updates/download/${encodeURIComponent(release.tag_name)}/${encodeURIComponent(payloadName)}`,
+          url: `${base}/updates/download/${encodeURIComponent(newest.tag)}/${encodeURIComponent(newest.payloadName)}`,
         },
       },
     };
   }
 
-  /** Streams a release asset through this API.
+  /** Where a release asset really lives.
    *
-   * Looked up against the real release rather than trusting the path,
-   * so this cannot be turned into an open proxy for arbitrary URLs. */
-  async assetUrl(tag: string, assetName: string): Promise<string> {
-    const release = await this.latestRelease();
-    if (!release || release.tag_name !== tag) {
-      throw new NotFoundException("Unknown release");
+   * Checked against the release rather than trusted from the path, and
+   * rebuilt rather than echoed, so this endpoint cannot be turned into
+   * an open redirect to an arbitrary URL. */
+  async downloadUrl(tag: string, assetName: string): Promise<string> {
+    const newest = await this.newestBuild();
+    if (!newest || newest.tag !== tag || newest.payloadName !== assetName) {
+      throw new NotFoundException("Unknown release asset");
     }
-    const asset = release.assets.find((candidate) => candidate.name === assetName);
-    if (!asset) {
-      throw new NotFoundException("Unknown asset");
-    }
-    return asset.browser_download_url;
+    return `https://github.com/${GITHUB_REPO}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(assetName)}`;
   }
 
-  private async latestRelease(): Promise<GithubRelease | null> {
-    if (this.cache && Date.now() - this.cache.at < CACHE_MS) return this.cache.release;
+  /** The newest *build*, by the version the installer will actually
+   * produce -- not by the tag, and not by publication date.
+   *
+   * Both of those were wrong, and each in a way that shipped. Taking
+   * the most recently published release assumes date order and version
+   * order agree, which re-tagging after a failed build breaks. Taking
+   * the version from the tag assumes whoever tagged it had bumped the
+   * app first, which is exactly what went wrong when desktop-v0.9.0 was
+   * pushed against a tree still at 0.8.0 and published a 0.8.0
+   * installer under a 0.9.0 name.
+   *
+   * The filename cannot lie in the same way: it is written by the
+   * bundler from the version compiled into the app, so it is the
+   * version the customer will report after installing. Read it from
+   * there and a mislabelled release simply advertises what it really
+   * contains, which no client will loop on.
+   */
+  private async newestBuild(): Promise<NewestBuild | null> {
+    if (this.cache && Date.now() - this.cache.at < CACHE_MS) return this.cache.build;
 
-    let release: GithubRelease | null = null;
+    let build: NewestBuild | null = null;
     try {
       const response = await fetch(
         `https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30`,
@@ -119,13 +116,15 @@ export class UpdatesService {
       );
       if (response.ok) {
         const releases = (await response.json()) as GithubRelease[];
-        release =
-          releases.find(
-            (candidate) =>
-              candidate.tag_name.startsWith(TAG_PREFIX) &&
-              !candidate.draft &&
-              !candidate.prerelease,
-          ) ?? null;
+        for (const release of releases) {
+          if (!release.tag_name.startsWith(TAG_PREFIX)) continue;
+          if (release.draft || release.prerelease) continue;
+          const described = describe(release);
+          if (!described) continue;
+          if (!build || compareVersions(described.version, build.version) > 0) {
+            build = described;
+          }
+        }
       } else {
         this.logger.warn(`GitHub releases request failed: ${response.status}`);
       }
@@ -135,9 +134,47 @@ export class UpdatesService {
 
     // A failed lookup is cached too, briefly. Otherwise an outage at
     // GitHub turns every client launch into a fresh outbound request.
-    this.cache = { at: Date.now(), release };
-    return release;
+    this.cache = { at: Date.now(), build };
+    return build;
   }
+}
+
+interface NewestBuild {
+  tag: string;
+  name: string | null;
+  version: string;
+  payloadName: string;
+  signatureUrl: string;
+  publishedAt: string;
+}
+
+/** Pulls the payload, its signature and its real version out of a
+ * release, or nothing if the release is not a usable update.
+ *
+ * The payload is found via its signature rather than by guessing the
+ * installer's filename -- Tauri has named the Windows updater artifact
+ * several different ways across versions, and the one invariant is that
+ * the file to download is whatever the .sig sits beside. */
+function describe(release: GithubRelease): NewestBuild | null {
+  const signatureAsset = release.assets.find((asset) => asset.name.endsWith(".sig"));
+  if (!signatureAsset) return null;
+
+  const payloadName = signatureAsset.name.slice(0, -".sig".length);
+  if (!release.assets.some((asset) => asset.name === payloadName)) return null;
+
+  // Neoxify_0.8.1_x64-setup.exe -- written by the bundler from the
+  // version compiled into the binary.
+  const match = payloadName.match(/_(\d+\.\d+\.\d+)_/);
+  if (!match) return null;
+
+  return {
+    tag: release.tag_name,
+    name: release.name,
+    version: match[1],
+    payloadName,
+    signatureUrl: signatureAsset.browser_download_url,
+    publishedAt: release.published_at,
+  };
 }
 
 async function fetchText(url: string): Promise<string | null> {

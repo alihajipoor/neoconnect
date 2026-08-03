@@ -25,7 +25,7 @@ export class UpdatesController {
     @Param("asset") asset: string,
     @Res() res: Response,
   ) {
-    const url = await this.updates.assetUrl(tag, asset);
+    const url = await this.updates.downloadUrl(tag, asset);
     // Redirect rather than stream. Streaming would put the whole
     // installer through this box on every update; a redirect keeps the
     // control in our hands -- the client still had to ask us where to
