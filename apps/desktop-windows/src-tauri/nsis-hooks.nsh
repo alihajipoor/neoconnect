@@ -1,5 +1,13 @@
 ; Installer hooks that register and remove the privileged helper
-; service.
+; service, plus the one asset the custom installer page needs.
+;
+; The logo path is resolved here rather than in installer.nsi because
+; `__FILEDIR__` is the directory of the file being parsed, and this file
+; is included by absolute path while installer.nsi is rendered into
+; target/release/nsis/x64/ -- where a path relative to src-tauri would
+; point at nothing.
+!define NX_LOGO "${__FILEDIR__}\installer-logo.bmp"
+
 ;
 ; This is where the product's one and only elevation happens. The
 ; installer already runs elevated (installMode is perMachine), so
