@@ -1,4 +1,5 @@
 import type { Invoice } from "@prisma/client";
+import { BRAND_LOGO_SVG_MONO } from "../brand/logo";
 
 /** A printable invoice, rendered as HTML.
  *
@@ -35,7 +36,37 @@ function formatDate(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
 
-export function renderInvoiceHtml(invoice: Invoice, customerEmail: string, businessName = "Neoxify"): string {
+/** Where to reach the business, shown under the invoice.
+ *
+ * An invoice is the document somebody digs out when they have a
+ * question about a charge, so it is exactly the wrong place to be
+ * unreachable. Optional and individually nullable, same rule as
+ * everywhere else these links appear: render only what is set, never a
+ * link that goes nowhere. */
+export interface InvoiceContactLinks {
+  websiteUrl?: string | null;
+  discordUrl?: string | null;
+  telegramUrl?: string | null;
+}
+
+export function renderInvoiceHtml(
+  invoice: Invoice,
+  customerEmail: string,
+  businessName = "Neoxify",
+  links: InvoiceContactLinks = {},
+): string {
+  const contact = [
+    { url: links.websiteUrl, label: "Website" },
+    { url: links.discordUrl, label: "Discord" },
+    { url: links.telegramUrl, label: "Telegram" },
+  ]
+    .filter((entry): entry is { url: string; label: string } => Boolean(entry.url))
+    .map(
+      (entry) =>
+        `<a href="${escapeHtml(entry.url)}">${entry.label}</a>`,
+    )
+    .join('<span class="sep">&middot;</span>');
+
   const lineItems = (invoice.lineItemsJson as unknown as LineItem[]) ?? [];
   const rows = lineItems
     .map(
@@ -71,7 +102,14 @@ export function renderInvoiceHtml(invoice: Invoice, customerEmail: string, busin
     background-image: linear-gradient(135deg,#8b5cf6 0%,#7c3aed 60%,#5b21b6 100%);
     color: #fff; padding: 28px 36px; display: flex; justify-content: space-between; align-items: flex-start;
   }
-  .brand { font-size: 20px; font-weight: 700; letter-spacing: .2px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  /* Sized here rather than on the SVG so the same markup can be reused
+     at another size without editing the asset. The mark draws itself in
+     currentColor, which the white header text already sets -- the
+     gradient version would lose its violet half against this
+     background. */
+  .brand .mark svg { display: block; width: 34px; height: 34px; }
+  .brand .name { font-size: 20px; font-weight: 700; letter-spacing: .2px; }
   .doc { text-align: right; }
   .doc .num { font-family: 'SFMono-Regular', Consolas, Menlo, monospace; font-size: 14px; opacity: .95; }
   .doc .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; opacity: .8; }
@@ -94,6 +132,9 @@ export function renderInvoiceHtml(invoice: Invoice, customerEmail: string, busin
   .num { text-align: right; font-family: 'SFMono-Regular', Consolas, Menlo, monospace; white-space: nowrap; }
   tfoot td { border: 0; padding-top: 18px; font-size: 16px; font-weight: 700; }
   footer { padding: 20px 36px; border-top: 1px solid #eceaf5; background: #fbfaff; color: #6b7280; font-size: 12px; }
+  footer .contact { margin-top: 8px; }
+  footer .contact a { color: #7c3aed; text-decoration: none; font-weight: 600; }
+  footer .sep { color: #c9c4de; margin: 0 8px; }
   .print { max-width: 720px; margin: 16px auto 0; text-align: right; }
   .print button {
     border: 0; border-radius: 10px; padding: 10px 20px; cursor: pointer; color: #fff; font-weight: 600;
@@ -110,7 +151,10 @@ export function renderInvoiceHtml(invoice: Invoice, customerEmail: string, busin
 <body>
   <div class="sheet">
     <header>
-      <div class="brand">&#9889; ${escapeHtml(businessName)}</div>
+      <div class="brand">
+        <span class="mark">${BRAND_LOGO_SVG_MONO}</span>
+        <span class="name">${escapeHtml(businessName)}</span>
+      </div>
       <div class="doc">
         <div class="label">Invoice</div>
         <div class="num">${escapeHtml(invoice.invoiceNumber)}</div>
@@ -157,6 +201,7 @@ export function renderInvoiceHtml(invoice: Invoice, customerEmail: string, busin
             ? `Payable by ${formatDate(invoice.dueAt)}.`
             : "Thank you."
       }
+      ${contact ? `<div class="contact">${contact}</div>` : ""}
     </footer>
   </div>
   <div class="print"><button onclick="window.print()">Save as PDF</button></div>

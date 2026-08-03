@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { AdminRole, InvoiceStatus } from "@prisma/client";
 import { InvoicesService } from "./invoices.service";
 import { renderInvoiceHtml } from "./invoice-document";
+import { AppLinksService } from "../app-links/app-links.service";
 import { CustomersService } from "../customers/customers.service";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
@@ -16,6 +17,7 @@ export class InvoicesController {
   constructor(
     private readonly invoices: InvoicesService,
     private readonly customers: CustomersService,
+    private readonly appLinks: AppLinksService,
   ) {}
 
   @Get()
@@ -43,7 +45,7 @@ export class InvoicesController {
   async document(@Param("id") id: string): Promise<string> {
     const invoice = await this.invoices.get(id);
     const customer = await this.customers.get(invoice.customerId);
-    return renderInvoiceHtml(invoice, customer.email);
+    return renderInvoiceHtml(invoice, customer.email, undefined, await this.appLinks.get());
   }
 
   /** Voiding is restricted beyond the usual admin guard: it changes what

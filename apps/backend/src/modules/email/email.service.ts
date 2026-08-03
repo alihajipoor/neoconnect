@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import * as nodemailer from "nodemailer";
 import { EmailSettingsService, ResolvedEmailSettings } from "./email-settings.service";
+import { EmailBrandService } from "./email-brand.service";
 
 export interface SendMailInput {
   to: string;
@@ -53,7 +54,10 @@ export class EmailService {
   // without needing a process restart, without reconnecting on every send.
   private cachedTransporter: { fingerprint: string; transporter: nodemailer.Transporter } | null = null;
 
-  constructor(private readonly emailSettingsService: EmailSettingsService) {}
+  constructor(
+    private readonly emailSettingsService: EmailSettingsService,
+    private readonly brand: EmailBrandService,
+  ) {}
 
   async sendMail(input: SendMailInput): Promise<boolean> {
     const settings = await this.emailSettingsService.resolve();
@@ -71,7 +75,10 @@ export class EmailService {
         from: { name: "Neoxify", address: settings.fromAddress },
         to: input.to,
         subject: input.subject,
-        html: input.html,
+        // The single point every message passes through, which is
+        // why the brand chrome is substituted here rather than in
+        // each template -- a call site cannot forget it.
+        html: await this.brand.apply(input.html),
         text: input.text,
         ...(input.bulk ? { headers: bulkHeaders(settings.fromAddress) } : {}),
       });

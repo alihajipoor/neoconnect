@@ -15,6 +15,20 @@ const MUTED = "#6b7280";
 const BORDER = "#eceaf5";
 const BG = "#f4f4fa";
 
+/** Filled in by EmailBrandService just before the message is sent.
+ *
+ * Slots rather than parameters because these two things -- where this
+ * API answers from, and which community links the operator has set --
+ * are runtime facts that live in config and the database, while every
+ * template here is a pure function called from a dozen places. Threading
+ * them through all of those would make each call site responsible for
+ * remembering brand chrome it has no opinion about, and one that forgot
+ * would silently send an unbranded email. Substituting at the single
+ * point every message already passes through cannot be forgotten, and
+ * keeps the templates synchronous and testable. */
+export const BRAND_LOGO_SLOT = "<!--neoxify:logo-->";
+export const BRAND_LINKS_SLOT = "<!--neoxify:links-->";
+
 const FONT_STACK =
   "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
@@ -56,8 +70,12 @@ function shell({
           <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(139,92,246,0.12);">
             <tr>
               <td style="background-color:${PRIMARY};background-image:linear-gradient(135deg,${PRIMARY} 0%,${PRIMARY_DARK} 60%,#5b21b6 100%);padding:28px 32px;">
-                <span style="font-size:22px;line-height:1;vertical-align:middle;">&#9889;</span>
-                <span style="font-size:19px;font-weight:700;color:#ffffff;letter-spacing:0.2px;vertical-align:middle;margin-left:8px;">Neoxify</span>
+                <!-- The mark as an image, with the name beside it as
+                     real text. Images are blocked by default in a good
+                     number of clients, and a header that is entirely an
+                     image becomes a blank bar when that happens -- the
+                     text means the brand always survives. -->
+                ${BRAND_LOGO_SLOT}<span style="font-size:19px;font-weight:700;color:#ffffff;letter-spacing:0.2px;vertical-align:middle;">Neoxify</span>
               </td>
             </tr>
             <tr>
@@ -67,6 +85,7 @@ function shell({
             </tr>
             <tr>
               <td style="padding:20px 32px;border-top:1px solid ${BORDER};background:#fbfaff;">
+                ${BRAND_LINKS_SLOT}
                 <p style="margin:0;font-size:12px;color:${MUTED};">
                   You're receiving this because you have a Neoxify account.
                   ${footerHtml ?? "If something here looks wrong, you can safely ignore this email."}
