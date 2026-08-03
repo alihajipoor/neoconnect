@@ -730,7 +730,34 @@ export function Dashboard({
             // Nothing this app does goes through the tunnel, so it has
             // no way to observe an exit address. Blank is honest.
             setExitIp(null);
-            verdict = carried ? "connected" : "degraded";
+
+            if (carried) {
+              verdict = "connected";
+            } else {
+              // Custom mode failing is not the protocol failing, and
+              // conflating the two cost the customer every protocol
+              // they ever picked.
+              //
+              // This branch used to go straight to "degraded", so the
+              // ladder rejected the attempt and walked down to the next
+              // candidate -- every time, on every protocol, landing on
+              // WireGuard. From the outside that looked like "Stealth
+              // never connects". It was not: the tunnel was up and
+              // healthy, and only the split-tunnel redirect could not
+              // reach through it.
+              //
+              // So ask the tunnel itself. A live handshake means the
+              // protocol works and deserves to be kept; the customer
+              // gets what they chose, and the fact that their selected
+              // apps are NOT being routed is reported rather than
+              // hidden behind a silent downgrade.
+              const status = await invoke<VpnStatus>("vpn_status").catch(() => null);
+              const tunnelAlive = status?.health.state === "alive";
+              verdict = tunnelAlive ? "connected" : "degraded";
+              if (tunnelAlive) {
+                reason = `${t("dash.customModeDetached")} ${reason}`.trim();
+              }
+            }
           } else {
             const egress = await confirmEgress(baselineIpRef.current, verifyBudget);
             setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
