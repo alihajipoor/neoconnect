@@ -29,6 +29,7 @@ import { VouchersModule } from "./modules/vouchers/vouchers.module";
 import { AppLinksModule } from "./modules/app-links/app-links.module";
 import { SupportModule } from "./modules/support/support.module";
 import { BrandModule } from "./modules/brand/brand.module";
+import { UpdatesModule } from "./modules/updates/updates.module";
 import { EmailModule } from "./modules/email/email.module";
 import { AnnouncementsModule } from "./modules/announcements/announcements.module";
 
@@ -71,6 +72,7 @@ import { AnnouncementsModule } from "./modules/announcements/announcements.modul
     AppLinksModule,
     SupportModule,
     BrandModule,
+    UpdatesModule,
     EmailModule,
     AnnouncementsModule,
   ],
