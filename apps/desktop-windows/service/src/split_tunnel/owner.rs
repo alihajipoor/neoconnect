@@ -92,7 +92,8 @@ pub struct OwnerLookup {
     udp: HashMap<u16, u32>,
     built_at: Instant,
     last_refresh: Instant,
-    images: HashMap<u32, Option<String>>,
+    /// Only successful resolutions live here -- see image_for_port.
+    images: HashMap<u32, String>,
 }
 
 impl OwnerLookup {
@@ -129,7 +130,22 @@ impl OwnerLookup {
         // Resolved once per process rather than per connection: an
         // image path cannot change while a process lives, and a busy
         // browser opens far more connections than processes.
-        self.images.entry(pid).or_insert_with(|| image_path(pid)).as_deref()
+        //
+        // Only *successful* lookups are cached, and that is the whole
+        // point. Caching a failure was a real bug: `OpenProcess` can
+        // fail transiently, the entry then survives for as long as the
+        // process is in the connection table, and every later
+        // connection from it resolves to "unknown" and is left
+        // untunnelled. Reported exactly that way -- Chrome quietly
+        // stopped using the VPN and only came back after restarting
+        // it, because restarting is what finally retired the poisoned
+        // process id.
+        if !self.images.contains_key(&pid) {
+            if let Some(path) = image_path(pid) {
+                self.images.insert(pid, path);
+            }
+        }
+        self.images.get(&pid).map(String::as_str)
     }
 
     fn pid_for(&self, transport: Transport, port: u16) -> Option<u32> {

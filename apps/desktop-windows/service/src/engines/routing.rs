@@ -294,12 +294,23 @@ pub fn install_passive_default(
     let (dest, mask) = PASSIVE_DEFAULT;
     let mut installed = InstalledRoutes::none();
 
-    // The tunnel's own address as next hop is what the full-tunnel Xray
-    // path already does successfully. Point-to-point adapters are
-    // sometimes happier with an unspecified next hop, so that is tried
-    // second rather than failing the feature on a formality.
-    add_route(dest, mask, &tunnel_address.to_string(), tunnel_index, PASSIVE_METRIC)
-        .or_else(|_| add_route(dest, mask, "0.0.0.0", tunnel_index, PASSIVE_METRIC))
+    // On-link first, the adapter's own address only as a fallback.
+    //
+    // The order matters and getting it wrong is not visible from here.
+    // Adding a route via the adapter's own address *succeeds* on Xray's
+    // TUN and then does not work: a socket pinned to that interface
+    // fails to connect with WSAEHOSTUNREACH, so Custom mode looked
+    // broken for every Xray protocol while WireGuard was fine, and the
+    // ladder fell through to WireGuard every time. Because the command
+    // succeeded, the fallback below never ran.
+    //
+    // On-link is also what the spike used -- `New-NetRoute -NextHop
+    // 0.0.0.0` -- and the spike is the only version of this that was
+    // ever proven end to end against a real node.
+    add_route(dest, mask, "0.0.0.0", tunnel_index, PASSIVE_METRIC)
+        .or_else(|_| {
+            add_route(dest, mask, &tunnel_address.to_string(), tunnel_index, PASSIVE_METRIC)
+        })
         .map_err(|e| format!("could not make the tunnel reachable for selected apps: {e}"))?;
 
     installed.destinations.push((dest.to_string(), mask.to_string(), tunnel_index));
