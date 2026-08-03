@@ -46,7 +46,7 @@ const LOG_FILE: &str = "openvpn.log";
 /// Distinct from the one Xray creates ("neoconnect0"), so the two
 /// engines can never contend for the same adapter when switching
 /// between them.
-const ADAPTER_NAME: &str = "Neoxify-OpenVPN";
+pub const ADAPTER_NAME: &str = "Neoxify-OpenVPN";
 
 /// Makes sure a Wintun adapter exists for OpenVPN to attach to.
 ///
@@ -90,7 +90,7 @@ fn ensure_adapter(engines: &Engines) -> Result<(), String> {
     Ok(())
 }
 
-fn build_config(p: &OpenvpnProfile) -> Result<String, String> {
+fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     let (host, port) = p
         .endpoint
         .rsplit_once(':')
@@ -105,8 +105,16 @@ fn build_config(p: &OpenvpnProfile) -> Result<String, String> {
         None => String::new(),
     };
 
+    // Custom mode wants the tunnel up but routing nothing, so the
+    // server's pushed `redirect-gateway` has to be ignored. `route-nopull`
+    // is OpenVPN's own directive for exactly that: the tunnel and its
+    // address still come up, no routes are installed, and the split
+    // tunnel adds the one route it needs itself.
+    let routing = if passive { "route-nopull\n" } else { "" };
+
     Ok(format!(
         "client\n\
+         {routing}\
          dev tun\n\
          windows-driver wintun\n\
          dev-node {adapter}\n\
@@ -136,13 +144,17 @@ fn build_config(p: &OpenvpnProfile) -> Result<String, String> {
     ))
 }
 
-pub fn connect(engines: &Engines, profile: &OpenvpnProfile) -> Result<Child, String> {
+pub fn connect(
+    engines: &Engines,
+    profile: &OpenvpnProfile,
+    passive: bool,
+) -> Result<Child, String> {
     let exe = engines.engine_path("openvpn.exe")?;
     engines.engine_path("wintun.dll")?;
     ensure_adapter(engines)?;
 
     let config_path = engines.config_path(CONFIG_FILE);
-    write_config(&config_path, &build_config(profile)?)?;
+    write_config(&config_path, &build_config(profile, passive)?)?;
 
     let exe_dir = exe
         .parent()
@@ -178,16 +190,27 @@ mod tests {
     }
 
     #[test]
+    fn custom_mode_refuses_the_servers_pushed_routes() {
+        // OpenVPN is told where to route by the server, so unlike the
+        // other engines the passive behaviour cannot come from omitting
+        // something -- route-nopull has to be added, or the pushed
+        // redirect-gateway takes the default route and Custom mode
+        // silently becomes a full tunnel.
+        assert!(build_config(&profile(), true).unwrap().contains("route-nopull"));
+        assert!(!build_config(&profile(), false).unwrap().contains("route-nopull"));
+    }
+
+    #[test]
     fn splits_endpoint_into_openvpn_remote_syntax() {
         // OpenVPN wants `remote <host> <port>`, space-separated -- not
         // the host:port form every other engine here takes.
-        let conf = build_config(&profile()).unwrap();
+        let conf = build_config(&profile(), false).unwrap();
         assert!(conf.contains("remote 203.0.113.5 1194"));
     }
 
     #[test]
     fn inlines_all_three_pem_blocks() {
-        let conf = build_config(&profile()).unwrap();
+        let conf = build_config(&profile(), false).unwrap();
         assert!(conf.contains("<ca>\n-----BEGIN CERTIFICATE-----"));
         assert!(conf.contains("<cert>\n-----BEGIN CERTIFICATE-----"));
         assert!(conf.contains("<key>\n-----BEGIN PRIVATE KEY-----"));
@@ -199,19 +222,19 @@ mod tests {
         // script-security 0 that is refused and the connection dies
         // immediately after opening the adapter -- see the module doc for
         // why losing that layer is acceptable here.
-        assert!(build_config(&profile()).unwrap().contains("script-security 2"));
+        assert!(build_config(&profile(), false).unwrap().contains("script-security 2"));
     }
 
     #[test]
     fn uses_the_shared_wintun_driver() {
-        assert!(build_config(&profile()).unwrap().contains("windows-driver wintun"));
+        assert!(build_config(&profile(), false).unwrap().contains("windows-driver wintun"));
     }
 
     #[test]
     fn binds_to_its_own_adapter_rather_than_whatever_is_free() {
         // Without naming an adapter, OpenVPN searches for any free
         // Wintun device and fails when Xray is holding the only one.
-        let conf = build_config(&profile()).unwrap();
+        let conf = build_config(&profile(), false).unwrap();
         assert!(conf.contains("dev-node Neoxify-OpenVPN"));
     }
 
@@ -220,7 +243,7 @@ mod tests {
         // Omitting this against a tls-crypt server is invisible: the
         // server drops the client's packets rather than rejecting them,
         // so the connection hangs with an empty log.
-        let conf = build_config(&profile()).unwrap();
+        let conf = build_config(&profile(), false).unwrap();
         assert!(conf.contains("<tls-crypt>\n-----BEGIN OpenVPN Static key V1-----"));
         assert!(conf.contains("</tls-crypt>"));
     }
@@ -229,6 +252,6 @@ mod tests {
     fn omits_the_tls_crypt_block_when_the_server_has_no_key() {
         let mut p = profile();
         p.tls_crypt_key = None;
-        assert!(!build_config(&p).unwrap().contains("tls-crypt"));
+        assert!(!build_config(&p, false).unwrap().contains("tls-crypt"));
     }
 }

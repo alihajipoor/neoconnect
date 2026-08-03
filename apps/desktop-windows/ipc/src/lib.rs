@@ -37,6 +37,77 @@ pub enum Request {
     Connect { profile: ConnectProfile },
     Disconnect,
     Status,
+    /// Replaces the Custom-mode selection: which applications, if any,
+    /// are the only ones whose traffic goes through the tunnel.
+    ///
+    /// Separate from `Connect` so the customer can change their mind
+    /// without dropping a live session, and sent on connect as well so
+    /// the service never has to assume a previous setting survived a
+    /// restart.
+    SetSplitTunnel { config: SplitTunnelConfig },
+}
+
+/// Custom mode, as the app expresses it.
+///
+/// `enabled` and an empty `apps` is a real, reachable state -- the
+/// customer turned the toggle on and has not chosen anything yet. It
+/// must not be read as "tunnel everything": that is the opposite of what
+/// the toggle promises, and it would arrive as a surprise full tunnel.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitTunnelConfig {
+    pub enabled: bool,
+    /// Absolute paths to executables. Paths rather than process names,
+    /// because a name matches whatever happens to be called that, and
+    /// paths rather than process ids, because a modern application is
+    /// several processes and the set changes while it runs.
+    pub apps: Vec<String>,
+}
+
+/// The most applications one customer can select.
+///
+/// Not a technical limit -- matching is a hash lookup either way -- but a
+/// bound on a list that arrives over IPC and is held in memory by a
+/// LocalSystem service.
+const MAX_SELECTED_APPS: usize = 64;
+
+impl SplitTunnelConfig {
+    /// Checks the selection before the service acts on it.
+    ///
+    /// These paths never reach a config file, so this is not the
+    /// injection defence the profile validation is. It is a sanity
+    /// check: a relative path or a directory cannot be matched against
+    /// what a running process reports, so accepting one would mean a
+    /// selection that silently never applies.
+    pub fn validate(&self) -> Checked {
+        if self.apps.len() > MAX_SELECTED_APPS {
+            return Err(reject("apps", "selects too many applications"));
+        }
+        for app in &self.apps {
+            // Deliberately not `check_single_line`, which allows only
+            // printable ASCII. That is right for values written into a
+            // config file and wrong here: a customer whose Windows
+            // username or game folder is in Persian, Russian or Chinese
+            // has a perfectly ordinary path this would reject. Control
+            // characters are still refused, since nothing legitimate has
+            // them and a path is compared against what a process
+            // reports.
+            if app.is_empty() || app.len() > 32_767 {
+                return Err(reject("apps", "is not a usable path"));
+            }
+            if app.chars().any(|c| c.is_control()) {
+                return Err(reject("apps", "contains control characters"));
+            }
+            let looks_absolute = app.as_bytes().get(1) == Some(&b':') || app.starts_with(r"\\");
+            if !looks_absolute {
+                return Err(reject("apps", "must be a full path to an executable"));
+            }
+            if !app.to_lowercase().ends_with(".exe") {
+                return Err(reject("apps", "must name an executable"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,6 +130,16 @@ pub enum Response {
         protocol: Option<String>,
         #[serde(default)]
         health: TunnelHealth,
+        /// Whether Custom mode is actually intercepting right now, as
+        /// opposed to being switched on in the app's settings.
+        ///
+        /// Reported because the two genuinely differ: turning the toggle
+        /// on mid-session does not retrofit itself onto a tunnel that
+        /// was brought up to carry everything, and the customer needs to
+        /// be told that rather than left believing only their game is
+        /// being routed.
+        #[serde(default)]
+        split_tunnel_active: bool,
     },
     Error { message: String },
 }

@@ -8,18 +8,20 @@
 //! invisibly.
 
 mod openvpn;
-mod split_tunnel;
-mod routing;
+pub mod routing;
 mod wireguard;
 mod xray;
 
 use routing::InstalledRoutes;
 
 use std::io;
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use neoconnect_ipc::{ConnectProfile, TunnelHealth};
+
+use crate::split_tunnel::SplitTunnel;
 
 /// Suppresses the console window a child process would otherwise flash
 /// on screen. Every spawn in this service sets it -- the user must never
@@ -50,11 +52,34 @@ pub struct Engines {
     exe_dir: PathBuf,
     config_dir: PathBuf,
     active: Option<Active>,
+    /// Custom mode. Owned here because this is the only component that
+    /// knows which protocol is live, and the split tunnel has to follow
+    /// it -- an implementation bound to one adapter would stop working
+    /// the moment failover moved the customer, and would do it silently.
+    split_tunnel: SplitTunnel,
 }
 
 impl Engines {
     pub fn new(exe_dir: PathBuf, config_dir: PathBuf) -> Self {
-        Self { exe_dir, config_dir, active: None }
+        Self { exe_dir, config_dir, active: None, split_tunnel: SplitTunnel::new() }
+    }
+
+    /// Replaces the customer's Custom-mode selection.
+    ///
+    /// Takes effect immediately for connections made from now on. It
+    /// deliberately does not restart anything: a customer adding a
+    /// second game should not drop the first one's session.
+    ///
+    /// Changing it does change how the *next* tunnel is brought up,
+    /// though -- passive rather than full -- so turning Custom mode on
+    /// or off while connected only takes full effect on reconnect. The
+    /// UI says so rather than pretending otherwise.
+    pub fn set_split_tunnel(&mut self, enabled: bool, apps: Vec<String>) {
+        self.split_tunnel.set_selection(enabled, apps);
+    }
+
+    pub fn split_tunnel_running(&self) -> bool {
+        self.split_tunnel.is_running()
     }
 
     /// Resolves an engine binary from the service's own directory.
@@ -83,9 +108,15 @@ impl Engines {
         profile.validate().map_err(|e| e.to_string())?;
         self.disconnect()?;
 
+        // Decided once, up front. Every engine below has to know whether
+        // to install its own routes, and asking again per branch invites
+        // one of them to disagree -- which would show up as a full
+        // tunnel for a customer who asked for one app.
+        let passive = self.split_tunnel.wants_passive_tunnel();
+
         match profile {
             ConnectProfile::Wireguard(p) => {
-                wireguard::connect(self, p)?;
+                wireguard::connect(self, p, passive)?;
                 self.active = Some(Active::WireguardTunnel);
             }
             // Both Xray protocols take the same path: one engine, one
@@ -104,13 +135,21 @@ impl Engines {
                     _ => unreachable!("outer match restricts this to the Xray protocols"),
                 };
 
-                let mut child = xray::connect(self, &outbound)?;
+                let mut child = xray::connect(self, &outbound, passive)?;
                 // Xray creates the adapter but routes nothing into it, so
                 // the tunnel is inert until this succeeds. Failing here
                 // must take the engine down with it rather than leave a
                 // process running that reports connected and carries no
-                // traffic.
-                let routes = match xray::install_routes(&outbound) {
+                // traffic. In Custom mode the adapter still has to be
+                // given an address -- a socket pinned to an interface
+                // with none has no source to send from -- but nothing is
+                // routed into it.
+                let prepared = if passive {
+                    xray::prepare_passive(&outbound).map(|_| InstalledRoutes::none())
+                } else {
+                    xray::install_routes(&outbound)
+                };
+                let routes = match prepared {
                     Ok(routes) => routes,
                     Err(e) => {
                         let _ = child.kill();
@@ -121,7 +160,7 @@ impl Engines {
                 self.active = Some(Active::Child { protocol, child, routes });
             }
             ConnectProfile::Openvpn(p) => {
-                let child = openvpn::connect(self, p)?;
+                let child = openvpn::connect(self, p, passive)?;
                 self.active = Some(Active::Child {
                     protocol: "OPENVPN",
                     child,
@@ -129,10 +168,44 @@ impl Engines {
                 });
             }
         }
+
+        if passive {
+            self.start_split_tunnel(profile)?;
+        }
+        Ok(())
+    }
+
+    /// Brings Custom mode up against the tunnel that was just started.
+    ///
+    /// A failure here tears the engine down rather than leaving it
+    /// running. A passive tunnel with no redirect carries nothing at
+    /// all, so reporting success would tell the customer they were
+    /// protected while every application, selected or not, went out in
+    /// the clear.
+    fn start_split_tunnel(&mut self, profile: &ConnectProfile) -> Result<(), String> {
+        let adapter = adapter_name_for(profile);
+        let node = match node_address(profile) {
+            Ok(node) => node,
+            Err(e) => {
+                let _ = self.disconnect();
+                return Err(e);
+            }
+        };
+
+        if let Err(e) = self.split_tunnel.start(adapter, node) {
+            let _ = self.disconnect();
+            return Err(e);
+        }
         Ok(())
     }
 
     pub fn disconnect(&mut self) -> Result<(), String> {
+        // Before the engine, so no packet is ever rewritten towards a
+        // proxy whose upstream has just lost its tunnel. Stopping the
+        // redirect also restores ordinary routing for the selected apps,
+        // which is the state they should be left in.
+        self.split_tunnel.stop();
+
         let result = match self.active.take() {
             None => {
                 // Still ask wireguard.exe to remove the tunnel service:
@@ -209,6 +282,11 @@ impl Engines {
                     // as we notice, not only on an explicit disconnect.
                     routes.remove();
                     self.active = None;
+                    // The tunnel this was pinned to has gone. Selected
+                    // apps fall back to the ordinary route rather than
+                    // failing, which is the decided behaviour -- and the
+                    // UI is responsible for saying so.
+                    self.split_tunnel.detach_tunnel();
                     (false, None, TunnelHealth::Down)
                 }
                 // Xray and OpenVPN have no equivalent of WireGuard's
@@ -219,6 +297,59 @@ impl Engines {
             },
         }
     }
+}
+
+/// The network adapter a given protocol's engine creates.
+///
+/// Custom mode has to pin its sockets to it by index, so this mapping
+/// has to match what each engine actually names its adapter -- guarded
+/// by a test below rather than left to memory.
+fn adapter_name_for(profile: &ConnectProfile) -> &'static str {
+    match profile {
+        ConnectProfile::Wireguard(_) => wireguard::TUNNEL_NAME,
+        ConnectProfile::XrayVlessReality(_)
+        | ConnectProfile::XrayVlessTls(_)
+        | ConnectProfile::XrayTrojan(_) => xray::ADAPTER_NAME,
+        ConnectProfile::Openvpn(_) => openvpn::ADAPTER_NAME,
+    }
+}
+
+/// The node's IPv4 address.
+///
+/// Custom mode's packet filter excludes it, which is not an
+/// optimisation: the tunnel's own encrypted traffic goes to this
+/// address, and redirecting that would put the tunnel inside itself.
+fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
+    let (host, port) = match profile {
+        ConnectProfile::Wireguard(p) => split_host_port(&p.endpoint)?,
+        ConnectProfile::Openvpn(p) => split_host_port(&p.endpoint)?,
+        ConnectProfile::XrayVlessReality(p) => (p.host.clone(), p.port),
+        ConnectProfile::XrayVlessTls(p) => (p.host.clone(), p.port),
+        ConnectProfile::XrayTrojan(p) => (p.host.clone(), p.port),
+    };
+
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return Ok(ip);
+    }
+    // Nodes are registered by address today, but a hostname is resolved
+    // rather than rejected -- otherwise a DNS-named node would silently
+    // lose the exclusion above.
+    (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| format!("could not resolve {host}: {e}"))?
+        .find_map(|a| match a.ip() {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        })
+        .ok_or_else(|| format!("{host} has no IPv4 address"))
+}
+
+fn split_host_port(endpoint: &str) -> Result<(String, u16), String> {
+    let (host, port) = endpoint
+        .rsplit_once(':')
+        .ok_or_else(|| format!("{endpoint} is not host:port"))?;
+    let port = port.parse().map_err(|_| format!("{endpoint} has no valid port"))?;
+    Ok((host.to_string(), port))
 }
 
 /// Writes a config file into the protected config directory. Truncates

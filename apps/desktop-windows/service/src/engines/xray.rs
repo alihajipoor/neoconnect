@@ -30,7 +30,7 @@ use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
 const LOG_FILE: &str = "xray.log";
-const ADAPTER_NAME: &str = "neoconnect0";
+pub const ADAPTER_NAME: &str = "neoconnect0";
 
 /// How long to wait for the TUN adapter to show up after Xray starts.
 ///
@@ -178,18 +178,31 @@ impl Outbound<'_> {
     }
 }
 
-fn build_config_for(outbound: &Outbound) -> String {
+/// `passive` is Custom mode: the adapter comes up but nothing is routed
+/// into it, so only the applications the customer selected reach it --
+/// via sockets the split tunnel pins to it by hand.
+///
+/// That makes `autoSystemRoutingTable` the one setting that must differ.
+/// Left on, Xray installs system routes of its own and takes the default
+/// route, which is precisely the behaviour Custom mode exists to avoid;
+/// the customer would ask for one game and get their whole machine
+/// tunnelled.
+///
+/// `autoOutboundsInterface` stays on either way. It pins Xray's own
+/// connection to the node onto the physical link, which is what stops
+/// the engine's uplink being carried through the tunnel it is creating.
+fn build_config_for(outbound: &Outbound, passive: bool) -> String {
     let config = json!({
         "log": { "loglevel": "warning" },
         "inbounds": [{
             "tag": "tun-in",
             "protocol": "tun",
             "settings": {
-                "name": "neoconnect0",
+                "name": ADAPTER_NAME,
                 "desc": "Wintun",
                 "mtu": 1500,
                 "gateway": [TUN_GATEWAY],
-                "autoSystemRoutingTable": true,
+                "autoSystemRoutingTable": !passive,
                 "autoOutboundsInterface": true
             }
         }],
@@ -327,7 +340,36 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
 }
 
-pub fn connect(engines: &Engines, outbound: &Outbound) -> Result<Child, String> {
+/// Everything `install_routes` does except install the routes.
+///
+/// Custom mode needs the adapter to exist and to hold an address --
+/// otherwise a socket pinned to it has no source to use -- but must not
+/// have anything routed into it, because the whole point is that the
+/// machine's ordinary traffic carries on as before. The one route it
+/// does need is added by the split-tunnel controller, at a metric
+/// nothing prefers.
+///
+/// Returns the node's address, which the redirect filter excludes so the
+/// tunnel is never carried through itself.
+pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
+    let server_ip = resolve_server(outbound.host(), outbound.port())?;
+    wait_for_adapter()?;
+
+    let tun_gateway: Ipv4Addr = TUN_GATEWAY
+        .split('/')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
+    configure_adapter(tun_gateway)?;
+
+    Ok(server_ip)
+}
+
+pub fn connect(
+    engines: &Engines,
+    outbound: &Outbound,
+    passive: bool,
+) -> Result<Child, String> {
     let exe = engines.engine_path("xray.exe")?;
     // Checked explicitly because xray.exe starts fine without it and
     // only fails when the TUN adapter is created, which would surface to
@@ -335,7 +377,7 @@ pub fn connect(engines: &Engines, outbound: &Outbound) -> Result<Child, String> 
     engines.engine_path("wintun.dll")?;
 
     let config_path = engines.config_path(CONFIG_FILE);
-    write_config(&config_path, &build_config_for(outbound))?;
+    write_config(&config_path, &build_config_for(outbound, passive))?;
 
     let exe_dir = exe
         .parent()
@@ -373,7 +415,7 @@ mod tests {
 
     #[test]
     fn builds_config_xray_can_parse() {
-        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()))).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()), false)).unwrap();
         let outbound = &parsed["outbounds"][0];
         assert_eq!(outbound["protocol"], "vless");
         assert_eq!(outbound["settings"]["vnext"][0]["address"], "203.0.113.5");
@@ -394,7 +436,7 @@ mod tests {
     #[test]
     fn builds_a_trojan_config_xray_can_parse() {
         let parsed: serde_json::Value =
-            serde_json::from_str(&build_config_for(&Outbound::Trojan(&trojan_profile()))).unwrap();
+            serde_json::from_str(&build_config_for(&Outbound::Trojan(&trojan_profile()), false)).unwrap();
         let outbound = &parsed["outbounds"][0];
         assert_eq!(outbound["protocol"], "trojan");
         assert_eq!(outbound["settings"]["servers"][0]["address"], "203.0.113.5");
@@ -408,7 +450,7 @@ mod tests {
     /// it is worth a test rather than a comment.
     #[test]
     fn trojan_never_disables_certificate_verification() {
-        let json = build_config_for(&Outbound::Trojan(&trojan_profile()));
+        let json = build_config_for(&Outbound::Trojan(&trojan_profile()), false);
         assert!(!json.contains("allowInsecure"));
     }
 
@@ -416,7 +458,7 @@ mod tests {
     fn tun_inbound_enables_the_anti_loop_helpers() {
         // Without these two, routing 0.0.0.0/0 into the TUN loops
         // forever -- see this module's doc comment.
-        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()))).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()), false)).unwrap();
         let settings = &parsed["inbounds"][0]["settings"];
         assert_eq!(settings["autoSystemRoutingTable"], true);
         assert_eq!(settings["autoOutboundsInterface"], true);

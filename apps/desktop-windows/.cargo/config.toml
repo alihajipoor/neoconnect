@@ -1,0 +1,12 @@
+# windivert-sys resolves WinDivert.lib at *build* time, not just runtime,
+# and takes the directory from this variable (see its build script). The
+# three files it wants live in src-tauri/resources/, put there by
+# scripts/fetch-binaries.ps1 alongside wireguard.exe and the rest.
+#
+# Set here rather than in each developer's shell and in CI separately, so
+# `cargo build` works the same everywhere and nobody has to know this.
+# `relative = true` resolves it against the directory holding this
+# .cargo/ folder -- the desktop-windows workspace root -- so it survives
+# being built from any subdirectory.
+[env]
+WINDIVERT_PATH = { value = "src-tauri/resources", relative = true }

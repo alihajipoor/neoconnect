@@ -14,10 +14,8 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, OpenvpnProfile, Request, Response, TrojanProfile, TunnelHealth, VlessTlsProfile,
-    WireguardProfile,
-    XrayProfile,
-    PIPE_NAME,
+    ConnectProfile, OpenvpnProfile, Request, Response, SplitTunnelConfig, TrojanProfile,
+    TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile, PIPE_NAME,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -245,6 +243,21 @@ pub async fn vpn_disconnect() -> Result<(), String> {
     call_expecting_ok(&Request::Disconnect).await
 }
 
+/// Tells the service which applications, if any, are the only ones whose
+/// traffic should go through the tunnel.
+///
+/// Sent whenever the setting changes and again before every connect, so
+/// the service never has to assume a previous selection survived a
+/// restart -- it runs as a Windows service and can be restarted
+/// independently of the app.
+#[tauri::command]
+pub async fn vpn_set_split_tunnel(enabled: bool, apps: Vec<String>) -> Result<(), String> {
+    call_expecting_ok(&Request::SetSplitTunnel {
+        config: SplitTunnelConfig { enabled, apps },
+    })
+    .await
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct VpnStatus {
     /// An engine is running. Weaker than it sounds -- see `health`.
@@ -254,6 +267,15 @@ pub struct VpnStatus {
     /// because `connected` alone was being shown to customers as
     /// "Connected" while no traffic was flowing.
     health: TunnelHealth,
+    /// Whether Custom mode is intercepting right now.
+    ///
+    /// Distinct from the setting being switched on: turning it on
+    /// mid-session cannot retrofit itself onto a tunnel that was brought
+    /// up to carry everything. The UI reads this rather than its own
+    /// toggle so it never claims only one app is being routed while the
+    /// whole machine is.
+    #[serde(rename = "splitTunnelActive")]
+    split_tunnel_active: bool,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -404,7 +426,9 @@ fn icmp_latency(host: &str) -> Option<u32> {
 #[tauri::command]
 pub async fn vpn_status() -> Result<VpnStatus, String> {
     match call(&Request::Status).await? {
-        Response::State { connected, protocol, health } => Ok(VpnStatus { connected, protocol, health }),
+        Response::State { connected, protocol, health, split_tunnel_active } => {
+            Ok(VpnStatus { connected, protocol, health, split_tunnel_active })
+        }
         Response::Error { message } => Err(message),
         Response::Ok => Err("the background service returned an unexpected reply".into()),
     }
