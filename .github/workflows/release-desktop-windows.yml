@@ -5,6 +5,13 @@ name: Release Desktop (Windows)
 # Release asset whenever a desktop-v* tag is pushed -- a separate tag
 # prefix from the agent's own v* releases (release-agent.yml) since the
 # two ship on independent schedules.
+#
+# The .sig published alongside the installer is what makes in-app
+# updating work: the API's /updates endpoint finds the newest
+# desktop-v* release, reads that signature, and hands both to the
+# client, which refuses any payload the signature does not match. The
+# tag prefix is load-bearing for the same reason -- an agent release
+# must never be offered to the app as an update.
 on:
   push:
     tags:
@@ -42,12 +49,60 @@ jobs:
       # (e.g. via a signtool step against the built .exe, or Tauri's
       # own WINDOWS_CERTIFICATE/WINDOWS_CERTIFICATE_PASSWORD env vars)
       # before the release step below.
+      #
+      # Note this is a different concern from the updater signing below,
+      # and neither covers the other: Authenticode proves the publisher
+      # to Windows and SmartScreen, while the updater key proves to an
+      # already-installed app that a payload came from this pipeline.
+      # ---------------------------------------------------------------
+      # TAURI_SIGNING_PRIVATE_KEY signs the updater artifact. Without
+      # it the build still succeeds but produces no .sig, and the API's
+      # update endpoint finds nothing to offer -- a silent no-updates
+      # state rather than a failure, so the secret's absence is checked
+      # explicitly here instead of being discovered weeks later.
+      - name: Check updater signing key is present
+        shell: bash
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is not set -- the release would ship without an updater signature." >&2
+            exit 1
+          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
       - name: Build
         working-directory: apps/desktop-windows
         run: pnpm exec tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # The branded single-click installer the website hands out. It
+      # carries the NSIS installer above inside itself, so NEOXIFY_SETUP
+      # has to point at an already-built one -- hence this step running
+      # after the build rather than as part of it.
+      #
+      # Both artifacts ship. This one is for a human downloading the app
+      # for the first time; the raw NSIS installer beside it is what the
+      # in-app updater consumes, where the welcome screen would only be
+      # something to click through.
+      - name: Build branded bootstrapper
+        working-directory: apps/desktop-windows
+        shell: bash
+        run: |
+          setup=$(ls target/release/bundle/nsis/*_x64-setup.exe | head -1)
+          echo "Embedding $setup"
+          NEOXIFY_SETUP="$setup" cargo build --release -p neoxify-bootstrapper
+          cp target/release/neoxify-bootstrapper.exe target/release/bundle/nsis/Neoxify-Setup.exe
+
+      # apps/desktop-windows/Cargo.toml is the cargo workspace root
+      # (members: src-tauri, service, ipc, bootstrapper), so the target
+      # directory is there rather than under src-tauri/. These paths
+      # used to say src-tauri/target and matched nothing -- which no
+      # one noticed because no desktop-v* tag had ever been pushed, so
+      # this workflow had never actually run.
       - name: Generate checksum
-        working-directory: apps/desktop-windows/src-tauri/target/release/bundle/nsis
+        working-directory: apps/desktop-windows/target/release/bundle/nsis
         shell: bash
         run: sha256sum *.exe > sha256sums.txt
 
@@ -55,6 +110,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            apps/desktop-windows/src-tauri/target/release/bundle/nsis/*.exe
-            apps/desktop-windows/src-tauri/target/release/bundle/nsis/sha256sums.txt
+            apps/desktop-windows/target/release/bundle/nsis/*.exe
+            apps/desktop-windows/target/release/bundle/nsis/*.sig
+            apps/desktop-windows/target/release/bundle/nsis/sha256sums.txt
           generate_release_notes: true

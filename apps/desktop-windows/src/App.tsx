@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
 import { verifyEmailByToken } from "./lib/auth";
@@ -12,6 +13,8 @@ import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
+import { UpdateBanner } from "./components/UpdateBanner";
+import { applyStagedUpdate, startUpdateChecks, stagedUpdate, type UpdateState } from "./lib/updates";
 
 type Screen =
   | "loading"
@@ -33,6 +36,9 @@ export default function App() {
   // memory for this handoff, never persisted.
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState>({ status: "none" });
+  const [restarting, setRestarting] = useState(false);
+  const [updateBlocked, setUpdateBlocked] = useState(false);
   // Guards against processing the same deep-link URL twice -- the launch
   // URL can plausibly reach handleDeepLinkUrl via both the Rust-side
   // get_launch_deep_link command and the plugin's own onOpenUrl forwarding
@@ -101,9 +107,58 @@ export default function App() {
     };
   }, []);
 
+  // Background update checking, and applying it on the way out.
+  //
+  // The install is held until quit because replacing the binaries --
+  // the helper service among them -- under a live tunnel would drop the
+  // connection. For someone who cannot reach anything without it, being
+  // cut off without warning is worse than running a version behind.
+  useEffect(() => startUpdateChecks(setUpdateState), []);
+
+  useEffect(() => {
+    const window = getCurrentWindow();
+    const unlisten = window.onCloseRequested(async (event) => {
+      if (!stagedUpdate()) return;
+      event.preventDefault();
+      try {
+        // Only when nothing is running. The check is cheap and the
+        // consequence of skipping it is a dropped tunnel, so it is
+        // worth making even though the customer is quitting.
+        const status = await invoke<{ connected: boolean }>("vpn_status");
+        if (!status.connected) await applyStagedUpdate(false);
+      } catch {
+        // An update that cannot be applied must never be a window that
+        // cannot be closed. Whatever went wrong, the next launch tries
+        // again.
+      }
+      void window.destroy();
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
   function goToVerify(email: string, password: string) {
     setPendingAuth({ email, password });
     setScreen("verify");
+  }
+
+  async function restartForUpdate() {
+    setRestarting(true);
+    try {
+      const status = await invoke<{ connected: boolean }>("vpn_status");
+      if (status.connected) {
+        // Refusing rather than silently dropping their tunnel. It will
+        // install on quit regardless, so nothing is lost by waiting.
+        setUpdateBlocked(true);
+        return;
+      }
+      await applyStagedUpdate(true);
+    } catch {
+      setUpdateBlocked(true);
+    } finally {
+      setRestarting(false);
+    }
   }
 
   if (screen === "loading") {
@@ -175,11 +230,25 @@ export default function App() {
   if (screen === "plans") {
     return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;
   }
+  // The banner rides above the Dashboard only. It is the screen people
+  // sit on, and putting it above every screen would mean it appears
+  // over the sign-in form -- telling somebody who cannot get into their
+  // account yet about a version number.
   return (
-    <Dashboard
-      onLoggedOut={() => setScreen("login")}
-      onBrowsePlans={() => setScreen("plans")}
-      onOpenSettings={() => setScreen("settings")}
-    />
+    <div className="flex h-full flex-col">
+      <UpdateBanner
+        state={updateState}
+        onRestart={() => void restartForUpdate()}
+        busy={restarting}
+        blocked={updateBlocked}
+      />
+      <div className="min-h-0 flex-1">
+        <Dashboard
+          onLoggedOut={() => setScreen("login")}
+          onBrowsePlans={() => setScreen("plans")}
+          onOpenSettings={() => setScreen("settings")}
+        />
+      </div>
+    </div>
   );
 }

@@ -9,6 +9,8 @@
     "store:default",
     "dialog:allow-open",
     "clipboard-manager:allow-write-text",
+    "updater:default",
+    "process:allow-restart",
     {
       "identifier": "http:default",
       "allow": [
