@@ -139,3 +139,30 @@ export interface RouteOption {
    * latency: "is it up" rather than "is it fast for me". */
   nodeStatus: "ONLINE" | "OFFLINE" | "PENDING" | "DISABLED";
 }
+
+/** What GET /customer/referrals returns.
+ *
+ * Friends arrive already masked -- the server never sends the real
+ * addresses, so there is nothing here to leak by accident. */
+export type ReferralOverview = {
+  enabled: boolean;
+  code: string | null;
+  rules: {
+    loyalFriendMonths: number;
+    friendsRequired: number;
+    friendMonths: number;
+    rewardDays: number;
+  };
+  friends: {
+    maskedEmail: string;
+    joinedAt: string;
+    activated: boolean;
+    paidMonths: number;
+  }[];
+  rewards: { id: string; reason: string; rewardDays: number; grantedAt: string }[];
+  progress: {
+    monthsToNextReward: number;
+    qualifyingFriends: number;
+    bestFriendMonths: number;
+  };
+};

@@ -4,6 +4,7 @@ import type {
   PaymentProvider,
   PaymentStart,
   ProtocolUser,
+  ReferralOverview,
   RouteOption,
   Subscription,
   SubscriptionPlan,
@@ -13,6 +14,7 @@ export const getMe = () => apiRequest<Customer>("/customer/me");
 export const getSubscriptions = () => apiRequest<Subscription[]>("/customer/subscriptions");
 export const getProtocolUsers = () => apiRequest<ProtocolUser[]>("/customer/protocol-users");
 export const getPlans = () => apiRequest<SubscriptionPlan[]>("/customer/plans");
+export const getReferrals = () => apiRequest<ReferralOverview>("/customer/referrals");
 
 export const getAvailableRoutes = (subscriptionId: string) =>
   apiRequest<RouteOption[]>(`/customer/subscriptions/${subscriptionId}/routes`);

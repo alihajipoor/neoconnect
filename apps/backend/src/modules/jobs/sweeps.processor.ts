@@ -4,6 +4,7 @@ import { Job } from "bullmq";
 import { UsageService } from "../usage/usage.service";
 import { InvoicesService } from "../invoices/invoices.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
+import { ReferralsService } from "../referrals/referrals.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -14,6 +15,7 @@ export class SweepsProcessor extends WorkerHost {
     private readonly usageService: UsageService,
     private readonly invoicesService: InvoicesService,
     private readonly subscriptionsService: SubscriptionsService,
+    private readonly referralsService: ReferralsService,
   ) {
     super();
   }
@@ -47,6 +49,13 @@ export class SweepsProcessor extends WorkerHost {
         const overdue = await this.invoicesService.markOverdue();
         if (overdue.length > 0) {
           this.logger.log(`invoice overdue sweep: marked ${overdue.length} invoice(s) overdue`);
+        }
+        break;
+      }
+      case "referral": {
+        const granted = await this.referralsService.sweep();
+        if (granted > 0) {
+          this.logger.log(`referral sweep: granted ${granted} free period(s)`);
         }
         break;
       }

@@ -8,6 +8,7 @@
     "opener:default",
     "store:default",
     "dialog:allow-open",
+    "clipboard-manager:allow-write-text",
     {
       "identifier": "http:default",
       "allow": [

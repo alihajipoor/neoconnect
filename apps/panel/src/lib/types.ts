@@ -89,6 +89,17 @@ export interface FreeTrialSettings {
   updatedAt: string;
 }
 
+export interface ReferralSettings {
+  id: string;
+  enabled: boolean;
+  rewardPlanId: string | null;
+  loyalFriendMonths: number;
+  friendsRequired: number;
+  friendMonths: number;
+  rewardDays: number;
+  updatedAt: string;
+}
+
 export interface EmailSettings {
   id: string;
   enabled: boolean;

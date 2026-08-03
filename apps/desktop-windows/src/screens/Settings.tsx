@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowLeft, Check, KeyRound, Languages, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, Gift, KeyRound, Languages, Loader2 } from "lucide-react";
 import { changePassword } from "../lib/auth";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { Button, Card, Input, Label } from "../components/ui";
@@ -10,7 +10,13 @@ import { CustomModeCard } from "../components/CustomModeCard";
  * Deliberately a screen rather than a dialog hung off the Dashboard: the
  * Dashboard is meant to stay a single Connect button rather than
  * accumulating controls, and Custom mode's app list needs real room. */
-export function Settings({ onBack }: { onBack: () => void }) {
+export function Settings({
+  onBack,
+  onOpenReferrals,
+}: {
+  onBack: () => void;
+  onOpenReferrals: () => void;
+}) {
   const { t, language, setLanguage } = useI18n();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
@@ -76,6 +82,24 @@ export function Settings({ onBack }: { onBack: () => void }) {
             ))}
           </div>
         </Card>
+
+        {/* A row rather than a card: the referral programme is a place
+            to go, not a setting to change, and giving it a full card
+            here would compete with the things that are. */}
+        <button
+          type="button"
+          onClick={onOpenReferrals}
+          className="press surface-interactive flex items-center gap-2 rounded-xl border border-white/10 bg-card/70 p-4 text-left"
+        >
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-highlight/15 text-highlight">
+            <Gift className="size-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold">{t("referrals.title")}</p>
+            <p className="text-xs text-muted-foreground">{t("referrals.subtitle")}</p>
+          </div>
+          <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+        </button>
 
         <CustomModeCard />
 

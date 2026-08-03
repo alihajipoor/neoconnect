@@ -16,7 +16,7 @@ import { CustomerAuthService } from "./customer-auth.service";
 import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
 import { AuthenticatedCustomer } from "./types";
-import { CreateCustomerDto } from "../customers/dto/create-customer.dto";
+import { RegisterCustomerDto } from "./dto/register-customer.dto";
 import { LoginDto } from "../auth/dto/login.dto";
 import { RefreshDto } from "../auth/dto/refresh.dto";
 import { VerifyEmailDto } from "./dto/verify-email.dto";
@@ -46,7 +46,7 @@ export class CustomerAuthController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("register")
   @HttpCode(HttpStatus.OK)
-  register(@Body() dto: CreateCustomerDto) {
+  register(@Body() dto: RegisterCustomerDto) {
     return this.customerAuthService.register(dto);
   }
 

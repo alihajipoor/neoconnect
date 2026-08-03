@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { ReferralsModule } from "../referrals/referrals.module";
 import { CustomerController } from "./customer.controller";
 import { CustomersModule } from "../customers/customers.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
@@ -10,7 +11,7 @@ import { InvoicesModule } from "../invoices/invoices.module";
 import { PaymentSettingsModule } from "../payment-settings/payment-settings.module";
 
 @Module({
-  imports: [CustomersModule, SubscriptionsModule, ProtocolUsersModule, PlansModule, RoutesModule, BillingModule, InvoicesModule, PaymentSettingsModule],
+  imports: [CustomersModule, SubscriptionsModule, ProtocolUsersModule, PlansModule, RoutesModule, BillingModule, InvoicesModule, PaymentSettingsModule, ReferralsModule],
   controllers: [CustomerController],
 })
 export class CustomerModule {}

@@ -5,10 +5,13 @@ import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from 
 /** Never returns a usable session -- see RequiresVerification's doc
  * comment. The app must always follow this up by showing the verify
  * screen, never a dashboard. */
-export async function register(email: string, password: string) {
+export async function register(email: string, password: string, referralCode?: string) {
   return publicRequest<RequiresVerification>("/customer-auth/register", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    // Omitted entirely when blank rather than sent as "": the backend
+    // treats a supplied-but-wrong code as an error, and an empty string
+    // is not a code somebody typed.
+    body: JSON.stringify({ email, password, ...(referralCode ? { referralCode } : {}) }),
   });
 }
 
