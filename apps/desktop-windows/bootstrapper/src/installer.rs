@@ -42,9 +42,76 @@ fn run_payload() -> io::Result<()> {
     let _ = std::fs::remove_file(&target);
 
     match outcome? {
-        0 => Ok(()),
+        0 => {
+            launch_app();
+            Ok(())
+        }
         code => Err(io::Error::other(format!("The installer stopped with code {code}."))),
     }
+}
+
+/// Opens the app once it is installed.
+///
+/// The NSIS installer will not do this for us here. It only launches on
+/// its own finish page, or on an explicit `/R` in passive mode -- and
+/// under `/S` it treats itself as a fully silent deployment, where
+/// windows appearing on someone's desktop is the opposite of what an
+/// administrator asked for. That is the right default for NSIS and the
+/// wrong one for this: a person just pressed Install and is watching.
+/// Reported as "app installed but app didn't open automatically".
+///
+/// Started from here rather than from the elevated installer, so it
+/// runs as the person who is signed in rather than as administrator.
+fn launch_app() {
+    let Some(dir) = installed_directory() else { return };
+    let exe = Path::new(&dir).join("neoconnect-desktop.exe");
+    if !exe.is_file() {
+        return;
+    }
+    // Detached: this process is about to exit, and waiting on the app
+    // would keep the installer alive behind it for the whole session.
+    let _ = std::process::Command::new(exe).spawn();
+}
+
+/// Where the installer put things, read back rather than assumed.
+///
+/// NSIS records it under its manufacturer/product key, and honours an
+/// existing installation's directory when upgrading -- so somebody who
+/// once installed elsewhere would otherwise have us launching a path
+/// that does not exist.
+fn installed_directory() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+    };
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let subkey = wide(r"Software\Neoxify\Neoxify");
+
+    let mut buffer = [0u16; 512];
+    let mut size = (buffer.len() * 2) as u32;
+    // SAFETY: the key name is NUL-terminated and the buffer size is
+    // passed in bytes, which is what this API expects.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            std::ptr::null(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut size,
+        )
+    };
+    if status != 0 {
+        // Falls back to the default location rather than giving up: a
+        // missing registry value should cost the customer a click, not
+        // the launch entirely.
+        let program_files = std::env::var("ProgramFiles").ok()?;
+        return Some(format!(r"{program_files}\Neoxify"));
+    }
+
+    let chars = (size as usize / 2).saturating_sub(1);
+    Some(String::from_utf16_lossy(&buffer[..chars]))
 }
 
 /// Starts a program through the shell and waits for it to finish.

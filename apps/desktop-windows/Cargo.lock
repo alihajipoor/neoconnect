@@ -2700,7 +2700,6 @@ name = "neoxify-bootstrapper"
 version = "0.1.0"
 dependencies = [
  "fontdue",
- "png 0.17.16",
  "raw-window-handle",
  "softbuffer",
  "tiny-skia",
