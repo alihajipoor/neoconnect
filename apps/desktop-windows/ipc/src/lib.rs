@@ -45,6 +45,14 @@ pub enum Request {
     /// the service never has to assume a previous setting survived a
     /// restart.
     SetSplitTunnel { config: SplitTunnelConfig },
+    /// Asks the service to prove the tunnel is carrying traffic, using a
+    /// socket pinned to it exactly as a selected app's traffic is.
+    ///
+    /// Needed because the app's own egress check cannot answer this once
+    /// Custom mode is on: the app is not a selected app, so its request
+    /// correctly leaves by the ordinary route and correctly reports the
+    /// tunnel as bypassed.
+    ProbeSplitTunnel,
 }
 
 /// Custom mode, as the app expresses it.
