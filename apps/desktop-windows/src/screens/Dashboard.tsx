@@ -10,7 +10,7 @@ import { captureBaselineIp, verifyEgress, type EgressVerdict } from "../lib/egre
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { loadLastGood, saveLastGood } from "../lib/failover-store";
-import { loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
+import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
@@ -612,8 +612,11 @@ export function Dashboard({
       // It has to happen before the connect below, because it decides
       // whether the tunnel comes up passively or takes the default
       // route -- a decision that cannot be changed afterwards.
+      let customMode = false;
       try {
-        await pushSplitTunnel(await loadSplitTunnel());
+        const settings = await loadSplitTunnel();
+        await pushSplitTunnel(settings);
+        customMode = isEffective(settings);
       } catch {
         // A failure here means Custom mode does not apply to this
         // attempt, which the status poll will report honestly rather
@@ -665,21 +668,63 @@ export function Dashboard({
           setConnectionState("verifying");
           if (cancelRef.current) break;
 
-          const egress = await confirmEgress(baselineIpRef.current, verifyBudget);
-          setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
+          // Custom mode has to be checked a different way, and the
+          // reason is structural rather than a quirk worth working
+          // around. The egress check below works by asking a server what
+          // address it sees us from -- but in Custom mode this app is
+          // not one of the selected apps, so that request correctly
+          // leaves by the ordinary route and correctly reports the
+          // tunnel bypassed. Every protocol then "failed", the ladder
+          // walked all five, and the customer was told it could not
+          // connect while the tunnel was up and carrying their game.
+          //
+          // The service answers instead, over a socket pinned to the
+          // tunnel exactly as a selected app's traffic is -- which is
+          // stronger evidence anyway, because it tests the path that
+          // actually matters rather than this app's.
+          let verdict: ConnectionState;
+          // Why this attempt was rejected, for the technical details
+          // the customer can expand. Kept as text rather than as an
+          // EgressVerdict because Custom mode's evidence is a different
+          // kind of thing: there is no exit address to compare, and
+          // inventing one to fit the type would be a lie in a field the
+          // UI shows.
+          let reason = "";
 
-          // The reachability check is worth its eight seconds only when
-          // this is the last hope: it distinguishes "server is dead"
-          // from "server is fine but our traffic goes around it", which
-          // is a distinction for the error message, not for deciding
-          // whether to try the next protocol. Another candidate waiting
-          // makes moving on strictly better than diagnosing.
-          const verdict =
-            egress.state === "throughTunnel"
-              ? "connected"
-              : isLast
-                ? combineEvidence(await confirmReachable(), egress)
-                : "degraded";
+          if (customMode) {
+            // The service's own words when it fails, not a generic
+            // message: it distinguishes "no tunnel is up" from "the
+            // tunnel did not carry a test connection", and that is the
+            // whole difference between a failed connect and a leak.
+            const carried = await invoke("vpn_probe_split_tunnel")
+              .then(() => true)
+              .catch((err: unknown) => {
+                reason = String(err);
+                return false;
+              });
+            // Nothing this app does goes through the tunnel, so it has
+            // no way to observe an exit address. Blank is honest.
+            setExitIp(null);
+            verdict = carried ? "connected" : "degraded";
+          } else {
+            const egress = await confirmEgress(baselineIpRef.current, verifyBudget);
+            setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
+
+            // The reachability check is worth its eight seconds only
+            // when this is the last hope: it distinguishes "server is
+            // dead" from "server is fine but our traffic goes around
+            // it", which is a distinction for the error message, not
+            // for deciding whether to try the next protocol. Another
+            // candidate waiting makes moving on strictly better than
+            // diagnosing.
+            verdict =
+              egress.state === "throughTunnel"
+                ? "connected"
+                : isLast
+                  ? combineEvidence(await confirmReachable(), egress)
+                  : "degraded";
+            reason = egress.state;
+          }
 
           if (verdict === "connected") {
             setConnectionState("connected");
@@ -694,7 +739,7 @@ export function Dashboard({
             return true;
           }
 
-          attempts.push(`${label}: up but ${egress.state}`);
+          attempts.push(`${label}: up but ${reason}`);
           lastError = {
             kind: "serverUnreachable",
             messageKey: candidates.length > 1 ? "err.allProtocolsFailed" : "err.notCarryingTraffic",

@@ -258,6 +258,20 @@ impl SplitTunnel {
         }
     }
 
+    /// Whether the tunnel is really carrying traffic, checked over the
+    /// same kind of pinned socket a selected app's traffic uses.
+    ///
+    /// The app cannot answer this for itself in Custom mode: its own
+    /// requests deliberately do not go through the tunnel, so its usual
+    /// "did my address change" check correctly reports being bypassed
+    /// and would fail every protocol in turn. See [`proxy::probe`].
+    pub fn probe(&self) -> Result<(), String> {
+        let Some(active) = &self.active else {
+            return Err("custom mode is not running".into());
+        };
+        proxy::probe(&active.tunnel)
+    }
+
     /// Marks that no tunnel is available, so redirected traffic goes out
     /// unprotected instead of failing. See the fail-open note above.
     pub fn detach_tunnel(&self) {

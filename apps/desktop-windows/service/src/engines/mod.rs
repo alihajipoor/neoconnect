@@ -82,6 +82,13 @@ impl Engines {
         self.split_tunnel.is_running()
     }
 
+    /// Proves the tunnel carries traffic, over the path selected apps
+    /// use. See `SplitTunnel::probe` for why the app cannot check this
+    /// for itself once Custom mode is on.
+    pub fn probe_split_tunnel(&self) -> Result<(), String> {
+        self.split_tunnel.probe()
+    }
+
     /// Resolves an engine binary from the service's own directory.
     ///
     /// This is the reason the IPC protocol carries no paths: the set of

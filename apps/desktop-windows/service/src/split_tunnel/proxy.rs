@@ -131,6 +131,63 @@ fn bind_upstream(tunnel: &TunnelInterface) -> io::Result<UdpSocket> {
     Ok(socket.into())
 }
 
+/// Addresses used only to prove the tunnel carries traffic.
+///
+/// Two, because one being down or filtered is not evidence about the
+/// tunnel. Both are anycast resolvers that answer on 443 from
+/// essentially everywhere, so a refusal here really does say something
+/// about the path rather than about the destination.
+const PROBE_TARGETS: [(Ipv4Addr, u16); 2] =
+    [(Ipv4Addr::new(1, 1, 1, 1), 443), (Ipv4Addr::new(8, 8, 8, 8), 443)];
+
+/// Short on purpose: this runs inside the connect ladder, and a slow
+/// answer costs the customer the same as a wrong one.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(3500);
+
+/// Proves the tunnel is actually carrying traffic, over the exact path a
+/// selected app's traffic takes.
+///
+/// This exists because Custom mode broke the app's own connection check
+/// and the reason is structural, not a bug to patch: the check works by
+/// requesting its own address and seeing the server's. In Custom mode
+/// the app is not a selected app, so that request correctly goes out the
+/// ordinary route -- and the check correctly reports the tunnel being
+/// bypassed. Every protocol therefore "failed", the ladder walked all
+/// five, and the customer was told it could not connect while the tunnel
+/// was in fact up and working.
+///
+/// A socket pinned exactly as the proxy's are is the honest replacement.
+/// A completed TCP handshake through it proves the tunnel exists, has a
+/// route to the internet, and that the far end answered -- for the path
+/// that actually matters, rather than for the app's own traffic, which
+/// deliberately does not use it.
+pub fn probe(tunnel: &TunnelInterface) -> Result<(), String> {
+    // No tunnel means the fail-open state: selected apps are going out
+    // unprotected. Reporting that as reachable would be the exact
+    // dishonesty this whole function exists to remove.
+    let Some(index) = tunnel.get() else {
+        return Err("no tunnel is up, so nothing is being routed through one".into());
+    };
+
+    let mut last = String::new();
+    for (address, port) in PROBE_TARGETS {
+        match connect_pinned(address, port, index) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = format!("{address}:{port} {e}"),
+        }
+    }
+    Err(format!("the tunnel did not carry a test connection ({last})"))
+}
+
+fn connect_pinned(address: Ipv4Addr, port: u16, index: u32) -> Result<(), String> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|e| e.to_string())?;
+    pin_to_interface(&socket, index).map_err(|e| e.to_string())?;
+    socket
+        .connect_timeout(&SocketAddr::from((address, port)).into(), PROBE_TIMEOUT)
+        .map_err(|e| e.to_string())
+}
+
 /// Handles on the running relays, so the controller can stop them.
 pub struct Relays {
     pub tcp_port: u16,
@@ -369,6 +426,26 @@ mod tests {
         assert_eq!(tunnel.get(), Some(14));
         tunnel.set(0);
         assert_eq!(tunnel.get(), None);
+    }
+
+    #[test]
+    fn the_probe_refuses_to_pass_when_no_tunnel_is_up() {
+        // The fail-open state: selected apps are going out unprotected.
+        // Reporting that as reachable would let the ladder settle on a
+        // "connection" carrying nothing through the tunnel -- the exact
+        // false-Connected this project keeps having to remove.
+        let error = probe(&TunnelInterface::default()).expect_err("no tunnel means no proof");
+        assert!(error.contains("no tunnel"), "got {error}");
+    }
+
+    #[test]
+    fn the_probe_fails_rather_than_falling_back_to_the_normal_route() {
+        // Pinned to an interface that does not exist, so there is no
+        // route to reach anything. If this ever passed, the probe would
+        // be measuring the machine's ordinary connectivity and would
+        // call a dead tunnel healthy.
+        let error = probe(&TunnelInterface::new(u32::MAX)).expect_err("nothing can be reached");
+        assert!(error.contains("did not carry"), "got {error}");
     }
 
     #[test]

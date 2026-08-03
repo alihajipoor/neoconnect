@@ -243,6 +243,20 @@ pub async fn vpn_disconnect() -> Result<(), String> {
     call_expecting_ok(&Request::Disconnect).await
 }
 
+/// Asks the service to prove the tunnel is carrying traffic, over a
+/// socket pinned to it exactly as a selected app's traffic is.
+///
+/// The app's own egress check cannot answer this in Custom mode: the app
+/// is not one of the selected apps, so its request leaves by the
+/// ordinary route by design and correctly reports the tunnel bypassed.
+/// Leaving it in charge meant every protocol "failed", the ladder walked
+/// all five, and the customer was told it could not connect while the
+/// tunnel was up and working.
+#[tauri::command]
+pub async fn vpn_probe_split_tunnel() -> Result<(), String> {
+    call_expecting_ok(&Request::ProbeSplitTunnel).await
+}
+
 /// Tells the service which applications, if any, are the only ones whose
 /// traffic should go through the tunnel.
 ///
