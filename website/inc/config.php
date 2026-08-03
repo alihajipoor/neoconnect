@@ -126,8 +126,23 @@ return array(
     // up and get nothing. Turn this on only once the trial is genuinely
     // enabled in the panel, and set the number of days to match the trial
     // plan's own duration.
-    'free_trial_enabled' => false,
+    // TURNED ON because you said the trial is running. Do check that
+    // FreeTrialSettings is also enabled in the admin panel -- this switch only
+    // controls what the website *says*. If the panel's own toggle is still
+    // off, people will read the announcement, sign up, and get nothing.
+    'free_trial_enabled' => true,
     'free_trial_days' => 30,
+
+    // ---------------------------------------------------------------
+    // Launch announcement
+    // ---------------------------------------------------------------
+
+    // The popup shown to first-time visitors. Set false to stop it entirely.
+    'announcement_enabled' => true,
+
+    // Dismissal is remembered per version. Bump this string when the message
+    // changes and everyone who already dismissed it sees the new one once.
+    'announcement_version' => '1',
 
     // ---------------------------------------------------------------
     // Referral programme
