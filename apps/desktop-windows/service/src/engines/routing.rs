@@ -169,39 +169,40 @@ mod tests {
     }
 }
 
-/// Adds a single `/32` route for `destination` through the tunnel.
+/// A default route through the tunnel that nothing will ever choose.
 ///
-/// Split-tunnel ("Custom") mode's whole mechanism -- see split_tunnel.rs
-/// for why routing is used rather than packet rewriting. Separate from
-/// `install_full_tunnel` because that one owns a fixed set of routes for
-/// the lifetime of a connection, whereas these come and go as the
-/// selected app opens connections to new destinations.
-pub fn add_host_route(
-    destination: &str,
-    gateway: &str,
-    interface_index: u32,
-    metric: u32,
-) -> Result<(), String> {
-    add_route(destination, "255.255.255.255", gateway, interface_index, metric)
-}
+/// Custom mode's foundation, and the least obvious part of it.
+/// `IP_UNICAST_IF` restricts a socket to one interface's routes; it does
+/// not invent one. A tunnel brought up passively owns no routes at all,
+/// so a socket pinned to it fails with ENETUNREACH -- proven rather than
+/// assumed, since that is exactly what the first attempt did.
+///
+/// The answer is a `0.0.0.0/0` route through the tunnel at a metric so
+/// high that the physical link always wins. Windows adds the interface
+/// metric to the route metric, so at 9999 nothing prefers it, the
+/// machine's ordinary traffic is untouched, and a pinned socket -- which
+/// is not choosing between interfaces at all -- finds it and uses it.
+///
+/// Deliberately separate from [`install_full_tunnel`], whose job is to
+/// make the tunnel win. This one makes it available without winning.
+pub fn install_passive_default(
+    tunnel_address: Ipv4Addr,
+    tunnel_index: u32,
+) -> Result<InstalledRoutes, String> {
+    const METRIC: u32 = 9999;
+    let mut installed = InstalledRoutes::none();
 
-/// Removes a single `/32` route. Best-effort by design: the caller is
-/// tearing down, and a route that has already gone with its adapter is
-/// the desired end state rather than a failure.
-pub fn delete_host_route(destination: &str) -> Result<(), String> {
-    let exe = route_exe();
-    let status = run_hidden(
-        &exe,
-        &[
-            OsStr::new("delete"),
-            OsStr::new(destination),
-            OsStr::new("mask"),
-            OsStr::new("255.255.255.255"),
-        ],
-    )
-    .map_err(|e| format!("could not run route.exe: {e}"))?;
-    if !status.success() {
-        return Err(format!("removing the route for {destination} failed ({status})"));
+    // The tunnel's own address as next hop is what the Xray path already
+    // does successfully. Point-to-point adapters are sometimes happier
+    // with an unspecified next hop, so that is tried second rather than
+    // failing the whole feature on a formality.
+    let by_self =
+        add_route("0.0.0.0", "0.0.0.0", &tunnel_address.to_string(), tunnel_index, METRIC);
+    if by_self.is_err() {
+        add_route("0.0.0.0", "0.0.0.0", "0.0.0.0", tunnel_index, METRIC)
+            .map_err(|e| format!("could not make the tunnel reachable for selected apps: {e}"))?;
     }
-    Ok(())
+
+    installed.destinations.push(("0.0.0.0".into(), "0.0.0.0".into()));
+    Ok(installed)
 }

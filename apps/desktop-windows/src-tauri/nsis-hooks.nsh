@@ -124,6 +124,22 @@
   !insertmacro WaitForProcessGone "xray.exe"
   !insertmacro WaitForProcessGone "openvpn.exe"
 
+  ; WinDivert's kernel driver, used by Custom mode. WinDivert registers it
+  ; as a service on first use and unregisters it when the last handle
+  ; closes -- which the helper service does on disconnect and on stop, so
+  ; by this point it is usually already gone. "Usually" is not good
+  ; enough here: a loaded driver holds WinDivert64.sys open, and this
+  ; installer's entire history of "Error opening file for writing" is
+  ; binaries something still had open.
+  ;
+  ; Note the helper service now links WinDivert.dll implicitly, so it will
+  ; not start at all if that file is missing -- which makes writing over
+  ; these two successfully a hard requirement, not a nicety.
+  nsExec::ExecToLog 'sc.exe stop WinDivert'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete WinDivert'
+  Pop $0
+
   ; The old install directory is left in place rather than deleted here.
   ; Removing files from a path this installer does not own is the kind of
   ; thing that goes badly wrong if the assumption is ever off, and a stale
@@ -188,4 +204,20 @@
   !insertmacro WaitForProcessGone "wireguard.exe"
   !insertmacro WaitForProcessGone "xray.exe"
   !insertmacro WaitForProcessGone "openvpn.exe"
+
+  ; WinDivert's kernel driver, used by Custom mode. WinDivert registers it
+  ; as a service on first use and unregisters it when the last handle
+  ; closes -- which the helper service does on disconnect and on stop, so
+  ; by this point it is usually already gone. "Usually" is not good
+  ; enough here: a loaded driver holds WinDivert64.sys open, and this
+  ; installer's entire history of "Error opening file for writing" is
+  ; binaries something still had open.
+  ;
+  ; Note the helper service now links WinDivert.dll implicitly, so it will
+  ; not start at all if that file is missing -- which makes writing over
+  ; these two successfully a hard requirement, not a nicety.
+  nsExec::ExecToLog 'sc.exe stop WinDivert'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete WinDivert'
+  Pop $0
 !macroend

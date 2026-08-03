@@ -3,13 +3,13 @@ import { ArrowLeft, Check, KeyRound, Languages, Loader2 } from "lucide-react";
 import { changePassword } from "../lib/auth";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { Button, Card, Input, Label } from "../components/ui";
+import { CustomModeCard } from "../components/CustomModeCard";
 
 /** The app's settings surface.
  *
- * Currently just the password form, but deliberately a screen rather
- * than a dialog hung off the Dashboard: split-tunnel ("Custom" mode) and
- * update preferences both land here next, and the Dashboard is meant to
- * stay a single Connect button rather than accumulating controls. */
+ * Deliberately a screen rather than a dialog hung off the Dashboard: the
+ * Dashboard is meant to stay a single Connect button rather than
+ * accumulating controls, and Custom mode's app list needs real room. */
 export function Settings({ onBack }: { onBack: () => void }) {
   const { t, language, setLanguage } = useI18n();
   const [current, setCurrent] = useState("");
@@ -76,6 +76,8 @@ export function Settings({ onBack }: { onBack: () => void }) {
             ))}
           </div>
         </Card>
+
+        <CustomModeCard />
 
         <Card className="flex flex-col gap-3">
           <div className="flex items-center gap-2">

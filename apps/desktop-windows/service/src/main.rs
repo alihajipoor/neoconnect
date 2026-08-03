@@ -34,6 +34,7 @@ mod adapters;
 mod engines;
 mod pipe;
 mod security;
+mod split_tunnel;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

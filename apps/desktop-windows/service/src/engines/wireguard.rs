@@ -16,29 +16,56 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use super::{run_hidden, run_hidden_capture, write_config, Engines};
 
-const TUNNEL_NAME: &str = "neoconnect";
+pub const TUNNEL_NAME: &str = "neoconnect";
 const CONF_FILE: &str = "neoconnect.conf";
 
 /// wireguard.exe derives the tunnel's service name from the config file
 /// name, so this is fixed by CONF_FILE above, not chosen independently.
 const TUNNEL_SERVICE_NAME: &str = "WireGuardTunnel$neoconnect";
 
-fn build_conf(p: &WireguardProfile) -> String {
+/// Builds the tunnel config.
+///
+/// `passive` is Custom mode. It adds `Table = off`, wireguard.exe's own
+/// directive for "create the interface but do not touch the routing
+/// table" -- verified on this machine rather than taken on trust:
+/// with `AllowedIPs = 0.0.0.0/0` and the directive present, the adapter
+/// appeared and the system default route stayed on the physical link.
+///
+/// `AllowedIPs` is left as it is either way. It is cryptokey routing --
+/// which destinations this peer is *allowed* to carry -- and the split
+/// tunnel needs that to stay wide open. What it must not do is become
+/// the machine's routing policy, and `Table = off` is exactly the line
+/// between the two.
+///
+/// DNS is also dropped in passive mode. Setting a tunnel resolver would
+/// point the whole machine's lookups at the VPN, which is a full-tunnel
+/// behaviour arriving through a setting that promised the opposite.
+fn build_conf(p: &WireguardProfile, passive: bool) -> String {
+    let dns = if passive {
+        String::new()
+    } else {
+        format!("DNS = {}\n", p.dns.as_deref().unwrap_or("1.1.1.1"))
+    };
+    let table = if passive { "Table = off\n" } else { "" };
+
     format!(
-        "[Interface]\nPrivateKey = {}\nAddress = {}\nDNS = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = 25\n",
+        "[Interface]\nPrivateKey = {}\nAddress = {}\n{dns}{table}\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = 25\n",
         p.private_key,
         p.address,
-        p.dns.as_deref().unwrap_or("1.1.1.1"),
         p.server_public_key,
         p.allowed_ips,
         p.endpoint,
     )
 }
 
-pub fn connect(engines: &Engines, profile: &WireguardProfile) -> Result<(), String> {
+pub fn connect(
+    engines: &Engines,
+    profile: &WireguardProfile,
+    passive: bool,
+) -> Result<(), String> {
     let exe = engines.engine_path("wireguard.exe")?;
     let conf_path = engines.config_path(CONF_FILE);
-    write_config(&conf_path, &build_conf(profile))?;
+    write_config(&conf_path, &build_conf(profile, passive))?;
 
     let status = run_hidden(&exe, &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
@@ -161,6 +188,47 @@ fn parse_handshake(out: &str, now: u64) -> HandshakeHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn profile() -> WireguardProfile {
+        WireguardProfile {
+            private_key: "cHJpdmF0ZQ==".into(),
+            address: "10.66.0.5/32".into(),
+            dns: Some("1.1.1.1".into()),
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "cHVibGlj".into(),
+            endpoint: "203.0.113.5:51820".into(),
+        }
+    }
+
+    #[test]
+    fn a_full_tunnel_config_installs_routes_and_sets_dns() {
+        let conf = build_conf(&profile(), false);
+        assert!(!conf.contains("Table = off"), "the default must still capture routing");
+        assert!(conf.contains("DNS = 1.1.1.1"));
+    }
+
+    #[test]
+    fn custom_mode_keeps_the_interface_and_gives_up_the_routing_table() {
+        // The distinction Custom mode rests on. AllowedIPs stays wide
+        // open -- it is cryptokey routing, "what this peer may carry" --
+        // while Table = off stops that becoming the machine's routing
+        // policy. Verified on a real machine before this was written:
+        // with both present, the adapter appeared and the system default
+        // route stayed on the physical link.
+        let conf = build_conf(&profile(), true);
+        assert!(conf.contains("Table = off"));
+        assert!(conf.contains("AllowedIPs = 0.0.0.0/0"), "the peer must still accept everything");
+    }
+
+    #[test]
+    fn custom_mode_leaves_the_machines_dns_alone() {
+        // Pointing every lookup at the VPN resolver is a full-tunnel
+        // behaviour. Arriving through a setting that promises the
+        // opposite would send the whole machine's browsing history to
+        // the node for a customer who selected one game.
+        let conf = build_conf(&profile(), true);
+        assert!(!conf.contains("DNS ="));
+    }
 
     const NOW: u64 = 1_700_000_000;
 

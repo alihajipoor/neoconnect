@@ -52,6 +52,12 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        // The native file picker, used only to choose which executables
+        // Custom mode routes. `dialog:allow-open` is the single
+        // permission granted for it -- notably not save or message, so a
+        // compromised webview cannot write files or raise dialogs of its
+        // own.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -75,6 +81,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             vpn::vpn_connect,
             vpn::vpn_disconnect,
+            vpn::vpn_set_split_tunnel,
             vpn::vpn_status,
             vpn::measure_latency,
             vpn::network_fingerprint,

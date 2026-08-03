@@ -10,6 +10,7 @@ import { captureBaselineIp, verifyEgress, type EgressVerdict } from "../lib/egre
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { loadLastGood, saveLastGood } from "../lib/failover-store";
+import { loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
@@ -25,6 +26,11 @@ import { useI18n } from "../lib/i18n";
 type VpnStatus = {
   connected: boolean;
   protocol: string | null;
+  /** Whether Custom mode is intercepting right now, as opposed to being
+   * switched on in Settings. The difference is real -- turning it on
+   * mid-session cannot retrofit itself onto a tunnel already carrying
+   * everything -- and the customer is told which they have. */
+  splitTunnelActive?: boolean;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }
@@ -371,6 +377,14 @@ export function Dashboard({
    * state because nothing renders from it. */
   const baselineIpRef = useRef<string | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
+  /** Taken from the service, never from the Settings toggle.
+   *
+   * The two disagree in a state the customer can easily reach: switch
+   * Custom mode on while already connected, and the setting says yes
+   * while the live tunnel is still carrying everything. Showing the
+   * toggle here would tell them only their game is routed when the whole
+   * machine is. */
+  const [splitTunnelActive, setSplitTunnelActive] = useState(false);
 
   useEffect(() => {
     void loadAll();
@@ -446,6 +460,7 @@ export function Dashboard({
       const status = await invoke<VpnStatus>("vpn_status");
       adopted = stateFromStatus(status);
       setConnectionState(adopted);
+      setSplitTunnelActive(Boolean(status.splitTunnelActive));
     } catch {
       setConnectionState("disconnected");
     }
@@ -480,7 +495,9 @@ export function Dashboard({
 
       let fromStatus: ConnectionState;
       try {
-        fromStatus = stateFromStatus(await invoke<VpnStatus>("vpn_status"));
+        const status = await invoke<VpnStatus>("vpn_status");
+        setSplitTunnelActive(Boolean(status.splitTunnelActive));
+        fromStatus = stateFromStatus(status);
       } catch {
         // Failing to ask is not the same as learning the tunnel is
         // down, so the last known state stands and no strike is counted.
@@ -585,6 +602,23 @@ export function Dashboard({
       //
       // Harmless from the Connect button, where nothing is up.
       await invoke("vpn_disconnect").catch(() => undefined);
+
+      // Re-sent on every pass, not only when the setting changes. The
+      // helper is a Windows service with its own lifetime: it can be
+      // restarted underneath a running app and come back knowing
+      // nothing about Custom mode. Re-sending is one cheap IPC call and
+      // removes the whole class of "it quietly stopped applying".
+      //
+      // It has to happen before the connect below, because it decides
+      // whether the tunnel comes up passively or takes the default
+      // route -- a decision that cannot be changed afterwards.
+      try {
+        await pushSplitTunnel(await loadSplitTunnel());
+      } catch {
+        // A failure here means Custom mode does not apply to this
+        // attempt, which the status poll will report honestly rather
+        // than the connection being blocked over a preference.
+      }
 
       // The ladder, not a single credential. Everything the subscription
       // holds is already provisioned, so moving to another protocol
@@ -856,6 +890,16 @@ export function Dashboard({
                           {t("dash.switchedTo")}{" "}
                           <span className="font-medium">{failedOverTo}</span>
                         </p>
+                      ) : null}
+
+                      {/* Custom mode changes what "protected" covers, so
+                          the same word must not stand for both. Read
+                          from the service rather than from the setting:
+                          only the service knows whether this tunnel was
+                          actually brought up to carry one app or all of
+                          them. */}
+                      {connectionState === "connected" && splitTunnelActive ? (
+                        <p className="mt-1 text-xs text-highlight">{t("dash.customActive")}</p>
                       ) : null}
                     </div>
 

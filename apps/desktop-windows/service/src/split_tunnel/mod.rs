@@ -1,0 +1,271 @@
+//! Custom mode: route only the applications the customer chose.
+//!
+//! The opposite of the usual "exclude this app from the VPN". Here the
+//! default is that nothing is tunnelled and the selected applications
+//! are the exception -- the shape a gaming accelerator has, and the one
+//! that was asked for.
+//!
+//! # How the pieces fit
+//!
+//! 1. The engine brings its tunnel up **passively**: an adapter exists
+//!    and will encrypt anything, but no routes are installed, so the
+//!    machine's traffic carries on exactly as before.
+//! 2. [`engines::routing::install_passive_default`] adds one route
+//!    through that adapter at a metric nothing will ever prefer. This is
+//!    what makes the tunnel reachable to a socket that asks for it by
+//!    name, without making it attractive to anything that does not.
+//! 3. [`redirect`] intercepts outbound packets, works out which
+//!    application each belongs to, and rewrites the selected ones to a
+//!    local proxy.
+//! 4. [`proxy`] carries them onward on sockets pinned to the tunnel with
+//!    `IP_UNICAST_IF`, and relays the replies back.
+//!
+//! Each of those was proven separately against a real node before any of
+//! this was written -- interception, pinning, TCP end to end and UDP end
+//! to end -- because two earlier designs failed in ways that counters
+//! and return codes reported as success.
+//!
+//! # Following the active protocol
+//!
+//! The interface is not captured when Custom mode starts; it is read
+//! when each socket is created, so nothing here is bound to one
+//! protocol's adapter.
+//!
+//! Failover itself arrives as an ordinary `Connect`, which tears the old
+//! engine down and brings a new one up -- and takes Custom mode with it,
+//! stopping and restarting against the new adapter. That deliberately
+//! reuses the existing path instead of adding a re-point of its own:
+//! there is then one way a tunnel is established, not two, and the
+//! seconds in between behave exactly as a full-tunnel customer's would.
+//!
+//! # Failing open
+//!
+//! In the seconds when no tunnel exists -- mid-failover, or before the
+//! first connect -- selected traffic goes out unprotected rather than
+//! being dropped. That was the decision for this feature, and it is the
+//! right one for a game. It is not automatically right for someone using
+//! this to reach a blocked site, so **the UI must say plainly that
+//! traffic can leave unprotected while reconnecting.** Leaking silently
+//! is the failure this project has spent the most effort removing.
+
+mod divert;
+mod flows;
+mod owner;
+mod proxy;
+mod redirect;
+
+use std::net::Ipv4Addr;
+use std::sync::Arc;
+
+use crate::adapters;
+use crate::engines::routing::{self, InstalledRoutes};
+
+pub use owner::Selection;
+
+/// How long to wait for a tunnel adapter to appear and be given an
+/// address after its engine starts.
+///
+/// The adapter and its address arrive separately, and a socket pinned to
+/// an interface with no address of its own has nothing to use as a
+/// source -- so both have to be there before the proxy is any use.
+const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Custom mode, whether or not it is currently running.
+///
+/// The selection outlives any one connection: a customer who picked
+/// their game keeps it selected across disconnects, reconnects and
+/// protocol switches.
+pub struct SplitTunnel {
+    enabled: bool,
+    selection: Arc<Selection>,
+    active: Option<Active>,
+}
+
+struct Active {
+    redirect: redirect::Running,
+    relays: proxy::Relays,
+    tunnel: Arc<proxy::TunnelInterface>,
+    route: InstalledRoutes,
+}
+
+impl Default for SplitTunnel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SplitTunnel {
+    pub fn new() -> Self {
+        Self { enabled: false, selection: Arc::new(Selection::default()), active: None }
+    }
+
+    /// Replaces the customer's choice. Takes effect on the next
+    /// connection a selected app makes, without restarting anything --
+    /// the redirect loop reads the selection per decision.
+    pub fn set_selection(&mut self, enabled: bool, apps: Vec<String>) {
+        self.enabled = enabled;
+        self.selection = Arc::new(Selection::new(apps));
+    }
+
+    /// Whether Custom mode should shape how the next tunnel is brought
+    /// up. False when the toggle is off, and false when it is on with
+    /// nothing chosen -- which must not mean "tunnel everything", since
+    /// that is the opposite of what the customer asked for.
+    pub fn wants_passive_tunnel(&self) -> bool {
+        self.enabled && !self.selection.is_empty()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Brings Custom mode up against a tunnel that is already running
+    /// passively.
+    ///
+    /// `adapter_name` is the engine's own adapter; `node` is the VPN
+    /// server, whose traffic must never be redirected -- doing so would
+    /// carry the tunnel through itself.
+    pub fn start(&mut self, adapter_name: &str, node: Ipv4Addr) -> Result<(), String> {
+        self.stop();
+        if !self.wants_passive_tunnel() {
+            return Ok(());
+        }
+
+        let tunnel_adapter = wait_for_addressed_adapter(adapter_name)?;
+        let tunnel_address = tunnel_adapter
+            .ipv4
+            .ok_or_else(|| format!("{adapter_name} came up without an address"))?;
+
+        let uplink = adapters::physical_uplink(&[adapter_name])
+            .map_err(|e| format!("could not enumerate network adapters: {e}"))?
+            .ok_or_else(|| "no physical network connection to send traffic over".to_string())?;
+        let local_addr = uplink
+            .ipv4
+            .ok_or_else(|| "the physical network connection has no address".to_string())?;
+
+        let route = routing::install_passive_default(tunnel_address, tunnel_adapter.index)?;
+
+        let nat = Arc::new(flows::Nat::new());
+        let tunnel = Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index));
+        let relays = match proxy::start(nat.clone(), tunnel.clone()) {
+            Ok(relays) => relays,
+            Err(e) => {
+                let mut route = route;
+                route.remove();
+                return Err(format!("could not start the local relay: {e}"));
+            }
+        };
+
+        let redirect = redirect::Redirect {
+            local_addr,
+            node_addr: node,
+            tcp_proxy_port: relays.tcp_port,
+            udp_proxy_port: relays.udp_port,
+            own_image: own_image_path(),
+        };
+
+        match redirect::start(redirect, nat, self.selection.clone()) {
+            Ok(running) => {
+                self.active = Some(Active { redirect: running, relays, tunnel, route });
+                Ok(())
+            }
+            Err(e) => {
+                relays.stop();
+                let mut route = route;
+                route.remove();
+                Err(e)
+            }
+        }
+    }
+
+    /// Marks that no tunnel is available, so redirected traffic goes out
+    /// unprotected instead of failing. See the fail-open note above.
+    pub fn detach_tunnel(&self) {
+        if let Some(active) = &self.active {
+            active.tunnel.set(0);
+        }
+    }
+
+    pub fn stop(&mut self) {
+        let Some(active) = self.active.take() else { return };
+        // Interception first. Stopping the relays while packets were
+        // still being rewritten to them would send a selected app's
+        // traffic to a port with nothing behind it -- a blackout rather
+        // than the fail-open this promises.
+        active.redirect.stop();
+        active.relays.stop();
+        let mut route = active.route;
+        route.remove();
+    }
+}
+
+/// Waits for an adapter to exist *and* to have an address.
+fn wait_for_addressed_adapter(name: &str) -> Result<adapters::Adapter, String> {
+    let deadline = std::time::Instant::now() + ADAPTER_WAIT;
+    loop {
+        match adapters::find_by_name(name) {
+            Ok(Some(adapter)) if adapter.ipv4.is_some() => return Ok(adapter),
+            Ok(_) if std::time::Instant::now() < deadline => {}
+            Ok(_) => {
+                return Err(format!(
+                    "the tunnel adapter ({name}) never came up with an address, so \
+                     selected apps had nowhere to send their traffic"
+                ))
+            }
+            Err(e) => return Err(format!("could not enumerate network adapters: {e}")),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// This service's own executable.
+///
+/// Excluded from redirection unconditionally. When no tunnel is up the
+/// proxy's onward socket is unpinned and looks like any other
+/// application's, so without this the proxy would intercept its own
+/// traffic and hand it back to itself.
+fn own_image_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_selection_does_not_shape_the_tunnel() {
+        // The toggle being on with nothing chosen must not be read as
+        // "tunnel everything" -- that is the opposite of Custom mode,
+        // and it would arrive as a surprise full tunnel.
+        let mut split = SplitTunnel::new();
+        split.set_selection(true, Vec::new());
+        assert!(!split.wants_passive_tunnel());
+
+        split.set_selection(true, vec![r"C:\Games\game.exe".into()]);
+        assert!(split.wants_passive_tunnel());
+
+        split.set_selection(false, vec![r"C:\Games\game.exe".into()]);
+        assert!(!split.wants_passive_tunnel());
+    }
+
+    #[test]
+    fn stopping_when_nothing_is_running_is_harmless() {
+        // Disconnect calls this unconditionally, including for customers
+        // who have never turned Custom mode on.
+        let mut split = SplitTunnel::new();
+        split.stop();
+        split.stop();
+        assert!(!split.is_running());
+    }
+
+    #[test]
+    fn this_service_knows_its_own_executable() {
+        // The self-exclusion depends on it. An empty string here would
+        // match nothing, and the proxy would be free to intercept its
+        // own upstream connections.
+        let image = own_image_path();
+        assert!(image.to_lowercase().ends_with(".exe"), "got {image}");
+    }
+}
