@@ -97,7 +97,10 @@ jobs:
           setup=$(ls "$PWD"/target/release/bundle/nsis/*_x64-setup.exe | head -1)
           echo "Embedding $setup"
           NEOXIFY_SETUP="$setup" cargo build --release -p neoxify-bootstrapper
-          cp target/release/neoxify-bootstrapper.exe target/release/bundle/nsis/Neoxify-Setup.exe
+          # The crate is neoxify-bootstrapper but its [[bin]] name is
+          # Neoxify-Setup, so that -- not the crate name -- is what
+          # cargo writes.
+          cp target/release/Neoxify-Setup.exe target/release/bundle/nsis/Neoxify-Setup.exe
 
       # apps/desktop-windows/Cargo.toml is the cargo workspace root
       # (members: src-tauri, service, ipc, bootstrapper), so the target
