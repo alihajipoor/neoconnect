@@ -1,5 +1,6 @@
 import { apiRequest } from "./api";
 import type {
+  AppLinks,
   Customer,
   PaymentProvider,
   PaymentStart,
@@ -13,6 +14,8 @@ import type {
 export const getMe = () => apiRequest<Customer>("/customer/me");
 export const getSubscriptions = () => apiRequest<Subscription[]>("/customer/subscriptions");
 export const getProtocolUsers = () => apiRequest<ProtocolUser[]>("/customer/protocol-users");
+export const getAppLinks = () => apiRequest<AppLinks>("/customer/links");
+
 export const getPlans = () => apiRequest<SubscriptionPlan[]>("/customer/plans");
 
 /** What a voucher code would grant, without spending it.

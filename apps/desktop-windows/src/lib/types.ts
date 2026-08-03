@@ -166,3 +166,16 @@ export type ReferralOverview = {
     bestFriendMonths: number;
   };
 };
+
+/** Where to find the product outside the app.
+ *
+ * Served by the backend rather than compiled in, so a Discord invite
+ * that expires or an account that gets renamed does not need a new
+ * release. Every field is nullable and the app renders only what is
+ * set, so there is no way to end up with a button going nowhere. */
+export interface AppLinks {
+  websiteUrl: string | null;
+  discordUrl: string | null;
+  instagramUrl: string | null;
+  telegramUrl: string | null;
+}

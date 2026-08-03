@@ -812,3 +812,27 @@ model VoucherRedemption {
   @@index([customerId])
   @@map("voucher_redemptions")
 }
+
+// ---------------------------------------------------------------------------
+// Community links
+// ---------------------------------------------------------------------------
+
+/// Where customers can find the product outside the app.
+///
+/// Served rather than compiled in, and that is the point: a Discord
+/// invite expires, an account gets renamed, and neither should need a
+/// new release of a desktop app to fix. Every field is nullable and the
+/// app renders only what is filled in, so nothing here can produce a
+/// button that goes nowhere.
+///
+/// Same lazily-created singleton shape as FreeTrialSettings.
+model AppLinks {
+  id           String   @id @default(uuid())
+  websiteUrl   String?
+  discordUrl   String?
+  instagramUrl String?
+  telegramUrl  String?
+  updatedAt    DateTime @updatedAt
+
+  @@map("app_links")
+}

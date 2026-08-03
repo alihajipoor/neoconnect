@@ -15,6 +15,7 @@ import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
 import { LocationPicker } from "../components/LocationPicker";
+import { CommunityLinks } from "../components/CommunityLinks";
 import { useI18n } from "../lib/i18n";
 
 /** What the helper service reports about the far end.
@@ -850,6 +851,9 @@ export function Dashboard({
       <header className="flex items-center justify-between">
         <Logo />
         <div className="flex items-center gap-1">
+          {/* Left of the gear, and only for links the operator has
+              actually set -- see CommunityLinks. */}
+          <CommunityLinks />
           <Button
             variant="ghost"
             onClick={onOpenSettings}

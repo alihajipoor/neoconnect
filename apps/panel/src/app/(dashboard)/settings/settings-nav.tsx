@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CreditCard, Gift, Mail, ShieldCheck, Users } from "lucide-react";
+import { CreditCard, Gift, Link2, Mail, ShieldCheck, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /** Settings sections.
@@ -17,6 +17,7 @@ const SECTIONS = [
   { href: "/settings/email", label: "Email", icon: Mail, superAdminOnly: true },
   { href: "/settings/trial", label: "Free trial", icon: Gift, superAdminOnly: true },
   { href: "/settings/referrals", label: "Referrals", icon: Users, superAdminOnly: true },
+  { href: "/settings/links", label: "Community links", icon: Link2, superAdminOnly: true },
 ];
 
 export function SettingsNav({ isSuperAdmin }: { isSuperAdmin: boolean }) {

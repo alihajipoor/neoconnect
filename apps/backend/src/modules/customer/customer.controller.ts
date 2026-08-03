@@ -25,6 +25,7 @@ import { CreateOwnSubscriptionDto } from "./dto/create-own-subscription.dto";
 import { SwitchRouteDto } from "./dto/switch-route.dto";
 import { ReferralsService } from "../referrals/referrals.service";
 import { VouchersService } from "../vouchers/vouchers.service";
+import { AppLinksService } from "../app-links/app-links.service";
 import { RedeemVoucherDto } from "../vouchers/dto/redeem-voucher.dto";
 import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
@@ -47,6 +48,7 @@ export class CustomerController {
     private readonly plansService: PlansService,
     private readonly referralsService: ReferralsService,
     private readonly vouchersService: VouchersService,
+    private readonly appLinksService: AppLinksService,
     private readonly routesService: RoutesService,
     private readonly billingService: BillingService,
     private readonly config: ConfigService,
@@ -82,6 +84,15 @@ export class CustomerController {
    * a paying customer; a readable list of other people's email
    * addresses is a different thing, and a referral link posted publicly
    * would turn this into a way to collect them. */
+  /** Where to find the product outside the app.
+   *
+   * Served rather than compiled into the client so a Discord invite or
+   * a renamed account does not need a new release to fix. */
+  @Get("links")
+  links() {
+    return this.appLinksService.get();
+  }
+
   /** Checks a code and says what it would grant, without spending it.
    *
    * Separate from redeeming so the app can show the plan and let the
