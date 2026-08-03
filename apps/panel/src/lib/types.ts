@@ -204,3 +204,12 @@ export interface Voucher {
   updatedAt: string;
   _count?: { redemptions: number };
 }
+
+/** Links the desktop app shows in its header. All nullable: the app
+ * renders only what is set, so an empty field means no button. */
+export interface AppLinks {
+  websiteUrl: string | null;
+  discordUrl: string | null;
+  instagramUrl: string | null;
+  telegramUrl: string | null;
+}
