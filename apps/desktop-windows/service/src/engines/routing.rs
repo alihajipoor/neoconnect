@@ -186,32 +186,52 @@ mod tests {
     }
 
     #[test]
-    fn nothing_here_ever_installs_a_real_default_route() {
-        // The bug this guards is not subtle in hindsight and was
-        // invisible in advance: `route delete 0.0.0.0 mask 0.0.0.0`
-        // removes *every* default route on the machine, so tearing down
-        // our own took the physical link's with it and the computer lost
-        // internet for 10-30 seconds after each failed attempt.
-        //
-        // Two defences, and this asserts the first: never create a
-        // 0.0.0.0/0 entry at all. The halves cover the same space, are
-        // more specific, and belong to nobody else.
+    fn the_full_tunnel_never_installs_a_real_default_route() {
+        // Its half-defaults beat the physical link on prefix length, so
+        // the existing default is left in place rather than removed and
+        // restored -- if this process dies, the machine still works.
         for (dest, mask) in HALF_DEFAULTS {
-            assert_ne!(
-                (dest, mask),
-                ("0.0.0.0", "0.0.0.0"),
-                "a real default route cannot be removed without removing everyone's"
-            );
+            assert_ne!((dest, mask), ("0.0.0.0", "0.0.0.0"));
         }
     }
 
     #[test]
+    fn the_passive_route_must_be_a_real_default_route() {
+        // The opposite requirement to the test above, and the one that
+        // is easy to get backwards -- it was, and it put a whole machine
+        // through the tunnel for a customer who had selected one
+        // browser.
+        //
+        // Windows matches longest prefix first and only then compares
+        // metrics. A half-default is more specific than the physical
+        // link's 0.0.0.0/0, so it wins outright and metric 9999 is never
+        // even looked at. Only at equal prefix length does a huge metric
+        // mean "reachable but never preferred", which is the entire
+        // property Custom mode is built on.
+        //
+        assert_eq!(
+            PASSIVE_DEFAULT,
+            ("0.0.0.0", "0.0.0.0"),
+            "anything more specific than a default route becomes a full tunnel"
+        );
+        assert!(
+            !HALF_DEFAULTS.contains(&PASSIVE_DEFAULT),
+            "the passive route must not reuse the full tunnel's more-specific halves"
+        );
+        // Comfortably above any interface metric Windows assigns, so the
+        // sum can never fall below a physical link's.
+        assert!(PASSIVE_METRIC >= 9999);
+    }
+
+    #[test]
     fn every_recorded_route_carries_the_interface_it_was_added_on() {
-        // The second defence. Even for destinations nobody else uses,
-        // deletion is scoped to our own interface -- so a leftover route
-        // from an adapter that has gone cannot take a live one with it.
+        // What makes a 0.0.0.0/0 safe to own. `route delete 0.0.0.0 mask
+        // 0.0.0.0` with no interface removes *every* default route on
+        // the machine, the physical link's included -- which took a
+        // customer's computer offline for 10-30 seconds after each
+        // failed attempt. Scoped to our own interface, it cannot.
         let mut routes = InstalledRoutes::none();
-        routes.destinations.push(("0.0.0.0".into(), "128.0.0.0".into(), 42));
+        routes.destinations.push(("0.0.0.0".into(), "0.0.0.0".into(), 42));
         let (_, _, interface_index) = routes.destinations[0].clone();
         assert_eq!(interface_index, 42);
         routes.remove();
@@ -248,33 +268,50 @@ const HALF_DEFAULTS: [(&str, &str); 2] =
 /// Deliberately separate from [`install_full_tunnel`], whose job is to
 /// make the tunnel win. This one makes it available without winning.
 ///
-/// Uses the two half-defaults rather than a real `0.0.0.0/0`, and the
-/// reason is worth stating because the first version did not. Removing a
-/// `0.0.0.0/0` entry deletes every default route on the machine, ours
-/// and the physical link's alike, so every failed connection attempt
-/// knocked the whole computer offline until Windows rebuilt it. The
-/// halves cover the same space and belong to nobody else.
+/// # Why this is a real `0.0.0.0/0` and must stay one
+///
+/// It is the one place in this module that cannot use the half-defaults,
+/// and the reason is the whole mechanism. Windows selects a route by
+/// **longest prefix first**, and only compares metrics between routes of
+/// equal length. A `/1` is more specific than the physical link's `/0`,
+/// so it wins outright and the metric is never consulted -- which turns
+/// this into a full tunnel no matter how unattractive the metric looks.
+///
+/// That is not a theory. Swapping this to half-defaults, as a
+/// well-meant fix for the deletion problem below, put a customer's
+/// entire machine through the tunnel while they had asked for one
+/// browser. Only at equal prefix length does metric 9999 do its job:
+/// nothing prefers the tunnel, but a socket pinned to it -- which is not
+/// choosing between interfaces at all -- still finds a route.
+///
+/// The deletion problem is real and is solved separately, by scoping
+/// removal to the interface the route was added on. See
+/// [`InstalledRoutes::destinations`].
 pub fn install_passive_default(
     tunnel_address: Ipv4Addr,
     tunnel_index: u32,
 ) -> Result<InstalledRoutes, String> {
-    const METRIC: u32 = 9999;
+    let (dest, mask) = PASSIVE_DEFAULT;
     let mut installed = InstalledRoutes::none();
 
-    for (dest, mask) in HALF_DEFAULTS {
-        // The tunnel's own address as next hop is what the full-tunnel
-        // Xray path already does successfully. Point-to-point adapters
-        // are sometimes happier with an unspecified next hop, so that is
-        // tried second rather than failing the feature on a formality.
-        let added = add_route(dest, mask, &tunnel_address.to_string(), tunnel_index, METRIC)
-            .or_else(|_| add_route(dest, mask, "0.0.0.0", tunnel_index, METRIC));
+    // The tunnel's own address as next hop is what the full-tunnel Xray
+    // path already does successfully. Point-to-point adapters are
+    // sometimes happier with an unspecified next hop, so that is tried
+    // second rather than failing the feature on a formality.
+    add_route(dest, mask, &tunnel_address.to_string(), tunnel_index, PASSIVE_METRIC)
+        .or_else(|_| add_route(dest, mask, "0.0.0.0", tunnel_index, PASSIVE_METRIC))
+        .map_err(|e| format!("could not make the tunnel reachable for selected apps: {e}"))?;
 
-        if let Err(e) = added {
-            installed.remove();
-            return Err(format!("could not make the tunnel reachable for selected apps: {e}"));
-        }
-        installed.destinations.push((dest.to_string(), mask.to_string(), tunnel_index));
-    }
-
+    installed.destinations.push((dest.to_string(), mask.to_string(), tunnel_index));
     Ok(installed)
 }
+
+/// The passive route's destination. A real default route, and it has to
+/// be -- see [`install_passive_default`].
+const PASSIVE_DEFAULT: (&str, &str) = ("0.0.0.0", "0.0.0.0");
+
+/// High enough that the physical link always wins the metric comparison.
+/// Windows adds the interface metric to this, and a physical link sits
+/// around 25, so there is no plausible arrangement where the tunnel is
+/// preferred.
+const PASSIVE_METRIC: u32 = 9999;

@@ -164,21 +164,21 @@ model AdminUser {
 }
 
 model Customer {
-  id            String         @id @default(uuid())
-  email         String         @unique
-  passwordHash  String
-  telegramId    String?
-  referralCode  String?        @unique
-  status        CustomerStatus @default(ACTIVE)
+  id                             String         @id @default(uuid())
+  email                          String         @unique
+  passwordHash                   String
+  telegramId                     String?
+  referralCode                   String?        @unique
+  status                         CustomerStatus @default(ACTIVE)
   // Refresh-token revocation counter, same purpose/pattern as
   // AdminUser.tokenVersion -- bumping it invalidates every outstanding
   // customer refresh token at once (logout-all-sessions).
-  tokenVersion  Int            @default(0)
+  tokenVersion                   Int            @default(0)
   // null = unverified. Set by POST /customer-auth/verify-email or
   // /verify-email-code. No VPN access (trial or paid) is granted before
   // this is set -- see M16's "Customer Self-Signup + Free Trial Mode"
   // gating decision, 2026-07-24.
-  emailVerifiedAt DateTime?
+  emailVerifiedAt                DateTime?
   // Short human-enterable alternative to the verify-email link/token --
   // added 2026-07-24 after live testing showed the token (a full JWT) is
   // both unusable to type by hand and prone to breaking email HTML
@@ -192,15 +192,27 @@ model Customer {
   // bug that gave verification its code path in the first place. A
   // locked-out customer needs something they can read off the screen and
   // type. Cleared once used or superseded by another request.
-  passwordResetCode              String?
-  passwordResetCodeExpiresAt     DateTime?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  passwordResetCode          String?
+  passwordResetCodeExpiresAt DateTime?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+
+  // Who invited them, if anyone. Set once at signup from the referral
+  // code they typed and never changed afterwards -- a referral is a
+  // fact about how an account came to exist, and letting it move later
+  // would make the reward arithmetic below rewritable after the fact.
+  referredByCustomerId String?
 
   subscriptions Subscription[]
   transactions  PaymentTransaction[]
   invoices      Invoice[]
 
+  referredBy      Customer?        @relation("CustomerReferrals", fields: [referredByCustomerId], references: [id])
+  referrals       Customer[]       @relation("CustomerReferrals")
+  referralRewards ReferralReward[] @relation("ReferralRewardsEarned")
+  referralCredits ReferralCredit[] @relation("ReferralCreditsGiven")
+
+  @@index([referredByCustomerId])
   @@map("customers")
 }
 
@@ -209,11 +221,11 @@ model Customer {
 // ---------------------------------------------------------------------------
 
 model SubscriptionPlan {
-  id                       String   @id @default(uuid())
+  id                       String     @id @default(uuid())
   name                     String
   dataCapBytes             BigInt
   durationDays             Int
-  priceUsd                 Decimal  @db.Decimal(10, 2)
+  priceUsd                 Decimal    @db.Decimal(10, 2)
   maxConcurrentConnections Int?
   // Per-user speed caps in megabits per second, applied on the node to
   // every ProtocolUser provisioned on this plan. Null means uncapped,
@@ -225,7 +237,7 @@ model SubscriptionPlan {
   maxDownloadMbps          Int?
   maxUploadMbps            Int?
   protocolsAllowed         Protocol[]
-  isActive                 Boolean  @default(true)
+  isActive                 Boolean    @default(true)
   // Which Route a customer purchasing this plan gets provisioned on --
   // same v1 simplification as FreeTrialSettings.trialRouteId (one
   // admin-configured default, no per-purchase server picker yet). Used
@@ -233,27 +245,28 @@ model SubscriptionPlan {
   // ProtocolUser once payment actually clears -- see
   // apps/backend/src/modules/billing/billing.service.ts.
   defaultRouteId           String?
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
+  createdAt                DateTime   @default(now())
+  updatedAt                DateTime   @updatedAt
 
-  subscriptions      Subscription[]
-  freeTrialSettings  FreeTrialSettings[]
-  defaultRoute       Route?          @relation(fields: [defaultRouteId], references: [id])
+  subscriptions     Subscription[]
+  freeTrialSettings FreeTrialSettings[]
+  referralSettings  ReferralSettings[]
+  defaultRoute      Route?              @relation(fields: [defaultRouteId], references: [id])
 
   @@map("subscription_plans")
 }
 
 model Subscription {
-  id             String              @id @default(uuid())
-  customerId     String
-  planId         String
-  primaryNodeId  String?
-  status         SubscriptionStatus  @default(ACTIVE)
-  startAt        DateTime            @default(now())
-  expireAt       DateTime
-  dataCapBytes   BigInt
-  dataUsedBytes  BigInt              @default(0)
-  autoRenew      Boolean             @default(false)
+  id                   String             @id @default(uuid())
+  customerId           String
+  planId               String
+  primaryNodeId        String?
+  status               SubscriptionStatus @default(ACTIVE)
+  startAt              DateTime           @default(now())
+  expireAt             DateTime
+  dataCapBytes         BigInt
+  dataUsedBytes        BigInt             @default(0)
+  autoRenew            Boolean            @default(false)
   // Set once the low-data-remaining warning email has been sent for the
   // current billing period, so the sweep that checks for it fires only
   // once. Reset to null on renewal (BillingService.renewSubscription()).
@@ -261,16 +274,17 @@ model Subscription {
   // Same "already warned" pattern for the subscription-expiring-soon
   // email, reset on renewal alongside the field above.
   expiryWarningSentAt  DateTime?
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
 
-  customer     Customer           @relation(fields: [customerId], references: [id])
-  plan         SubscriptionPlan   @relation(fields: [planId], references: [id])
-  primaryNode  Node?              @relation(fields: [primaryNodeId], references: [id])
-  protocolUsers ProtocolUser[]
-  usageRecords  UsageRecord[]
-  transactions  PaymentTransaction[]
-  invoices      Invoice[]
+  customer       Customer             @relation(fields: [customerId], references: [id])
+  plan           SubscriptionPlan     @relation(fields: [planId], references: [id])
+  primaryNode    Node?                @relation(fields: [primaryNodeId], references: [id])
+  protocolUsers  ProtocolUser[]
+  usageRecords   UsageRecord[]
+  transactions   PaymentTransaction[]
+  invoices       Invoice[]
+  referralReward ReferralReward?
 
   @@index([customerId])
   @@index([status])
@@ -305,7 +319,7 @@ model Node {
 }
 
 model ProtocolConfig {
-  id               String   @id @default(uuid())
+  id               String            @id @default(uuid())
   nodeId           String
   protocol         Protocol
   listenPort       Int
@@ -324,12 +338,12 @@ model ProtocolConfig {
   // TCP/NONE as far as this model is concerned (their own transports are
   // not configurable here), and the one Xray config in production is
   // TCP + REALITY.
-  transport        Transport      @default(TCP)
+  transport        Transport         @default(TCP)
   security         TransportSecurity @default(NONE)
   publicParamsJson Json
-  isEnabled        Boolean  @default(true)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  isEnabled        Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
   node          Node           @relation(fields: [nodeId], references: [id])
   protocolUsers ProtocolUser[]
@@ -358,8 +372,8 @@ model Route {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
-  entryProtocolConfig ProtocolConfig  @relation("RouteEntry", fields: [entryProtocolConfigId], references: [id])
-  exitProtocolConfig  ProtocolConfig? @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
+  entryProtocolConfig ProtocolConfig      @relation("RouteEntry", fields: [entryProtocolConfigId], references: [id])
+  exitProtocolConfig  ProtocolConfig?     @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
   protocolUsers       ProtocolUser[]
   freeTrialSettings   FreeTrialSettings[]
   defaultForPlans     SubscriptionPlan[]
@@ -416,8 +430,8 @@ model UsageRecord {
   reportedAt     DateTime @default(now())
 
   protocolUser ProtocolUser? @relation(fields: [protocolUserId], references: [id], onDelete: SetNull)
-  subscription Subscription @relation(fields: [subscriptionId], references: [id])
-  node         Node         @relation(fields: [nodeId], references: [id])
+  subscription Subscription  @relation(fields: [subscriptionId], references: [id])
+  node         Node          @relation(fields: [nodeId], references: [id])
 
   @@index([subscriptionId, reportedAt])
   @@index([nodeId, reportedAt])
@@ -429,14 +443,14 @@ model UsageRecord {
 // ---------------------------------------------------------------------------
 
 model EnrollmentToken {
-  id              String                @id @default(uuid())
-  nodeId          String?
-  tokenHash       String                @unique
-  status          EnrollmentTokenStatus @default(PENDING)
-  expiresAt       DateTime
+  id               String                @id @default(uuid())
+  nodeId           String?
+  tokenHash        String                @unique
+  status           EnrollmentTokenStatus @default(PENDING)
+  expiresAt        DateTime
   createdByAdminId String
-  createdAt       DateTime              @default(now())
-  claimedAt       DateTime?
+  createdAt        DateTime              @default(now())
+  claimedAt        DateTime?
 
   node           Node?     @relation(fields: [nodeId], references: [id])
   createdByAdmin AdminUser @relation(fields: [createdByAdminId], references: [id])
@@ -498,17 +512,17 @@ model Invoice {
 }
 
 model PaymentTransaction {
-  id                 String          @id @default(uuid())
-  customerId         String
-  subscriptionId     String?
-  provider           PaymentProvider
-  providerRef        String
-  amountUsd          Decimal         @db.Decimal(10, 2)
-  currency           String
-  status             PaymentStatus   @default(PENDING)
-  rawWebhookPayload  Json?
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
+  id                String          @id @default(uuid())
+  customerId        String
+  subscriptionId    String?
+  provider          PaymentProvider
+  providerRef       String
+  amountUsd         Decimal         @db.Decimal(10, 2)
+  currency          String
+  status            PaymentStatus   @default(PENDING)
+  rawWebhookPayload Json?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
 
   customer     Customer      @relation(fields: [customerId], references: [id])
   subscription Subscription? @relation(fields: [subscriptionId], references: [id])
@@ -544,15 +558,15 @@ model AuditLog {
 }
 
 model AgentCommand {
-  id         String             @id @default(uuid())
-  nodeId     String
-  type       AgentCommandType
+  id          String             @id @default(uuid())
+  nodeId      String
+  type        AgentCommandType
   payloadJson Json
-  status     AgentCommandStatus @default(QUEUED)
-  createdAt  DateTime           @default(now())
-  sentAt     DateTime?
-  ackedAt    DateTime?
-  error      String?
+  status      AgentCommandStatus @default(QUEUED)
+  createdAt   DateTime           @default(now())
+  sentAt      DateTime?
+  ackedAt     DateTime?
+  error       String?
 
   node Node @relation(fields: [nodeId], references: [id])
 
@@ -610,8 +624,8 @@ model PaymentSettings {
   stripeWebhookSecretEncrypted String?
 
   /// Crypto.
-  nowPaymentsEnabled          Boolean @default(false)
-  nowPaymentsApiKeyEncrypted  String?
+  nowPaymentsEnabled            Boolean @default(false)
+  nowPaymentsApiKeyEncrypted    String?
   nowPaymentsIpnSecretEncrypted String?
 
   updatedAt DateTime @updatedAt
@@ -631,4 +645,98 @@ model EmailSettings {
   updatedAt         DateTime @updatedAt
 
   @@map("email_settings")
+}
+
+// ---------------------------------------------------------------------------
+// Referral program (see docs and ReferralsService for the reward rules)
+// ---------------------------------------------------------------------------
+
+/// Same lazily-initialized-singleton shape as FreeTrialSettings.
+///
+/// Every threshold is configurable rather than hardcoded, because the
+/// right numbers are a commercial decision the operator will want to
+/// tune once real referrals exist -- and changing them should not need a
+/// deployment.
+model ReferralSettings {
+  id      String  @id @default(uuid())
+  enabled Boolean @default(false)
+
+  /// Which plan a free month is granted on. Deliberately the operator's
+  /// choice rather than whatever plan the inviter happens to be on: the
+  /// reward is a gift from the business, and the business decides what
+  /// it is worth.
+  rewardPlanId String?
+  rewardPlan   SubscriptionPlan? @relation(fields: [rewardPlanId], references: [id])
+
+  /// One reward when a single invited customer reaches this many
+  /// cumulative paid months.
+  loyalFriendMonths Int @default(3)
+  /// Or one reward when this many distinct invited customers have each
+  /// reached `friendMonths`. Whichever condition is met first.
+  friendsRequired   Int @default(3)
+  friendMonths      Int @default(1)
+
+  /// How long the granted subscription runs. Held separately from the
+  /// reward plan's own durationDays so "a free month" stays a month even
+  /// if the operator points the reward at an annual plan.
+  rewardDays Int @default(30)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("referral_settings")
+}
+
+enum ReferralRewardReason {
+  /// One invited customer stayed long enough on their own.
+  LOYAL_FRIEND
+  /// Several invited customers each reached the smaller threshold.
+  SEVERAL_FRIENDS
+}
+
+/// A free month that has actually been granted.
+///
+/// Recorded rather than recomputed, for the reason every ledger is: the
+/// thresholds are admin-editable, so a reward earned under the old
+/// numbers must not evaporate when they change.
+model ReferralReward {
+  id         String               @id @default(uuid())
+  referrerId String
+  referrer   Customer             @relation("ReferralRewardsEarned", fields: [referrerId], references: [id])
+  reason     ReferralRewardReason
+
+  /// Which invited customers paid for this reward and how many of their
+  /// months it consumed -- the audit trail for why it was granted, and
+  /// the thing that makes a disputed reward answerable.
+  sourceJson Json
+
+  /// The subscription granted. Nullable because the grant can fail
+  /// (no reward plan configured, provisioning error) after the reward
+  /// itself has been decided, and losing the record of the decision
+  /// would let the same months earn a second reward on the next sweep.
+  subscriptionId String?       @unique
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  rewardDays Int
+  grantedAt  DateTime @default(now())
+
+  @@index([referrerId])
+  @@map("referral_rewards")
+}
+
+/// How much of one invited customer's paid time has already been spent
+/// on a reward.
+///
+/// Without this the arithmetic is not idempotent: a friend who has paid
+/// for three months would earn their inviter a free month on every
+/// sweep, forever. Spending is recorded against the friend rather than
+/// the reward so the "months still available" question -- the one the
+/// customer-facing progress bar asks -- is a single lookup.
+model ReferralCredit {
+  id                 String   @id @default(uuid())
+  referredCustomerId String   @unique
+  referredCustomer   Customer @relation("ReferralCreditsGiven", fields: [referredCustomerId], references: [id])
+  monthsSpent        Int      @default(0)
+  updatedAt          DateTime @updatedAt
+
+  @@map("referral_credits")
 }

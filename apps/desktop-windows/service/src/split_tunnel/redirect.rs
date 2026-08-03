@@ -85,21 +85,30 @@ pub struct Stats {
     /// Flows attributed to a selected application. Zero with `seen`
     /// high means the selection matches nothing that is running.
     pub matched: AtomicU64,
-    /// Packets rewritten towards the proxy.
+    /// Packets rewritten towards the proxy *and accepted by the driver*.
+    ///
+    /// Counted after the injection, not after the rewrite. The first
+    /// version counted intent, which made a run where every packet was
+    /// rewritten and every injection refused look identical to one that
+    /// worked -- the single most useful distinction there is here.
     pub redirected: AtomicU64,
     /// Replies rewritten back. Zero with `redirected` high means the
     /// proxy is not getting answers -- so the tunnel, not the redirect.
     pub returned: AtomicU64,
+    /// Injections the driver refused. Should be zero; anything else
+    /// means the packets are not going where the counters imply.
+    pub rejected: AtomicU64,
 }
 
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={}",
+            "seen={} matched={} redirected={} returned={} rejected={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
             self.returned.load(Ordering::Relaxed),
+            self.rejected.load(Ordering::Relaxed),
         )
     }
 }
@@ -230,7 +239,7 @@ fn worker(
         };
 
         stats.seen.fetch_add(1, Ordering::Relaxed);
-        let handled = handle_packet(
+        let rewrote = handle_packet(
             &mut packet[..len as usize],
             &mut address,
             &redirect,
@@ -240,13 +249,32 @@ fn worker(
             &stats,
         );
 
-        if handled {
+        if rewrote.is_some() {
             recalculate_checksums(&mut packet[..len as usize], len, &mut address);
         }
         // Sent whether or not anything was rewritten. A packet that
         // falls out of the logic above still has to reach the network.
-        handle.send(&packet[..len as usize], len, &address);
+        let sent = handle.send(&packet[..len as usize], len, &address);
+
+        // Counted here rather than at the rewrite, so the numbers say
+        // what was delivered rather than what was intended.
+        match (rewrote, sent) {
+            (Some(Leg::Outbound), true) => stats.redirected.fetch_add(1, Ordering::Relaxed),
+            (Some(Leg::Return), true) => stats.returned.fetch_add(1, Ordering::Relaxed),
+            (Some(_), false) => stats.rejected.fetch_add(1, Ordering::Relaxed),
+            (None, _) => 0,
+        };
     }
+}
+
+/// Which half of the translation a packet went through, so the worker
+/// can attribute the injection that follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leg {
+    /// App towards the proxy.
+    Outbound,
+    /// Proxy's reply back to the app.
+    Return,
 }
 
 /// The fields the decision needs, or `None` if this is not an IPv4
@@ -307,8 +335,8 @@ fn handle_packet(
     selection: &Selection,
     owner: &mut OwnerLookup,
     stats: &Stats,
-) -> bool {
-    let Some(parsed) = parse(packet) else { return false };
+) -> Option<Leg> {
+    let parsed = parse(packet)?;
 
     let proxy_port = match parsed.transport {
         Transport::Tcp => redirect.tcp_proxy_port,
@@ -316,11 +344,7 @@ fn handle_packet(
     };
 
     if parsed.source_port == proxy_port {
-        let rewritten = rewrite_return_leg(packet, address, &parsed, nat);
-        if rewritten {
-            stats.returned.fetch_add(1, Ordering::Relaxed);
-        }
-        return rewritten;
+        return rewrite_return_leg(packet, address, &parsed, nat).then_some(Leg::Return);
     }
 
     // Read before the rewrite, which overwrites it: the return leg has
@@ -331,11 +355,10 @@ fn handle_packet(
     let interface_id = unsafe { address.union_field.Network.interface_id };
     let verdict = decide(&parsed, nat, selection, owner, redirect, interface_id, stats);
     match verdict {
-        Verdict::Direct | Verdict::Unknown => false,
+        Verdict::Direct | Verdict::Unknown => None,
         Verdict::Redirect { nat_port } => {
             rewrite_outbound(packet, address, &parsed, redirect.local_addr, nat_port, proxy_port);
-            stats.redirected.fetch_add(1, Ordering::Relaxed);
-            true
+            Some(Leg::Outbound)
         }
     }
 }
