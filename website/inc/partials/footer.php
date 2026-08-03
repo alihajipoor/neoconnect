@@ -61,6 +61,16 @@ $nx_telegram = trim((string) nx_cfg('telegram_url', ''));
   </div>
 </footer>
 
+<?php
+// Home page only. It is the page most first visits land on, and keeping it
+// off the others means it can never cover the contact or reseller form while
+// someone is halfway through writing to you. Delete the condition to show it
+// site-wide.
+if (nx_page() === 'home') {
+    require NX_INC . '/partials/announcement.php';
+}
+?>
+
 <script src="<?php echo nx_esc(nx_asset('js/site.js')); ?>" defer></script>
 </body>
 </html>

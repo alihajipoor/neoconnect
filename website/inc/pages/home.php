@@ -151,16 +151,20 @@ require NX_INC . '/partials/head.php';
 
     <div class="grid grid--3">
       <?php
+      // Three, deliberately. Nine cards read as a specification sheet and
+      // nobody finishes them; the three below are the questions a buyer
+      // actually has -- is it private, will it survive my network, and what
+      // control do I get.
+      //
+      // The strings for the others (access, locations, hotupdate, updates,
+      // support, usage) are still in inc/lang/*.php, so swapping one in is a
+      // one-line change here rather than a rewrite. Several are already said
+      // elsewhere anyway: self-updating on the download page, location
+      // switching and stability in the assurance strip above.
       $nx_features = array(
           'encryption' => 'lock',
           'stealth'    => 'shield',
-          'access'     => 'route',
           'custom'     => 'layers',
-          'locations'  => 'map-pin',
-          'hotupdate'  => 'activity',
-          'updates'    => 'refresh',
-          'support'    => 'message',
-          'usage'      => 'chart',
       );
       foreach ($nx_features as $nx_key => $nx_glyph): ?>
         <article class="card reveal">
