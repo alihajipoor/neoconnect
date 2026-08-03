@@ -26,10 +26,17 @@ export interface Customer {
   updatedAt: string;
 }
 
-export type Protocol = "XRAY_VLESS_REALITY" | "XRAY_VMESS" | "XRAY_TROJAN" | "WIREGUARD" | "OPENVPN";
+export type Protocol =
+  | "XRAY_VLESS_REALITY"
+  | "XRAY_VLESS_TLS"
+  | "XRAY_VMESS"
+  | "XRAY_TROJAN"
+  | "WIREGUARD"
+  | "OPENVPN";
 
 export const ALL_PROTOCOLS: Protocol[] = [
   "XRAY_VLESS_REALITY",
+  "XRAY_VLESS_TLS",
   "XRAY_VMESS",
   "XRAY_TROJAN",
   "WIREGUARD",
@@ -82,6 +89,17 @@ export interface FreeTrialSettings {
   updatedAt: string;
 }
 
+export interface ReferralSettings {
+  id: string;
+  enabled: boolean;
+  rewardPlanId: string | null;
+  loyalFriendMonths: number;
+  friendsRequired: number;
+  friendMonths: number;
+  rewardDays: number;
+  updatedAt: string;
+}
+
 export interface EmailSettings {
   id: string;
   enabled: boolean;
@@ -98,7 +116,8 @@ export type SubscriptionStatus = "ACTIVE" | "SUSPENDED" | "EXPIRED" | "CANCELLED
 export interface SubscriptionPlan {
   id: string;
   name: string;
-  dataCapBytes: string;
+  /** Null means unlimited traffic. */
+  dataCapBytes: string | null;
   durationDays: number;
   priceUsd: string;
   maxConcurrentConnections: number | null;
@@ -146,4 +165,90 @@ export interface InvoiceSummary {
   totalUsd: string;
   byPlan: { name: string; amountUsd: string }[];
   byProvider: { provider: string; amountUsd: string }[];
+}
+
+/** Payment provider configuration. Secrets are never sent to the browser
+ * -- the API returns only whether each one is set, so the form can show
+ * "configured" without ever holding a live key. */
+export interface PaymentSettings {
+  id: string;
+  stripeEnabled: boolean;
+  stripePublishableKey: string | null;
+  stripeSecretKeySet: boolean;
+  stripeWebhookSecretSet: boolean;
+  nowPaymentsEnabled: boolean;
+  nowPaymentsApiKeySet: boolean;
+  nowPaymentsIpnSecretSet: boolean;
+  updatedAt: string;
+}
+
+/** A code that grants a plan without payment.
+ *
+ * The three kinds the operator asked for are two independent limits
+ * that compose rather than an enum: `maxRedemptions: 1` is a one-time
+ * code, `expiresAt` makes it expiring, both null makes it unlimited --
+ * and a code can be both capped and expiring. */
+export interface Voucher {
+  id: string;
+  code: string;
+  planId: string;
+  plan: Pick<SubscriptionPlan, "id" | "name"> & {
+    durationDays?: number;
+    priceUsd?: string;
+  };
+  maxRedemptions: number | null;
+  redeemedCount: number;
+  expiresAt: string | null;
+  isActive: boolean;
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
+  _count?: { redemptions: number };
+}
+
+/** Links the desktop app shows in its header. All nullable: the app
+ * renders only what is set, so an empty field means no button. */
+export interface AppLinks {
+  websiteUrl: string | null;
+  discordUrl: string | null;
+  instagramUrl: string | null;
+  telegramUrl: string | null;
+}
+
+/** Async support conversations, rendered in the app as a chat.
+ *
+ * Deliberately not live chat: the operator has an away switch, so
+ * promising presence would be a promise the product cannot keep. */
+export type SupportTicketStatus = "OPEN" | "ANSWERED" | "RESOLVED";
+
+export interface SupportMessage {
+  id: string;
+  ticketId: string;
+  /** Which side wrote it. The customer only ever sees "Support", never
+   * which admin answered. */
+  fromAdmin: boolean;
+  body: string;
+  createdAt: string;
+}
+
+export interface SupportTicket {
+  id: string;
+  customerId: string;
+  customer?: Pick<Customer, "id" | "email">;
+  subject: string;
+  status: SupportTicketStatus;
+  lastMessageAt: string;
+  createdAt: string;
+  updatedAt: string;
+  messages?: SupportMessage[];
+  _count?: { messages: number };
+}
+
+export interface SupportSettings {
+  /** Off closes new conversations only. Threads already running stay
+   * open, so nobody gets cut off mid-sentence. */
+  acceptingTickets: boolean;
+  awayMessage: string | null;
+  replyWithinHours: number | null;
+  updatedAt: string;
 }

@@ -27,7 +27,10 @@ func (r *recorder) matching(substr string) []string {
 
 func newTest() (*Shaper, *recorder) {
 	rec := &recorder{}
-	return &Shaper{iface: "wg0", run: rec.run}, rec
+	// Built through the real constructor, not a struct literal: a literal
+	// left the IFB device name empty and the upload assertions silently
+	// matched nothing rather than failing loudly.
+	return NewWithRunner("wg0", rec.run), rec
 }
 
 func TestUncappedUserIsLeftCompletelyAlone(t *testing.T) {
@@ -55,8 +58,8 @@ func TestOneDirectionCappedLeavesTheOtherUnlimited(t *testing.T) {
 	if got := rec.matching("class replace"); len(got) != 1 {
 		t.Errorf("expected the download class, got %v", got)
 	}
-	if got := rec.matching("police"); len(got) != 0 {
-		t.Errorf("upload was left uncapped, so nothing should be policed: %v", got)
+	if got := rec.matching("dev ifb-wg0 protocol ip parent 1:"); len(got) != 0 {
+		t.Errorf("upload was left uncapped, so nothing should be shaped on the ifb: %v", got)
 	}
 }
 
@@ -72,12 +75,19 @@ func TestDownloadMatchesDestinationAndUploadMatchesSource(t *testing.T) {
 	if len(down) != 1 || !strings.Contains(down[0], "match ip dst 10.66.0.7/32") {
 		t.Errorf("download filter should match the customer as destination, got %v", down)
 	}
-	up := rec.matching("filter add dev wg0 protocol ip parent ffff:")
+	// Upload is shaped on the IFB device rather than policed on ingress:
+	// policing measured 12.3 Mbit/s against a 20 Mbit/s cap, because it
+	// drops instead of queueing and TCP settles well under the rate.
+	up := rec.matching("filter add dev ifb-wg0 protocol ip parent 1:")
 	if len(up) != 1 || !strings.Contains(up[0], "match ip src 10.66.0.7/32") {
-		t.Errorf("upload filter should match the customer as source, got %v", up)
+		t.Errorf("upload filter should match the customer as source on the ifb, got %v", up)
 	}
-	if !strings.Contains(up[0], "rate 20mbit") {
-		t.Errorf("upload should be policed at the upload rate, got %v", up)
+	upClass := rec.matching("class replace dev ifb-wg0")
+	if len(upClass) != 1 || !strings.Contains(upClass[0], "rate 20mbit") {
+		t.Errorf("upload should be shaped at the upload rate, got %v", upClass)
+	}
+	if got := rec.matching("police"); len(got) != 0 {
+		t.Errorf("policing should be gone entirely, got %v", got)
 	}
 	if !strings.Contains(down[0], "flowid") {
 		t.Errorf("download filter must point at its class, got %v", down)

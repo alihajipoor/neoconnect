@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { InvoiceStatus, Prisma } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
+import { JwtService } from "@nestjs/jwt";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EmailService } from "../email/email.service";
 import { invoiceIssuedEmail, invoiceOverdueEmail } from "../email/templates";
@@ -10,6 +11,17 @@ export interface InvoiceLineItem {
   amountUsd: string;
 }
 
+/** Pins what an invoice-link token may be used for, so one cannot be
+ * presented as a session token or a verification link. Same discipline as
+ * the email-verification and password-reset tokens. */
+const INVOICE_DOCUMENT_PURPOSE = "invoice-document";
+
+/** Long enough that an invoice emailed today is still openable when
+ * someone goes looking for it at the end of the month, short enough that
+ * a forwarded email does not hand out a permanent link. The invoice
+ * remains available in the app regardless. */
+const INVOICE_LINK_TTL = "60d";
+
 @Injectable()
 export class InvoicesService {
   private readonly logger = new Logger(InvoicesService.name);
@@ -18,6 +30,7 @@ export class InvoicesService {
     private readonly prisma: PrismaService,
     private readonly emailService: EmailService,
     private readonly config: ConfigService,
+    private readonly jwt: JwtService,
   ) {}
 
   /** Issues the invoice for a payment that has just cleared.
@@ -46,7 +59,7 @@ export class InvoicesService {
     if (!payment) throw new NotFoundException("Payment transaction not found");
 
     const plan = payment.subscription?.plan;
-    const planName = plan?.name ?? "NeoConnect subscription";
+    const planName = plan?.name ?? "Neoxify subscription";
     const periodStart = payment.subscription?.startAt ?? payment.createdAt;
     const periodEnd = payment.subscription?.expireAt ?? payment.createdAt;
 
@@ -99,7 +112,45 @@ export class InvoicesService {
   private documentUrl(invoiceId: string): string | undefined {
     const base = this.config.get<string>("publicApiUrl");
     if (!base) return undefined;
-    return `${base.replace(/\/$/, "")}/customer/invoices/${invoiceId}/document`;
+
+    // Carries its own signed token rather than pointing at the
+    // customer-authenticated route. An emailed link is opened in whatever
+    // browser the mail was read in -- usually a phone -- which has no
+    // session, so the guarded endpoint could only ever answer 401. It did
+    // exactly that as soon as PUBLIC_API_URL was configured and this link
+    // started appearing at all.
+    //
+    // Same shape as the email-verification link: a short-lived JWT whose
+    // purpose is pinned, so it cannot be replayed against anything else.
+    const token = this.jwt.sign(
+      { sub: invoiceId, purpose: INVOICE_DOCUMENT_PURPOSE },
+      {
+        secret: this.config.get<string>("customerJwt.accessSecret"),
+        expiresIn: INVOICE_LINK_TTL,
+      },
+    );
+    return `${base.replace(/\/$/, "")}/invoice-document?token=${encodeURIComponent(token)}`;
+  }
+
+  /** Resolves an emailed invoice link back to an invoice.
+   *
+   * The token is the authorisation: it names one invoice, was signed by
+   * this server, and expires. No ownership check is needed beyond that,
+   * and none is possible -- there is no session here by design.
+   */
+  async getByDocumentToken(token: string) {
+    let payload: { sub?: string; purpose?: string };
+    try {
+      payload = await this.jwt.verifyAsync(token, {
+        secret: this.config.get<string>("customerJwt.accessSecret"),
+      });
+    } catch {
+      throw new NotFoundException("This invoice link has expired or is not valid");
+    }
+    if (payload.purpose !== INVOICE_DOCUMENT_PURPOSE || !payload.sub) {
+      throw new NotFoundException("This invoice link has expired or is not valid");
+    }
+    return this.get(payload.sub);
   }
 
   /** `INV-<year>-<n>`, with the counter coming from a Postgres sequence.

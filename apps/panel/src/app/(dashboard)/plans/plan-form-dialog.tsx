@@ -42,14 +42,21 @@ export function PlanFormDialog({
   // showing a cap that quietly does nothing on those protocols.
   const unshapeable = protocols.filter((p) => p.startsWith("XRAY"));
   const [pending, startTransition] = useTransition();
+  const [unlimitedData, setUnlimitedData] = useState(plan ? plan.dataCapBytes === null : false);
   const isEdit = Boolean(plan);
 
   function handleSubmit(formData: FormData) {
-    const dataCapInput = String(formData.get("dataCap") ?? "");
-    const dataCapBytes = parseBytesInput(dataCapInput);
-    if (!dataCapBytes) {
-      toast.error('Data cap must look like "10GB", "512MB", etc.');
-      return;
+    // Null, not a very large number. An unlimited plan and a plan with
+    // a huge cap are different things, and only the first one survives
+    // somebody deciding later to raise the "big" number.
+    let dataCapBytes: string | null = null;
+    if (!unlimitedData) {
+      const parsed = parseBytesInput(String(formData.get("dataCap") ?? ""));
+      if (!parsed) {
+        toast.error('Data cap must look like "10GB", "512MB", etc.');
+        return;
+      }
+      dataCapBytes = parsed;
     }
 
     const protocolsAllowed = formData.getAll("protocolsAllowed") as Protocol[];
@@ -109,9 +116,22 @@ export function PlanFormDialog({
                 id="dataCap"
                 name="dataCap"
                 placeholder="10GB"
-                defaultValue={plan ? formatBytes(plan.dataCapBytes).replace(" ", "") : ""}
-                required
+                defaultValue={
+                  plan?.dataCapBytes ? formatBytes(plan.dataCapBytes).replace(" ", "") : ""
+                }
+                disabled={unlimitedData}
+                required={!unlimitedData}
               />
+              {/* Metered and unmetered plans coexist on purpose: a relay
+                  through an Iranian VPS is capped because that VPS's own
+                  allowance is small, a direct foreign route need not be. */}
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Checkbox
+                  checked={unlimitedData}
+                  onCheckedChange={(value) => setUnlimitedData(value === true)}
+                />
+                Unlimited traffic
+              </label>
             </div>
             <div className="flex flex-col gap-2">
               <Label htmlFor="durationDays">Duration (days)</Label>

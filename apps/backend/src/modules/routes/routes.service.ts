@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { Protocol } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { generateCredentials } from "../protocol-users/generate-credentials";
 import { CreateRouteDto } from "./dto/create-route.dto";
@@ -12,10 +13,50 @@ const SUPPORTED_EXIT_PROTOCOL = "XRAY_VLESS_REALITY";
 
 @Injectable()
 export class RoutesService {
+  private readonly logger = new Logger(RoutesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
+    private readonly protocolUsersService: ProtocolUsersService,
   ) {}
+
+  /** Gives every existing customer who is entitled to this route a
+   * credential for it.
+   *
+   * Without this a route only ever reaches subscriptions created after
+   * it existed, so the customers who have been here longest would have
+   * the fewest protocols to fall back to -- exactly backwards, and
+   * invisible until one of them got blocked. Best-effort per
+   * subscription: one failure must not stop the rest, and provisionAll
+   * is idempotent so a retry costs nothing.
+   */
+  private async backfillExistingSubscriptions(routeId: string) {
+    const route = await this.prisma.route.findUnique({
+      where: { id: routeId },
+      include: { entryProtocolConfig: { select: { protocol: true } } },
+    });
+    if (!route?.isEnabled) return;
+
+    const subscriptions = await this.prisma.subscription.findMany({
+      where: {
+        status: { in: ["ACTIVE", "SUSPENDED"] },
+        plan: { protocolsAllowed: { has: route.entryProtocolConfig.protocol } },
+      },
+      select: { id: true },
+    });
+
+    let added = 0;
+    for (const subscription of subscriptions) {
+      try {
+        added += (await this.protocolUsersService.provisionAll(subscription.id)).length;
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Could not backfill route ${routeId} onto subscription ${subscription.id}: ${reason}`);
+      }
+    }
+    if (added) this.logger.log(`Backfilled route ${routeId} onto ${added} subscription(s)`);
+  }
 
   list() {
     return this.prisma.route.findMany({ orderBy: { createdAt: "desc" } });
@@ -45,7 +86,8 @@ export class RoutesService {
         entryProtocolConfig: {
           select: {
             protocol: true,
-            node: { select: { name: true, region: true } },
+            listenPort: true,
+            node: { select: { name: true, region: true, publicIp: true, status: true, lastHeartbeatAt: true } },
           },
         },
       },
@@ -57,6 +99,20 @@ export class RoutesService {
       protocol: entryProtocolConfig.protocol,
       isRelay: exitProtocolConfigId !== null,
       location: { region: entryProtocolConfig.node.region, nodeName: entryProtocolConfig.node.name },
+      // The address the client dials, so the app can measure its own
+      // latency to each option rather than showing a number measured
+      // from this server, which is irrelevant to the customer.
+      //
+      // Only the *entry* endpoint. A relayed route's exit node stays
+      // hidden, per the same reasoning that keeps uplinkCredentialsJson
+      // out of this response -- and the entry is what the client
+      // connects to anyway, so it is also the honest thing to time.
+      endpoint: { host: entryProtocolConfig.node.publicIp, port: entryProtocolConfig.listenPort },
+      // Availability as the control plane sees it (agent heartbeats,
+      // M2). Answers a different question from latency -- "is it up" vs
+      // "is it fast for me" -- and a node that is down should be marked
+      // so before the client wastes time probing it.
+      nodeStatus: entryProtocolConfig.node.status,
     }));
   }
 
@@ -76,13 +132,15 @@ export class RoutesService {
     if (!entryProtocolConfig) throw new BadRequestException("Entry protocol config not found");
 
     if (!dto.exitProtocolConfigId) {
-      return this.prisma.route.create({
+      const direct = await this.prisma.route.create({
         data: {
           name: dto.name,
           entryProtocolConfigId: dto.entryProtocolConfigId,
           isEnabled: dto.isEnabled ?? true,
         },
       });
+      await this.backfillExistingSubscriptions(direct.id);
+      return direct;
     }
 
     // Relayed route: entry must be on a RELAY node, exit must be the one
@@ -140,11 +198,24 @@ export class RoutesService {
       },
     });
 
+    await this.backfillExistingSubscriptions(route.id);
     return route;
   }
 
   async remove(id: string) {
     const route = await this.get(id);
+
+    // Every subscription now holds a credential on every route it is
+    // entitled to, so a route being deleted almost always has users on
+    // it. The relation is required, so Prisma would refuse the delete --
+    // and more importantly the accounts would be left running on the
+    // engine with nothing in the database tracking them. remove() sends
+    // DELETE_USER and drops the row.
+    const users = await this.prisma.protocolUser.findMany({ where: { routeId: id }, select: { id: true } });
+    for (const user of users) {
+      await this.protocolUsersService.remove(user.id);
+    }
+    if (users.length) this.logger.log(`Removed ${users.length} protocol user(s) before deleting route ${id}`);
 
     if (route.exitProtocolConfigId) {
       const exitProtocolConfig = await this.prisma.protocolConfig.findUniqueOrThrow({

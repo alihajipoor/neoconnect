@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
-import { Prisma } from "@prisma/client";
+import { Prisma, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreatePaymentDto } from "./dto/create-payment.dto";
@@ -205,7 +205,20 @@ export class BillingService {
     });
     if (!subscription) return;
 
-    const base = subscription.expireAt > new Date() ? subscription.expireAt : new Date();
+    // Extending from the existing expiry is right for a renewal -- time
+    // already paid for should not be thrown away -- but wrong for a first
+    // activation. A self-serve purchase creates the subscription PENDING
+    // with a provisional expireAt already a full term out, so treating
+    // that as time the customer owns handed them two terms for one
+    // payment: a 30-day plan activated as 60 days. Reported after a real
+    // purchase.
+    //
+    // Status is the discriminator rather than the date, because the date
+    // cannot distinguish "provisional, never paid for" from "genuinely
+    // owned".
+    const firstActivation = subscription.status === SubscriptionStatus.PENDING;
+    const base =
+      !firstActivation && subscription.expireAt > new Date() ? subscription.expireAt : new Date();
     const newExpireAt = new Date(base.getTime() + subscription.plan.durationDays * 24 * 60 * 60 * 1000);
 
     await this.prisma.subscription.update({
@@ -223,19 +236,23 @@ export class BillingService {
       },
     });
 
+    // Re-enable before provisioning: a renewal after a quota suspension
+    // has users that exist but are switched off, and provisionAll only
+    // fills gaps -- it would leave a disabled row disabled.
     const existingUsers = await this.prisma.protocolUser.findMany({ where: { subscriptionId } });
-    if (existingUsers.length === 0) {
-      if (subscription.plan.defaultRouteId) {
-        await this.protocolUsersService.create({ subscriptionId, routeId: subscription.plan.defaultRouteId });
-      } else {
-        this.logger.warn(
-          `Subscription ${subscriptionId} (plan ${subscription.planId}) had a payment confirmed but the plan has no defaultRouteId configured -- no protocol user was provisioned`,
-        );
-      }
-    } else {
-      for (const user of existingUsers.filter((u) => u.status === "DISABLED")) {
-        await this.protocolUsersService.setEnabled(user.id, true);
-      }
+    for (const user of existingUsers.filter((u) => u.status === "DISABLED")) {
+      await this.protocolUsersService.setEnabled(user.id, true);
+    }
+
+    // Every route the plan allows, not just the plan's default one, so
+    // the client can fail over between protocols without needing to
+    // reach us. defaultRouteId still decides which the client tries
+    // first; it no longer decides which exist.
+    const provisioned = await this.protocolUsersService.provisionAll(subscriptionId);
+    if (existingUsers.length === 0 && provisioned.length === 0) {
+      this.logger.warn(
+        `Subscription ${subscriptionId} (plan ${subscription.planId}) had a payment confirmed but no enabled route matches its allowed protocols -- no protocol user was provisioned`,
+      );
     }
 
     this.logger.log(`Subscription ${subscriptionId} renewed through ${newExpireAt.toISOString()}`);

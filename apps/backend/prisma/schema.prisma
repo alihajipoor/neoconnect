@@ -23,6 +23,10 @@ enum CustomerStatus {
 }
 
 enum SubscriptionStatus {
+  /// Created but not paid for yet. A customer who picks a plan and then
+  /// abandons the payment sits here -- not ACTIVE, which would show them
+  /// to the operator as a paying customer and start their clock running.
+  PENDING
   ACTIVE
   SUSPENDED
   EXPIRED
@@ -44,10 +48,46 @@ enum NodeStatus {
 
 enum Protocol {
   XRAY_VLESS_REALITY
+  /// VLESS presenting a real certificate for a real domain, rather than
+  /// borrowing a third party's the way REALITY does. Separate from
+  /// XRAY_VLESS_REALITY because a client builds a genuinely different
+  /// outbound for it -- there are no borrowed-certificate parameters,
+  /// only a name to verify. The `transport` column, not another enum
+  /// member, is what distinguishes carrying it over TCP from WebSocket.
+  XRAY_VLESS_TLS
   XRAY_VMESS
   XRAY_TROJAN
   WIREGUARD
   OPENVPN
+}
+
+/// How a protocol's bytes travel. Only meaningful for the Xray-based
+/// protocols; WireGuard and OpenVPN carry themselves.
+enum Transport {
+  TCP
+  /// Inside a WebSocket, which on the wire is an ordinary HTTP upgrade
+  /// followed by a long-lived connection -- the shape Windscribe sells as
+  /// "WStunnel". Needs a path and a real certificate to be convincing.
+  WS
+  /// gRPC over HTTP/2. Survives some CDNs and HTTP/2-aware middleboxes
+  /// that mangle raw WebSockets.
+  GRPC
+}
+
+/// What the transport is wrapped in.
+enum TransportSecurity {
+  /// No TLS of its own. Correct for WireGuard and OpenVPN, whose own
+  /// protocols handle this, and for an Xray inbound behind a terminator.
+  NONE
+  /// A real certificate for a real domain. The basis of anything that
+  /// should look like an ordinary HTTPS site -- Windscribe's "Stealth"
+  /// shape.
+  TLS
+  /// Borrows a third-party site's certificate rather than presenting its
+  /// own, so there is no certificate of ours to fingerprint. Cannot share
+  /// a port with a TLS service: it intercepts the handshake and proxies
+  /// non-matching clients to the site it is imitating.
+  REALITY
 }
 
 enum ProtocolUserStatus {
@@ -124,34 +164,57 @@ model AdminUser {
 }
 
 model Customer {
-  id            String         @id @default(uuid())
-  email         String         @unique
-  passwordHash  String
-  telegramId    String?
-  referralCode  String?        @unique
-  status        CustomerStatus @default(ACTIVE)
+  id                             String         @id @default(uuid())
+  email                          String         @unique
+  passwordHash                   String
+  telegramId                     String?
+  referralCode                   String?        @unique
+  status                         CustomerStatus @default(ACTIVE)
   // Refresh-token revocation counter, same purpose/pattern as
   // AdminUser.tokenVersion -- bumping it invalidates every outstanding
   // customer refresh token at once (logout-all-sessions).
-  tokenVersion  Int            @default(0)
+  tokenVersion                   Int            @default(0)
   // null = unverified. Set by POST /customer-auth/verify-email or
   // /verify-email-code. No VPN access (trial or paid) is granted before
   // this is set -- see M16's "Customer Self-Signup + Free Trial Mode"
   // gating decision, 2026-07-24.
-  emailVerifiedAt DateTime?
+  emailVerifiedAt                DateTime?
   // Short human-enterable alternative to the verify-email link/token --
   // added 2026-07-24 after live testing showed the token (a full JWT) is
   // both unusable to type by hand and prone to breaking email HTML
   // layout when displayed. Cleared once used or superseded by a resend.
   emailVerificationCode          String?
   emailVerificationCodeExpiresAt DateTime?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+
+  // Same reasoning as the verification code above, for the same reason.
+  // Reset used to be a link carrying a JWT, which a desktop app cannot
+  // receive reliably -- webmail strips custom URI schemes, which is the
+  // bug that gave verification its code path in the first place. A
+  // locked-out customer needs something they can read off the screen and
+  // type. Cleared once used or superseded by another request.
+  passwordResetCode          String?
+  passwordResetCodeExpiresAt DateTime?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+
+  // Who invited them, if anyone. Set once at signup from the referral
+  // code they typed and never changed afterwards -- a referral is a
+  // fact about how an account came to exist, and letting it move later
+  // would make the reward arithmetic below rewritable after the fact.
+  referredByCustomerId String?
 
   subscriptions Subscription[]
   transactions  PaymentTransaction[]
   invoices      Invoice[]
 
+  referredBy         Customer?           @relation("CustomerReferrals", fields: [referredByCustomerId], references: [id])
+  referrals          Customer[]          @relation("CustomerReferrals")
+  referralRewards    ReferralReward[]    @relation("ReferralRewardsEarned")
+  referralCredits    ReferralCredit[]    @relation("ReferralCreditsGiven")
+  voucherRedemptions VoucherRedemption[]
+  supportTickets     SupportTicket[]
+
+  @@index([referredByCustomerId])
   @@map("customers")
 }
 
@@ -160,11 +223,19 @@ model Customer {
 // ---------------------------------------------------------------------------
 
 model SubscriptionPlan {
-  id                       String   @id @default(uuid())
+  id                       String     @id @default(uuid())
   name                     String
-  dataCapBytes             BigInt
+  /// Null means unlimited traffic.
+  ///
+  /// Nullable rather than a sentinel like 0 or a huge number: the whole
+  /// product now has two shapes of plan, and a relay through an Iranian
+  /// VPS is metered precisely because that VPS's own traffic allowance
+  /// is small. "No cap" and "a cap that happens to be big" are
+  /// different facts, and a sentinel makes every comparison site
+  /// silently answer the wrong one.
+  dataCapBytes             BigInt?
   durationDays             Int
-  priceUsd                 Decimal  @db.Decimal(10, 2)
+  priceUsd                 Decimal    @db.Decimal(10, 2)
   maxConcurrentConnections Int?
   // Per-user speed caps in megabits per second, applied on the node to
   // every ProtocolUser provisioned on this plan. Null means uncapped,
@@ -176,7 +247,7 @@ model SubscriptionPlan {
   maxDownloadMbps          Int?
   maxUploadMbps            Int?
   protocolsAllowed         Protocol[]
-  isActive                 Boolean  @default(true)
+  isActive                 Boolean    @default(true)
   // Which Route a customer purchasing this plan gets provisioned on --
   // same v1 simplification as FreeTrialSettings.trialRouteId (one
   // admin-configured default, no per-purchase server picker yet). Used
@@ -184,27 +255,32 @@ model SubscriptionPlan {
   // ProtocolUser once payment actually clears -- see
   // apps/backend/src/modules/billing/billing.service.ts.
   defaultRouteId           String?
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
+  createdAt                DateTime   @default(now())
+  updatedAt                DateTime   @updatedAt
 
-  subscriptions      Subscription[]
-  freeTrialSettings  FreeTrialSettings[]
-  defaultRoute       Route?          @relation(fields: [defaultRouteId], references: [id])
+  subscriptions     Subscription[]
+  freeTrialSettings FreeTrialSettings[]
+  referralSettings  ReferralSettings[]
+  defaultRoute      Route?              @relation(fields: [defaultRouteId], references: [id])
+  Voucher           Voucher[]
 
   @@map("subscription_plans")
 }
 
 model Subscription {
-  id             String              @id @default(uuid())
-  customerId     String
-  planId         String
-  primaryNodeId  String?
-  status         SubscriptionStatus  @default(ACTIVE)
-  startAt        DateTime            @default(now())
-  expireAt       DateTime
-  dataCapBytes   BigInt
-  dataUsedBytes  BigInt              @default(0)
-  autoRenew      Boolean             @default(false)
+  id                   String             @id @default(uuid())
+  customerId           String
+  planId               String
+  primaryNodeId        String?
+  status               SubscriptionStatus @default(ACTIVE)
+  startAt              DateTime           @default(now())
+  expireAt             DateTime
+  /// Snapshot of the plan's cap at purchase, so editing a plan later
+  /// does not rewrite what an existing customer bought. Null means
+  /// unlimited, same as on the plan.
+  dataCapBytes         BigInt?
+  dataUsedBytes        BigInt             @default(0)
+  autoRenew            Boolean            @default(false)
   // Set once the low-data-remaining warning email has been sent for the
   // current billing period, so the sweep that checks for it fires only
   // once. Reset to null on renewal (BillingService.renewSubscription()).
@@ -212,16 +288,18 @@ model Subscription {
   // Same "already warned" pattern for the subscription-expiring-soon
   // email, reset on renewal alongside the field above.
   expiryWarningSentAt  DateTime?
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
 
-  customer     Customer           @relation(fields: [customerId], references: [id])
-  plan         SubscriptionPlan   @relation(fields: [planId], references: [id])
-  primaryNode  Node?              @relation(fields: [primaryNodeId], references: [id])
-  protocolUsers ProtocolUser[]
-  usageRecords  UsageRecord[]
-  transactions  PaymentTransaction[]
-  invoices      Invoice[]
+  customer          Customer             @relation(fields: [customerId], references: [id])
+  plan              SubscriptionPlan     @relation(fields: [planId], references: [id])
+  primaryNode       Node?                @relation(fields: [primaryNodeId], references: [id])
+  protocolUsers     ProtocolUser[]
+  usageRecords      UsageRecord[]
+  transactions      PaymentTransaction[]
+  invoices          Invoice[]
+  referralReward    ReferralReward?
+  voucherRedemption VoucherRedemption?
 
   @@index([customerId])
   @@index([status])
@@ -256,14 +334,31 @@ model Node {
 }
 
 model ProtocolConfig {
-  id               String   @id @default(uuid())
+  id               String            @id @default(uuid())
   nodeId           String
   protocol         Protocol
   listenPort       Int
+  // How the protocol is carried, and what it is wrapped in.
+  //
+  // Separate from `protocol` because they are genuinely independent: the
+  // same VLESS can run raw over TCP, inside a WebSocket, or over gRPC,
+  // and be secured by REALITY, a real certificate, or nothing. Encoding
+  // each combination as its own Protocol member would multiply the enum
+  // for no gain -- XRAY_VLESS_REALITY already conflates two of these
+  // three dimensions, which is why adding a WebSocket variant had
+  // nowhere to go.
+  //
+  // Defaults reproduce exactly what every existing row already does, so
+  // this migration changes no behaviour: WireGuard and OpenVPN are
+  // TCP/NONE as far as this model is concerned (their own transports are
+  // not configurable here), and the one Xray config in production is
+  // TCP + REALITY.
+  transport        Transport         @default(TCP)
+  security         TransportSecurity @default(NONE)
   publicParamsJson Json
-  isEnabled        Boolean  @default(true)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  isEnabled        Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
   node          Node           @relation(fields: [nodeId], references: [id])
   protocolUsers ProtocolUser[]
@@ -292,8 +387,8 @@ model Route {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
-  entryProtocolConfig ProtocolConfig  @relation("RouteEntry", fields: [entryProtocolConfigId], references: [id])
-  exitProtocolConfig  ProtocolConfig? @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
+  entryProtocolConfig ProtocolConfig      @relation("RouteEntry", fields: [entryProtocolConfigId], references: [id])
+  exitProtocolConfig  ProtocolConfig?     @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
   protocolUsers       ProtocolUser[]
   freeTrialSettings   FreeTrialSettings[]
   defaultForPlans     SubscriptionPlan[]
@@ -350,8 +445,8 @@ model UsageRecord {
   reportedAt     DateTime @default(now())
 
   protocolUser ProtocolUser? @relation(fields: [protocolUserId], references: [id], onDelete: SetNull)
-  subscription Subscription @relation(fields: [subscriptionId], references: [id])
-  node         Node         @relation(fields: [nodeId], references: [id])
+  subscription Subscription  @relation(fields: [subscriptionId], references: [id])
+  node         Node          @relation(fields: [nodeId], references: [id])
 
   @@index([subscriptionId, reportedAt])
   @@index([nodeId, reportedAt])
@@ -363,14 +458,14 @@ model UsageRecord {
 // ---------------------------------------------------------------------------
 
 model EnrollmentToken {
-  id              String                @id @default(uuid())
-  nodeId          String?
-  tokenHash       String                @unique
-  status          EnrollmentTokenStatus @default(PENDING)
-  expiresAt       DateTime
+  id               String                @id @default(uuid())
+  nodeId           String?
+  tokenHash        String                @unique
+  status           EnrollmentTokenStatus @default(PENDING)
+  expiresAt        DateTime
   createdByAdminId String
-  createdAt       DateTime              @default(now())
-  claimedAt       DateTime?
+  createdAt        DateTime              @default(now())
+  claimedAt        DateTime?
 
   node           Node?     @relation(fields: [nodeId], references: [id])
   createdByAdmin AdminUser @relation(fields: [createdByAdminId], references: [id])
@@ -432,17 +527,17 @@ model Invoice {
 }
 
 model PaymentTransaction {
-  id                 String          @id @default(uuid())
-  customerId         String
-  subscriptionId     String?
-  provider           PaymentProvider
-  providerRef        String
-  amountUsd          Decimal         @db.Decimal(10, 2)
-  currency           String
-  status             PaymentStatus   @default(PENDING)
-  rawWebhookPayload  Json?
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
+  id                String          @id @default(uuid())
+  customerId        String
+  subscriptionId    String?
+  provider          PaymentProvider
+  providerRef       String
+  amountUsd         Decimal         @db.Decimal(10, 2)
+  currency          String
+  status            PaymentStatus   @default(PENDING)
+  rawWebhookPayload Json?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
 
   customer     Customer      @relation(fields: [customerId], references: [id])
   subscription Subscription? @relation(fields: [subscriptionId], references: [id])
@@ -478,15 +573,15 @@ model AuditLog {
 }
 
 model AgentCommand {
-  id         String             @id @default(uuid())
-  nodeId     String
-  type       AgentCommandType
+  id          String             @id @default(uuid())
+  nodeId      String
+  type        AgentCommandType
   payloadJson Json
-  status     AgentCommandStatus @default(QUEUED)
-  createdAt  DateTime           @default(now())
-  sentAt     DateTime?
-  ackedAt    DateTime?
-  error      String?
+  status      AgentCommandStatus @default(QUEUED)
+  createdAt   DateTime           @default(now())
+  sentAt      DateTime?
+  ackedAt     DateTime?
+  error       String?
 
   node Node @relation(fields: [nodeId], references: [id])
 
@@ -523,6 +618,36 @@ model FreeTrialSettings {
 // scheme (see modules/protocol-users/credentials-crypto.ts) rather than a
 // new crypto scheme; the raw password is never logged or returned by any
 // API response.
+/// Payment provider credentials, entered in the panel rather than baked
+/// into environment variables at deploy time.
+///
+/// Same lazily-initialised singleton shape as EmailSettings: the service
+/// findFirst()s and creates one default row if none exists.
+///
+/// Secrets are encrypted at rest with the same AES-256-GCM helper that
+/// protects VPN credentials -- an API key that can move money is at least
+/// as sensitive as one that grants a tunnel. Only the publishable key is
+/// stored in the clear, because it is published by definition.
+model PaymentSettings {
+  id String @id @default(uuid())
+
+  /// Cards. Disabled until a secret key is present, so a half-filled form
+  /// never leaves customers with a button that fails.
+  stripeEnabled                Boolean @default(false)
+  stripePublishableKey         String?
+  stripeSecretKeyEncrypted     String?
+  stripeWebhookSecretEncrypted String?
+
+  /// Crypto.
+  nowPaymentsEnabled            Boolean @default(false)
+  nowPaymentsApiKeyEncrypted    String?
+  nowPaymentsIpnSecretEncrypted String?
+
+  updatedAt DateTime @updatedAt
+
+  @@map("payment_settings")
+}
+
 model EmailSettings {
   id                String   @id @default(uuid())
   enabled           Boolean  @default(false)
@@ -535,4 +660,270 @@ model EmailSettings {
   updatedAt         DateTime @updatedAt
 
   @@map("email_settings")
+}
+
+// ---------------------------------------------------------------------------
+// Referral program (see docs and ReferralsService for the reward rules)
+// ---------------------------------------------------------------------------
+
+/// Same lazily-initialized-singleton shape as FreeTrialSettings.
+///
+/// Every threshold is configurable rather than hardcoded, because the
+/// right numbers are a commercial decision the operator will want to
+/// tune once real referrals exist -- and changing them should not need a
+/// deployment.
+model ReferralSettings {
+  id      String  @id @default(uuid())
+  enabled Boolean @default(false)
+
+  /// Which plan a free month is granted on. Deliberately the operator's
+  /// choice rather than whatever plan the inviter happens to be on: the
+  /// reward is a gift from the business, and the business decides what
+  /// it is worth.
+  rewardPlanId String?
+  rewardPlan   SubscriptionPlan? @relation(fields: [rewardPlanId], references: [id])
+
+  /// One reward when a single invited customer reaches this many
+  /// cumulative paid months.
+  loyalFriendMonths Int @default(3)
+  /// Or one reward when this many distinct invited customers have each
+  /// reached `friendMonths`. Whichever condition is met first.
+  friendsRequired   Int @default(3)
+  friendMonths      Int @default(1)
+
+  /// How long the granted subscription runs. Held separately from the
+  /// reward plan's own durationDays so "a free month" stays a month even
+  /// if the operator points the reward at an annual plan.
+  rewardDays Int @default(30)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("referral_settings")
+}
+
+enum ReferralRewardReason {
+  /// One invited customer stayed long enough on their own.
+  LOYAL_FRIEND
+  /// Several invited customers each reached the smaller threshold.
+  SEVERAL_FRIENDS
+}
+
+/// A free month that has actually been granted.
+///
+/// Recorded rather than recomputed, for the reason every ledger is: the
+/// thresholds are admin-editable, so a reward earned under the old
+/// numbers must not evaporate when they change.
+model ReferralReward {
+  id         String               @id @default(uuid())
+  referrerId String
+  referrer   Customer             @relation("ReferralRewardsEarned", fields: [referrerId], references: [id])
+  reason     ReferralRewardReason
+
+  /// Which invited customers paid for this reward and how many of their
+  /// months it consumed -- the audit trail for why it was granted, and
+  /// the thing that makes a disputed reward answerable.
+  sourceJson Json
+
+  /// The subscription granted. Nullable because the grant can fail
+  /// (no reward plan configured, provisioning error) after the reward
+  /// itself has been decided, and losing the record of the decision
+  /// would let the same months earn a second reward on the next sweep.
+  subscriptionId String?       @unique
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  rewardDays Int
+  grantedAt  DateTime @default(now())
+
+  @@index([referrerId])
+  @@map("referral_rewards")
+}
+
+/// How much of one invited customer's paid time has already been spent
+/// on a reward.
+///
+/// Without this the arithmetic is not idempotent: a friend who has paid
+/// for three months would earn their inviter a free month on every
+/// sweep, forever. Spending is recorded against the friend rather than
+/// the reward so the "months still available" question -- the one the
+/// customer-facing progress bar asks -- is a single lookup.
+model ReferralCredit {
+  id                 String   @id @default(uuid())
+  referredCustomerId String   @unique
+  referredCustomer   Customer @relation("ReferralCreditsGiven", fields: [referredCustomerId], references: [id])
+  monthsSpent        Int      @default(0)
+  updatedAt          DateTime @updatedAt
+
+  @@map("referral_credits")
+}
+
+// ---------------------------------------------------------------------------
+// Vouchers
+// ---------------------------------------------------------------------------
+
+/// A code that grants a plan without payment.
+///
+/// The three kinds the operator asked for are not an enum, because they
+/// are two independent limits that compose: a one-time code is
+/// `maxRedemptions = 1`, an expiring one sets `expiresAt`, an unlimited
+/// one leaves both open -- and a code can be both limited and expiring,
+/// which an enum would have made impossible to express.
+model Voucher {
+  id     String           @id @default(uuid())
+  /// Uppercased on write so redeeming is not case-sensitive to the
+  /// customer while the unique constraint still means what it says.
+  code   String           @unique
+  planId String
+  plan   SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  /// null = no limit on how many people may redeem it.
+  maxRedemptions Int?
+  /// Kept as a counter as well as a row count, because the check that
+  /// stops a one-time code being used twice has to be a single
+  /// conditional update -- counting rows first and inserting after is
+  /// exactly the race that lets two people redeem the last use.
+  redeemedCount  Int  @default(0)
+
+  /// null = never expires.
+  expiresAt DateTime?
+  /// Lets the operator stop a code immediately without deleting it and
+  /// losing the record of who already redeemed it.
+  isActive  Boolean   @default(true)
+  /// Operator-facing label: which campaign or person it was cut for.
+  note      String?
+
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  redemptions VoucherRedemption[]
+
+  @@index([planId])
+  @@map("vouchers")
+}
+
+/// One customer's use of one voucher.
+///
+/// Recorded rather than inferred from the counter, so "who used this
+/// code" is answerable -- and so the unique constraint below can stop
+/// the same person redeeming the same code twice, which a counter alone
+/// cannot express.
+model VoucherRedemption {
+  id         String   @id @default(uuid())
+  voucherId  String
+  voucher    Voucher  @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  /// The subscription it granted. Nullable because the redemption is
+  /// recorded first: losing the record would let the same code be spent
+  /// again if provisioning failed halfway.
+  subscriptionId String?       @unique
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  redeemedAt DateTime @default(now())
+
+  @@unique([voucherId, customerId])
+  @@index([customerId])
+  @@map("voucher_redemptions")
+}
+
+// ---------------------------------------------------------------------------
+// Community links
+// ---------------------------------------------------------------------------
+
+/// Where customers can find the product outside the app.
+///
+/// Served rather than compiled in, and that is the point: a Discord
+/// invite expires, an account gets renamed, and neither should need a
+/// new release of a desktop app to fix. Every field is nullable and the
+/// app renders only what is filled in, so nothing here can produce a
+/// button that goes nowhere.
+///
+/// Same lazily-created singleton shape as FreeTrialSettings.
+model AppLinks {
+  id           String   @id @default(uuid())
+  websiteUrl   String?
+  discordUrl   String?
+  instagramUrl String?
+  telegramUrl  String?
+  updatedAt    DateTime @updatedAt
+
+  @@map("app_links")
+}
+
+// ---------------------------------------------------------------------------
+// Support
+// ---------------------------------------------------------------------------
+
+/// Whether the operator is taking new conversations.
+///
+/// Async tickets rather than live chat, deliberately. This is a
+/// one-person operation with an away switch, so presence is a promise
+/// that could not be kept -- a thread that looks like chat and does not
+/// claim anyone is watching is the honest version of the same feature.
+///
+/// Same lazily-created singleton shape as the other settings models.
+model SupportSettings {
+  id String @id @default(uuid())
+  /// Off means no *new* conversations. Existing ones stay open on
+  /// purpose: cutting somebody off mid-conversation is worse than
+  /// declining to start one.
+  acceptingTickets Boolean @default(false)
+  /// What the app says when new conversations are closed. Null falls
+  /// back to wording the app ships, so an empty setting cannot produce
+  /// a blank explanation.
+  awayMessage      String?
+  /// Roughly how long a reply takes, shown when opening a ticket so
+  /// nobody sits watching an empty thread expecting an instant answer.
+  replyWithinHours Int?    @default(24)
+  updatedAt        DateTime @updatedAt
+
+  @@map("support_settings")
+}
+
+enum SupportTicketStatus {
+  /// Waiting on the operator.
+  OPEN
+  /// The operator has replied; waiting on the customer.
+  ANSWERED
+  /// Done. Either side can reopen by writing again.
+  RESOLVED
+}
+
+model SupportTicket {
+  id         String              @id @default(uuid())
+  customerId String
+  customer   Customer            @relation(fields: [customerId], references: [id])
+  subject    String
+  status     SupportTicketStatus @default(OPEN)
+
+  /// Denormalised so the inbox can sort and the app can show an unread
+  /// dot without loading every message of every thread.
+  lastMessageAt      DateTime  @default(now())
+  /// Drives the app's unread marker: a reply is unread when it is newer
+  /// than this. Held per side because each reads independently.
+  customerLastReadAt DateTime?
+
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  messages  SupportMessage[]
+
+  @@index([customerId])
+  @@index([status, lastMessageAt])
+  @@map("support_tickets")
+}
+
+model SupportMessage {
+  id       String        @id @default(uuid())
+  ticketId String
+  ticket   SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  /// Which side wrote it, rather than a relation to AdminUser. An admin
+  /// account can be deleted and the conversation still has to read
+  /// correctly afterwards -- and the customer is only ever shown
+  /// "Support", never which person answered.
+  fromAdmin Boolean
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+  @@map("support_messages")
 }

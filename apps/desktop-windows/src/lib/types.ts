@@ -17,7 +17,11 @@ export interface Customer {
   updatedAt: string;
 }
 
-export type SubscriptionStatus = "ACTIVE" | "SUSPENDED" | "EXPIRED" | "CANCELLED";
+// PENDING was added backend-side when self-purchase landed (a
+// subscription exists before the payment clears) but never mirrored
+// here, so the app had no way to express "created, not paid for" and
+// treated one as a real subscription.
+export type SubscriptionStatus = "PENDING" | "ACTIVE" | "SUSPENDED" | "EXPIRED" | "CANCELLED";
 
 export interface Subscription {
   id: string;
@@ -27,14 +31,21 @@ export interface Subscription {
   status: SubscriptionStatus;
   startAt: string;
   expireAt: string;
-  dataCapBytes: string;
+  /** Null means unlimited traffic. */
+  dataCapBytes: string | null;
   dataUsedBytes: string;
   autoRenew: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
-export type Protocol = "XRAY_VLESS_REALITY" | "XRAY_VMESS" | "XRAY_TROJAN" | "WIREGUARD" | "OPENVPN";
+export type Protocol =
+  | "XRAY_VLESS_REALITY"
+  | "XRAY_VLESS_TLS"
+  | "XRAY_VMESS"
+  | "XRAY_TROJAN"
+  | "WIREGUARD"
+  | "OPENVPN";
 
 export type PaymentProvider = "STRIPE" | "NOWPAYMENTS";
 
@@ -79,10 +90,15 @@ export interface ProtocolUser {
 export interface SubscriptionPlan {
   id: string;
   name: string;
-  dataCapBytes: string;
+  /** Null means unlimited traffic. */
+  dataCapBytes: string | null;
   durationDays: number;
   priceUsd: string;
   maxConcurrentConnections: number | null;
+  /** Per-user speed caps in Mbit/s, null = uncapped. Worth showing on the
+   * plan card: "how fast" is the second thing anyone asks after price. */
+  maxDownloadMbps: number | null;
+  maxUploadMbps: number | null;
   protocolsAllowed: Protocol[];
   isActive: boolean;
   defaultRouteId: string | null;
@@ -116,4 +132,95 @@ export interface RouteOption {
   protocol: Protocol;
   isRelay: boolean;
   location: { region: string; nodeName: string };
+  /** Entry endpoint the client dials. Used to measure latency locally --
+   * a figure measured on the backend would describe the backend's
+   * network, not the customer's. Only the entry is exposed; a relay's
+   * exit node stays hidden. */
+  endpoint: { host: string; port: number };
+  /** What the control plane knows from agent heartbeats. Distinct from
+   * latency: "is it up" rather than "is it fast for me". */
+  nodeStatus: "ONLINE" | "OFFLINE" | "PENDING" | "DISABLED";
+}
+
+/** What GET /customer/referrals returns.
+ *
+ * Friends arrive already masked -- the server never sends the real
+ * addresses, so there is nothing here to leak by accident. */
+export type ReferralOverview = {
+  enabled: boolean;
+  code: string | null;
+  rules: {
+    loyalFriendMonths: number;
+    friendsRequired: number;
+    friendMonths: number;
+    rewardDays: number;
+  };
+  friends: {
+    maskedEmail: string;
+    joinedAt: string;
+    activated: boolean;
+    paidMonths: number;
+  }[];
+  rewards: { id: string; reason: string; rewardDays: number; grantedAt: string }[];
+  progress: {
+    monthsToNextReward: number;
+    qualifyingFriends: number;
+    bestFriendMonths: number;
+  };
+};
+
+/** Where to find the product outside the app.
+ *
+ * Served by the backend rather than compiled in, so a Discord invite
+ * that expires or an account that gets renamed does not need a new
+ * release. Every field is nullable and the app renders only what is
+ * set, so there is no way to end up with a button going nowhere. */
+export interface AppLinks {
+  websiteUrl: string | null;
+  discordUrl: string | null;
+  instagramUrl: string | null;
+  telegramUrl: string | null;
+}
+
+/** Support conversations.
+ *
+ * Async tickets, shown as a chat. The distinction matters for what the
+ * UI is allowed to promise: there is nobody watching a socket, so the
+ * screen says when a reply is likely rather than implying one is
+ * coming right now. */
+export type SupportTicketStatus = "OPEN" | "ANSWERED" | "RESOLVED";
+
+export interface SupportMessage {
+  id: string;
+  fromAdmin: boolean;
+  body: string;
+  createdAt: string;
+}
+
+export interface SupportTicketSummary {
+  id: string;
+  subject: string;
+  status: SupportTicketStatus;
+  lastMessageAt: string;
+  createdAt: string;
+  /** Computed by the backend so the app and any future client cannot
+   * disagree about what counts as unread. */
+  unread: boolean;
+}
+
+export interface SupportThread {
+  id: string;
+  subject: string;
+  status: SupportTicketStatus;
+  lastMessageAt: string;
+  messages: SupportMessage[];
+}
+
+export interface SupportOverview {
+  /** Off means no new conversations. Existing ones stay open, so the
+   * app still shows the reply box inside a thread. */
+  acceptingTickets: boolean;
+  awayMessage: string | null;
+  replyWithinHours: number | null;
+  tickets: SupportTicketSummary[];
 }

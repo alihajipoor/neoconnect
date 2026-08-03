@@ -1,10 +1,12 @@
-# Workspace root for the three Rust crates that make up the Windows
+# Workspace root for the four Rust crates that make up the Windows
 # client. `src-tauri` is the app the user actually sees; `service` is the
 # privileged helper it drives; `ipc` is the wire contract between them,
-# shared so the two can never drift out of sync.
+# shared so the two can never drift out of sync; `bootstrapper` is the
+# file a customer downloads, which draws the install window and runs the
+# real installer inside it.
 [workspace]
 resolver = "2"
-members = ["src-tauri", "service", "ipc"]
+members = ["src-tauri", "service", "ipc", "bootstrapper"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

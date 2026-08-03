@@ -1,3 +1,4 @@
+import { SubscriptionStatus } from "@prisma/client";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateSubscriptionDto } from "./dto/create-subscription.dto";
@@ -43,7 +44,69 @@ export class SubscriptionsService {
     return subscription;
   }
 
-  async create(dto: CreateSubscriptionDto) {
+  /** `status` is explicit because the three callers mean different
+   * things. A customer picking a plan has not paid yet and must start
+   * PENDING; a free trial and an admin-created subscription are live
+   * immediately. The column default was ACTIVE, which silently made
+   * "clicked a plan and closed the payment window" look identical to
+   * "paying customer" in the panel. */
+  /** The customer self-purchase entry point: reuse an unpaid attempt at
+   * the same plan rather than starting a new one.
+   *
+   * Every press of Card or Crypto used to create a fresh subscription
+   * before the payment was even attempted, so a customer whose payment
+   * failed -- or who simply changed their mind about the method -- left a
+   * PENDING row behind each time. Four test purchases produced four
+   * subscriptions.
+   *
+   * Reuse is keyed on customer+plan+PENDING, which is exactly the
+   * "I'm still trying to buy this" case. Switching plans still creates a
+   * separate attempt, since that is a different purchase.
+   *
+   * The dates and cap are refreshed on reuse: the row was never paid for,
+   * so it should reflect the plan as it is now, not as it was when the
+   * first abandoned attempt happened.
+   */
+  async createOrReusePending(customerId: string, planId: string) {
+    const plan = await this.prisma.subscriptionPlan.findUnique({ where: { id: planId } });
+    if (!plan) throw new BadRequestException("Plan not found");
+    if (!plan.isActive) throw new BadRequestException("Plan is not active");
+
+    const existing = await this.prisma.subscription.findFirst({
+      where: { customerId, planId, status: SubscriptionStatus.PENDING },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const expireAt = new Date(Date.now() + plan.durationDays * 24 * 60 * 60 * 1000);
+
+    if (existing) {
+      return this.prisma.subscription.update({
+        where: { id: existing.id },
+        data: { expireAt, dataCapBytes: plan.dataCapBytes },
+      });
+    }
+
+    return this.create({ customerId, planId }, SubscriptionStatus.PENDING);
+  }
+
+  /** Cancels unpaid attempts that were abandoned.
+   *
+   * Without this, every failed or half-finished purchase is a PENDING row
+   * that lingers forever -- invisible to the customer, but real clutter in
+   * the admin's Subscriptions view and in any revenue query that isn't
+   * careful about status. Cancelled rather than deleted so the attempt
+   * stays auditable alongside its PaymentTransaction.
+   */
+  async cancelStalePending(olderThanMs: number) {
+    const cutoff = new Date(Date.now() - olderThanMs);
+    const { count } = await this.prisma.subscription.updateMany({
+      where: { status: SubscriptionStatus.PENDING, createdAt: { lt: cutoff } },
+      data: { status: SubscriptionStatus.CANCELLED },
+    });
+    return count;
+  }
+
+  async create(dto: CreateSubscriptionDto, status: SubscriptionStatus = SubscriptionStatus.ACTIVE) {
     const [customer, plan] = await Promise.all([
       this.prisma.customer.findUnique({ where: { id: dto.customerId } }),
       this.prisma.subscriptionPlan.findUnique({ where: { id: dto.planId } }),
@@ -62,6 +125,7 @@ export class SubscriptionsService {
         expireAt,
         dataCapBytes: plan.dataCapBytes,
         autoRenew: dto.autoRenew ?? false,
+        status,
       },
     });
   }

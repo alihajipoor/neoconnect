@@ -5,10 +5,13 @@ import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from 
 /** Never returns a usable session -- see RequiresVerification's doc
  * comment. The app must always follow this up by showing the verify
  * screen, never a dashboard. */
-export async function register(email: string, password: string) {
+export async function register(email: string, password: string, referralCode?: string) {
   return publicRequest<RequiresVerification>("/customer-auth/register", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    // Omitted entirely when blank rather than sent as "": the backend
+    // treats a supplied-but-wrong code as an error, and an empty string
+    // is not a code somebody typed.
+    body: JSON.stringify({ email, password, ...(referralCode ? { referralCode } : {}) }),
   });
 }
 
@@ -34,7 +37,7 @@ export async function verifyEmailByCode(email: string, code: string) {
 }
 
 /** The token-based counterpart to verifyEmailByCode -- used when the
- * "Open in NeoConnect" link in the verification email actually launches
+ * "Open in Neoxify" link in the verification email actually launches
  * the app (see the deep-link handling in App.tsx). No password is ever
  * available at this point (a cold app launch via a clicked email link,
  * not a live register/login session), so this can't auto-sign-in the way
@@ -74,4 +77,32 @@ export async function changePassword(currentPassword: string, newPassword: strin
     await setTokens(result.data);
   }
   return result;
+}
+
+/** Asks for a reset code by email.
+ *
+ * Always succeeds from the caller's point of view, whether or not the
+ * address belongs to an account -- the server deliberately answers the
+ * same either way so this cannot be used to find out who has one. The UI
+ * must therefore say "if that address is registered", never "sent".
+ */
+export async function forgotPassword(email: string) {
+  return publicRequest<void>("/customer-auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+/** Completes the reset with the emailed code.
+ *
+ * The code rather than the token, for the same reason verifyEmailByCode
+ * exists: the token only ever arrives inside a link, and webmail strips
+ * the custom URI scheme those links use, so a desktop client cannot rely
+ * on receiving one.
+ */
+export async function resetPasswordByCode(email: string, code: string, newPassword: string) {
+  return publicRequest<void>("/customer-auth/reset-password-code", {
+    method: "POST",
+    body: JSON.stringify({ email, code, newPassword }),
+  });
 }

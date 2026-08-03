@@ -8,6 +8,7 @@ import { CustomersModule } from "../customers/customers.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
 import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
 import { FreeTrialSettingsModule } from "../free-trial-settings/free-trial-settings.module";
+import { ReferralsModule } from "../referrals/referrals.module";
 import { EmailModule } from "../email/email.module";
 
 @Module({
@@ -18,6 +19,7 @@ import { EmailModule } from "../email/email.module";
     SubscriptionsModule,
     ProtocolUsersModule,
     FreeTrialSettingsModule,
+    ReferralsModule,
     EmailModule,
   ],
   controllers: [CustomerAuthController],

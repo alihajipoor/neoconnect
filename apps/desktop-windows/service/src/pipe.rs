@@ -200,8 +200,20 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             Err(message) => Response::Error { message },
         },
         Request::Status => {
-            let (connected, protocol) = engines.status();
-            Response::State { connected, protocol }
+            let (connected, protocol, health) = engines.status();
+            let split_tunnel_active = engines.split_tunnel_running();
+            Response::State { connected, protocol, health, split_tunnel_active }
         }
+        Request::ProbeSplitTunnel => match engines.probe_split_tunnel() {
+            Ok(()) => Response::Ok,
+            Err(message) => Response::Error { message },
+        },
+        Request::SetSplitTunnel { config } => match config.validate() {
+            Ok(()) => {
+                engines.set_split_tunnel(config.enabled, config.apps);
+                Response::Ok
+            }
+            Err(e) => Response::Error { message: e.to_string() },
+        },
     }
 }

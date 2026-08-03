@@ -5,11 +5,12 @@ import * as argon2 from "argon2";
 import { randomInt } from "node:crypto";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CustomersService } from "../customers/customers.service";
-import { CreateCustomerDto } from "../customers/dto/create-customer.dto";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { FreeTrialSettingsService } from "../free-trial-settings/free-trial-settings.service";
 import { EmailService } from "../email/email.service";
+import { ReferralsService } from "../referrals/referrals.service";
+import { RegisterCustomerDto } from "./dto/register-customer.dto";
 import { verificationEmail, passwordResetEmail } from "../email/templates";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 import {
@@ -27,7 +28,9 @@ export interface CustomerTokenPair {
 
 const VERIFY_EMAIL_TOKEN_TTL = "24h";
 const VERIFY_EMAIL_CODE_TTL_MS = 24 * 60 * 60 * 1000;
-const PASSWORD_RESET_TOKEN_TTL = "30m";
+// Thirty minutes, the same window the token flow used. Short because a
+// reset code is a live credential sitting in an inbox.
+const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
 
 @Injectable()
 export class CustomerAuthService {
@@ -39,6 +42,7 @@ export class CustomerAuthService {
     private readonly subscriptionsService: SubscriptionsService,
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly freeTrialSettingsService: FreeTrialSettingsService,
+    private readonly referralsService: ReferralsService,
     private readonly emailService: EmailService,
   ) {}
 
@@ -51,8 +55,20 @@ export class CustomerAuthService {
    * Returns the same `requiresVerification` shape login() does for an
    * unverified account, so the app has one response shape to branch on
    * regardless of which endpoint got it there. */
-  async register(dto: CreateCustomerDto): Promise<CustomerRequiresVerification> {
+  async register(dto: RegisterCustomerDto): Promise<CustomerRequiresVerification> {
+    // Resolved before the account exists, so a wrong code fails the
+    // signup outright instead of silently creating an account that
+    // credits nobody. A typo here costs the inviter their reward and
+    // neither party would ever find out.
+    const referredByCustomerId = await this.referralsService.resolveReferralCode(dto.referralCode);
+
     const customer = await this.customersService.create(dto);
+    if (referredByCustomerId) {
+      await this.prisma.customer.update({
+        where: { id: customer.id },
+        data: { referredByCustomerId },
+      });
+    }
 
     // One email, not two. The welcome used to be its own send whose
     // entire content was "a separate verification email is on its way" --
@@ -63,7 +79,7 @@ export class CustomerAuthService {
     return { requiresVerification: true, email: customer.email };
   }
 
-  /** Sends both a deep-link token (for "Open in NeoConnect") and a short
+  /** Sends both a deep-link token (for "Open in Neoxify") and a short
    * 6-digit code (for typing directly into the app) -- added 2026-07-24
    * after live testing showed the raw JWT is unusable to hand-type and
    * broke the email's layout when displayed prominently. The code is
@@ -137,6 +153,17 @@ export class CustomerAuthService {
    * yet at this point) and checks it hasn't expired. */
   async verifyEmailByCode(email: string, code: string) {
     const customer = await this.prisma.customer.findUnique({ where: { email } });
+
+    // Already-verified is checked before the code, because verifying
+    // clears the code. Someone who clicked the emailed link on their
+    // phone and then typed the code into the app was told the code had
+    // expired -- while their account was in fact verified and fine. The
+    // account is what matters, not which route confirmed it, and saying
+    // "expired" sent people off to request codes that would never help.
+    if (customer?.emailVerifiedAt) {
+      return { alreadyVerified: true, trial: null };
+    }
+
     if (
       !customer ||
       !customer.emailVerificationCode ||
@@ -159,6 +186,13 @@ export class CustomerAuthService {
       data: { emailVerifiedAt: new Date(), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
     });
     const trial = await this.grantFreeTrialIfEnabled(customerId);
+
+    // Only now, not at signup. An unverified account is not a person
+    // yet, and mailing on an unconfirmed address would turn a shared
+    // referral link into a way to send mail to strangers. Best-effort
+    // inside, so a notification cannot fail the verification.
+    await this.referralsService.notifyReferrerOfActivation(customerId);
+
     return { alreadyVerified: false, trial };
   }
 
@@ -172,12 +206,20 @@ export class CustomerAuthService {
       customerId,
       planId: settings.trialPlanId,
     });
-    const protocolUser = await this.protocolUsersService.create({
-      subscriptionId: subscription.id,
-      routeId: settings.trialRouteId,
-    });
+    // Every route the trial plan allows, so a trial customer gets the
+    // same failover the paid one does -- they are the likeliest to be on
+    // a network that blocks something, and the likeliest to give up if
+    // the first attempt fails.
+    const protocolUsers = await this.protocolUsersService.provisionAll(subscription.id);
 
-    return { subscription, protocolUser };
+    // trialRouteId stays the preferred one, and stays first in the
+    // response so an older client reading only the first entry still
+    // gets the route the operator chose.
+    protocolUsers.sort((a, b) =>
+      a.routeId === settings.trialRouteId ? -1 : b.routeId === settings.trialRouteId ? 1 : 0,
+    );
+
+    return { subscription, protocolUsers, protocolUser: protocolUsers[0] ?? null };
   }
 
   async validateCredentials(email: string, password: string) {
@@ -259,12 +301,58 @@ export class CustomerAuthService {
     const customer = await this.prisma.customer.findUnique({ where: { email } });
     if (!customer || customer.status !== "ACTIVE") return;
 
-    const payload: CustomerPasswordResetTokenPayload = { sub: customer.id, purpose: "password-reset" };
-    const token = await this.jwt.signAsync(payload, {
-      secret: this.config.get<string>("customerJwt.accessSecret"),
-      expiresIn: PASSWORD_RESET_TOKEN_TTL,
+    // A code, not a token. The email used to carry a signed JWT behind
+    // an "enter this code" instruction, which is neither typeable nor
+    // something any client here accepts -- the flow read as available
+    // while being unusable.
+    //
+    // resetPassword() and its token still exist and are still correct;
+    // nothing issues a token now, because the only place one could be
+    // delivered is a link, and no surface can receive one. A website
+    // would reinstate that path by signing a token here and linking to
+    // its own reset page, the way verification's https bounce page
+    // works. Until then this is the whole flow.
+    const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
+    await this.prisma.customer.update({
+      where: { id: customer.id },
+      data: {
+        passwordResetCode: code,
+        passwordResetCodeExpiresAt: new Date(Date.now() + PASSWORD_RESET_CODE_TTL_MS),
+      },
     });
-    await this.emailService.sendMail({ to: customer.email, ...passwordResetEmail(token) });
+
+    await this.emailService.sendMail({ to: customer.email, ...passwordResetEmail(code) });
+  }
+
+  /** Resets by emailed code rather than by token.
+   *
+   * The token route stays for anything that can receive a link; this is
+   * the one a desktop client can use, and mirrors verifyEmailByCode.
+   *
+   * The email address is part of the credential here, unlike the token
+   * which identifies the account by itself. Six digits alone would be a
+   * million-guess space shared across every customer; tied to one
+   * address, and rate-limited at the controller, it is the same strength
+   * as the verification code already in use.
+   */
+  async resetPasswordByCode(email: string, code: string, newPassword: string): Promise<void> {
+    const customer = await this.prisma.customer.findUnique({ where: { email } });
+
+    if (
+      !customer ||
+      customer.status !== "ACTIVE" ||
+      !customer.passwordResetCode ||
+      customer.passwordResetCode !== code ||
+      !customer.passwordResetCodeExpiresAt ||
+      customer.passwordResetCodeExpiresAt < new Date()
+    ) {
+      // Deliberately identical whatever went wrong -- a distinct "no such
+      // account" would turn this into an account-enumeration oracle, which
+      // is the very thing forgotPassword() goes to lengths to avoid.
+      throw new BadRequestException("Invalid or expired reset code");
+    }
+
+    await this.applyNewPassword(customer.id, newPassword);
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {
@@ -280,13 +368,27 @@ export class CustomerAuthService {
       throw new BadRequestException("Invalid or expired reset link");
     }
 
+    await this.applyNewPassword(payload.sub, newPassword);
+  }
+
+  /** The part both reset routes share.
+   *
+   * Bumping tokenVersion invalidates every outstanding refresh token --
+   * a password reset should end any session an attacker (or the user on
+   * another device) already had open. Clearing the code matters just as
+   * much: a used code that still works is a second key left under the
+   * mat for thirty minutes.
+   */
+  private async applyNewPassword(customerId: string, newPassword: string): Promise<void> {
     const passwordHash = await argon2.hash(newPassword);
-    // Bumping tokenVersion invalidates every outstanding refresh token --
-    // a password reset should end any session an attacker (or the user
-    // on another device) already had open.
     await this.prisma.customer.update({
-      where: { id: payload.sub },
-      data: { passwordHash, tokenVersion: { increment: 1 } },
+      where: { id: customerId },
+      data: {
+        passwordHash,
+        tokenVersion: { increment: 1 },
+        passwordResetCode: null,
+        passwordResetCodeExpiresAt: null,
+      },
     });
   }
 

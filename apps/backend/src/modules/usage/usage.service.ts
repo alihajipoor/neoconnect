@@ -51,8 +51,21 @@ export class UsageService {
     const bytesDown = BigInt(delta.bytesDown || "0");
     if (bytesUp === 0n && bytesDown === 0n) return;
 
+    // Matched on the external id alone, not on the reported protocol.
+    //
+    // A node running several inbounds in one engine cannot always say
+    // which of them a byte belongs to: Xray keeps usage per user, so the
+    // agent reports every Xray user under whichever Xray protocol
+    // happens to be doing the reporting. Requiring the label to match
+    // meant those deltas found no row and were dropped in silence --
+    // customers using a second Xray protocol accrued no usage at all
+    // against their cap.
+    //
+    // The label is still worth carrying for diagnostics, but it earns
+    // nothing here: externalUserId is a UUID, a WireGuard public key or
+    // a certificate name, so it identifies the row on its own.
     const protocolUser = await this.prisma.protocolUser.findFirst({
-      where: { nodeId, protocol: delta.protocol, externalUserId: delta.externalUserId },
+      where: { nodeId, externalUserId: delta.externalUserId },
     });
     if (!protocolUser) {
       // Most commonly a relay's shared uplink identity (route:<id>),
@@ -87,7 +100,15 @@ export class UsageService {
       });
     });
 
-    if (subscription.status === "ACTIVE" && subscription.dataUsedBytes >= subscription.dataCapBytes) {
+    // A null cap is unlimited, so there is nothing to cross. Checked
+    // explicitly rather than relying on the comparison: `x >= null`
+    // coerces to `x >= 0` in JS and would suspend every unlimited
+    // subscription on its first byte.
+    if (
+      subscription.status === "ACTIVE" &&
+      subscription.dataCapBytes !== null &&
+      subscription.dataUsedBytes >= subscription.dataCapBytes
+    ) {
       await this.suspendForQuota(subscription.id);
     }
   }
@@ -132,8 +153,12 @@ export class UsageService {
    * single Prisma where-clause, so it's filtered in code after fetching
    * ACTIVE subscriptions -- fine at this data scale. */
   async sweepQuota(): Promise<number> {
-    const active = await this.prisma.subscription.findMany({ where: { status: "ACTIVE" } });
-    const overCap = active.filter((s) => s.dataUsedBytes >= s.dataCapBytes);
+    const active = await this.prisma.subscription.findMany({
+      // Unlimited subscriptions can never be over cap, so they do not
+      // even need fetching.
+      where: { status: "ACTIVE", dataCapBytes: { not: null } },
+    });
+    const overCap = active.filter((s) => s.dataCapBytes !== null && s.dataUsedBytes >= s.dataCapBytes);
     for (const s of overCap) {
       await this.suspendForQuota(s.id);
     }
@@ -156,14 +181,18 @@ export class UsageService {
    * BillingService.renewSubscription()) so this fires exactly once. */
   async sweepLowDataWarnings(): Promise<number> {
     const candidates = await this.prisma.subscription.findMany({
-      where: { status: "ACTIVE", lowDataWarningSentAt: null },
+      // No cap, no "running low" -- there is nothing to run low on.
+      where: { status: "ACTIVE", lowDataWarningSentAt: null, dataCapBytes: { not: null } },
       include: { customer: true },
     });
     const nearCap = candidates.filter(
-      (s) => s.dataUsedBytes < s.dataCapBytes && s.dataCapBytes - s.dataUsedBytes <= LOW_DATA_WARNING_THRESHOLD_BYTES,
+      (s) =>
+        s.dataCapBytes !== null &&
+        s.dataUsedBytes < s.dataCapBytes &&
+        s.dataCapBytes - s.dataUsedBytes <= LOW_DATA_WARNING_THRESHOLD_BYTES,
     );
     for (const s of nearCap) {
-      const remainingGb = Number(s.dataCapBytes - s.dataUsedBytes) / Number(BYTES_PER_GB);
+      const remainingGb = Number(s.dataCapBytes! - s.dataUsedBytes) / Number(BYTES_PER_GB);
       await this.emailService.sendMail({ to: s.customer.email, ...lowDataWarningEmail(remainingGb) });
       await this.prisma.subscription.update({ where: { id: s.id }, data: { lowDataWarningSentAt: new Date() } });
     }

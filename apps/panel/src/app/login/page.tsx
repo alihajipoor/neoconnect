@@ -13,7 +13,7 @@ export default async function LoginPage() {
         <Logo className="scale-110" />
         <LoginForm />
         <p className="text-center text-xs text-muted-foreground">
-          NeoConnect control plane &middot; internal use only
+          Neoxify control plane &middot; internal use only
         </p>
       </div>
     </div>

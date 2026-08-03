@@ -1,5 +1,5 @@
 import { IsBoolean, IsEnum, IsInt, IsObject, IsOptional, IsUUID, Max, Min } from "class-validator";
-import { Protocol } from "@prisma/client";
+import { Protocol, Transport, TransportSecurity } from "@prisma/client";
 
 export class CreateProtocolConfigDto {
   @IsUUID()
@@ -21,6 +21,22 @@ export class CreateProtocolConfigDto {
    * over the wire -- see M3/M4 scope notes in docs/architecture.md. */
   @IsObject()
   publicParamsJson!: Record<string, unknown>;
+
+  /** How this inbound is carried, and what it is wrapped in.
+   *
+   * Separate from `protocol` because one Xray protocol is offered several
+   * ways -- VLESS over plain TCP with REALITY is a different thing on the
+   * wire from VLESS over WebSocket with TLS, and enumerating every
+   * combination as its own Protocol member does not scale. Defaults
+   * (TCP/NONE) are deliberately the dullest option, so a caller that
+   * says nothing does not accidentally claim TLS it isn't serving. */
+  @IsOptional()
+  @IsEnum(Transport)
+  transport?: Transport;
+
+  @IsOptional()
+  @IsEnum(TransportSecurity)
+  security?: TransportSecurity;
 
   @IsOptional()
   @IsBoolean()

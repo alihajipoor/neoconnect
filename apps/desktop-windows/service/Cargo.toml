@@ -13,6 +13,19 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 windows-service = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+# Custom (per-app split tunnel) mode. Raw FFI rather than the higher-level
+# `windivert` wrapper, which upstream still describes as work in progress
+# -- the packet rewriting here needs exact control over the address
+# structure, which is precisely what a wrapper abstracts away.
+windivert-sys = "0.9"
+# `windivert-sys` exposes its handles as this crate's HANDLE, so the
+# version has to match the one it was built against rather than the
+# windows-sys used everywhere else in this crate.
+windows = { version = "0.43", features = ["Win32_Foundation"] }
+# IP_UNICAST_IF has to be set on a socket before it connects, which rules
+# out std's TcpStream::connect. socket2 is the standard way to build a
+# socket, configure it, and only then hand it to std.
+socket2 = { version = "0.5", features = ["all"] }
 
 [dependencies.windows-sys]
 version = "0.59"

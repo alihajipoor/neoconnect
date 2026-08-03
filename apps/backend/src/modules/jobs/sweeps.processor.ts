@@ -3,7 +3,9 @@ import { Logger } from "@nestjs/common";
 import { Job } from "bullmq";
 import { UsageService } from "../usage/usage.service";
 import { InvoicesService } from "../invoices/invoices.service";
-import { SWEEPS_QUEUE } from "./jobs.constants";
+import { SubscriptionsService } from "../subscriptions/subscriptions.service";
+import { ReferralsService } from "../referrals/referrals.service";
+import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
 export class SweepsProcessor extends WorkerHost {
@@ -12,6 +14,8 @@ export class SweepsProcessor extends WorkerHost {
   constructor(
     private readonly usageService: UsageService,
     private readonly invoicesService: InvoicesService,
+    private readonly subscriptionsService: SubscriptionsService,
+    private readonly referralsService: ReferralsService,
   ) {
     super();
   }
@@ -45,6 +49,20 @@ export class SweepsProcessor extends WorkerHost {
         const overdue = await this.invoicesService.markOverdue();
         if (overdue.length > 0) {
           this.logger.log(`invoice overdue sweep: marked ${overdue.length} invoice(s) overdue`);
+        }
+        break;
+      }
+      case "referral": {
+        const granted = await this.referralsService.sweep();
+        if (granted > 0) {
+          this.logger.log(`referral sweep: granted ${granted} free period(s)`);
+        }
+        break;
+      }
+      case "stale-pending": {
+        const count = await this.subscriptionsService.cancelStalePending(STALE_PENDING_AFTER_MS);
+        if (count > 0) {
+          this.logger.log(`stale pending sweep: cancelled ${count} abandoned purchase attempt(s)`);
         }
         break;
       }

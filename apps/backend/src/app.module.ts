@@ -20,9 +20,16 @@ import { UsageModule } from "./modules/usage/usage.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { BillingModule } from "./modules/billing/billing.module";
 import { InvoicesModule } from "./modules/invoices/invoices.module";
+import { PaymentSettingsModule } from "./modules/payment-settings/payment-settings.module";
 import { CustomerAuthModule } from "./modules/customer-auth/customer-auth.module";
 import { CustomerModule } from "./modules/customer/customer.module";
 import { FreeTrialSettingsModule } from "./modules/free-trial-settings/free-trial-settings.module";
+import { ReferralsModule } from "./modules/referrals/referrals.module";
+import { VouchersModule } from "./modules/vouchers/vouchers.module";
+import { AppLinksModule } from "./modules/app-links/app-links.module";
+import { SupportModule } from "./modules/support/support.module";
+import { BrandModule } from "./modules/brand/brand.module";
+import { UpdatesModule } from "./modules/updates/updates.module";
 import { EmailModule } from "./modules/email/email.module";
 import { AnnouncementsModule } from "./modules/announcements/announcements.module";
 
@@ -56,9 +63,16 @@ import { AnnouncementsModule } from "./modules/announcements/announcements.modul
     JobsModule,
     BillingModule,
     InvoicesModule,
+    PaymentSettingsModule,
     CustomerAuthModule,
     CustomerModule,
     FreeTrialSettingsModule,
+    ReferralsModule,
+    VouchersModule,
+    AppLinksModule,
+    SupportModule,
+    BrandModule,
+    UpdatesModule,
     EmailModule,
     AnnouncementsModule,
   ],
