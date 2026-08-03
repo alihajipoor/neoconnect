@@ -307,14 +307,21 @@ fn decode_logo() -> Option<Pixmap> {
     let mut reader = decoder.read_info().ok()?;
     let mut raw = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut raw).ok()?;
-    if info.color_type != png::ColorType::Rgba {
-        return None;
-    }
+
+    // Both channel counts are handled rather than only RGBA. Which one
+    // an icon export produces depends on the tool that made it, and a
+    // silent `None` here is invisible until someone notices the window
+    // has no logo on it -- which is exactly how the first build shipped.
+    let channels = match info.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        _ => return None,
+    };
 
     let mut pixmap = Pixmap::new(info.width, info.height)?;
-    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(raw.chunks_exact(4)) {
+    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(raw.chunks_exact(channels)) {
         // tiny-skia stores premultiplied alpha; PNG does not.
-        let a = src[3] as u32;
+        let a = if channels == 4 { src[3] as u32 } else { 255 };
         let p = |c: u8| ((c as u32 * a) / 255) as u8;
         *dst = tiny_skia::PremultipliedColorU8::from_rgba(p(src[0]), p(src[1]), p(src[2]), a as u8)?;
     }

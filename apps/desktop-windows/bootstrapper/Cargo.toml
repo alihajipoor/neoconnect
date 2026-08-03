@@ -38,6 +38,10 @@ features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_UI_WindowsAndMessaging",
+    # ShellExecuteExW is gated behind Registry, because its info struct
+    # carries an HKEY for the (unused here) class-key field.
+    "Win32_UI_Shell",
+    "Win32_System_Registry",
     "Win32_System_Threading",
 ]
 
