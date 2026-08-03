@@ -229,6 +229,57 @@ export function expiringSoonEmail(daysRemaining: number) {
   };
 }
 
+/** Sent to the inviter when someone they invited activates their
+ * account. The trigger M16 listed and could not build, because the
+ * referral programme it depends on did not exist yet.
+ *
+ * The friend's address is masked before it ever reaches this function.
+ * The inviter is entitled to know their invite worked; they are not
+ * entitled to a readable copy of someone else's email address, and a
+ * referral link shared publicly would otherwise become a way to harvest
+ * them. */
+export function referralFriendJoinedEmail(maskedEmail: string, monthsToGo: number | null) {
+  const progress =
+    monthsToGo === null
+      ? paragraph("Keep inviting friends to earn free months of Neoxify.")
+      : paragraph(
+          `You're ${monthsToGo} paid ${monthsToGo === 1 ? "month" : "months"} away from your next free month.`,
+        );
+
+  return {
+    subject: "Someone joined Neoxify with your invite",
+    html: shell({
+      preheader: `${maskedEmail} just activated their account.`,
+      bodyHtml: `
+        ${heading("Your invite worked")}
+        ${statPill(maskedEmail, "just activated their account")}
+        ${progress}
+      `,
+    }),
+    text: `${maskedEmail} just activated their Neoxify account using your invite.${
+      monthsToGo === null ? "" : ` You are ${monthsToGo} paid month(s) away from your next free month.`
+    }`,
+  };
+}
+
+/** Sent when a free month has actually been granted -- after the
+ * subscription exists, never before. Promising a reward that then fails
+ * to provision would be worse than a delayed email. */
+export function referralRewardEmail(days: number, planName: string) {
+  return {
+    subject: "You've earned free Neoxify time",
+    html: shell({
+      preheader: `${days} free days have been added to your account.`,
+      bodyHtml: `
+        ${heading("Your free time is ready")}
+        ${statPill(`${days} days`, `free on ${planName}`)}
+        ${paragraph("Thanks for spreading the word. It's already on your account -- open Neoxify and connect as usual.")}
+      `,
+    }),
+    text: `You have earned ${days} free days of Neoxify on ${planName}, thanks to the friends you invited. It is already active on your account.`,
+  };
+}
+
 /** Used by AnnouncementsProcessor to wrap an admin-composed broadcast in
  * the same branded shell -- so a manual "server maintenance tonight"
  * notice looks as polished as every automated trigger above, not a bare
