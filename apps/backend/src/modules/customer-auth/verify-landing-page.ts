@@ -24,7 +24,7 @@ function shell(inner: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NeoConnect</title>
+<title>Neoxify</title>
 <style>
   :root { color-scheme: light; }
   body {
@@ -53,7 +53,7 @@ function shell(inner: string): string {
   .bad { color: #b42318; }
 </style>
 </head>
-<body><div class="card"><div class="bar">&#9889; NeoConnect</div><div class="body">${inner}</div></div></body>
+<body><div class="card"><div class="bar">&#9889; Neoxify</div><div class="body">${inner}</div></div></body>
 </html>`;
 }
 
@@ -63,11 +63,22 @@ export function verifiedPage(deepLink: string, alreadyVerified: boolean): string
     ? "This address was already confirmed, so there's nothing more to do."
     : "Your address is confirmed and your account is ready to use.";
 
+  // The instruction comes before the button on purpose. This link is
+  // usually opened on a phone, because that is where the email was read
+  // -- and a phone has no Neoxify app, so the neoconnect:// button can
+  // only fail there. Leading with it produced a browser error about a
+  // missing app, which reads as "verification failed" when in fact it
+  // had already succeeded before this page was rendered. Reported by a
+  // customer who then went back to the app and was told their code had
+  // expired.
   return shell(`
     <h1>${headline}</h1>
     <p>${detail}</p>
-    <p><a class="btn" href="${deepLink}">Open NeoConnect</a></p>
-    <p class="muted">If nothing happens, open the NeoConnect app and sign in normally &mdash; you're verified either way.</p>
+    <p><strong>You can close this page.</strong> Go back to the Neoxify app on your computer &mdash;
+       it will pick this up on its own within a few seconds.</p>
+    <p class="muted">On the computer where Neoxify is installed, you can also
+       <a href="${deepLink}">open the app directly</a>. That link does nothing on a phone,
+       which is fine &mdash; your email is confirmed either way.</p>
   `);
 }
 
@@ -76,7 +87,7 @@ export function verificationFailedPage(reason: string): string {
     <h1 class="bad">Couldn't verify this link</h1>
     <p>${reason}</p>
     <p class="muted">
-      Verification links expire after 24 hours. Open the NeoConnect app and request a new one,
+      Verification links expire after 24 hours. Open the Neoxify app and request a new one,
       or enter the 6-digit code from your email instead.
     </p>
   `);

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
@@ -17,6 +17,10 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
   { href: "/protocol-configs", label: "Protocol Configs", icon: Radio },
   { href: "/routes", label: "Routes", icon: RouteIcon },
   { href: "/invoices", label: "Invoices", icon: ReceiptText, roles: ["SUPERADMIN", "BILLING"] },
+  // Same gating as Invoices: a voucher gives a paid plan away, which is
+  // a commercial act rather than routine support work.
+  { href: "/vouchers", label: "Vouchers", icon: Ticket, roles: ["SUPERADMIN", "BILLING"] },
+  { href: "/support", label: "Support", icon: LifeBuoy, roles: ["SUPERADMIN", "SUPPORT"] },
   { href: "/announcements", label: "Announcements", icon: Megaphone, roles: ["SUPERADMIN"] },
   { href: "/admins", label: "Admins", icon: ShieldCheck, roles: ["SUPERADMIN"] },
   // No `roles` restriction -- every admin manages their own account

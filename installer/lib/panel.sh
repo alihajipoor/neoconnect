@@ -328,7 +328,7 @@ action_uninstall_panel() {
 print_panel_menu() {
   cat <<'EOF'
 
-  NeoConnect Panel Server
+  Neoxify Panel Server
   ------------------------
   1) View status / logs
   2) Rebuild and restart (after a git pull)

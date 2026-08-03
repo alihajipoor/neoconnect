@@ -1,16 +1,32 @@
 import { useEffect, useRef, useState } from "react";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
 import { verifyEmailByToken } from "./lib/auth";
 import { Login } from "./screens/Login";
 import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
+import { ForgotPassword } from "./screens/ForgotPassword";
 import { Dashboard } from "./screens/Dashboard";
 import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
+import { Referrals } from "./screens/Referrals";
+import { Support } from "./screens/Support";
+import { UpdateBanner } from "./components/UpdateBanner";
+import { applyStagedUpdate, startUpdateChecks, stagedUpdate, type UpdateState } from "./lib/updates";
 
-type Screen = "loading" | "login" | "register" | "verify" | "dashboard" | "plans" | "settings";
+type Screen =
+  | "loading"
+  | "login"
+  | "register"
+  | "forgot"
+  | "verify"
+  | "dashboard"
+  | "plans"
+  | "settings"
+  | "referrals"
+  | "support";
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
@@ -20,6 +36,9 @@ export default function App() {
   // memory for this handoff, never persisted.
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState>({ status: "none" });
+  const [restarting, setRestarting] = useState(false);
+  const [updateBlocked, setUpdateBlocked] = useState(false);
   // Guards against processing the same deep-link URL twice -- the launch
   // URL can plausibly reach handleDeepLinkUrl via both the Rust-side
   // get_launch_deep_link command and the plugin's own onOpenUrl forwarding
@@ -30,10 +49,15 @@ export default function App() {
   const handledDeepLinkUrls = useRef(new Set<string>());
 
   useEffect(() => {
-    getTokens().then((tokens) => setScreen(tokens ? "dashboard" : "login"));
+    // getTokens() swallows its own read failures, but a catch here too
+    // means no future change to it can strand the app on "Loading..."
+    // with no way forward.
+    getTokens()
+      .then((tokens) => setScreen(tokens ? "dashboard" : "login"))
+      .catch(() => setScreen("login"));
   }, []);
 
-  // Handles the "Open in NeoConnect" link from the verification email --
+  // Handles the "Open in Neoxify" link from the verification email --
   // `neoconnect://verify-email?token=...`. No password is available at
   // this point (a launch via a clicked link, not a live register/login
   // session in this same app instance), so this can't auto-sign-in the
@@ -83,9 +107,58 @@ export default function App() {
     };
   }, []);
 
+  // Background update checking, and applying it on the way out.
+  //
+  // The install is held until quit because replacing the binaries --
+  // the helper service among them -- under a live tunnel would drop the
+  // connection. For someone who cannot reach anything without it, being
+  // cut off without warning is worse than running a version behind.
+  useEffect(() => startUpdateChecks(setUpdateState), []);
+
+  useEffect(() => {
+    const window = getCurrentWindow();
+    const unlisten = window.onCloseRequested(async (event) => {
+      if (!stagedUpdate()) return;
+      event.preventDefault();
+      try {
+        // Only when nothing is running. The check is cheap and the
+        // consequence of skipping it is a dropped tunnel, so it is
+        // worth making even though the customer is quitting.
+        const status = await invoke<{ connected: boolean }>("vpn_status");
+        if (!status.connected) await applyStagedUpdate(false);
+      } catch {
+        // An update that cannot be applied must never be a window that
+        // cannot be closed. Whatever went wrong, the next launch tries
+        // again.
+      }
+      void window.destroy();
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
   function goToVerify(email: string, password: string) {
     setPendingAuth({ email, password });
     setScreen("verify");
+  }
+
+  async function restartForUpdate() {
+    setRestarting(true);
+    try {
+      const status = await invoke<{ connected: boolean }>("vpn_status");
+      if (status.connected) {
+        // Refusing rather than silently dropping their tunnel. It will
+        // install on quit regardless, so nothing is lost by waiting.
+        setUpdateBlocked(true);
+        return;
+      }
+      await applyStagedUpdate(true);
+    } catch {
+      setUpdateBlocked(true);
+    } finally {
+      setRestarting(false);
+    }
   }
 
   if (screen === "loading") {
@@ -97,10 +170,25 @@ export default function App() {
         onSuccess={() => setScreen("dashboard")}
         onNeedsVerification={goToVerify}
         onGoRegister={() => setScreen("register")}
+        onGoForgotPassword={() => setScreen("forgot")}
         notice={loginNotice}
       />
     );
   }
+  if (screen === "forgot") {
+    return (
+      <ForgotPassword
+        // Reuses the same notice slot a verification success uses, so a
+        // reset lands the customer on sign-in already knowing it worked.
+        onDone={(notice) => {
+          setLoginNotice(notice);
+          setScreen("login");
+        }}
+        onCancel={() => setScreen("login")}
+      />
+    );
+  }
+
   if (screen === "register") {
     return <Register onNeedsVerification={goToVerify} onGoLogin={() => setScreen("login")} />;
   }
@@ -121,16 +209,46 @@ export default function App() {
     );
   }
   if (screen === "settings") {
-    return <Settings onBack={() => setScreen("dashboard")} />;
+    return (
+      <Settings
+        onBack={() => setScreen("dashboard")}
+        onOpenReferrals={() => setScreen("referrals")}
+        onOpenSupport={() => setScreen("support")}
+      />
+    );
+  }
+  if (screen === "referrals") {
+    // Back to Settings rather than the Dashboard: that is where the
+    // customer came from, and dropping them somewhere else is how a
+    // two-tap detour starts feeling like getting lost.
+    return <Referrals onBack={() => setScreen("settings")} />;
+  }
+  if (screen === "support") {
+    // Same reasoning as Referrals: back where they came from.
+    return <Support onBack={() => setScreen("settings")} />;
   }
   if (screen === "plans") {
     return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;
   }
+  // The banner rides above the Dashboard only. It is the screen people
+  // sit on, and putting it above every screen would mean it appears
+  // over the sign-in form -- telling somebody who cannot get into their
+  // account yet about a version number.
   return (
-    <Dashboard
-      onLoggedOut={() => setScreen("login")}
-      onBrowsePlans={() => setScreen("plans")}
-      onOpenSettings={() => setScreen("settings")}
-    />
+    <div className="flex h-full flex-col">
+      <UpdateBanner
+        state={updateState}
+        onRestart={() => void restartForUpdate()}
+        busy={restarting}
+        blocked={updateBlocked}
+      />
+      <div className="min-h-0 flex-1">
+        <Dashboard
+          onLoggedOut={() => setScreen("login")}
+          onBrowsePlans={() => setScreen("plans")}
+          onOpenSettings={() => setScreen("settings")}
+        />
+      </div>
+    </div>
   );
 }

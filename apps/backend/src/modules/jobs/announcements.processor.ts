@@ -33,7 +33,13 @@ export class AnnouncementsProcessor extends WorkerHost {
         to,
         subject,
         html: announcementEmail(body),
-        text: body,
+        text: `${body}
+
+--
+This is an announcement from Neoxify. Reply with "Unsubscribe" to stop receiving them.`,
+        // Bulk, unlike every other send in this codebase -- see
+        // SendMailInput.bulk.
+        bulk: true,
       });
       if (ok) sent += 1;
     }

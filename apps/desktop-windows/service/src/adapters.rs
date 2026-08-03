@@ -28,6 +28,13 @@ pub struct Adapter {
     /// gateway can't carry off-link traffic, which is what distinguishes
     /// the real uplink from loopback, virtual and tunnel adapters.
     pub gateway: Option<Ipv4Addr>,
+    /// The adapter's own IPv4 address, when it has one.
+    ///
+    /// Split tunnel needs it for two things: it is the source address a
+    /// socket pinned to this interface will use, and excluding that
+    /// address from the interception filter is what stops the proxy
+    /// intercepting its own upstream traffic in a loop.
+    pub ipv4: Option<Ipv4Addr>,
     pub is_up: bool,
 }
 
@@ -121,12 +128,37 @@ pub fn list() -> io::Result<Vec<Adapter>> {
             gw = g.Next;
         }
 
+        // The adapter's own address, from the same walk. Unicast
+        // addresses are a list because an adapter may hold several; the
+        // first usable IPv4 is the one a socket pinned here would use.
+        let mut ipv4 = None;
+        let mut ua = entry.FirstUnicastAddress;
+        while !ua.is_null() {
+            // SAFETY: same linked-list guarantee as the gateway walk.
+            let u = unsafe { &*ua };
+            if !u.Address.lpSockaddr.is_null() {
+                // SAFETY: family was restricted to AF_INET.
+                let sa = unsafe { &*(u.Address.lpSockaddr as *const SOCKADDR_IN) };
+                if sa.sin_family == AF_INET {
+                    // SAFETY: reading the union's IPv4 representation.
+                    let octets = unsafe { sa.sin_addr.S_un.S_addr }.to_ne_bytes();
+                    let addr = Ipv4Addr::from(octets);
+                    if !addr.is_unspecified() && !addr.is_loopback() {
+                        ipv4 = Some(addr);
+                        break;
+                    }
+                }
+            }
+            ua = u.Next;
+        }
+
         adapters.push(Adapter {
             // SAFETY: reading a plain field of the union-typed anonymous
             // struct the API defines.
             index: unsafe { entry.Anonymous1.Anonymous.IfIndex },
             name: wide_to_string(entry.FriendlyName),
             gateway,
+            ipv4,
             is_up: entry.OperStatus == IF_OPER_STATUS_UP,
         });
 

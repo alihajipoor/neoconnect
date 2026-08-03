@@ -12,16 +12,35 @@ import type { TokenPair } from "./types";
 // already expire and rotate on their own.
 let storePromise: Promise<Store> | null = null;
 function getStore(): Promise<Store> {
-  storePromise ??= load("session.json", { autoSave: false });
+  // A rejected promise must not be cached: `??=` alone would remember the
+  // failure for the life of the process, so one transient error (a
+  // locked or half-written session.json) would permanently break saving
+  // and clearing tokens even after the underlying problem cleared.
+  storePromise ??= load("session.json", { autoSave: false }).catch((err) => {
+    storePromise = null;
+    throw err;
+  });
   return storePromise;
 }
 
+/** The stored session, or null if there isn't one.
+ *
+ * A store that cannot be read is reported as "no session" rather than
+ * thrown: the only caller is the app's startup check, and an unreadable
+ * session.json means the customer signs in again -- which works --
+ * whereas a rejection there left the app on "Loading..." forever with no
+ * way out.
+ */
 export async function getTokens(): Promise<TokenPair | null> {
-  const store = await getStore();
-  const accessToken = await store.get<string>("accessToken");
-  const refreshToken = await store.get<string>("refreshToken");
-  if (!accessToken || !refreshToken) return null;
-  return { accessToken, refreshToken };
+  try {
+    const store = await getStore();
+    const accessToken = await store.get<string>("accessToken");
+    const refreshToken = await store.get<string>("refreshToken");
+    if (!accessToken || !refreshToken) return null;
+    return { accessToken, refreshToken };
+  } catch {
+    return null;
+  }
 }
 
 export async function setTokens(tokens: TokenPair): Promise<void> {

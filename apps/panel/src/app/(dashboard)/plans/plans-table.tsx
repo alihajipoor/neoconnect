@@ -68,7 +68,13 @@ export function PlansTable({
               plans.map((plan) => (
                 <TableRow key={plan.id}>
                   <TableCell className="font-medium">{plan.name}</TableCell>
-                  <TableCell>{formatBytes(plan.dataCapBytes)}</TableCell>
+                  <TableCell>
+                    {plan.dataCapBytes === null ? (
+                      <span className="text-highlight">Unlimited</span>
+                    ) : (
+                      formatBytes(plan.dataCapBytes)
+                    )}
+                  </TableCell>
                   <TableCell>{plan.durationDays}d</TableCell>
                   <TableCell>${plan.priceUsd}</TableCell>
                   <TableCell>

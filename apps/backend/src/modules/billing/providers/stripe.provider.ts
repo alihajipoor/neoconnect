@@ -1,24 +1,42 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import Stripe from "stripe";
+import { PaymentSettingsService } from "../../payment-settings/payment-settings.service";
 
 @Injectable()
 export class StripeProvider {
   private readonly logger = new Logger(StripeProvider.name);
-  private readonly client?: Stripe;
+  /** Cached client plus the key it was built from, so a key changed in the
+   * panel takes effect without restarting the backend -- but a normal
+   * request does not pay to rebuild the SDK every time. */
+  private cached?: { key: string; client: Stripe };
 
-  constructor(private readonly config: ConfigService) {
-    const secretKey = this.config.get<string>("billing.stripeSecretKey");
-    if (secretKey) {
-      this.client = new Stripe(secretKey);
-    } else {
-      this.logger.warn("STRIPE_SECRET_KEY not set -- Stripe payments are disabled");
-    }
+  constructor(
+    private readonly config: ConfigService,
+    private readonly paymentSettings: PaymentSettingsService,
+  ) {}
+
+  /** Resolves the secret key: the panel first, then the environment.
+   *
+   * The env fallback is deliberate and not dead weight. The running
+   * deployment was configured through STRIPE_SECRET_KEY before this
+   * existed, and dropping it would take payments down the moment this
+   * ships and stay down until someone retyped the key into the panel.
+   */
+  private async secretKey(): Promise<string | undefined> {
+    const configured = await this.paymentSettings.stripe();
+    return configured?.secretKey ?? this.config.get<string>("billing.stripeSecretKey");
   }
 
-  private requireClient(): Stripe {
-    if (!this.client) throw new Error("Stripe is not configured (STRIPE_SECRET_KEY missing)");
-    return this.client;
+  private async requireClient(): Promise<Stripe> {
+    const key = await this.secretKey();
+    if (!key) {
+      throw new Error("Stripe is not configured -- add a secret key in Settings > Payments");
+    }
+    if (this.cached?.key !== key) {
+      this.cached = { key, client: new Stripe(key) };
+    }
+    return this.cached.client;
   }
 
   /** Creates a hosted Checkout Session and returns the URL to send the
@@ -41,7 +59,7 @@ export class StripeProvider {
     planName: string,
     returnUrl: string,
   ): Promise<{ providerRef: string; url: string }> {
-    const session = await this.requireClient().checkout.sessions.create({
+    const session = await (await this.requireClient()).checkout.sessions.create({
       mode: "payment",
       line_items: [
         {
@@ -49,7 +67,7 @@ export class StripeProvider {
           price_data: {
             currency: "usd",
             unit_amount: Math.round(amountUsd * 100),
-            product_data: { name: `NeoConnect ${planName}` },
+            product_data: { name: `Neoxify ${planName}` },
           },
         },
       ],
@@ -76,7 +94,7 @@ export class StripeProvider {
    * UI. Retained for the admin/panel path; the desktop client uses
    * createCheckoutSession above. */
   async createPaymentIntent(amountUsd: number, transactionId: string): Promise<{ providerRef: string; clientSecret: string }> {
-    const intent = await this.requireClient().paymentIntents.create({
+    const intent = await (await this.requireClient()).paymentIntents.create({
       amount: Math.round(amountUsd * 100),
       currency: "usd",
       metadata: { paymentTransactionId: transactionId },
@@ -88,16 +106,21 @@ export class StripeProvider {
     return { providerRef: intent.id, clientSecret: intent.client_secret };
   }
 
-  retrievePaymentIntent(providerRef: string): Promise<Stripe.PaymentIntent> {
-    return this.requireClient().paymentIntents.retrieve(providerRef);
+  async retrievePaymentIntent(providerRef: string): Promise<Stripe.PaymentIntent> {
+    return (await this.requireClient()).paymentIntents.retrieve(providerRef);
   }
 
   /** Verifies the webhook signature and parses the event. Throws on a
    * bad signature -- that's what actually protects this intentionally-
    * unauthenticated endpoint (see webhooks.controller.ts), not a guard. */
-  constructEvent(rawBody: Buffer, signature: string): Stripe.Event {
-    const webhookSecret = this.config.get<string>("billing.stripeWebhookSecret");
-    if (!webhookSecret) throw new Error("STRIPE_WEBHOOK_SECRET is not configured");
-    return this.requireClient().webhooks.constructEvent(rawBody, signature, webhookSecret);
+  async constructEvent(rawBody: Buffer, signature: string): Promise<Stripe.Event> {
+    // Same panel-then-environment order as the secret key, for the same
+    // reason: the running deployment configured this through env.
+    const configured = await this.paymentSettings.stripe();
+    const webhookSecret = configured?.webhookSecret ?? this.config.get<string>("billing.stripeWebhookSecret");
+    if (!webhookSecret) {
+      throw new Error("No Stripe webhook secret configured -- add one in Settings > Payments");
+    }
+    return (await this.requireClient()).webhooks.constructEvent(rawBody, signature, webhookSecret);
   }
 }

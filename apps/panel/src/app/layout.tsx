@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NeoConnect Admin",
-  description: "NeoConnect control-plane admin panel",
+  title: "Neoxify Admin",
+  description: "Neoxify control-plane admin panel",
 };
 
 export default function RootLayout({

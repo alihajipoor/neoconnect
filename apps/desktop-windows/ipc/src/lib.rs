@@ -1,4 +1,4 @@
-//! Wire contract between the NeoConnect desktop app and its privileged
+//! Wire contract between the Neoxify desktop app and its privileged
 //! helper service, plus the validation every field must survive before
 //! the service will act on it.
 //!
@@ -37,6 +37,85 @@ pub enum Request {
     Connect { profile: ConnectProfile },
     Disconnect,
     Status,
+    /// Replaces the Custom-mode selection: which applications, if any,
+    /// are the only ones whose traffic goes through the tunnel.
+    ///
+    /// Separate from `Connect` so the customer can change their mind
+    /// without dropping a live session, and sent on connect as well so
+    /// the service never has to assume a previous setting survived a
+    /// restart.
+    SetSplitTunnel { config: SplitTunnelConfig },
+    /// Asks the service to prove the tunnel is carrying traffic, using a
+    /// socket pinned to it exactly as a selected app's traffic is.
+    ///
+    /// Needed because the app's own egress check cannot answer this once
+    /// Custom mode is on: the app is not a selected app, so its request
+    /// correctly leaves by the ordinary route and correctly reports the
+    /// tunnel as bypassed.
+    ProbeSplitTunnel,
+}
+
+/// Custom mode, as the app expresses it.
+///
+/// `enabled` and an empty `apps` is a real, reachable state -- the
+/// customer turned the toggle on and has not chosen anything yet. It
+/// must not be read as "tunnel everything": that is the opposite of what
+/// the toggle promises, and it would arrive as a surprise full tunnel.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitTunnelConfig {
+    pub enabled: bool,
+    /// Absolute paths to executables. Paths rather than process names,
+    /// because a name matches whatever happens to be called that, and
+    /// paths rather than process ids, because a modern application is
+    /// several processes and the set changes while it runs.
+    pub apps: Vec<String>,
+}
+
+/// The most applications one customer can select.
+///
+/// Not a technical limit -- matching is a hash lookup either way -- but a
+/// bound on a list that arrives over IPC and is held in memory by a
+/// LocalSystem service.
+const MAX_SELECTED_APPS: usize = 64;
+
+impl SplitTunnelConfig {
+    /// Checks the selection before the service acts on it.
+    ///
+    /// These paths never reach a config file, so this is not the
+    /// injection defence the profile validation is. It is a sanity
+    /// check: a relative path or a directory cannot be matched against
+    /// what a running process reports, so accepting one would mean a
+    /// selection that silently never applies.
+    pub fn validate(&self) -> Checked {
+        if self.apps.len() > MAX_SELECTED_APPS {
+            return Err(reject("apps", "selects too many applications"));
+        }
+        for app in &self.apps {
+            // Deliberately not `check_single_line`, which allows only
+            // printable ASCII. That is right for values written into a
+            // config file and wrong here: a customer whose Windows
+            // username or game folder is in Persian, Russian or Chinese
+            // has a perfectly ordinary path this would reject. Control
+            // characters are still refused, since nothing legitimate has
+            // them and a path is compared against what a process
+            // reports.
+            if app.is_empty() || app.len() > 32_767 {
+                return Err(reject("apps", "is not a usable path"));
+            }
+            if app.chars().any(|c| c.is_control()) {
+                return Err(reject("apps", "contains control characters"));
+            }
+            let looks_absolute = app.as_bytes().get(1) == Some(&b':') || app.starts_with(r"\\");
+            if !looks_absolute {
+                return Err(reject("apps", "must be a full path to an executable"));
+            }
+            if !app.to_lowercase().ends_with(".exe") {
+                return Err(reject("apps", "must name an executable"));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,8 +125,54 @@ pub enum Response {
     /// Reports what is actually running, re-derived from live process /
     /// service state rather than from a remembered flag, so a
     /// crashed-engine case surfaces as disconnected instead of lying.
-    State { connected: bool, protocol: Option<String> },
+    ///
+    /// `connected` answers "is an engine up", which is a weaker claim
+    /// than most callers assume; `health` answers "is the far end
+    /// actually answering". Both are reported because they genuinely
+    /// differ: a WireGuard tunnel whose peer never replies has
+    /// `connected: true` and `health: NeverHandshaked`, and calling that
+    /// state "Connected" is what told customers they were protected when
+    /// they were not.
+    State {
+        connected: bool,
+        protocol: Option<String>,
+        #[serde(default)]
+        health: TunnelHealth,
+        /// Whether Custom mode is actually intercepting right now, as
+        /// opposed to being switched on in the app's settings.
+        ///
+        /// Reported because the two genuinely differ: turning the toggle
+        /// on mid-session does not retrofit itself onto a tunnel that
+        /// was brought up to carry everything, and the customer needs to
+        /// be told that rather than left believing only their game is
+        /// being routed.
+        #[serde(default)]
+        split_tunnel_active: bool,
+    },
     Error { message: String },
+}
+
+/// Whether the far end is answering, separate from whether an engine is
+/// running locally.
+///
+/// Deliberately has an explicit "unknown" rather than defaulting to
+/// either healthy or broken: for protocols or situations where no
+/// trustworthy evidence is available, saying so lets the UI stay quiet
+/// instead of inventing reassurance or alarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum TunnelHealth {
+    /// Positive evidence the peer is responding.
+    Alive { age_secs: u64 },
+    /// It responded once but has gone quiet.
+    Stale { age_secs: u64 },
+    /// An engine is up but the peer has never responded: wrong key,
+    /// unreachable host, or a blocked port.
+    NeverHandshaked,
+    /// Nothing is running, so there is nothing to assess.
+    Down,
+    #[default]
+    Unknown,
 }
 
 /// The credentials for one connection, in exactly the shape the backend
@@ -61,6 +186,10 @@ pub enum ConnectProfile {
     Wireguard(WireguardProfile),
     #[serde(rename = "XRAY_VLESS_REALITY")]
     XrayVlessReality(XrayProfile),
+    #[serde(rename = "XRAY_VLESS_TLS")]
+    XrayVlessTls(VlessTlsProfile),
+    #[serde(rename = "XRAY_TROJAN")]
+    XrayTrojan(TrojanProfile),
     Openvpn(OpenvpnProfile),
 }
 
@@ -86,6 +215,45 @@ pub struct XrayProfile {
     pub port: u16,
     pub reality_public_key: String,
     pub short_id: String,
+    pub server_name: String,
+}
+
+/// VLESS over ordinary TLS.
+///
+/// The same account as the REALITY variant reached a different way: the
+/// server presents its own certificate instead of borrowing one, so
+/// there is no public key or shortId to carry and the client simply
+/// verifies the name it was told to expect. Structurally this is the
+/// Trojan profile with a UUID in place of a password, which is exactly
+/// what the two protocols differ by.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VlessTlsProfile {
+    pub uuid: String,
+    pub flow: String,
+    pub host: String,
+    pub port: u16,
+    /// The name to expect on the certificate, and the SNI to send.
+    pub server_name: String,
+}
+
+/// Trojan over TLS.
+///
+/// Shorter than the REALITY profile because there is less to describe:
+/// the server presents an ordinary certificate for a real domain, so
+/// there are no borrowed-certificate parameters to carry -- only which
+/// name to expect on it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrojanProfile {
+    /// The shared secret. On a wrong one the server answers exactly like
+    /// the web server it imitates, which is the entire disguise.
+    pub password: String,
+    pub host: String,
+    pub port: u16,
+    /// The name to expect on the certificate, and the SNI to send. Kept
+    /// separate from `host` because a node is reached by address while
+    /// its certificate is issued for a domain.
     pub server_name: String,
 }
 
@@ -267,6 +435,34 @@ impl ConnectProfile {
                 check_single_line("serverName", &p.server_name, 300)?;
                 Ok(())
             }
+            ConnectProfile::XrayVlessTls(p) => {
+                check_key_like("uuid", &p.uuid, 64)?;
+                check_single_line("flow", &p.flow, 64)?;
+                check_endpoint("host", &format!("{}:{}", p.host, p.port))?;
+                // Not optional the way it arguably is for REALITY, where a
+                // missing name only weakens the disguise. Here the
+                // certificate is verified against it, so an empty one
+                // cannot connect at all -- reject it with a message rather
+                // than as a TLS error from xray.exe.
+                check_single_line("serverName", &p.server_name, 300)?;
+                if p.server_name.trim().is_empty() {
+                    return Err(reject("serverName", "is required to verify the server's certificate"));
+                }
+                Ok(())
+            }
+            ConnectProfile::XrayTrojan(p) => {
+                // The password is a base64url secret from the control
+                // plane, so it is key-like: no separators, no spaces.
+                // Checking it here means a mangled credential is rejected
+                // with a clear message rather than becoming a connection
+                // that simply never authenticates -- which, for Trojan,
+                // is indistinguishable from the server being a plain web
+                // server, and so gives the customer nothing to go on.
+                check_key_like("password", &p.password, 128)?;
+                check_endpoint("host", &format!("{}:{}", p.host, p.port))?;
+                check_single_line("serverName", &p.server_name, 300)?;
+                Ok(())
+            }
             ConnectProfile::Openvpn(p) => {
                 check_pem("certPem", &p.cert_pem)?;
                 check_pem("keyPem", &p.key_pem)?;
@@ -290,6 +486,8 @@ impl ConnectProfile {
         match self {
             ConnectProfile::Wireguard(_) => "WIREGUARD",
             ConnectProfile::XrayVlessReality(_) => "XRAY_VLESS_REALITY",
+            ConnectProfile::XrayVlessTls(_) => "XRAY_VLESS_TLS",
+            ConnectProfile::XrayTrojan(_) => "XRAY_TROJAN",
             ConnectProfile::Openvpn(_) => "OPENVPN",
         }
     }

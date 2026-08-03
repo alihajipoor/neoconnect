@@ -6,9 +6,9 @@ set -euo pipefail
 print_agent_menu() {
   cat <<'EOF'
 
-  NeoConnect Agent Node
+  Neoxify Agent Node
   -----------------------
-  1) Install NeoConnect Agent
+  1) Install Neoxify Agent
   2) Update Agent / Protocol Engines
   3) View Status / Logs
   4) Change Panel URL / Re-enroll

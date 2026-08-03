@@ -21,7 +21,7 @@ export async function publicRequest<T>(path: string, init?: RequestInit): Promis
       headers: { "Content-Type": "application/json", ...init?.headers },
     });
   } catch {
-    return { ok: false, error: "Could not reach NeoConnect. Check your internet connection." };
+    return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
   }
 
   if (!res.ok) {
@@ -69,7 +69,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<A
   try {
     res = await doFetch(tokens.accessToken);
   } catch {
-    return { ok: false, error: "Could not reach NeoConnect. Check your internet connection." };
+    return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
   }
 
   if (res.status === 401) {
@@ -81,7 +81,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<A
     try {
       res = await doFetch(refreshed.accessToken);
     } catch {
-      return { ok: false, error: "Could not reach NeoConnect. Check your internet connection." };
+      return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
     }
   }
 

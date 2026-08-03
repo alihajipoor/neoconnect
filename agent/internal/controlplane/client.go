@@ -190,6 +190,11 @@ func statsLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, disp
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			// Protocols that assign addresses at connect time can only be
+			// shaped while a client is online, so this rides the same tick
+			// that already looks at who is connected.
+			dispatcher.ReconcileShaping(ctx)
+
 			deltas, errs := dispatcher.CollectStats(ctx)
 			for _, err := range errs {
 				log.Printf("stats collection error: %v", err)

@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Child;
 
-use neoconnect_ipc::XrayProfile;
+use neoconnect_ipc::{TrojanProfile, VlessTlsProfile, XrayProfile};
 use serde_json::json;
 
 use super::routing::{self, InstalledRoutes};
@@ -30,7 +30,7 @@ use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
 const LOG_FILE: &str = "xray.log";
-const ADAPTER_NAME: &str = "neoconnect0";
+pub const ADAPTER_NAME: &str = "neoconnect0";
 
 /// How long to wait for the TUN adapter to show up after Xray starts.
 ///
@@ -61,52 +61,156 @@ const TUN_GATEWAY: &str = "198.18.0.1/30";
 /// anywhere.
 const TUN_DNS: &str = "1.1.1.1";
 
-fn build_config(p: &XrayProfile) -> String {
-    // Built through serde_json rather than string formatting so every
-    // value is escaped by construction -- config injection through a
-    // credential field isn't possible here even before validation.
+/// Which proxy the generated config dials out through.
+///
+/// Everything else about the client -- the TUN inbound, the adapter
+/// address, the routes -- is identical between protocols, so only the
+/// outbound varies.
+pub enum Outbound<'a> {
+    VlessReality(&'a XrayProfile),
+    /// VLESS over an ordinary certificate rather than a borrowed one.
+    VlessTls(&'a VlessTlsProfile),
+    /// Trojan over ordinary TLS. No borrowed certificate, so the client
+    /// simply verifies the name it was told to expect.
+    Trojan(&'a TrojanProfile),
+}
+
+impl Outbound<'_> {
+    fn host(&self) -> &str {
+        match self {
+            Outbound::VlessReality(p) => &p.host,
+            Outbound::VlessTls(p) => &p.host,
+            Outbound::Trojan(p) => &p.host,
+        }
+    }
+
+    fn port(&self) -> u16 {
+        match self {
+            Outbound::VlessReality(p) => p.port,
+            Outbound::VlessTls(p) => p.port,
+            Outbound::Trojan(p) => p.port,
+        }
+    }
+
+    /// The outbound block. Built through serde_json rather than string
+    /// formatting so every value is escaped by construction.
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Outbound::VlessReality(p) => json!({
+                "tag": "proxy",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": p.host,
+                        "port": p.port,
+                        "users": [{ "id": p.uuid, "encryption": "none", "flow": p.flow }]
+                    }]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "serverName": p.server_name,
+                        "fingerprint": "chrome",
+                        "publicKey": p.reality_public_key,
+                        "shortId": p.short_id
+                    }
+                }
+            }),
+            // Same vnext/users block as the REALITY variant -- only the
+            // wrapping differs, which is the entire distinction between
+            // the two.
+            Outbound::VlessTls(p) => json!({
+                "tag": "proxy",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": p.host,
+                        "port": p.port,
+                        "users": [{ "id": p.uuid, "encryption": "none", "flow": p.flow }]
+                    }]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "tls",
+                    "tlsSettings": {
+                        // Verified normally, and with no allowInsecure
+                        // escape hatch, for the same reason as Trojan
+                        // below: a client that accepts any certificate
+                        // hands its traffic to whoever is on the path.
+                        "serverName": p.server_name,
+                        "fingerprint": "chrome",
+                        "alpn": ["h2", "http/1.1"]
+                    }
+                }
+            }),
+            Outbound::Trojan(p) => json!({
+                "tag": "proxy",
+                "protocol": "trojan",
+                "settings": {
+                    "servers": [{
+                        "address": p.host,
+                        "port": p.port,
+                        "password": p.password
+                    }]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "tls",
+                    "tlsSettings": {
+                        // The certificate is a real one for a real
+                        // domain, so it is verified normally -- there is
+                        // deliberately no allowInsecure escape hatch. A
+                        // client that accepts any certificate is a client
+                        // whose traffic can be read by whoever is on the
+                        // path, which is the opposite of the point.
+                        "serverName": p.server_name,
+                        // Presenting Chrome's TLS fingerprint matters as
+                        // much as the certificate: a handshake that looks
+                        // like no browser on earth is itself the signal a
+                        // censor looks for.
+                        "fingerprint": "chrome",
+                        "alpn": ["h2", "http/1.1"]
+                    }
+                }
+            }),
+        }
+    }
+}
+
+/// `passive` is Custom mode: the adapter comes up but nothing is routed
+/// into it, so only the applications the customer selected reach it --
+/// via sockets the split tunnel pins to it by hand.
+///
+/// That makes `autoSystemRoutingTable` the one setting that must differ.
+/// Left on, Xray installs system routes of its own and takes the default
+/// route, which is precisely the behaviour Custom mode exists to avoid;
+/// the customer would ask for one game and get their whole machine
+/// tunnelled.
+///
+/// `autoOutboundsInterface` stays on either way. It pins Xray's own
+/// connection to the node onto the physical link, which is what stops
+/// the engine's uplink being carried through the tunnel it is creating.
+fn build_config_for(outbound: &Outbound, passive: bool) -> String {
     let config = json!({
         "log": { "loglevel": "warning" },
         "inbounds": [{
             "tag": "tun-in",
             "protocol": "tun",
             "settings": {
-                "name": "neoconnect0",
+                "name": ADAPTER_NAME,
                 "desc": "Wintun",
                 "mtu": 1500,
                 "gateway": [TUN_GATEWAY],
-                "autoSystemRoutingTable": true,
+                "autoSystemRoutingTable": !passive,
                 "autoOutboundsInterface": true
             }
         }],
-        "outbounds": [{
-            "tag": "proxy",
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": p.host,
-                    "port": p.port,
-                    "users": [{
-                        "id": p.uuid,
-                        "encryption": "none",
-                        "flow": p.flow
-                    }]
-                }]
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "serverName": p.server_name,
-                    "fingerprint": "chrome",
-                    "publicKey": p.reality_public_key,
-                    "shortId": p.short_id
-                }
-            }
-        }]
+        "outbounds": [outbound.to_json()]
     });
     config.to_string()
 }
+
 
 /// Assigns the TUN adapter its address and DNS.
 ///
@@ -208,8 +312,8 @@ fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
 /// Split out from `connect` so a routing failure can tear down the engine
 /// it belongs to -- a running Xray with no routes is the exact state that
 /// previously looked connected while changing nothing.
-pub fn install_routes(profile: &XrayProfile) -> Result<InstalledRoutes, String> {
-    let server_ip = resolve_server(&profile.host, profile.port)?;
+pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
+    let server_ip = resolve_server(outbound.host(), outbound.port())?;
 
     // Captured before the tunnel takes over: afterwards the best route to
     // the server would be the tunnel itself, and the bypass would point
@@ -236,7 +340,36 @@ pub fn install_routes(profile: &XrayProfile) -> Result<InstalledRoutes, String> 
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
 }
 
-pub fn connect(engines: &Engines, profile: &XrayProfile) -> Result<Child, String> {
+/// Everything `install_routes` does except install the routes.
+///
+/// Custom mode needs the adapter to exist and to hold an address --
+/// otherwise a socket pinned to it has no source to use -- but must not
+/// have anything routed into it, because the whole point is that the
+/// machine's ordinary traffic carries on as before. The one route it
+/// does need is added by the split-tunnel controller, at a metric
+/// nothing prefers.
+///
+/// Returns the node's address, which the redirect filter excludes so the
+/// tunnel is never carried through itself.
+pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
+    let server_ip = resolve_server(outbound.host(), outbound.port())?;
+    wait_for_adapter()?;
+
+    let tun_gateway: Ipv4Addr = TUN_GATEWAY
+        .split('/')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
+    configure_adapter(tun_gateway)?;
+
+    Ok(server_ip)
+}
+
+pub fn connect(
+    engines: &Engines,
+    outbound: &Outbound,
+    passive: bool,
+) -> Result<Child, String> {
     let exe = engines.engine_path("xray.exe")?;
     // Checked explicitly because xray.exe starts fine without it and
     // only fails when the TUN adapter is created, which would surface to
@@ -244,7 +377,7 @@ pub fn connect(engines: &Engines, profile: &XrayProfile) -> Result<Child, String
     engines.engine_path("wintun.dll")?;
 
     let config_path = engines.config_path(CONFIG_FILE);
-    write_config(&config_path, &build_config(profile))?;
+    write_config(&config_path, &build_config_for(outbound, passive))?;
 
     let exe_dir = exe
         .parent()
@@ -282,7 +415,7 @@ mod tests {
 
     #[test]
     fn builds_config_xray_can_parse() {
-        let parsed: serde_json::Value = serde_json::from_str(&build_config(&profile())).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()), false)).unwrap();
         let outbound = &parsed["outbounds"][0];
         assert_eq!(outbound["protocol"], "vless");
         assert_eq!(outbound["settings"]["vnext"][0]["address"], "203.0.113.5");
@@ -291,11 +424,41 @@ mod tests {
         assert_eq!(outbound["streamSettings"]["realitySettings"]["serverName"], "example.com");
     }
 
+    fn trojan_profile() -> TrojanProfile {
+        TrojanProfile {
+            password: "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MEFCQ0RFRg".into(),
+            host: "203.0.113.5".into(),
+            port: 8443,
+            server_name: "fi1.example.com".into(),
+        }
+    }
+
+    #[test]
+    fn builds_a_trojan_config_xray_can_parse() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_config_for(&Outbound::Trojan(&trojan_profile()), false)).unwrap();
+        let outbound = &parsed["outbounds"][0];
+        assert_eq!(outbound["protocol"], "trojan");
+        assert_eq!(outbound["settings"]["servers"][0]["address"], "203.0.113.5");
+        assert_eq!(outbound["settings"]["servers"][0]["port"], 8443);
+        assert_eq!(outbound["streamSettings"]["security"], "tls");
+        assert_eq!(outbound["streamSettings"]["tlsSettings"]["serverName"], "fi1.example.com");
+    }
+
+    /// A client that accepts any certificate can be read by whoever is on
+    /// the path. The absence of this setting is the security property, so
+    /// it is worth a test rather than a comment.
+    #[test]
+    fn trojan_never_disables_certificate_verification() {
+        let json = build_config_for(&Outbound::Trojan(&trojan_profile()), false);
+        assert!(!json.contains("allowInsecure"));
+    }
+
     #[test]
     fn tun_inbound_enables_the_anti_loop_helpers() {
         // Without these two, routing 0.0.0.0/0 into the TUN loops
         // forever -- see this module's doc comment.
-        let parsed: serde_json::Value = serde_json::from_str(&build_config(&profile())).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&build_config_for(&Outbound::VlessReality(&profile()), false)).unwrap();
         let settings = &parsed["inbounds"][0]["settings"];
         assert_eq!(settings["autoSystemRoutingTable"], true);
         assert_eq!(settings["autoOutboundsInterface"], true);

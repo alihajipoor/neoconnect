@@ -121,15 +121,64 @@ export class ProtocolUsersService {
     };
   }
 
-  /** Customer-facing: moves a subscription's VPN account from whichever
-   * route(s) it's currently on to a different one -- the location
-   * picker's "switch server" action. Reuses remove()+create() directly
-   * (DELETE_USER on the old node, CREATE_USER on the new one) rather than
-   * inventing a dedicated agent command; there's no schema-level
-   * guarantee of exactly one ProtocolUser per subscription (see
-   * renewSubscription's own "existingUsers" list handling in
-   * billing.service.ts), so this removes every existing one, not just
-   * the first found. */
+  /** Provisions this subscription on every route its plan allows.
+   *
+   * The client holds all of them at once so it can fail over to another
+   * protocol without asking the server for anything. That is the whole
+   * point: on a censored network the control plane is a plausible thing
+   * to lose first, and a fallback that needs the network in order to
+   * route around the network being broken is not a fallback.
+   *
+   * Idempotent, and has to be -- it runs on first payment, on every
+   * renewal, when a plan changes, when a new route appears, and from the
+   * backfill. Routes the subscription already has are skipped rather
+   * than torn down and recreated, so re-running this never disturbs a
+   * connected customer.
+   */
+  async provisionAll(subscriptionId: string) {
+    const subscription = await this.prisma.subscription.findUnique({
+      where: { id: subscriptionId },
+      include: { plan: true },
+    });
+    if (!subscription) throw new BadRequestException("Subscription not found");
+
+    const [routes, existing] = await Promise.all([
+      this.prisma.route.findMany({
+        where: {
+          isEnabled: true,
+          entryProtocolConfig: { protocol: { in: subscription.plan.protocolsAllowed }, isEnabled: true },
+        },
+        select: { id: true },
+        orderBy: { name: "asc" },
+      }),
+      this.prisma.protocolUser.findMany({ where: { subscriptionId }, select: { routeId: true } }),
+    ]);
+
+    const already = new Set(existing.map((u) => u.routeId));
+    const created = [];
+    for (const route of routes) {
+      if (already.has(route.id)) continue;
+      // Sequential, not Promise.all: WireGuard address allocation reads
+      // the addresses already in use, so two routes on the same node
+      // provisioned in parallel can pick the same one.
+      created.push(await this.create({ subscriptionId, routeId: route.id }));
+    }
+    return created;
+  }
+
+  /** Customer-facing: the location picker's "switch server" action.
+   *
+   * Deliberately non-destructive. It used to remove every existing
+   * ProtocolUser and create one for the chosen route, which under
+   * provisionAll() would delete exactly the credentials failover depends
+   * on -- and the shipped 0.1.0/0.2.0 clients both call this endpoint
+   * when a customer picks a server, so the destructive version would
+   * have broken apps already in the field.
+   *
+   * Switching is now a local choice the client makes between credentials
+   * it already holds; this endpoint only guarantees the chosen one
+   * exists and hands it back.
+   */
   async switchRoute(subscriptionId: string, routeId: string) {
     const [subscription, route] = await Promise.all([
       this.prisma.subscription.findUnique({ where: { id: subscriptionId }, include: { plan: true } }),
@@ -142,11 +191,21 @@ export class ProtocolUsersService {
       throw new BadRequestException("This route's protocol is not allowed on your plan");
     }
 
-    const existing = await this.prisma.protocolUser.findMany({ where: { subscriptionId } });
-    for (const user of existing) {
-      await this.remove(user.id);
-    }
+    // Bring the rest up to date too, so a subscription created before a
+    // route existed gains it the next time the customer touches the
+    // picker rather than staying permanently short of options.
+    await this.provisionAll(subscriptionId);
 
+    const existing = await this.prisma.protocolUser.findFirst({
+      where: { subscriptionId, routeId },
+      include: { protocolConfig: { include: { node: true } } },
+    });
+    if (existing) {
+      return {
+        ...withDecryptedCredentials(existing),
+        connection: connectionInfo(existing.protocolConfig.node, existing.protocolConfig),
+      };
+    }
     return this.create({ subscriptionId, routeId });
   }
 
@@ -238,6 +297,18 @@ function withDecryptedCredentials<T extends { credentialsJson: string }>(
  * omission. */
 const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
   XRAY_VLESS_REALITY: ["realityPublicKey", "shortIds", "dest", "serverName"],
+  // Trojan's certificate is a real one for a real domain, and the client
+  // verifies it with no allowInsecure escape hatch. So the domain has to
+  // reach the client: without it the client falls back to the node's IP
+  // as SNI, the certificate does not match that, and every connection
+  // fails at the TLS handshake. The password is the customer's and lives
+  // in credentials; the domain is the server's and lives here.
+  XRAY_TROJAN: ["serverName"],
+  // Same reasoning as Trojan: an ordinary certificate is verified against
+  // a name, so the name has to travel. There is deliberately nothing
+  // REALITY-shaped here -- no borrowed key, no shortId -- because this
+  // variant presents a certificate of its own.
+  XRAY_VLESS_TLS: ["serverName"],
   WIREGUARD: ["serverPublicKey", "endpoint", "subnetCidr", "dns"],
   // caCertPem is genuinely needed to verify the server, and already
   // travels in the per-user credentials. caKeyPem and serverKeyPem are

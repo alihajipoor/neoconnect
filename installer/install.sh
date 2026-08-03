@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NeoConnect installer. One script, two possible roles for the Linux box
+# Neoxify installer. One script, two possible roles for the Linux box
 # it's run on:
 #   - Main Panel Server: backend + admin panel + Postgres + Redis (Docker
 #     Compose) fronted by nginx + Let's Encrypt. Must be run from inside

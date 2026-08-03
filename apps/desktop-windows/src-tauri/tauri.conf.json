@@ -1,21 +1,24 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "NeoConnect",
-  "version": "0.1.0",
+  "productName": "Neoxify",
+  "version": "0.8.0",
   "identifier": "com.neoxify.neoconnect",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build:bundle",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "NeoConnect",
-        "width": 400,
-        "height": 640,
-        "resizable": false
+        "title": "Neoxify",
+        "width": 940,
+        "height": 700,
+        "resizable": true,
+        "minWidth": 720,
+        "minHeight": 600,
+        "center": true
       }
     ],
     "security": {
@@ -25,13 +28,26 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["neoconnect"]
+        "schemes": [
+          "neoconnect"
+        ]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://connect.neoxify.com/api/updates/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEwNzM3MzUzMDJGRkU0NkMKUldSczVQOENVM056b0tzN3hFUEJrTWFrejdSelFnNVRaR3JDKzgzY25QUmEyVVhQSnpWUzg2S2MK",
+      "windows": {
+        "installMode": "passive"
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -50,13 +66,18 @@
       "resources/libpkcs11-helper-1.dll": "resources/libpkcs11-helper-1.dll",
       "resources/vcruntime140.dll": "resources/vcruntime140.dll",
       "resources/tapctl.exe": "resources/tapctl.exe",
-      "resources/neoconnect-service.exe": "resources/neoconnect-service.exe"
+      "resources/neoconnect-service.exe": "resources/neoconnect-service.exe",
+      "resources/WinDivert.dll": "resources/WinDivert.dll",
+      "resources/WinDivert64.sys": "resources/WinDivert64.sys"
     },
     "windows": {
       "nsis": {
+        "template": "installer.nsi",
         "installerHooks": "nsis-hooks.nsh",
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "installerIcon": "icons/icon.ico"
       }
-    }
+    },
+    "createUpdaterArtifacts": true
   }
 }

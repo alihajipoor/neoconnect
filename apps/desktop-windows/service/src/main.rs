@@ -1,4 +1,4 @@
-//! NeoConnect's privileged helper service.
+//! Neoxify's privileged helper service.
 //!
 //! # Why this exists
 //!
@@ -34,6 +34,7 @@ mod adapters;
 mod engines;
 mod pipe;
 mod security;
+mod split_tunnel;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -49,8 +50,8 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-const SERVICE_NAME: &str = "NeoConnectService";
-const SERVICE_DISPLAY_NAME: &str = "NeoConnect VPN Service";
+const SERVICE_NAME: &str = "NeoxifyService";
+const SERVICE_DISPLAY_NAME: &str = "Neoxify VPN Service";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 fn config_dir() -> PathBuf {
@@ -59,7 +60,7 @@ fn config_dir() -> PathBuf {
     // after install. The ACL is set explicitly at creation -- see
     // security::create_protected_dir.
     let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
-    PathBuf::from(base).join("NeoConnect")
+    PathBuf::from(base).join("Neoxify")
 }
 
 fn exe_dir() -> std::io::Result<PathBuf> {
@@ -108,7 +109,7 @@ fn install() -> Result<(), Box<dyn std::error::Error>> {
             manager.open_service(SERVICE_NAME, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)?
         }
     };
-    service.set_description("Manages NeoConnect VPN tunnels so connecting never requires an administrator prompt.")?;
+    service.set_description("Manages Neoxify VPN tunnels so connecting never requires an administrator prompt.")?;
     let _ = service.start(&[] as &[&std::ffi::OsStr]);
     Ok(())
 }

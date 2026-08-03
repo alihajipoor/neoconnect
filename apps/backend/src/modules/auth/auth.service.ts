@@ -116,7 +116,7 @@ export class AuthService {
     const secret = authenticator.generateSecret();
     await this.prisma.adminUser.update({ where: { id: adminId }, data: { mfaSecret: secret, mfaEnabled: false } });
 
-    const otpauthUrl = authenticator.keyuri(admin.email, "NeoConnect", secret);
+    const otpauthUrl = authenticator.keyuri(admin.email, "Neoxify", secret);
     const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
     return { secret, otpauthUrl, qrCodeDataUrl };
   }

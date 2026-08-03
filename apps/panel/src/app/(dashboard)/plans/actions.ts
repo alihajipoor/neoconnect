@@ -6,7 +6,8 @@ import type { Protocol, SubscriptionPlan } from "@/lib/types";
 
 export interface PlanInput {
   name: string;
-  dataCapBytes: string;
+  /** Null means unlimited traffic. */
+  dataCapBytes: string | null;
   durationDays: number;
   priceUsd: number;
   maxConcurrentConnections?: number;

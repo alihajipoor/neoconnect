@@ -27,7 +27,11 @@ const PARAM_HELP: Record<string, string> = {
   WIREGUARD: "serverPublicKey, endpoint, subnetCidr, and optionally dns",
   OPENVPN: "endpoint, and optionally proto (udp/tcp)",
   XRAY_VMESS: "protocol-specific connection parameters",
-  XRAY_TROJAN: "protocol-specific connection parameters",
+  // Vague help here is how a missing serverName went unnoticed until
+  // every Trojan connection failed at the TLS handshake: the client
+  // verifies the certificate against this name and cannot guess it.
+  XRAY_TROJAN: "serverName -- the domain the node's certificate is issued for",
+  XRAY_VLESS_TLS: "serverName -- the domain the node's certificate is issued for",
 };
 
 /** Editing exists because a config registered with wrong or missing

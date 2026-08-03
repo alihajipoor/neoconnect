@@ -15,16 +15,53 @@ const MUTED = "#6b7280";
 const BORDER = "#eceaf5";
 const BG = "#f4f4fa";
 
+/** Filled in by EmailBrandService just before the message is sent.
+ *
+ * Slots rather than parameters because these two things -- where this
+ * API answers from, and which community links the operator has set --
+ * are runtime facts that live in config and the database, while every
+ * template here is a pure function called from a dozen places. Threading
+ * them through all of those would make each call site responsible for
+ * remembering brand chrome it has no opinion about, and one that forgot
+ * would silently send an unbranded email. Substituting at the single
+ * point every message already passes through cannot be forgotten, and
+ * keeps the templates synchronous and testable. */
+export const BRAND_LOGO_SLOT = "<!--neoxify:logo-->";
+export const BRAND_LINKS_SLOT = "<!--neoxify:links-->";
+
 const FONT_STACK =
   "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 /** Wraps a template's body content in the shared branded shell: a
- * gradient header with the NeoConnect mark, a white card, and a muted
+ * gradient header with the Neoxify mark, a white card, and a muted
  * footer. `preheader` is the short hidden preview text most mail clients
  * show next to the subject line in the inbox list. */
-function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string }): string {
+function shell({
+  preheader,
+  bodyHtml,
+  footerHtml,
+}: {
+  preheader: string;
+  bodyHtml: string;
+  /** Replaces the default closing sentence. Bulk mail needs to say how
+   * to stop receiving it; transactional mail must not, since there is
+   * nothing to opt out of. */
+  footerHtml?: string;
+}): string {
   return `<!doctype html>
 <html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <!-- Declares this design as light-only. Without it, clients that
+         auto-invert for dark mode (Outlook and Gmail both do) recolour
+         the card and the code block by their own rules, and the violet
+         text on the pale violet panel is exactly the combination that
+         comes out illegible. Better to render as designed in both modes
+         than to be re-interpreted in one. -->
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+  </head>
   <body style="margin:0;padding:0;background:${BG};font-family:${FONT_STACK};">
     <div style="display:none;max-height:0;overflow:hidden;opacity:0;">${preheader}</div>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${BG};padding:32px 16px;">
@@ -33,8 +70,12 @@ function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string })
           <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(139,92,246,0.12);">
             <tr>
               <td style="background-color:${PRIMARY};background-image:linear-gradient(135deg,${PRIMARY} 0%,${PRIMARY_DARK} 60%,#5b21b6 100%);padding:28px 32px;">
-                <span style="font-size:22px;line-height:1;vertical-align:middle;">&#9889;</span>
-                <span style="font-size:19px;font-weight:700;color:#ffffff;letter-spacing:0.2px;vertical-align:middle;margin-left:8px;">NeoConnect</span>
+                <!-- The mark as an image, with the name beside it as
+                     real text. Images are blocked by default in a good
+                     number of clients, and a header that is entirely an
+                     image becomes a blank bar when that happens -- the
+                     text means the brand always survives. -->
+                ${BRAND_LOGO_SLOT}<span style="font-size:19px;font-weight:700;color:#ffffff;letter-spacing:0.2px;vertical-align:middle;">Neoxify</span>
               </td>
             </tr>
             <tr>
@@ -44,8 +85,10 @@ function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string })
             </tr>
             <tr>
               <td style="padding:20px 32px;border-top:1px solid ${BORDER};background:#fbfaff;">
+                ${BRAND_LINKS_SLOT}
                 <p style="margin:0;font-size:12px;color:${MUTED};">
-                  You're receiving this because you have a NeoConnect account. If something here looks wrong, ignore this email or reach out to support.
+                  You're receiving this because you have a Neoxify account.
+                  ${footerHtml ?? "If something here looks wrong, you can safely ignore this email."}
                 </p>
               </td>
             </tr>
@@ -55,6 +98,13 @@ function shell({ preheader, bodyHtml }: { preheader: string; bodyHtml: string })
     </table>
   </body>
 </html>`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function heading(text: string): string {
@@ -131,44 +181,52 @@ export function verificationEmail(token: string, code: string, publicApiUrl?: st
     : deepLink;
 
   return {
-    subject: "Welcome to NeoConnect -- verify your email",
+    subject: "Welcome to Neoxify -- verify your email",
     html: shell({
       preheader: `Your verification code is ${code}.`,
       bodyHtml: `
         ${heading("Welcome aboard ⚡")}
-        ${paragraph("Your NeoConnect account is created. One step left -- enter this code in the app to activate it:")}
+        ${paragraph("Your Neoxify account is created. One step left -- enter this code in the app to activate it:")}
         ${bigCode(code)}
         ${fineprint("Or just click here:")}
         ${button(link, "Verify my email")}
-        ${fineprint("This code expires in 24 hours. If you didn't create a NeoConnect account, you can ignore this email.")}
+        ${fineprint("This code expires in 24 hours. If you didn't create a Neoxify account, you can ignore this email.")}
       `,
     }),
-    text: `Welcome to NeoConnect. Your verification code: ${code} (expires in 24 hours). Or open: ${link}`,
+    text: `Welcome to Neoxify. Your verification code: ${code} (expires in 24 hours). Or open: ${link}`,
   };
 }
 
-export function passwordResetEmail(token: string) {
-  const deepLink = `neoconnect://reset-password?token=${encodeURIComponent(token)}`;
+/** Code only, no link.
+ *
+ * There used to be an "Open in Neoxify" button pointing at
+ * neoconnect://reset-password, and nothing in the app has ever handled
+ * that scheme -- it launched the app to no effect. Webmail strips custom
+ * schemes anyway, which is the same reason verification grew a code.
+ *
+ * The token-based reset endpoint stays: it is still the right shape for
+ * a website, which does not exist yet. When one does, this can carry an
+ * https link the way the verification email does. */
+export function passwordResetEmail(code: string) {
   return {
-    subject: "Reset your NeoConnect password",
+    subject: "Reset your Neoxify password",
     html: shell({
-      preheader: "Use this code to reset your password.",
+      preheader: `Your password reset code is ${code}.`,
       bodyHtml: `
         ${heading("Reset your password")}
         ${paragraph("A password reset was requested for your account. Enter this code in the app to continue:")}
-        ${codeBlock(token)}
-        ${button(deepLink, "Open in NeoConnect")}
+        ${bigCode(code)}
         ${fineprint("This code expires in 30 minutes. If you didn't request this, you can safely ignore this email -- your password won't change.")}
       `,
     }),
-    text: `A password reset was requested for your NeoConnect account. Code: ${token} (expires in 30 minutes). Or open: ${deepLink}. If you didn't request this, ignore this email.`,
+    text: `A password reset was requested for your Neoxify account. Your code: ${code} (expires in 30 minutes). If you didn't request this, ignore this email.`,
   };
 }
 
 export function lowDataWarningEmail(remainingGb: number) {
   const remaining = remainingGb.toFixed(1);
   return {
-    subject: "Your NeoConnect data is running low",
+    subject: "Your Neoxify data is running low",
     html: shell({
       preheader: `About ${remaining} GB left on your current plan.`,
       bodyHtml: `
@@ -184,7 +242,7 @@ export function lowDataWarningEmail(remainingGb: number) {
 export function expiringSoonEmail(daysRemaining: number) {
   const unit = daysRemaining === 1 ? "day" : "days";
   return {
-    subject: "Your NeoConnect subscription is expiring soon",
+    subject: "Your Neoxify subscription is expiring soon",
     html: shell({
       preheader: `Your subscription expires in about ${daysRemaining} ${unit}.`,
       bodyHtml: `
@@ -194,6 +252,57 @@ export function expiringSoonEmail(daysRemaining: number) {
       `,
     }),
     text: `Your subscription expires in about ${daysRemaining} day(s). Renew before it expires to keep your VPN connection active without interruption.`,
+  };
+}
+
+/** Sent to the inviter when someone they invited activates their
+ * account. The trigger M16 listed and could not build, because the
+ * referral programme it depends on did not exist yet.
+ *
+ * The friend's address is masked before it ever reaches this function.
+ * The inviter is entitled to know their invite worked; they are not
+ * entitled to a readable copy of someone else's email address, and a
+ * referral link shared publicly would otherwise become a way to harvest
+ * them. */
+export function referralFriendJoinedEmail(maskedEmail: string, monthsToGo: number | null) {
+  const progress =
+    monthsToGo === null
+      ? paragraph("Keep inviting friends to earn free months of Neoxify.")
+      : paragraph(
+          `You're ${monthsToGo} paid ${monthsToGo === 1 ? "month" : "months"} away from your next free month.`,
+        );
+
+  return {
+    subject: "Someone joined Neoxify with your invite",
+    html: shell({
+      preheader: `${maskedEmail} just activated their account.`,
+      bodyHtml: `
+        ${heading("Your invite worked")}
+        ${statPill(maskedEmail, "just activated their account")}
+        ${progress}
+      `,
+    }),
+    text: `${maskedEmail} just activated their Neoxify account using your invite.${
+      monthsToGo === null ? "" : ` You are ${monthsToGo} paid month(s) away from your next free month.`
+    }`,
+  };
+}
+
+/** Sent when a free month has actually been granted -- after the
+ * subscription exists, never before. Promising a reward that then fails
+ * to provision would be worse than a delayed email. */
+export function referralRewardEmail(days: number, planName: string) {
+  return {
+    subject: "You've earned free Neoxify time",
+    html: shell({
+      preheader: `${days} free days have been added to your account.`,
+      bodyHtml: `
+        ${heading("Your free time is ready")}
+        ${statPill(`${days} days`, `free on ${planName}`)}
+        ${paragraph("Thanks for spreading the word. It's already on your account -- open Neoxify and connect as usual.")}
+      `,
+    }),
+    text: `You have earned ${days} free days of Neoxify on ${planName}, thanks to the friends you invited. It is already active on your account.`,
   };
 }
 
@@ -208,7 +317,46 @@ export function announcementEmail(body: string) {
       .split(/\n{2,}/)
       .map((para) => paragraph(para.replace(/\n/g, "<br>")))
       .join(""),
+    // The visible half of the opt-out. EmailService sets the
+    // List-Unsubscribe header, because it knows the from-address; this
+    // line is for the human, who does not read headers.
+    //
+    // Worded as a reply because that is what actually happens. There is
+    // no unsubscribe endpoint yet, and a link that does nothing is worse
+    // than an instruction that works.
+    footerHtml:
+      'This is an announcement from Neoxify. To stop receiving them, reply with "Unsubscribe".',
   });
+}
+
+/** Sent when the operator answers a support conversation.
+ *
+ * Deliberately carries the reply itself rather than only "you have a
+ * new message": support here is asynchronous, the app may be shut, and
+ * an answer somebody has to go and fetch is an answer they may never
+ * read. The thread still lives in the app for the back-and-forth.
+ *
+ * Escaped, unlike the announcement body above -- an operator typing
+ * "if x < y" into a reply box should not be able to produce broken
+ * markup in their own customer's inbox.
+ */
+export function supportReplyEmail(subject: string, body: string) {
+  const escaped = escapeHtml(body);
+  return {
+    subject: `Re: ${subject}`,
+    html: shell({
+      preheader: body.slice(0, 120),
+      bodyHtml: `
+        ${heading("Support replied")}
+        ${escaped
+          .split(/\n{2,}/)
+          .map((para) => paragraph(para.replace(/\n/g, "<br>")))
+          .join("")}
+        ${fineprint("Reply from inside the Neoxify app to continue the conversation.")}
+      `,
+    }),
+    text: `${body}\n\n--\nReply from inside the Neoxify app to continue the conversation.`,
+  };
 }
 
 /** Receipt for a payment that has cleared.
@@ -229,7 +377,7 @@ export function invoiceIssuedEmail(params: {
 }) {
   const amount = `$${params.amountUsd} ${params.currency.toUpperCase()}`;
   return {
-    subject: `Your NeoConnect receipt (${params.invoiceNumber})`,
+    subject: `Your Neoxify receipt (${params.invoiceNumber})`,
     html: shell({
       preheader: `${amount} for ${params.planName}.`,
       bodyHtml: `

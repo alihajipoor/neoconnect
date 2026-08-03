@@ -1,4 +1,4 @@
-// Command agentd is the NeoConnect node agent: it runs on each VPS node,
+// Command agentd is the Neoxify node agent: it runs on each VPS node,
 // manages local VPN protocol engines, and syncs state with the control plane.
 package main
 
@@ -31,10 +31,13 @@ func main() {
 	configPath := flag.String("config", config.DefaultPath, "path to the agent's persisted config")
 	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
 	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
+	xrayTrojanTag := flag.String("xray-trojan-inbound-tag", "trojan-in", "tag of the Trojan+TLS inbound in Xray's config. Registered unconditionally: a tag that does not exist simply nacks any Trojan command with Xray's own error, which is clearer than the node silently not offering the protocol")
+	xrayVlessTlsTag := flag.String("xray-vless-tls-inbound-tag", "vless-tls-in", "tag of the VLESS+TLS inbound in Xray's config. Registered unconditionally for the same reason as the Trojan tag above")
 	xrayAccessLog := flag.String("xray-access-log", "/var/log/xray/access.log", "Xray's access log, read to count how many places each user is connected from -- concurrency is not exposed by Xray's API. Harmless if absent: counts are simply not reported")
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
 	relayTunInboundTag := flag.String("relay-tun-inbound-tag", "relay-tun-in", "tag of the dormant tun inbound in a relay node's Xray config (see installer/assets/xray-relay-config.json.template)")
 	relayTunInterface := flag.String("relay-tun-interface", "relay-tun", "OS network interface name of that same tun inbound, used for ip route/rule when bridging WireGuard/OpenVPN entries into a Route's exit outbound")
+	openvpnInterface := flag.String("openvpn-interface", "tun0", "OpenVPN server tun interface, shaped for per-plan speed caps")
 	openvpnMgmtAddr := flag.String("openvpn-mgmt-addr", "127.0.0.1:7505", "OpenVPN server's local Management Interface address (see installer/lib/agent.sh's install_openvpn)")
 	openvpnCcdDir := flag.String("openvpn-ccd-dir", "/etc/openvpn/ccd", "OpenVPN client-config-dir this node's server is configured with")
 	flag.Parse()
@@ -60,13 +63,28 @@ func main() {
 
 	dispatcher := dispatch.New()
 	dispatcher.Register("XRAY_VLESS_REALITY", xrayProvisioner)
+	// Same Xray process, different inbound and a different credential
+	// shape -- so it shares the connection rather than dialing a second
+	// one. See Provisioner.ForTrojan.
+	dispatcher.Register("XRAY_TROJAN", xrayProvisioner.ForTrojan(*xrayTrojanTag, *xrayAccessLog))
+	// The certificate-presenting VLESS inbound. Same account shape as the
+	// REALITY one above -- only the listener differs -- so it is a second
+	// tag on the same process rather than anything new.
+	dispatcher.Register("XRAY_VLESS_TLS", xrayProvisioner.ForVless(*xrayVlessTlsTag, *xrayAccessLog))
 	dispatcher.Register("WIREGUARD", wireguard.New(*wgInterface))
 	// Per-user speed caps, WireGuard only for now: each peer has its own
 	// address assigned at provisioning time, which is what a tc rule needs
 	// to target one customer. OpenVPN assigns from a pool at connect time
 	// and Xray has no per-user address at all -- see RegisterShaper.
 	dispatcher.RegisterShaper("WIREGUARD", shaper.New(*wgInterface))
-	dispatcher.Register("OPENVPN", openvpn.New(*openvpnMgmtAddr, *openvpnCcdDir))
+	openvpnProvisioner := openvpn.New(*openvpnMgmtAddr, *openvpnCcdDir)
+	dispatcher.Register("OPENVPN", openvpnProvisioner)
+	// OpenVPN hands out addresses from a pool when a client connects, so
+	// its shaper cannot act at provisioning time -- it needs the address
+	// discovered while the client is online. The tun interface it shapes is
+	// the one OpenVPN was configured with.
+	dispatcher.RegisterShaper("OPENVPN", shaper.New(*openvpnInterface))
+	dispatcher.RegisterAddressDiscoverer("OPENVPN", openvpnProvisioner)
 	// Every node's Xray process can be a relay's exit fabric regardless
 	// of which protocols it terminates -- CONFIGURE_ROUTE/REMOVE_ROUTE
 	// are simply no-ops in practice on nodes that never receive them.

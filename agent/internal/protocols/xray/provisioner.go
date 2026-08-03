@@ -19,6 +19,7 @@ import (
 	scommand "github.com/xtls/xray-core/app/stats/command"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
+	"github.com/xtls/xray-core/proxy/trojan"
 	"github.com/xtls/xray-core/proxy/vless"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
@@ -30,13 +31,35 @@ import (
 // exactly one inbound, identified by tag, which is where the actual
 // VLESS+REALITY listener lives.
 type Provisioner struct {
-	apiAddr     string
-	inboundTag  string
-	conn        *grpc.ClientConn
-	handlerConn hcommand.HandlerServiceClient
-	statsConn   scommand.StatsServiceClient
-	sessions    *SessionCounter
+	apiAddr    string
+	inboundTag string
+	kind       accountKind
+	ownsConn   bool
+	// Whether this provisioner reports the Xray process's usage stats.
+	// Exactly one may -- see StatsSince.
+	reportsStats bool
+	conn         *grpc.ClientConn
+	handlerConn  hcommand.HandlerServiceClient
+	statsConn    scommand.StatsServiceClient
+	sessions     *SessionCounter
 }
+
+// Which credential shape an inbound authenticates with.
+//
+// Xray runs several proxy protocols in one process, and they differ only
+// in the account message attached to a user -- the add/remove RPC, the
+// stats keys and the no-restart guarantee are identical. So one
+// provisioner serves them all, parameterised by this.
+type accountKind int
+
+const (
+	kindVLESS accountKind = iota
+	// Trojan authenticates with a shared secret and, on a wrong one,
+	// answers exactly like the web server it is pretending to be. That
+	// is its whole disguise, and it is why the password is generated
+	// with real entropy rather than being a UUID.
+	kindTrojan
+)
 
 // How far back a client address still counts as "currently connected".
 // Long enough to span a quiet period on an idle connection, short enough
@@ -49,12 +72,15 @@ func New(apiAddr, inboundTag, accessLogPath string) (*Provisioner, error) {
 		return nil, fmt.Errorf("connect to xray api at %s: %w", apiAddr, err)
 	}
 	return &Provisioner{
-		apiAddr:     apiAddr,
-		inboundTag:  inboundTag,
-		conn:        conn,
-		handlerConn: hcommand.NewHandlerServiceClient(conn),
-		statsConn:   scommand.NewStatsServiceClient(conn),
-		sessions:    NewSessionCounter(accessLogPath, sessionWindow),
+		apiAddr:      apiAddr,
+		inboundTag:   inboundTag,
+		kind:         kindVLESS,
+		ownsConn:     true,
+		reportsStats: true,
+		conn:         conn,
+		handlerConn:  hcommand.NewHandlerServiceClient(conn),
+		statsConn:    scommand.NewStatsServiceClient(conn),
+		sessions:     NewSessionCounter(accessLogPath, sessionWindow),
 	}, nil
 }
 
@@ -66,7 +92,52 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 	return p.sessions.Counts()
 }
 
+// ForInbound returns a provisioner for another inbound running in the
+// same Xray process, sharing this one's connection.
+//
+// Sharing rather than dialling again is the same reasoning behind Conn()
+// below: it is one process with one API listener, and a second
+// connection would be a second thing to fail and to reconnect. The
+// derived provisioner does not own the connection, so closing it must
+// not take the original's out from under it.
+//
+// Session counting is deliberately not shared -- it is derived from the
+// access log, which records the inbound tag, so a Trojan inbound needs
+// its own counter keyed to its own tag. Passing the same one would
+// attribute Trojan sessions to VLESS users.
+func (p *Provisioner) ForInbound(kind accountKind, inboundTag, accessLogPath string) *Provisioner {
+	return &Provisioner{
+		apiAddr:    p.apiAddr,
+		inboundTag: inboundTag,
+		kind:       kind,
+		ownsConn:   false,
+		// Deliberately false: stats are per-process, not per-inbound.
+		reportsStats: false,
+		conn:         p.conn,
+		handlerConn:  p.handlerConn,
+		statsConn:    p.statsConn,
+		sessions:     NewSessionCounter(accessLogPath, sessionWindow),
+	}
+}
+
+// ForTrojan is the Trojan inbound on this same process.
+func (p *Provisioner) ForTrojan(inboundTag, accessLogPath string) *Provisioner {
+	return p.ForInbound(kindTrojan, inboundTag, accessLogPath)
+}
+
+// ForVless is a second VLESS inbound on this same process -- the
+// certificate-presenting one, alongside the REALITY inbound this
+// provisioner was built for. Same account shape, different listener:
+// what differs between the two is entirely in how the inbound wraps the
+// connection, which is the config file's business and not this code's.
+func (p *Provisioner) ForVless(inboundTag, accessLogPath string) *Provisioner {
+	return p.ForInbound(kindVLESS, inboundTag, accessLogPath)
+}
+
 func (p *Provisioner) Close() error {
+	if !p.ownsConn {
+		return nil
+	}
 	return p.conn.Close()
 }
 
@@ -77,22 +148,46 @@ func (p *Provisioner) Conn() *grpc.ClientConn {
 	return p.conn
 }
 
-func (p *Provisioner) CreateUser(ctx context.Context, user common.ProtocolUser) error {
-	account := &vless.Account{
-		Id:   user.Credentials["uuid"],
-		Flow: user.Credentials["flow"],
+// account builds the credential message for this inbound's protocol.
+//
+// The missing-field checks are not defensive noise: Xray accepts an
+// account with an empty id or password without complaint, and the result
+// is an inbound that silently authenticates nobody. Failing here means
+// the command is nacked and the control plane can say why, rather than a
+// customer discovering it by not being able to connect.
+func (p *Provisioner) account(user common.ProtocolUser) (*serial.TypedMessage, error) {
+	switch p.kind {
+	case kindTrojan:
+		password := user.Credentials["password"]
+		if password == "" {
+			return nil, fmt.Errorf("xray CreateUser: trojan credentials missing password")
+		}
+		return serial.ToTypedMessage(&trojan.Account{Password: password}), nil
+	default:
+		id := user.Credentials["uuid"]
+		if id == "" {
+			return nil, fmt.Errorf("xray CreateUser: credentials missing uuid")
+		}
+		return serial.ToTypedMessage(&vless.Account{
+			Id:   id,
+			Flow: user.Credentials["flow"],
+		}), nil
 	}
-	if account.Id == "" {
-		return fmt.Errorf("xray CreateUser: credentials missing uuid")
+}
+
+func (p *Provisioner) CreateUser(ctx context.Context, user common.ProtocolUser) error {
+	account, err := p.account(user)
+	if err != nil {
+		return err
 	}
 
-	_, err := p.handlerConn.AlterInbound(ctx, &hcommand.AlterInboundRequest{
+	_, err = p.handlerConn.AlterInbound(ctx, &hcommand.AlterInboundRequest{
 		Tag: p.inboundTag,
 		Operation: serial.ToTypedMessage(&hcommand.AddUserOperation{
 			User: &protocol.User{
 				Level:   0,
 				Email:   user.ExternalUserID,
-				Account: serial.ToTypedMessage(account),
+				Account: account,
 			},
 		}),
 	})
@@ -147,6 +242,22 @@ func (p *Provisioner) SetEnabled(ctx context.Context, externalUserID string, ena
 }
 
 func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, error) {
+	// Xray keeps usage per user, not per inbound: the "user>>>" pattern
+	// below matches every user in the process whichever inbound they
+	// belong to, and the query drains the counters as it reads them. So
+	// exactly one provisioner may report, no matter how many inbounds
+	// this process serves.
+	//
+	// With more than one reporting, each poll a different one won the
+	// map-iteration race, drained everything, and labelled all of it
+	// with its own protocol -- and the control plane dropped every delta
+	// whose label did not match the user's real protocol. Roughly half
+	// the node's traffic disappeared, at random, with nothing logged.
+	// Found after registering a second Xray inbound for Trojan.
+	if !p.reportsStats {
+		return nil, nil
+	}
+
 	byUser := make(map[string]*common.UsageDelta)
 
 	// A single "user>>>" pattern query matches every stat name of the

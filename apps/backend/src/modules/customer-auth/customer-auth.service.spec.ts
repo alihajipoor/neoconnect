@@ -22,6 +22,8 @@ function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
     emailVerifiedAt: null,
     emailVerificationCode: null,
     emailVerificationCodeExpiresAt: null,
+    passwordResetCode: null,
+    passwordResetCodeExpiresAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -35,8 +37,9 @@ describe("CustomerAuthService", () => {
   let config: { get: jest.Mock };
   let customersService: { create: jest.Mock };
   let subscriptionsService: { create: jest.Mock };
-  let protocolUsersService: { create: jest.Mock };
+  let protocolUsersService: { create: jest.Mock; provisionAll: jest.Mock };
   let freeTrialSettingsService: { get: jest.Mock };
+  let referralsService: { resolveReferralCode: jest.Mock; notifyReferrerOfActivation: jest.Mock };
   let emailService: { sendMail: jest.Mock };
 
   beforeAll(async () => {
@@ -51,8 +54,14 @@ describe("CustomerAuthService", () => {
     config = { get: jest.fn((key: string) => `config:${key}`) };
     customersService = { create: jest.fn() };
     subscriptionsService = { create: jest.fn() };
-    protocolUsersService = { create: jest.fn() };
+    protocolUsersService = { create: jest.fn(), provisionAll: jest.fn().mockResolvedValue([]) };
     freeTrialSettingsService = { get: jest.fn() };
+    // Resolves to "no referrer" by default, which is what the existing
+    // cases here describe. A test that cares supplies its own.
+    referralsService = {
+      resolveReferralCode: jest.fn().mockResolvedValue(null),
+      notifyReferrerOfActivation: jest.fn().mockResolvedValue(undefined),
+    };
     emailService = { sendMail: jest.fn().mockResolvedValue(true) };
 
     service = new CustomerAuthService(
@@ -63,6 +72,7 @@ describe("CustomerAuthService", () => {
       subscriptionsService as any,
       protocolUsersService as any,
       freeTrialSettingsService as any,
+      referralsService as any,
       emailService as any,
     );
   });
@@ -109,6 +119,7 @@ describe("CustomerAuthService", () => {
       expect(freeTrialSettingsService.get).not.toHaveBeenCalled();
       expect(subscriptionsService.create).not.toHaveBeenCalled();
       expect(protocolUsersService.create).not.toHaveBeenCalled();
+      expect(protocolUsersService.provisionAll).not.toHaveBeenCalled();
     });
   });
 
@@ -147,15 +158,25 @@ describe("CustomerAuthService", () => {
         trialRouteId: "route-1",
       });
       subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
-      protocolUsersService.create.mockResolvedValue({ id: "pu-1", credentials: { uuid: "x" } });
+      // Every route the plan allows, so the client can fail over without
+      // asking us. The operator's chosen trial route must still come
+      // first in the response.
+      protocolUsersService.provisionAll.mockResolvedValue([
+        { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
+        { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
+      ]);
 
       const result = await service.verifyEmail("token");
 
       expect(subscriptionsService.create).toHaveBeenCalledWith({ customerId: "customer-1", planId: "plan-1" });
-      expect(protocolUsersService.create).toHaveBeenCalledWith({ subscriptionId: "sub-1", routeId: "route-1" });
+      expect(protocolUsersService.provisionAll).toHaveBeenCalledWith("sub-1");
       expect(result.trial).toEqual({
         subscription: { id: "sub-1" },
-        protocolUser: { id: "pu-1", credentials: { uuid: "x" } },
+        protocolUsers: [
+          { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
+          { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
+        ],
+        protocolUser: { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
       });
     });
 
@@ -191,6 +212,29 @@ describe("CustomerAuthService", () => {
       await expect(service.verifyEmailByCode("customer@example.com", "111111")).rejects.toThrow(BadRequestException);
     });
 
+    // Reported from real use: verified by clicking the emailed link on a
+    // phone, then typed the code into the app and was told it had
+    // expired -- because verifying clears the code. The account was fine;
+    // only the message was wrong, and it sent the customer chasing codes
+    // that could never work.
+    it("reports an already-verified account as verified, not as an expired code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        buildCustomer({
+          emailVerifiedAt: new Date(),
+          // Cleared by the earlier verification, which is exactly why the
+          // code check alone reported failure.
+          emailVerificationCode: null,
+          emailVerificationCodeExpiresAt: null,
+        }),
+      );
+
+      const result = await service.verifyEmailByCode("customer@example.com", "111111");
+
+      expect(result.alreadyVerified).toBe(true);
+      // No second trial for an account that already got one.
+      expect(result.trial).toBeNull();
+    });
+
     it("marks the customer verified and grants a trial on a correct, unexpired code", async () => {
       prisma.customer.findUnique.mockResolvedValue(
         buildCustomer({
@@ -205,7 +249,7 @@ describe("CustomerAuthService", () => {
         trialRouteId: "route-1",
       });
       subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
-      protocolUsersService.create.mockResolvedValue({ id: "pu-1" });
+      protocolUsersService.provisionAll.mockResolvedValue([{ id: "pu-1", routeId: "route-1" }]);
 
       const result = await service.verifyEmailByCode("customer@example.com", "111111");
 
@@ -213,7 +257,11 @@ describe("CustomerAuthService", () => {
         where: { id: "customer-1" },
         data: { emailVerifiedAt: expect.any(Date), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
       });
-      expect(result.trial).toEqual({ subscription: { id: "sub-1" }, protocolUser: { id: "pu-1" } });
+      expect(result.trial).toEqual({
+        subscription: { id: "sub-1" },
+        protocolUsers: [{ id: "pu-1", routeId: "route-1" }],
+        protocolUser: { id: "pu-1", routeId: "route-1" },
+      });
     });
   });
 
@@ -255,6 +303,21 @@ describe("CustomerAuthService", () => {
 
       expect(emailService.sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: "customer@example.com" }));
     });
+
+    /** The code is looked up server-side, so unlike the self-verifying
+     * token it only works if it was actually stored. */
+    it("stores a six-digit code the customer can type", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      jwt.signAsync.mockResolvedValue("reset-token");
+
+      await service.forgotPassword("customer@example.com");
+
+      const { data } = prisma.customer.update.mock.calls[0][0] as {
+        data: { passwordResetCode: string; passwordResetCodeExpiresAt: Date };
+      };
+      expect(data.passwordResetCode).toMatch(/^\d{6}$/);
+      expect(data.passwordResetCodeExpiresAt.getTime()).toBeGreaterThan(Date.now());
+    });
   });
 
   describe("resetPassword", () => {
@@ -275,8 +338,95 @@ describe("CustomerAuthService", () => {
 
       expect(prisma.customer.update).toHaveBeenCalledWith({
         where: { id: "customer-1" },
-        data: { passwordHash: expect.any(String), tokenVersion: { increment: 1 } },
+        data: {
+          passwordHash: expect.any(String),
+          tokenVersion: { increment: 1 },
+          // Cleared here too: a used code that still works is a second
+          // key left under the mat for the rest of its lifetime.
+          passwordResetCode: null,
+          passwordResetCodeExpiresAt: null,
+        },
       });
+    });
+  });
+
+  /** The route the desktop app uses.
+   *
+   * It exists because the token route cannot reach a desktop client
+   * reliably -- the token only ever arrived in a link, and webmail
+   * strips the custom URI scheme those links used. Without this a
+   * customer who forgot their password had no way back in at all.
+   */
+  describe("resetPasswordByCode", () => {
+    const withCode = (overrides = {}) =>
+      buildCustomer({
+        passwordResetCode: "123456",
+        passwordResetCodeExpiresAt: new Date(Date.now() + 60_000),
+        ...overrides,
+      });
+
+    it("resets the password when the code matches and is current", async () => {
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+
+      await service.resetPasswordByCode("customer@example.com", "123456", "new-password");
+
+      expect(prisma.customer.update).toHaveBeenCalledWith({
+        where: { id: "customer-1" },
+        data: {
+          passwordHash: expect.any(String),
+          tokenVersion: { increment: 1 },
+          passwordResetCode: null,
+          passwordResetCodeExpiresAt: null,
+        },
+      });
+    });
+
+    it("rejects the wrong code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+      await expect(
+        service.resetPasswordByCode("customer@example.com", "000000", "new-password"),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.customer.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects a code that has expired", async () => {
+      prisma.customer.findUnique.mockResolvedValue(
+        withCode({ passwordResetCodeExpiresAt: new Date(Date.now() - 1) }),
+      );
+      await expect(
+        service.resetPasswordByCode("customer@example.com", "123456", "new-password"),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("rejects when no reset was ever requested", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      await expect(
+        service.resetPasswordByCode("customer@example.com", "123456", "new-password"),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("refuses a disabled account even with the right code", async () => {
+      prisma.customer.findUnique.mockResolvedValue(withCode({ status: "DISABLED" }));
+      await expect(
+        service.resetPasswordByCode("customer@example.com", "123456", "new-password"),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    /** Every failure has to look the same. A distinct "no such account"
+     * would turn this endpoint into the account-enumeration oracle that
+     * forgotPassword() goes to lengths to avoid being. */
+    it("says the same thing whether the account exists or the code is wrong", async () => {
+      prisma.customer.findUnique.mockResolvedValue(null);
+      const missing = await service
+        .resetPasswordByCode("nobody@example.com", "123456", "new-password")
+        .catch((e: Error) => e.message);
+
+      prisma.customer.findUnique.mockResolvedValue(withCode());
+      const wrong = await service
+        .resetPasswordByCode("customer@example.com", "999999", "new-password")
+        .catch((e: Error) => e.message);
+
+      expect(missing).toBe(wrong);
     });
   });
 

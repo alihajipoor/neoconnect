@@ -5,7 +5,9 @@ import IORedis from "ioredis";
 import { UsageModule } from "../usage/usage.module";
 import { EmailModule } from "../email/email.module";
 import { InvoicesModule } from "../invoices/invoices.module";
+import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
 import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
+import { ReferralsModule } from "../referrals/referrals.module";
 import { SweepsProcessor } from "./sweeps.processor";
 import { SweepsSchedulerService } from "./sweeps-scheduler.service";
 import { AnnouncementsProcessor } from "./announcements.processor";
@@ -30,10 +32,14 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
       }),
     }),
     BullModule.registerQueue({ name: SWEEPS_QUEUE }),
+    ReferralsModule,
     announcementsQueue,
     UsageModule,
     EmailModule,
     InvoicesModule,
+    // For the stale-pending sweep. No cycle: SubscriptionsModule pulls in
+    // nothing from here.
+    SubscriptionsModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

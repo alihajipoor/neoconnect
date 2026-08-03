@@ -1,11 +1,16 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
+import { rateLimitFor } from "../protocol-users/rate-limit";
 import { CreatePlanDto } from "./dto/create-plan.dto";
 import { UpdatePlanDto } from "./dto/update-plan.dto";
 
 @Injectable()
 export class PlansService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly agentGateway: AgentGatewayService,
+  ) {}
 
   list() {
     return this.prisma.subscriptionPlan.findMany({ orderBy: { priceUsd: "asc" } });
@@ -33,7 +38,8 @@ export class PlansService {
     return this.prisma.subscriptionPlan.create({
       data: {
         name: dto.name,
-        dataCapBytes: BigInt(dto.dataCapBytes),
+        // Null (or omitted) means unlimited.
+        dataCapBytes: dto.dataCapBytes == null ? null : BigInt(dto.dataCapBytes),
         durationDays: dto.durationDays,
         priceUsd: dto.priceUsd,
         maxConcurrentConnections: dto.maxConcurrentConnections,
@@ -47,12 +53,18 @@ export class PlansService {
   }
 
   async update(id: string, dto: UpdatePlanDto) {
-    await this.get(id);
-    return this.prisma.subscriptionPlan.update({
+    const before = await this.get(id);
+    const plan = await this.prisma.subscriptionPlan.update({
       where: { id },
       data: {
         name: dto.name,
-        dataCapBytes: dto.dataCapBytes !== undefined ? BigInt(dto.dataCapBytes) : undefined,
+        // undefined leaves it alone; explicit null makes it unlimited.
+        dataCapBytes:
+          dto.dataCapBytes === undefined
+            ? undefined
+            : dto.dataCapBytes === null
+              ? null
+              : BigInt(dto.dataCapBytes),
         durationDays: dto.durationDays,
         priceUsd: dto.priceUsd,
         maxConcurrentConnections: dto.maxConcurrentConnections,
@@ -63,6 +75,44 @@ export class PlansService {
         defaultRouteId: dto.defaultRouteId,
       },
     });
+
+    if (plan.maxDownloadMbps !== before.maxDownloadMbps || plan.maxUploadMbps !== before.maxUploadMbps) {
+      await this.reapplyRateLimits(plan);
+    }
+
+    return plan;
+  }
+
+  /** Pushes changed speed caps to everyone already on this plan.
+   *
+   * Without this an admin edits a plan, sees the new number, and nothing
+   * happens to any existing customer -- only people provisioned afterwards
+   * would get it, which is the opposite of what editing a plan looks like
+   * it does.
+   *
+   * Sent as UPDATE_USER per user, reusing the same per-user hot-update
+   * contract every other change goes through, so nothing is restarted and
+   * nobody else on the node is disturbed. Credentials are not included:
+   * the agent only needs to know who to re-shape, and re-sending secrets
+   * that have not changed would widen their exposure for no reason.
+   */
+  private async reapplyRateLimits(plan: {
+    id: string;
+    maxDownloadMbps: number | null;
+    maxUploadMbps: number | null;
+  }) {
+    const users = await this.prisma.protocolUser.findMany({
+      where: { subscription: { planId: plan.id } },
+      select: { nodeId: true, protocol: true, externalUserId: true },
+    });
+
+    for (const user of users) {
+      await this.agentGateway.enqueueCommand(user.nodeId, "UPDATE_USER", {
+        protocol: user.protocol,
+        externalUserId: user.externalUserId,
+        ...rateLimitFor(plan, user.protocol),
+      });
+    }
   }
 
   /** A bare `prisma.subscriptionPlan.delete()` 500s (unhandled Prisma FK
