@@ -24,6 +24,8 @@ import { CreatePaymentDto } from "../billing/dto/create-payment.dto";
 import { CreateOwnSubscriptionDto } from "./dto/create-own-subscription.dto";
 import { SwitchRouteDto } from "./dto/switch-route.dto";
 import { ReferralsService } from "../referrals/referrals.service";
+import { VouchersService } from "../vouchers/vouchers.service";
+import { RedeemVoucherDto } from "../vouchers/dto/redeem-voucher.dto";
 import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
 import { AuthenticatedCustomer } from "../customer-auth/types";
@@ -44,6 +46,7 @@ export class CustomerController {
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly plansService: PlansService,
     private readonly referralsService: ReferralsService,
+    private readonly vouchersService: VouchersService,
     private readonly routesService: RoutesService,
     private readonly billingService: BillingService,
     private readonly config: ConfigService,
@@ -79,6 +82,24 @@ export class CustomerController {
    * a paying customer; a readable list of other people's email
    * addresses is a different thing, and a referral link posted publicly
    * would turn this into a way to collect them. */
+  /** Checks a code and says what it would grant, without spending it.
+   *
+   * Separate from redeeming so the app can show the plan and let the
+   * customer confirm -- a code that silently converts on the first
+   * keystroke is not something anyone should build. */
+  @Post("vouchers/preview")
+  previewVoucher(@Body() dto: RedeemVoucherDto) {
+    return this.vouchersService.preview(dto.code);
+  }
+
+  @Post("vouchers/redeem")
+  redeemVoucher(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Body() dto: RedeemVoucherDto,
+  ) {
+    return this.vouchersService.redeem(customer.sub, dto.code);
+  }
+
   @Get("referrals")
   referrals(@CurrentCustomer() customer: AuthenticatedCustomer) {
     return this.referralsService.overviewFor(customer.sub);

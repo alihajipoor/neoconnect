@@ -63,24 +63,68 @@ const EXPIRY_INTERVAL: Duration = Duration::from_secs(5);
 ///
 /// Zero means no tunnel, which is the fail-open case: sockets are left
 /// unpinned and take the ordinary route.
-#[derive(Default)]
-pub struct TunnelInterface(AtomicU32);
+pub struct TunnelInterface {
+    index: AtomicU32,
+    /// The tunnel's own address, held as bits so it can live beside the
+    /// index without a lock.
+    ///
+    /// Sockets are bound to it as well as pinned to the interface.
+    /// `IP_UNICAST_IF` alone was enough for WireGuard and not for Xray
+    /// or OpenVPN, whose TUN adapters answered every pinned connect with
+    /// WSAEHOSTUNREACH -- so Custom mode worked on exactly the one
+    /// protocol the spike happened to test it against. Binding the
+    /// source address states which interface the packet belongs to in
+    /// the way the stack cannot decline to honour.
+    address: AtomicU32,
+}
 
 impl TunnelInterface {
-    pub fn new(index: u32) -> Self {
-        Self(AtomicU32::new(index))
-    }
-
-    pub fn set(&self, index: u32) {
-        self.0.store(index, Ordering::Relaxed);
-    }
-
-    fn get(&self) -> Option<u32> {
-        match self.0.load(Ordering::Relaxed) {
-            0 => None,
-            index => Some(index),
+    pub fn new(index: u32, address: Ipv4Addr) -> Self {
+        Self {
+            index: AtomicU32::new(index),
+            address: AtomicU32::new(u32::from(address)),
         }
     }
+
+    pub fn set(&self, index: u32, address: Ipv4Addr) {
+        self.index.store(index, Ordering::Relaxed);
+        self.address.store(u32::from(address), Ordering::Relaxed);
+    }
+
+    /// Marks that no tunnel is available. Zero is not a valid interface
+    /// index, so it doubles as the fail-open signal.
+    pub fn clear(&self) {
+        self.index.store(0, Ordering::Relaxed);
+        self.address.store(0, Ordering::Relaxed);
+    }
+
+    fn get(&self) -> Option<(u32, Ipv4Addr)> {
+        match self.index.load(Ordering::Relaxed) {
+            0 => None,
+            index => Some((index, Ipv4Addr::from(self.address.load(Ordering::Relaxed)))),
+        }
+    }
+}
+
+impl Default for TunnelInterface {
+    fn default() -> Self {
+        Self { index: AtomicU32::new(0), address: AtomicU32::new(0) }
+    }
+}
+
+/// Ties a socket to the tunnel: pinned to the interface, and bound to
+/// the address that interface owns.
+///
+/// Both, not either. The pin constrains which routes may be chosen; the
+/// bind states where the packet comes from. WireGuard's adapter was
+/// happy with the pin alone, which is why this looked finished, but
+/// Xray's and OpenVPN's TUNs refused to route for it -- every pinned
+/// connect came back WSAEHOSTUNREACH and every Xray protocol failed its
+/// probe, so the ladder fell through to WireGuard every single time.
+fn attach_to_tunnel(socket: &Socket, index: u32, address: Ipv4Addr) -> io::Result<()> {
+    pin_to_interface(socket, index)?;
+    // Port 0: the source address is what matters, the port is not.
+    socket.bind(&SocketAddr::from((address, 0)).into())
 }
 
 /// Restricts a socket to one interface's routes.
@@ -111,8 +155,8 @@ fn pin_to_interface(socket: &Socket, index: u32) -> io::Result<()> {
 /// up.
 fn connect_upstream(target: SocketAddrV4, tunnel: &TunnelInterface) -> io::Result<TcpStream> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    if let Some(index) = tunnel.get() {
-        pin_to_interface(&socket, index)?;
+    if let Some((index, address)) = tunnel.get() {
+        attach_to_tunnel(&socket, index, address)?;
     }
     socket.connect_timeout(&SocketAddr::V4(target).into(), UPSTREAM_CONNECT_TIMEOUT)?;
     Ok(socket.into())
@@ -121,10 +165,11 @@ fn connect_upstream(target: SocketAddrV4, tunnel: &TunnelInterface) -> io::Resul
 /// A UDP socket placed the same way.
 fn bind_upstream(tunnel: &TunnelInterface) -> io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    if let Some(index) = tunnel.get() {
-        pin_to_interface(&socket, index)?;
+    match tunnel.get() {
+        Some((index, address)) => attach_to_tunnel(&socket, index, address)?,
+        // Fail-open: no tunnel, so take the ordinary route.
+        None => socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into())?,
     }
-    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into())?;
     // Bounded so a reader thread notices its flow has been retired
     // instead of blocking forever on a socket nobody will answer.
     socket.set_read_timeout(Some(POLL_INTERVAL))?;
@@ -165,26 +210,31 @@ pub fn probe(tunnel: &TunnelInterface) -> Result<(), String> {
     // No tunnel means the fail-open state: selected apps are going out
     // unprotected. Reporting that as reachable would be the exact
     // dishonesty this whole function exists to remove.
-    let Some(index) = tunnel.get() else {
+    let Some((index, address)) = tunnel.get() else {
         return Err("no tunnel is up, so nothing is being routed through one".into());
     };
 
     let mut last = String::new();
-    for (address, port) in PROBE_TARGETS {
-        match connect_pinned(address, port, index) {
+    for (target, port) in PROBE_TARGETS {
+        match connect_pinned(target, port, index, address) {
             Ok(()) => return Ok(()),
-            Err(e) => last = format!("{address}:{port} {e}"),
+            Err(e) => last = format!("{target}:{port} {e}"),
         }
     }
     Err(format!("the tunnel did not carry a test connection ({last})"))
 }
 
-fn connect_pinned(address: Ipv4Addr, port: u16, index: u32) -> Result<(), String> {
+fn connect_pinned(
+    target: Ipv4Addr,
+    port: u16,
+    index: u32,
+    source: Ipv4Addr,
+) -> Result<(), String> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
         .map_err(|e| e.to_string())?;
-    pin_to_interface(&socket, index).map_err(|e| e.to_string())?;
+    attach_to_tunnel(&socket, index, source).map_err(|e| e.to_string())?;
     socket
-        .connect_timeout(&SocketAddr::from((address, port)).into(), PROBE_TIMEOUT)
+        .connect_timeout(&SocketAddr::from((target, port)).into(), PROBE_TIMEOUT)
         .map_err(|e| e.to_string())
 }
 
@@ -424,9 +474,9 @@ mod tests {
         // moment the decided behaviour is to let traffic through.
         let tunnel = TunnelInterface::default();
         assert_eq!(tunnel.get(), None);
-        tunnel.set(14);
-        assert_eq!(tunnel.get(), Some(14));
-        tunnel.set(0);
+        tunnel.set(14, Ipv4Addr::new(10, 66, 0, 3));
+        assert_eq!(tunnel.get(), Some((14, Ipv4Addr::new(10, 66, 0, 3))));
+        tunnel.clear();
         assert_eq!(tunnel.get(), None);
     }
 
@@ -446,7 +496,8 @@ mod tests {
         // route to reach anything. If this ever passed, the probe would
         // be measuring the machine's ordinary connectivity and would
         // call a dead tunnel healthy.
-        let error = probe(&TunnelInterface::new(u32::MAX)).expect_err("nothing can be reached");
+        let error = probe(&TunnelInterface::new(u32::MAX, Ipv4Addr::new(10, 66, 0, 3)))
+            .expect_err("nothing can be reached");
         assert!(error.contains("did not carry"), "got {error}");
     }
 

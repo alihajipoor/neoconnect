@@ -374,7 +374,7 @@ fn run_hidden(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<std::process:
 }
 
 /// Runs a short-lived command, hidden, and returns its stdout.
-fn run_hidden_capture(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<String> {
+pub(crate) fn run_hidden_capture(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<String> {
     use std::os::windows::process::CommandExt;
     let out = Command::new(exe)
         .args(args)
