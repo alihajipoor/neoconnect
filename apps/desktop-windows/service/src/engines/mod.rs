@@ -192,7 +192,8 @@ impl Engines {
             }
         };
 
-        if let Err(e) = self.split_tunnel.start(adapter, node) {
+        let log_dir = self.config_dir.clone();
+        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir) {
             let _ = self.disconnect();
             return Err(e);
         }

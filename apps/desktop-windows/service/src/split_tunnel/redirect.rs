@@ -43,7 +43,7 @@
 //! through is what happens by default.
 
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use windivert_sys::address::WINDIVERT_ADDRESS;
@@ -68,6 +68,41 @@ const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const TCP_FLAG_SYN: u8 = 0x02;
 const TCP_FLAG_ACK: u8 = 0x10;
+
+/// What the loop has actually done, for diagnosis.
+///
+/// Not telemetry and not sent anywhere -- it is written to a log file
+/// beside the engine logs. Custom mode has three plausible ways to fail
+/// silently (nothing intercepted, intercepted but nothing matched the
+/// selection, matched but the proxy never connected) and they look
+/// identical from the outside. These four numbers separate them in one
+/// reading, which is worth more than the guesses it replaces.
+#[derive(Default)]
+pub struct Stats {
+    /// Packets the filter handed over. Zero means the driver is not
+    /// intercepting at all.
+    pub seen: AtomicU64,
+    /// Flows attributed to a selected application. Zero with `seen`
+    /// high means the selection matches nothing that is running.
+    pub matched: AtomicU64,
+    /// Packets rewritten towards the proxy.
+    pub redirected: AtomicU64,
+    /// Replies rewritten back. Zero with `redirected` high means the
+    /// proxy is not getting answers -- so the tunnel, not the redirect.
+    pub returned: AtomicU64,
+}
+
+impl Stats {
+    pub fn summary(&self) -> String {
+        format!(
+            "seen={} matched={} redirected={} returned={}",
+            self.seen.load(Ordering::Relaxed),
+            self.matched.load(Ordering::Relaxed),
+            self.redirected.load(Ordering::Relaxed),
+            self.returned.load(Ordering::Relaxed),
+        )
+    }
+}
 
 /// Everything the loop needs that does not change while it runs.
 pub struct Redirect {
@@ -118,6 +153,7 @@ pub fn filter_for(redirect: &Redirect) -> String {
 pub struct Running {
     handle: Arc<Handle>,
     stop: Arc<AtomicBool>,
+    pub stats: Arc<Stats>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -152,21 +188,23 @@ pub fn start(
     let handle = Arc::new(handle);
     let redirect = Arc::new(redirect);
     let stop = Arc::new(AtomicBool::new(false));
+    let stats = Arc::new(Stats::default());
 
     let threads = (0..WORKERS)
         .map(|_| {
-            let (handle, redirect, nat, selection, stop) = (
+            let (handle, redirect, nat, selection, stop, stats) = (
                 handle.clone(),
                 redirect.clone(),
                 nat.clone(),
                 selection.clone(),
                 stop.clone(),
+                stats.clone(),
             );
-            std::thread::spawn(move || worker(handle, redirect, nat, selection, stop))
+            std::thread::spawn(move || worker(handle, redirect, nat, selection, stop, stats))
         })
         .collect();
 
-    Ok(Running { handle, stop, threads })
+    Ok(Running { handle, stop, stats, threads })
 }
 
 fn worker(
@@ -175,6 +213,7 @@ fn worker(
     nat: Arc<Nat>,
     selection: Arc<Selection>,
     stop: Arc<AtomicBool>,
+    stats: Arc<Stats>,
 ) {
     // One per thread rather than shared: the lookup caches a snapshot of
     // the connection tables, and a lock around it would put every
@@ -190,6 +229,7 @@ fn worker(
             Ok(None) | Err(_) => return,
         };
 
+        stats.seen.fetch_add(1, Ordering::Relaxed);
         let handled = handle_packet(
             &mut packet[..len as usize],
             &mut address,
@@ -197,6 +237,7 @@ fn worker(
             &nat,
             &selection,
             &mut owner,
+            &stats,
         );
 
         if handled {
@@ -265,6 +306,7 @@ fn handle_packet(
     nat: &Nat,
     selection: &Selection,
     owner: &mut OwnerLookup,
+    stats: &Stats,
 ) -> bool {
     let Some(parsed) = parse(packet) else { return false };
 
@@ -274,7 +316,11 @@ fn handle_packet(
     };
 
     if parsed.source_port == proxy_port {
-        return rewrite_return_leg(packet, address, &parsed, nat);
+        let rewritten = rewrite_return_leg(packet, address, &parsed, nat);
+        if rewritten {
+            stats.returned.fetch_add(1, Ordering::Relaxed);
+        }
+        return rewritten;
     }
 
     // Read before the rewrite, which overwrites it: the return leg has
@@ -283,11 +329,12 @@ fn handle_packet(
     // SAFETY: this came from the network layer, so the Network arm of
     // the union is the live one.
     let interface_id = unsafe { address.union_field.Network.interface_id };
-    let verdict = decide(&parsed, nat, selection, owner, redirect, interface_id);
+    let verdict = decide(&parsed, nat, selection, owner, redirect, interface_id, stats);
     match verdict {
         Verdict::Direct | Verdict::Unknown => false,
         Verdict::Redirect { nat_port } => {
             rewrite_outbound(packet, address, &parsed, redirect.local_addr, nat_port, proxy_port);
+            stats.redirected.fetch_add(1, Ordering::Relaxed);
             true
         }
     }
@@ -300,6 +347,7 @@ fn decide(
     owner: &mut OwnerLookup,
     redirect: &Redirect,
     interface_id: u32,
+    stats: &Stats,
 ) -> Verdict {
     // A SYN without an ACK is a new connection, so any leave-alone
     // verdict recorded against this port belongs to whatever held it
@@ -358,7 +406,10 @@ fn decide(
         interface_id,
     };
     match nat.redirect(parsed.transport, origin) {
-        Some(nat_port) => Verdict::Redirect { nat_port },
+        Some(nat_port) => {
+            stats.matched.fetch_add(1, Ordering::Relaxed);
+            Verdict::Redirect { nat_port }
+        }
         // Out of synthetic ports. Fail open, consistent with the rest of
         // the feature: unprotected traffic beats a stalled game.
         None => {

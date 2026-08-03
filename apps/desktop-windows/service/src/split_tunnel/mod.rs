@@ -55,6 +55,7 @@ mod proxy;
 mod redirect;
 
 use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::adapters;
@@ -86,6 +87,67 @@ struct Active {
     relays: proxy::Relays,
     tunnel: Arc<proxy::TunnelInterface>,
     route: InstalledRoutes,
+    logger: Logger,
+}
+
+/// How often the counters are written out.
+///
+/// Frequent enough to be useful within one test, rare enough that the
+/// file stays readable over a long session.
+const LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The log file's name, beside the engines' own logs in the protected
+/// config directory.
+const LOG_FILE: &str = "split-tunnel.log";
+
+/// Writes the redirect counters to disk periodically.
+///
+/// This exists because of how the spike went: three attempts were spent
+/// on byte counters that turned out to measure elapsed time and adapter
+/// chatter, and the question was settled in one run by a packet capture.
+/// The same lesson applies to a feature nobody can capture on a
+/// customer's machine -- four numbers written down beat any number of
+/// guesses about which stage failed.
+struct Logger {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Logger {
+    fn start(path: PathBuf, stats: Arc<redirect::Stats>, header: String) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                // Truncated on start: the interesting session is this
+                // one, and an ever-growing file in a directory the user
+                // cannot easily reach is its own small problem.
+                let _ = std::fs::write(&path, format!("{header}\n"));
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(LOG_INTERVAL);
+                    append(&path, &stats.summary());
+                }
+                append(&path, &format!("stopped {}", stats.summary()));
+            })
+        };
+        Self { stop, thread: Some(thread) }
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Best-effort. A log line that cannot be written must never affect the
+/// connection it is describing.
+fn append(path: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 impl Default for SplitTunnel {
@@ -125,7 +187,12 @@ impl SplitTunnel {
     /// `adapter_name` is the engine's own adapter; `node` is the VPN
     /// server, whose traffic must never be redirected -- doing so would
     /// carry the tunnel through itself.
-    pub fn start(&mut self, adapter_name: &str, node: Ipv4Addr) -> Result<(), String> {
+    pub fn start(
+        &mut self,
+        adapter_name: &str,
+        node: Ipv4Addr,
+        log_dir: &Path,
+    ) -> Result<(), String> {
         self.stop();
         if !self.wants_passive_tunnel() {
             return Ok(());
@@ -164,9 +231,22 @@ impl SplitTunnel {
             own_image: own_image_path(),
         };
 
+        // Recorded before anything can go wrong with it: if Custom mode
+        // turns out to route nothing, the first question is always
+        // whether it was pointed at the right adapter and the right
+        // local address, and this is the only place that is written
+        // down.
+        let header = format!(
+            "custom mode on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}",
+            tunnel_adapter.index, relays.tcp_port, relays.udp_port
+        );
+
         match redirect::start(redirect, nat, self.selection.clone()) {
             Ok(running) => {
-                self.active = Some(Active { redirect: running, relays, tunnel, route });
+                let logger =
+                    Logger::start(log_dir.join(LOG_FILE), running.stats.clone(), header);
+                self.active =
+                    Some(Active { redirect: running, relays, tunnel, route, logger });
                 Ok(())
             }
             Err(e) => {
@@ -194,6 +274,7 @@ impl SplitTunnel {
         // than the fail-open this promises.
         active.redirect.stop();
         active.relays.stop();
+        active.logger.stop();
         let mut route = active.route;
         route.remove();
     }
