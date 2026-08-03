@@ -1,0 +1,52 @@
+[package]
+name = "neoxify-bootstrapper"
+version = "0.1.0"
+edition = "2021"
+
+# The file a customer actually downloads. It draws its own window and
+# runs the real NSIS installer silently underneath -- see src/main.rs.
+[[bin]]
+name = "Neoxify-Setup"
+path = "src/main.rs"
+
+[dependencies]
+# Window and input. Handles the borderless window, DPI changes and the
+# drag-by-background behaviour that a custom title bar needs.
+winit = "0.30"
+# A CPU framebuffer for that window. No GPU, no swapchain, no driver
+# surprises on a machine we know nothing about -- an installer has to
+# run everywhere, including a fresh Windows image in a VM with a basic
+# display adapter.
+softbuffer = "0.4"
+# Antialiased 2D drawing into that buffer. Rounded rectangles and the
+# glow behind the logo are vector work, redrawn at whatever size the
+# display's scale factor asks for, so this stays crisp at 150% where a
+# pre-rendered bitmap would blur.
+tiny-skia = "0.11"
+# Glyph rasterising. Fonts are read from the Windows font directory at
+# runtime rather than embedded: Segoe UI is present on every supported
+# version, and shipping a copy of it would be both larger and a
+# licensing question nobody needs.
+fontdue = "0.9"
+# Decodes the app icon for the mark at the top of the window.
+png = "0.17"
+raw-window-handle = "0.6"
+
+[dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+]
+
+# An installer is downloaded before it is trusted, so size is worth
+# real effort -- and it is a one-shot process, so a slower build and
+# no unwinding cost nothing at runtime.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
