@@ -228,7 +228,7 @@ export class CustomerController {
   ): Promise<string> {
     const invoice = await this.invoicesService.getOwned(id, customer.sub);
     const me = await this.customersService.get(customer.sub);
-    return renderInvoiceHtml(invoice, me.email);
+    return renderInvoiceHtml(invoice, me.email, undefined, await this.appLinksService.get());
   }
 
   @Post("billing/payments")

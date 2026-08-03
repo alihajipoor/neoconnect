@@ -3,6 +3,7 @@ import { Throttle } from "@nestjs/throttler";
 import { InvoicesService } from "./invoices.service";
 import { CustomersService } from "../customers/customers.service";
 import { renderInvoiceHtml } from "./invoice-document";
+import { AppLinksService } from "../app-links/app-links.service";
 
 /** The "View invoice" button in an emailed invoice.
  *
@@ -27,6 +28,7 @@ export class InvoiceLinkController {
   constructor(
     private readonly invoicesService: InvoicesService,
     private readonly customersService: CustomersService,
+    private readonly appLinks: AppLinksService,
   ) {}
 
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
@@ -38,6 +40,6 @@ export class InvoiceLinkController {
     }
     const invoice = await this.invoicesService.getByDocumentToken(token);
     const customer = await this.customersService.get(invoice.customerId);
-    return renderInvoiceHtml(invoice, customer.email);
+    return renderInvoiceHtml(invoice, customer.email, undefined, await this.appLinks.get());
   }
 }
