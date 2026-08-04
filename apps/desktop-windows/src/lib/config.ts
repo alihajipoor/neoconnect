@@ -12,9 +12,14 @@
  * Dev talks to the local backend port; a real build talks to the public
  * /api path nginx proxies to it (see installer/assets/nginx-panel.conf.template).
  */
-export const API_BASE_URLS: readonly string[] = import.meta.env.DEV
-  ? ["http://localhost:4000"]
-  : [
+/** The real endpoints, named separately from the dev override.
+ *
+ * Exported so the capability-scope test can assert against the list that
+ * actually ships. Reading API_BASE_URLS there would check localhost --
+ * vitest sets DEV -- and pass while the production URLs went unchecked,
+ * which is precisely the hole that let an unpermitted endpoint reach
+ * customers. */
+export const PRODUCTION_API_BASE_URLS: readonly string[] = [
       // A separate domain on a CDN, deliberately sharing nothing with
       // the marketing site: a block aimed at one cannot take the other
       // with it, which is the entire reason it is a second domain rather
@@ -24,7 +29,11 @@ export const API_BASE_URLS: readonly string[] = import.meta.env.DEV
       // can be unavailable, and on an unfiltered network this is the
       // shortest path.
       "https://connect.neoxify.com/api",
-    ];
+  ];
+
+export const API_BASE_URLS: readonly string[] = import.meta.env.DEV
+  ? ["http://localhost:4000"]
+  : PRODUCTION_API_BASE_URLS;
 
 /** The first choice, for the few places that need a single address
  * rather than the ordered list. */
