@@ -6,6 +6,17 @@ set -euo pipefail
 
 AGENT_REPO="${AGENT_REPO:-alihajipoor/neoconnect}"
 
+# Where the admin access token is cached for the life of this install.
+#
+# A fixed path derived from the script's own PID, computed here at file
+# scope, because every consumer runs inside a command substitution and
+# so cannot see anything a subshell assigns -- including the path
+# itself, had this been an mktemp inside the function. `$$` is the
+# original shell's PID and stays the same in subshells, which is
+# precisely the property needed.
+ADMIN_TOKEN_CACHE="${TMPDIR:-/tmp}/neoxify-admin-token.$$"
+trap 'rm -f "$ADMIN_TOKEN_CACHE"' EXIT
+
 # The newest *agent* release, resolved by tag rather than by asking
 # GitHub for "latest".
 #
@@ -661,13 +672,24 @@ EOF
 # OpenVPN's Protocol Config creation (unlike Xray/WireGuard, which set
 # themselves up node-locally) requires calling the backend's admin API
 # to generate the CA (see openvpn-pki.ts). Bash has no string return,
-# so callers do: token="$(get_admin_bearer_token)".
+# so callers do: token="$(get_admin_bearer_token)" -- which is exactly
+# why the cache below is a file rather than a variable.
 get_admin_bearer_token() {
-  # Cached for the whole install: every protocol registration and route
-  # creation needs it, and asking for the same password once per engine
-  # was both tedious and an easy way to mistype halfway through.
-  if [[ -n "${admin_token:-}" ]]; then
-    echo "$admin_token"
+  # Cached in a file, not a variable.
+  #
+  # A shell variable cannot work here and quietly did not: every caller
+  # uses `token="$(get_admin_bearer_token)"`, and command substitution
+  # runs the function in a subshell, so the assignment meant to cache
+  # the token was discarded the moment it returned. The result was a
+  # fresh login per protocol -- which registering a full node exceeds,
+  # since admin login is throttled to five attempts a minute. A real
+  # install died with HTTP 429 partway through, having already asked for
+  # the same password four times.
+  #
+  # 0600 and removed on exit. It holds a 15-minute access token, which
+  # deserves no less care than the password that produced it.
+  if [[ -s "$ADMIN_TOKEN_CACHE" ]]; then
+    cat "$ADMIN_TOKEN_CACHE"
     return 0
   fi
 
@@ -696,7 +718,13 @@ get_admin_bearer_token() {
     echo "ERROR: admin login failed -- check the email/password (and code, if MFA is enabled)." >&2
     return 1
   fi
-  admin_token="$access_token"
+  # Created empty, locked down, and only then written to. Writing first
+  # and chmod-ing after would leave the token world-readable for the
+  # instant in between, and relying on umask alone assumes an inherited
+  # value this script does not set.
+  : > "$ADMIN_TOKEN_CACHE"
+  chmod 600 "$ADMIN_TOKEN_CACHE"
+  printf '%s' "$access_token" > "$ADMIN_TOKEN_CACHE"
   echo "$access_token"
 }
 
