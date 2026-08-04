@@ -235,6 +235,16 @@ pub struct VlessTlsProfile {
     pub port: u16,
     /// The name to expect on the certificate, and the SNI to send.
     pub server_name: String,
+    /// Set when this inbound is carried inside a WebSocket rather than
+    /// raw over TCP.
+    ///
+    /// The same protocol is served both ways -- that is what the
+    /// server's `transport` column exists to express -- so the client
+    /// cannot infer the stream shape and a wrong guess fails the
+    /// handshake. `None` means TCP, which is what every node registered
+    /// before the column existed serves.
+    #[serde(default)]
+    pub ws_path: Option<String>,
 }
 
 /// Trojan over TLS.

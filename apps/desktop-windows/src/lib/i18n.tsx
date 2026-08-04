@@ -192,6 +192,12 @@ const en = {
   // Android only: this build carries one engine, and a customer who
   // picked another protocol deserves the reason rather than a silent
   // substitution.
+  // Shown when the control plane could not be reached and the screen is
+  // running on the cached snapshot. Names the age of the data, because
+  // the alternative is presenting a stale usage total as today's.
+  "dash.offlineTitle": "Can't reach Neoxify right now — you can still connect.",
+  "dash.offlineHint":
+    "Using your saved servers. Data usage and expiry were last updated {when} and may be out of date.",
   "dash.androidWireguardOnly":
     "{protocol} isn't in the Android app yet, so it will connect with Fast instead.",
   "settings.customAllApps": "No apps chosen yet, so every app uses the VPN. Pick one to route just that app.",
@@ -416,6 +422,9 @@ const fa: Record<TranslationKey, string> = {
   "settings.customFailOpen": "هنگام تعویض سرور، برنامه‌های انتخابی به‌جای قطع شدن، لحظه‌ای از اینترنت معمولی استفاده می‌کنند.",
   "settings.customTooMany": "حداکثر {max} برنامه می‌توانید انتخاب کنید.",
   "settings.customAlready": "این برنامه از قبل در فهرست است.",
+  "dash.offlineTitle": "در حال حاضر به Neoxify دسترسی نیست — همچنان می‌توانید متصل شوید.",
+  "dash.offlineHint":
+    "از سرورهای ذخیره‌شده استفاده می‌شود. مصرف داده و تاریخ انقضا آخرین بار در {when} به‌روز شده و ممکن است دقیق نباشد.",
   "dash.androidWireguardOnly":
     "پروتکل {protocol} هنوز در نسخه اندروید نیست، بنابراین با Fast متصل می‌شود.",
   "settings.customAllApps":

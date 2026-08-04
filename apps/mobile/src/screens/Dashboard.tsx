@@ -14,6 +14,7 @@ import { Logo } from "@shared/components/Logo";
 import { LocationPicker } from "@shared/components/LocationPicker";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
+import { clearSnapshot, loadSnapshot, saveSnapshot } from "@shared/lib/credential-cache";
 import { loadAllowedApps } from "../lib/per-app";
 import {
   connectWireGuard,
@@ -158,6 +159,9 @@ export function Dashboard({
   /** Set when the chosen server's protocol has no engine in this build,
    * so the reason is a missing feature rather than a blocked network. */
   const [unsupportedChoice, setUnsupportedChoice] = useState<string | null>(null);
+  /** When the shown data was last fetched, if the server could not be
+   * reached this time. Null means everything on screen is current. */
+  const [offlineSince, setOfflineSince] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   /** Set when the customer declined Android's VPN consent dialog. Shown
    * rather than swallowed: a refusal looks exactly like a failed connect
@@ -190,10 +194,31 @@ export function Dashboard({
         onLoggedOut();
         return;
       }
+      // The control plane is unreachable, which is not the same as the
+      // subscription being gone. Everything needed to build a tunnel was
+      // handed over last time, so fall back to it rather than stranding
+      // a paying customer whose nodes are perfectly reachable.
+      const cached = await loadSnapshot();
+      if (cached) {
+        setSubscription(cached.subscription);
+        setProtocolUsers(cached.protocolUsers);
+        setRoutes(cached.routes);
+        const preferred = preferRouteId ?? chosenRouteId;
+        setProtocolUser(
+          cached.protocolUsers.find((u) => u.routeId === preferred) ?? cached.protocolUsers[0] ?? null,
+        );
+        setOfflineSince(cached.savedAt);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+
       setError(!meResult.ok ? meResult.error : !subsResult.ok ? subsResult.error : t("dash.loadFailed"));
       setLoading(false);
       return;
     }
+
+    setOfflineSince(null);
 
     setMe(meResult.data);
     const sub = usableSubscription(subsResult.data);
@@ -203,10 +228,22 @@ export function Dashboard({
     setProtocolUser(usersResult.data.find((u) => u.routeId === chosen) ?? usersResult.data[0] ?? null);
     setLoading(false);
 
+    let currentRoutes: RouteOption[] = [];
     if (sub) {
       const routesResult = await getAvailableRoutes(sub.id);
-      if (routesResult.ok) setRoutes(routesResult.data);
+      if (routesResult.ok) {
+        currentRoutes = routesResult.data;
+        setRoutes(currentRoutes);
+      }
     }
+
+    // Only after a wholly successful fetch, so a partial answer cannot
+    // overwrite a good cache with a worse one.
+    void saveSnapshot({
+      subscription: sub,
+      protocolUsers: usersResult.data,
+      routes: currentRoutes,
+    });
 
     // The tunnel outlives the UI here even more than on Windows: Android
     // keeps a VpnService running with its own notification while the
@@ -416,6 +453,9 @@ export function Dashboard({
   }
 
   async function handleLogout() {
+    // Before the session goes: one customer's credentials left on the
+    // device for the next person to connect with is a leak, not a cache.
+    await clearSnapshot();
     await logout();
     onLoggedOut();
   }
@@ -497,6 +537,15 @@ export function Dashboard({
         </Card>
       ) : (
         <>
+          {offlineSince !== null ? (
+            <div className="animate-rise rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
+              <p className="text-xs font-medium text-warning">{t("dash.offlineTitle")}</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {t("dash.offlineHint", { when: new Date(offlineSince).toLocaleString() })}
+              </p>
+            </div>
+          ) : null}
+
           <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
             <span
               className={

@@ -60,7 +60,40 @@ function realityOutbound(user: ProtocolUser, params: Record<string, unknown>): J
   };
 }
 
-function vlessTlsOutbound(user: ProtocolUser, params: Record<string, unknown>): Json {
+/** The stream wrapper, which is where TCP and WebSocket differ.
+ *
+ * One function because everything else about a VLESS+TLS outbound is
+ * identical between them -- the credential, the address, the
+ * fingerprint. Only how the bytes are carried changes.
+ */
+function tlsStream(params: Record<string, unknown>, transport: string): Json {
+  const settings: Json = {
+    network: transport === "WS" ? "ws" : "tcp",
+    security: "tls",
+    tlsSettings: {
+      // Verified normally, with no allowInsecure escape hatch. A client
+      // that accepts any certificate hands its traffic to whoever is on
+      // the path, which is the opposite of the point.
+      serverName: params.serverName,
+      fingerprint: "chrome",
+      alpn: ["h2", "http/1.1"],
+    },
+  };
+
+  if (transport === "WS") {
+    settings.wsSettings = {
+      path: (params.path as string) || "/",
+      // Sent as the Host header. A WebSocket upgrade with no Host, or
+      // one that disagrees with the SNI, is a mismatch a censor can
+      // pick out precisely because no browser produces it.
+      host: params.serverName,
+    };
+  }
+
+  return settings;
+}
+
+function vlessTlsOutbound(user: ProtocolUser, params: Record<string, unknown>, transport: string): Json {
   return {
     tag: "proxy",
     protocol: "vless",
@@ -70,23 +103,16 @@ function vlessTlsOutbound(user: ProtocolUser, params: Record<string, unknown>): 
           address: user.connection.host,
           port: user.connection.port,
           users: [
+            // Empty over WebSocket: XTLS Vision needs a TLS record
+            // stream to splice into and there is none inside a
+            // WebSocket. The server clears it at generation, so this
+            // simply passes through whatever was issued.
             { id: user.credentials.uuid, encryption: "none", flow: user.credentials.flow ?? "" },
           ],
         },
       ],
     },
-    streamSettings: {
-      network: "tcp",
-      security: "tls",
-      tlsSettings: {
-        // Verified normally, with no allowInsecure escape hatch. A
-        // client that accepts any certificate hands its traffic to
-        // whoever is on the path, which is the opposite of the point.
-        serverName: params.serverName,
-        fingerprint: "chrome",
-        alpn: ["h2", "http/1.1"],
-      },
-    },
+    streamSettings: tlsStream(params, transport),
   };
 }
 
@@ -129,6 +155,9 @@ export function isXrayProtocol(protocol: string): boolean {
  */
 export function buildXrayConfig(user: ProtocolUser): string {
   const params = (user.connection.publicParams ?? {}) as Record<string, unknown>;
+  // Defaulted for nodes registered before the column existed, which were
+  // all plain TCP.
+  const transport = user.connection.transport ?? "TCP";
 
   let outbound: Json;
   switch (user.protocol) {
@@ -140,7 +169,7 @@ export function buildXrayConfig(user: ProtocolUser): string {
       break;
     case "XRAY_VLESS_TLS":
       if (!params.serverName) throw new Error("This server is missing its TLS server name");
-      outbound = vlessTlsOutbound(user, params);
+      outbound = vlessTlsOutbound(user, params, transport);
       break;
     case "XRAY_TROJAN":
       if (!params.serverName) throw new Error("This server is missing its TLS server name");
