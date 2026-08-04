@@ -201,6 +201,28 @@ export const structure = [
         preset: "readonly",
         topic: "Node and route status · وضعیت سرورها و مسیرها",
       },
+      // The next three hold self-updating panels written by the bot
+      // (apps/discord-bot/src/panels.ts). Read-only because their content is
+      // rewritten from live data every few minutes -- anything a person
+      // posted here would be noise next to a message that edits itself.
+      {
+        name: "⬇️・downloads",
+        type: TEXT,
+        preset: "readonly",
+        topic: "Every platform's newest build, updated automatically · دانلود آخرین نسخه",
+      },
+      {
+        name: "💳・plans",
+        type: TEXT,
+        preset: "readonly",
+        topic: "What is on sale right now, straight from the panel · پلن‌های فعلی",
+      },
+      {
+        name: "🔗・links",
+        type: TEXT,
+        preset: "readonly",
+        topic: "Official links, and what we will never ask you for · لینک‌های رسمی",
+      },
     ],
   },
   {
@@ -215,6 +237,15 @@ export const structure = [
         preset: "public",
         topic: "Any language welcome · به هر زبانی خوش آمدید",
         slowmode: 3,
+      },
+      // Read-only on purpose: the only thing to do here is press the button,
+      // which opens a private thread. A channel people could type in would
+      // fill with "hello?" messages nobody is watching.
+      {
+        name: "🎟️・open-a-ticket",
+        type: TEXT,
+        preset: "threadOnly",
+        topic: "Account, payment or log problems — opens a private thread · تیکت خصوصی پشتیبانی",
       },
       {
         name: "🖼️・showcase",

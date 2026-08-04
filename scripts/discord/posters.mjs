@@ -7,7 +7,7 @@
 import { Resvg } from "@resvg/resvg-js";
 import { mkdirSync, writeFileSync } from "node:fs";
 
-const OUT = new URL("./out/", import.meta.url);
+const OUT = new URL("./posters/", import.meta.url);
 mkdirSync(OUT, { recursive: true });
 
 const W = 1200;
@@ -73,6 +73,10 @@ const POSTERS = {
   resources: { kicker: "NEOXIFY", title: "Resources", subtitle: "Guides, links, and reference material." },
   "faq-fa": { kicker: "نئوکسیفای", title: "سوالات متداول", subtitle: "پرسش‌هایی که بیشتر پرسیده می‌شوند.", rtl: true },
   "resources-fa": { kicker: "نئوکسیفای", title: "منابع", subtitle: "راهنماها، لینک‌ها و منابع مفید.", rtl: true },
+  downloads: { kicker: "NEOXIFY", title: "Downloads", subtitle: "Windows and Android, always the newest build." },
+  plans: { kicker: "NEOXIFY", title: "Plans", subtitle: "What is on sale, straight from the panel." },
+  links: { kicker: "NEOXIFY", title: "Official Links", subtitle: "The only places we ever ask you to go." },
+  tickets: { kicker: "NEOXIFY", title: "Support Tickets", subtitle: "A private thread with the team, in one click." },
 };
 
 for (const [name, spec] of Object.entries(POSTERS)) {
@@ -83,6 +87,6 @@ for (const [name, spec] of Object.entries(POSTERS)) {
   })
     .render()
     .asPng();
-  writeFileSync(new URL(`./out/${name}.png`, import.meta.url), png);
+  writeFileSync(new URL(`${name}.png`, OUT), png);
   console.log(`  ${name}.png  ${(png.length / 1024).toFixed(0)} KB`);
 }
