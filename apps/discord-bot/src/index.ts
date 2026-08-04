@@ -3,6 +3,8 @@ import { Client, Events, GatewayIntentBits, REST, Routes, type Interaction } fro
 import { NeoxifyApi } from "./api.js";
 import { definitions, handle } from "./commands.js";
 import { loadConfig } from "./config.js";
+import { REFRESH_MS, refreshPanels } from "./panels.js";
+import { ensureTicketPanel, handleTicketButton, handleTicketModal, isTicketInteraction } from "./tickets.js";
 
 const config = loadConfig();
 const api = new NeoxifyApi(config);
@@ -28,9 +30,54 @@ async function registerCommands(): Promise<void> {
 
 client.once(Events.ClientReady, (ready) => {
   console.log(`Logged in as ${ready.user.tag}`);
+
+  // Panels are rewritten on boot and then on a timer, so a deploy is enough
+  // to correct one that drifted and nobody has to touch a Discord message
+  // by hand. Failures inside are logged per panel, never thrown.
+  const ctx = { api, config };
+  const tick = () => {
+    void refreshPanels(client, ctx, config.guildId);
+    void ensureTicketPanel(client, config, config.guildId);
+  };
+  tick();
+  const timer = setInterval(tick, REFRESH_MS);
+  timer.unref?.();
+});
+
+// Gateway lifecycle. Without these a dropped shard is completely silent:
+// the process stays up, the last line in the log is still "Logged in", and
+// every slash command hangs on "Sending command..." with nothing anywhere
+// saying why. That is exactly how the first deployment failed.
+client.on(Events.Error, (err) => console.error("client error:", err));
+client.on(Events.ShardError, (err, id) => console.error(`shard ${id} error:`, err));
+client.on(Events.ShardDisconnect, (event, id) =>
+  console.warn(`shard ${id} disconnected: ${event.code} ${event.reason || ""}`),
+);
+client.on(Events.ShardReconnecting, (id) => console.warn(`shard ${id} reconnecting`));
+client.on(Events.ShardResume, (id, replayed) => console.log(`shard ${id} resumed, replayed ${replayed} events`));
+client.on(Events.Invalidated, () => {
+  console.error("session invalidated by Discord; exiting so the restart policy reconnects");
+  process.exit(1);
 });
 
 async function onInteraction(interaction: Interaction): Promise<void> {
+  // Logged before anything can throw, so "did the event even arrive?" is
+  // answerable from the log rather than by inference.
+  console.log(
+    `interaction ${interaction.type} ` +
+      (interaction.isChatInputCommand() ? `/${interaction.commandName} ` : "") +
+      `from ${interaction.user?.tag ?? "?"}`,
+  );
+
+  if (interaction.isButton() && isTicketInteraction(interaction.customId)) {
+    await handleTicketButton(interaction);
+    return;
+  }
+  if (interaction.isModalSubmit() && isTicketInteraction(interaction.customId)) {
+    await handleTicketModal(interaction);
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   try {

@@ -180,6 +180,42 @@ export class UpdatesService {
    * Checked against the release rather than trusted from the path, and
    * rebuilt rather than echoed, so this endpoint cannot be turned into
    * an open redirect to an arbitrary URL. */
+  /** Every platform's newest build in one call, for surfaces that list
+   * downloads rather than perform one -- the website and the Discord bot.
+   *
+   * Each platform is resolved independently and a failure on one is
+   * reported as `null` rather than thrown: an Android release that has not
+   * happened yet, or a GitHub blip, must not stop the Windows download
+   * being shown. The caller decides what to say about a missing entry.
+   */
+  async releaseSummary(): Promise<PlatformRelease[]> {
+    const [windows, android] = await Promise.all([
+      this.newestBuild().catch(() => null),
+      this.newestAndroidBuild().catch(() => null),
+    ]);
+
+    return [
+      {
+        platform: "windows",
+        version: windows?.version ?? null,
+        url: windows
+          ? `https://github.com/${GITHUB_REPO}/releases/download/${encodeURIComponent(windows.tag)}/${encodeURIComponent(INSTALLER_ASSET)}`
+          : null,
+        publishedAt: windows?.publishedAt ?? null,
+      },
+      {
+        platform: "android",
+        version: android?.version ?? null,
+        url: android
+          ? `https://github.com/${GITHUB_REPO}/releases/download/${encodeURIComponent(android.tag)}/${encodeURIComponent(android.asset)}`
+          : null,
+        // The Android path reads its version from the APK filename rather
+        // than the release, so there is no publish date to report here.
+        publishedAt: null,
+      },
+    ];
+  }
+
   async downloadUrl(tag: string, assetName: string): Promise<string> {
     const newest = await this.newestBuild();
     if (!newest || newest.tag !== tag || newest.payloadName !== assetName) {
@@ -237,6 +273,14 @@ export class UpdatesService {
     this.cache = { at: Date.now(), build };
     return build;
   }
+}
+
+export interface PlatformRelease {
+  platform: "windows" | "android";
+  /** Null when no usable release exists yet, or the feed was unavailable. */
+  version: string | null;
+  url: string | null;
+  publishedAt: string | null;
 }
 
 interface NewestBuild {

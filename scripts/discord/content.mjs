@@ -26,6 +26,12 @@ export const channelPosters = {
   resources: "resources.png",
   "سوالات-متداول": "faq-fa.png",
   منابع: "resources-fa.png",
+  // These four sit above a panel the bot rewrites from live data. The
+  // poster is the static header; everything under it maintains itself.
+  downloads: "downloads.png",
+  plans: "plans.png",
+  links: "links.png",
+  "open-a-ticket": "tickets.png",
 };
 
 export const channelContent = {
@@ -76,6 +82,13 @@ export const channelContent = {
   announcements: [],
   releases: [],
   "server-status": [],
+  // Poster only. The bot posts and maintains the actual content below it
+  // (apps/discord-bot/src/panels.ts), so anything written here would be a
+  // second, stale copy of the same thing.
+  downloads: [],
+  plans: [],
+  links: [],
+  "open-a-ticket": [],
 
   faq: [
     [

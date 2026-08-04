@@ -7,6 +7,14 @@ export interface StatusSummary {
   checkedAt: string;
 }
 
+export interface PlatformRelease {
+  platform: "windows" | "android";
+  /** Null when nothing is released for that platform yet, or the feed failed. */
+  version: string | null;
+  url: string | null;
+  publishedAt: string | null;
+}
+
 export interface PublicPlan {
   name: string;
   priceUsd: string;
@@ -81,5 +89,9 @@ export class NeoxifyApi {
 
   download(): Promise<{ installerUrl: string | null }> {
     return this.get<{ installerUrl: string | null }>("/integrations/download");
+  }
+
+  releases(): Promise<PlatformRelease[]> {
+    return this.get<PlatformRelease[]>("/integrations/releases");
   }
 }
