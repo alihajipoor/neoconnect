@@ -11,6 +11,56 @@ export class SubscriptionsService {
     private readonly protocolUsers: ProtocolUsersService,
   ) {}
 
+  /** Gives a customer a plan, ready to use.
+   *
+   * `create()` on its own writes the row and stops -- it does not
+   * provision anything, because the purchase flow provisions later,
+   * when the payment clears. An operator assigning a plan by hand has
+   * no such second step, so a subscription created that way would look
+   * correct in the panel and leave the customer unable to connect.
+   * This is create-and-provision, which is what "assign a plan"
+   * actually means. */
+  async assign(customerId: string, planId: string) {
+    const subscription = await this.create({ customerId, planId });
+    await this.protocolUsers.provisionAll(subscription.id);
+    return this.get(subscription.id);
+  }
+
+  /** Moves an existing subscription onto a different plan.
+   *
+   * The data cap is re-snapshotted, because the subscription carries
+   * its own copy rather than reading through to the plan -- that is
+   * what stops a later plan edit rewriting what someone already
+   * bought, and it means a plan change has to update it explicitly.
+   *
+   * Credentials are then topped up for whatever the new plan allows.
+   * A plan that permits more protocols than the old one needs the
+   * extra ones provisioned or the customer simply cannot use what they
+   * were moved onto. provisionAll only adds what is missing, so this is
+   * safe to run on a subscription that already has most of them.
+   *
+   * The expiry is left alone. Changing plan is not the same as renewing
+   * it, and silently moving somebody's end date -- in either direction
+   * -- is not something to infer. */
+  async changePlan(id: string, planId: string) {
+    await this.get(id);
+    const plan = await this.prisma.subscriptionPlan.findUnique({ where: { id: planId } });
+    if (!plan) throw new BadRequestException("Plan not found");
+    if (!plan.isActive) throw new BadRequestException("Plan is not active");
+
+    await this.prisma.subscription.update({
+      where: { id },
+      data: {
+        planId,
+        dataCapBytes: plan.dataCapBytes,
+        // The old cap's warning has nothing to say about the new one.
+        lowDataWarningSentAt: null,
+      },
+    });
+    await this.protocolUsers.provisionAll(id);
+    return this.get(id);
+  }
+
   /** Sets a subscription's status and brings the nodes in line with it.
    *
    * The second half is the part that matters and the part that is easy
