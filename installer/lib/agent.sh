@@ -289,7 +289,18 @@ HTML
 
   cat > /etc/nginx/sites-available/neoxify-fallback <<CONF
 server {
-    listen 127.0.0.1:8080;
+    # proxy_protocol because Xray's fallback opens a fresh loopback
+    # connection to get here. Without it nginx sees 127.0.0.1 as the
+    # client for every request, which makes the API mirror above report
+    # the wrong address to /health/ip -- breaking the check that proves
+    # a tunnel carries traffic -- and puts every customer arriving
+    # through this node into a single rate-limit bucket.
+    #
+    # Paired with "xver": 1 on the Xray fallbacks; neither works alone.
+    listen 127.0.0.1:8080 proxy_protocol;
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
     server_name _;
     root /var/www/neoxify-fallback;
     index index.html;

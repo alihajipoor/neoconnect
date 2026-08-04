@@ -51,7 +51,8 @@
         "decryption": "none",
         "fallbacks": [
           {
-            "dest": "__TROJAN_FALLBACK__"
+            "dest": "__TROJAN_FALLBACK__",
+            "xver": 1
           }
         ]
       },
@@ -78,7 +79,8 @@
         "clients": [],
         "fallbacks": [
           {
-            "dest": "__TROJAN_FALLBACK__"
+            "dest": "__TROJAN_FALLBACK__",
+            "xver": 1
           }
         ]
       },
