@@ -93,7 +93,7 @@ export function ticketPanelEmbed(config: BotConfig): EmbedBuilder {
         "Config files, keys, subscription links, or invoices — not even in a ticket screenshot. " +
         "Staff will ask for your **email or order time**, never your password.",
     })
-    .setFooter({ text: `${PANEL_MARKER} · ${config.panelUrl}` });
+    .setFooter({ text: `${PANEL_MARKER} · ${config.websiteUrl}` });
 }
 
 function staffRoleIds(guild: Guild): string[] {

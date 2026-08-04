@@ -51,7 +51,7 @@ export const channelContent = {
       "",
       "**Links · لینک‌ها**",
       "- <https://neoxify.net> — download · دانلود",
-      "- <https://connect.neoxify.com> — account, plans, invoices · حساب کاربری، پلن‌ها، فاکتورها",
+      "- Your subscription lives **in the app** · اشتراک شما داخل خود برنامه مدیریت می‌شود",
     ].join("\n"),
 
     [
@@ -102,7 +102,7 @@ export const channelContent = {
       "Yes. Split tunneling lets you choose per application. Ask in `split-tunneling` for help setting it up.",
       "",
       "**How many devices can I use?**",
-      "Depends on your plan. Your limit and active devices are at <https://connect.neoxify.com>.",
+      "Depends on your plan. Your limit and active devices are shown in the app, under Settings.",
     ].join("\n"),
 
     [
@@ -124,7 +124,7 @@ export const channelContent = {
     [
       "**Official**",
       "- Website and downloads — <https://neoxify.net>",
-      "- Account, plans, invoices, devices — <https://connect.neoxify.com>",
+      "- Your plan, invoices and devices — in the app, under Settings",
       "",
       "**In this server**",
       "- `faq` — the short answers",
@@ -150,7 +150,7 @@ export const channelContent = {
       "بله. تونل تفکیکی این امکان را برای هر برنامه جداگانه می‌دهد. برای راهنمایی در `تونل-تفکیکی` بپرسید.",
       "",
       "**روی چند دستگاه می‌توانم استفاده کنم؟**",
-      "بستگی به پلن شما دارد. سقف و دستگاه‌های فعالتان در <https://connect.neoxify.com> آمده است.",
+      "بستگی به پلن شما دارد. سقف و دستگاه‌های فعالتان در خود برنامه، بخش تنظیمات، نمایش داده می‌شود.",
     ].join("\n"),
 
     [
@@ -172,7 +172,7 @@ export const channelContent = {
     [
       "**رسمی**",
       "- وب‌سایت و دانلود — <https://neoxify.net>",
-      "- حساب کاربری، پلن‌ها، فاکتورها، دستگاه‌ها — <https://connect.neoxify.com>",
+      "- پلن، فاکتورها و دستگاه‌ها — داخل برنامه، بخش تنظیمات",
       "",
       "**در همین سرور**",
       "- `سوالات-متداول` — پاسخ‌های کوتاه",

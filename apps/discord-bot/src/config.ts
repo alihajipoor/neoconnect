@@ -12,7 +12,6 @@ export interface BotConfig {
   apiBaseUrl: string;
   serviceToken: string;
   websiteUrl: string;
-  panelUrl: string;
 }
 
 function required(name: string): string {
@@ -34,9 +33,22 @@ export function loadConfig(): BotConfig {
     apiBaseUrl: required("NEOXIFY_API_URL").replace(/\/+$/, ""),
     serviceToken: required("INTEGRATIONS_SERVICE_TOKEN"),
     websiteUrl: process.env.NEOXIFY_WEBSITE_URL?.trim() || "https://neoxify.net",
-    panelUrl: process.env.NEOXIFY_PANEL_URL?.trim() || "https://connect.neoxify.com",
   };
 }
+
+/**
+ * Deliberately absent: the operator panel's address.
+ *
+ * connect.neoxify.com serves apps/panel -- the admin dashboard, with
+ * customers, invoices, nodes and settings on it. There is no customer web
+ * portal there; members manage their subscription in the app. An earlier
+ * version of this bot carried that host as `panelUrl` and printed it to a
+ * public channel labelled "Your account", which is both wrong and an
+ * address the community has no reason to know.
+ *
+ * It is not configurable here on purpose. A value the process never holds
+ * cannot be pasted into an embed by the next person editing this file.
+ */
 
 /** The product palette's primary violet, as Discord wants it: a plain int. */
 export const BRAND_COLOUR = 0x8b5cf6;
