@@ -1,11 +1,102 @@
 import { SubscriptionStatus } from "@prisma/client";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreateSubscriptionDto } from "./dto/create-subscription.dto";
 
 @Injectable()
 export class SubscriptionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly protocolUsers: ProtocolUsersService,
+  ) {}
+
+  /** Sets a subscription's status and brings the nodes in line with it.
+   *
+   * The second half is the part that matters and the part that is easy
+   * to leave out: a subscription marked SUSPENDED whose credentials are
+   * still enabled is a customer who carries on using the service. The
+   * database would say suspended and the node would disagree, which is
+   * the worse of the two to be wrong about.
+   *
+   * Only ACTIVE leaves credentials enabled. Suspended, expired and
+   * cancelled all mean "cannot connect", so they all disable. */
+  async setStatus(id: string, status: SubscriptionStatus) {
+    await this.get(id);
+    const enabled = status === SubscriptionStatus.ACTIVE;
+
+    await this.prisma.subscription.update({ where: { id }, data: { status } });
+    await this.applyEnabled(id, enabled);
+    return this.get(id);
+  }
+
+  /** Moves the expiry out by a number of days.
+   *
+   * Extends from whichever is later, now or the current expiry, so
+   * extending an already-lapsed subscription gives the full period
+   * rather than silently burning most of it on time already past.
+   *
+   * Reactivating is deliberately not folded in here. An operator
+   * extending a suspended subscription has not necessarily decided to
+   * un-suspend it, and guessing wrong would put someone back online who
+   * was taken off on purpose. Status is its own action. */
+  async extend(id: string, days: number) {
+    const subscription = await this.get(id);
+    const from = Math.max(Date.now(), subscription.expireAt.getTime());
+    const expireAt = new Date(from + days * 86_400_000);
+
+    await this.prisma.subscription.update({
+      where: { id },
+      // The expiry warning is about the old date and would otherwise
+      // never fire again for the new one.
+      data: { expireAt, expiryWarningSentAt: null },
+    });
+    return this.get(id);
+  }
+
+  /** Zeroes the usage counter for the current period.
+   *
+   * Does not touch status, for the same reason extend does not: a
+   * subscription can be suspended for reasons other than its data cap,
+   * and resurrecting one that was suspended deliberately would be a
+   * surprise. The append-only UsageRecord history is untouched -- this
+   * resets the counter the cap is compared against, not the record of
+   * what was used. */
+  async resetUsage(id: string) {
+    await this.get(id);
+    await this.prisma.subscription.update({
+      where: { id },
+      data: { dataUsedBytes: 0, lowDataWarningSentAt: null },
+    });
+    return this.get(id);
+  }
+
+  /** Removes a subscription and the credentials it provisioned.
+   *
+   * Credentials first, so each one gets its DELETE_USER command to the
+   * node it lives on. Dropping the subscription row first would orphan
+   * them: the rows would go, and the users would carry on existing in
+   * the engines with nothing left to say they should not. */
+  async remove(id: string) {
+    await this.get(id);
+    const users = await this.prisma.protocolUser.findMany({ where: { subscriptionId: id } });
+    for (const user of users) {
+      await this.protocolUsers.remove(user.id);
+    }
+    await this.prisma.subscription.delete({ where: { id } });
+    return { deleted: true };
+  }
+
+  private async applyEnabled(subscriptionId: string, enabled: boolean) {
+    const users = await this.prisma.protocolUser.findMany({ where: { subscriptionId } });
+    for (const user of users) {
+      // Already in the wanted state: skip rather than enqueue a command
+      // the node would only have to ignore.
+      const alreadyRight = enabled ? user.status === "ACTIVE" : user.status === "DISABLED";
+      if (alreadyRight) continue;
+      await this.protocolUsers.setEnabled(user.id, enabled);
+    }
+  }
 
   list() {
     return this.prisma.subscription.findMany({ orderBy: { createdAt: "desc" } });
