@@ -57,7 +57,6 @@ nodes are up".
 | `NEOXIFY_API_URL`            | yes      | Backend base URL, e.g. `http://backend:4000`   |
 | `INTEGRATIONS_SERVICE_TOKEN` | yes      | Must match the backend's value                 |
 | `NEOXIFY_WEBSITE_URL`        | no       | Defaults to `https://neoxify.net`              |
-| `NEOXIFY_PANEL_URL`          | no       | Defaults to `https://connect.neoxify.com`      |
 
 Every required variable is checked at boot and the process exits if one is
 missing. A bot that starts without an API URL looks healthy in `docker ps` and
