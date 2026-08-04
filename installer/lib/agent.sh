@@ -164,6 +164,23 @@ EOF
   install -d -m 755 /etc/neoxify
   echo "agent" > /etc/neoxify/role
 
+  # Started here, before any protocol is registered, and deliberately
+  # not at the end.
+  #
+  # It used to run last, so anything that failed during registration --
+  # a rate limit, an unset variable, a bad password -- left a node with
+  # its engines installed, its configs in the panel, and the agent never
+  # switched on. Nothing said so: the error was about whatever had
+  # actually failed, and the missing agent was silent. A real second-node
+  # install ended exactly there, showing PENDING with no clue why, and
+  # the fix was a single `systemctl start` nobody knew to run.
+  #
+  # An agent with no protocols yet is harmless -- it connects, reports
+  # in, and has nothing to do. So the ordering costs nothing and means a
+  # partial install leaves something alive and visible in the panel
+  # rather than something that looks finished and is inert.
+  start_agentd
+
   echo
   read -r -p "Install Xray (VLESS+REALITY) on this node now? [Y/n]: " install_xray_choice
   if [[ "${install_xray_choice,,}" != "n" ]]; then
@@ -182,11 +199,10 @@ EOF
     install_openvpn
   fi
 
-  start_agentd
   cat <<EOF
 
 Done. "$node_name" is registered with its engines and routes, and should
-show as ONLINE in the panel within a few seconds.
+already show as ONLINE in the panel.
 
 Nothing further to configure by hand -- customers can select it as soon
 as it reports in. To change ports or parameters later, edit the Protocol
