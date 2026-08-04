@@ -82,10 +82,8 @@ require NX_INC . '/partials/announcement.php';
         <div class="app">
           <div class="app__head">
             <span class="app__brand">
-              <?php /* The real app still ships the old bolt mark -- the site
-                       is deliberately ahead of it here, same as the renamed
-                       windows_asset in config. Update this if the app's own
-                       logo lands as something different. */ ?>
+              <?php /* Mirrors the app's own mark. Update this if the app's
+                       logo ever diverges from the site's. */ ?>
               <span class="app__mark"><?php echo nx_logo_mark(); ?></span>
               <?php echo nx_e('brand.name'); ?>
             </span>

@@ -227,8 +227,8 @@ return array(
 
     'download.windows.name' => 'ویندوز',
     'download.windows.requirements' => 'ویندوز ۱۰ یا ۱۱، ۶۴ بیتی',
-    'download.windows.version' => 'نسخه :version',
     'download.windows.button' => 'دانلود برای ویندوز',
+    'download.windows.always_current' => 'همیشه آخرین نسخه',
     'download.windows.checksum' => 'کدهای بررسی SHA-256',
 
     'download.unreleased.badge' => 'به‌زودی',
@@ -240,7 +240,7 @@ return array(
     'download.autoupdate.body' => 'پس از نصب، برنامه خودش را به‌روز نگه می‌دارد — نسخه‌های جدید را بررسی و خودش نصب می‌کند. برای نسخه بعدی لازم نیست دوباره به این صفحه برگردید.',
 
     'download.unsigned.title' => 'درباره هشداری که ویندوز نشان می‌دهد',
-    'download.unsigned.body' => 'فایل نصب هنوز امضای دیجیتال ندارد، بنابراین ممکن است اولین بار که آن را اجرا می‌کنید ویندوز صفحه آبی «Windows protected your PC» را نشان دهد. روی More info و سپس Run anyway بزنید. تهیه گواهی امضا پیش از انتشار عمومی در برنامه ماست؛ تا آن زمان می‌توانید فایل دانلودشده را با کد SHA-256 منتشرشده خودتان بررسی کنید.',
+    'download.unsigned.body' => 'فایل نصب هنوز امضای دیجیتال ندارد، بنابراین ممکن است اولین بار که آن را اجرا می‌کنید ویندوز صفحه آبی «Windows protected your PC» را نشان دهد. روی More info و سپس Run anyway بزنید. تهیه گواهی امضا پیش از انتشار عمومی در برنامه ماست. تا آن زمان، فقط از همین صفحه دانلود کنید — دکمه این صفحه همیشه از سمت ماست.',
 
     'download.steps.title' => 'نصب',
     'download.steps.1' => 'فایل نصب را اجرا کنید. فقط برای حساب کاربری خودتان نصب می‌شود و دسترسی مدیر سیستم نمی‌خواهد.',

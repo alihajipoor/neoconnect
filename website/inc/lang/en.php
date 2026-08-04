@@ -246,8 +246,8 @@ return array(
 
     'download.windows.name' => 'Windows',
     'download.windows.requirements' => 'Windows 10 or 11, 64-bit',
-    'download.windows.version' => 'Version :version',
     'download.windows.button' => 'Download for Windows',
+    'download.windows.always_current' => 'Always the current version',
     'download.windows.checksum' => 'SHA-256 checksums',
 
     'download.unreleased.badge' => 'Releasing soon',
@@ -259,7 +259,7 @@ return array(
     'download.autoupdate.body' => 'Once it is installed, the app keeps itself up to date — it checks for new versions and installs them on its own. You will not have to come back to this page for the next release.',
 
     'download.unsigned.title' => 'About the warning Windows will show you',
-    'download.unsigned.body' => 'The installer is not code-signed yet, so Windows SmartScreen may show a blue "Windows protected your PC" screen the first time you run it. Choose More info, then Run anyway. A signing certificate is on the list before public launch; until then you can verify the download yourself against the published SHA-256 checksum.',
+    'download.unsigned.body' => 'The installer is not code-signed yet, so Windows SmartScreen may show a blue "Windows protected your PC" screen the first time you run it. Choose More info, then Run anyway. A signing certificate is on the list before public launch. Until then, only ever download from this page — the button here always comes from us.',
 
     'download.steps.title' => 'Installing',
     'download.steps.1' => 'Run the installer. It installs for your user account only and does not ask for administrator rights.',

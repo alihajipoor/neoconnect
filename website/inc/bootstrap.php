@@ -218,11 +218,6 @@ function nx_asset($relative)
     return $url;
 }
 
-/** The GitHub repository's public URL. */
-function nx_github_url($path = '')
-{
-    return 'https://github.com/' . nx_cfg('github_repo') . $path;
-}
 
 
 // ---------------------------------------------------------------------
@@ -230,39 +225,35 @@ function nx_github_url($path = '')
 // ---------------------------------------------------------------------
 
 /**
- * Whether a real, published Windows installer exists to link to.
+ * Whether there is a Windows installer to link to.
  *
- * Guarded by config rather than assumed: the release workflow exists but a
- * desktop-v* tag has to actually be pushed before the asset URL resolves.
- * Until then the download page says so plainly instead of 404ing visitors.
+ * Config decides, rather than the page assuming: with no URL set the download
+ * page says the app is not out yet instead of offering a dead button.
  *
  * @return bool
  */
 function nx_windows_available()
 {
-    $tag = trim((string) nx_cfg('windows_release_tag', ''));
-    return $tag !== '';
+    return nx_windows_download_url() !== '';
 }
 
-/** Direct download URL for the Windows installer, or '' if unreleased. */
+/**
+ * Download URL for the Windows installer, or '' if unreleased.
+ *
+ * A single configured URL that always resolves to the current release -- the
+ * site deliberately holds no version number or release tag of its own, since
+ * that is exactly what silently went stale and served an old build. See the
+ * note in config.php.
+ */
 function nx_windows_download_url()
 {
-    if (!nx_windows_available()) {
-        return '';
-    }
-    return nx_github_url('/releases/download/'
-        . rawurlencode(nx_cfg('windows_release_tag'))
-        . '/' . rawurlencode(nx_cfg('windows_asset')));
+    return trim((string) nx_cfg('windows_installer_url', ''));
 }
 
-/** URL of the checksum file published alongside the installer, or ''. */
+/** URL of published checksums, or '' when none is configured. */
 function nx_windows_checksum_url()
 {
-    if (!nx_windows_available()) {
-        return '';
-    }
-    return nx_github_url('/releases/download/'
-        . rawurlencode(nx_cfg('windows_release_tag')) . '/sha256sums.txt');
+    return trim((string) nx_cfg('windows_checksums_url', ''));
 }
 
 
