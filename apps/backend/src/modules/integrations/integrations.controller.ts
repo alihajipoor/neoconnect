@@ -27,4 +27,9 @@ export class IntegrationsController {
   download() {
     return this.integrations.download();
   }
+
+  @Get("releases")
+  releases() {
+    return this.integrations.releases();
+  }
 }

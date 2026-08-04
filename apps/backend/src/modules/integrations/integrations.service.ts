@@ -2,7 +2,7 @@ import { Injectable } from "@nestjs/common";
 
 import { PrismaService } from "../../prisma/prisma.service";
 import { PlansService } from "../plans/plans.service";
-import { UpdatesService } from "../updates/updates.service";
+import { UpdatesService, type PlatformRelease } from "../updates/updates.service";
 
 /** A node is considered stale once it has been quiet for this long, even if
  * its stored status still says ONLINE. The heartbeat sweep flips the column
@@ -129,6 +129,24 @@ export class IntegrationsService {
       // The updates feed is upstream and occasionally unavailable. A bot
       // reply of "download from the website" beats a 500.
       return { installerUrl: null };
+    }
+  }
+
+  /**
+   * Every platform's newest build, for the download panel the bot keeps
+   * up to date in Discord.
+   *
+   * This is what makes that panel self-maintaining: it reads the same
+   * GitHub releases the in-app updater does, so tagging a release is the
+   * only action needed and the Discord post follows on its own.
+   */
+  async releases(): Promise<PlatformRelease[]> {
+    try {
+      return await this.updates.releaseSummary();
+    } catch {
+      // Same reasoning as download(): the panel says "check the website"
+      // rather than the bot erroring in a public channel.
+      return [];
     }
   }
 }
