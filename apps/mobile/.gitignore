@@ -35,5 +35,16 @@ src-tauri/target/
 .gradle/
 local.properties
 *.apk
+# apksigner's v4 signature block, written beside the APK.
+*.idsig
 *.aab
 *.keystore
+
+# The Android release signing key and its password.
+#
+# Never commit either. Android identifies an app by its signing key, so
+# once a build is installed anywhere, every future update MUST be signed
+# with this exact key -- losing it means a new package the tablet treats
+# as a different app, with no upgrade path. Back it up somewhere outside
+# this machine.
+.signing/

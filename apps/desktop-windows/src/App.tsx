@@ -12,6 +12,7 @@ import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
+import { CustomModeCard } from "./components/CustomModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 
@@ -202,6 +203,7 @@ export default function App() {
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
         onOpenSupport={() => setScreen("support")}
+        customSection={<CustomModeCard />}
       />
     );
   }

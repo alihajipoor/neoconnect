@@ -180,6 +180,20 @@ const en = {
   "settings.customFailOpen": "While the app is switching servers, chosen apps briefly use your normal connection instead of stalling.",
   "settings.customTooMany": "You can choose up to {max} apps.",
   "settings.customAlready": "That app is already on the list.",
+  // Android picks from the installed-app list rather than a file
+  // dialog, so these have no Windows counterpart.
+  //
+  // customAllApps is not a translation of customNoApps -- it is the
+  // opposite fact. On Windows, on-with-nothing-chosen routes nothing;
+  // on Android an empty allow-list would route nothing at all, so the
+  // app falls back to a full tunnel instead. Same toggle state, opposite
+  // consequence, and telling somebody the wrong one is worse than saying
+  // nothing.
+  "settings.customAllApps": "No apps chosen yet, so every app uses the VPN. Pick one to route just that app.",
+  "settings.customHintNative": "Send only the apps you choose through the VPN. Everything else uses your normal connection.",
+  "settings.customSearch": "Search apps",
+  "settings.customNoMatches": "No apps match that.",
+  "settings.customClear": "Clear selection",
   "settings.mismatch": "These don't match.",
 
   "dash.subscription": "Subscription",
@@ -397,6 +411,13 @@ const fa: Record<TranslationKey, string> = {
   "settings.customFailOpen": "هنگام تعویض سرور، برنامه‌های انتخابی به‌جای قطع شدن، لحظه‌ای از اینترنت معمولی استفاده می‌کنند.",
   "settings.customTooMany": "حداکثر {max} برنامه می‌توانید انتخاب کنید.",
   "settings.customAlready": "این برنامه از قبل در فهرست است.",
+  "settings.customAllApps":
+    "هنوز برنامه‌ای انتخاب نشده، پس همه برنامه‌ها از VPN عبور می‌کنند. برای عبور فقط یک برنامه، آن را انتخاب کنید.",
+  "settings.customHintNative":
+    "فقط برنامه‌هایی که انتخاب می‌کنید از VPN عبور می‌کنند. بقیه از اینترنت معمولی استفاده می‌کنند.",
+  "settings.customSearch": "جست‌وجوی برنامه‌ها",
+  "settings.customNoMatches": "برنامه‌ای با این نام پیدا نشد.",
+  "settings.customClear": "پاک کردن انتخاب‌ها",
   "settings.mismatch": "یکسان نیستند.",
 
   "dash.subscription": "اشتراک",

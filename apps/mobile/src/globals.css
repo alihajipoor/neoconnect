@@ -1,0 +1,46 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Tailwind's automatic content detection roots at this file, which would
+   find only apps/mobile. Most of what this app renders lives in the
+   Windows client's tree, and without this every class used exclusively
+   over there -- which is most of them -- would be absent from the bundle.
+   The app would look unstyled and nothing would say why. */
+@source "../src";
+@source "../../desktop-windows/src";
+
+/* The same tokens, base layer and utilities the Windows client uses. One
+   file, shared by reference, so the two clients cannot drift into looking
+   like different products. */
+@import "../../desktop-windows/src/theme.css";
+
+@layer base {
+  body {
+    /* A phone scrolls; a fixed 400x640 desktop window does not. This is
+       the counterpart to the Windows client's `overflow: hidden`, and the
+       reason that rule lives in each app rather than in the shared theme.
+       Without it a screen taller than the viewport -- the plan list, the
+       installed-app picker -- would simply be cut off. */
+    overflow-y: auto;
+    /* Chrome's overscroll glow inside a WebView reads as the app coming
+       loose from its own frame. */
+    overscroll-behavior-y: none;
+  }
+
+  /* Keeps content clear of the notch, the status bar and the gesture
+     handle. Tauri draws into the full window on Android, so nothing does
+     this for us -- without it the header sits under the clock. */
+  #root {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    box-sizing: border-box;
+  }
+
+  /* A tap on Android otherwise flashes a grey box over the tapped
+     element, on top of the app's own press animation. */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+}

@@ -1,0 +1,119 @@
+name: Release Android
+
+# Builds the Android client into one signed APK and publishes it as a
+# GitHub Release asset whenever an android-v* tag is pushed.
+#
+# Its own tag prefix, like desktop-v* and the agent's v*, because the
+# three ship on independent schedules and because the API resolves
+# "newest release" per prefix -- a desktop release once hijacked the
+# agent installer's download URL precisely because they shared one.
+#
+# The published asset is Neoxify-<version>.apk, and the API's
+# /updates/installer/android reads the version out of that filename
+# rather than out of the tag. Same reasoning as the desktop path: the
+# filename is written by the build from the version compiled in, so it
+# cannot disagree with what the app reports about itself.
+on:
+  push:
+    tags:
+      - "android-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install the NDK
+        run: |
+          sdkmanager --install "ndk;26.1.10909125" "platforms;android-36" "build-tools;34.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+
+      - run: pnpm install --frozen-lockfile
+
+      # Same guard as the Windows release, and it exists because the
+      # unguarded version shipped a real mistake: desktop-v0.9.0 was
+      # pushed against a tree still at 0.8.0 and published a 0.8.0
+      # installer under a 0.9.0 name. Prose warnings did not prevent it,
+      # so the pipeline refuses it instead.
+      - name: Check the tag matches the app version
+        run: |
+          tagged="${GITHUB_REF_NAME#android-v}"
+          built=$(node -p "require('./apps/mobile/src-tauri/tauri.conf.json').version")
+          if [ "$tagged" != "$built" ]; then
+            echo "Tag $GITHUB_REF_NAME says $tagged but the app is built as $built." >&2
+            echo "Bump package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json, commit, then tag." >&2
+            exit 1
+          fi
+          echo "tag and app agree on $built"
+
+      # Android identifies an app by its signing key. Every update has
+      # to be signed with the same one the customer already installed,
+      # or the system treats it as an unrelated package and offers no
+      # upgrade path -- so an unsigned or differently-signed release is
+      # not a lesser release, it is a dead end. Fail loudly rather than
+      # publish one.
+      - name: Check the signing key is present
+        run: |
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD}" ]; then
+            echo "ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD are not set." >&2
+            echo "Without them this would publish an APK nobody can upgrade to." >&2
+            exit 1
+          fi
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+
+      - name: Generate the Android project
+        working-directory: apps/mobile
+        run: pnpm exec tauri android init
+
+      - name: Build
+        working-directory: apps/mobile
+        run: pnpm exec tauri android build --apk --target aarch64
+
+      - name: Sign
+        working-directory: apps/mobile
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#android-v}"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
+          unsigned=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-unsigned.apk' | head -1)
+          echo "Signing $unsigned"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
+            --ks keystore.jks \
+            --ks-key-alias neoxify \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --key-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --out "Neoxify-$version.apk" \
+            "$unsigned"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "Neoxify-$version.apk"
+          rm -f keystore.jks
+          sha256sum "Neoxify-$version.apk" > sha256sums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            apps/mobile/Neoxify-*.apk
+            apps/mobile/sha256sums.txt
+          generate_release_notes: true
