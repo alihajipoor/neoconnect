@@ -25,8 +25,11 @@ it landed on rather than claiming success silently.
 An Android client (`apps/mobile`, Tauri) sharing the Windows client's
 screens by direct import rather than by copy -- everything but the
 dashboard, which drives a `VpnService` instead of a privileged Windows
-service. WireGuard only so far, via WireGuard's own embeddable tunnel
-library.
+service. Four of the five protocols: WireGuard via the maintainers'
+own embeddable tunnel library, and Stealth, Stealth HTTPS and Stealth
+Lite via xray-core compiled into the app with gomobile. OpenVPN is
+absent for a licensing reason, not an unfinished one -- the usable
+Android implementation is GPLv2.
 
 **Custom mode.** Per-application split tunnel -- route one game or one
 browser and leave everything else alone. On Windows it follows whichever
@@ -147,7 +150,8 @@ Same shape, own tag prefix. Bump the version in
 git tag android-v0.1.0 && git push origin android-v0.1.0
 ```
 
-GitHub Actions builds and signs `Neoxify-<version>.apk`. The download
+GitHub Actions compiles xray-core with gomobile, builds and signs
+`Neoxify-<version>.apk`. The download
 link is `https://connect.neoxify.com/api/updates/installer/android`, which
 resolves to the newest `android-v*` release.
 

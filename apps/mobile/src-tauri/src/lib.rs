@@ -13,6 +13,7 @@ pub fn run() {
             tauri_plugin_neoxify_vpn::vpn_has_permission,
             tauri_plugin_neoxify_vpn::vpn_request_permission,
             tauri_plugin_neoxify_vpn::vpn_connect_wireguard,
+            tauri_plugin_neoxify_vpn::vpn_connect_xray,
             tauri_plugin_neoxify_vpn::vpn_disconnect,
             tauri_plugin_neoxify_vpn::vpn_status,
             tauri_plugin_neoxify_vpn::vpn_list_apps

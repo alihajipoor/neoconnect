@@ -61,6 +61,25 @@ export const requestVpnPermission = () => invoke<{ granted: boolean }>("vpn_requ
 export const connectWireGuard = (profile: WireGuardProfile) =>
   invoke<void>("vpn_connect_wireguard", { profile });
 
+/** What the Xray engine needs.
+ *
+ * The config crosses as a finished JSON string rather than as fields:
+ * the shape of a REALITY or Trojan outbound is protocol knowledge, it
+ * already lives in xray-config.ts beside the credential types, and
+ * rebuilding it on the Kotlin side would mean two places to keep in
+ * step with the server. */
+export interface XrayProfile {
+  config: string;
+  /** Reported back by `status`, so the UI can name what it landed on. */
+  protocol: string;
+  dns: string;
+  mtu: number;
+  allowedApps: string[];
+}
+
+export const connectXray = (profile: XrayProfile) =>
+  invoke<void>("vpn_connect_xray", { profile });
+
 export const disconnect = () => invoke<void>("vpn_disconnect");
 
 export const vpnStatus = () => invoke<VpnStatus>("vpn_status");

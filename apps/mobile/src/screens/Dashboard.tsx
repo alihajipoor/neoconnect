@@ -17,12 +17,14 @@ import { useI18n } from "@shared/lib/i18n";
 import { loadAllowedApps } from "../lib/per-app";
 import {
   connectWireGuard,
+  connectXray,
   disconnect,
   hasVpnPermission,
   requestVpnPermission,
   vpnStatus,
   type VpnStatus,
 } from "../lib/vpn";
+import { buildXrayConfig, isXrayProtocol, TUN_DNS, TUN_MTU } from "../lib/xray-config";
 
 /** The Android dashboard.
  *
@@ -105,15 +107,21 @@ function formatDuration(totalSeconds: number) {
 
 /** Which credentials this build can actually connect with.
  *
- * WireGuard only for now. The subscription already holds one credential
- * per route its plan allows -- five on a typical plan today -- and
- * offering the customer a protocol whose engine is not in this APK would
- * fail every time while looking like the server's fault.
+ * Four of the five the platform sells. Offering a customer a protocol
+ * whose engine is not in the APK would fail every time while looking
+ * like the server's fault, so the ladder never considers one.
  *
- * The ladder below is written against a list rather than a single
- * credential precisely so that adding the Xray engines is a change to
- * this filter and nothing else. */
-const SUPPORTED = new Set(["WIREGUARD"]);
+ * OpenVPN is the omission, and it is a licensing decision rather than an
+ * unfinished one: the usable Android OpenVPN implementation is GPLv2,
+ * which this closed-source app cannot link. Both other engines --
+ * WireGuard's tunnel library and xray-core -- are permissively licensed,
+ * which is why they are here. */
+const SUPPORTED = new Set([
+  "WIREGUARD",
+  "XRAY_VLESS_REALITY",
+  "XRAY_VLESS_TLS",
+  "XRAY_TROJAN",
+]);
 
 export function Dashboard({
   onLoggedOut,
@@ -145,9 +153,7 @@ export function Dashboard({
    * Not cosmetic. On Windows the absence of this cost five releases of
    * "no matter what I pick it connects as Fast" -- the app was moving
    * them and saying nothing, so a working failover was indistinguishable
-   * from a bug. Here it is currently the normal case rather than the
-   * exception, because this build only carries WireGuard, which makes
-   * saying so more important rather than less. */
+   * from a bug. */
   const [failedOverTo, setFailedOverTo] = useState<string | null>(null);
   /** Set when the chosen server's protocol has no engine in this build,
    * so the reason is a missing feature rather than a blocked network. */
@@ -319,8 +325,8 @@ export function Dashboard({
         kind: "serverUnreachable",
         messageKey: "err.notCarryingTraffic",
         detail:
-          "This build connects with WireGuard only, and none of this subscription's servers offer it. " +
-          "Pick a different location, or use the Windows app.",
+          "None of this subscription's servers offer a protocol this app can use. " +
+          "OpenVPN is Windows-only; pick a different location.",
       });
       return;
     }
@@ -346,15 +352,25 @@ export function Dashboard({
       setBaselineIp(baseline);
 
       try {
-        await connectWireGuard({
-          privateKey: candidate.credentials.privateKey,
-          address: candidate.credentials.address,
-          dns: candidate.credentials.dns,
-          serverPublicKey: candidate.credentials.serverPublicKey,
-          endpoint: candidate.credentials.endpoint,
-          allowedIPs: candidate.credentials.allowedIPs,
-          allowedApps,
-        });
+        if (isXrayProtocol(candidate.protocol)) {
+          await connectXray({
+            config: buildXrayConfig(candidate),
+            protocol: candidate.protocol,
+            dns: TUN_DNS,
+            mtu: TUN_MTU,
+            allowedApps,
+          });
+        } else {
+          await connectWireGuard({
+            privateKey: candidate.credentials.privateKey,
+            address: candidate.credentials.address,
+            dns: candidate.credentials.dns,
+            serverPublicKey: candidate.credentials.serverPublicKey,
+            endpoint: candidate.credentials.endpoint,
+            allowedIPs: candidate.credentials.allowedIPs,
+            allowedApps,
+          });
+        }
         setProtocolUser(candidate);
         setConnectedAt(Date.now());
         setConnectionState("verifying");

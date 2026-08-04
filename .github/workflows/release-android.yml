@@ -80,6 +80,16 @@ jobs:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
 
+      # xray-core, compiled to an Android library. Gitignored rather than
+      # committed, so this step is not optional: without it Gradle finds
+      # no libs/ and the four Xray protocols silently vanish from the
+      # build. Several minutes on a cold cache.
+      - name: Build the Xray engine
+        working-directory: apps/mobile
+        run: bash scripts/build-xray-aar.sh
+        env:
+          ANDROID_NDK_HOME: ${{ env.NDK_HOME }}
+
       - name: Generate the Android project
         working-directory: apps/mobile
         run: pnpm exec tauri android init
