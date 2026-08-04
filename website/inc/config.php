@@ -92,7 +92,13 @@ return array(
     //
     // Empty means "not released yet" and the download page says so, rather
     // than linking to something that 404s.
-    'windows_installer_url' => 'https://connect.neoxify.com/api/updates/installer/windows',
+    // .site rather than .com, and that is the whole point: connect.neoxify.com's
+    // address was filtered in Iran, so a visitor there could reach this page
+    // and still not reach the download. This hostname is on a separate domain
+    // behind a CDN, so it is not the same address to block. Either resolves to
+    // the newest release -- the endpoint reads the version from the published
+    // filename, so this link never needs editing when a version ships.
+    'windows_installer_url' => 'https://connect.neoxify.site/api/updates/installer/windows',
 
     // Optional link to published SHA-256 checksums, shown beside the download.
     //
