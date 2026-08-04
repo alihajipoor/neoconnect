@@ -314,6 +314,16 @@ html[lang="fa"] .eyebrow {
   gap: 1.25rem;
 }
 
+/* Grid and flex children default to min-width:auto, so one stubborn
+   unwrappable child can push a whole column past the viewport. Letting them
+   shrink is the general guard against exactly the overflow that the
+   full-width button above caused. */
+.grid > *,
+.download-main > *,
+.form-layout > * {
+  min-width: 0;
+}
+
 @media (min-width: 40rem) {
   .grid--2 {
     grid-template-columns: repeat(2, 1fr);
@@ -365,6 +375,21 @@ html[lang="fa"] .eyebrow {
   white-space: nowrap;
 }
 
+/* Icons inside buttons MUST be sized here. The inline SVGs carry a viewBox
+   but no width/height, so without this they fall back to the SVG default and
+   render enormous -- a download icon was rendering at 234px inside a button
+   before this rule existed. */
+.btn svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex-shrink: 0;
+}
+
+.btn--lg svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
 .btn:hover {
   transform: translateY(-1px);
 }
@@ -401,6 +426,11 @@ html[lang="fa"] .eyebrow {
 
 .btn--block {
   width: 100%;
+  /* Buttons are nowrap by default, which is right for a button sitting in a
+     row. A full-width one is different: on a 320px screen the label's
+     min-content width was forcing its whole grid column wider than the
+     viewport and making the download page scroll sideways. Let it wrap. */
+  white-space: normal;
 }
 
 .btn[aria-disabled="true"],
@@ -1956,198 +1986,135 @@ html[lang="fa"] .site-footer h4 {
 }
 
 /* ==========================================================================
-   13e. Launch announcement
+   13e. Launch banner
    --------------------------------------------------------------------------
-   Rendered hidden and opened by JavaScript, so with scripting off it never
-   appears -- the right failure mode for something that covers the page.
+   An inline strip at the top of the home page, deliberately NOT a modal. It
+   sits in the flow, so it covers nothing, needs no scroll lock or focus
+   handling, and renders fine with JavaScript off -- the script only hides it
+   again for someone who already dismissed it.
+
+   Styled off the .notice card so it reads as part of the page rather than an
+   ad bolted on top, with a violet tint to earn a little more attention than a
+   plain notice gets.
+
+   Note the background: two layered backgrounds rather than a pseudo-element
+   at z-index -1. That trick breaks the instant the element becomes its own
+   stacking context -- which is exactly what turned the modal this replaced
+   into a solid gradient with unreadable text on top of it.
    ========================================================================== */
 
-.announce {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: grid;
-  place-items: center;
-  padding: var(--gutter);
+.banner-wrap {
+  padding-block-start: 1.5rem;
 }
 
-.announce[hidden] {
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius);
+  border: 1px solid rgba(139, 92, 246, 0.32);
+  background: linear-gradient(
+      100deg,
+      rgba(139, 92, 246, 0.14),
+      rgba(34, 211, 238, 0.06) 55%,
+      transparent
+    ),
+    var(--card);
+  box-shadow: var(--shadow-card);
+}
+
+.banner[hidden] {
   display: none;
 }
 
-.announce__backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(6, 6, 10, 0.78);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  animation: nx-fade 0.25s ease both;
-}
-
-.announce__card {
-  position: relative;
-  isolation: isolate;
-  width: min(30rem, 100%);
-  /* vh first as the fallback; dvh accounts for mobile browser chrome that
-     appears and disappears as you scroll. */
-  max-height: calc(100vh - 2 * var(--gutter));
-  max-height: calc(100dvh - 2 * var(--gutter));
-  overflow-y: auto;
-  padding: clamp(1.6rem, 4vw, 2.25rem);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  border: 1px solid transparent;
-  box-shadow: 0 30px 80px -24px rgba(0, 0, 0, 0.95),
-    0 0 60px -30px var(--primary);
-  text-align: center;
-  animation: nx-pop 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
-}
-
-/* Gradient hairline around the card, drawn behind it rather than as a border
-   so the corners stay clean. */
-.announce__card::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  z-index: -1;
-  border-radius: inherit;
-  background: linear-gradient(140deg, var(--primary), var(--highlight) 45%, transparent 75%);
-}
-
-.announce__glow {
-  position: absolute;
-  z-index: -1;
-  inset-block-start: -6rem;
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
-  width: 22rem;
-  height: 14rem;
-  background: radial-gradient(ellipse at center, rgba(139, 92, 246, 0.4), transparent 70%);
-  filter: blur(30px);
-  pointer-events: none;
-}
-
-.announce__x {
-  position: absolute;
-  inset-block-start: 0.75rem;
-  inset-inline-end: 0.75rem;
+.banner__icon {
   display: grid;
   place-items: center;
-  width: 2rem;
-  height: 2rem;
-  border-radius: 50%;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.04);
+  width: 2.5rem;
+  height: 2.5rem;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  background: rgba(139, 92, 246, 0.16);
+  border: 1px solid rgba(139, 92, 246, 0.34);
+  color: var(--primary-soft);
+}
+
+.banner__icon svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.banner__text {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.banner__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.65rem;
+  font-weight: 650;
+  font-size: 1rem;
+}
+
+.banner__pill {
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.banner__body {
+  margin-block-start: 0.3rem;
   color: var(--fg-muted);
+  font-size: 0.9rem;
+}
+
+.banner__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.banner__x {
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-subtle);
   cursor: pointer;
   transition: color 0.15s ease, background 0.15s ease;
 }
 
-.announce__x:hover {
+.banner__x:hover {
   color: var(--fg);
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.07);
 }
 
-.announce__x svg {
-  width: 1rem;
-  height: 1rem;
+.banner__x svg {
+  width: 0.9rem;
+  height: 0.9rem;
 }
 
-.announce__head {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.6rem;
-  margin-block-end: 1.25rem;
-}
-
-.announce__mark {
-  width: 2.25rem;
-  height: 2.25rem;
-  filter: drop-shadow(0 0 12px rgba(139, 92, 246, 0.6));
-}
-
-.announce__mark svg {
-  width: 100%;
-  height: 100%;
-}
-
-.announce__badge {
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--highlight);
-}
-
-html[lang="fa"] .announce__badge {
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-/* The headline number -- the one thing someone should read if they read
-   nothing else. */
-.announce__pill {
-  display: inline-block;
-  padding: 0.35rem 1rem;
-  border-radius: var(--radius-pill);
-  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
-  color: #fff;
-  font-size: 0.85rem;
-  font-weight: 700;
-  box-shadow: 0 8px 24px -10px var(--primary);
-  margin-block-end: 1rem;
-}
-
-.announce__title {
-  font-size: clamp(1.5rem, 4vw, 1.9rem);
-  margin-block-end: 0.85rem;
-}
-
-.announce__body {
-  color: var(--fg-muted);
-  font-size: 0.95rem;
-}
-
-.announce__actions {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  margin-block-start: 1.75rem;
-}
-
-.announce__actions .btn {
-  width: 100%;
-}
-
-.announce__note {
-  margin-block-start: 1rem;
-  font-size: 0.82rem;
-  color: var(--fg-subtle);
-}
-
-/* Stops the page behind scrolling while the dialog is open. */
-.nx-locked {
-  overflow: hidden;
-}
-
-@keyframes nx-fade {
-  from {
-    opacity: 0;
+@media (max-width: 48rem) {
+  .banner {
+    flex-wrap: wrap;
   }
-  to {
-    opacity: 1;
+  .banner__actions {
+    width: 100%;
   }
-}
-
-@keyframes nx-pop {
-  from {
-    opacity: 0;
-    transform: translateY(12px) scale(0.97);
-  }
-  to {
-    opacity: 1;
-    transform: none;
+  .banner__actions .btn {
+    flex: 1;
   }
 }
 

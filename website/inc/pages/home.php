@@ -14,6 +14,11 @@ $nx_faq = nx_content('faq');
 $nx_has_windows = nx_windows_available();
 
 require NX_INC . '/partials/head.php';
+
+// Above the hero, in the flow. Home page only: it never covers the contact or
+// reseller form, because it is not on those pages and never covers anything
+// anywhere.
+require NX_INC . '/partials/announcement.php';
 ?>
 
 <!-- ============================ Hero ============================ -->
