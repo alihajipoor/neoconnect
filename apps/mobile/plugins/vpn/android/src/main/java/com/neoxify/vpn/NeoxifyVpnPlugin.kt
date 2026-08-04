@@ -1,6 +1,7 @@
 package com.neoxify.vpn
 
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -8,6 +9,7 @@ import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.net.VpnService
+import android.os.Build
 import android.util.Base64
 import android.util.Log
 import androidx.activity.result.ActivityResult
@@ -23,6 +25,7 @@ import com.wireguard.android.backend.Backend
 import com.wireguard.android.backend.GoBackend
 import com.wireguard.android.backend.Tunnel
 import com.wireguard.config.Config
+import neoxifyxray.Neoxifyxray
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.StringReader
@@ -112,6 +115,22 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     private var activeProtocol: String? = null
 
     @InvokeArg
+    class XrayProfile {
+        /** The complete xray-core config, built by the app.
+         *
+         * Assembled in TypeScript rather than here on purpose: the shape
+         * of a REALITY or Trojan outbound is protocol knowledge, and it
+         * already lives beside the credential types that feed it. Kotlin's
+         * job is the tunnel, and it needs to know nothing about VLESS to
+         * do it. */
+        lateinit var config: String
+        lateinit var protocol: String
+        lateinit var dns: String
+        var mtu: Int = 1500
+        var allowedApps: List<String> = emptyList()
+    }
+
+    @InvokeArg
     class WireGuardProfile {
         lateinit var privateKey: String
         lateinit var address: String
@@ -175,10 +194,60 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /**
+     * Brings up one of the Xray protocols.
+     *
+     * Two steps, in this order and not the other: start the service so it
+     * exists, then hand it the config. Android constructs services itself
+     * and offers no synchronous way to get the instance back, so this
+     * waits for it to register rather than assuming it is immediate.
+     */
+    @Command
+    fun connectXray(invoke: Invoke) {
+        val profile = invoke.parseArgs(XrayProfile::class.java)
+        offMainThread(invoke, "connectXray") {
+            // Whatever is up comes down first, including a WireGuard
+            // tunnel: Android allows one VPN per app, and establishing a
+            // second silently replaces the first.
+            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+
+            val intent = Intent(activity, NeoxifyTunService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activity.startForegroundService(intent)
+            } else {
+                activity.startService(intent)
+            }
+
+            val service = awaitService()
+                ?: throw IllegalStateException("The VPN service did not start")
+
+            service.start(profile.config, profile.mtu, profile.dns, profile.allowedApps)
+            activeProtocol = profile.protocol
+            JSObject()
+        }
+    }
+
+    /** Waits briefly for the service to come up. Polling rather than
+     * binding because the wait is short and a ServiceConnection would add
+     * a lifecycle to unwind on every failure path. */
+    private fun awaitService(): NeoxifyTunService? {
+        val deadline = System.currentTimeMillis() + SERVICE_START_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            NeoxifyTunService.instance?.let { return it }
+            Thread.sleep(50)
+        }
+        return NeoxifyTunService.instance
+    }
+
     @Command
     fun disconnect(invoke: Invoke) {
         offMainThread(invoke, "disconnect") {
-            backend.setState(tunnel, Tunnel.State.DOWN, null)
+            // Both engines, unconditionally. Asking which one is running
+            // means trusting a variable that a service restart can
+            // outlive; tearing down an engine that is already down costs
+            // nothing.
+            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+            activity.stopService(Intent(activity, NeoxifyTunService::class.java))
             activeProtocol = null
             JSObject()
         }
@@ -197,18 +266,25 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun status(invoke: Invoke) = offMainThread(invoke, "status") { readStatus() }
 
     private fun readStatus(): JSObject {
-        val up = try {
+        // Two engines, either of which may be the live one.
+        val xrayUp = runCatching { Neoxifyxray.running() }.getOrDefault(false)
+        val wireguardUp = try {
             backend.getState(tunnel) == Tunnel.State.UP
         } catch (e: Exception) {
             Log.w(TAG, "state unavailable", e)
             false
         }
+        val up = xrayUp || wireguardUp
 
         var rx = 0L
         var tx = 0L
         var handshakeAge: Long? = null
 
-        if (up) {
+        // Only WireGuard has cheap evidence to report. Xray has no
+        // handshake to read, so its age stays null and the app falls back
+        // to proving the tunnel with real traffic -- the stronger test,
+        // and the only one that works for every protocol.
+        if (wireguardUp) {
             try {
                 val stats = backend.getStatistics(tunnel)
                 rx = stats.totalRx()
@@ -338,5 +414,6 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     companion object {
         private const val TAG = "NeoxifyVpn"
+        private const val SERVICE_START_TIMEOUT_MS = 5_000L
     }
 }

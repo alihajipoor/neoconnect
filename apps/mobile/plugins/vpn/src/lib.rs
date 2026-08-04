@@ -48,6 +48,22 @@ pub struct WireGuardProfile {
     pub allowed_apps: Vec<String>,
 }
 
+/// The Xray engines' equivalent of WireGuardProfile.
+///
+/// `config` arrives already built. See the note on the TypeScript side:
+/// protocol knowledge belongs next to the credential types, not spread
+/// across three languages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XrayProfile {
+    pub config: String,
+    pub protocol: String,
+    pub dns: String,
+    pub mtu: u32,
+    #[serde(default)]
+    pub allowed_apps: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VpnStatus {

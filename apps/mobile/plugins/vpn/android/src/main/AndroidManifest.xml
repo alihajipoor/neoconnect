@@ -18,6 +18,19 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <!-- The Xray protocols' own TUN device. Separate from WireGuard's
+             above because that one belongs to the WireGuard library and
+             cannot be reused; only one is ever active at a time. -->
+        <service
+            android:name="com.neoxify.vpn.NeoxifyTunService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="systemExempted"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
     </application>
 
     <!-- Android 13+ will not show the tunnel's ongoing notification without

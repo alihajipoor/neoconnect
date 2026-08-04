@@ -5,7 +5,7 @@
 //! root of a library crate those two collide with each other. Official
 //! Tauri plugins put their commands in a submodule for the same reason.
 
-use crate::{Apps, Empty, Granted, VpnStatus, WireGuardProfile};
+use crate::{Apps, Empty, Granted, VpnStatus, WireGuardProfile, XrayProfile};
 #[cfg(target_os = "android")]
 use crate::Vpn;
 use tauri::{AppHandle, Runtime};
@@ -75,6 +75,25 @@ pub async fn vpn_connect_wireguard<R: Runtime>(
         handle(&app)?
             .0
             .run_mobile_plugin::<Empty>("connectWireguard", profile)
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, profile);
+        Err(unavailable())
+    }
+}
+
+#[tauri::command]
+pub async fn vpn_connect_xray<R: Runtime>(
+    app: AppHandle<R>,
+    profile: XrayProfile,
+) -> Result<Empty, String> {
+    #[cfg(target_os = "android")]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<Empty>("connectXray", profile)
             .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "android"))]

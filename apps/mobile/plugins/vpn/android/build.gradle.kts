@@ -25,6 +25,7 @@ android {
     kotlinOptions {
         jvmTarget = "1.8"
     }
+    sourceSets["main"].jniLibs.srcDir("libs/jni")
 }
 
 dependencies {
@@ -42,6 +43,13 @@ dependencies {
     // the same decision the node agent and the Windows client both made:
     // an upstream fix becomes a version bump instead of a rewrite.
     implementation("com.wireguard.android:tunnel:1.0.20230706")
+
+    // xray-core, compiled by gomobile and then split in two: Gradle
+    // rejects a local .aar inside a library module, but takes the jar and
+    // the native library separately. Built by
+    // apps/mobile/scripts/build-xray-aar.sh rather than committed --
+    // see the note in .gitignore.
+    implementation(files("libs/xray-classes.jar"))
 
     implementation(project(":tauri-android"))
 }
