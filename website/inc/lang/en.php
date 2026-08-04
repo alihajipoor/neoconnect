@@ -27,6 +27,7 @@ return array(
     'nav.download' => 'Download',
     'nav.contact' => 'Contact',
     'nav.reseller' => 'Resellers',
+    'nav.privacy' => 'Privacy',
     'nav.cta' => 'Get the app',
     'nav.menu' => 'Menu',
     'nav.close' => 'Close menu',
@@ -53,6 +54,20 @@ return array(
 
     'meta.contact.title' => 'Contact — Neoxify',
     'meta.contact.description' => 'Questions about Neoxify? Send us a message and we will get back to you.',
+
+    'meta.privacy.title' => 'Privacy — Neoxify',
+    'meta.privacy.description' => 'What Neoxify collects, why we have it, and how to ask us to remove it.',
+
+    'privacy.title' => 'Privacy',
+    'privacy.subtitle' => 'What we collect, why we have it, and what you can ask us to do about it. Written to describe what the service actually does, not to fill a page.',
+    'privacy.updated' => 'Last updated :date',
+    // PHP date() format. Per locale because date('F') only ever produces
+    // English month names -- the Persian page was rendering "3 August 2026".
+    // A numeric format there avoids depending on the intl extension, which
+    // shared hosting may not have.
+    'privacy.date_format' => 'j F Y',
+    'privacy.contact.title' => 'Contact',
+    'privacy.contact.body' => 'Questions about any of this, or a request about your own data, go to :email. Write from the address on your account and we will deal with it.',
 
     'meta.reseller.title' => 'Become a reseller — Neoxify',
     'meta.reseller.description' => 'Apply to resell Neoxify. Terms are agreed individually with every partner.',

@@ -2131,6 +2131,68 @@ html[lang="fa"] .site-footer h4 {
 }
 
 /* ==========================================================================
+   13f. Long-form prose (privacy statement)
+   ========================================================================== */
+
+.privacy__updated {
+  margin-block-start: 1rem;
+  font-size: 0.85rem;
+  color: var(--fg-subtle);
+}
+
+.prose {
+  max-width: 44rem;
+  color: var(--fg-muted);
+}
+
+.prose h2 {
+  font-size: clamp(1.15rem, 2.2vw, 1.35rem);
+  color: var(--fg);
+  margin-block: 2.5rem 0.85rem;
+}
+
+.prose h2:first-child {
+  margin-block-start: 0;
+}
+
+.prose p {
+  margin-block-end: 0.9rem;
+  font-size: 0.98rem;
+}
+
+.prose ul {
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.prose li {
+  position: relative;
+  padding-inline-start: 1.25rem;
+  font-size: 0.98rem;
+}
+
+.prose li::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  inset-block-start: 0.6em;
+  width: 0.35rem;
+  height: 0.35rem;
+  border-radius: 50%;
+  background: var(--primary);
+}
+
+.prose a {
+  color: var(--highlight);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  unicode-bidi: isolate;
+}
+
+/* ==========================================================================
    14. Utilities
    --------------------------------------------------------------------------
    A deliberately small set. They exist so no template needs a style="..."

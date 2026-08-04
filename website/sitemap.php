@@ -16,7 +16,7 @@ require __DIR__ . '/inc/bootstrap.php';
 
 header('Content-Type: application/xml; charset=UTF-8');
 
-$nx_pages = array('home', 'download', 'reseller', 'contact');
+$nx_pages = array('home', 'download', 'reseller', 'contact', 'privacy');
 $nx_locales = array('en', 'fa');
 
 echo '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
