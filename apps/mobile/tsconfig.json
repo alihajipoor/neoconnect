@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* The Windows client's UI, shared by reference. See vite.config.ts
+       for why this is an alias rather than a package. */
+    "baseUrl": ".",
+    "paths": { "@shared/*": ["../desktop-windows/src/*"] },
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  // Only this app's own sources. The shared files still get type-checked
+  // -- they enter the program through the imports that reach them -- but
+  // listing the whole tree would drag in the Windows-only screens too,
+  // and those import plugins this app has no reason to install.
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   AppWindow,
   ArrowLeft,
@@ -13,7 +13,6 @@ import {
 import { changePassword } from "../lib/auth";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { Button, Card, Input, Label } from "../components/ui";
-import { CustomModeCard } from "../components/CustomModeCard";
 import { cn } from "../lib/utils";
 
 /** The app's settings surface.
@@ -34,10 +33,20 @@ export function Settings({
   onBack,
   onOpenReferrals,
   onOpenSupport,
+  customSection,
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
   onOpenSupport: () => void;
+  /** Custom mode's pane, supplied by the platform rather than imported.
+   *
+   * Language and password are the same product on every platform and
+   * live here. Custom mode is not: Windows drives WinDivert and a
+   * transparent proxy and picks .exe paths from a file dialog, while
+   * Android hands package names to VpnService.Builder and picks them
+   * from the installed-app list. Same feature, nothing shared but the
+   * slot it sits in. */
+  customSection: ReactNode;
 }) {
   const { t } = useI18n();
   const [section, setSection] = useState<SectionId>("custom");
@@ -122,7 +131,7 @@ export function Settings({
         {/* Only the pane scrolls, and only when its own content is tall
             -- which in practice is Custom mode with a long app list. */}
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-          {section === "custom" ? <CustomModeCard /> : null}
+          {section === "custom" ? customSection : null}
           {section === "general" ? <LanguageSection /> : null}
           {section === "account" ? <PasswordSection /> : null}
         </div>
