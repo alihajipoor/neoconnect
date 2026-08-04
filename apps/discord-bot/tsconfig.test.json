@@ -1,0 +1,13 @@
+{
+  // Tests run against compiled output rather than through a TS loader: the
+  // source uses NodeNext, whose `.js` import specifiers only resolve once
+  // emitted. Compiling first also means the tests exercise exactly what
+  // ships, not a differently-transformed copy of it.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-test",
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "dist-test"]
+}

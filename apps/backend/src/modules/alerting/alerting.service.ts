@@ -25,10 +25,12 @@ export class AlertingService {
       const res = await fetch(webhookUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // "text" is the field Slack/Discord-compatible webhooks look
-        // for; a custom endpoint can read whichever fields it wants
-        // from the same body.
-        body: JSON.stringify({ text: message, message, ...context }),
+        // Slack reads "text", Discord reads "content" -- they are not the
+        // same field, and Discord rejects a body without it outright
+        // ("Cannot send an empty message", 50006). Sending both means one
+        // payload works against either, and a custom endpoint can read
+        // whichever fields it wants from the same body.
+        body: JSON.stringify({ content: message, text: message, message, ...context }),
       });
       if (!res.ok) {
         this.logger.warn(`Alert webhook returned ${res.status}: ${message}`);

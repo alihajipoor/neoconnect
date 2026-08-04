@@ -1,5 +1,8 @@
 node_modules/
 dist/
+# Compiled test output -- the bot's tests run against emitted JS because its
+# NodeNext `.js` import specifiers only resolve once emitted.
+dist-test/
 build/
 .next/
 .turbo/
