@@ -773,18 +773,48 @@ register_protocol_config() {
 # -> abroad exit) are offered here too, because the exit side is just one
 # more Xray user and the installer is the point where someone actually
 # knows which node this one is meant to relay through.
-create_route_for_config() {
-  local protocol="$1" config_id="$2"
-  local token response route_id
+# This node's name, however this function was reached.
+#
+# `node_name` is only ever set by the full-install flow, which prompts
+# for it. Entering through "Add/Remove Protocol Engine" on an
+# already-enrolled node never sets it, and `set -u` then killed the
+# install immediately after the protocol had been registered -- so the
+# engine existed, the config existed, and the route silently did not.
+#
+# agent.json records the node id but not the name, so the name is
+# fetched from the panel: it is the authoritative copy, and it is
+# already correct for a node that enrolled.
+resolve_node_name() {
+  if [[ -n "${node_name:-}" ]]; then
+    echo "$node_name"
+    return 0
+  fi
+
+  local id token name
+  id="$(jq -r '.nodeId // empty' /etc/neoxify/agent.json 2>/dev/null || true)"
+  if [[ -z "$id" ]]; then
+    echo "node"
+    return 0
+  fi
 
   token="$(get_admin_bearer_token)" || return 1
+  name="$(curl -fsSL "$panel_url/nodes/$id" -H "Authorization: Bearer $token" 2>/dev/null     | jq -r '.name // empty' || true)"
+  echo "${name:-node}"
+}
+
+create_route_for_config() {
+  local protocol="$1" config_id="$2"
+  local token response route_id node_label
+
+  token="$(get_admin_bearer_token)" || return 1
+  node_label="$(resolve_node_name)" || return 1
 
   local exit_config_id=""
   if [[ "${node_is_relay:-n}" == "y" ]]; then
     exit_config_id="$(choose_exit_protocol_config)" || return 1
   fi
 
-  local route_name="$node_name / $protocol"
+  local route_name="$node_label / $protocol"
   local payload
   if [[ -n "$exit_config_id" ]]; then
     payload="$(jq -n --arg name "$route_name" --arg entry "$config_id" --arg exit "$exit_config_id" \
