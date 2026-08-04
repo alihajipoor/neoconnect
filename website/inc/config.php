@@ -70,38 +70,39 @@ return array(
     // Downloads
     // ---------------------------------------------------------------
 
-    'github_repo' => 'alihajipoor/neoconnect',
+    // The Windows download link.
+    //
+    // This is an endpoint on the control plane that redirects to the current
+    // release's installer. Set once; it should never need editing again.
+    //
+    // It replaced a pinned GitHub release tag, and the reason is worth
+    // keeping. A pinned tag is correct until the day it isn't, and nobody
+    // goes back to check: this site spent days serving desktop-v0.9.0, a
+    // mislabelled release whose payload was the older 0.8.0 build, while the
+    // real current version was 0.8.6. Visitors were downloading the worst
+    // build we had shipped.
+    //
+    // GitHub's /releases/latest/download/ shortcut is not the fix either --
+    // "latest" spans every tag in the repository, including agent releases,
+    // so it breaks the moment a non-desktop release is newer.
+    //
+    // This endpoint resolves through the same code the in-app updater uses,
+    // so the download link and the update path can never disagree about what
+    // the current version is.
+    //
+    // Empty means "not released yet" and the download page says so, rather
+    // than linking to something that 404s.
+    'windows_installer_url' => 'https://connect.neoxify.com/api/updates/installer/windows',
 
-    // The Windows client's published release tag.
+    // Optional link to published SHA-256 checksums, shown beside the download.
     //
-    // Empty means "not released yet", and the download page says so rather
-    // than linking to a URL that 404s. It is filled in now: desktop-v0.9.0
-    // is published and all of its asset URLs were checked for a real 200
-    // before this was set.
-    //
-    // Pinned to a tag on purpose, rather than using GitHub's
-    // /releases/latest/download/ shortcut. "Latest" means the newest release
-    // in the whole repository, and this repo also cuts agent releases (v0.2.1
-    // and friends). The moment an agent release is newer than the desktop
-    // one, that shortcut would resolve to a release with no installer in it
-    // and start 404ing silently. Since the app updates itself after the first
-    // install, a pinned tag going a version stale costs nothing.
-    'windows_release_tag' => 'desktop-v0.9.0',
-
-    // Asset filename inside that release.
-    //
-    // This is the bootstrapper, which has a STABLE name across releases --
-    // unlike the NSIS bundle beside it (Neoxify_0.8.0_x64-setup.exe), which
-    // carries the version and so changes every time. Prefer the stable name:
-    // it means bumping the tag above is usually the only edit a release needs.
-    'windows_asset' => 'Neoxify-Setup.exe',
-
-    // Human-readable version shown on the download page.
-    //
-    // This is the APP's version (tauri.conf.json), which is not the same as
-    // the release tag -- desktop-v0.9.0 ships an app that reports 0.8.0. What
-    // a user sees in the app is what belongs here.
-    'windows_version' => '0.8.0',
+    // Empty by default and deliberately so: the installer URL above always
+    // serves the current release, so any checksum pinned to one release would
+    // eventually describe a different file than the one people just
+    // downloaded -- worse than no checksum at all. It also keeps the site
+    // from advertising where the binaries are hosted. Fill it in only if you
+    // publish a checksum list that tracks the current release.
+    'windows_checksums_url' => '',
 
     // The Windows installer is not code-signed yet (a deliberate decision --
     // signing is deferred until closer to public launch). While this is true,

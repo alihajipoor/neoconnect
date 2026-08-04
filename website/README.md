@@ -27,36 +27,45 @@ say the wrong thing until they are done.
 
 ## The download page
 
-Live, pointing at `desktop-v0.9.0`. Every asset URL was checked for a real
-`200` before being wired up.
-
-The link goes to **`Neoxify-Setup.exe`**, the bootstrapper, whose filename is
-stable across releases — unlike the NSIS bundle beside it
-(`Neoxify_0.8.0_x64-setup.exe`), which carries the version and so changes
-every time. That means a new release is usually a one-line edit:
+The download button points at one URL that should never need editing:
 
 ```php
-'windows_release_tag' => 'desktop-v0.9.0',   // bump this
-'windows_asset' => 'Neoxify-Setup.exe',      // stable, leave alone
-'windows_version' => '0.8.0',                // the APP version, not the tag
+'windows_installer_url' => 'https://connect.neoxify.com/api/updates/installer/windows',
 ```
 
-Note the tag and the app version genuinely differ — `desktop-v0.9.0` ships an
-app that reports `0.8.0`. What the user sees inside the app is what belongs in
-`windows_version`.
+That is a control-plane endpoint which redirects to the current release's
+installer, resolving through the same code the in-app updater uses. The
+download link and the update path therefore cannot disagree about what the
+current version is.
 
-**Why a pinned tag and not `/releases/latest/download/`.** "Latest" means the
-newest release in the whole repository, and this repo also cuts agent releases
-(`v0.2.1` and friends). The first time an agent release is newer than the
-desktop one, that shortcut resolves to a release containing no installer and
-starts 404ing silently. Pinning avoids that, and since **the app updates
-itself after the first install**, a tag going a version stale costs nothing —
-bumping it is housekeeping, not urgent.
+**The page holds no version number and no release tag**, deliberately. Anything
+printed beside a rolling link can only go stale, and that is not hypothetical
+here — read on.
 
-Leaving `windows_release_tag` empty flips the page back to an honest "not
-released yet" panel with a "tell me when it's ready" link, rather than a button
-that 404s. Set `windows_unsigned` to `false` once a signing certificate exists,
-which removes the SmartScreen explainer.
+### Why it is not a pinned tag (learned the hard way)
+
+This page originally pinned `desktop-v0.9.0`. Every asset URL was verified
+`200` at the time, so it looked correct. It wasn't: that tag was mislabelled
+and its payload was the older `0.8.0` build, while the real current release was
+`0.8.6`. The site spent days handing every visitor the worst build we had
+shipped, and nobody went back to check, because a pinned link that resolves
+looks fine forever.
+
+`/releases/latest/download/…` is not the fix either — "latest" spans every tag
+in the repository, including agent releases, so it breaks the first time a
+non-desktop release is newer.
+
+### Other download settings
+
+- `windows_checksums_url` is empty by default. A checksum pinned to one release
+  would eventually describe a different file than the one a visitor just
+  downloaded — worse than publishing none. Fill it in only if you publish a
+  checksum list that tracks the current release. While empty, the link is
+  simply not rendered.
+- Emptying `windows_installer_url` flips the page back to an honest "not
+  released yet" panel with a "tell me when it's ready" link.
+- Set `windows_unsigned` to `false` once a signing certificate exists, which
+  removes the SmartScreen explainer.
 
 ## Deploying
 

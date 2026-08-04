@@ -3,9 +3,14 @@
  * Download page, shared by /download/ and /fa/download/.
  *
  * The Windows card has two genuine states, driven by config's
- * windows_release_tag: a real download when a release has actually been
- * published, and an honest "not out yet" panel when it has not. There is
- * deliberately no third state where we show a button that 404s.
+ * windows_installer_url: a real download when one is configured, and an
+ * honest "not out yet" panel when it is not. There is deliberately no third
+ * state where we show a button that 404s.
+ *
+ * The page holds no version number or release tag of its own. The configured
+ * URL always resolves to the current release, and anything printed here
+ * beside it could only go stale -- which is exactly what happened when this
+ * page pinned a release tag.
  */
 
 defined('NX') || exit;
@@ -54,12 +59,16 @@ require NX_INC . '/partials/head.php';
             </a>
 
             <p class="download-card__links">
-              <?php echo nx_e('download.windows.version', array(
-                  'version' => nx_cfg('windows_version'))); ?>
-              &middot;
-              <a href="<?php echo nx_esc(nx_windows_checksum_url()); ?>" rel="noopener">
-                <?php echo nx_e('download.windows.checksum'); ?>
-              </a>
+              <?php /* No version number here on purpose -- the link always
+                       resolves to the current release, so a number printed
+                       here could only ever be wrong. */ ?>
+              <?php echo nx_e('download.windows.always_current'); ?>
+              <?php if (nx_windows_checksum_url() !== ''): ?>
+                &middot;
+                <a href="<?php echo nx_esc(nx_windows_checksum_url()); ?>" rel="noopener">
+                  <?php echo nx_e('download.windows.checksum'); ?>
+                </a>
+              <?php endif; ?>
             </p>
 
           <?php else: ?>
