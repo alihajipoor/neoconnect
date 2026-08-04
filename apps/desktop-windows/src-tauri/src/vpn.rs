@@ -36,6 +36,14 @@ pub struct ProtocolUserPayload {
 pub struct ConnectionInfo {
     host: String,
     port: u16,
+    /// How the protocol is carried. The same Protocol member is served
+    /// raw over TCP and inside a WebSocket, so this cannot be inferred,
+    /// and a wrong guess fails the handshake.
+    ///
+    /// Optional because nodes registered before the server grew this
+    /// column report nothing, and every one of those is plain TCP.
+    #[serde(default)]
+    transport: Option<String>,
     #[serde(rename = "publicParams")]
     public_params: serde_json::Value,
 }
@@ -112,17 +120,39 @@ impl ProtocolUserPayload {
                         "this server's TLS settings are missing 'serverName' -- ask support to re-provision it"
                             .to_string()
                     })?;
+                // Only when the node says so. The path is not guessable
+                // and a wrong one is answered by the fallback web page
+                // rather than by the tunnel, which reads to a customer as
+                // a server that is up but broken.
+                let ws_path = if self.connection.transport.as_deref() == Some("WS") {
+                    Some(
+                        self.connection
+                            .public_params
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("/")
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
                 Ok(ConnectProfile::XrayVlessTls(VlessTlsProfile {
                     uuid: field(&self.credentials, "uuid")?.to_string(),
+                    // Defaulting to Vision is right for TCP and wrong for
+                    // WebSocket, so the default only applies when the
+                    // server issued no flow at all -- which for a
+                    // WebSocket credential it deliberately does, as an
+                    // empty string rather than an absent field.
                     flow: self
                         .credentials
                         .get("flow")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("xtls-rprx-vision")
+                        .unwrap_or(if ws_path.is_some() { "" } else { "xtls-rprx-vision" })
                         .to_string(),
                     host: self.connection.host.clone(),
                     port: self.connection.port,
                     server_name: server_name.to_string(),
+                    ws_path,
                 }))
             }
             "XRAY_TROJAN" => {
@@ -456,7 +486,12 @@ mod tests {
         ProtocolUserPayload {
             protocol: protocol.into(),
             credentials,
-            connection: ConnectionInfo { host: "203.0.113.5".into(), port: 443, public_params },
+            connection: ConnectionInfo {
+                host: "203.0.113.5".into(),
+                port: 443,
+                transport: None,
+                public_params,
+            },
         }
     }
 

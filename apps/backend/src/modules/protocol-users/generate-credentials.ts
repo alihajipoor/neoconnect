@@ -1,6 +1,6 @@
 import { BadRequestException } from "@nestjs/common";
 import { randomBytes, randomUUID } from "node:crypto";
-import { Protocol } from "@prisma/client";
+import { Protocol, Transport } from "@prisma/client";
 import { signCert } from "../protocol-configs/openvpn-pki";
 import { generateWireGuardKeypair } from "./wireguard-keys";
 import { allocateWireGuardAddress } from "./wireguard-subnet";
@@ -54,7 +54,11 @@ function isOpenVpnPublicParams(value: unknown): value is OpenVpnPublicParams {
  * native-client-format note in project memory. */
 export function generateCredentials(
   protocol: Protocol,
-  protocolConfig: { publicParamsJson: unknown },
+  // `transport` matters to exactly one decision below (XTLS Vision is
+  // TCP-only), but it has to be passed rather than inferred: the same
+  // Protocol member is carried over TCP and over WebSocket, which is the
+  // whole reason that column exists instead of another enum value.
+  protocolConfig: { publicParamsJson: unknown; transport?: Transport },
   usedAddresses: string[],
 ): {
   externalUserId: string;
@@ -72,12 +76,18 @@ export function generateCredentials(
       // credentials.
       //
       // XTLS Vision needs a TLS-like transport underneath it to splice
-      // into, which ordinary TLS over TCP is. It is left on here for the
-      // same reason it is on for REALITY: it removes a layer of double
-      // encryption. A WebSocket transport would have to clear this, since
-      // there is no TLS record stream for Vision to work with.
+      // into, which ordinary TLS over TCP is. It is left on for that case
+      // for the same reason it is on for REALITY: it removes a layer of
+      // double encryption.
+      //
+      // Over a WebSocket there is no TLS record stream for Vision to work
+      // with, and a client that offers a flow the server cannot honour
+      // fails the handshake rather than degrading. So it is cleared here,
+      // at generation, rather than being something every client has to
+      // remember not to send.
       const uuid = randomUUID();
-      return { externalUserId: uuid, credentials: { uuid, flow: "xtls-rprx-vision" } };
+      const flow = protocolConfig.transport === "WS" ? "" : "xtls-rprx-vision";
+      return { externalUserId: uuid, credentials: { uuid, flow } };
     }
     case Protocol.XRAY_TROJAN: {
       // Trojan authenticates with a shared secret rather than a UUID, and

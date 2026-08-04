@@ -30,6 +30,25 @@ export const CUSTOMER_PROTOCOL_LABELS: Record<Protocol, string> = {
   OPENVPN: "Compatible",
 };
 
+/** What a customer sees for a credential, once its transport is known.
+ *
+ * VLESS+TLS is sold as two different things depending on how it is
+ * carried, and it has to be: the whole point of the WebSocket variant is
+ * that it can sit behind a CDN, which is a materially different answer
+ * to "will this get through". Showing both as "Stealth HTTPS" would also
+ * make the failover notice ambiguous -- "switched to Stealth HTTPS" when
+ * you were already on Stealth HTTPS reads as a bug.
+ *
+ * Everything else ignores transport, because for everything else there
+ * is only one. */
+export function customerProtocolLabel(
+  protocol: Protocol,
+  transport?: string,
+): string {
+  if (protocol === "XRAY_VLESS_TLS" && transport === "WS") return "Stealth Web";
+  return CUSTOMER_PROTOCOL_LABELS[protocol] ?? protocol;
+}
+
 /** The one line of "when would I pick this" that belongs next to the
  * name. Without it the labels are just different jargon. */
 export const CUSTOMER_PROTOCOL_HINTS: Record<Protocol, string> = {
@@ -40,3 +59,8 @@ export const CUSTOMER_PROTOCOL_HINTS: Record<Protocol, string> = {
   WIREGUARD: "Fastest. Best when nothing is blocking you.",
   OPENVPN: "Slower, but works almost everywhere.",
 };
+
+/** The WebSocket variant's own hint. Not in the record above because
+ * that is keyed by Protocol, and this is the same Protocol carried
+ * differently. */
+export const STEALTH_WEB_HINT = "Looks like ordinary web traffic. Best when everything else is blocked.";

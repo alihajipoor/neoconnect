@@ -69,6 +69,17 @@ export type PaymentStart =
 export interface ProtocolUserConnection {
   host: string;
   port: number;
+  /** How the protocol is carried, and what wraps it.
+   *
+   * The same Protocol member is served over plain TCP and inside a
+   * WebSocket -- that is what the server's `transport` column exists to
+   * express -- so a client cannot infer the stream shape from the
+   * protocol alone, and guessing wrong fails the handshake.
+   *
+   * Optional because a node registered before these columns existed
+   * reports neither, and every one of those is plain TCP. */
+  transport?: "TCP" | "WS" | "GRPC";
+  security?: "NONE" | "TLS" | "REALITY";
   publicParams: Record<string, unknown>;
 }
 
