@@ -35,12 +35,24 @@ client.once(Events.ClientReady, (ready) => {
   // to correct one that drifted and nobody has to touch a Discord message
   // by hand. Failures inside are logged per panel, never thrown.
   const ctx = { api, config };
-  const tick = () => {
-    void refreshPanels(client, ctx, config.guildId);
-    void ensureTicketPanel(client, config, config.guildId);
+
+  // The boot attempt races the backend: on a deploy both containers restart
+  // together and the bot is ready long before the backend finishes its
+  // migrations, so the first fetch fails. Retry quickly a few times rather
+  // than leaving the channels empty until the ten-minute tick.
+  const settle = async (attempt = 1): Promise<void> => {
+    const failures = await refreshPanels(client, ctx, config.guildId).catch(() => 1);
+    await ensureTicketPanel(client, config, config.guildId).catch((err) =>
+      console.error("ticket panel failed:", err instanceof Error ? err.message : err),
+    );
+    if (failures > 0 && attempt < 6) {
+      console.warn(`${failures} panel(s) failed on attempt ${attempt}; retrying in 15s`);
+      setTimeout(() => void settle(attempt + 1), 15_000).unref?.();
+    }
   };
-  tick();
-  const timer = setInterval(tick, REFRESH_MS);
+
+  void settle();
+  const timer = setInterval(() => void settle(), REFRESH_MS);
   timer.unref?.();
 });
 
