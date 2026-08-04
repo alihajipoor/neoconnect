@@ -1,7 +1,8 @@
-import { IsEmail, IsOptional, IsString, MinLength } from "class-validator";
+import { NormalizedEmail } from "../../../common/decorators/normalized-email.decorator";
+import { IsOptional, IsString, MinLength } from "class-validator";
 
 export class CreateCustomerDto {
-  @IsEmail()
+  @NormalizedEmail()
   email!: string;
 
   @IsString()
