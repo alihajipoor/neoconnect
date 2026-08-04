@@ -6,9 +6,10 @@ WORKDIR /repo
 
 FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-# Every workspace package.json, or --frozen-lockfile refuses to install.
-COPY apps/backend/package.json apps/backend/package.json
-COPY apps/panel/package.json apps/panel/package.json
+# Only this app's manifest. pnpm skips a lockfile importer whose directory is
+# absent from the build context, so the other workspace packages do not need
+# to be here -- which is also why adding this app required no change to the
+# backend and panel images.
 COPY apps/discord-bot/package.json apps/discord-bot/package.json
 COPY packages ./packages
 RUN pnpm install --frozen-lockfile

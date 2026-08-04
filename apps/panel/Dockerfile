@@ -8,7 +8,6 @@ FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY apps/backend/package.json apps/backend/package.json
 COPY apps/panel/package.json apps/panel/package.json
-COPY apps/discord-bot/package.json apps/discord-bot/package.json
 COPY packages ./packages
 RUN pnpm install --frozen-lockfile
 
