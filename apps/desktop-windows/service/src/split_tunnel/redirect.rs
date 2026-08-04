@@ -409,7 +409,9 @@ fn decide(
         return Verdict::Direct;
     }
 
-    let selected = match owner.image_for_port(parsed.transport, parsed.source_port) {
+    let owner_image = owner.image_for_port(parsed.transport, parsed.source_port);
+    let known_owner = owner_image.is_some();
+    let selected = match owner_image {
         Some(image) => !image.eq_ignore_ascii_case(&redirect.own_image) && selection.matches(image),
         // A port with no owner this can see. Leaving it alone is the
         // only safe answer -- redirecting traffic whose origin is
@@ -417,7 +419,30 @@ fn decide(
         None => false,
     };
     if !selected {
-        nat.record_direct(parsed.transport, parsed.source_port);
+        // Only remember the decision when the owner was actually known.
+        //
+        // Recording it on a miss was a real, reported bug: a TCP SYN can
+        // reach here in the moment between the socket being created and
+        // the connection table showing it, and pinning that connection
+        // to Direct meant it stayed unprotected for its whole life --
+        // however many times a lookup would have succeeded afterwards.
+        // Browsers keep connections alive and reuse them, so one lost
+        // race left Chrome showing the real IP until enough reloads
+        // happened to open a fresh connection that won it. Reported
+        // exactly that way: "had to refresh a few times until I see the
+        // VPN ip".
+        //
+        // Leaving it unrecorded costs a repeat lookup on the SYN
+        // retransmit, roughly a second later, by which point the table
+        // always has the row. That is the correct trade: a table walk
+        // against a connection that silently bypasses the tunnel.
+        //
+        // This is the same poisoning that OwnerLookup's image cache had
+        // and it survived here, one layer up, because the cache fix
+        // only stopped the *lookup* from going permanently wrong.
+        if known_owner {
+            nat.record_direct(parsed.transport, parsed.source_port);
+        }
         return Verdict::Direct;
     }
 

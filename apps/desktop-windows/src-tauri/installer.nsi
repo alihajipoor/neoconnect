@@ -1265,6 +1265,12 @@ Function NeoxifyInstFilesShow
   SetCtlColors $R0 ${NX_TEXT} ${NX_BG}
   !insertmacro NxMeasure $R0
 
+  ; Back does nothing useful once files are being written, and MUI
+  ; leaves it sitting there looking like an option. It was the only
+  ; thing on an otherwise empty page, which is most of why this screen
+  ; read as broken rather than as busy.
+  !insertmacro NxHideParent 3
+
   GetDlgItem $R1 $R0 1016  ; the log listbox
   ShowWindow $R1 ${SW_HIDE}
   GetDlgItem $R1 $R0 1027  ; "show details"
@@ -1285,6 +1291,23 @@ Function NeoxifyInstFilesShow
   IntOp $R2 $R2 / 2
   IntOp $R3 $NxHeight / 2
   System::Call "user32::SetWindowPos(p $R1, p 0, i $R2, i $R3, i 240, i 6, i 0x0004)"
+
+  ; A heading above the bar, so the page says what is happening instead
+  ; of presenting a lone progress bar in an empty dark window. The
+  ; welcome page before it has the mark and the product name; without
+  ; something here the two screens do not look like the same installer.
+  ;
+  ; Raw CreateWindowEx rather than nsDialogs::CreateControl: this is
+  ; MUI's own INSTFILES dialog, not one nsDialogs created, so it has no
+  ; nsDialogs context to add controls to. WS_CHILD|WS_VISIBLE with
+  ; SS_CENTER|SS_CENTERIMAGE.
+  IntOp $R4 $NxHeight / 2
+  IntOp $R4 $R4 - 44
+  System::Call "user32::CreateWindowExW(i 0, w 'STATIC', w '$(NxInstalling)',     i 0x50000201, i 0, i $R4, i $NxWidth, i 28, p $R0, p 0, p 0, p 0) p .r5"
+  ${If} $5 <> 0
+    SetCtlColors $5 ${NX_TEXT} ${NX_BG}
+    SendMessage $5 ${WM_SETFONT} $NxButtonFont 1
+  ${EndIf}
 
   ; The current-action line, under the bar rather than above it.
   GetDlgItem $R1 $R0 1006

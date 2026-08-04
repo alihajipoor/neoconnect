@@ -22,6 +22,10 @@ export interface Customer {
   telegramId: string | null;
   referralCode: string | null;
   status: CustomerStatus;
+  /** Null until they click the link. Nothing VPN-related is granted
+   * before this is set, so it is the first thing to check when somebody
+   * reports the app refusing them. */
+  emailVerifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -111,7 +115,15 @@ export interface EmailSettings {
   updatedAt: string;
 }
 
-export type SubscriptionStatus = "ACTIVE" | "SUSPENDED" | "EXPIRED" | "CANCELLED";
+export type SubscriptionStatus =
+  /** Created but not paid for. The self-serve purchase flow starts here,
+   * so the panel has always been able to receive one and could not name
+   * it. */
+  | "PENDING"
+  | "ACTIVE"
+  | "SUSPENDED"
+  | "EXPIRED"
+  | "CANCELLED";
 
 export interface SubscriptionPlan {
   id: string;
@@ -250,5 +262,21 @@ export interface SupportSettings {
   acceptingTickets: boolean;
   awayMessage: string | null;
   replyWithinHours: number | null;
+  updatedAt: string;
+}
+
+export interface Subscription {
+  id: string;
+  customerId: string;
+  planId: string;
+  primaryNodeId: string | null;
+  status: SubscriptionStatus;
+  startAt: string;
+  expireAt: string;
+  /** Snapshot of the plan's cap at purchase. Null means unlimited. */
+  dataCapBytes: string | null;
+  dataUsedBytes: string;
+  autoRenew: boolean;
+  createdAt: string;
   updatedAt: string;
 }

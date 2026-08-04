@@ -34,6 +34,28 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The tag names the version the API will offer; tauri.conf.json
+      # names the version the built app reports about itself. If they
+      # disagree the updater loops forever -- it installs the "new"
+      # build, the app still reports the old number, and the same update
+      # is offered again on every launch.
+      #
+      # This is not hypothetical. desktop-v0.9.0 was pushed against a
+      # tree still at 0.8.0 and published exactly that: a 0.8.0
+      # installer under a 0.9.0 tag. Warning about it in prose did not
+      # prevent it, so the pipeline refuses it instead.
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          tagged="${GITHUB_REF_NAME#desktop-v}"
+          built=$(node -p "require('./apps/desktop-windows/src-tauri/tauri.conf.json').version")
+          if [ "$tagged" != "$built" ]; then
+            echo "Tag $GITHUB_REF_NAME says $tagged but the app is built as $built." >&2
+            echo "Bump package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json, commit, then tag." >&2
+            exit 1
+          fi
+          echo "tag and app agree on $built"
+
       # Fetches the real, official wireguard.exe/wg.exe (see
       # src-tauri/scripts/fetch-binaries.ps1 and resources/README.md) --
       # gitignored, never vendored in git, must exist on disk before
