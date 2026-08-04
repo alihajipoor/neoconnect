@@ -180,12 +180,21 @@ async function findExisting(channel: TextChannel, panelId: string, botId: string
   );
 }
 
-/** Rewrites every panel once. Never throws: a panel that cannot be built is
- *  logged and skipped, because one bad channel must not stop the others. */
-export async function refreshPanels(client: Client, ctx: PanelContext, guildId: string): Promise<void> {
+/** Rewrites every panel once and reports how many failed.
+ *
+ * Never throws: a panel that cannot be built is logged and skipped, because
+ * one bad channel must not stop the others. The count is what lets the
+ * caller retry sooner than the normal interval -- on a deploy the bot
+ * reaches ClientReady while the backend is still running migrations, so the
+ * first attempt legitimately fails and waiting ten minutes to correct it
+ * would leave the channels visibly empty.
+ */
+export async function refreshPanels(client: Client, ctx: PanelContext, guildId: string): Promise<number> {
   const guild = await client.guilds.fetch(guildId);
   const botId = client.user?.id;
-  if (!botId) return;
+  if (!botId) return 0;
+
+  let failures = 0;
 
   for (const panel of PANELS) {
     try {
@@ -209,7 +218,10 @@ export async function refreshPanels(client: Client, ctx: PanelContext, guildId: 
         await channel.send({ embeds: stamped });
       }
     } catch (err) {
-      console.error(`panel "${panel.id}" failed:`, err);
+      failures += 1;
+      console.error(`panel "${panel.id}" failed:`, err instanceof Error ? err.message : err);
     }
   }
+
+  return failures;
 }
