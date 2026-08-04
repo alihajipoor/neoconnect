@@ -10,7 +10,7 @@
     "register": "node dist/register.js",
     "lint": "eslint \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "test": "tsc --project tsconfig.test.json && node --test \"dist-test/*.test.js\""
+    "test": "tsc --project tsconfig.test.json && cd dist-test && node --test"
   },
   "dependencies": {
     "discord.js": "^14.16.3"
