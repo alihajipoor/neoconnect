@@ -8,6 +8,11 @@ const TAG_PREFIX = "desktop-v";
 
 const GITHUB_REPO = "alihajipoor/neoconnect";
 
+/** The branded bootstrapper, which is what a person should download.
+ * The raw NSIS installer beside it is the updater's payload -- it runs
+ * silently and would present no UI to somebody double-clicking it. */
+const INSTALLER_ASSET = "Neoxify-Setup.exe";
+
 /** GitHub allows 60 unauthenticated API calls an hour per IP. Every
  * running client asks this endpoint on launch, so without a cache a
  * few dozen customers starting the app in the same hour would exhaust
@@ -73,6 +78,27 @@ export class UpdatesService {
         },
       },
     };
+  }
+
+  /** The branded installer a human downloads, from the newest release.
+   *
+   * Exists so the website can link to one URL that never changes.
+   * GitHub's own /releases/latest/download cannot be used: "latest"
+   * there means the newest release of *any* tag, so an agent release
+   * silently hijacks it -- which already broke the node installer once.
+   * Pinning a tag by hand is worse again; the site ended up serving
+   * 0.8.0 for hours because the pinned tag was a mislabelled release
+   * nobody revisited.
+   *
+   * Resolved through the same newestBuild() the updater uses, so the
+   * download and the update path can never disagree about what the
+   * current version is. */
+  async installerUrl(): Promise<string> {
+    const newest = await this.newestBuild();
+    if (!newest) {
+      throw new NotFoundException("No release is available to download yet");
+    }
+    return `https://github.com/${GITHUB_REPO}/releases/download/${encodeURIComponent(newest.tag)}/${encodeURIComponent(INSTALLER_ASSET)}`;
   }
 
   /** Where a release asset really lives.
