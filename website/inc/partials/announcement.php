@@ -1,21 +1,20 @@
 <?php
 /**
- * Launch announcement popup.
+ * Launch banner.
  *
- * Two things keep this honest rather than pushy:
+ * An inline strip at the top of the home page, not a modal. It sits in the
+ * page flow, so it never covers content, needs no scroll lock or focus
+ * management, and is fully visible with JavaScript switched off -- the script
+ * only hides it again for someone who has already dismissed it. That is the
+ * opposite of the usual popup arrangement, and the right way round: the
+ * failure mode is "the message shows", not "the page is blocked".
  *
- *  1. It picks its message from the same free-trial switch the rest of the
- *     site uses. With the trial off it falls back to a plain "we're live"
- *     message, so the popup can never promise a free month that the panel
- *     isn't actually granting.
- *  2. It is rendered hidden and only opened by JavaScript, after a short
- *     delay, and only once per person per message version. With scripting
- *     off it never appears at all -- which is the right failure mode for
- *     something that covers the page.
+ * The message follows the same free-trial switch as the rest of the site.
+ * With the trial off it falls back to a plain "we're live" line, so this can
+ * never advertise a free month the panel is not actually granting.
  *
- * Dismissal is stored in localStorage against announcement_version, so
- * bumping that string in config re-shows a changed message to everyone
- * without nagging people about one they already read.
+ * Dismissal is stored against announcement_version, so bumping that string in
+ * config re-shows a changed message without nagging people about an old one.
  */
 
 defined('NX') || exit;
@@ -27,51 +26,36 @@ if (!nx_cfg('announcement_enabled', false)) {
 $nx_trial = nx_free_trial_enabled();
 $nx_variant = $nx_trial ? 'trial' : 'launch';
 $nx_days = (int) nx_cfg('free_trial_days', 30);
+$nx_glyph = $nx_trial ? 'ticket' : 'download';
 
 $nx_key = 'nx-announce-' . nx_locale() . '-' . nx_cfg('announcement_version', '1');
 ?>
-<div class="announce" data-announce data-announce-key="<?php echo nx_esc($nx_key); ?>" hidden>
-  <div class="announce__backdrop" data-announce-close></div>
+<div class="container banner-wrap">
+  <div class="banner" data-announce data-announce-key="<?php echo nx_esc($nx_key); ?>">
 
-  <div class="announce__card" role="dialog" aria-modal="true"
-       aria-labelledby="nx-announce-title" aria-describedby="nx-announce-body">
+    <span class="banner__icon"><?php echo nx_icon($nx_glyph); ?></span>
 
-    <button type="button" class="announce__x" data-announce-close
-            aria-label="<?php echo nx_e('announce.close'); ?>">
-      <?php echo nx_icon('close'); ?>
-    </button>
-
-    <div class="announce__glow" aria-hidden="true"></div>
-
-    <div class="announce__head">
-      <span class="announce__mark"><?php echo nx_logo_mark(); ?></span>
-      <span class="announce__badge"><?php echo nx_e('announce.badge'); ?></span>
+    <div class="banner__text">
+      <p class="banner__title">
+        <span class="banner__pill">
+          <?php echo nx_e('announce.' . $nx_variant . '.pill', array('days' => $nx_days)); ?>
+        </span>
+        <span><?php echo nx_e('announce.' . $nx_variant . '.headline'); ?></span>
+      </p>
+      <p class="banner__body">
+        <?php echo nx_e('announce.' . $nx_variant . '.short'); ?>
+      </p>
     </div>
 
-    <p class="announce__pill">
-      <?php echo nx_e('announce.' . $nx_variant . '.pill', array('days' => $nx_days)); ?>
-    </p>
-
-    <h2 id="nx-announce-title" class="announce__title">
-      <?php echo nx_e('announce.' . $nx_variant . '.headline'); ?>
-    </h2>
-
-    <p id="nx-announce-body" class="announce__body">
-      <?php echo nx_e('announce.' . $nx_variant . '.body'); ?>
-    </p>
-
-    <div class="announce__actions">
-      <a class="btn btn--primary btn--lg" href="<?php echo nx_esc(nx_url('download')); ?>">
-        <?php echo nx_icon('download'); ?>
+    <div class="banner__actions">
+      <a class="btn btn--primary" href="<?php echo nx_esc(nx_url('download')); ?>">
         <?php echo nx_e('announce.cta'); ?>
       </a>
-      <button type="button" class="btn btn--ghost" data-announce-close>
-        <?php echo nx_e('announce.dismiss'); ?>
+      <button type="button" class="banner__x" data-announce-close
+              aria-label="<?php echo nx_e('announce.close'); ?>">
+        <?php echo nx_icon('close'); ?>
       </button>
     </div>
 
-    <p class="announce__note">
-      <?php echo nx_e('announce.' . $nx_variant . '.note'); ?>
-    </p>
   </div>
 </div>

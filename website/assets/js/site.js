@@ -95,60 +95,35 @@
    * Launch announcement
    * ---------------------------------------------------------------- */
 
+  // The banner is in the markup and visible by default -- this only hides it
+  // again for someone who has already dismissed it. Deliberately that way
+  // round: with scripting off, the message still shows, rather than a popup
+  // that can never be closed.
   var announce = doc.querySelector("[data-announce]");
 
   if (announce) {
     var storeKey = announce.getAttribute("data-announce-key") || "nx-announce";
-    var lastFocus = null;
-    var seen = false;
 
     try {
-      seen = window.localStorage.getItem(storeKey) === "1";
+      if (window.localStorage.getItem(storeKey) === "1") {
+        announce.hidden = true;
+      }
     } catch (err) {
-      // Private browsing can throw on localStorage access. Treat that as
-      // "not seen yet" -- showing once a visit is better than never showing.
-      seen = false;
-    }
-
-    var closeAnnounce = function () {
-      announce.hidden = true;
-      doc.documentElement.classList.remove("nx-locked");
-      try {
-        window.localStorage.setItem(storeKey, "1");
-      } catch (err2) {
-        // Nothing to do -- it just means it may appear again next visit.
-      }
-      if (lastFocus && lastFocus.focus) {
-        lastFocus.focus();
-      }
-    };
-
-    var openAnnounce = function () {
-      lastFocus = doc.activeElement;
-      announce.hidden = false;
-      doc.documentElement.classList.add("nx-locked");
-      // Move focus into the dialog so a keyboard user isn't left behind it.
-      var closeButton = announce.querySelector(".announce__x");
-      if (closeButton && closeButton.focus) {
-        closeButton.focus();
-      }
-    };
-
-    if (!seen) {
-      // A short beat, so it doesn't slam into the page mid-render.
-      window.setTimeout(openAnnounce, 1400);
+      // Private browsing can throw on localStorage access. Leaving the banner
+      // visible is the harmless outcome.
     }
 
     var closers = announce.querySelectorAll("[data-announce-close]");
     for (var c = 0; c < closers.length; c++) {
-      closers[c].addEventListener("click", closeAnnounce);
+      closers[c].addEventListener("click", function () {
+        announce.hidden = true;
+        try {
+          window.localStorage.setItem(storeKey, "1");
+        } catch (err2) {
+          // It just means it may reappear next visit.
+        }
+      });
     }
-
-    doc.addEventListener("keydown", function (event) {
-      if (event.key === "Escape" && !announce.hidden) {
-        closeAnnounce();
-      }
-    });
   }
 
   /* ------------------------------------------------------------------

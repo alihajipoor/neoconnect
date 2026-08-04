@@ -346,21 +346,16 @@ return array(
     // never promise a free month that isn't being granted.
     // -----------------------------------------------------------------
 
-    'announce.badge' => 'Just launched',
-
-    'announce.trial.headline' => 'Your first month is on us',
-    'announce.trial.body' => 'Neoxify is newly released, and we are opening it up with a free month. No card, no payment details, nothing to cancel — create an account in the app and it starts right away.',
     'announce.trial.pill' => ':days days free',
-    'announce.trial.note' => 'After that, pick a plan if you want to stay. If you don\'t, nothing happens.',
+    'announce.trial.headline' => 'Your first month is on us',
+    'announce.trial.short' => 'No card and no payment details — create an account in the app and it starts right away.',
 
-    'announce.launch.headline' => 'Neoxify is live',
-    'announce.launch.body' => 'The Windows app is out now and keeps itself updated from here on. macOS, Android and iOS are still in development.',
     'announce.launch.pill' => 'Out now',
-    'announce.launch.note' => 'One installer, and nothing else to set up.',
+    'announce.launch.headline' => 'Neoxify has launched',
+    'announce.launch.short' => 'The Windows app is available now and keeps itself updated from here on.',
 
     'announce.cta' => 'Get the app',
-    'announce.dismiss' => 'Maybe later',
-    'announce.close' => 'Close this message',
+    'announce.close' => 'Dismiss this message',
 
     // -----------------------------------------------------------------
     // Errors
