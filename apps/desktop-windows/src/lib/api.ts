@@ -1,7 +1,37 @@
 import { fetch } from "@tauri-apps/plugin-http";
-import { API_BASE_URL } from "./config";
+import { apiEndpoints, rememberEndpoint } from "./api-endpoints";
 import { clearTokens, getTokens, setTokens } from "./session";
 import type { TokenPair } from "./types";
+
+/** Sends one request, trying each known endpoint until one answers.
+ *
+ * "Answers" means a real HTTP response, whatever its status. A 401 or a
+ * 500 proves the endpoint is reachable and is the service -- moving on
+ * would be wrong, and would turn one rejected password into a walk
+ * through every mirror. Only a transport failure, which is what a
+ * blocked address looks like, rotates to the next.
+ *
+ * Throws if none answered, so the callers below keep their existing
+ * "could not reach Neoxify" handling unchanged.
+ */
+async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Response> {
+  const endpoints = await apiEndpoints();
+  let lastError: unknown;
+
+  for (const base of endpoints) {
+    try {
+      const response = await fetch(`${base}${path}`, init);
+      // Remembered before returning: the next request should start here
+      // rather than paying the blocked address's timeout again.
+      void rememberEndpoint(base);
+      return response;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw lastError ?? new Error("no API endpoint is configured");
+}
 
 export type ApiResult<T> = { ok: true; data: T } | { ok: false; error: string; sessionExpired?: boolean };
 
@@ -16,7 +46,7 @@ async function parseErrorMessage(res: Response): Promise<string> {
 export async function publicRequest<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}${path}`, {
+    res = await fetchAnyEndpoint(path, {
       ...init,
       headers: { "Content-Type": "application/json", ...init?.headers },
     });
@@ -56,7 +86,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<A
   if (!tokens) return { ok: false, error: "Not signed in.", sessionExpired: true };
 
   const doFetch = (accessToken: string) =>
-    fetch(`${API_BASE_URL}${path}`, {
+    fetchAnyEndpoint(path, {
       ...init,
       headers: {
         "Content-Type": "application/json",
