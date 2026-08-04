@@ -108,7 +108,7 @@ function plansEmbed(plans: PublicPlan[], lang: Lang, config: BotConfig): EmbedBu
   for (const plan of plans.slice(0, 25)) {
     embed.addFields({ name: plan.name, value: planLine(plan, lang) });
   }
-  return embed.setDescription(`${say("buyAt", lang)} ${config.panelUrl}`);
+  return embed.setDescription(`${say("buyAt", lang)} ${config.websiteUrl}`);
 }
 
 /**

@@ -122,7 +122,8 @@ function plansEmbed(plans: PublicPlan[], config: BotConfig): EmbedBuilder {
     .setDescription(
       plans.length === 0
         ? "No plans are on sale right now."
-        : `Buy or manage your plan at **${config.panelUrl}**\nخرید و مدیریت اشتراک از پنل کاربری`,
+        : `Buy and manage your subscription **in the app** — download it from ${config.websiteUrl}\n` +
+          "خرید و مدیریت اشتراک از داخل خود برنامه انجام می‌شود.",
     );
 
   for (const plan of plans.slice(0, 25)) {
@@ -138,7 +139,11 @@ function linksEmbed(config: BotConfig): EmbedBuilder {
     .setDescription("Everything official, in one place. هر چیزی که رسمی است، یکجا.")
     .addFields(
       { name: "🌐  Website", value: config.websiteUrl, inline: true },
-      { name: "👤  Your account", value: config.panelUrl, inline: true },
+      {
+        name: "👤  Your subscription",
+        value: "In the app — Settings → Account",
+        inline: true,
+      },
       {
         name: "⚠️  Only these",
         value:
