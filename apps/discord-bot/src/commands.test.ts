@@ -26,7 +26,7 @@ const plan = (over: Partial<PublicPlan> = {}): PublicPlan => ({
   ...over,
 });
 
-const config = { panelUrl: "https://connect.neoxify.com" } as BotConfig;
+const config = { websiteUrl: "https://neoxify.net" } as BotConfig;
 
 describe("statusColour", () => {
   it("is brand violet when everything is up", () => {
@@ -144,8 +144,8 @@ describe("plansEmbed", () => {
     assert.equal(plansEmbed(many, "en", config).toJSON().fields?.length, 25);
   });
 
-  it("points at the panel to buy", () => {
-    assert.match(plansEmbed([plan()], "en", config).toJSON().description ?? "", /connect\.neoxify\.com/);
+  it("points at the website, never the operator panel", () => {
+    assert.match(plansEmbed([plan()], "en", config).toJSON().description ?? "", /neoxify\.net/);
   });
 });
 

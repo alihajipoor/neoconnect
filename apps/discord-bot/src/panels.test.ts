@@ -9,7 +9,6 @@ const { downloadsEmbed, plansEmbed, linksEmbed, planLine, markerFor } = __testin
 
 const config = {
   websiteUrl: "https://neoxify.net",
-  panelUrl: "https://connect.neoxify.com",
 } as BotConfig;
 
 const release = (over: Partial<PlatformRelease> = {}): PlatformRelease => ({
@@ -89,8 +88,8 @@ describe("planLine", () => {
 });
 
 describe("plansEmbed", () => {
-  it("points at the panel to buy", () => {
-    assert.match(plansEmbed([plan()], config).toJSON().description ?? "", /connect\.neoxify\.com/);
+  it("points at the website, never the operator panel", () => {
+    assert.match(plansEmbed([plan()], config).toJSON().description ?? "", /neoxify\.net/);
   });
 
   it("says so plainly when nothing is on sale", () => {
@@ -104,10 +103,10 @@ describe("plansEmbed", () => {
 });
 
 describe("linksEmbed", () => {
-  it("carries both official URLs", () => {
+  it("carries the website and never the operator panel", () => {
     const json = JSON.stringify(linksEmbed(config).toJSON());
     assert.match(json, /neoxify\.net/);
-    assert.match(json, /connect\.neoxify\.com/);
+    assert.doesNotMatch(json, /connect\.neoxify\.com/);
   });
 
   /** The anti-phishing line is the reason this panel exists at all. */
