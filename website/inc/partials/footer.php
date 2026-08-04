@@ -36,6 +36,7 @@ $nx_telegram = trim((string) nx_cfg('telegram_url', ''));
         <ul>
           <li><a href="<?php echo nx_esc(nx_url('reseller')); ?>"><?php echo nx_e('nav.reseller'); ?></a></li>
           <li><a href="<?php echo nx_esc(nx_url('contact')); ?>"><?php echo nx_e('nav.contact'); ?></a></li>
+          <li><a href="<?php echo nx_esc(nx_url('privacy')); ?>"><?php echo nx_e('nav.privacy'); ?></a></li>
           <?php if ($nx_telegram !== ''): ?>
             <li><a href="<?php echo nx_esc($nx_telegram); ?>" rel="noopener">Telegram</a></li>
           <?php endif; ?>

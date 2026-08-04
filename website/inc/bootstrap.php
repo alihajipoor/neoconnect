@@ -33,6 +33,7 @@ $NX_ROUTES = array(
     'download' => 'download/',
     'contact'  => 'contact/',
     'reseller' => 'reseller/',
+    'privacy'  => 'privacy/',
 );
 
 // Fall back rather than fatal, so a page that forgets to declare itself still
@@ -312,6 +313,34 @@ function nx_pick($value, $locale = null)
         return (string) $value['en'];
     }
     return $value ? (string) reset($value) : '';
+}
+
+/**
+ * Pick a per-locale LIST out of a content entry -- the paragraph and bullet
+ * arrays in inc/content/privacy.php, where nx_pick() would return an array
+ * where a string is expected.
+ *
+ * @param array       $item   the content entry
+ * @param string      $key    'body', 'bullets', ...
+ * @param string|null $locale defaults to the current locale
+ * @return array empty when the key or the locale's list is absent
+ */
+function nx_pick_list($item, $key, $locale = null)
+{
+    if (!isset($item[$key]) || !is_array($item[$key])) {
+        return array();
+    }
+
+    $set = $item[$key];
+    $locale = $locale === null ? nx_locale() : $locale;
+
+    if (isset($set[$locale]) && is_array($set[$locale])) {
+        return $set[$locale];
+    }
+    if (isset($set['en']) && is_array($set['en'])) {
+        return $set['en'];
+    }
+    return array();
 }
 
 /** Whether the site should advertise the free trial. */
