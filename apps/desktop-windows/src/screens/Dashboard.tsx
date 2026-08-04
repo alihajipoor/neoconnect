@@ -12,6 +12,7 @@ import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from
 import { loadLastGood, saveLastGood } from "../lib/failover-store";
 import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
+import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
@@ -864,6 +865,18 @@ export function Dashboard({
             setLastGood(updated);
             void saveLastGood(updated);
             strikesRef.current = 0;
+            // Successes are reported too, and they are not filler. A
+            // failure rate needs a denominator, and "Stealth works from
+            // this network while Fast does not" is a fact only the
+            // successes can establish. The ladder is attached whenever
+            // something had to be walked past to get here.
+            void reportAttempt({
+              kind: "CONNECT",
+              outcome: "SUCCESS",
+              protocol: label,
+              routeId: candidate.routeId,
+              attempts: attempts.length > 0 ? rungsFrom([...attempts, `${label}: connected`]) : undefined,
+            });
             return true;
           }
 
@@ -893,6 +906,17 @@ export function Dashboard({
       // A pass the customer stopped is not a failure and must not be
       // reported as one.
       setConnectionError(cancelRef.current ? null : lastError);
+      if (!cancelRef.current) {
+        // The whole ladder failed. This is the report that has been
+        // costing a screenshot and a conversation every time: which
+        // protocols were tried, in order, and what each one did.
+        void reportAttempt({
+          kind: "CONNECT",
+          outcome: lastError ? outcomeFromError(lastError.kind) : "OTHER",
+          reason: lastError?.detail,
+          attempts: rungsFrom(attempts),
+        });
+      }
       setConnectionState("disconnected");
       await invoke("vpn_disconnect").catch(() => undefined);
       return false;

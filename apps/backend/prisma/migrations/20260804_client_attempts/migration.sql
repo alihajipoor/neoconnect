@@ -35,6 +35,7 @@ CREATE TABLE "client_attempts" (
   "apiEndpoint"  TEXT,
   "reason"       TEXT,
   "ip"           TEXT,
+  "occurredAt"   TIMESTAMP(3),
   "createdAt"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
   CONSTRAINT "client_attempts_pkey" PRIMARY KEY ("id")

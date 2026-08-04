@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getTokens } from "@shared/lib/session";
+import { flushAttempts } from "@shared/lib/attempts";
 import { Login } from "@shared/screens/Login";
 import { Register } from "@shared/screens/Register";
 import { VerifyEmail } from "@shared/screens/VerifyEmail";
@@ -53,6 +54,13 @@ export default function App() {
     getTokens()
       .then((tokens) => setScreen(tokens ? "dashboard" : "login"))
       .catch(() => setScreen("login"));
+  }, []);
+
+  // Anything the device could not report at the time -- which is every
+  // "could not reach the control plane", since it cannot be reported
+  // while it is true -- goes out now. Unawaited and silent by design.
+  useEffect(() => {
+    void flushAttempts();
   }, []);
 
   // Deliberately no deep-link handling, unlike the Windows client.

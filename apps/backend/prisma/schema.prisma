@@ -651,7 +651,22 @@ model ClientAttempt {
 
   /// Where the report came from. Personal data about people in a country
   /// where that matters, so it is kept briefly and joined to nothing.
-  ip        String?
+  ip String?
+
+  /// When the client says it happened, as opposed to when we received it.
+  ///
+  /// Not a refinement -- without it the most valuable bucket is a lie. A
+  /// client that could not reach the control plane cannot report that it
+  /// could not reach the control plane, so it queues and sends on the next
+  /// contact, which may be hours later. Stamping those "just now" would
+  /// make an outage look like it is happening at the moment somebody
+  /// finally got back online.
+  ///
+  /// Client-supplied, therefore never trusted for ordering or retention:
+  /// `createdAt` stays the arrival time and remains what everything sorts
+  /// and sweeps by. This is shown, not relied on.
+  occurredAt DateTime?
+
   createdAt DateTime @default(now())
 
   customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)

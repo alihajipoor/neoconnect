@@ -280,3 +280,53 @@ export interface Subscription {
   createdAt: string;
   updatedAt: string;
 }
+
+/** What a client was trying to do when it reported an attempt. */
+export type ClientAttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT";
+
+/** How it went, in the app's own vocabulary rather than an HTTP status.
+ *
+ * These are the distinctions that change what an operator does.
+ * "Reached the server and it said no" and "never reached the server"
+ * look identical to a customer and mean opposite things to us. */
+export type ClientAttemptOutcome =
+  | "SUCCESS"
+  | "CONTROL_PLANE_UNREACHABLE"
+  | "REJECTED"
+  | "NOT_CARRYING_TRAFFIC"
+  | "ENGINE_FAILED"
+  | "PERMISSION_DENIED"
+  | "OTHER";
+
+/** One rung of the failover ladder, as the app recorded it. */
+export interface AttemptRung {
+  protocol: string;
+  result: string;
+}
+
+export interface ClientAttempt {
+  id: string;
+  kind: ClientAttemptKind;
+  outcome: ClientAttemptOutcome;
+  customerId: string | null;
+  customer?: Pick<Customer, "id" | "email"> | null;
+  platform: string;
+  appVersion: string;
+  routeId: string | null;
+  protocol: string | null;
+  /** Null unless the client sent a ladder -- most sign-ins have none. */
+  attemptsJson: AttemptRung[] | null;
+  apiEndpoint: string | null;
+  reason: string | null;
+  ip: string | null;
+  /** When the client says it happened, if that is not when it arrived.
+   * A report queued while the control plane was unreachable can be hours
+   * late, and those are the ones worth reading. */
+  occurredAt: string | null;
+  createdAt: string;
+}
+
+export interface ClientAttemptSummaryRow {
+  outcome: ClientAttemptOutcome;
+  count: number;
+}

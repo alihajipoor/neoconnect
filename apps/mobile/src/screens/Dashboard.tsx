@@ -15,6 +15,7 @@ import { LocationPicker } from "@shared/components/LocationPicker";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "@shared/lib/credential-cache";
+import { outcomeFromError, reportAttempt, rungsFrom } from "@shared/lib/attempts";
 import { loadAllowedApps } from "../lib/per-app";
 import {
   connectWireGuard,
@@ -358,13 +359,19 @@ export function Dashboard({
     }
 
     if (usable.length === 0) {
+      const detail =
+        "None of this subscription's servers offer a protocol this app can use. " +
+        "OpenVPN is Windows-only; pick a different location.";
       setConnectionError({
         kind: "serverUnreachable",
         messageKey: "err.notCarryingTraffic",
-        detail:
-          "None of this subscription's servers offer a protocol this app can use. " +
-          "OpenVPN is Windows-only; pick a different location.",
+        detail,
       });
+      // Worth reporting even though nothing was attempted. It is not a
+      // network fault at all -- it means a plan is being sold with
+      // routes this build cannot use -- and that is invisible from the
+      // panel unless somebody says so.
+      void reportAttempt({ kind: "CONNECT", outcome: "OTHER", reason: detail });
       return;
     }
 
@@ -423,6 +430,16 @@ export function Dashboard({
           // to Fast" to somebody who chose Fast is noise.
           if (chosen && candidate.routeId !== chosen.routeId) setFailedOverTo(label);
           setConnectionState("connected");
+          // Successes carry the denominator. A failure count without one
+          // cannot distinguish "the tablet build is broken" from "one
+          // person tried once".
+          void reportAttempt({
+            kind: "CONNECT",
+            outcome: "SUCCESS",
+            protocol: label,
+            routeId: candidate.routeId,
+            attempts: attempts.length > 0 ? rungsFrom([...attempts, `${label}: connected`]) : undefined,
+          });
           return;
         }
 
@@ -450,6 +467,15 @@ export function Dashboard({
     setExitIp(null);
     setConnectionError(lastError);
     setConnectionState("disconnected");
+    // The report that has been costing a screenshot and a conversation
+    // every time a tablet could not connect: which protocols were tried,
+    // in order, and what each one did.
+    void reportAttempt({
+      kind: "CONNECT",
+      outcome: lastError ? outcomeFromError(lastError.kind) : "OTHER",
+      reason: lastError?.detail,
+      attempts: rungsFrom(attempts),
+    });
   }
 
   async function handleLogout() {

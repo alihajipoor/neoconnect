@@ -22,6 +22,12 @@ const STALE_PENDING_INTERVAL_MS = 60 * 60 * 1000;
 // hourly would only mean a customer hears about their free month a few
 // hours sooner, at the cost of a table scan every hour forever.
 const REFERRAL_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Attempt reports expire on a 14-day window, so a daily pass is as
+// precise as the window is. This one is not merely tidying: those rows
+// are IP addresses belonging to people in a country where holding them
+// is dangerous, and the sweep is the only thing that actually enforces
+// the retention promise.
+const CLIENT_ATTEMPT_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -58,6 +64,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "referral",
       {},
       { repeat: { every: REFERRAL_INTERVAL_MS }, jobId: "referral-sweep" },
+    );
+    await this.queue.add(
+      "client-attempt-retention",
+      {},
+      { repeat: { every: CLIENT_ATTEMPT_INTERVAL_MS }, jobId: "client-attempt-retention-sweep" },
     );
   }
 }
