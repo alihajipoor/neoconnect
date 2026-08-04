@@ -84,6 +84,17 @@ jobs:
         working-directory: apps/mobile
         run: pnpm exec tauri android init
 
+      # `android init` writes Tauri's own placeholder launcher icons into
+      # the generated tree, and that tree is gitignored, so the committed
+      # icons under src-tauri/icons never reach the APK on their own.
+      # Without this step the release ships with Tauri's logo on the home
+      # screen -- which is exactly what android-v0.1.0 did.
+      #
+      # Must run after init, not before: init would overwrite it.
+      - name: Apply the Neoxify launcher icon
+        working-directory: apps/mobile
+        run: pnpm exec tauri icon src-tauri/icons/icon.png
+
       - name: Build
         working-directory: apps/mobile
         run: pnpm exec tauri android build --apk --target aarch64
