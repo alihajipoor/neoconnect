@@ -61,7 +61,10 @@ return array(
     // Home — hero
     // -----------------------------------------------------------------
 
-    'home.hero.eyebrow' => 'Encrypted. Stable. Hard to block.',
+    // Must not repeat the headline underneath it -- an earlier version read
+    // "Encrypted. Stable. Hard to block." directly above a headline already
+    // saying "Hard to block."
+    'home.hero.eyebrow' => 'For networks that fight back',
     'home.hero.title' => 'Low latency. Hard to block.',
     'home.hero.title_accent' => 'Built for gamers.',
     'home.hero.subtitle' => 'Your traffic is encrypted the moment it leaves your device, carried across servers we run ourselves, and built to keep working on networks that try hard to shut connections like this down.',

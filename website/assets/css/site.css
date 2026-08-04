@@ -800,6 +800,18 @@ html[lang="fa"] .eyebrow {
   opacity: 0.55;
 }
 
+/* The shared badge position is bottom-centre, which works for the phone but
+   put the macOS one directly behind the app window in front of it -- about
+   two thirds of it was covered, so it read as a fragment of a word. The top
+   corner is the part of this window nothing overlaps. */
+.device--mac .device__soon {
+  inset-block-start: 0.5rem;
+  inset-block-end: auto;
+  inset-inline-start: auto;
+  inset-inline-end: 0.5rem;
+  transform: none;
+}
+
 .device--mac .device__body {
   height: 7.5rem;
   background: linear-gradient(
