@@ -114,6 +114,16 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
      * silently is the same dishonesty as a false "Connected". */
     private var activeProtocol: String? = null
 
+    /** Whether this process has ever started the xray engine.
+     *
+     * Gates every read of the Go library, so a customer who only uses
+     * WireGuard never loads it at all. Deliberately not derived from
+     * activeProtocol: that is cleared on disconnect, while the library
+     * stays loaded for the life of the process, and asking it after a
+     * disconnect is both safe and correct. */
+    @Volatile
+    private var xrayStarted = false
+
     @InvokeArg
     class XrayProfile {
         /** The complete xray-core config, built by the app.
@@ -222,6 +232,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
                 ?: throw IllegalStateException("The VPN service did not start")
 
             service.start(profile.config, profile.mtu, profile.dns, profile.allowedApps)
+            xrayStarted = true
             activeProtocol = profile.protocol
             JSObject()
         }
@@ -266,8 +277,20 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun status(invoke: Invoke) = offMainThread(invoke, "status") { readStatus() }
 
     private fun readStatus(): JSObject {
-        // Two engines, either of which may be the live one.
-        val xrayUp = runCatching { Neoxifyxray.running() }.getOrDefault(false)
+        // Two engines, either of which may be the live one -- but the
+        // xray one is asked only if it was ever started.
+        //
+        // Touching Neoxifyxray loads libgojni.so and starts a second Go
+        // runtime alongside the one inside WireGuard's libwg-go.so. Two
+        // of them initialising in the same process is a known way to
+        // crash, and status() runs on every dashboard load, so simply
+        // signing in was enough to bring the second runtime up for
+        // somebody who only ever uses WireGuard.
+        //
+        // Loading a 46MB engine to answer "is anything connected?" was
+        // wasteful regardless. It is now loaded when it is needed to
+        // carry traffic and not before.
+        val xrayUp = xrayStarted && runCatching { Neoxifyxray.running() }.getOrDefault(false)
         val wireguardUp = try {
             backend.getState(tunnel) == Tunnel.State.UP
         } catch (e: Exception) {

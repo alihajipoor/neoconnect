@@ -36,6 +36,10 @@ import neoxifyxray.Protector
 class NeoxifyTunService : VpnService(), Protector {
     private var tun: ParcelFileDescriptor? = null
 
+    /** Whether the Go engine has actually been started in this service.
+     * See the note in teardown. */
+    private var started = false
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -65,10 +69,17 @@ class NeoxifyTunService : VpnService(), Protector {
     }
 
     private fun teardown() {
-        try {
-            Neoxifyxray.stop()
-        } catch (e: Exception) {
-            Log.w(TAG, "xray stop failed", e)
+        // Only if it was started. Calling into the Go library to stop
+        // something that never ran would load libgojni.so purely to be
+        // told "nothing is running" -- and loading it is exactly what we
+        // are avoiding until traffic needs it.
+        if (started) {
+            try {
+                Neoxifyxray.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "xray stop failed", e)
+            }
+            started = false
         }
         try {
             tun?.close()
@@ -156,6 +167,7 @@ class NeoxifyTunService : VpnService(), Protector {
 
         try {
             Neoxifyxray.start(configJson, descriptor.fd.toLong(), this)
+            started = true
         } catch (e: Exception) {
             teardown()
             throw e
