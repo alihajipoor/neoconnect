@@ -51,6 +51,12 @@
         "decryption": "none",
         "fallbacks": [
           {
+            "//": "Keyed on the negotiated ALPN -- see the note in xray-config.json.template. This inbound offers h2, and handing an h2 connection to an HTTP/1.1-only nginx kills it with a protocol error, which is what broke the node API mirrors for every modern client.",
+            "alpn": "h2",
+            "dest": "__TROJAN_FALLBACK_H2__",
+            "xver": 1
+          },
+          {
             "dest": "__TROJAN_FALLBACK__",
             "xver": 1
           }
@@ -78,6 +84,12 @@
       "settings": {
         "clients": [],
         "fallbacks": [
+          {
+            "//": "Keyed on the negotiated ALPN -- see the note in xray-config.json.template. This inbound offers h2, and handing an h2 connection to an HTTP/1.1-only nginx kills it with a protocol error, which is what broke the node API mirrors for every modern client.",
+            "alpn": "h2",
+            "dest": "__TROJAN_FALLBACK_H2__",
+            "xver": 1
+          },
           {
             "dest": "__TROJAN_FALLBACK__",
             "xver": 1
