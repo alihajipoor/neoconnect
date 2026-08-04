@@ -545,6 +545,29 @@ export function Dashboard({
         return;
       }
 
+      // Custom mode not carrying, but the tunnel itself is healthy.
+      //
+      // This is the whole "no matter which protocol I pick it ends up on
+      // Fast" report. The connect path was taught this and the poll was
+      // not, so a protocol would connect correctly and then be dragged
+      // off it seconds later: probe fails, strikes accumulate, the
+      // ladder runs, WireGuard wins. Every time, on every protocol,
+      // which is exactly what it looked like from outside.
+      //
+      // The probe is also demonstrably capable of false negatives -- it
+      // flashed "not carrying traffic" while Chrome was visibly going
+      // through the tunnel. Letting a check that flaky throw away a
+      // working protocol is indefensible.
+      //
+      // So: a split-tunnel probe failure is never grounds to change
+      // protocol. The engine's own handshake decides whether the tunnel
+      // is alive; if it is, the session stands.
+      if (splitTunnelActive && fromStatus === "connected") {
+        strikesRef.current = 0;
+        setConnectionState("connected");
+        return;
+      }
+
       setConnectionState("degraded");
       strikesRef.current += 1;
 
