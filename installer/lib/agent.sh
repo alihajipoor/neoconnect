@@ -4,24 +4,60 @@
 # engines as systemd units, and enrolls with the control-plane panel.
 set -euo pipefail
 
-# The repo is public, so GitHub's friendly "latest release" asset URLs
-# (see .github/workflows/release-agent.yml, which publishes
-# agentd-linux-amd64/arm64 + sha256sums.txt on every v* tag) work with a
-# plain unauthenticated curl -- confirmed directly against the real
-# release. Override for a self-hosted/custom build, e.g.:
+AGENT_REPO="${AGENT_REPO:-alihajipoor/neoconnect}"
+
+# The newest *agent* release, resolved by tag rather than by asking
+# GitHub for "latest".
+#
+# /releases/latest/download used to be here and it broke the moment the
+# desktop client started publishing releases: "latest" is the newest
+# release of *any* tag, so it began resolving to desktop-v0.8.5 and
+# every node install 404'd looking for agentd-linux-amd64 in a release
+# containing a Windows installer.
+#
+# The two artefacts ship on independent schedules under deliberately
+# separate tag prefixes -- v* for the agent, desktop-v* for the client
+# (see .github/workflows/release-agent.yml and
+# release-desktop-windows.yml) -- so the prefix is what has to be
+# matched. Anything else is a race between two release cadences.
+#
+# Override for a self-hosted or pinned build, e.g.:
 #   AGENT_RELEASE_URL_BASE=https://example.com/releases/v0.1.0 sudo -E ./install.sh
-AGENT_RELEASE_URL_BASE="${AGENT_RELEASE_URL_BASE:-https://github.com/alihajipoor/neoconnect/releases/latest/download}"
+resolve_agent_release_base() {
+  if [[ -n "${AGENT_RELEASE_URL_BASE:-}" ]]; then
+    echo "$AGENT_RELEASE_URL_BASE"
+    return 0
+  fi
+
+  local tag
+  # Newest non-draft, non-prerelease tag that looks like v1.2.3 -- the
+  # agent's own scheme. `desktop-v*` does not match, which is the point.
+  tag="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=50" 2>/dev/null     | jq -r '[.[] | select(.draft==false and .prerelease==false)
+              | select(.tag_name | test("^v[0-9]+\.[0-9]+\.[0-9]+$"))]
+             | first | .tag_name // empty')"
+
+  if [[ -z "$tag" ]]; then
+    echo "ERROR: could not find an agent release (tag vX.Y.Z) in $AGENT_REPO." >&2
+    echo "Pin one by hand, e.g.:" >&2
+    echo "  AGENT_RELEASE_URL_BASE=https://github.com/$AGENT_REPO/releases/download/v0.2.1 sudo -E ./install.sh" >&2
+    return 1
+  fi
+
+  echo "https://github.com/$AGENT_REPO/releases/download/$tag"
+}
 
 fetch_agent_binary() {
   local asset_name="agentd-linux-$AGENT_ARCH"
+  local base
+  base="$(resolve_agent_release_base)" || exit 1
 
-  echo "Downloading agent binary for linux/$AGENT_ARCH..."
+  echo "Downloading agent binary for linux/$AGENT_ARCH from ${base##*/}..."
   # Saved under the same name sha256sums.txt references (not a generic
   # "agentd") -- sha256sum -c verifies by matching the exact filename in
   # each checksum line against a file of that name in the cwd. (This
   # tripped up an earlier version of this function -- see git history.)
-  curl -fsSL "$AGENT_RELEASE_URL_BASE/$asset_name" -o "/tmp/$asset_name"
-  curl -fsSL "$AGENT_RELEASE_URL_BASE/sha256sums.txt" -o /tmp/sha256sums.txt
+  curl -fsSL "$base/$asset_name" -o "/tmp/$asset_name"
+  curl -fsSL "$base/sha256sums.txt" -o /tmp/sha256sums.txt
 
   if ! (cd /tmp && grep "$asset_name" sha256sums.txt | sha256sum -c -); then
     echo "ERROR: checksum verification failed, aborting install." >&2
