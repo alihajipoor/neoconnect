@@ -139,6 +139,19 @@ export function Dashboard({
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
   const [baselineIp, setBaselineIp] = useState<string | null>(null);
+  /** Names the protocol actually in use when it is not the one the
+   * customer asked for.
+   *
+   * Not cosmetic. On Windows the absence of this cost five releases of
+   * "no matter what I pick it connects as Fast" -- the app was moving
+   * them and saying nothing, so a working failover was indistinguishable
+   * from a bug. Here it is currently the normal case rather than the
+   * exception, because this build only carries WireGuard, which makes
+   * saying so more important rather than less. */
+  const [failedOverTo, setFailedOverTo] = useState<string | null>(null);
+  /** Set when the chosen server's protocol has no engine in this build,
+   * so the reason is a missing feature rather than a blocked network. */
+  const [unsupportedChoice, setUnsupportedChoice] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   /** Set when the customer declined Android's VPN consent dialog. Shown
    * rather than swallowed: a refusal looks exactly like a failed connect
@@ -285,9 +298,21 @@ export function Dashboard({
    * other engines slot into unchanged.
    */
   async function runLadder() {
-    const usable = (protocolUsers.length > 0 ? protocolUsers : [protocolUser!]).filter((u) =>
-      SUPPORTED.has(u.protocol),
-    );
+    setFailedOverTo(null);
+    setUnsupportedChoice(null);
+
+    const all = protocolUsers.length > 0 ? protocolUsers : [protocolUser!];
+    const usable = all.filter((u) => SUPPORTED.has(u.protocol));
+
+    // Said before the attempt rather than discovered after it. A customer
+    // who deliberately picked Stealth and silently got Fast has no way to
+    // tell a deliberate fallback from a broken picker -- and on Windows,
+    // where exactly that happened, they reasonably concluded the app was
+    // ignoring them.
+    const chosen = all.find((u) => u.routeId === chosenRouteId) ?? all[0];
+    if (chosen && !SUPPORTED.has(chosen.protocol)) {
+      setUnsupportedChoice(CUSTOMER_PROTOCOL_LABELS[chosen.protocol] ?? chosen.protocol);
+    }
 
     if (usable.length === 0) {
       setConnectionError({
@@ -341,6 +366,9 @@ export function Dashboard({
         if (await confirmEgress(baseline)) {
           const verdict = await verifyEgress(baseline);
           setExitIp(verdict.state === "throughTunnel" ? verdict.exitIp : null);
+          // Only when it is not what they asked for. Announcing "switched
+          // to Fast" to somebody who chose Fast is noise.
+          if (chosen && candidate.routeId !== chosen.routeId) setFailedOverTo(label);
           setConnectionState("connected");
           return;
         }
@@ -510,6 +538,22 @@ export function Dashboard({
                               ? t("dash.verifyingHint")
                               : t("dash.notProtectedHint")}
                       </p>
+                      {/* Never move the customer without saying so. The
+                          Windows client learned this the expensive way:
+                          five releases of "it always connects as Fast"
+                          were a working failover that told nobody. */}
+                      {connectionState === "connected" && failedOverTo ? (
+                        <p className="mt-1 text-xs text-amber-400/90">
+                          {t("dash.switchedTo")} <span className="font-medium">{failedOverTo}</span>
+                        </p>
+                      ) : null}
+
+                      {unsupportedChoice ? (
+                        <p className="mt-1 text-xs text-amber-400/90">
+                          {t("dash.androidWireguardOnly", { protocol: unsupportedChoice })}
+                        </p>
+                      ) : null}
+
                       {connectionState === "connected" && exitIp ? (
                         <p className="mt-1.5 text-xs text-muted-foreground">
                           {t("dash.yourIp")}{" "}

@@ -26,6 +26,8 @@ import com.wireguard.config.Config
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.StringReader
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * The tunnel.
@@ -45,6 +47,49 @@ import java.io.StringReader
 @TauriPlugin
 class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     private val backend: Backend by lazy { GoBackend(activity.applicationContext) }
+
+    /**
+     * Everything that touches the engine runs here, never on the caller's
+     * thread.
+     *
+     * Tauri dispatches plugin commands on the main thread, and Android
+     * throws NetworkOnMainThreadException for any network call made there
+     * -- including the DNS lookup `Config.parse` performs when a peer's
+     * endpoint is a hostname rather than a literal address.
+     *
+     * That asymmetry shipped and was reported: Finland's endpoint is
+     * 204.168.161.100:51820 and connected fine, France's is
+     * fr1.neoxify.com:51820 and failed every time, so the ladder walked
+     * past France to Finland on every attempt. The node's own capture
+     * showed the desktop client handshaking with France perfectly while
+     * the tablet never sent it a single packet -- the connection died
+     * inside the app, before the network was involved at all.
+     *
+     * Single-threaded on purpose: connect and disconnect must not
+     * interleave, or a teardown can land between another attempt's
+     * setState and its status read.
+     */
+    private val engine: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "neoxify-vpn").apply { isDaemon = true }
+    }
+
+    /** Runs `work` off the main thread and resolves the call with whatever
+     * it returns, or rejects with the engine's own words if it throws. */
+    private fun offMainThread(invoke: Invoke, what: String, work: () -> JSObject) {
+        engine.execute {
+            try {
+                invoke.resolve(work())
+            } catch (e: Exception) {
+                // Passed through rather than flattened into "could not
+                // connect": the difference between a refused permission,
+                // an unreachable endpoint and a bad key is three
+                // different fixes, and the app shows this text under
+                // "show details" precisely so it survives to be read.
+                Log.e(TAG, "$what failed", e)
+                invoke.reject(e.message ?: e.toString())
+            }
+        }
+    }
 
     /** The one tunnel this app ever creates.
      *
@@ -114,32 +159,28 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun connectWireguard(invoke: Invoke) {
+        // Parsed on this thread -- reading the arguments touches no
+        // network -- but everything after it must not be.
         val profile = invoke.parseArgs(WireGuardProfile::class.java)
-        try {
-            val config = Config.parse(BufferedReader(StringReader(buildQuickConfig(profile))))
-            backend.setState(tunnel, Tunnel.State.UP, config)
-            activeProtocol = "WIREGUARD"
-            invoke.resolve(JSObject())
-        } catch (e: Exception) {
-            activeProtocol = null
-            // The engine's own words, passed through. A generic "could
-            // not connect" throws away the difference between a refused
-            // permission, an unreachable endpoint and a malformed key --
-            // three completely different fixes.
-            Log.e(TAG, "connect failed", e)
-            invoke.reject(e.message ?: e.toString())
+        offMainThread(invoke, "connect") {
+            try {
+                val config = Config.parse(BufferedReader(StringReader(buildQuickConfig(profile))))
+                backend.setState(tunnel, Tunnel.State.UP, config)
+                activeProtocol = "WIREGUARD"
+                JSObject()
+            } catch (e: Exception) {
+                activeProtocol = null
+                throw e
+            }
         }
     }
 
     @Command
     fun disconnect(invoke: Invoke) {
-        try {
+        offMainThread(invoke, "disconnect") {
             backend.setState(tunnel, Tunnel.State.DOWN, null)
             activeProtocol = null
-            invoke.resolve(JSObject())
-        } catch (e: Exception) {
-            Log.e(TAG, "disconnect failed", e)
-            invoke.reject(e.message ?: e.toString())
+            JSObject()
         }
     }
 
@@ -153,7 +194,9 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
      * which is the only cheap evidence requiring the server to take part.
      */
     @Command
-    fun status(invoke: Invoke) {
+    fun status(invoke: Invoke) = offMainThread(invoke, "status") { readStatus() }
+
+    private fun readStatus(): JSObject {
         val up = try {
             backend.getState(tunnel) == Tunnel.State.UP
         } catch (e: Exception) {
@@ -194,7 +237,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // Null, never zero. Zero would read as "handshook just now",
         // which is the opposite of what no evidence means.
         result.put("lastHandshakeAgeSecs", handshakeAge)
-        invoke.resolve(result)
+        return result
     }
 
     /**
@@ -207,7 +250,9 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
      * check measure the wrong path.
      */
     @Command
-    fun listApps(invoke: Invoke) {
+    fun listApps(invoke: Invoke) = offMainThread(invoke, "listApps") { readApps() }
+
+    private fun readApps(): JSObject {
         val pm = activity.packageManager
         val apps = JSArray()
 
@@ -229,7 +274,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             apps.put(entry)
         }
 
-        invoke.resolve(JSObject().put("apps", apps))
+        return JSObject().put("apps", apps)
     }
 
     /**
