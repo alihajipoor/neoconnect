@@ -241,7 +241,53 @@ ensure_fallback_site() {
 </html>
 HTML
 
-  cat > /etc/nginx/sites-available/neoxify-fallback <<'CONF'
+  # Where this node's API mirror forwards to. Read from the agent's own
+  # config rather than a shell variable: this also runs on re-runs from
+  # the management menu, where nothing prompted for a panel URL, and that
+  # file is the one place the answer is already correct. It already ends
+  # in /api -- see the prompt at enrollment.
+  local panel_api=""
+  if [[ -f /etc/neoxify/agent.json ]]; then
+    panel_api="$(jq -r '.panelUrl // empty' /etc/neoxify/agent.json 2>/dev/null || true)"
+  fi
+  [[ -z "$panel_api" ]] && panel_api="${panel_url:-}"
+
+  # This node as a mirror of the panel's API.
+  #
+  # It exists because one hardcoded control-plane address was a single
+  # point of failure for the whole product, and it failed: the panel's IP
+  # was filtered in Iran and every customer there lost sign-in, purchase,
+  # support and updates at once -- on nodes that were not blocked at all.
+  # With this, the set of reachable API endpoints is the set of reachable
+  # VPN nodes, and if every node is blocked there is no product anyway.
+  #
+  # No new port and no new certificate: Xray's TLS inbounds already
+  # answer anything that is not a valid VPN connection with this server,
+  # so an ordinary HTTPS request to the same port and name lands here. To
+  # anyone probing, it is the fallback site -- the same disguise the
+  # tunnel already relies on.
+  local api_mirror=""
+  if [[ -n "$panel_api" ]]; then
+    printf -v api_mirror '%s\n' \
+      "" \
+      "    location /api/ {" \
+      "        proxy_pass ${panel_api%/}/;" \
+      "        proxy_set_header Host \$proxy_host;" \
+      "        # The panel rate-limits per client address, so the real" \
+      "        # one has to survive the hop -- otherwise every customer" \
+      "        # arriving through this node looks like one very busy" \
+      "        # client and they throttle each other." \
+      "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" \
+      "        proxy_set_header X-Forwarded-Proto https;" \
+      "        proxy_ssl_server_name on;" \
+      "        # Support threads and update downloads are the long ones." \
+      "        proxy_read_timeout 120s;" \
+      "    }"
+  else
+    echo "  Note: no panel URL on record, so this node will not mirror the API." >&2
+  fi
+
+  cat > /etc/nginx/sites-available/neoxify-fallback <<CONF
 server {
     listen 127.0.0.1:8080;
     server_name _;
@@ -249,6 +295,7 @@ server {
     index index.html;
     # No server tokens: the version string is a fingerprint of its own.
     server_tokens off;
+$api_mirror
 }
 CONF
   ln -sf /etc/nginx/sites-available/neoxify-fallback /etc/nginx/sites-enabled/neoxify-fallback
