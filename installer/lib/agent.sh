@@ -4,24 +4,71 @@
 # engines as systemd units, and enrolls with the control-plane panel.
 set -euo pipefail
 
-# The repo is public, so GitHub's friendly "latest release" asset URLs
-# (see .github/workflows/release-agent.yml, which publishes
-# agentd-linux-amd64/arm64 + sha256sums.txt on every v* tag) work with a
-# plain unauthenticated curl -- confirmed directly against the real
-# release. Override for a self-hosted/custom build, e.g.:
+AGENT_REPO="${AGENT_REPO:-alihajipoor/neoconnect}"
+
+# Where the admin access token is cached for the life of this install.
+#
+# A fixed path derived from the script's own PID, computed here at file
+# scope, because every consumer runs inside a command substitution and
+# so cannot see anything a subshell assigns -- including the path
+# itself, had this been an mktemp inside the function. `$$` is the
+# original shell's PID and stays the same in subshells, which is
+# precisely the property needed.
+ADMIN_TOKEN_CACHE="${TMPDIR:-/tmp}/neoxify-admin-token.$$"
+trap 'rm -f "$ADMIN_TOKEN_CACHE"' EXIT
+
+# The newest *agent* release, resolved by tag rather than by asking
+# GitHub for "latest".
+#
+# /releases/latest/download used to be here and it broke the moment the
+# desktop client started publishing releases: "latest" is the newest
+# release of *any* tag, so it began resolving to desktop-v0.8.5 and
+# every node install 404'd looking for agentd-linux-amd64 in a release
+# containing a Windows installer.
+#
+# The two artefacts ship on independent schedules under deliberately
+# separate tag prefixes -- v* for the agent, desktop-v* for the client
+# (see .github/workflows/release-agent.yml and
+# release-desktop-windows.yml) -- so the prefix is what has to be
+# matched. Anything else is a race between two release cadences.
+#
+# Override for a self-hosted or pinned build, e.g.:
 #   AGENT_RELEASE_URL_BASE=https://example.com/releases/v0.1.0 sudo -E ./install.sh
-AGENT_RELEASE_URL_BASE="${AGENT_RELEASE_URL_BASE:-https://github.com/alihajipoor/neoconnect/releases/latest/download}"
+resolve_agent_release_base() {
+  if [[ -n "${AGENT_RELEASE_URL_BASE:-}" ]]; then
+    echo "$AGENT_RELEASE_URL_BASE"
+    return 0
+  fi
+
+  local tag
+  # Newest non-draft, non-prerelease tag that looks like v1.2.3 -- the
+  # agent's own scheme. `desktop-v*` does not match, which is the point.
+  tag="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=50" 2>/dev/null     | jq -r '[.[] | select(.draft==false and .prerelease==false)
+              | select(.tag_name | test("^v[0-9]+\.[0-9]+\.[0-9]+$"))]
+             | first | .tag_name // empty')"
+
+  if [[ -z "$tag" ]]; then
+    echo "ERROR: could not find an agent release (tag vX.Y.Z) in $AGENT_REPO." >&2
+    echo "Pin one by hand, e.g.:" >&2
+    echo "  AGENT_RELEASE_URL_BASE=https://github.com/$AGENT_REPO/releases/download/v0.2.1 sudo -E ./install.sh" >&2
+    return 1
+  fi
+
+  echo "https://github.com/$AGENT_REPO/releases/download/$tag"
+}
 
 fetch_agent_binary() {
   local asset_name="agentd-linux-$AGENT_ARCH"
+  local base
+  base="$(resolve_agent_release_base)" || exit 1
 
-  echo "Downloading agent binary for linux/$AGENT_ARCH..."
+  echo "Downloading agent binary for linux/$AGENT_ARCH from ${base##*/}..."
   # Saved under the same name sha256sums.txt references (not a generic
   # "agentd") -- sha256sum -c verifies by matching the exact filename in
   # each checksum line against a file of that name in the cwd. (This
   # tripped up an earlier version of this function -- see git history.)
-  curl -fsSL "$AGENT_RELEASE_URL_BASE/$asset_name" -o "/tmp/$asset_name"
-  curl -fsSL "$AGENT_RELEASE_URL_BASE/sha256sums.txt" -o /tmp/sha256sums.txt
+  curl -fsSL "$base/$asset_name" -o "/tmp/$asset_name"
+  curl -fsSL "$base/sha256sums.txt" -o /tmp/sha256sums.txt
 
   if ! (cd /tmp && grep "$asset_name" sha256sums.txt | sha256sum -c -); then
     echo "ERROR: checksum verification failed, aborting install." >&2
@@ -117,6 +164,23 @@ EOF
   install -d -m 755 /etc/neoxify
   echo "agent" > /etc/neoxify/role
 
+  # Started here, before any protocol is registered, and deliberately
+  # not at the end.
+  #
+  # It used to run last, so anything that failed during registration --
+  # a rate limit, an unset variable, a bad password -- left a node with
+  # its engines installed, its configs in the panel, and the agent never
+  # switched on. Nothing said so: the error was about whatever had
+  # actually failed, and the missing agent was silent. A real second-node
+  # install ended exactly there, showing PENDING with no clue why, and
+  # the fix was a single `systemctl start` nobody knew to run.
+  #
+  # An agent with no protocols yet is harmless -- it connects, reports
+  # in, and has nothing to do. So the ordering costs nothing and means a
+  # partial install leaves something alive and visible in the panel
+  # rather than something that looks finished and is inert.
+  start_agentd
+
   echo
   read -r -p "Install Xray (VLESS+REALITY) on this node now? [Y/n]: " install_xray_choice
   if [[ "${install_xray_choice,,}" != "n" ]]; then
@@ -135,11 +199,10 @@ EOF
     install_openvpn
   fi
 
-  start_agentd
   cat <<EOF
 
 Done. "$node_name" is registered with its engines and routes, and should
-show as ONLINE in the panel within a few seconds.
+already show as ONLINE in the panel.
 
 Nothing further to configure by hand -- customers can select it as soon
 as it reports in. To change ports or parameters later, edit the Protocol
@@ -625,13 +688,24 @@ EOF
 # OpenVPN's Protocol Config creation (unlike Xray/WireGuard, which set
 # themselves up node-locally) requires calling the backend's admin API
 # to generate the CA (see openvpn-pki.ts). Bash has no string return,
-# so callers do: token="$(get_admin_bearer_token)".
+# so callers do: token="$(get_admin_bearer_token)" -- which is exactly
+# why the cache below is a file rather than a variable.
 get_admin_bearer_token() {
-  # Cached for the whole install: every protocol registration and route
-  # creation needs it, and asking for the same password once per engine
-  # was both tedious and an easy way to mistype halfway through.
-  if [[ -n "${admin_token:-}" ]]; then
-    echo "$admin_token"
+  # Cached in a file, not a variable.
+  #
+  # A shell variable cannot work here and quietly did not: every caller
+  # uses `token="$(get_admin_bearer_token)"`, and command substitution
+  # runs the function in a subshell, so the assignment meant to cache
+  # the token was discarded the moment it returned. The result was a
+  # fresh login per protocol -- which registering a full node exceeds,
+  # since admin login is throttled to five attempts a minute. A real
+  # install died with HTTP 429 partway through, having already asked for
+  # the same password four times.
+  #
+  # 0600 and removed on exit. It holds a 15-minute access token, which
+  # deserves no less care than the password that produced it.
+  if [[ -s "$ADMIN_TOKEN_CACHE" ]]; then
+    cat "$ADMIN_TOKEN_CACHE"
     return 0
   fi
 
@@ -660,7 +734,13 @@ get_admin_bearer_token() {
     echo "ERROR: admin login failed -- check the email/password (and code, if MFA is enabled)." >&2
     return 1
   fi
-  admin_token="$access_token"
+  # Created empty, locked down, and only then written to. Writing first
+  # and chmod-ing after would leave the token world-readable for the
+  # instant in between, and relying on umask alone assumes an inherited
+  # value this script does not set.
+  : > "$ADMIN_TOKEN_CACHE"
+  chmod 600 "$ADMIN_TOKEN_CACHE"
+  printf '%s' "$access_token" > "$ADMIN_TOKEN_CACHE"
   echo "$access_token"
 }
 
@@ -709,18 +789,48 @@ register_protocol_config() {
 # -> abroad exit) are offered here too, because the exit side is just one
 # more Xray user and the installer is the point where someone actually
 # knows which node this one is meant to relay through.
-create_route_for_config() {
-  local protocol="$1" config_id="$2"
-  local token response route_id
+# This node's name, however this function was reached.
+#
+# `node_name` is only ever set by the full-install flow, which prompts
+# for it. Entering through "Add/Remove Protocol Engine" on an
+# already-enrolled node never sets it, and `set -u` then killed the
+# install immediately after the protocol had been registered -- so the
+# engine existed, the config existed, and the route silently did not.
+#
+# agent.json records the node id but not the name, so the name is
+# fetched from the panel: it is the authoritative copy, and it is
+# already correct for a node that enrolled.
+resolve_node_name() {
+  if [[ -n "${node_name:-}" ]]; then
+    echo "$node_name"
+    return 0
+  fi
+
+  local id token name
+  id="$(jq -r '.nodeId // empty' /etc/neoxify/agent.json 2>/dev/null || true)"
+  if [[ -z "$id" ]]; then
+    echo "node"
+    return 0
+  fi
 
   token="$(get_admin_bearer_token)" || return 1
+  name="$(curl -fsSL "$panel_url/nodes/$id" -H "Authorization: Bearer $token" 2>/dev/null     | jq -r '.name // empty' || true)"
+  echo "${name:-node}"
+}
+
+create_route_for_config() {
+  local protocol="$1" config_id="$2"
+  local token response route_id node_label
+
+  token="$(get_admin_bearer_token)" || return 1
+  node_label="$(resolve_node_name)" || return 1
 
   local exit_config_id=""
   if [[ "${node_is_relay:-n}" == "y" ]]; then
     exit_config_id="$(choose_exit_protocol_config)" || return 1
   fi
 
-  local route_name="$node_name / $protocol"
+  local route_name="$node_label / $protocol"
   local payload
   if [[ -n "$exit_config_id" ]]; then
     payload="$(jq -n --arg name "$route_name" --arg entry "$config_id" --arg exit "$exit_config_id" \

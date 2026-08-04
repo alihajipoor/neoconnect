@@ -88,7 +88,17 @@ export function CustomModeCard() {
           <AppWindow className="size-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold">{t("settings.custom")}</p>
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-semibold">{t("settings.custom")}</p>
+            {/* Labelled beta because it is. It took five releases to
+                stop it dropping people onto another protocol, and its
+                failure mode is quiet -- selected apps going out
+                unprotected -- so somebody turning it on deserves to
+                know it is newer than the rest of the app. */}
+            <span className="rounded-md border border-highlight/30 bg-highlight/10 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-highlight uppercase">
+              {t("settings.customBeta")}
+            </span>
+          </div>
           <p className="text-xs text-muted-foreground">{t("settings.customHint")}</p>
         </div>
         <button

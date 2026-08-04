@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Neoxify",
-  "version": "0.8.0",
+  "version": "0.8.6",
   "identifier": "com.neoxify.neoconnect",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -39,7 +39,7 @@
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEwNzM3MzUzMDJGRkU0NkMKUldSczVQOENVM056b0tzN3hFUEJrTWFrejdSelFnNVRaR3JDKzgzY25QUmEyVVhQSnpWUzg2S2MK",
       "windows": {
-        "installMode": "passive"
+        "installMode": "quiet"
       }
     }
   },

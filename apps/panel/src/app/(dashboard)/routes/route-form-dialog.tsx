@@ -35,6 +35,10 @@ export function RouteFormDialog({
 }) {
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
+  // Tracked so the name can follow the chosen entry, and so a name that
+  // contradicts it can be pointed out. See the warning below.
+  const [entryId, setEntryId] = useState("");
+  const [name, setName] = useState("");
 
   const nodeById = (id: string) => nodes.find((n) => n.id === id);
   const label = (pc: ProtocolConfig) => {
@@ -49,6 +53,31 @@ export function RouteFormDialog({
   const exitCandidates = protocolConfigs.filter(
     (pc) => pc.protocol === "XRAY_VLESS_REALITY" && nodeById(pc.nodeId)?.role === "EXIT",
   );
+
+  const entryNode = entryId
+    ? nodeById(protocolConfigs.find((pc) => pc.id === entryId)?.nodeId ?? "")
+    : undefined;
+
+  // The name says one node and the route points at another.
+  //
+  // This is not hypothetical tidiness. A route called "france-1 /
+  // Stealth HTTP" was created against finland1's config and went live:
+  // customers choosing France would have been sent to Finland, with
+  // nothing reporting an error because the tunnel works perfectly --
+  // just not where it claims. Route names are what the location picker
+  // shows, so a wrong one is a lie told to every customer who reads it.
+  //
+  // A warning rather than a block: an operator may have a naming scheme
+  // that does not start with the node's name, and refusing to save
+  // would be wrong. It only has to be impossible to do *silently*.
+  const otherNodeNames = nodes
+    .map((n) => n.name)
+    .filter((n) => entryNode && n !== entryNode.name);
+  const nameContradictsEntry =
+    Boolean(entryNode) &&
+    name.trim().length > 0 &&
+    !name.toLowerCase().includes(entryNode!.name.toLowerCase()) &&
+    otherNodeNames.some((other) => name.toLowerCase().includes(other.toLowerCase()));
 
   function handleSubmit(formData: FormData) {
     const exitProtocolConfigId = String(formData.get("exitProtocolConfigId") ?? "");
@@ -80,11 +109,36 @@ export function RouteFormDialog({
         <form action={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
             <Label htmlFor="name">Name</Label>
-            <Input id="name" name="name" placeholder="e.g. Frankfurt direct" required autoFocus />
+            <Input
+              id="name"
+              name="name"
+              placeholder="e.g. Frankfurt direct"
+              required
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Shown to customers in the app&apos;s location picker.
+            </p>
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="entryProtocolConfigId">Entry (client-facing)</Label>
-            <Select name="entryProtocolConfigId" required>
+            <Select
+              name="entryProtocolConfigId"
+              required
+              value={entryId}
+              onValueChange={(value) => {
+                setEntryId(value);
+                // Prefill the name from the chosen entry, but never
+                // overwrite something already typed.
+                const pc = protocolConfigs.find((c) => c.id === value);
+                const node = pc ? nodeById(pc.nodeId) : undefined;
+                if (node && name.trim() === "") {
+                  setName(`${node.name} / ${PROTOCOL_LABELS[pc!.protocol]}`);
+                }
+              }}
+            >
               <SelectTrigger id="entryProtocolConfigId">
                 <SelectValue placeholder="Select a protocol config" />
               </SelectTrigger>
@@ -112,6 +166,13 @@ export function RouteFormDialog({
                 ))}
               </SelectContent>
             </Select>
+            {nameContradictsEntry && (
+              <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                This route is named for a different server than the entry points at. Customers
+                choosing it would reach <strong>{entryNode?.name}</strong>. Check the entry, or the
+                name.
+              </p>
+            )}
             <p className="text-xs text-muted-foreground">
               Only VLESS+REALITY configs on EXIT-role nodes can be an exit leg. Leave as &ldquo;None&rdquo;
               for a direct route (client connects straight to the entry).

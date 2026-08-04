@@ -79,3 +79,11 @@ jobs:
           # expected noise for scripts that source relative paths computed
           # at runtime — real issues are warning severity and above.
           severity: warning
+
+      # Catches the backend growing an environment variable the
+      # installer never creates. That drift is invisible until somebody
+      # installs from scratch, which nobody does -- production has been
+      # upgraded in place for weeks -- so it would surface months later
+      # on a fresh box, for someone with no idea what changed.
+      - name: Installer covers every backend env var
+        run: bash scripts/check-installer-drift.sh

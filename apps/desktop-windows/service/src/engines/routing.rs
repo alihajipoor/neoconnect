@@ -287,30 +287,57 @@ const HALF_DEFAULTS: [(&str, &str); 2] =
 /// The deletion problem is real and is solved separately, by scoping
 /// removal to the interface the route was added on. See
 /// [`InstalledRoutes::destinations`].
-pub fn install_passive_default(
+/// How the passive default route names its next hop.
+///
+/// There are two shapes and *which one works depends on the adapter*,
+/// which is the thing three rounds of guessing never established. On-link
+/// is what the spike proved against WireGuard's WinTun adapter. It does
+/// not follow that it works on Xray's TUN or OpenVPN's TAP, and the
+/// evidence from a real machine says it does not: both probe with
+/// WSAEHOSTUNREACH -- a route exists and the stack cannot resolve a next
+/// hop over it -- while WireGuard on the same machine is fine.
+///
+/// Critically, *both shapes install successfully*. `route add` returning
+/// 0 says nothing about whether a socket can then use it, so a
+/// try-one-then-fall-back-on-error chain can never discover this. The
+/// caller resolves it by probing, not by predicting -- see
+/// `split_tunnel::install_verified_route`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassiveRouteShape {
+    /// Next hop 0.0.0.0: deliver directly on the interface.
+    OnLink,
+    /// Next hop is the tunnel's own address.
+    ViaTunnelAddress,
+}
+
+impl PassiveRouteShape {
+    /// Tried in this order. On-link first because it is the one proven
+    /// end to end, so the common case stays on the known-good path.
+    pub const ALL: [PassiveRouteShape; 2] =
+        [PassiveRouteShape::OnLink, PassiveRouteShape::ViaTunnelAddress];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PassiveRouteShape::OnLink => "on-link",
+            PassiveRouteShape::ViaTunnelAddress => "via the tunnel address",
+        }
+    }
+}
+
+pub fn install_passive_default_shaped(
     tunnel_address: Ipv4Addr,
     tunnel_index: u32,
+    shape: PassiveRouteShape,
 ) -> Result<InstalledRoutes, String> {
     let (dest, mask) = PASSIVE_DEFAULT;
     let mut installed = InstalledRoutes::none();
 
-    // On-link first, the adapter's own address only as a fallback.
-    //
-    // The order matters and getting it wrong is not visible from here.
-    // Adding a route via the adapter's own address *succeeds* on Xray's
-    // TUN and then does not work: a socket pinned to that interface
-    // fails to connect with WSAEHOSTUNREACH, so Custom mode looked
-    // broken for every Xray protocol while WireGuard was fine, and the
-    // ladder fell through to WireGuard every time. Because the command
-    // succeeded, the fallback below never ran.
-    //
-    // On-link is also what the spike used -- `New-NetRoute -NextHop
-    // 0.0.0.0` -- and the spike is the only version of this that was
-    // ever proven end to end against a real node.
-    add_route(dest, mask, "0.0.0.0", tunnel_index, PASSIVE_METRIC)
-        .or_else(|_| {
-            add_route(dest, mask, &tunnel_address.to_string(), tunnel_index, PASSIVE_METRIC)
-        })
+    let gateway = match shape {
+        PassiveRouteShape::OnLink => "0.0.0.0".to_string(),
+        PassiveRouteShape::ViaTunnelAddress => tunnel_address.to_string(),
+    };
+
+    add_route(dest, mask, &gateway, tunnel_index, PASSIVE_METRIC)
         .map_err(|e| format!("could not make the tunnel reachable for selected apps: {e}"))?;
 
     installed.destinations.push((dest.to_string(), mask.to_string(), tunnel_index));
@@ -318,7 +345,7 @@ pub fn install_passive_default(
 }
 
 /// The passive route's destination. A real default route, and it has to
-/// be -- see [`install_passive_default`].
+/// be -- see [`install_passive_default_shaped`].
 const PASSIVE_DEFAULT: (&str, &str) = ("0.0.0.0", "0.0.0.0");
 
 /// High enough that the physical link always wins the metric comparison.

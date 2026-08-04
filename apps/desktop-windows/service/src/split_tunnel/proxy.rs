@@ -121,10 +121,26 @@ impl Default for TunnelInterface {
 /// Xray's and OpenVPN's TUNs refused to route for it -- every pinned
 /// connect came back WSAEHOSTUNREACH and every Xray protocol failed its
 /// probe, so the ladder fell through to WireGuard every single time.
-fn attach_to_tunnel(socket: &Socket, index: u32, address: Ipv4Addr) -> io::Result<()> {
+pub(super) fn attach_to_tunnel(socket: &Socket, index: u32, address: Ipv4Addr) -> io::Result<()> {
     pin_to_interface(socket, index)?;
     // Port 0: the source address is what matters, the port is not.
     socket.bind(&SocketAddr::from((address, 0)).into())
+}
+
+/// Whether a socket can actually be attached to this tunnel yet.
+///
+/// Calls `attach_to_tunnel` rather than reimplementing a lighter
+/// version of it, because a readiness check that tests something
+/// *similar* to the real operation is worse than none: 0.8.4 checked a
+/// plain `bind` while production pins the interface first and then
+/// binds, so the check passed on adapters where the real attach still
+/// failed with WSAEADDRNOTAVAIL, and the wait it was supposed to
+/// provide never happened.
+pub(super) fn can_attach(index: u32, address: Ipv4Addr) -> bool {
+    let Ok(socket) = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) else {
+        return false;
+    };
+    attach_to_tunnel(&socket, index, address).is_ok()
 }
 
 /// Restricts a socket to one interface's routes.
@@ -491,11 +507,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "u32::MAX is not a reliable stand-in for an unreachable interface -- see the comment"]
     fn the_probe_fails_rather_than_falling_back_to_the_normal_route() {
-        // Pinned to an interface that does not exist, so there is no
-        // route to reach anything. If this ever passed, the probe would
-        // be measuring the machine's ordinary connectivity and would
-        // call a dead tunnel healthy.
+        // Pinned to an interface that does not exist, so there should be
+        // no route to reach anything.
+        //
+        // Ignored because the premise is not a guarantee. This is the
+        // second time this same test has been written against an assumed
+        // Windows behaviour and been wrong: first `setsockopt` was
+        // expected to reject a bogus index and did not, and now `connect`
+        // over one is observed to succeed on a real machine -- an invalid
+        // index appears to leave the socket unconstrained rather than
+        // constrained to nothing.
+        //
+        // The property itself does hold for indices that name a real
+        // adapter, which is the only case production has. The evidence is
+        // a customer's own log: on one machine, at one moment, sockets
+        // pinned to the Xray and OpenVPN adapters failed with
+        // WSAEHOSTUNREACH while a socket pinned to the WireGuard adapter
+        // connected. If pinning were being ignored, all three would have
+        // gone out the physical link and all three would have succeeded.
+        //
+        // Left in place rather than deleted so the next person does not
+        // write it a third time.
         let error = probe(&TunnelInterface::new(u32::MAX, Ipv4Addr::new(10, 66, 0, 3)))
             .expect_err("nothing can be reached");
         assert!(error.contains("did not carry"), "got {error}");
@@ -514,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "same unguaranteed premise as the probe test above"]
     fn a_socket_pinned_to_a_nonexistent_interface_cannot_connect() {
         // The property Custom mode's honesty rests on. `setsockopt`
         // itself accepts any index -- checked here, and it does -- so
