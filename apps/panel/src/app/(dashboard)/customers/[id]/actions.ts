@@ -58,3 +58,35 @@ export async function deleteSubscription(
     await apiMutate<{ deleted: boolean }>(`/subscriptions/${id}`, { method: "DELETE" }),
   );
 }
+
+/** Gives the customer a plan and provisions it.
+ *
+ * Deliberately the /assign endpoint rather than a plain create: that
+ * one only writes the row, leaving a subscription the customer cannot
+ * actually connect with. */
+export async function assignPlan(
+  customerId: string,
+  planId: string,
+): Promise<MutationResult<Subscription>> {
+  return done(
+    customerId,
+    await apiMutate<Subscription>("/subscriptions/assign", {
+      method: "POST",
+      body: JSON.stringify({ customerId, planId }),
+    }),
+  );
+}
+
+export async function changeSubscriptionPlan(
+  customerId: string,
+  id: string,
+  planId: string,
+): Promise<MutationResult<Subscription>> {
+  return done(
+    customerId,
+    await apiMutate<Subscription>(`/subscriptions/${id}/plan`, {
+      method: "PATCH",
+      body: JSON.stringify({ planId }),
+    }),
+  );
+}

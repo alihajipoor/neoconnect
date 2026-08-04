@@ -492,7 +492,9 @@ fn wait_for_addressed_adapter(name: &str) -> Result<adapters::Adapter, String> {
     loop {
         match adapters::find_by_name(name) {
             Ok(Some(adapter))
-                if adapter.ipv4.is_some_and(is_bindable)
+                if adapter
+                    .ipv4
+                    .is_some_and(|ip| proxy::can_attach(adapter.index, ip))
                     || (adapter.ipv4.is_some() && std::time::Instant::now() >= deadline) =>
             {
                 return Ok(adapter)
@@ -508,35 +510,6 @@ fn wait_for_addressed_adapter(name: &str) -> Result<adapters::Adapter, String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
-}
-
-/// Whether a socket can actually be bound to this address yet.
-///
-/// The question the old code asked was "does the adapter have an
-/// address", and that is not the same question. A freshly assigned
-/// Windows address is reported by `GetAdaptersAddresses` while it is
-/// still tentative -- duplicate-address detection has not finished --
-/// and binding to it in that state fails with WSAEADDRNOTAVAIL
-/// (10049), "the requested address is not valid in its context".
-///
-/// That is the whole Custom-mode saga. Every Xray and OpenVPN attempt
-/// failed at the first pinned socket while WireGuard on the same
-/// machine worked, and it looked like a routing problem for days
-/// because the error surfaced at connect. It was never the routes:
-/// WireGuard's adapter simply settles before anything asks, and the
-/// TUN adapters do not.
-///
-/// Asked by binding rather than by reading DadState from the adapter
-/// tables: binding is the operation that has to succeed, so it is the
-/// only check that cannot be right about the wrong thing.
-fn is_bindable(address: Ipv4Addr) -> bool {
-    use socket2::{Domain, Socket, Type};
-    let Ok(socket) = Socket::new(Domain::IPV4, Type::STREAM, None) else {
-        return false;
-    };
-    socket
-        .bind(&std::net::SocketAddr::from((address, 0)).into())
-        .is_ok()
 }
 
 /// This service's own executable.

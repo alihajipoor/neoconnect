@@ -2,7 +2,12 @@ import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } f
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { SubscriptionsService } from "./subscriptions.service";
 import { CreateSubscriptionDto } from "./dto/create-subscription.dto";
-import { ExtendSubscriptionDto, SetSubscriptionStatusDto } from "./dto/manage-subscription.dto";
+import {
+  AssignPlanDto,
+  ChangePlanDto,
+  ExtendSubscriptionDto,
+  SetSubscriptionStatusDto,
+} from "./dto/manage-subscription.dto";
 import { AdminRole } from "@prisma/client";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { RolesGuard } from "../../common/guards/roles.guard";
@@ -28,6 +33,24 @@ export class SubscriptionsController {
   @Get(":id")
   get(@Param("id") id: string) {
     return this.subscriptionsService.get(id);
+  }
+
+  /** Gives a customer a plan and provisions it, in one step.
+   *
+   * Distinct from POST / which only writes the row -- that is the
+   * purchase flow's shape, where provisioning waits for payment. */
+  @Post("assign")
+  @UseGuards(RolesGuard)
+  @Roles(AdminRole.SUPERADMIN, AdminRole.BILLING)
+  assign(@Body() dto: AssignPlanDto) {
+    return this.subscriptionsService.assign(dto.customerId, dto.planId);
+  }
+
+  @Patch(":id/plan")
+  @UseGuards(RolesGuard)
+  @Roles(AdminRole.SUPERADMIN, AdminRole.BILLING)
+  changePlan(@Param("id") id: string, @Body() dto: ChangePlanDto) {
+    return this.subscriptionsService.changePlan(id, dto.planId);
   }
 
   /** Suspend, resume, expire or cancel.

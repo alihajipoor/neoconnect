@@ -1,4 +1,4 @@
-import { IsEnum, IsInt, Max, Min } from "class-validator";
+import { IsEnum, IsInt, IsUUID, Max, Min } from "class-validator";
 import { SubscriptionStatus } from "@prisma/client";
 
 export class SetSubscriptionStatusDto {
@@ -14,4 +14,17 @@ export class ExtendSubscriptionDto {
   @Min(1)
   @Max(730)
   days!: number;
+}
+
+export class ChangePlanDto {
+  @IsUUID()
+  planId!: string;
+}
+
+export class AssignPlanDto {
+  @IsUUID()
+  customerId!: string;
+
+  @IsUUID()
+  planId!: string;
 }

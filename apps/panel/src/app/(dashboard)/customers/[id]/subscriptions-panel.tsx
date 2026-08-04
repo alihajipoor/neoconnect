@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { CalendarPlus, MoreHorizontal, Pause, Play, RotateCcw, Trash2 } from "lucide-react";
+import { ArrowLeftRight, CalendarPlus, MoreHorizontal, Pause, Play, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { Subscription, SubscriptionPlan, SubscriptionStatus } from "@/lib/types";
 import {
+  assignPlan,
+  changeSubscriptionPlan,
   deleteSubscription,
   extendSubscription,
   resetSubscriptionUsage,
@@ -52,8 +54,12 @@ export function SubscriptionsPanel({
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
         <CardTitle className="text-base">Subscriptions</CardTitle>
+        {/* Assigning a plan by hand is the operator's equivalent of a
+            purchase, so it belongs here rather than behind a row menu
+            that only exists once there is already a subscription. */}
+        <AssignPlanButton customerId={customerId} plans={plans} />
       </CardHeader>
       <CardContent>
         {subscriptions.length === 0 ? (
@@ -127,6 +133,20 @@ export function SubscriptionsPanel({
                               <CalendarPlus /> Extend {days} days
                             </DropdownMenuItem>
                           ))}
+                          {plans
+                            .filter((p) => p.isActive && p.id !== subscription.planId)
+                            .map((p) => (
+                              <DropdownMenuItem
+                                key={p.id}
+                                onSelect={() =>
+                                  run(subscription.id, `Moved to ${p.name}`, () =>
+                                    changeSubscriptionPlan(customerId, subscription.id, p.id),
+                                  )
+                                }
+                              >
+                                <ArrowLeftRight /> Move to {p.name}
+                              </DropdownMenuItem>
+                            ))}
                           <DropdownMenuItem
                             onSelect={() =>
                               run(subscription.id, "Usage reset", () =>
@@ -193,5 +213,51 @@ export function SubscriptionsPanel({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/** Assigning a plan, for a customer who has none or needs another.
+ *
+ * A menu of active plans rather than a dialog with a select: there is
+ * exactly one decision to make and a dialog would add two clicks to
+ * it. */
+function AssignPlanButton({
+  customerId,
+  plans,
+}: {
+  customerId: string;
+  plans: SubscriptionPlan[];
+}) {
+  const [pending, startTransition] = useTransition();
+  const active = plans.filter((p) => p.isActive);
+
+  if (active.length === 0) {
+    return <span className="text-xs text-muted-foreground">No active plans to assign</span>;
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button size="sm" disabled={pending}>
+          <Plus /> Assign plan
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {active.map((plan) => (
+          <DropdownMenuItem
+            key={plan.id}
+            onSelect={() =>
+              startTransition(async () => {
+                const result = await assignPlan(customerId, plan.id);
+                if (result.ok) toast.success(`Assigned ${plan.name}`);
+                else toast.error(result.error);
+              })
+            }
+          >
+            {plan.name}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

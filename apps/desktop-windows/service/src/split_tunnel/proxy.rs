@@ -121,10 +121,26 @@ impl Default for TunnelInterface {
 /// Xray's and OpenVPN's TUNs refused to route for it -- every pinned
 /// connect came back WSAEHOSTUNREACH and every Xray protocol failed its
 /// probe, so the ladder fell through to WireGuard every single time.
-fn attach_to_tunnel(socket: &Socket, index: u32, address: Ipv4Addr) -> io::Result<()> {
+pub(super) fn attach_to_tunnel(socket: &Socket, index: u32, address: Ipv4Addr) -> io::Result<()> {
     pin_to_interface(socket, index)?;
     // Port 0: the source address is what matters, the port is not.
     socket.bind(&SocketAddr::from((address, 0)).into())
+}
+
+/// Whether a socket can actually be attached to this tunnel yet.
+///
+/// Calls `attach_to_tunnel` rather than reimplementing a lighter
+/// version of it, because a readiness check that tests something
+/// *similar* to the real operation is worse than none: 0.8.4 checked a
+/// plain `bind` while production pins the interface first and then
+/// binds, so the check passed on adapters where the real attach still
+/// failed with WSAEADDRNOTAVAIL, and the wait it was supposed to
+/// provide never happened.
+pub(super) fn can_attach(index: u32, address: Ipv4Addr) -> bool {
+    let Ok(socket) = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) else {
+        return false;
+    };
+    attach_to_tunnel(&socket, index, address).is_ok()
 }
 
 /// Restricts a socket to one interface's routes.
