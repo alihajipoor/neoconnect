@@ -13,6 +13,11 @@ describe("IntegrationsService", () => {
     routes = [] as unknown[],
     plans = [] as unknown[],
     installerUrl = () => Promise.resolve("https://neoxify.net/download/NeoxifySetup.exe"),
+    releaseSummary = () =>
+      Promise.resolve([
+        { platform: "windows", version: "0.8.7", url: "https://gh/win.exe", publishedAt: "2026-08-04T00:00:00Z" },
+        { platform: "android", version: "0.2.1", url: "https://gh/app.apk", publishedAt: null },
+      ]),
   } = {}) =>
     new IntegrationsService(
       {
@@ -20,7 +25,7 @@ describe("IntegrationsService", () => {
         route: { findMany: jest.fn().mockResolvedValue(routes) },
       } as unknown as PrismaService,
       { listActive: jest.fn().mockResolvedValue(plans) } as unknown as PlansService,
-      { installerUrl } as unknown as UpdatesService,
+      { installerUrl, releaseSummary } as unknown as UpdatesService,
     );
 
   describe("status", () => {
@@ -120,6 +125,25 @@ describe("IntegrationsService", () => {
       const [result] = await build({ plans: [plan] }).publicPlans();
       expect(result.maxDownloadMbps).toBe(200);
       expect(result.maxUploadMbps).toBeNull();
+    });
+  });
+
+  describe("releases", () => {
+    it("returns every platform's newest build", async () => {
+      const releases = await build().releases();
+      expect(releases.map((r) => r.platform)).toEqual(["windows", "android"]);
+      expect(releases[0]).toMatchObject({ version: "0.8.7", url: "https://gh/win.exe" });
+    });
+
+    /** This feeds a panel the bot rewrites in a public channel. A thrown
+     *  error there would be a broken post seen by every member, so an empty
+     *  list -- which the panel renders as "check the website" -- is the
+     *  better failure. */
+    it("degrades to an empty list rather than throwing", async () => {
+      const service = build({
+        releaseSummary: () => Promise.reject(new Error("GitHub is down")),
+      });
+      await expect(service.releases()).resolves.toEqual([]);
     });
   });
 

@@ -290,6 +290,29 @@ function basePreset(preset, roleId, everyoneId) {
         ...staff(permissions("VIEW_CHANNEL", ...TALK, "MANAGE_MESSAGES", "MENTION_EVERYONE")),
       ];
 
+    // Read-only in the channel, but writable inside a thread. The ticket
+    // channel needs exactly this: the only action is pressing a button, and
+    // the conversation happens in the private thread that opens. Plain
+    // `readonly` denies SEND_MESSAGES_IN_THREADS, which would leave a member
+    // unable to reply in their own ticket.
+    case "threadOnly":
+      return [
+        entry(
+          everyoneId,
+          permissions(
+            "VIEW_CHANNEL",
+            "READ_MESSAGE_HISTORY",
+            "SEND_MESSAGES_IN_THREADS",
+            "ATTACH_FILES",
+            "EMBED_LINKS",
+            "ADD_REACTIONS",
+            "USE_EXTERNAL_EMOJIS",
+          ),
+          permissions("SEND_MESSAGES", "CREATE_PUBLIC_THREADS", "CREATE_PRIVATE_THREADS"),
+        ),
+        ...staff(permissions("VIEW_CHANNEL", ...TALK, "MANAGE_MESSAGES", "MANAGE_THREADS")),
+      ];
+
     case "staffOnly":
       return [
         entry(everyoneId, 0n, permissions("VIEW_CHANNEL")),
