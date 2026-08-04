@@ -31,7 +31,14 @@ export function NormalizedEmail(): PropertyDecorator {
   return applyDecorators(
     // Before IsEmail, so validation judges the value that will be stored
     // rather than the one that was typed.
-    Transform(({ value }) => (typeof value === "string" ? value.trim().toLowerCase() : value)),
+    // The parameter is typed `any` by class-transformer, so the
+    // non-string branch is annotated rather than returned bare -- a
+    // non-string must pass straight through to IsEmail, which rejects
+    // it, instead of throwing on .trim() and turning a malformed request
+    // into a 500.
+    Transform(({ value }: { value: unknown }) =>
+      typeof value === "string" ? value.trim().toLowerCase() : value,
+    ),
     IsEmail(),
   );
 }
