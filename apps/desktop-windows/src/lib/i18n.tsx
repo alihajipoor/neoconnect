@@ -189,6 +189,11 @@ const en = {
   // app falls back to a full tunnel instead. Same toggle state, opposite
   // consequence, and telling somebody the wrong one is worse than saying
   // nothing.
+  // Android only: this build carries one engine, and a customer who
+  // picked another protocol deserves the reason rather than a silent
+  // substitution.
+  "dash.androidWireguardOnly":
+    "{protocol} isn't in the Android app yet, so it will connect with Fast instead.",
   "settings.customAllApps": "No apps chosen yet, so every app uses the VPN. Pick one to route just that app.",
   "settings.customHintNative": "Send only the apps you choose through the VPN. Everything else uses your normal connection.",
   "settings.customSearch": "Search apps",
@@ -411,6 +416,8 @@ const fa: Record<TranslationKey, string> = {
   "settings.customFailOpen": "هنگام تعویض سرور، برنامه‌های انتخابی به‌جای قطع شدن، لحظه‌ای از اینترنت معمولی استفاده می‌کنند.",
   "settings.customTooMany": "حداکثر {max} برنامه می‌توانید انتخاب کنید.",
   "settings.customAlready": "این برنامه از قبل در فهرست است.",
+  "dash.androidWireguardOnly":
+    "پروتکل {protocol} هنوز در نسخه اندروید نیست، بنابراین با Fast متصل می‌شود.",
   "settings.customAllApps":
     "هنوز برنامه‌ای انتخاب نشده، پس همه برنامه‌ها از VPN عبور می‌کنند. برای عبور فقط یک برنامه، آن را انتخاب کنید.",
   "settings.customHintNative":
