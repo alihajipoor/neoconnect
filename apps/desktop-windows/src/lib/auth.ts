@@ -1,18 +1,45 @@
 import { apiRequest, publicRequest } from "./api";
+import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { clearTokens, setTokens } from "./session";
+import type { ApiResult } from "./api";
+import type { AttemptKind } from "./attempts";
 import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from "./types";
+
+/** Reports how a sign-up or sign-in went.
+ *
+ * Here rather than in the screens so there is exactly one place it can
+ * be forgotten, and because the interesting distinction -- refused
+ * versus never arrived -- is visible in the result rather than in the
+ * component.
+ *
+ * Deliberately does not send the address. The endpoint accepts anonymous
+ * reports, so an email in the body would be an unverified claim about a
+ * real person, and these rows already hold an IP from somewhere it is
+ * dangerous to hold one. A verified session attaches the customer
+ * server-side; a failed sign-in has no session, and that is the honest
+ * answer.
+ */
+function reportAuth(kind: AttemptKind, result: ApiResult<unknown>): void {
+  void reportAttempt(
+    result.ok
+      ? { kind, outcome: "SUCCESS" }
+      : { kind, outcome: outcomeFromApiError(result.error), reason: result.error },
+  );
+}
 
 /** Never returns a usable session -- see RequiresVerification's doc
  * comment. The app must always follow this up by showing the verify
  * screen, never a dashboard. */
 export async function register(email: string, password: string, referralCode?: string) {
-  return publicRequest<RequiresVerification>("/customer-auth/register", {
+  const result = await publicRequest<RequiresVerification>("/customer-auth/register", {
     method: "POST",
     // Omitted entirely when blank rather than sent as "": the backend
     // treats a supplied-but-wrong code as an error, and an empty string
     // is not a code somebody typed.
     body: JSON.stringify({ email, password, ...(referralCode ? { referralCode } : {}) }),
   });
+  reportAuth("REGISTER", result);
+  return result;
 }
 
 /** Only stores a session when the account is actually verified --
@@ -26,6 +53,9 @@ export async function login(email: string, password: string) {
   if (result.ok && !("requiresVerification" in result.data)) {
     await setTokens(result.data);
   }
+  // After the tokens are stored, so a successful sign-in is attributed
+  // to the customer it belongs to rather than arriving anonymous.
+  reportAuth("SIGN_IN", result);
   return result;
 }
 
