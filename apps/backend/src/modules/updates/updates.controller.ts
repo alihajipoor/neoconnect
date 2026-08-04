@@ -19,6 +19,18 @@ import { UpdatesService } from "./updates.service";
 export class UpdatesController {
   constructor(private readonly updates: UpdatesService) {}
 
+  /** The stable download link for the website.
+   *
+   * Always redirects to the newest release's branded installer, so the
+   * site is set once and never edited again. Kept here rather than on a
+   * marketing page for the same reason the update manifest is: it is
+   * ours, so where the file actually lives can change without anybody
+   * updating a link. */
+  @Get("/installer/windows")
+  async installer(@Res() res: Response) {
+    res.redirect(302, await this.updates.installerUrl());
+  }
+
   @Get("download/:tag/:asset")
   async download(
     @Param("tag") tag: string,
