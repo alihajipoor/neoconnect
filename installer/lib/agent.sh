@@ -287,7 +287,24 @@ HTML
     echo "  Note: no panel URL on record, so this node will not mirror the API." >&2
   fi
 
-  cat > /etc/nginx/sites-available/neoxify-fallback <<CONF
+  # The same site twice, on two sockets: 8080 for HTTP/1.1, 8081 for
+  # HTTP/2, with Xray choosing between them on the negotiated ALPN.
+  #
+  # This is not a preference, it is an nginx version limit. Before 1.25.1
+  # there is no `http2 on;` directive that auto-detects, and the `http2`
+  # listen flag on a cleartext socket forces h2c -- verified live on
+  # nginx 1.24: adding it fixed HTTP/2 and broke HTTP/1.1 outright, three
+  # runs, against an untouched node as a control.
+  #
+  # It has to work over HTTP/2 at all because the TLS inbounds advertise
+  # h2 so they look like an ordinary web server, and anything modern
+  # takes that offer. While these listeners were HTTP/1.1-only, every
+  # HTTP/2 client got ERR_HTTP2_PROTOCOL_ERROR -- which silently disabled
+  # the node API mirrors, the fallback path the clients rely on when the
+  # control plane's own address is blocked.
+  : > /etc/nginx/sites-available/neoxify-fallback
+  for listen_directive in "8080" "8081 http2"; do
+    cat >> /etc/nginx/sites-available/neoxify-fallback <<CONF
 server {
     # proxy_protocol because Xray's fallback opens a fresh loopback
     # connection to get here. Without it nginx sees 127.0.0.1 as the
@@ -297,7 +314,7 @@ server {
     # through this node into a single rate-limit bucket.
     #
     # Paired with "xver": 1 on the Xray fallbacks; neither works alone.
-    listen 127.0.0.1:8080 proxy_protocol;
+    listen 127.0.0.1:$listen_directive proxy_protocol;
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
 
@@ -309,6 +326,7 @@ server {
 $api_mirror
 }
 CONF
+  done
   ln -sf /etc/nginx/sites-available/neoxify-fallback /etc/nginx/sites-enabled/neoxify-fallback
   nginx -t >/dev/null 2>&1 || { echo "nginx rejected the fallback site config" >&2; return 1; }
   systemctl reload nginx 2>/dev/null || systemctl restart nginx
@@ -533,6 +551,9 @@ install_xray() {
     # error, which is the whole difference between "an HTTPS site" and
     # "something hiding on a high port".
     trojan_fallback="127.0.0.1:8080"
+    # The same site on a second socket, for connections that negotiated
+    # HTTP/2. See ensure_fallback_site for why it cannot be one listener.
+    trojan_fallback_h2="127.0.0.1:8081"
     ensure_fallback_site || return 1
 
     # VLESS+TLS is offered first because xray-core marks Trojan
@@ -577,6 +598,7 @@ install_xray() {
     -e "s#__TLS_CERT_PATH__#${tls_cert:-/dev/null}#g" \
     -e "s#__TLS_KEY_PATH__#${tls_key:-/dev/null}#g" \
     -e "s/__TROJAN_FALLBACK__/${trojan_fallback:-127.0.0.1:8080}/g" \
+    -e "s/__TROJAN_FALLBACK_H2__/${trojan_fallback_h2:-127.0.0.1:8081}/g" \
     "$template" > /usr/local/etc/xray/config.json
 
   # A declined Trojan inbound is removed rather than left listening on
