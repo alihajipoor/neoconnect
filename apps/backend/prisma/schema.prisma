@@ -213,6 +213,7 @@ model Customer {
   referralCredits    ReferralCredit[]    @relation("ReferralCreditsGiven")
   voucherRedemptions VoucherRedemption[]
   supportTickets     SupportTicket[]
+  clientAttempts     ClientAttempt[]
 
   @@index([referredByCustomerId])
   @@map("customers")
@@ -572,6 +573,95 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+/// What a client was trying to do when it reported in.
+enum ClientAttemptKind {
+  REGISTER
+  SIGN_IN
+  CONNECT
+}
+
+/// How it went, in the app's own vocabulary rather than an HTTP status.
+///
+/// These are the distinctions that actually change what an operator does.
+/// "Reached the server and it said no" and "never reached the server" look
+/// identical to a customer and mean opposite things to us.
+enum ClientAttemptOutcome {
+  /// Worked.
+  SUCCESS
+  /// The control plane could not be reached at all -- every endpoint
+  /// failed or timed out. The signature of a filtered address.
+  CONTROL_PLANE_UNREACHABLE
+  /// The server answered and refused: wrong password, unverified email,
+  /// quota exhausted.
+  REJECTED
+  /// A tunnel came up but no traffic crossed it. The failure the egress
+  /// check exists to catch, and the one a customer misreads as "slow".
+  NOT_CARRYING_TRAFFIC
+  /// The engine itself refused to start.
+  ENGINE_FAILED
+  /// The customer declined the OS permission prompt.
+  PERMISSION_DENIED
+  /// Something else, with the detail in `reason`.
+  OTHER
+}
+
+/// One reported attempt by a client, for watching a beta in the places we
+/// cannot see.
+///
+/// Every failure during this beta cost a screenshot and a round trip to
+/// diagnose -- a tablet crashing, a friend unable to register because the
+/// panel's address was filtered, a protocol blocked by one ISP but not
+/// another. The app already computes all of it: the failover ladder knows
+/// which rungs it tried, the egress check knows whether traffic actually
+/// moved, and the endpoint list knows which address answered. It showed
+/// that to the customer and threw it away.
+///
+/// Deliberately not tied to a customer. The most valuable reports are the
+/// ones from somebody who could not sign in, so the endpoint accepts
+/// anonymous submissions -- which is also why every field here is bounded
+/// and the whole table is swept on a short retention window.
+model ClientAttempt {
+  id      String               @id @default(uuid())
+  kind    ClientAttemptKind
+  outcome ClientAttemptOutcome
+
+  /// Set only when the client had a session. Null for the register and
+  /// sign-in failures, which are the ones worth having.
+  customerId String?
+
+  /// "windows" | "android", and the app version, so a fault can be tied
+  /// to a release rather than guessed at.
+  platform   String
+  appVersion String
+
+  /// For a connect: what was attempted and what it settled on.
+  routeId      String?
+  protocol     String?
+  /// Which rung each ladder attempt reached, newest run only. Bounded on
+  /// write; this is a diagnosis aid, not an archive.
+  attemptsJson Json?
+
+  /// Which control-plane address answered, if any. This alone would have
+  /// shown the CDN domain being refused before a packet ever left.
+  apiEndpoint String?
+
+  /// The app's own error text, truncated. Free-form on purpose: the
+  /// enum above is for filtering, this is for understanding.
+  reason String?
+
+  /// Where the report came from. Personal data about people in a country
+  /// where that matters, so it is kept briefly and joined to nothing.
+  ip        String?
+  createdAt DateTime @default(now())
+
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([outcome, createdAt])
+  @@index([customerId])
+  @@map("client_attempts")
+}
+
 model AgentCommand {
   id          String             @id @default(uuid())
   nodeId      String
@@ -862,18 +952,18 @@ model AppLinks {
 ///
 /// Same lazily-created singleton shape as the other settings models.
 model SupportSettings {
-  id String @id @default(uuid())
+  id               String   @id @default(uuid())
   /// Off means no *new* conversations. Existing ones stay open on
   /// purpose: cutting somebody off mid-conversation is worse than
   /// declining to start one.
-  acceptingTickets Boolean @default(false)
+  acceptingTickets Boolean  @default(false)
   /// What the app says when new conversations are closed. Null falls
   /// back to wording the app ships, so an empty setting cannot produce
   /// a blank explanation.
   awayMessage      String?
   /// Roughly how long a reply takes, shown when opening a ticket so
   /// nobody sits watching an empty thread expecting an instant answer.
-  replyWithinHours Int?    @default(24)
+  replyWithinHours Int?     @default(24)
   updatedAt        DateTime @updatedAt
 
   @@map("support_settings")
