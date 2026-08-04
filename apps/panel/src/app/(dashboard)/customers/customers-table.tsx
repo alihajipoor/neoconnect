@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { MoreHorizontal, Plus } from "lucide-react";
 import type { Customer } from "@/lib/types";
 import { deleteCustomer } from "./actions";
@@ -53,7 +54,17 @@ export function CustomersTable({ customers }: { customers: Customer[] }) {
             ) : (
               customers.map((customer) => (
                 <TableRow key={customer.id}>
-                  <TableCell className="font-medium">{customer.email}</TableCell>
+                  <TableCell className="font-medium">
+                    {/* The row's own link rather than a "view" action in
+                        the menu: opening the person is the most common
+                        thing to want from this table. */}
+                    <Link
+                      href={`/customers/${customer.id}`}
+                      className="hover:text-primary hover:underline"
+                    >
+                      {customer.email}
+                    </Link>
+                  </TableCell>
                   <TableCell>{customer.telegramId ?? "—"}</TableCell>
                   <TableCell className="font-mono text-xs">{customer.referralCode ?? "—"}</TableCell>
                   <TableCell>

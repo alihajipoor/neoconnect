@@ -1,6 +1,7 @@
 import { SubscriptionStatus } from "@prisma/client";
 import { SubscriptionsService } from "./subscriptions.service";
 import { PrismaService } from "../../prisma/prisma.service";
+import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 
 /** The property under test is the one that decides whether someone who
  * never paid looks like a customer. */
@@ -20,7 +21,17 @@ describe("SubscriptionsService.create", () => {
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: "sub-1", ...data })),
       },
     };
-    return { prisma, service: new SubscriptionsService(prisma as unknown as PrismaService) };
+    // The protocol-user side is not exercised by these tests -- they
+    // cover status-at-creation, not provisioning -- so a stub keeps the
+    // constructor honest without pretending to test what it does.
+    const protocolUsers = {
+      setEnabled: jest.fn(),
+      remove: jest.fn(),
+    } as unknown as ProtocolUsersService;
+    return {
+      prisma,
+      service: new SubscriptionsService(prisma as unknown as PrismaService, protocolUsers),
+    };
   }
 
   it("starts PENDING when the caller says so, so an unpaid plan is not a customer", async () => {
@@ -60,7 +71,17 @@ describe("SubscriptionsService.createOrReusePending", () => {
         updateMany: jest.fn().mockResolvedValue({ count: 3 }),
       },
     };
-    return { prisma, service: new SubscriptionsService(prisma as unknown as PrismaService) };
+    // The protocol-user side is not exercised by these tests -- they
+    // cover status-at-creation, not provisioning -- so a stub keeps the
+    // constructor honest without pretending to test what it does.
+    const protocolUsers = {
+      setEnabled: jest.fn(),
+      remove: jest.fn(),
+    } as unknown as ProtocolUsersService;
+    return {
+      prisma,
+      service: new SubscriptionsService(prisma as unknown as PrismaService, protocolUsers),
+    };
   }
 
   // The app calls this before every payment attempt, so pressing Card and
