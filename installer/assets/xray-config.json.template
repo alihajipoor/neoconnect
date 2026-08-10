@@ -131,7 +131,13 @@
       "settings": {
         "method": "2022-blake3-aes-256-gcm",
         "password": "__SHADOWSOCKS_SERVER_KEY__",
-        "clients": [],
+        "//clients": "One seed entry, and it is load-bearing rather than an example. xray-core picks the single-user Shadowsocks server when this array is empty, and that implementation is not a UserManager -- so every add-user RPC is refused with \"proxy is not a UserManager\" and no customer can ever be provisioned. Deploying with an empty array is exactly how that was found. The key is random and never issued to anyone, so the entry authenticates nobody; it exists only to select the multi-user implementation.",
+        "clients": [
+          {
+            "password": "__SHADOWSOCKS_SEED_KEY__",
+            "email": "reserved-multiuser-seed"
+          }
+        ],
         "network": "tcp,udp"
       },
       "tag": "shadowsocks-in"

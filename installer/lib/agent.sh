@@ -500,7 +500,7 @@ install_xray() {
   # Shadowsocks 2022 stands alone: its own encryption, no certificate, no
   # dependency on the TLS block below. Offered separately for that reason
   # -- a node with no domain can still serve it.
-  local ss_port="" ss_server_key="" ss_is_new="y"
+  local ss_port="" ss_server_key="" ss_seed_key="" ss_is_new="y"
 
   # Same reasoning as the REALITY identity above: re-running this on a
   # node that already serves these must not ask for ports and a domain
@@ -536,6 +536,9 @@ install_xray() {
       # credential already issued on this node, so minting a new one
       # would lock out every existing customer at once.
       ss_server_key="$(echo "$existing" | jq -r '.settings.password')"
+      # Carried over too. Regenerating it would be harmless to customers
+      # -- nobody holds it -- but a re-run should not churn the config.
+      ss_seed_key="$(echo "$existing" | jq -r '.settings.clients[0].password // empty')"
       echo
       echo "Shadowsocks 2022 is already configured on port $ss_port -- keeping it."
     fi
@@ -647,6 +650,13 @@ install_xray() {
       # blake3-aes-256-gcm derives from exactly 32 bytes, and xray decodes
       # it with StdEncoding, so a base64url key fails to parse at startup.
       ss_server_key="$(openssl rand -base64 32)"
+      # A second, throwaway key for the seed client the template carries.
+      # It is never issued to anyone and authenticates nobody -- its only
+      # job is to make the inbound non-empty, because xray-core picks the
+      # single-user Shadowsocks server for an empty client list and that
+      # one is not a UserManager. With it empty, every add-user RPC is
+      # refused and no customer can be provisioned at all.
+      ss_seed_key="$(openssl rand -base64 32)"
     fi
   fi
 
@@ -674,6 +684,7 @@ install_xray() {
     -e "s#__VLESS_WS_PATH__#${vless_ws_path:-/ws}#g" \
     -e "s/__SHADOWSOCKS_PORT__/${ss_port:-0}/g" \
     -e "s#__SHADOWSOCKS_SERVER_KEY__#${ss_server_key:-placeholder}#g" \
+    -e "s#__SHADOWSOCKS_SEED_KEY__#${ss_seed_key:-placeholder}#g" \
     "$template" > /usr/local/etc/xray/config.json
 
   # A declined Trojan inbound is removed rather than left listening on
