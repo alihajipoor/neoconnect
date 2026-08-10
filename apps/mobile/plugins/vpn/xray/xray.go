@@ -28,8 +28,8 @@ import (
 	"sync"
 	"syscall"
 
-	core "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/common/platform"
+	core "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	"github.com/xtls/xray-core/transport/internet"
 
@@ -41,15 +41,23 @@ import (
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	_ "github.com/xtls/xray-core/proxy/freedom"
+	// Shadowsocks 2022. The whole package, not a .../outbound
+	// subpackage: unlike VLESS and VMess this one keeps client and
+	// server together, and it is the 2022 package rather than
+	// proxy/shadowsocks -- a 2022 cipher is routed to
+	// shadowsocks_2022.ClientConfig by the config layer, so importing
+	// the original package would register the wrong thing and leave this
+	// one absent.
+	_ "github.com/xtls/xray-core/proxy/shadowsocks_2022"
 	_ "github.com/xtls/xray-core/proxy/trojan"
 	_ "github.com/xtls/xray-core/proxy/tun"
 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
 	_ "github.com/xtls/xray-core/proxy/vmess/outbound"
+	_ "github.com/xtls/xray-core/transport/internet/grpc"
+	_ "github.com/xtls/xray-core/transport/internet/reality"
 	_ "github.com/xtls/xray-core/transport/internet/tcp"
 	_ "github.com/xtls/xray-core/transport/internet/tls"
-	_ "github.com/xtls/xray-core/transport/internet/reality"
 	_ "github.com/xtls/xray-core/transport/internet/websocket"
-	_ "github.com/xtls/xray-core/transport/internet/grpc"
 )
 
 // Protector is implemented on the Kotlin side by the VpnService.
