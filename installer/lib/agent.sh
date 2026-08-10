@@ -493,6 +493,10 @@ install_xray() {
   # own TLS -- so they get one each.
   local trojan_port="" vless_tls_port="" tls_cert="" tls_key="" trojan_fallback="" tls_domain=""
   local trojan_is_new="y" vless_tls_is_new="y"
+  # The WebSocket carrier rides on the VLESS+TLS listener rather than
+  # taking a port of its own -- see the fallback note in the template.
+  # Loopback only, so the port never appears from outside.
+  local vless_ws_path="" vless_ws_port="10086" vless_ws_is_new="y"
 
   # Same reasoning as the REALITY identity above: re-running this on a
   # node that already serves these must not ask for ports and a domain
@@ -519,6 +523,14 @@ install_xray() {
       trojan_fallback="$(echo "$existing" | jq -r '.settings.fallbacks[0].dest')"
       echo
       echo "VLESS over TLS is already configured on port $vless_tls_port -- keeping it."
+    fi
+    existing="$(jq -c '.inbounds[]? | select(.tag=="vless-ws-in")' "$config_path" 2>/dev/null)"
+    if [[ -n "$existing" ]]; then
+      vless_ws_is_new="n"
+      vless_ws_port="$(echo "$existing" | jq -r '.port')"
+      vless_ws_path="$(echo "$existing" | jq -r '.streamSettings.wsSettings.path')"
+      echo
+      echo "VLESS over WebSocket is already configured on path $vless_ws_path -- keeping it."
     fi
   fi
 
@@ -578,6 +590,28 @@ install_xray() {
       echo "VLESS and Trojan cannot share a port -- each terminates its own TLS." >&2
       return 1
     fi
+
+    # Offered only alongside a VLESS+TLS listener, because it is carried
+    # by one: the upgrade arrives on that port, under that certificate,
+    # and is routed here by path. Without it there is nothing to attach
+    # to.
+    if [[ -n "$vless_tls_port" && "$vless_ws_is_new" == "y" ]]; then
+      echo
+      echo "VLESS over WebSocket (optional) shares the port and certificate above."
+      echo "On the wire it is an HTTP upgrade to a long-lived connection -- what"
+      echo "ordinary web apps do -- which survives some filtering that plain TLS"
+      echo "does not. No extra port is opened."
+      read -r -p "Path for the WebSocket, or 'skip' [/ws]: " vless_ws_path
+      vless_ws_path="${vless_ws_path:-/ws}"
+      if [[ "${vless_ws_path,,}" == "skip" ]]; then
+        vless_ws_path=""
+      elif [[ "$vless_ws_path" != /* ]]; then
+        # Xray matches the request path literally, so a path without a
+        # leading slash silently matches nothing and the fallback quietly
+        # never fires.
+        vless_ws_path="/$vless_ws_path"
+      fi
+    fi
   fi
 
   local template="$SCRIPT_DIR/assets/xray-config.json.template"
@@ -599,6 +633,9 @@ install_xray() {
     -e "s#__TLS_KEY_PATH__#${tls_key:-/dev/null}#g" \
     -e "s/__TROJAN_FALLBACK__/${trojan_fallback:-127.0.0.1:8080}/g" \
     -e "s/__TROJAN_FALLBACK_H2__/${trojan_fallback_h2:-127.0.0.1:8081}/g" \
+    -e "s/__VLESS_WS_PORT__/${vless_ws_port:-10086}/g" \
+    -e "s#__VLESS_WS_DEST__#127.0.0.1:${vless_ws_port:-10086}#g" \
+    -e "s#__VLESS_WS_PATH__#${vless_ws_path:-/ws}#g" \
     "$template" > /usr/local/etc/xray/config.json
 
   # A declined Trojan inbound is removed rather than left listening on
@@ -608,6 +645,12 @@ install_xray() {
   local unused_tags=""
   [[ -z "$trojan_port" ]] && unused_tags="trojan-in"
   [[ -z "$vless_tls_port" ]] && unused_tags="$unused_tags vless-tls-in"
+  # A declined WebSocket has to take its fallback with it. An inbound
+  # removed on its own would leave the TLS listeners routing that path to
+  # a port nothing is listening on -- so the disguise site would answer
+  # every request except that one, which is a stranger fingerprint than
+  # simply not offering it.
+  [[ -z "$vless_ws_path" ]] && unused_tags="$unused_tags vless-ws-in"
   if [[ -n "${unused_tags// /}" ]]; then
     UNUSED_INBOUND_TAGS="$unused_tags" python3 - <<'PY' || echo "warning: could not remove the unused TLS inbounds -- edit /usr/local/etc/xray/config.json by hand" >&2
 import json
@@ -618,6 +661,16 @@ path = "/usr/local/etc/xray/config.json"
 with open(path) as handle:
     config = json.load(handle)
 config["inbounds"] = [i for i in config["inbounds"] if i.get("tag") not in drop]
+
+# The WebSocket fallback goes with its inbound. It is the only
+# path-keyed fallback in either template, so matching on the presence of
+# a path is exact and stays correct if the port ever changes.
+if "vless-ws-in" in drop:
+    for inbound in config["inbounds"]:
+        fallbacks = inbound.get("settings", {}).get("fallbacks")
+        if fallbacks:
+            inbound["settings"]["fallbacks"] = [f for f in fallbacks if not f.get("path")]
+
 with open(path, "w") as handle:
     json.dump(config, handle, indent=2)
 PY
@@ -680,8 +733,27 @@ EOF
     create_route_for_config "Xray VLESS+TLS" "$config_id"
   fi
 
+  # Registered as the same protocol on the same public port as the TCP
+  # config above, distinguished only by transport and path. That is not a
+  # duplicate: the client builds a different stream from it, the agent
+  # provisions it on a different inbound, and a customer can fail over
+  # between the two when one shape is filtered and the other is not.
+  if [[ -n "$vless_ws_path" && "$vless_ws_is_new" == "y" ]]; then
+    echo "Registering VLESS over WebSocket in the panel..."
+    # path travels with serverName because the client needs both: the
+    # name for SNI and certificate verification, the path for the upgrade
+    # request. A WebSocket to the right host on the wrong path is refused
+    # by the fallback and looks exactly like a broken credential.
+    params="$(jq -n --arg sn "$tls_domain" --arg p "$vless_ws_path" '{serverName: $sn, path: $p}')"
+    config_id="$(register_protocol_config "XRAY_VLESS_TLS" "$vless_tls_port" "$params" \
+      '{"transport": "WS", "security": "TLS"}')" || return 1
+    echo "  Registered (config $config_id)."
+    create_route_for_config "Xray VLESS+TLS (WebSocket)" "$config_id"
+  fi
+
   echo "Xray is running on port $listen_port and is ready to use."
   [[ -n "$vless_tls_port" ]] && echo "VLESS over TLS is running on port $vless_tls_port."
+  [[ -n "$vless_ws_path" ]] && echo "VLESS over WebSocket shares port $vless_tls_port on path $vless_ws_path."
   [[ -n "$trojan_port" ]] && echo "Trojan over TLS is running on port $trojan_port."
   return 0
 }

@@ -153,12 +153,16 @@ describe("ClientAttemptsService.prune", () => {
     const { service, deleteMany } = build();
     const before = Date.now();
     await service.prune();
-    const cutoff: Date = deleteMany.mock.calls[0][0].where.createdAt.lt;
+    const after = Date.now();
+    const cutoff: number = (deleteMany.mock.calls[0][0].where.createdAt.lt as Date).getTime();
 
-    const age = before - cutoff.getTime();
-    expect(age).toBeGreaterThanOrEqual(RETENTION_DAYS * 86_400_000);
-    // Allow for the milliseconds the call itself takes, nothing more --
-    // a window that quietly drifted to 15 days should fail here.
-    expect(age).toBeLessThan(RETENTION_DAYS * 86_400_000 + 5_000);
+    // The service reads its own clock somewhere between these two, so
+    // the cutoff is bracketed rather than compared to a single instant.
+    // An earlier version asserted against `before` alone, which required
+    // the call to take exactly zero milliseconds -- it passed alone and
+    // failed inside the full suite.
+    const window = RETENTION_DAYS * 86_400_000;
+    expect(cutoff).toBeGreaterThanOrEqual(before - window);
+    expect(cutoff).toBeLessThanOrEqual(after - window);
   });
 });

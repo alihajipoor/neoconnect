@@ -28,6 +28,17 @@ type commandPayload struct {
 	// sending 0, which would otherwise read as a limit of zero.
 	DownloadMbps uint32 `json:"downloadMbps"`
 	UploadMbps   uint32 `json:"uploadMbps"`
+	// How the protocol is carried -- "TCP", "WS", "GRPC". Empty from an
+	// older control plane, and from every command written before this
+	// field existed, which is why the lookup treats absent as TCP rather
+	// than requiring it.
+	//
+	// It has to travel with the command because the protocol alone no
+	// longer identifies an inbound: one node can serve VLESS+TLS over a
+	// raw TCP stream and inside a WebSocket at the same time, sharing a
+	// port and a certificate, and a user added to the wrong one of those
+	// gets a credential that silently never connects.
+	Transport string `json:"transport"`
 }
 
 // Dispatcher holds one provisioner per protocol this node runs. A node
@@ -68,6 +79,35 @@ func New() *Dispatcher {
 
 func (d *Dispatcher) Register(protocol string, p common.Provisioner) {
 	d.provisioners[protocol] = p
+}
+
+// RegisterTransport registers a provisioner for one protocol carried over
+// a specific non-default transport -- today only VLESS+TLS inside a
+// WebSocket. Kept distinct from Register because the two share a protocol
+// enum but land on different Xray inbounds, and a user created on the
+// wrong one gets a credential that never connects.
+func (d *Dispatcher) RegisterTransport(protocol, transport string, p common.Provisioner) {
+	d.provisioners[provisionerKey(protocol, transport)] = p
+}
+
+// provisionerKey maps a (protocol, transport) pair to the map key.
+//
+// Absent or TCP collapses to the bare protocol, so every command written
+// before transports existed -- and every TCP one written after -- keeps
+// resolving to exactly the provisioner it always did. Only a genuinely
+// different carrier gets its own key.
+func provisionerKey(protocol, transport string) string {
+	if transport == "" || transport == "TCP" {
+		return protocol
+	}
+	return protocol + "|" + transport
+}
+
+func describeTarget(protocol, transport string) string {
+	if transport == "" || transport == "TCP" {
+		return fmt.Sprintf("protocol %q", protocol)
+	}
+	return fmt.Sprintf("protocol %q over %s", protocol, transport)
 }
 
 // RegisterShaper enables per-user speed caps for one protocol.
@@ -174,9 +214,9 @@ func (d *Dispatcher) Execute(ctx context.Context, cmd *pb.Command) (success bool
 		return false, fmt.Sprintf("invalid command payload: %v", err)
 	}
 
-	provisioner, ok := d.provisioners[payload.Protocol]
+	provisioner, ok := d.provisioners[provisionerKey(payload.Protocol, payload.Transport)]
 	if !ok {
-		return false, fmt.Sprintf("no provisioner registered for protocol %q on this node", payload.Protocol)
+		return false, fmt.Sprintf("no provisioner registered for %s on this node", describeTarget(payload.Protocol, payload.Transport))
 	}
 
 	user := common.ProtocolUser{ExternalUserID: payload.ExternalUserID, Credentials: payload.Credentials}

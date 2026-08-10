@@ -9,7 +9,14 @@ import { encryptCredentials } from "../protocol-users/credentials-crypto";
  * gRPC Hello would need a signed handshake and a live stream, which
  * tests the transport rather than the reconciliation this exists for. */
 describe("AgentGatewayService reconnect reconciliation", () => {
-  function build(users: { protocol: string; externalUserId: string; credentials: Record<string, string> }[]) {
+  function build(
+    users: {
+      protocol: string;
+      externalUserId: string;
+      credentials: Record<string, string>;
+      transport?: string;
+    }[],
+  ) {
     const prisma = {
       protocolUser: {
         findMany: jest.fn().mockResolvedValue(
@@ -20,6 +27,7 @@ describe("AgentGatewayService reconnect reconciliation", () => {
             externalUserId: u.externalUserId,
             status: "ACTIVE",
             credentialsJson: encryptCredentials(u.credentials),
+            protocolConfig: { transport: u.transport ?? "TCP" },
           })),
         ),
       },
@@ -57,9 +65,34 @@ describe("AgentGatewayService reconnect reconciliation", () => {
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(enqueue).toHaveBeenCalledWith("node-1", "CREATE_USER", {
       protocol: "WIREGUARD",
+      transport: "TCP",
       externalUserId: "peer-key-1",
       credentials: { privateKey: "a", address: "10.66.0.2/32" },
     });
+  });
+
+  /** The protocol alone no longer says which inbound a user belongs on:
+   * one node serves VLESS+TLS as a raw TCP stream and inside a WebSocket
+   * at the same time, on one port and one certificate.
+   *
+   * Re-assert is the dangerous place to get this wrong. It runs when a
+   * node comes back, for every customer at once, so dropping the
+   * transport here would quietly rebuild every WebSocket customer on the
+   * TCP inbound -- leaving them a credential that looks right and never
+   * connects. */
+  it("carries the transport, so a WebSocket user is not rebuilt on the TCP inbound", async () => {
+    const { service, enqueue } = build([
+      {
+        protocol: "XRAY_VLESS_TLS",
+        externalUserId: "uuid-ws",
+        credentials: { uuid: "uuid-ws" },
+        transport: "WS",
+      },
+    ]);
+
+    await reassert(service, "node-1");
+
+    expect(enqueue.mock.calls[0][2]).toMatchObject({ protocol: "XRAY_VLESS_TLS", transport: "WS" });
   });
 
   it("sends decrypted credentials, since the agent cannot use the stored form", async () => {
@@ -78,9 +111,14 @@ describe("AgentGatewayService reconnect reconciliation", () => {
 
     await reassert(service, "node-1");
 
-    expect(prisma.protocolUser.findMany).toHaveBeenCalledWith({
-      where: { nodeId: "node-1", status: "ACTIVE" },
-    });
+    // The scoping is the point, asserted on its own rather than on the
+    // whole argument: what else the query selects or includes is free to
+    // change, but re-asserting another node's users onto this one never
+    // is.
+    const [args] = (prisma.protocolUser.findMany as jest.Mock).mock.calls[0] as [
+      { where: Record<string, unknown> },
+    ];
+    expect(args.where).toEqual({ nodeId: "node-1", status: "ACTIVE" });
   });
 
   it("sends nothing for a node with no provisioned users", async () => {

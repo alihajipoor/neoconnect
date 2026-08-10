@@ -33,6 +33,7 @@ func main() {
 	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
 	xrayTrojanTag := flag.String("xray-trojan-inbound-tag", "trojan-in", "tag of the Trojan+TLS inbound in Xray's config. Registered unconditionally: a tag that does not exist simply nacks any Trojan command with Xray's own error, which is clearer than the node silently not offering the protocol")
 	xrayVlessTlsTag := flag.String("xray-vless-tls-inbound-tag", "vless-tls-in", "tag of the VLESS+TLS inbound in Xray's config. Registered unconditionally for the same reason as the Trojan tag above")
+	xrayVlessWsTag := flag.String("xray-vless-ws-inbound-tag", "vless-ws-in", "tag of the VLESS+TLS-over-WebSocket inbound in Xray's config. Same account shape as the TCP VLESS inbound -- only the stream differs -- so it is registered as the WS transport of XRAY_VLESS_TLS, and a node without that inbound simply nacks any WS command with Xray's own error")
 	xrayAccessLog := flag.String("xray-access-log", "/var/log/xray/access.log", "Xray's access log, read to count how many places each user is connected from -- concurrency is not exposed by Xray's API. Harmless if absent: counts are simply not reported")
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
 	relayTunInboundTag := flag.String("relay-tun-inbound-tag", "relay-tun-in", "tag of the dormant tun inbound in a relay node's Xray config (see installer/assets/xray-relay-config.json.template)")
@@ -71,6 +72,12 @@ func main() {
 	// REALITY one above -- only the listener differs -- so it is a second
 	// tag on the same process rather than anything new.
 	dispatcher.Register("XRAY_VLESS_TLS", xrayProvisioner.ForVless(*xrayVlessTlsTag, *xrayAccessLog))
+	// The same VLESS+TLS protocol carried inside a WebSocket -- the
+	// "WStunnel" shape. Identical account, different inbound, so it is a
+	// transport variant of XRAY_VLESS_TLS rather than a new protocol: the
+	// control plane sends transport "WS" and the dispatcher routes it
+	// here, to the ws inbound, instead of to the TCP one above.
+	dispatcher.RegisterTransport("XRAY_VLESS_TLS", "WS", xrayProvisioner.ForVless(*xrayVlessWsTag, *xrayAccessLog))
 	dispatcher.Register("WIREGUARD", wireguard.New(*wgInterface))
 	// Per-user speed caps, WireGuard only for now: each peer has its own
 	// address assigned at provisioning time, which is what a tc rule needs

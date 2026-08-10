@@ -51,6 +51,12 @@
         "decryption": "none",
         "fallbacks": [
           {
+            "//": "The WebSocket carrier, sharing this port and certificate -- see the note in xray-config.json.template. Matched ahead of the ALPN entry because a WebSocket upgrade is HTTP/1.1 and never reaches the h2 bucket.",
+            "path": "__VLESS_WS_PATH__",
+            "dest": "__VLESS_WS_DEST__",
+            "xver": 1
+          },
+          {
             "//": "Keyed on the negotiated ALPN -- see the note in xray-config.json.template. This inbound offers h2, and handing an h2 connection to an HTTP/1.1-only nginx kills it with a protocol error, which is what broke the node API mirrors for every modern client.",
             "alpn": "h2",
             "dest": "__TROJAN_FALLBACK_H2__",
@@ -85,6 +91,12 @@
         "clients": [],
         "fallbacks": [
           {
+            "//": "The WebSocket carrier, sharing this port and certificate -- see the note in xray-config.json.template. Matched ahead of the ALPN entry because a WebSocket upgrade is HTTP/1.1 and never reaches the h2 bucket.",
+            "path": "__VLESS_WS_PATH__",
+            "dest": "__VLESS_WS_DEST__",
+            "xver": 1
+          },
+          {
             "//": "Keyed on the negotiated ALPN -- see the note in xray-config.json.template. This inbound offers h2, and handing an h2 connection to an HTTP/1.1-only nginx kills it with a protocol error, which is what broke the node API mirrors for every modern client.",
             "alpn": "h2",
             "dest": "__TROJAN_FALLBACK_H2__",
@@ -110,6 +122,27 @@
         }
       },
       "tag": "trojan-in"
+    },
+    {
+      "//": "VLESS+TLS inside a WebSocket -- see the note in xray-config.json.template. Loopback-only, no TLS of its own (the public inbound already terminated it), and acceptProxyProtocol paired with that fallback's \"xver\": 1 so customers do not all appear to arrive from 127.0.0.1.",
+      "listen": "127.0.0.1",
+      "port": __VLESS_WS_PORT__,
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "__VLESS_WS_PATH__"
+        },
+        "sockopt": {
+          "acceptProxyProtocol": true
+        }
+      },
+      "tag": "vless-ws-in"
     },
     {
       "port": 0,

@@ -51,6 +51,12 @@
         "decryption": "none",
         "fallbacks": [
           {
+            "//": "The WebSocket carrier, on the same port and the same certificate as this inbound. A path rather than a port of its own is the entire point: a second listener is a second thing to fingerprint and block, while an HTTP upgrade on a normal HTTPS port is what ordinary web applications do all day. Matched before the ALPN entry below because WebSocket upgrades are HTTP/1.1, so they never reach the h2 bucket.",
+            "path": "__VLESS_WS_PATH__",
+            "dest": "__VLESS_WS_DEST__",
+            "xver": 1
+          },
+          {
             "//": "Keyed on the negotiated ALPN, and it has to be. This inbound offers h2 so it looks like an ordinary web server, and a browser or any modern HTTP client takes that offer -- then nginx, which only spoke HTTP/1.1, received HTTP/2 frames and the connection died with a protocol error. Measured, not theorised: reproduced from an uncensored machine, and it meant the node API mirrors never worked for an HTTP/2 client. Since nginx before 1.25.1 cannot detect h2c and HTTP/1.1 on one listener -- the http2 flag forces h2c and breaks HTTP/1.1 -- each gets a socket of its own and Xray picks by ALPN.",
             "alpn": "h2",
             "dest": "__TROJAN_FALLBACK_H2__",
@@ -85,6 +91,12 @@
         "clients": [],
         "fallbacks": [
           {
+            "//": "The WebSocket carrier, on the same port and the same certificate as this inbound. A path rather than a port of its own is the entire point: a second listener is a second thing to fingerprint and block, while an HTTP upgrade on a normal HTTPS port is what ordinary web applications do all day. Matched before the ALPN entry below because WebSocket upgrades are HTTP/1.1, so they never reach the h2 bucket.",
+            "path": "__VLESS_WS_PATH__",
+            "dest": "__VLESS_WS_DEST__",
+            "xver": 1
+          },
+          {
             "//": "Keyed on the negotiated ALPN, and it has to be. This inbound offers h2 so it looks like an ordinary web server, and a browser or any modern HTTP client takes that offer -- then nginx, which only spoke HTTP/1.1, received HTTP/2 frames and the connection died with a protocol error. Measured, not theorised: reproduced from an uncensored machine, and it meant the node API mirrors never worked for an HTTP/2 client. Since nginx before 1.25.1 cannot detect h2c and HTTP/1.1 on one listener -- the http2 flag forces h2c and breaks HTTP/1.1 -- each gets a socket of its own and Xray picks by ALPN.",
             "alpn": "h2",
             "dest": "__TROJAN_FALLBACK_H2__",
@@ -110,6 +122,27 @@
         }
       },
       "tag": "trojan-in"
+    },
+    {
+      "//": "VLESS+TLS carried inside a WebSocket -- the shape Windscribe sells as WStunnel. Loopback-only and with no TLS of its own: the public inbound above already terminated TLS and routed here by request path, so a second handshake would be wrong as well as wasteful. acceptProxyProtocol pairs with that fallback's \"xver\": 1, and without it every customer would appear to arrive from 127.0.0.1 -- which breaks per-user concurrency counting and puts the whole node in one rate-limit bucket.",
+      "listen": "127.0.0.1",
+      "port": __VLESS_WS_PORT__,
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "__VLESS_WS_PATH__"
+        },
+        "sockopt": {
+          "acceptProxyProtocol": true
+        }
+      },
+      "tag": "vless-ws-in"
     }
   ],
   "outbounds": [
