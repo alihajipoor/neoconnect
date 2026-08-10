@@ -1,5 +1,5 @@
 import { fetch } from "@tauri-apps/plugin-http";
-import { API_BASE_URL } from "./config";
+import { apiEndpoints } from "./api-endpoints";
 
 /** Proving a tunnel actually carries traffic, rather than merely existing.
  *
@@ -21,17 +21,30 @@ import { API_BASE_URL } from "./config";
 const EGRESS_TIMEOUT_MS = 6000;
 
 async function publicIp(): Promise<string | null> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), EGRESS_TIMEOUT_MS);
-    const res = await fetch(`${API_BASE_URL}/health/ip`, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const body = (await res.json()) as { ip?: string };
-    return body.ip ?? null;
-  } catch {
-    return null;
+  // The same endpoint list the rest of the app uses, and for a sharper
+  // reason here: this check decides whether the customer is told they
+  // are protected. Pinned to one address, a blocked control plane would
+  // report a perfectly working tunnel as carrying nothing -- turning a
+  // reachability problem into a false accusation against the VPN.
+  //
+  // Each endpoint gets its own budget rather than sharing one. A first
+  // address that is blocked burns the whole timeout doing nothing, and a
+  // shared deadline would leave the working one no time to answer.
+  for (const base of await apiEndpoints()) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), EGRESS_TIMEOUT_MS);
+      const res = await fetch(`${base}/health/ip`, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const body = (await res.json()) as { ip?: string };
+      if (body.ip) return body.ip;
+    } catch {
+      // Try the next one. Exhausting the list returns null, which the
+      // caller already treats as "no evidence" rather than as failure.
+    }
   }
+  return null;
 }
 
 /** The address the world saw before connecting, for later comparison.

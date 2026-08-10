@@ -1,6 +1,7 @@
 import { forwardRef, Inject, Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
+import { ConcurrencyStore } from "./concurrency-store";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
 
 export interface SessionCountInput {
@@ -24,6 +25,20 @@ const STRIKES_BEFORE_ACTION = 3;
  * trip the limit again, short enough that a customer who simply had a
  * bad reading isn't locked out meaningfully. */
 const COOLDOWN_MS = 60_000;
+
+/** The shortest gap between two strikes against the same subscription.
+ *
+ * Strikes are meant to count polling *cycles*, and they did while one
+ * node reported. Now that several nodes report the same subscription
+ * independently, five nodes would land three strikes in a few seconds
+ * and act on what is still a single reading -- turning a deliberate
+ * ~90-second debounce into no debounce at all, on exactly the customers
+ * who use the most locations.
+ *
+ * Twenty seconds is comfortably inside a ~30s report interval, so an
+ * honest cycle still counts, while a burst from several nodes counts
+ * once. */
+const MIN_STRIKE_GAP_MS = 20_000;
 
 /** Enforces a plan's concurrent-connection limit.
  *
@@ -53,6 +68,9 @@ export class ConcurrencyService implements OnModuleDestroy {
   /** Users disconnected recently, so a burst of reports doesn't disconnect
    * the same person repeatedly while they are still reconnecting. */
   private readonly cooldownUntil = new Map<string, number>();
+  /** When each subscription last took a strike, so a burst of reports
+   * from different nodes counts as one. See MIN_STRIKE_GAP_MS. */
+  private readonly lastStrikeAt = new Map<string, number>();
   /** Scheduled restores, tracked so shutdown can cancel them. */
   private readonly pendingReenables = new Map<string, NodeJS.Timeout>();
 
@@ -64,6 +82,7 @@ export class ConcurrencyService implements OnModuleDestroy {
     // other consumer of the same service, already does this).
     @Inject(forwardRef(() => AgentGatewayService))
     private readonly agentGateway: AgentGatewayService,
+    private readonly store: ConcurrencyStore,
   ) {}
 
   /** One node's report, aggregated per subscription before judging it.
@@ -78,10 +97,12 @@ export class ConcurrencyService implements OnModuleDestroy {
    * time, so a legitimate customer contributes one source however many
    * credentials they hold.
    *
-   * Scope is one node's batch. A customer spread across two nodes is
-   * still counted separately per node -- that needs short-lived
-   * cross-node state and is not what provisioning-everywhere introduced,
-   * so it stays a known gap rather than a guess.
+   * The total is then taken across the whole fleet, not just this node.
+   * Per-node was the obvious hole once every subscription gained a
+   * credential on every route: a sharer only had to give each friend a
+   * different location, and a limit of two across five nodes quietly
+   * permitted ten. ConcurrencyStore holds each node's latest count so
+   * the limit means what it says on the plan.
    */
   async handleSessionCounts(nodeId: string, counts: SessionCountInput[]) {
     const bySubscription = new Map<string, { sources: number; protocol: string }>();
@@ -103,7 +124,8 @@ export class ConcurrencyService implements OnModuleDestroy {
     }
 
     for (const [subscriptionId, { sources }] of bySubscription) {
-      await this.evaluate(subscriptionId, sources);
+      const total = await this.store.recordAndTotal(subscriptionId, nodeId, sources);
+      await this.evaluate(subscriptionId, total);
     }
   }
 
@@ -122,11 +144,17 @@ export class ConcurrencyService implements OnModuleDestroy {
       // Back within the limit: forget the history rather than letting
       // strikes accumulate across unrelated incidents hours apart.
       this.strikes.delete(key);
+      this.lastStrikeAt.delete(key);
       return;
     }
 
     const until = this.cooldownUntil.get(key);
     if (until && Date.now() < until) return;
+
+    // One strike per cycle however many nodes report it.
+    const lastStrike = this.lastStrikeAt.get(key);
+    if (lastStrike && Date.now() - lastStrike < MIN_STRIKE_GAP_MS) return;
+    this.lastStrikeAt.set(key, Date.now());
 
     const strikes = (this.strikes.get(key) ?? 0) + 1;
     this.strikes.set(key, strikes);
@@ -138,7 +166,14 @@ export class ConcurrencyService implements OnModuleDestroy {
     }
 
     this.strikes.delete(key);
+    this.lastStrikeAt.delete(key);
     this.cooldownUntil.set(key, Date.now() + COOLDOWN_MS);
+
+    // The stored counts describe sessions that are about to stop
+    // existing. Left in place they would survive the disconnect for a
+    // minute and a half and re-trip the limit the moment the customer's
+    // legitimate devices came back.
+    await this.store.clear(subscriptionId);
 
     // Every credential, not only the one that reported over the limit.
     // Dropping just that one would move the sharer onto the next

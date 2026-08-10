@@ -32,6 +32,8 @@ import { BrandModule } from "./modules/brand/brand.module";
 import { UpdatesModule } from "./modules/updates/updates.module";
 import { EmailModule } from "./modules/email/email.module";
 import { AnnouncementsModule } from "./modules/announcements/announcements.module";
+import { IntegrationsModule } from "./modules/integrations/integrations.module";
+import { ClientAttemptsModule } from "./modules/client-attempts/client-attempts.module";
 
 @Module({
   imports: [
@@ -75,6 +77,8 @@ import { AnnouncementsModule } from "./modules/announcements/announcements.modul
     UpdatesModule,
     EmailModule,
     AnnouncementsModule,
+    IntegrationsModule,
+    ClientAttemptsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

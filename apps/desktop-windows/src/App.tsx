@@ -3,6 +3,7 @@ import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
 import { verifyEmailByToken } from "./lib/auth";
+import { flushAttempts } from "./lib/attempts";
 import { Login } from "./screens/Login";
 import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
@@ -12,6 +13,7 @@ import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
+import { CustomModeCard } from "./components/CustomModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 
@@ -110,6 +112,14 @@ export default function App() {
   // not -- see the note below on why there is no install-on-close.
   useEffect(() => startUpdateChecks(setUpdateState), []);
 
+  // Anything the app could not report at the time -- which is every
+  // "could not reach the control plane", since a client cannot tell us
+  // that while it is true -- goes out now. Deliberately unawaited and
+  // silent: it is diagnostics, and the customer is here to connect.
+  useEffect(() => {
+    void flushAttempts();
+  }, []);
+
   // There is deliberately no install-on-close handler here.
   //
   // There was one, and it made the app impossible to close. It called
@@ -202,6 +212,7 @@ export default function App() {
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
         onOpenSupport={() => setScreen("support")}
+        customSection={<CustomModeCard />}
       />
     );
   }

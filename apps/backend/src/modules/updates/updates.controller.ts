@@ -31,6 +31,17 @@ export class UpdatesController {
     res.redirect(302, await this.updates.installerUrl());
   }
 
+  /** The same thing for Android.
+   *
+   * A tablet opens this in its browser and gets the APK; Android then
+   * asks whether to install it. That confirmation tap cannot be skipped
+   * by any app that is not the device owner, which is why there is no
+   * silent-update counterpart here the way there is for Windows. */
+  @Get("/installer/android")
+  async androidInstaller(@Res() res: Response) {
+    res.redirect(302, await this.updates.androidApkUrl());
+  }
+
   @Get("download/:tag/:asset")
   async download(
     @Param("tag") tag: string,

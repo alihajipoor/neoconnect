@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Declared here rather than in the app's manifest so the tunnel and
+         the thing that declares it stay together: this service belongs to
+         the WireGuard library, and any app merging this plugin in gets it
+         whether or not anyone remembered to add it.
+
+         GoBackend starts the service and hands it the TUN descriptor.
+         BIND_VPN_SERVICE is what tells Android only the system may bind. -->
+    <application>
+        <service
+            android:name="com.wireguard.android.backend.GoBackend$VpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="systemExempted"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
+        <!-- The Xray protocols' own TUN device. Separate from WireGuard's
+             above because that one belongs to the WireGuard library and
+             cannot be reused; only one is ever active at a time. -->
+        <service
+            android:name="com.neoxify.vpn.NeoxifyTunService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="systemExempted"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+    </application>
+
+    <!-- Android 13+ will not show the tunnel's ongoing notification without
+         this, and a VPN running with no visible indication is exactly what
+         the platform is trying to prevent. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!-- Android 11+ hides most installed packages from
+         getInstalledApplications unless an app declares why it needs them.
+         Custom mode is a per-app allow list, so the list of apps IS the
+         feature; without this the picker shows a handful of entries and
+         looks broken. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+</manifest>

@@ -77,6 +77,10 @@ services:
       NOWPAYMENTS_IPN_SECRET: ${NOWPAYMENTS_IPN_SECRET:-}
       CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?CREDENTIALS_ENCRYPTION_KEY is required}
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      # Shared secret machine callers present as X-Service-Token. Must reach
+      # the backend as well as the bot: the guard fails closed, so with this
+      # set only on the bot side every request is rejected with a 401.
+      INTEGRATIONS_SERVICE_TOKEN: ${INTEGRATIONS_SERVICE_TOKEN:-}
       # Public address of this API, used to build links inside emails.
       PUBLIC_API_URL: ${PUBLIC_API_URL:-}
     volumes:
@@ -100,6 +104,31 @@ services:
       NODE_ENV: production
     ports:
       - "127.0.0.1:3000:3000"
+
+  # Optional. Only starts under `--profile discord`, so a deployment that has
+  # no Discord server is unaffected by its presence here.
+  discord-bot:
+    profiles: ["discord"]
+    build:
+      context: ..
+      dockerfile: apps/discord-bot/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      # Defaulted to empty so compose does not warn on every deployment that
+      # never enables this profile. The bot validates them at boot and exits
+      # if one is missing, which is the honest place to fail.
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-}
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
+      # Reaches the backend over the internal compose network, so the bot's
+      # service token never crosses the public internet.
+      NEOXIFY_API_URL: http://backend:4000
+      INTEGRATIONS_SERVICE_TOKEN: ${INTEGRATIONS_SERVICE_TOKEN:-}
+      NEOXIFY_WEBSITE_URL: ${NEOXIFY_WEBSITE_URL:-https://neoxify.net}
+      NODE_ENV: production
+    # No ports: the bot dials out to Discord and accepts nothing inbound.
 
 volumes:
   postgres-data:

@@ -2,6 +2,7 @@ import { Controller, Get, Ip, Req, ServiceUnavailableException } from "@nestjs/c
 import type { Request } from "express";
 import { SkipThrottle } from "@nestjs/throttler";
 import { PrismaService } from "../../prisma/prisma.service";
+import { clientIpOf } from "../../common/client-ip";
 
 @Controller("health")
 export class HealthController {
@@ -32,14 +33,7 @@ export class HealthController {
   @SkipThrottle()
   @Get("ip")
   ip(@Ip() ip: string, @Req() req: Request) {
-    // Behind nginx, @Ip() reflects the proxy unless trust proxy is set,
-    // so prefer the forwarded header the panel's nginx config actually
-    // sets (see installer/assets/nginx-panel.conf.template).
-    const forwarded = req.headers["x-real-ip"] ?? req.headers["x-forwarded-for"];
-    const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-    // X-Forwarded-For may be a chain; the client is the first entry.
-    const client = raw?.split(",")[0]?.trim();
-    return { ip: client || ip };
+    return { ip: clientIpOf(req) || ip };
   }
 
   @Get()

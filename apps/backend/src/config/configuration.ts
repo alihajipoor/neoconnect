@@ -46,6 +46,12 @@ export default () => ({
     // 32 raw bytes, hex-encoded (64 hex chars).
     credentialsEncryptionKey: process.env.CREDENTIALS_ENCRYPTION_KEY,
   },
+  integrations: {
+    // Shared secret machine callers present as X-Service-Token. Currently
+    // just the Discord bot. Guarded routes are read-only and fail closed
+    // when this is unset -- see common/guards/service-token.guard.ts.
+    serviceToken: process.env.INTEGRATIONS_SERVICE_TOKEN,
+  },
   alerting: {
     // Optional generic webhook (Slack/Discord/Telegram-via-adapter/custom
     // endpoint all accept a plain JSON POST) -- alerting is a silent

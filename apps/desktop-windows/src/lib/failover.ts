@@ -70,10 +70,18 @@ export function orderCandidates(
     return 0;
   };
 
+  // A WebSocket-carried credential sorts after its TCP sibling: the
+  // extra framing costs a little speed, and its advantage -- surviving a
+  // CDN, looking like ordinary web traffic -- only matters once the
+  // plainer variant has failed. Same protocol, so nothing above
+  // separates them.
+  const wsLast = (u: ProtocolUser) => (u.connection?.transport === "WS" ? 1 : 0);
+
   return [...users].sort(
     (a, b) =>
       priority(a) - priority(b) ||
       rank(a.protocol) - rank(b.protocol) ||
+      wsLast(a) - wsLast(b) ||
       a.routeId.localeCompare(b.routeId),
   );
 }

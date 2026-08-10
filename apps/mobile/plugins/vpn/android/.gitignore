@@ -1,0 +1,8 @@
+# Copied in by the tauri-plugin build script from the installed Tauri
+# version -- regenerated, never edited.
+/.tauri
+
+# Built from ../xray by scripts/build-xray-aar.sh (and by the release
+# workflow). 21MB of compiled xray-core has no business in git, and a
+# committed binary is one nobody rebuilds when the Go source changes.
+/libs/
