@@ -221,16 +221,29 @@ class NeoxifyTunService : VpnService(), Protector {
             }
         }
 
-        // Never route this app's own traffic. It would put the control
-        // plane inside the tunnel it is managing, and make the egress
-        // check measure the wrong path.
-        if (allowedApps.isEmpty()) {
-            try {
-                builder.addDisallowedApplication(packageName)
-            } catch (e: PackageManager.NameNotFoundException) {
-                Log.w(TAG, "could not exclude ourselves", e)
-            }
-        }
+        // This app's own traffic goes through the tunnel like everything
+        // else, and that is deliberate.
+        //
+        // It used to be excluded, to keep the control plane out of the
+        // tunnel it manages. The reasoning was backwards for the check
+        // that decides whether a connect succeeded: verification asks
+        // the API what our exit address is and compares it against the
+        // address before connecting. Excluded, the app was the one
+        // process still going out the plain route, so the answer never
+        // changed, every Xray connect was judged "up but not carrying
+        // traffic", and the ladder tore down a working tunnel and fell
+        // back to Fast.
+        //
+        // That is why no stealth protocol has ever worked on Android
+        // while WireGuard always did: GoBackend's service excludes
+        // nothing, so its verification saw the truth. The node's own log
+        // showed this tunnel carrying real traffic in the same seconds
+        // the app declared it dead.
+        //
+        // Nothing loops as a result. xray-core's own sockets to the
+        // server are kept out of the tunnel by VpnService.protect (see
+        // the Protector the Go side calls), which is the mechanism for
+        // that job -- excluding the whole app was never what stopped it.
 
         val descriptor = builder.establish()
             ?: throw IllegalStateException("Android refused to create the VPN interface")
