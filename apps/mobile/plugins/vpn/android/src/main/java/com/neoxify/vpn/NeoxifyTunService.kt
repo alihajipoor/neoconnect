@@ -49,7 +49,27 @@ class NeoxifyTunService : VpnService(), Protector {
         // Android requires a visible notification for a service holding a
         // VPN, and rightly: a tunnel nobody can see is a tunnel nobody
         // can turn off.
-        startForeground(NOTIFICATION_ID, buildNotification())
+        //
+        // Guarded because this runs on the main thread, dispatched by the
+        // system, outside every try/catch the plugin has -- so anything
+        // thrown here kills the process rather than failing the connect.
+        // A missing foreground-service permission did exactly that on
+        // 0.2.7 and presented as "the app crashes on stealth protocols",
+        // with no error anywhere the customer or the telemetry could see
+        // it. The permission is declared now; this makes the next reason
+        // -- an OEM policy, a future platform rule -- a legible failure
+        // instead of a silent death.
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (e: Throwable) {
+            Log.e(TAG, "could not start in the foreground; stopping", e)
+            // Must stop: a service started with startForegroundService
+            // that never calls startForeground is killed by the system
+            // anyway, with an ANR rather than this log line.
+            instance = null
+            stopSelf()
+            return START_NOT_STICKY
+        }
         return START_STICKY
     }
 
