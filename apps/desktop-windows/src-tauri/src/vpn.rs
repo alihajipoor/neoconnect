@@ -14,7 +14,8 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, OpenvpnProfile, Request, Response, SplitTunnelConfig, TrojanProfile,
+    ConnectProfile, OpenvpnProfile, Request, Response, ShadowsocksProfile, SplitTunnelConfig,
+    TrojanProfile,
     TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile, PIPE_NAME,
 };
 use serde::Deserialize;
@@ -176,6 +177,29 @@ impl ProtocolUserPayload {
                     host: self.connection.host.clone(),
                     port: self.connection.port,
                     server_name,
+                }))
+            }
+            "SHADOWSOCKS" => {
+                // Both halves are required. The server key belongs to the
+                // listener and the user key to this customer; either one
+                // alone authenticates nobody, and Shadowsocks answers a
+                // bad key with silence rather than a refusal, so the
+                // failure would look like a dead server.
+                let params = &self.connection.public_params;
+                let server_key = params
+                    .get("serverKey")
+                    .and_then(|v| v.as_str())
+                    .ok_or("this server is missing its Shadowsocks server key")?;
+                let method = params
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .ok_or("this server is missing its Shadowsocks method")?;
+                let user_key = field(&self.credentials, "userKey")?;
+                Ok(ConnectProfile::Shadowsocks(ShadowsocksProfile {
+                    host: self.connection.host.clone(),
+                    port: self.connection.port,
+                    method: method.to_string(),
+                    password: format!("{server_key}:{user_key}"),
                 }))
             }
             "OPENVPN" => Ok(ConnectProfile::Openvpn(OpenvpnProfile {

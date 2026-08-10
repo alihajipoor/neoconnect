@@ -141,9 +141,48 @@ function trojanOutbound(user: ProtocolUser, params: Record<string, unknown>): Js
   };
 }
 
+/** Shadowsocks 2022.
+ *
+ * No streamSettings at all, and that is the whole character of it: there
+ * is no TLS to configure and no handshake to disguise, because the
+ * protocol encrypts everything itself and looks like random bytes from
+ * the first packet. Nothing to fingerprint -- and equally nothing to
+ * hide behind once the port is known, which is why it complements the
+ * certificate-based transports rather than replacing them.
+ */
+function shadowsocksOutbound(user: ProtocolUser, params: Record<string, unknown>): Json {
+  return {
+    tag: "proxy",
+    protocol: "shadowsocks",
+    settings: {
+      servers: [
+        {
+          address: user.connection.host,
+          port: user.connection.port,
+          method: params.method,
+          // Both halves, joined here rather than stored joined. The
+          // server key belongs to the listener and the user key to the
+          // customer; keeping them apart until now means rotating the
+          // server key does not have to rewrite every credential.
+          password: `${String(params.serverKey)}:${String(user.credentials.userKey)}`,
+          uot: true,
+        },
+      ],
+    },
+  };
+}
+
 /** Whether this build can connect with the given protocol. */
 export function isXrayProtocol(protocol: string): boolean {
-  return protocol === "XRAY_VLESS_REALITY" || protocol === "XRAY_VLESS_TLS" || protocol === "XRAY_TROJAN";
+  return (
+    protocol === "XRAY_VLESS_REALITY" ||
+    protocol === "XRAY_VLESS_TLS" ||
+    protocol === "XRAY_TROJAN" ||
+    // Not an "Xray protocol" by name, but it is served by the same
+    // engine and built as an ordinary xray outbound, which is all this
+    // predicate is really asking.
+    protocol === "SHADOWSOCKS"
+  );
 }
 
 /** The full config, ready to hand to the engine.
@@ -174,6 +213,15 @@ export function buildXrayConfig(user: ProtocolUser): string {
     case "XRAY_TROJAN":
       if (!params.serverName) throw new Error("This server is missing its TLS server name");
       outbound = trojanOutbound(user, params);
+      break;
+    case "SHADOWSOCKS":
+      // Both halves are required. Without the server key the password is
+      // half a secret, which authenticates nobody and produces a tunnel
+      // that connects and carries nothing.
+      if (!params.serverKey || !params.method) {
+        throw new Error("This server is missing its Shadowsocks parameters");
+      }
+      outbound = shadowsocksOutbound(user, params);
       break;
     default:
       throw new Error(`${user.protocol} is not an Xray protocol`);

@@ -103,6 +103,26 @@ export function generateCredentials(
       const password = randomBytes(32).toString("base64url");
       return { externalUserId: randomUUID(), credentials: { password } };
     }
+    case Protocol.SHADOWSOCKS: {
+      // Shadowsocks 2022 authenticates with a pre-shared key, and the
+      // length is not a preference: blake3-aes-256-gcm derives its
+      // subkeys from exactly 32 bytes, and the server rejects a PSK of
+      // any other size outright. Standard base64, not base64url --
+      // xray-core decodes both the inbound key and each user's key with
+      // StdEncoding, so the URL-safe alphabet would fail to parse.
+      //
+      // Only the user's half is generated here. The server's PSK belongs
+      // to the inbound and lives in the ProtocolConfig, because every
+      // user on that listener shares it; the client authenticates with
+      // the two joined as "serverPSK:userPSK", which the connection
+      // block assembles rather than storing pre-joined -- a rotated
+      // server key would otherwise silently invalidate every credential
+      // already issued.
+      const userKey = randomBytes(32).toString("base64");
+      // Same reasoning as Trojan above: the stat key must not be the
+      // secret, since it appears in logs and stats queries.
+      return { externalUserId: randomUUID(), credentials: { userKey } };
+    }
     case Protocol.WIREGUARD: {
       if (!isWireGuardPublicParams(protocolConfig.publicParamsJson)) {
         throw new BadRequestException(

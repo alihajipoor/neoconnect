@@ -21,7 +21,7 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Child;
 
-use neoconnect_ipc::{TrojanProfile, VlessTlsProfile, XrayProfile};
+use neoconnect_ipc::{ShadowsocksProfile, TrojanProfile, VlessTlsProfile, XrayProfile};
 use serde_json::json;
 
 use super::routing::{self, InstalledRoutes};
@@ -73,6 +73,10 @@ pub enum Outbound<'a> {
     /// Trojan over ordinary TLS. No borrowed certificate, so the client
     /// simply verifies the name it was told to expect.
     Trojan(&'a TrojanProfile),
+    /// Shadowsocks 2022. Alone among these in having no streamSettings
+    /// at all -- there is no TLS to configure because the protocol
+    /// carries its own encryption and shows no handshake.
+    Shadowsocks(&'a ShadowsocksProfile),
 }
 
 impl Outbound<'_> {
@@ -81,6 +85,7 @@ impl Outbound<'_> {
             Outbound::VlessReality(p) => &p.host,
             Outbound::VlessTls(p) => &p.host,
             Outbound::Trojan(p) => &p.host,
+            Outbound::Shadowsocks(p) => &p.host,
         }
     }
 
@@ -89,6 +94,7 @@ impl Outbound<'_> {
             Outbound::VlessReality(p) => p.port,
             Outbound::VlessTls(p) => p.port,
             Outbound::Trojan(p) => p.port,
+            Outbound::Shadowsocks(p) => p.port,
         }
     }
 
@@ -192,6 +198,31 @@ impl Outbound<'_> {
                         "fingerprint": "chrome",
                         "alpn": ["h2", "http/1.1"]
                     }
+                }
+            }),
+            // No streamSettings, and that absence is the design rather
+            // than an omission: Shadowsocks 2022 encrypts from the first
+            // byte and presents no handshake, so there is no TLS to
+            // configure and no fingerprint to borrow. Nothing to detect,
+            // and equally nothing to hide behind once the port is found.
+            Outbound::Shadowsocks(p) => json!({
+                "tag": "proxy",
+                "protocol": "shadowsocks",
+                "settings": {
+                    "servers": [{
+                        "address": p.host,
+                        "port": p.port,
+                        "method": p.method,
+                        // Already "serverKey:userKey" -- joined by the
+                        // caller, since only it holds both halves.
+                        "password": p.password,
+                        // UDP over TCP. The tunnel carries a TUN
+                        // adapter's traffic, which includes DNS and
+                        // games; without this their UDP is silently
+                        // dropped and the customer sees a connection
+                        // that works for web pages and nothing else.
+                        "uot": true
+                    }]
                 }
             }),
         }

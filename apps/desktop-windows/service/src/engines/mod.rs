@@ -130,7 +130,8 @@ impl Engines {
             // adapter, one set of routes -- only the outbound differs.
             ConnectProfile::XrayVlessReality(_)
             | ConnectProfile::XrayVlessTls(_)
-            | ConnectProfile::XrayTrojan(_) => {
+            | ConnectProfile::XrayTrojan(_)
+            | ConnectProfile::Shadowsocks(_) => {
                 let (outbound, protocol) = match profile {
                     ConnectProfile::XrayVlessReality(p) => {
                         (xray::Outbound::VlessReality(p), "XRAY_VLESS_REALITY")
@@ -139,6 +140,9 @@ impl Engines {
                         (xray::Outbound::VlessTls(p), "XRAY_VLESS_TLS")
                     }
                     ConnectProfile::XrayTrojan(p) => (xray::Outbound::Trojan(p), "XRAY_TROJAN"),
+                    ConnectProfile::Shadowsocks(p) => {
+                        (xray::Outbound::Shadowsocks(p), "SHADOWSOCKS")
+                    }
                     _ => unreachable!("outer match restricts this to the Xray protocols"),
                 };
 
@@ -317,7 +321,8 @@ fn adapter_name_for(profile: &ConnectProfile) -> &'static str {
         ConnectProfile::Wireguard(_) => wireguard::TUNNEL_NAME,
         ConnectProfile::XrayVlessReality(_)
         | ConnectProfile::XrayVlessTls(_)
-        | ConnectProfile::XrayTrojan(_) => xray::ADAPTER_NAME,
+        | ConnectProfile::XrayTrojan(_)
+        | ConnectProfile::Shadowsocks(_) => xray::ADAPTER_NAME,
         ConnectProfile::Openvpn(_) => openvpn::ADAPTER_NAME,
     }
 }
@@ -334,6 +339,7 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
         ConnectProfile::XrayVlessReality(p) => (p.host.clone(), p.port),
         ConnectProfile::XrayVlessTls(p) => (p.host.clone(), p.port),
         ConnectProfile::XrayTrojan(p) => (p.host.clone(), p.port),
+        ConnectProfile::Shadowsocks(p) => (p.host.clone(), p.port),
     };
 
     if let Ok(ip) = host.parse::<Ipv4Addr>() {

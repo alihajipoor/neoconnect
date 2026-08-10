@@ -45,6 +45,7 @@ export type Protocol =
   | "XRAY_VMESS"
   | "XRAY_TROJAN"
   | "WIREGUARD"
+  | "SHADOWSOCKS"
   | "OPENVPN";
 
 export type PaymentProvider = "STRIPE" | "NOWPAYMENTS";

@@ -19,6 +19,7 @@ import (
 	scommand "github.com/xtls/xray-core/app/stats/command"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
+	shadowsocks2022 "github.com/xtls/xray-core/proxy/shadowsocks_2022"
 	"github.com/xtls/xray-core/proxy/trojan"
 	"github.com/xtls/xray-core/proxy/vless"
 
@@ -59,6 +60,11 @@ const (
 	// is its whole disguise, and it is why the password is generated
 	// with real entropy rather than being a UUID.
 	kindTrojan
+	// Shadowsocks 2022. The account carries a per-user pre-shared key,
+	// and the inbound holds a second key shared by everyone on it --
+	// clients authenticate with both. Only the per-user half is set
+	// here; the shared half belongs to the config file.
+	kindShadowsocks2022
 )
 
 // How far back a client address still counts as "currently connected".
@@ -125,6 +131,11 @@ func (p *Provisioner) ForTrojan(inboundTag, accessLogPath string) *Provisioner {
 	return p.ForInbound(kindTrojan, inboundTag, accessLogPath)
 }
 
+// ForShadowsocks is the Shadowsocks 2022 inbound on this same process.
+func (p *Provisioner) ForShadowsocks(inboundTag, accessLogPath string) *Provisioner {
+	return p.ForInbound(kindShadowsocks2022, inboundTag, accessLogPath)
+}
+
 // ForVless is a second VLESS inbound on this same process -- the
 // certificate-presenting one, alongside the REALITY inbound this
 // provisioner was built for. Same account shape, different listener:
@@ -163,6 +174,16 @@ func (p *Provisioner) account(user common.ProtocolUser) (*serial.TypedMessage, e
 			return nil, fmt.Errorf("xray CreateUser: trojan credentials missing password")
 		}
 		return serial.ToTypedMessage(&trojan.Account{Password: password}), nil
+	case kindShadowsocks2022:
+		// The 2022 account type, not the original shadowsocks one. They
+		// are different messages for different inbound implementations,
+		// and handing the wrong one to a 2022 inbound is accepted by the
+		// API and then never authenticates anybody.
+		key := user.Credentials["userKey"]
+		if key == "" {
+			return nil, fmt.Errorf("xray CreateUser: shadowsocks credentials missing userKey")
+		}
+		return serial.ToTypedMessage(&shadowsocks2022.Account{Key: key}), nil
 	default:
 		id := user.Credentials["uuid"]
 		if id == "" {

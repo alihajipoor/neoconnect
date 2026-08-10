@@ -36,6 +36,7 @@ export type Protocol =
   | "XRAY_VMESS"
   | "XRAY_TROJAN"
   | "WIREGUARD"
+  | "SHADOWSOCKS"
   | "OPENVPN";
 
 export const ALL_PROTOCOLS: Protocol[] = [

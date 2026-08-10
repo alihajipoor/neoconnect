@@ -123,6 +123,9 @@ const SUPPORTED = new Set([
   "XRAY_VLESS_REALITY",
   "XRAY_VLESS_TLS",
   "XRAY_TROJAN",
+  // Carried by the xray-core already in the APK, so it costs nothing to
+  // support here -- no second engine, no extra megabytes.
+  "SHADOWSOCKS",
 ]);
 
 export function Dashboard({

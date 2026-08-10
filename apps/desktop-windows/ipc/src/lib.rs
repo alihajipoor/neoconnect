@@ -190,7 +190,29 @@ pub enum ConnectProfile {
     XrayVlessTls(VlessTlsProfile),
     #[serde(rename = "XRAY_TROJAN")]
     XrayTrojan(TrojanProfile),
+    Shadowsocks(ShadowsocksProfile),
     Openvpn(OpenvpnProfile),
+}
+
+/// Shadowsocks 2022.
+///
+/// No certificate and no server name, unlike every other Xray-carried
+/// profile here: the protocol encrypts from the first byte and presents
+/// no handshake at all, so there is nothing to verify and nothing to
+/// name.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShadowsocksProfile {
+    pub host: String,
+    pub port: u16,
+    /// Always a blake3-aes-*-gcm variant. xray-core refuses chacha20 on
+    /// a multi-user inbound, and multi-user is what lets a customer be
+    /// added without restarting the engine for everyone else.
+    pub method: String,
+    /// The two pre-shared keys joined as "serverKey:userKey". Joined by
+    /// the caller rather than stored that way, so rotating the server's
+    /// half does not invalidate every credential already issued.
+    pub password: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -473,6 +495,30 @@ impl ConnectProfile {
                 check_single_line("serverName", &p.server_name, 300)?;
                 Ok(())
             }
+            ConnectProfile::Shadowsocks(p) => {
+                check_endpoint("host", &format!("{}:{}", p.host, p.port))?;
+                // Constrained rather than free text: this value picks a
+                // cipher inside xray, and only the blake3-aes-gcm family
+                // works on a multi-user inbound. Rejecting anything else
+                // here turns an operator's typo into a clear message
+                // instead of an engine that starts and authenticates
+                // nobody.
+                if p.method != "2022-blake3-aes-256-gcm" && p.method != "2022-blake3-aes-128-gcm" {
+                    return Err(reject("method", "must be a 2022-blake3-aes-*-gcm cipher"));
+                }
+                // "serverKey:userKey" -- two base64 keys joined by a
+                // colon, so this is not key-like as a whole. Both halves
+                // are checked separately, since a missing half is the
+                // realistic failure and Shadowsocks answers a bad key
+                // with silence rather than an error.
+                let (server_key, user_key) = p
+                    .password
+                    .split_once(':')
+                    .ok_or_else(|| reject("password", "must be serverKey:userKey"))?;
+                check_key_like("serverKey", server_key, 128)?;
+                check_key_like("userKey", user_key, 128)?;
+                Ok(())
+            }
             ConnectProfile::Openvpn(p) => {
                 check_pem("certPem", &p.cert_pem)?;
                 check_pem("keyPem", &p.key_pem)?;
@@ -498,6 +544,7 @@ impl ConnectProfile {
             ConnectProfile::XrayVlessReality(_) => "XRAY_VLESS_REALITY",
             ConnectProfile::XrayVlessTls(_) => "XRAY_VLESS_TLS",
             ConnectProfile::XrayTrojan(_) => "XRAY_TROJAN",
+            ConnectProfile::Shadowsocks(_) => "SHADOWSOCKS",
             ConnectProfile::Openvpn(_) => "OPENVPN",
         }
     }
@@ -518,6 +565,55 @@ mod tests {
         };
         mutate(&mut p);
         ConnectProfile::Wireguard(p)
+    }
+
+    fn ss(mutate: impl FnOnce(&mut ShadowsocksProfile)) -> ConnectProfile {
+        let mut p = ShadowsocksProfile {
+            host: "203.0.113.5".into(),
+            port: 23456,
+            method: "2022-blake3-aes-256-gcm".into(),
+            password: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=:1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE="
+                .into(),
+        };
+        mutate(&mut p);
+        ConnectProfile::Shadowsocks(p)
+    }
+
+    #[test]
+    fn accepts_a_real_shadowsocks_profile() {
+        assert!(ss(|_| {}).validate().is_ok());
+    }
+
+    /// Shadowsocks answers a bad key with silence rather than a refusal,
+    /// so a half-formed password produces a server that looks dead. It
+    /// has to be rejected here, where there is still something to say.
+    #[test]
+    fn rejects_a_password_missing_its_server_half() {
+        let err = ss(|p| p.password = "onlyonekey".into()).validate().unwrap_err();
+        assert!(err.to_string().contains("serverKey:userKey"), "{err}");
+    }
+
+    #[test]
+    fn rejects_an_empty_half() {
+        assert!(ss(|p| p.password = ":justtheuserkey".into()).validate().is_err());
+        assert!(ss(|p| p.password = "justtheserverkey:".into()).validate().is_err());
+    }
+
+    /// Only the blake3-aes-gcm family works on a multi-user inbound.
+    /// chacha20 parses everywhere else and fails only here, so an
+    /// operator copying a config from elsewhere would otherwise get an
+    /// engine that starts and authenticates nobody.
+    #[test]
+    fn rejects_a_cipher_the_server_cannot_run_multi_user() {
+        assert!(ss(|p| p.method = "2022-blake3-chacha20-poly1305".into())
+            .validate()
+            .is_err());
+        assert!(ss(|p| p.method = "aes-256-gcm".into()).validate().is_err());
+    }
+
+    #[test]
+    fn names_shadowsocks_for_the_service_log() {
+        assert_eq!(ss(|_| {}).protocol_name(), "SHADOWSOCKS");
     }
 
     #[test]

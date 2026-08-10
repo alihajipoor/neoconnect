@@ -57,6 +57,19 @@ enum Protocol {
   XRAY_VLESS_TLS
   XRAY_VMESS
   XRAY_TROJAN
+  /// Shadowsocks 2022 (blake3-aes-256-gcm), served by the same xray-core
+  /// process as everything above.
+  ///
+  /// Its own enum member rather than a transport of an Xray protocol,
+  /// because the credential is a different kind of thing: a pre-shared
+  /// key pair rather than a UUID, and the client builds a shadowsocks
+  /// outbound, not a VLESS one.
+  ///
+  /// The 2022 edition specifically. Original Shadowsocks and SSR are
+  /// fingerprinted by state censors and SSR is abandoned upstream, so
+  /// offering either would be selling protection this audience would not
+  /// actually get.
+  SHADOWSOCKS
   WIREGUARD
   OPENVPN
 }

@@ -10,6 +10,7 @@ export const PROTOCOL_LABELS: Record<Protocol, string> = {
   XRAY_VLESS_TLS: "Xray VLESS+TLS",
   XRAY_VMESS: "Xray VMess",
   XRAY_TROJAN: "Xray Trojan",
+  SHADOWSOCKS: "Shadowsocks 2022",
   WIREGUARD: "WireGuard",
   OPENVPN: "OpenVPN",
 };
@@ -26,6 +27,7 @@ export const CUSTOMER_PROTOCOL_LABELS: Record<Protocol, string> = {
   XRAY_VLESS_TLS: "Stealth HTTPS",
   XRAY_VMESS: "Stealth (legacy)",
   XRAY_TROJAN: "Stealth Lite",
+  SHADOWSOCKS: "Shadowsocks",
   WIREGUARD: "Fast",
   OPENVPN: "Compatible",
 };
@@ -56,6 +58,7 @@ export const CUSTOMER_PROTOCOL_HINTS: Record<Protocol, string> = {
   XRAY_VLESS_TLS: "Looks exactly like a normal HTTPS website.",
   XRAY_VMESS: "Older stealth option, kept for compatibility.",
   XRAY_TROJAN: "Also looks like a website. Older method than Stealth HTTPS.",
+  SHADOWSOCKS: "No handshake to detect. Good when stealth ports are blocked.",
   WIREGUARD: "Fastest. Best when nothing is blocking you.",
   OPENVPN: "Slower, but works almost everywhere.",
 };
