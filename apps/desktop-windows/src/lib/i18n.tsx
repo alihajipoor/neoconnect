@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { load, type Store } from "@tauri-apps/plugin-store";
+import { publicRequest } from "./api";
 
 /** Supported interface languages.
  *
@@ -217,6 +218,7 @@ const en = {
   "dash.session": "Session",
   "dash.daysLeft": "days left",
   "dash.change": "Change",
+  "dash.disconnectToChange": "Disconnect first to change server or protocol",
   "dash.protected": "You're protected",
   "dash.protectedHint": "Your traffic is encrypted and routed through Neoxify.",
   "dash.notProtected": "You're not protected",
@@ -446,6 +448,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.session": "مدت اتصال",
   "dash.daysLeft": "روز مانده",
   "dash.change": "تغییر",
+  "dash.disconnectToChange": "برای تغییر سرور یا پروتکل، ابتدا قطع اتصال کنید",
   "dash.protected": "شما محافظت می‌شوید",
   "dash.protectedHint": "ترافیک شما رمزگذاری شده و از طریق نئوکسیفای عبور می‌کند.",
   "dash.notProtected": "شما محافظت نمی‌شوید",
@@ -518,6 +521,30 @@ function detectLanguage(): Language {
   return locale.toLowerCase().startsWith("fa") ? "fa" : "en";
 }
 
+/** Where the customer is, according to the CDN in front of the API.
+ *
+ * The OS locale alone is not enough, and the gap is the common case
+ * rather than an edge one: a great many customers in Iran run Windows in
+ * English, so `navigator.language` says `en-US` and they were shown an
+ * English app they may not read -- with the language switch itself
+ * written in English.
+ *
+ * Cloudflare labels every proxied request with the country, so this
+ * costs one small request and no GeoIP data of our own. Deliberately
+ * best-effort and quick to give up: this decides a default that is one
+ * tap to change, and must never delay or block the first screen. A
+ * blocked network, an old server that does not return the field, or a
+ * request that took too long all mean "unknown", which means English.
+ */
+async function detectCountry(): Promise<string | undefined> {
+  try {
+    const result = await publicRequest<{ ip: string; country?: string }>("/health/ip");
+    return result.ok ? result.data.country : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [language, setLanguageState] = useState<Language>(detectLanguage);
 
@@ -525,13 +552,26 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   // shown, so the first paint is never blank waiting on disk.
   useEffect(() => {
     void (async () => {
+      let saved: Language | undefined;
       try {
-        const saved = await (await getStore()).get<Language>(STORE_KEY);
+        saved = await (await getStore()).get<Language>(STORE_KEY);
         if (saved && saved in LANGUAGES) setLanguageState(saved);
       } catch {
         // A settings file that can't be read is not worth failing over --
         // the detected language is a fine answer.
       }
+
+      // Only when the customer has never chosen. An explicit choice is
+      // final: someone in Iran who switched to English must not be put
+      // back into Persian every launch, which would read as the app
+      // ignoring them.
+      if (saved && saved in LANGUAGES) return;
+      // The OS locale already said Persian, so there is nothing to add
+      // and no reason to spend a request finding out.
+      if (detectLanguage() === "fa") return;
+
+      const country = await detectCountry();
+      if (country === "IR") setLanguageState("fa");
     })();
   }, []);
 

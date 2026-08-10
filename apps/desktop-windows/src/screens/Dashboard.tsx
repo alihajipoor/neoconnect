@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
+import { ChevronRight, Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -1155,15 +1155,31 @@ export function Dashboard({
               {/* What the connection actually is. These three answer the
                   questions a customer asks while looking at the orb. */}
               <div className="animate-rise grid grid-cols-3 gap-2">
+                {/* Both open the same picker, because a customer asking
+                    to "change the protocol" and one asking to "change the
+                    server" are choosing from the same list -- a location
+                    and the protocol it speaks are one choice here. Two
+                    entry points because people look for the word they
+                    have in mind. */}
                 <Stat
                   icon={<Globe className="size-3" />}
                   label={t("dash.server")}
                   value={currentRoute ? currentRoute.location.region : "—"}
+                  onClick={() => setShowLocationPicker(true)}
+                  actionLabel={t("dash.change")}
+                  disabledReason={
+                    connectionState === "disconnected" ? undefined : t("dash.disconnectToChange")
+                  }
                 />
                 <Stat
                   icon={<Shield className="size-3" />}
                   label={t("dash.protocol")}
                   value={protocolUser ? customerProtocolLabel(protocolUser.protocol, protocolUser.connection?.transport) : "—"}
+                  onClick={() => setShowLocationPicker(true)}
+                  actionLabel={t("dash.change")}
+                  disabledReason={
+                    connectionState === "disconnected" ? undefined : t("dash.disconnectToChange")
+                  }
                 />
                 <Stat
                   icon={<Clock className="size-3" />}
@@ -1235,18 +1251,33 @@ export function Dashboard({
                 </div>
               </Card>
 
+              {/* Deliberately not a second copy of the server name.
+                  This button used to show the same region as the Server
+                  tile above while being the only one that worked, which
+                  is precisely what made customers report the app broken:
+                  they pressed the thing displaying their server, nothing
+                  happened, and the working control looked like a repeat
+                  of it. The tile is now the control; this stays only as
+                  the plainly-worded way in, and says what it does rather
+                  than what is currently set. */}
               <Button
                 variant="outline"
                 onClick={() => setShowLocationPicker(true)}
                 disabled={connectionState !== "disconnected"}
                 className="w-full justify-between px-3"
+                title={connectionState !== "disconnected" ? t("dash.disconnectToChange") : undefined}
               >
                 <span className="flex items-center gap-2">
                   <MapPin className="size-4 text-primary" />
-                  {currentRoute ? currentRoute.location.region : t("dash.changeLocation")}
+                  {t("dash.changeLocation")}
                 </span>
-                <span className="text-xs text-muted-foreground">{t("dash.change")}</span>
+                <ChevronRight className="size-4 text-muted-foreground" />
               </Button>
+              {connectionState !== "disconnected" ? (
+                <p className="-mt-1 text-center text-xs text-muted-foreground">
+                  {t("dash.disconnectToChange")}
+                </p>
+              ) : null}
             </>
           ) : (
             // Previously a dead end: a customer with no subscription --

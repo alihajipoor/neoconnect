@@ -4,6 +4,7 @@
 // machinery here would be pure overhead. Revisit if a later screen
 // (route/plan picker) genuinely needs an overlay component.
 import type { ButtonHTMLAttributes, InputHTMLAttributes, LabelHTMLAttributes } from "react";
+import { ChevronRight } from "lucide-react";
 import { cn } from "../lib/utils";
 
 export function Button({
@@ -89,29 +90,89 @@ export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElemen
  * than three hand-built divs that drift apart, and so any later screen
  * showing a metric gets the same treatment for free.
  */
+/** A labelled fact about the connection, optionally the control that
+ * changes it.
+ *
+ * `onClick` is what fixes a real and repeated support problem: these
+ * tiles carry `surface-interactive`, so they highlight under the cursor
+ * and read as buttons, while the actual "change server" control sat
+ * further down the page showing the very same value. Customers tapped
+ * the tile, nothing happened, and they reported the app as broken --
+ * reasonably, because a thing that lights up when you point at it has
+ * promised something.
+ *
+ * So a tile that shows a changeable fact now *is* the control, with a
+ * chevron and an action word to say so out loud rather than relying on
+ * the hover state alone. A tile with no `onClick` stays a plain div and
+ * loses the interactive styling, so nothing lights up that cannot be
+ * pressed. */
 export function Stat({
   icon,
   label,
   value,
   className,
+  onClick,
+  actionLabel,
+  disabledReason,
 }: {
   icon?: React.ReactNode;
   label: string;
   value: React.ReactNode;
   className?: string;
+  onClick?: () => void;
+  /** Shown next to the chevron -- "Change", "Pick". */
+  actionLabel?: string;
+  /** When set, the tile is inert and this explains why. Saying it beats
+   * a dead control: an unexplained disabled button is the same dead end
+   * as a fake one. */
+  disabledReason?: string;
 }) {
-  return (
-    <div
-      className={cn(
-        "surface-interactive flex min-w-0 flex-col gap-1 rounded-lg border border-white/8 bg-white/[0.025] px-2.5 py-2",
-        className,
-      )}
-    >
+  const body = (
+    <>
       <span className="flex items-center gap-1 text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
         {icon}
         <span className="truncate">{label}</span>
       </span>
-      <span className="truncate text-xs font-semibold text-foreground">{value}</span>
-    </div>
+      <span className="flex items-center justify-between gap-1">
+        <span className="truncate text-xs font-semibold text-foreground">{value}</span>
+        {onClick && !disabledReason ? (
+          <span className="flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-primary">
+            {actionLabel}
+            <ChevronRight className="size-3" />
+          </span>
+        ) : null}
+      </span>
+    </>
+  );
+
+  const shell = "flex min-w-0 flex-col gap-1 rounded-lg border px-2.5 py-2 text-left";
+
+  if (!onClick) {
+    return (
+      <div className={cn(shell, "border-white/8 bg-white/[0.025]", className)}>{body}</div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={disabledReason ? undefined : onClick}
+      disabled={Boolean(disabledReason)}
+      title={disabledReason}
+      aria-label={disabledReason ? `${label}: ${disabledReason}` : undefined}
+      className={cn(
+        shell,
+        // A brighter border and the primary ring on hover, because this
+        // one really is pressable -- the difference from a plain tile has
+        // to be visible before the press, not after.
+        "surface-interactive border-primary/25 bg-primary/[0.06] transition-colors",
+        "hover:border-primary/50 hover:bg-primary/10",
+        "focus-visible:ring-2 focus-visible:ring-primary focus-visible:outline-none",
+        "disabled:cursor-not-allowed disabled:border-white/8 disabled:bg-white/[0.025] disabled:opacity-70",
+        className,
+      )}
+    >
+      {body}
+    </button>
   );
 }

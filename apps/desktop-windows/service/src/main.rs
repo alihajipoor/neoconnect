@@ -125,6 +125,27 @@ fn install() -> Result<(), Box<dyn std::error::Error>> {
 /// it would happen on every auto-update too, so this waits rather than
 /// hoping the timing works out.
 fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
+    // Before the service is stopped, while something still knows how to
+    // undo what was done.
+    //
+    // Uninstalling Neoxify while connected used to leave the WireGuard
+    // tunnel service registered on the machine. It is a Windows service
+    // in its own right and starts automatically, so it would come back
+    // on every boot -- taking the default route and DNS with it -- with
+    // the application that created it now deleted and no way for the
+    // user to find or remove it. Removing the VPN would permanently
+    // break their network, which is about the worst outcome an uninstall
+    // can have.
+    //
+    // Best-effort throughout: an uninstall that cannot clean up must
+    // still uninstall, or the user is stuck with both problems.
+    if let Ok(exe_dir) = exe_dir() {
+        let mut engines = engines::Engines::new(exe_dir, config_dir());
+        if let Err(err) = engines.disconnect() {
+            eprintln!("uninstall cleanup: {err}");
+        }
+    }
+
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     let service = manager.open_service(
         SERVICE_NAME,
@@ -190,7 +211,35 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_dir = config_dir();
     security::create_protected_dir(&config_dir)?;
-    let engines = Arc::new(Mutex::new(engines::Engines::new(exe_dir()?, config_dir)));
+    let mut engines = engines::Engines::new(exe_dir()?, config_dir);
+
+    // Tear down anything left over from a previous life, before serving
+    // anyone.
+    //
+    // This is the fix for the worst bug testers reported -- "installing
+    // the VPN broke my network and some apps stopped working". The cause
+    // is that `wireguard.exe /installtunnelservice` registers a Windows
+    // service of its own, and Windows services are automatic: it starts
+    // at boot whether or not Neoxify is running. So a crash, a force
+    // quit, or simply rebooting while connected leaves a machine whose
+    // default route and DNS point into a tunnel that nothing is managing
+    // and that may never come up. Nothing in the product noticed,
+    // because the only teardown path ran when the app asked for it.
+    //
+    // At the moment this service starts, no client has asked for
+    // anything, so by definition any tunnel present is a leftover. This
+    // service is AutoStart too, which means the machine now heals itself
+    // on the next boot rather than needing the app opened.
+    // Done before the value is shared, so it needs no lock and cannot
+    // race a client that connects the instant the pipe opens.
+    if let Err(err) = engines.disconnect() {
+        // Not fatal: a failed cleanup must not stop the service coming
+        // up, or a stuck tunnel would also cost the user the ability to
+        // connect at all.
+        eprintln!("startup cleanup: {err}");
+    }
+
+    let engines = Arc::new(Mutex::new(engines));
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
