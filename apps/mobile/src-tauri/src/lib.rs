@@ -1,3 +1,5 @@
+mod latency;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -16,7 +18,13 @@ pub fn run() {
             tauri_plugin_neoxify_vpn::vpn_connect_xray,
             tauri_plugin_neoxify_vpn::vpn_disconnect,
             tauri_plugin_neoxify_vpn::vpn_status,
-            tauri_plugin_neoxify_vpn::vpn_list_apps
+            tauri_plugin_neoxify_vpn::vpn_list_apps,
+            // The location picker calls this for every route. Absent
+            // here, every call rejected and every server showed "--"
+            // where its latency should be -- for the whole life of the
+            // Android client, because the command was only ever added
+            // to the Windows one.
+            latency::measure_latency
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
