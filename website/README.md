@@ -75,6 +75,42 @@ explains the "allow installs from this source" prompt up front. Somebody who
 meets that warning without being told reasonably assumes the file is suspect
 and stops.
 
+### Automatic language
+
+Someone in Iran lands on Persian without doing anything; everyone else lands
+on English; either can switch and have it stick. `inc/locale.php` decides, in
+this order:
+
+1. **An explicit choice.** The language switch sets a `nx_lang` cookie, and
+   that beats everything. Overriding someone's stated preference with a guess
+   is the one unforgivable behaviour here.
+2. **A country header**, if the host or a CDN adds one — `CF-IPCountry` and
+   several other common names are checked. Shared hosting often sends none,
+   which is why it isn't the only signal. **Putting the site behind Cloudflare
+   would make this considerably more accurate**, at no cost to anything else.
+3. **`Accept-Language`.** Every browser sends it and it needs no lookup.
+
+Deliberately not used: a third-party geolocation API. The site makes no
+external requests, and a blocking call to someone else's server on every page
+render — for an audience whose networks are the reason this product exists —
+is a bad trade.
+
+Two rules keep the redirect from being irritating, both worth preserving:
+
+- It only redirects **away from the English URLs**, never away from `/fa/`.
+  A Persian link someone shared is an explicit request for Persian.
+- It stops entirely once the cookie exists.
+
+The redirect is a **302**, never 301: it depends on who is asking, so it must
+not be cached as a permanent property of the URL. Responses carry
+`Vary: Accept-Language, Cookie` for the same reason. `sitemap.php` and
+`404.php` opt out via `$NX_SKIP_LOCALE_REDIRECT`.
+
+**This is the site's only cookie**, and the privacy statement describes it. It
+holds one word, identifies nobody, and needs no consent banner because
+remembering a preference someone deliberately asked for is exempt. If you ever
+add a second cookie, that page has to change.
+
 ### Beta phase
 
 `beta_enabled` drives three things at once — a badge beside the wordmark, a

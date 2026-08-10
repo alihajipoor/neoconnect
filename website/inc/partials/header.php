@@ -42,7 +42,7 @@ $nx_links = array(
 
     <div class="header-actions">
       <a class="lang-switch"
-         href="<?php echo nx_esc(nx_url($nx_current, nx_other_locale())); ?>"
+         href="<?php echo nx_esc(nx_switch_url()); ?>"
          lang="<?php echo nx_esc(nx_other_locale()); ?>"
          hreflang="<?php echo nx_esc(nx_other_locale()); ?>"
          aria-label="<?php echo nx_e('lang.switch_label'); ?>">

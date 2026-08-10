@@ -16,6 +16,11 @@ $NX_LOCALE = (strpos($nx_path, '/fa/') !== false || substr($nx_path, -3) === '/f
 // overridden below.
 $NX_PAGE = 'home';
 
+// Borrowing the home page's key would otherwise make a missing English URL
+// redirect an Iranian visitor to the Persian home page, losing the 404 and
+// the address they actually mistyped.
+$NX_SKIP_LOCALE_REDIRECT = true;
+
 require __DIR__ . '/inc/bootstrap.php';
 
 $NX_TITLE = nx_t('meta.404.title');

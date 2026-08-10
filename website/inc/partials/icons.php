@@ -50,6 +50,47 @@ function nx_logo_mark($class = '')
 }
 
 /**
+ * Platform glyphs for the download page.
+ *
+ * Kept apart from nx_icon() because these are solid brand marks rather than
+ * stroked UI icons -- they need fill, not stroke, and mixing them into the
+ * same set would mean one of the two rendering wrongly.
+ *
+ * Used nominatively, to say which platform a download is for. That is what
+ * they are for, and it is what visitors scan the page looking for.
+ *
+ * @param string $name  windows | android | apple
+ * @param string $class
+ * @return string
+ */
+function nx_platform_icon($name, $class = '')
+{
+    $paths = array(
+
+        // Four panes, the modern Windows mark.
+        'windows' => '<path d="M3 5.6 10.2 4.6v6.9H3zM11.4 4.4 21 3v8.5h-9.6zM3 12.5h7.2v6.9L3 18.4zM11.4 12.5H21V21l-9.6-1.4z"/>',
+
+        // Android robot head: dome, antennae, two eyes knocked out.
+        'android' => '<path d="M6.8 8.1c-.5 0-.9.4-.9.9v6.4c0 .5.4.9.9.9h10.4c.5 0 .9-.4.9-.9V9c0-.5-.4-.9-.9-.9z"/>'
+            . '<path d="M4.1 9.6c-.6 0-1.1.5-1.1 1.1v3.6c0 .6.5 1.1 1.1 1.1s1.1-.5 1.1-1.1v-3.6c0-.6-.5-1.1-1.1-1.1zM19.9 9.6c-.6 0-1.1.5-1.1 1.1v3.6c0 .6.5 1.1 1.1 1.1s1.1-.5 1.1-1.1v-3.6c0-.6-.5-1.1-1.1-1.1z"/>'
+            . '<path d="M8.6 17.1v2.4c0 .6.5 1.1 1.1 1.1s1.1-.5 1.1-1.1v-2.4zM13.2 17.1v2.4c0 .6.5 1.1 1.1 1.1s1.1-.5 1.1-1.1v-2.4z"/>'
+            . '<path d="M15.9 4.6l.9-1.6a.2.2 0 0 0-.1-.3.2.2 0 0 0-.3.1l-.9 1.7a6.6 6.6 0 0 0-5 0l-.9-1.7a.2.2 0 0 0-.3-.1.2.2 0 0 0-.1.3l.9 1.6A5 5 0 0 0 7.3 7.4h9.4a5 5 0 0 0-2.8-3zM10 6.2a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zm4 0a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1z"/>',
+
+        // Apple mark, used for both macOS and iOS.
+        'apple' => '<path d="M16.4 12.6c0-2.2 1.8-3.3 1.9-3.4-1-1.5-2.6-1.7-3.2-1.7-1.4-.1-2.7.8-3.3.8-.7 0-1.7-.8-2.8-.8-1.5 0-2.8.8-3.6 2.1-1.5 2.6-.4 6.5 1.1 8.6.7 1 1.6 2.2 2.7 2.2 1.1 0 1.5-.7 2.8-.7 1.3 0 1.6.7 2.8.7 1.2 0 1.9-1 2.6-2.1.8-1.2 1.2-2.4 1.2-2.5 0 0-2.2-.9-2.2-3.2zM14.2 5.9c.6-.7 1-1.7.9-2.7-.9 0-1.9.6-2.5 1.3-.6.6-1 1.6-.9 2.6 1 .1 2-.5 2.5-1.2z"/>',
+    );
+
+    if (!isset($paths[$name])) {
+        return '';
+    }
+
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"'
+        . ' fill="currentColor" stroke="none"'
+        . ($class !== '' ? ' class="' . nx_esc($class) . '"' : '')
+        . ' aria-hidden="true" focusable="false">' . $paths[$name] . '</svg>';
+}
+
+/**
  * @param string $name
  * @param string $class optional CSS class
  * @return string SVG markup, safe to echo directly

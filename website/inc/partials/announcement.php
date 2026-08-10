@@ -28,7 +28,11 @@ $nx_variant = $nx_trial ? 'trial' : 'launch';
 $nx_days = (int) nx_cfg('free_trial_days', 30);
 $nx_glyph = $nx_trial ? 'ticket' : 'download';
 
-$nx_key = 'nx-announce-' . nx_locale() . '-' . nx_cfg('announcement_version', '1');
+// Deliberately NOT keyed by locale. It used to be, and the result was that
+// dismissing the banner in English left it still showing in Persian -- the
+// same person, the same message, dismissed once, appearing again. One key
+// means dismissed once, dismissed everywhere.
+$nx_key = 'nx-announce-' . nx_cfg('announcement_version', '1');
 ?>
 <div class="container banner-wrap">
   <div class="banner" data-announce data-announce-key="<?php echo nx_esc($nx_key); ?>">

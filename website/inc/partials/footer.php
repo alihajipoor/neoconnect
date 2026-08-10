@@ -52,7 +52,7 @@ $nx_telegram = trim((string) nx_cfg('telegram_url', ''));
     <div class="site-footer__bottom">
       <p><?php echo nx_e('footer.rights', array('year' => date('Y'))); ?></p>
       <a class="lang-switch"
-         href="<?php echo nx_esc(nx_url(nx_page(), nx_other_locale())); ?>"
+         href="<?php echo nx_esc(nx_switch_url()); ?>"
          lang="<?php echo nx_esc(nx_other_locale()); ?>"
          hreflang="<?php echo nx_esc(nx_other_locale()); ?>">
         <?php echo nx_icon('globe'); ?>

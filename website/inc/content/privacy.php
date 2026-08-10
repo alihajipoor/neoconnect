@@ -129,11 +129,13 @@ return array(
             ),
             'body' => array(
                 'en' => array(
-                    'This website sets no cookies at all. It runs no analytics, loads nothing from any third party, and does not track you between visits. That is also why you were not asked to accept a cookie banner.',
+                    'This website sets exactly one cookie, and only once you use the language switch. It records whether you chose English or Persian, so we stop guessing on your next visit. It contains that word and nothing else, it identifies nobody, and it is why there is no cookie banner here — remembering a preference you deliberately asked for does not require consent. There is no analytics, nothing loaded from any third party, and no tracking between visits.',
+                    'To decide which language to show you before you have chosen, we read the language your browser asks for, and a country code if the network in front of us adds one to the request. Neither is stored, and you can always switch.',
                     'If you send the contact form or apply to be a reseller, we receive what you typed into it — your name, email address, and the message itself, plus the extra fields on the reseller form. Alongside it we store a one-way hash of your IP address, used to stop the form being abused. We do not keep the address itself.',
                 ),
                 'fa' => array(
-                    'این وب‌سایت هیچ کوکی‌ای تنظیم نمی‌کند. هیچ ابزار تحلیلی اجرا نمی‌کند، هیچ چیزی از سرویس‌های شخص ثالث بارگذاری نمی‌کند و شما را بین بازدیدها ردیابی نمی‌کند. به همین دلیل هم از شما خواسته نشد بنر کوکی را بپذیرید.',
+                    'این وب‌سایت دقیقاً یک کوکی تنظیم می‌کند، آن هم فقط زمانی که از کلید تغییر زبان استفاده کنید. این کوکی ثبت می‌کند که انگلیسی را انتخاب کرده‌اید یا فارسی، تا در بازدید بعدی دیگر حدس نزنیم. جز همین یک کلمه چیزی در آن نیست، هیچ‌کس را شناسایی نمی‌کند، و به همین دلیل اینجا بنر کوکی نمی‌بینید — به‌خاطر سپردن ترجیحی که خودتان خواسته‌اید نیازی به کسب رضایت ندارد. هیچ ابزار تحلیلی، هیچ بارگذاری از سرویس شخص ثالث و هیچ ردیابی میان بازدیدها وجود ندارد.',
+                    'برای اینکه پیش از انتخاب شما تصمیم بگیریم کدام زبان را نشان دهیم، به زبانی که مرورگرتان درخواست می‌کند نگاه می‌کنیم و همچنین به کد کشور، اگر شبکه‌ای که جلوی ماست آن را به درخواست اضافه کند. هیچ‌کدام ذخیره نمی‌شوند و همیشه می‌توانید زبان را عوض کنید.',
                     'اگر فرم تماس را بفرستید یا برای نمایندگی درخواست بدهید، آنچه در فرم نوشته‌اید به ما می‌رسد — نام، آدرس ایمیل و خود پیام، به‌علاوه فیلدهای اضافی فرم نمایندگی. در کنار آن، یک هش یک‌طرفه از نشانی IP شما را ذخیره می‌کنیم تا جلوی سوءاستفاده از فرم گرفته شود. خود نشانی را نگه نمی‌داریم.',
                 ),
             ),
