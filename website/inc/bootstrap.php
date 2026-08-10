@@ -405,3 +405,22 @@ function nx_price($amount)
     }
     return $symbol . $formatted;
 }
+
+
+// ---------------------------------------------------------------------
+// Locale preference and automatic language
+// ---------------------------------------------------------------------
+//
+// Last, because it needs nx_url() and nx_page() above, and it must still run
+// before a single byte of output -- it may redirect.
+//
+// A page can opt out by setting $NX_SKIP_LOCALE_REDIRECT before including
+// this file. The sitemap and the 404 page both do: neither is a page a
+// visitor chose to read in a particular language, and redirecting them would
+// be noise at best and a crawl problem at worst.
+
+require_once NX_INC . '/locale.php';
+
+if (empty($NX_SKIP_LOCALE_REDIRECT)) {
+    nx_apply_locale_preference();
+}

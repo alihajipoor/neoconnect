@@ -12,6 +12,10 @@
 $NX_LOCALE = 'en';
 $NX_PAGE = 'home';
 
+// A sitemap is read by crawlers, not by a person choosing a language, and it
+// lists both locales explicitly. Redirecting it would be actively harmful.
+$NX_SKIP_LOCALE_REDIRECT = true;
+
 require __DIR__ . '/inc/bootstrap.php';
 
 header('Content-Type: application/xml; charset=UTF-8');
