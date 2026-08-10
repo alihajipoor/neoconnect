@@ -819,6 +819,11 @@ EOF
   fi
 
   echo "Xray is running on port $listen_port and is ready to use."
+  # Same warning the panel installer ends with, for the same reason: a
+  # cloud firewall permitting only 22/80/443 leaves these listeners
+  # perfectly healthy and completely unreachable, and the customer-facing
+  # symptom is "the server does not work" with nothing in any log here.
+  echo "  If your provider has a cloud firewall, open inbound TCP $listen_port${vless_tls_port:+, $vless_tls_port}${trojan_port:+, $trojan_port}${ss_port:+, $ss_port} on it -- this script cannot."
   [[ -n "$vless_tls_port" ]] && echo "VLESS over TLS is running on port $vless_tls_port."
   [[ -n "$vless_ws_path" ]] && echo "VLESS over WebSocket shares port $vless_tls_port on path $vless_ws_path."
   [[ -n "$trojan_port" ]] && echo "Trojan over TLS is running on port $trojan_port."
