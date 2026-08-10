@@ -17,6 +17,13 @@ import { CustomModeCard } from "./components/CustomModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 
+/** How often a queued diagnostic report retries.
+ *
+ * Five minutes is short enough that a customer whose connection comes
+ * and goes gets their failures out during the same sitting, and long
+ * enough to be nothing on a network that is simply down. */
+const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
+
 type Screen =
   | "loading"
   | "login"
@@ -116,8 +123,31 @@ export default function App() {
   // "could not reach the control plane", since a client cannot tell us
   // that while it is true -- goes out now. Deliberately unawaited and
   // silent: it is diagnostics, and the customer is here to connect.
+  //
+  // Repeated, not just at startup, and that is the whole point. In ten
+  // months of real use the panel has recorded successes and not one
+  // failure, from any customer, on either platform -- while customers
+  // were demonstrably failing to connect. The reports were being
+  // written; they were queued because the control plane was unreachable
+  // at that moment, and then only ever retried on the next cold start.
+  // A customer whose network is being interfered with keeps the app
+  // open and keeps retrying, so that moment often never came, and the
+  // one class of failure worth seeing was the one that could never
+  // reach us.
+  //
+  // Cheap when there is nothing to send: flushAttempts reads a local
+  // store and returns.
   useEffect(() => {
     void flushAttempts();
+    const timer = setInterval(() => void flushAttempts(), FLUSH_INTERVAL_MS);
+    // Whenever the machine has just been given a working path to the
+    // internet, the queue has its best chance of draining.
+    const onOnline = () => void flushAttempts();
+    window.addEventListener("online", onOnline);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("online", onOnline);
+    };
   }, []);
 
   // There is deliberately no install-on-close handler here.
