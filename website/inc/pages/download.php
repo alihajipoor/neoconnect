@@ -2,10 +2,11 @@
 /**
  * Download page, shared by /download/ and /fa/download/.
  *
- * The Windows card has two genuine states, driven by config's
- * windows_installer_url: a real download when one is configured, and an
- * honest "not out yet" panel when it is not. There is deliberately no third
- * state where we show a button that 404s.
+ * Each platform card has two genuine states, driven by its configured
+ * installer URL: a real download when one is set, and an honest "not out
+ * yet" panel when it is not. There is deliberately no third state where we
+ * show a button that 404s. Windows and Android are independent, because
+ * they ship on their own schedules.
  *
  * The page holds no version number or release tag of its own. The configured
  * URL always resolves to the current release, and anything printed here
@@ -16,6 +17,7 @@
 defined('NX') || exit;
 
 $nx_available = nx_windows_available();
+$nx_android = nx_android_available();
 
 require NX_INC . '/partials/head.php';
 ?>
@@ -26,6 +28,19 @@ require NX_INC . '/partials/head.php';
       <h1><?php echo nx_e('download.title'); ?></h1>
       <p class="lead"><?php echo nx_e('download.subtitle'); ?></p>
     </div>
+
+    <?php if (nx_beta()): ?>
+      <?php /* Said before the download buttons rather than after. Somebody
+               about to install should know what they are joining, and the
+               request for feedback only makes sense if they read it first. */ ?>
+      <div class="notice u-mb-md">
+        <h3>
+          <?php echo nx_icon('activity'); ?>
+          <?php echo nx_e('beta.title'); ?>
+        </h3>
+        <p><?php echo nx_e('beta.body'); ?></p>
+      </div>
+    <?php endif; ?>
   </div>
 </section>
 
@@ -88,6 +103,40 @@ require NX_INC . '/partials/head.php';
           <?php endif; ?>
         </div>
 
+        <?php if ($nx_android): ?>
+          <div class="download-card u-mt-md">
+            <div class="download-card__head">
+              <span class="download-card__icon"><?php echo nx_icon('smartphone'); ?></span>
+              <div>
+                <h2 class="h-md"><?php echo nx_e('download.android.name'); ?></h2>
+                <p class="download-card__meta">
+                  <?php echo nx_e('download.android.requirements'); ?>
+                </p>
+              </div>
+            </div>
+
+            <a class="btn btn--primary btn--lg btn--block"
+               href="<?php echo nx_esc(nx_android_download_url()); ?>">
+              <?php echo nx_icon('download'); ?>
+              <?php echo nx_e('download.android.button'); ?>
+            </a>
+
+            <p class="download-card__links">
+              <?php echo nx_e('download.windows.always_current'); ?>
+            </p>
+          </div>
+
+          <?php /* Said plainly rather than discovered at install time.
+                   Android refuses an APK from a browser until the customer
+                   allows it, and shows a warning while doing so -- somebody
+                   who was not told that reasonably assumes the file is
+                   suspect and stops. */ ?>
+          <div class="notice notice--warn u-mt-md">
+            <h3><?php echo nx_e('download.android.sideload.title'); ?></h3>
+            <p><?php echo nx_e('download.android.sideload.body'); ?></p>
+          </div>
+        <?php endif; ?>
+
         <?php if ($nx_available): ?>
           <div class="notice u-mt-md">
             <h3>
@@ -95,6 +144,13 @@ require NX_INC . '/partials/head.php';
               <?php echo nx_e('download.autoupdate.title'); ?>
             </h3>
             <p><?php echo nx_e('download.autoupdate.body'); ?></p>
+            <?php if ($nx_android): ?>
+              <?php /* Android is the exception and the page says so. The
+                       system will not let an app replace its own APK
+                       without the customer confirming, so pretending it
+                       updates itself would be a promise we cannot keep. */ ?>
+              <p class="u-mt-xs"><?php echo nx_e('download.autoupdate.android'); ?></p>
+            <?php endif; ?>
           </div>
         <?php endif; ?>
 
@@ -116,18 +172,30 @@ require NX_INC . '/partials/head.php';
           </ol>
         </div>
 
+        <?php if ($nx_android): ?>
+          <div class="notice u-mt-sm">
+            <h3><?php echo nx_e('download.android.steps.title'); ?></h3>
+            <ol class="steps-list u-mt-sm">
+              <?php for ($nx_i = 1; $nx_i <= 4; $nx_i++): ?>
+                <li><span><?php echo nx_e('download.android.steps.' . $nx_i); ?></span></li>
+              <?php endfor; ?>
+            </ol>
+          </div>
+        <?php endif; ?>
+
         <div class="notice u-mt-sm">
           <h3><?php echo nx_e('download.other.title'); ?></h3>
           <p><?php echo nx_e('download.other.body'); ?></p>
 
           <div class="platform-list">
             <?php
-            $nx_others = array(
-                'macos'   => 'laptop',
-                'android' => 'smartphone',
-                'ios'     => 'smartphone',
-            );
-            foreach ($nx_others as $nx_key => $nx_glyph): ?>
+            /* Driven by config rather than hardcoded: this list and the
+               cards above were two places that could disagree about
+               whether a platform had shipped, and after Android shipped
+               they did. */
+            $nx_glyphs = array('macos' => 'laptop', 'android' => 'smartphone', 'ios' => 'smartphone');
+            foreach (nx_cfg('platforms_planned', array()) as $nx_key):
+                $nx_glyph = isset($nx_glyphs[$nx_key]) ? $nx_glyphs[$nx_key] : 'laptop'; ?>
               <div class="platform-row">
                 <?php echo nx_icon($nx_glyph); ?>
                 <span><?php echo nx_e('download.other.' . $nx_key); ?></span>

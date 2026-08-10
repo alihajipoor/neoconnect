@@ -46,6 +46,9 @@ require NX_INC . '/partials/announcement.php';
       </div>
 
       <p class="hero__note">
+        <?php if (nx_beta()): ?>
+          <span class="hero__beta"><?php echo nx_e('beta.hero'); ?></span>
+        <?php endif; ?>
         <?php echo $nx_has_windows
             ? nx_e('home.hero.note_available')
             : nx_e('home.hero.note_soon'); ?>

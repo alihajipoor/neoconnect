@@ -100,6 +100,17 @@ return array(
     // filename, so this link never needs editing when a version ships.
     'windows_installer_url' => 'https://connect.neoxify.site/api/updates/installer/windows',
 
+    // The Android APK, same arrangement as Windows above: one URL that
+    // always resolves to the newest release, so this never needs editing
+    // when a version ships. Empty means "not released yet" and the page
+    // says so rather than offering a dead button.
+    'android_installer_url' => 'https://connect.neoxify.site/api/updates/installer/android',
+
+    // Android builds are arm64-only. That is every phone and tablet sold
+    // for years, but it is stated on the page rather than left to fail at
+    // install time on something older.
+    'android_arm64_only' => true,
+
     // Optional link to published SHA-256 checksums, shown beside the download.
     //
     // Empty by default and deliberately so: the installer URL above always
@@ -117,8 +128,18 @@ return array(
     'windows_unsigned' => true,
 
     // Platforms that genuinely are not built yet. Listed on the download page
-    // as "not available", never as a dead link.
-    'platforms_planned' => array('macos', 'android', 'ios'),
+    // as "not available", never as a dead link. Android came off this list
+    // when android-v0.2.5 shipped.
+    'platforms_planned' => array('macos', 'ios'),
+
+    // ---------------------------------------------------------------
+    // Release phase
+    // ---------------------------------------------------------------
+
+    // Shows a "Beta" badge beside the logo, a line in the hero, and a short
+    // explanation on the download page. Set false when the product leaves
+    // beta and all three disappear together.
+    'beta_enabled' => true,
 
     // ---------------------------------------------------------------
     // Free trial
