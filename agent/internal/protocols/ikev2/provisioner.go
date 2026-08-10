@@ -42,6 +42,9 @@ type Provisioner struct {
 	// a customer who cannot connect.
 	mu    sync.Mutex
 	users map[string]string // username -> password
+	// Per-SA byte totals from the previous poll, so a delta can be taken
+	// without a rekey looking like a customer using nothing.
+	lastBytes map[string]saBytes
 }
 
 func New(secretsPath, swanctlPath string) *Provisioner {
@@ -52,6 +55,7 @@ func New(secretsPath, swanctlPath string) *Provisioner {
 		secretsPath: secretsPath,
 		swanctl:     swanctlPath,
 		users:       map[string]string{},
+		lastBytes:   map[string]saBytes{},
 	}
 }
 
@@ -116,16 +120,132 @@ func (p *Provisioner) SetEnabled(ctx context.Context, externalUserID string, ena
 	return p.terminate(ctx, externalUserID)
 }
 
-// StatsSince reports nothing yet.
+// StatsSince reports traffic since the last call, per user.
 //
-// Deliberately empty rather than approximated. strongSwan does track
-// per-SA bytes and `swanctl --list-sas` exposes them, but a delta needs
-// a stable per-user key across rekeys and reconnects, and getting that
-// wrong bills a customer for traffic they did not use. Returning
-// nothing means IKEv2 traffic is not counted against a quota, which is
-// visible and safe; returning a guess would be neither.
+// strongSwan reports totals per SA, and an SA is replaced on every rekey
+// and every reconnect -- so the totals restart from zero under a live
+// customer. Subtracting the previous reading per *user* would then go
+// negative and, clamped at zero, quietly lose everything since the last
+// poll.
+//
+// So the counters are tracked per SA and only summed per user after the
+// delta is taken. An SA that disappears between polls contributes its
+// last observed growth and is then forgotten; a new one starts from
+// zero, which is correct because it genuinely has carried nothing yet.
 func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, error) {
-	return nil, nil
+	sas, err := p.listSAs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	perUser := map[string]*common.UsageDelta{}
+	seen := map[string]bool{}
+	for _, sa := range sas {
+		if sa.user == "" {
+			continue
+		}
+		seen[sa.id] = true
+		prev := p.lastBytes[sa.id]
+		// A counter that went backwards means this SA was replaced under
+		// the same id, so the new one's totals are the delta.
+		up, down := sa.bytesUp, sa.bytesDown
+		if up >= prev.up {
+			up -= prev.up
+		}
+		if down >= prev.down {
+			down -= prev.down
+		}
+		p.lastBytes[sa.id] = saBytes{up: sa.bytesUp, down: sa.bytesDown}
+
+		d := perUser[sa.user]
+		if d == nil {
+			d = &common.UsageDelta{ExternalUserID: sa.user}
+			perUser[sa.user] = d
+		}
+		d.BytesUp += up
+		d.BytesDown += down
+	}
+	// Forget SAs that are gone, or this map grows for the life of the
+	// process on a busy node.
+	for id := range p.lastBytes {
+		if !seen[id] {
+			delete(p.lastBytes, id)
+		}
+	}
+
+	deltas := make([]common.UsageDelta, 0, len(perUser))
+	for _, d := range perUser {
+		if d.BytesUp == 0 && d.BytesDown == 0 {
+			continue
+		}
+		deltas = append(deltas, *d)
+	}
+	return deltas, nil
+}
+
+// SessionCounts reports how many distinct places each user is connected
+// from, which is what the account-wide connection limit is evaluated
+// against.
+//
+// IKEv2 needs this where WireGuard and OpenVPN do not. Those two are
+// self-limiting -- a WireGuard peer holds one endpoint at a time and
+// OpenVPN replaces a session when the same certificate reconnects -- but
+// strongSwan will happily run the same EAP identity from several places
+// at once. Without this, one account could be shared across any number
+// of devices over IKEv2 and nothing would notice.
+//
+// Counted by distinct remote address rather than by SA: a phone moving
+// between wifi and mobile data, or simply rekeying, can briefly hold two
+// SAs from the same place, and charging that against the limit would
+// disconnect somebody who did nothing wrong.
+func (p *Provisioner) SessionCounts() (map[string]int, error) {
+	sas, err := p.listSAs(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	hosts := map[string]map[string]bool{}
+	for _, sa := range sas {
+		if sa.user == "" || sa.remoteHost == "" {
+			continue
+		}
+		if hosts[sa.user] == nil {
+			hosts[sa.user] = map[string]bool{}
+		}
+		hosts[sa.user][sa.remoteHost] = true
+	}
+	counts := make(map[string]int, len(hosts))
+	for user, set := range hosts {
+		counts[user] = len(set)
+	}
+	return counts, nil
+}
+
+// saInfo is the part of one security association this cares about.
+type saInfo struct {
+	id         string
+	user       string
+	remoteHost string
+	bytesUp    uint64
+	bytesDown  uint64
+}
+
+type saBytes struct{ up, down uint64 }
+
+// listSAs reads the live SAs out of swanctl.
+//
+// `--raw` rather than the human-formatted default: the pretty output is
+// laid out for reading and its shape is not a promise, while the raw
+// form is the VICI message itself and is what the tooling around
+// strongSwan parses.
+func (p *Provisioner) listSAs(ctx context.Context) ([]saInfo, error) {
+	out, err := p.run(ctx, "--list-sas", "--raw")
+	if err != nil {
+		return nil, fmt.Errorf("ikev2: could not list security associations: %w (%s)", err, out)
+	}
+	return parseSAs(out), nil
 }
 
 // flushLocked rewrites the secrets file and reloads it.
