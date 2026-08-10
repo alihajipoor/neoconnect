@@ -135,6 +135,24 @@ jobs:
         shell: bash
         run: sha256sum *.exe > sha256sums.txt
 
+      # The tag's own annotation is the human-written changelog -- see the
+      # `git tag -a` message. Without passing it, action-gh-release falls
+      # back to generate_release_notes alone, which diffs against the most
+      # recent tag of ANY prefix: desktop-v0.9.1's notes came out as a
+      # comparison against android-v0.2.6, which is meaningless to a
+      # customer reading the download page. The generated commit list is
+      # still appended underneath.
+      - name: Read the tag's message
+        id: tagmsg
+        shell: bash
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          {
+            echo "body<<TAGMSG_EOF"
+            git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME"
+            echo "TAGMSG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -142,4 +160,5 @@ jobs:
             apps/desktop-windows/target/release/bundle/nsis/*.exe
             apps/desktop-windows/target/release/bundle/nsis/*.sig
             apps/desktop-windows/target/release/bundle/nsis/sha256sums.txt
+          body: ${{ steps.tagmsg.outputs.body }}
           generate_release_notes: true
