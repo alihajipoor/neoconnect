@@ -129,6 +129,8 @@ shares it), 8443 (Trojan), the Shadowsocks port you chose, 51820/udp
 - `installer/` — bash installer + management menu for VPS nodes
 - `infra/docker-compose.yml` — local Postgres + Redis for development
 - `scripts/` — repo-wide checks run by CI
+- `brand/` — store-listing art, and the script that renders it from the
+  mark's own geometry (see `brand/README.md`)
 
 ## Prerequisites
 

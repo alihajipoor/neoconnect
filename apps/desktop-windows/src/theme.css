@@ -176,6 +176,65 @@
     color: #fff;
   }
 
+  /* The scrollbar is part of the product too. Left alone, the location
+     picker and the plan list draw the platform's own grey bar -- opaque,
+     square, and lit for a light theme -- straight down the edge of a dark
+     violet panel, which reads as a piece of the OS showing through rather
+     than part of the app.
+
+     Deliberately styled with the -webkit- pseudo-elements rather than
+     `scrollbar-color`/`scrollbar-width`: the standard properties offer no
+     control over shape or inset, and in Chromium setting either of them
+     disables these rules for that element -- so the two cannot be
+     combined as progressive enhancement. Both clients run on Chromium
+     (WebView2, Android System WebView), so nothing is lost by picking the
+     expressive one.
+
+     Scoped to `pointer: fine` on purpose, which is to say the desktop
+     client and not the phone. A touch WebView draws its scrollbar as a
+     transient overlay that costs no layout width and fades out on its
+     own; styling these pseudo-elements there replaces it with a
+     permanent one that takes real space -- 10px off a phone's width and
+     a bar that never goes away, to fix a scrollbar the customer only
+     ever sees for a second mid-flick. Android keeps its native
+     behaviour. */
+  @media (pointer: fine) {
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    /* No track. A groove down the side would add a vertical rule the
+       layout never asked for; the thumb alone is enough to say where
+       you are. */
+    ::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      /* Violet at low opacity so it reads as the app's own accent
+         resting on the surface, not a slab painted over it. */
+      background-color: rgba(139, 92, 246, 0.35);
+      border-radius: 999px;
+      /* A transparent border clipped away from the background is what
+         insets the thumb inside the 10px gutter: a 6px capsule with room
+         to breathe, rather than a bar wedged against the panel edge.
+         Padding does not work here -- scrollbar parts do not have a box
+         to pad. */
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background-color: rgba(139, 92, 246, 0.55);
+    }
+
+    ::-webkit-scrollbar-thumb:active {
+      background-color: rgba(167, 139, 250, 0.75);
+    }
+  }
+
   /* Persian ascenders and diacritics need more vertical room than Latin,
      and at the default line height they collide with the line above. */
   html[lang="fa"] body {

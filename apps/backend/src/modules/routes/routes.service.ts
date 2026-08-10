@@ -86,6 +86,12 @@ export class RoutesService {
         entryProtocolConfig: {
           select: {
             protocol: true,
+            // Without this the picker cannot tell one VLESS+TLS route
+            // from another: the TCP and WebSocket variants share a
+            // protocol, so both rendered as "Stealth HTTPS" and the list
+            // showed two rows that looked identical and differed only in
+            // latency.
+            transport: true,
             listenPort: true,
             node: { select: { name: true, region: true, publicIp: true, status: true, lastHeartbeatAt: true } },
           },
@@ -97,6 +103,7 @@ export class RoutesService {
     return routes.map(({ exitProtocolConfigId, entryProtocolConfig, ...route }) => ({
       ...route,
       protocol: entryProtocolConfig.protocol,
+      transport: entryProtocolConfig.transport,
       isRelay: exitProtocolConfigId !== null,
       location: { region: entryProtocolConfig.node.region, nodeName: entryProtocolConfig.node.name },
       // The address the client dials, so the app can measure its own
