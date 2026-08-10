@@ -180,6 +180,11 @@ export class RoutesService {
 
     await this.agentGateway.enqueueCommand(exitProtocolConfig.nodeId, "CREATE_USER", {
       protocol: exitProtocolConfig.protocol,
+      // The relay's shared uplink is an ordinary user on the exit's
+      // inbound, so it needs the same transport routing every other user
+      // does -- an exit offered over WebSocket would otherwise get its
+      // uplink built on the wrong listener.
+      transport: exitProtocolConfig.transport,
       externalUserId: `route:${route.id}`,
       credentials: uplinkCredentials,
     });

@@ -110,6 +110,12 @@ export class ProtocolUsersService {
     // Route itself was created (see routes.service.ts).
     await this.agentGateway.enqueueCommand(protocolConfig.nodeId, "CREATE_USER", {
       protocol: protocolConfig.protocol,
+      // The protocol alone no longer identifies an inbound: one node can
+      // serve VLESS+TLS as a raw TCP stream and inside a WebSocket at
+      // once, on the same port and certificate. Without this the agent
+      // would add every WS customer to the TCP inbound, handing them a
+      // credential that looks correct and never connects.
+      transport: protocolConfig.transport,
       externalUserId,
       credentials,
       ...rateLimitFor(subscription.plan, protocolConfig.protocol),

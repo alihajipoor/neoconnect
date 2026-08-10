@@ -294,12 +294,18 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private async reassertProvisionedUsers(nodeId: string, opts: { persist: boolean } = { persist: true }) {
     const users = await this.prisma.protocolUser.findMany({
       where: { nodeId, status: "ACTIVE" },
+      // For the transport only. Without it every re-assert after an
+      // engine restart would rebuild WebSocket customers on the TCP
+      // inbound -- silently, and for everyone at once, since re-assert is
+      // exactly the path that runs when a node comes back.
+      include: { protocolConfig: { select: { transport: true } } },
     });
     if (users.length === 0) return;
 
     for (const user of users) {
       const payload = {
         protocol: user.protocol,
+        transport: user.protocolConfig.transport,
         externalUserId: user.externalUserId,
         credentials: decryptCredentials(user.credentialsJson),
       };
