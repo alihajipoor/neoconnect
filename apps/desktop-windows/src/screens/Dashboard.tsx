@@ -5,12 +5,14 @@ import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from ".
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { formatBytes } from "../lib/utils";
-import { CUSTOMER_PROTOCOL_LABELS } from "../lib/protocol-labels";
+import { customerProtocolLabel } from "../lib/protocol-labels";
 import { captureBaselineIp, verifyEgress, type EgressVerdict } from "../lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { loadLastGood, saveLastGood } from "../lib/failover-store";
 import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
+import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
+import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
@@ -386,6 +388,14 @@ export function Dashboard({
    * toggle here would tell them only their game is routed when the whole
    * machine is. */
   const [splitTunnelActive, setSplitTunnelActive] = useState(false);
+  /** When the shown data was last fetched, if the server could not be
+   * reached this time. Null means everything on screen is current.
+   *
+   * Shown rather than hidden: usage figures and expiry dates go stale,
+   * and a customer reading a three-day-old data total as today's is
+   * exactly the kind of quiet wrongness the rest of this screen exists
+   * to avoid. */
+  const [offlineSince, setOfflineSince] = useState<number | null>(null);
 
   useEffect(() => {
     void loadAll();
@@ -413,10 +423,42 @@ export function Dashboard({
         onLoggedOut();
         return;
       }
+
+      // The control plane is unreachable, which is not the same as the
+      // subscription being gone. Everything needed to build a tunnel was
+      // handed over last time and has not changed, so fall back to it
+      // rather than stranding a paying customer.
+      //
+      // This is why the cache exists: the panel's address was filtered in
+      // Iran and every customer there lost the product entirely -- on
+      // every protocol, on every node, none of which were blocked.
+      const cached = await loadSnapshot();
+      if (cached) {
+        setSubscription(cached.subscription);
+        setProtocolUsers(cached.protocolUsers);
+        setRoutes(cached.routes);
+        const preferred = preferRouteId ?? chosenRouteId;
+        setProtocolUser(
+          cached.protocolUsers.find((u) => u.routeId === preferred) ?? cached.protocolUsers[0] ?? null,
+        );
+        setOfflineSince(cached.savedAt);
+        setError(null);
+        setLoading(false);
+        void invoke<string | null>("network_fingerprint")
+          .then(setNetworkId)
+          .catch(() => setNetworkId(null));
+        void loadLastGood().then(setLastGood);
+        return;
+      }
+
       setError(!meResult.ok ? meResult.error : !subsResult.ok ? subsResult.error : t("dash.loadFailed"));
       setLoading(false);
       return;
     }
+
+    // Reached the server, so anything remembered about being offline is
+    // stale.
+    setOfflineSince(null);
 
     setMe(meResult.data);
     const sub = usableSubscription(subsResult.data);
@@ -446,10 +488,22 @@ export function Dashboard({
     // protocol-user row carries a routeId but no human-readable
     // location. Best-effort: a failure here costs a label, not the
     // screen, so it must never surface as an error.
+    let currentRoutes: RouteOption[] = [];
     if (sub) {
       const routesResult = await getAvailableRoutes(sub.id);
-      if (routesResult.ok) setRoutes(routesResult.data);
+      if (routesResult.ok) {
+        currentRoutes = routesResult.data;
+        setRoutes(currentRoutes);
+      }
     }
+
+    // Written only after a wholly successful fetch, so a partial answer
+    // can never overwrite a good cache with a worse one.
+    void saveSnapshot({
+      subscription: sub,
+      protocolUsers: usersResult.data,
+      routes: currentRoutes,
+    });
 
     // The tunnel outlives the app: the helper service keeps it up if the
     // window is closed, so on open the UI has to adopt whatever is
@@ -690,7 +744,7 @@ export function Dashboard({
 
       for (const [index, candidate] of candidates.entries()) {
         if (cancelRef.current) break;
-        const label = CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol;
+        const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
 
         // Patient only for the last candidate. With another protocol
@@ -811,6 +865,18 @@ export function Dashboard({
             setLastGood(updated);
             void saveLastGood(updated);
             strikesRef.current = 0;
+            // Successes are reported too, and they are not filler. A
+            // failure rate needs a denominator, and "Stealth works from
+            // this network while Fast does not" is a fact only the
+            // successes can establish. The ladder is attached whenever
+            // something had to be walked past to get here.
+            void reportAttempt({
+              kind: "CONNECT",
+              outcome: "SUCCESS",
+              protocol: label,
+              routeId: candidate.routeId,
+              attempts: attempts.length > 0 ? rungsFrom([...attempts, `${label}: connected`]) : undefined,
+            });
             return true;
           }
 
@@ -840,6 +906,17 @@ export function Dashboard({
       // A pass the customer stopped is not a failure and must not be
       // reported as one.
       setConnectionError(cancelRef.current ? null : lastError);
+      if (!cancelRef.current) {
+        // The whole ladder failed. This is the report that has been
+        // costing a screenshot and a conversation every time: which
+        // protocols were tried, in order, and what each one did.
+        void reportAttempt({
+          kind: "CONNECT",
+          outcome: lastError ? outcomeFromError(lastError.kind) : "OTHER",
+          reason: lastError?.detail,
+          attempts: rungsFrom(attempts),
+        });
+      }
       setConnectionState("disconnected");
       await invoke("vpn_disconnect").catch(() => undefined);
       return false;
@@ -849,6 +926,10 @@ export function Dashboard({
   }
 
   async function handleLogout() {
+    // Before the session goes, not after: leaving one customer's
+    // credentials on a shared machine for the next person to connect
+    // with is not a cache, it is a leak.
+    await clearSnapshot();
     await logout();
     onLoggedOut();
   }
@@ -937,6 +1018,20 @@ export function Dashboard({
         <>
           {/* Identity strip: a live status dot beside the account, so the
               single most important fact is legible before reading a word. */}
+          {/* Says plainly that the numbers below are old, and that
+              connecting still works. Without this the screen shows a
+              stale data total and expiry date as though they were
+              today's -- the same class of quiet wrongness as a false
+              "Connected". */}
+          {offlineSince !== null ? (
+            <div className="animate-rise rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
+              <p className="text-xs font-medium text-warning">{t("dash.offlineTitle")}</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {t("dash.offlineHint", { when: new Date(offlineSince).toLocaleString() })}
+              </p>
+            </div>
+          ) : null}
+
           <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
             <span
               className={
@@ -1068,7 +1163,7 @@ export function Dashboard({
                 <Stat
                   icon={<Shield className="size-3" />}
                   label={t("dash.protocol")}
-                  value={protocolUser ? (CUSTOMER_PROTOCOL_LABELS[protocolUser.protocol] ?? protocolUser.protocol) : "—"}
+                  value={protocolUser ? customerProtocolLabel(protocolUser.protocol, protocolUser.connection?.transport) : "—"}
                 />
                 <Stat
                   icon={<Clock className="size-3" />}

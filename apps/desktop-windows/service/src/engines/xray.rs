@@ -120,18 +120,11 @@ impl Outbound<'_> {
             // Same vnext/users block as the REALITY variant -- only the
             // wrapping differs, which is the entire distinction between
             // the two.
-            Outbound::VlessTls(p) => json!({
-                "tag": "proxy",
-                "protocol": "vless",
-                "settings": {
-                    "vnext": [{
-                        "address": p.host,
-                        "port": p.port,
-                        "users": [{ "id": p.uuid, "encryption": "none", "flow": p.flow }]
-                    }]
-                },
-                "streamSettings": {
-                    "network": "tcp",
+            Outbound::VlessTls(p) => {
+                // Two shapes, one credential. Everything but the stream
+                // is identical, so only the wrapper branches.
+                let mut stream = json!({
+                    "network": if p.ws_path.is_some() { "ws" } else { "tcp" },
                     "security": "tls",
                     "tlsSettings": {
                         // Verified normally, and with no allowInsecure
@@ -142,8 +135,35 @@ impl Outbound<'_> {
                         "fingerprint": "chrome",
                         "alpn": ["h2", "http/1.1"]
                     }
+                });
+                if let Some(path) = &p.ws_path {
+                    stream["wsSettings"] = json!({
+                        "path": path,
+                        // Sent as the Host header. An upgrade with no
+                        // Host, or one disagreeing with the SNI, is a
+                        // mismatch no browser produces -- which is
+                        // exactly what a censor looks for.
+                        "host": p.server_name
+                    });
                 }
-            }),
+                json!({
+                    "tag": "proxy",
+                    "protocol": "vless",
+                    "settings": {
+                        "vnext": [{
+                            "address": p.host,
+                            "port": p.port,
+                            // Empty over WebSocket: XTLS Vision needs a
+                            // TLS record stream to splice into, and a
+                            // WebSocket has none. The server clears it
+                            // at generation, so this passes through
+                            // whatever was issued.
+                            "users": [{ "id": p.uuid, "encryption": "none", "flow": p.flow }]
+                        }]
+                    },
+                    "streamSettings": stream
+                })
+            }
             Outbound::Trojan(p) => json!({
                 "tag": "proxy",
                 "protocol": "trojan",

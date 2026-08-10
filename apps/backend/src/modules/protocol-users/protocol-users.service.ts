@@ -308,7 +308,14 @@ const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
   // a name, so the name has to travel. There is deliberately nothing
   // REALITY-shaped here -- no borrowed key, no shortId -- because this
   // variant presents a certificate of its own.
-  XRAY_VLESS_TLS: ["serverName"],
+  //
+  // `path` is only set when this config is carried over a WebSocket, and
+  // it is not a secret: it is sent in the clear in the HTTP upgrade, so a
+  // censor watching the connection already has it. It travels because the
+  // client cannot guess it, and a mismatched path is answered by the
+  // fallback web page rather than by the tunnel -- which looks to the
+  // customer exactly like a server that is up but broken.
+  XRAY_VLESS_TLS: ["serverName", "path"],
   WIREGUARD: ["serverPublicKey", "endpoint", "subnetCidr", "dns"],
   // caCertPem is genuinely needed to verify the server, and already
   // travels in the per-user credentials. caKeyPem and serverKeyPem are
@@ -318,7 +325,13 @@ const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
 
 function connectionInfo(
   node: { publicIp: string },
-  protocolConfig: { protocol: string; listenPort: number; publicParamsJson: unknown },
+  protocolConfig: {
+    protocol: string;
+    listenPort: number;
+    publicParamsJson: unknown;
+    transport?: string;
+    security?: string;
+  },
 ) {
   const allowed = CLIENT_VISIBLE_PUBLIC_PARAMS[protocolConfig.protocol] ?? [];
   const source = (protocolConfig.publicParamsJson ?? {}) as Record<string, unknown>;
@@ -332,6 +345,15 @@ function connectionInfo(
   return {
     host: node.publicIp,
     port: protocolConfig.listenPort,
+    // How to carry it, and what to wrap it in. Without these a client
+    // holding a VLESS credential has no way to tell a plain TLS inbound
+    // from a WebSocket one -- the Protocol member is the same for both,
+    // deliberately, and guessing wrong fails the handshake.
+    //
+    // Defaulted rather than required so a client keeps working against a
+    // node whose row predates these columns.
+    transport: protocolConfig.transport ?? "TCP",
+    security: protocolConfig.security ?? "NONE",
     publicParams,
   };
 }

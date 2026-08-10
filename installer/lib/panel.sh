@@ -84,6 +84,16 @@ EOF
   ensure_env_key "NOWPAYMENTS_API_KEY" ""
   ensure_env_key "NOWPAYMENTS_IPN_SECRET" ""
   ensure_env_key "ALERT_WEBHOOK_URL" ""
+  # Generated rather than left blank: it is a secret of ours, not a
+  # credential from somebody else's service, and the operator has no way to
+  # invent a better one. The backend and the Discord bot both read this same
+  # value, so generating it in one place is what makes them agree.
+  ensure_env_key "INTEGRATIONS_SERVICE_TOKEN" "$(openssl rand -hex 32)"
+  # The Discord bot is an opt-in compose profile. Blank keys so a fresh
+  # infra/.env documents what to fill in without implying it is required.
+  ensure_env_key "DISCORD_BOT_TOKEN" ""
+  ensure_env_key "DISCORD_APPLICATION_ID" ""
+  ensure_env_key "DISCORD_GUILD_ID" ""
 
   # Where this API answers from a customer's browser. Emails put links
   # here, so it has to be the public address including the /api prefix

@@ -51,7 +51,14 @@
         "decryption": "none",
         "fallbacks": [
           {
-            "dest": "__TROJAN_FALLBACK__"
+            "//": "Keyed on the negotiated ALPN, and it has to be. This inbound offers h2 so it looks like an ordinary web server, and a browser or any modern HTTP client takes that offer -- then nginx, which only spoke HTTP/1.1, received HTTP/2 frames and the connection died with a protocol error. Measured, not theorised: reproduced from an uncensored machine, and it meant the node API mirrors never worked for an HTTP/2 client. Since nginx before 1.25.1 cannot detect h2c and HTTP/1.1 on one listener -- the http2 flag forces h2c and breaks HTTP/1.1 -- each gets a socket of its own and Xray picks by ALPN.",
+            "alpn": "h2",
+            "dest": "__TROJAN_FALLBACK_H2__",
+            "xver": 1
+          },
+          {
+            "dest": "__TROJAN_FALLBACK__",
+            "xver": 1
           }
         ]
       },
@@ -78,7 +85,14 @@
         "clients": [],
         "fallbacks": [
           {
-            "dest": "__TROJAN_FALLBACK__"
+            "//": "Keyed on the negotiated ALPN, and it has to be. This inbound offers h2 so it looks like an ordinary web server, and a browser or any modern HTTP client takes that offer -- then nginx, which only spoke HTTP/1.1, received HTTP/2 frames and the connection died with a protocol error. Measured, not theorised: reproduced from an uncensored machine, and it meant the node API mirrors never worked for an HTTP/2 client. Since nginx before 1.25.1 cannot detect h2c and HTTP/1.1 on one listener -- the http2 flag forces h2c and breaks HTTP/1.1 -- each gets a socket of its own and Xray picks by ALPN.",
+            "alpn": "h2",
+            "dest": "__TROJAN_FALLBACK_H2__",
+            "xver": 1
+          },
+          {
+            "dest": "__TROJAN_FALLBACK__",
+            "xver": 1
           }
         ]
       },

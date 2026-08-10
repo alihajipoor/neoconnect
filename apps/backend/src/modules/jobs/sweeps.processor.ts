@@ -5,6 +5,7 @@ import { UsageService } from "../usage/usage.service";
 import { InvoicesService } from "../invoices/invoices.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ReferralsService } from "../referrals/referrals.service";
+import { ClientAttemptsService } from "../client-attempts/client-attempts.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -16,6 +17,7 @@ export class SweepsProcessor extends WorkerHost {
     private readonly invoicesService: InvoicesService,
     private readonly subscriptionsService: SubscriptionsService,
     private readonly referralsService: ReferralsService,
+    private readonly clientAttemptsService: ClientAttemptsService,
   ) {
     super();
   }
@@ -64,6 +66,14 @@ export class SweepsProcessor extends WorkerHost {
         if (count > 0) {
           this.logger.log(`stale pending sweep: cancelled ${count} abandoned purchase attempt(s)`);
         }
+        break;
+      }
+      case "client-attempt-retention": {
+        // Not tidying -- this is the only thing that actually enforces
+        // the retention promise on a table of IP addresses belonging to
+        // people in a country where holding them is dangerous. The
+        // service logs the count itself when it deletes anything.
+        await this.clientAttemptsService.prune();
         break;
       }
       default:

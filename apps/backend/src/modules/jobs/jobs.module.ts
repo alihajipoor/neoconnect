@@ -6,6 +6,7 @@ import { UsageModule } from "../usage/usage.module";
 import { EmailModule } from "../email/email.module";
 import { InvoicesModule } from "../invoices/invoices.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
+import { ClientAttemptsModule } from "../client-attempts/client-attempts.module";
 import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { ReferralsModule } from "../referrals/referrals.module";
 import { SweepsProcessor } from "./sweeps.processor";
@@ -40,6 +41,8 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     // For the stale-pending sweep. No cycle: SubscriptionsModule pulls in
     // nothing from here.
     SubscriptionsModule,
+    // For the retention sweep only.
+    ClientAttemptsModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

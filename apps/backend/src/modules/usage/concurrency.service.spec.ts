@@ -1,6 +1,7 @@
 import { ConcurrencyService } from "./concurrency.service";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
+import { ConcurrencyStore, sumFresh } from "./concurrency-store";
 import { encryptCredentials } from "../protocol-users/credentials-crypto";
 
 /** Enforcement disconnects paying customers, so the conditions under
@@ -45,11 +46,52 @@ describe("ConcurrencyService", () => {
       },
     };
     const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue({}) };
+
+    // Mirrors the real store's semantics -- latest count per node, summed
+    // while fresh -- without a Redis. The freshness rule itself is tested
+    // directly against sumFresh at the bottom of this file.
+    const perNode = new Map<string, Map<string, { count: number; at: number }>>();
+    const store = {
+      // eslint-disable-next-line @typescript-eslint/require-await -- matches the real store's async signature
+      recordAndTotal: jest.fn(async (subscriptionId: string, nodeId: string, count: number) => {
+        const nodes = perNode.get(subscriptionId) ?? new Map();
+        nodes.set(nodeId, { count, at: Date.now() });
+        perNode.set(subscriptionId, nodes);
+        let total = 0;
+        for (const [node, entry] of nodes) {
+          if (Date.now() - entry.at > 90_000) nodes.delete(node);
+          else total += entry.count;
+        }
+        return total;
+      }),
+      // eslint-disable-next-line @typescript-eslint/require-await -- as above
+      clear: jest.fn(async (subscriptionId: string) => {
+        perNode.delete(subscriptionId);
+      }),
+    };
+
     const service = new ConcurrencyService(
       prisma as unknown as PrismaService,
       agentGateway as unknown as AgentGatewayService,
+      store as unknown as ConcurrencyStore,
     );
-    return { service, prisma, agentGateway };
+    return { service, prisma, agentGateway, store };
+  }
+
+  /** One polling cycle.
+   *
+   * The clock has to move between cycles, and not only for realism: a
+   * strike is deliberately capped at one per ~20 seconds, because several
+   * nodes now report the same subscription and three of them answering at
+   * once would otherwise burn the whole debounce on a single reading.
+   * Reports really are about 30 seconds apart. */
+  async function poll(
+    service: ConcurrencyService,
+    nodeId: string,
+    counts: { externalUserId: string; protocol: string; distinctSources: number }[],
+  ) {
+    await service.handleSessionCounts(nodeId, counts);
+    await jest.advanceTimersByTimeAsync(30_000);
   }
 
   /** One credential reporting `n` sources. */
@@ -59,11 +101,12 @@ describe("ConcurrencyService", () => {
 
   const disables = (mock: jest.Mock) => mock.mock.calls.filter((c) => c[1] === "DISABLE_USER");
 
+  beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
   it("does nothing while a user is within their limit", async () => {
     const { service, agentGateway } = build({ limit: 2 });
-    for (let i = 0; i < 5; i++) await service.handleSessionCounts("node-1", over(2));
+    for (let i = 0; i < 5; i++) await poll(service, "node-1", over(2));
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
@@ -71,18 +114,18 @@ describe("ConcurrencyService", () => {
     // A laptop waking on a new network shows two addresses for one poll.
     // Acting on that would disconnect people constantly.
     const { service, agentGateway } = build({ limit: 1 });
-    await service.handleSessionCounts("node-1", over(2));
+    await poll(service, "node-1", over(2));
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
   it("disconnects only after the excess persists", async () => {
     const { service, agentGateway } = build({ limit: 1 });
 
-    await service.handleSessionCounts("node-1", over(3));
-    await service.handleSessionCounts("node-1", over(3));
+    await poll(service, "node-1", over(3));
+    await poll(service, "node-1", over(3));
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
 
-    await service.handleSessionCounts("node-1", over(3));
+    await poll(service, "node-1", over(3));
     expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "DISABLE_USER", {
       protocol: "XRAY_VLESS_REALITY",
       externalUserId: "ext-0",
@@ -94,19 +137,18 @@ describe("ConcurrencyService", () => {
     // a disconnect for someone who never shared anything.
     const { service, agentGateway } = build({ limit: 1 });
 
-    await service.handleSessionCounts("node-1", over(2));
-    await service.handleSessionCounts("node-1", over(2));
-    await service.handleSessionCounts("node-1", over(1));
-    await service.handleSessionCounts("node-1", over(2));
+    await poll(service, "node-1", over(2));
+    await poll(service, "node-1", over(2));
+    await poll(service, "node-1", over(1));
+    await poll(service, "node-1", over(2));
 
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
   it("restores the user after the cooldown rather than leaving them cut off", async () => {
-    jest.useFakeTimers();
     const { service, agentGateway } = build({ limit: 1 });
 
-    for (let i = 0; i < 3; i++) await service.handleSessionCounts("node-1", over(4));
+    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
     expect(disables(agentGateway.enqueueCommand)).toHaveLength(1);
 
     await jest.advanceTimersByTimeAsync(61_000);
@@ -123,13 +165,13 @@ describe("ConcurrencyService", () => {
     // Plans created before this feature have no value set. Reading that
     // as "zero allowed" would disconnect every customer on them.
     const { service, agentGateway } = build({ limit: null });
-    for (let i = 0; i < 5; i++) await service.handleSessionCounts("node-1", over(99));
+    for (let i = 0; i < 5; i++) await poll(service, "node-1", over(99));
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
   it("leaves already-disabled users alone", async () => {
     const { service, agentGateway } = build({ limit: 1, status: "DISABLED" });
-    for (let i = 0; i < 5; i++) await service.handleSessionCounts("node-1", over(9));
+    for (let i = 0; i < 5; i++) await poll(service, "node-1", over(9));
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
@@ -137,7 +179,7 @@ describe("ConcurrencyService", () => {
     const { service, prisma, agentGateway } = build({ limit: 1 });
     prisma.protocolUser.findFirst.mockResolvedValue(null);
 
-    for (let i = 0; i < 5; i++) await service.handleSessionCounts("node-1", over(9));
+    for (let i = 0; i < 5; i++) await poll(service, "node-1", over(9));
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
@@ -159,7 +201,7 @@ describe("ConcurrencyService", () => {
       { externalUserId: "ext-2", protocol: "XRAY_TROJAN", distinctSources: 2 },
     ];
 
-    for (let i = 0; i < 3; i++) await service.handleSessionCounts("node-1", spreadOut);
+    for (let i = 0; i < 3; i++) await poll(service, "node-1", spreadOut);
 
     // 6 sources against a limit of 2.
     expect(disables(agentGateway.enqueueCommand).length).toBeGreaterThan(0);
@@ -174,9 +216,84 @@ describe("ConcurrencyService", () => {
       protocols: ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS", "XRAY_TROJAN"],
     });
 
-    for (let i = 0; i < 3; i++) await service.handleSessionCounts("node-1", over(5));
+    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(5));
 
     const dropped = disables(agentGateway.enqueueCommand).map((c) => (c[2] as { externalUserId: string }).externalUserId);
     expect(dropped.sort()).toEqual(["ext-0", "ext-1", "ext-2"]);
+  });
+
+  /** The hole that having a credential on every route opened next.
+   *
+   * Each node sees a count inside the limit, so per-node judging -- which
+   * is what this did before -- saw nothing wrong. A sharer only had to
+   * tell each friend to pick a different location, and a limit of two
+   * across five nodes quietly permitted ten.
+   */
+  it("counts a subscription across nodes, not one node at a time", async () => {
+    const { service, agentGateway } = build({ limit: 2 });
+
+    // Two devices in Finland and two in France. Neither node is over.
+    for (let i = 0; i < 3; i++) {
+      await poll(service, "node-1", over(2));
+      await poll(service, "node-2", over(2));
+    }
+
+    expect(disables(agentGateway.enqueueCommand).length).toBeGreaterThan(0);
+  });
+
+  /** The debounce is meant to require the excess to *persist*. Several
+   * nodes answering within the same cycle is one reading, not three, and
+   * counting it as three would disconnect people mid location-switch --
+   * hitting hardest the customers who use the most locations. */
+  it("counts one polling cycle once however many nodes report it", async () => {
+    const { service, agentGateway } = build({ limit: 1 });
+
+    // Five nodes, one cycle, comfortably over the limit.
+    for (const node of ["n1", "n2", "n3", "n4", "n5"]) {
+      await service.handleSessionCounts(node, over(2));
+    }
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
+  /** Otherwise the counts from before the drop survive it, and the
+   * customer's legitimate devices trip the limit again the moment they
+   * reconnect -- a disconnect loop rather than a warning. */
+  it("forgets the stored counts after disconnecting someone", async () => {
+    const { service, store } = build({ limit: 1 });
+
+    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
+
+    expect(store.clear).toHaveBeenCalledWith("sub-1");
+  });
+});
+
+/** The freshness rule, which is where the real judgement in the store
+ * lives. Tested directly so it needs no Redis. */
+describe("sumFresh", () => {
+  const now = 1_000_000;
+
+  it("adds up every node that reported recently", () => {
+    expect(
+      sumFresh({ "node-1": `2:${now - 1_000}`, "node-2": `3:${now - 2_000}` }, now),
+    ).toEqual({ total: 5, stale: [] });
+  });
+
+  /** A node that has gone quiet has no live sessions. Absence is the only
+   * "they disconnected" signal there is -- nodes report the users they
+   * see, never the ones they don't -- so a stale entry must drop out
+   * rather than pin someone at a count they no longer have. */
+  it("drops a node that has stopped reporting", () => {
+    const result = sumFresh({ "node-1": `2:${now - 1_000}`, "node-2": `9:${now - 200_000}` }, now);
+    expect(result.total).toBe(2);
+    expect(result.stale).toEqual(["node-2"]);
+  });
+
+  /** Counted-forever is the failure mode worth avoiding: a single bad
+   * write would otherwise hold a customer over their limit permanently. */
+  it("treats a malformed entry as stale rather than as a number", () => {
+    const result = sumFresh({ "node-1": "not-a-count", "node-2": `1:${now}` }, now);
+    expect(result.total).toBe(1);
+    expect(result.stale).toEqual(["node-1"]);
   });
 });
