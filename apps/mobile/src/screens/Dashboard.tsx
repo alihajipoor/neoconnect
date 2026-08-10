@@ -4,7 +4,7 @@ import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "@
 import { logout } from "@shared/lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "@shared/lib/types";
 import { formatBytes } from "@shared/lib/utils";
-import { CUSTOMER_PROTOCOL_LABELS } from "@shared/lib/protocol-labels";
+import { customerProtocolLabel } from "@shared/lib/protocol-labels";
 import { captureBaselineIp, verifyEgress } from "@shared/lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "@shared/lib/connection-errors";
 import { orderCandidates } from "@shared/lib/failover";
@@ -358,7 +358,7 @@ export function Dashboard({
     // ignoring them.
     const chosen = all.find((u) => u.routeId === chosenRouteId) ?? all[0];
     if (chosen && !SUPPORTED.has(chosen.protocol)) {
-      setUnsupportedChoice(CUSTOMER_PROTOCOL_LABELS[chosen.protocol] ?? chosen.protocol);
+      setUnsupportedChoice(customerProtocolLabel(chosen.protocol, chosen.connection?.transport));
     }
 
     if (usable.length === 0) {
@@ -390,7 +390,7 @@ export function Dashboard({
     const attempts: string[] = [];
 
     for (const candidate of candidates) {
-      const label = CUSTOMER_PROTOCOL_LABELS[candidate.protocol] ?? candidate.protocol;
+      const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
 
       // Taken while nothing is up. Captured through a live tunnel it
       // would record the exit address as the "before" value, and every
@@ -705,7 +705,7 @@ export function Dashboard({
                   label={t("dash.protocol")}
                   value={
                     protocolUser
-                      ? (CUSTOMER_PROTOCOL_LABELS[protocolUser.protocol] ?? protocolUser.protocol)
+                      ? customerProtocolLabel(protocolUser.protocol, protocolUser.connection?.transport)
                       : "—"
                   }
                   onClick={() => setShowLocationPicker(true)}
