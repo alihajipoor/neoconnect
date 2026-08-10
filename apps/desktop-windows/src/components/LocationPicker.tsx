@@ -17,9 +17,25 @@ export function LocationPicker({
   currentRouteId,
   onClose,
   onSwitched,
+  tunnelActive = false,
 }: {
   subscriptionId: string;
   currentRouteId: string | undefined;
+  /** Whether a tunnel is up right now.
+   *
+   * Latency is not measured while one is, because the measurement would
+   * travel through it. A TCP connect to the very node the traffic is
+   * already being tunnelled through takes almost no time, so every
+   * server reads a handful of milliseconds -- reported from a real
+   * phone, where the same list had shown a correct 150-170ms before the
+   * first connect.
+   *
+   * This became true when the app stopped excluding itself from its own
+   * tunnel, which it had to do so the egress check would stop declaring
+   * working tunnels dead. Showing "--" while connected is the honest
+   * answer: the number cannot be measured from in here, and inventing
+   * one is the failure this component was written to avoid. */
+  tunnelActive?: boolean;
   onClose: () => void;
   /** Signals that the switch succeeded. Deliberately carries no payload:
    * the caller re-reads the provisioned connection itself, so this
@@ -66,6 +82,10 @@ export function LocationPicker({
    * there is no useful number for a server that is down.
    */
   async function measureAll(options: RouteOption[]) {
+    // Nothing is measurable from inside a tunnel -- see `tunnelActive`.
+    // Leaving the map empty renders every row as "--", which is what
+    // "not measured" already means here.
+    if (tunnelActive) return;
     await Promise.all(
       options.map(async (route) => {
         if (route.nodeStatus !== "ONLINE") {
