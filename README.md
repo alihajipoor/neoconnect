@@ -12,10 +12,25 @@ installed clients and enrolled nodes would break both.
 
 ## What it does today
 
-**Protocols.** VLESS+REALITY, VLESS+TLS, Trojan, WireGuard and OpenVPN,
-all provisioned per customer without restarting the engine or disturbing
+**Protocols.** VLESS+REALITY, VLESS+TLS (over TCP *or* inside a
+WebSocket), Trojan, Shadowsocks 2022, WireGuard and OpenVPN -- all
+provisioned per customer without restarting the engine or disturbing
 anyone else on the node. Relayed routes chain an Iran-reachable entry node
 to an exit node abroad.
+
+The WebSocket variant shares the VLESS+TLS port and certificate rather
+than taking one of its own, routed by a path-keyed Xray fallback: a second
+public port is a second thing for a censor to fingerprint, while an HTTP
+upgrade on a normal HTTPS port is what ordinary web applications do.
+Shadowsocks 2022 is the opposite trade -- no handshake to fingerprint at
+all, but nothing to hide behind either once the port is found, so it sits
+late in the failover ladder rather than early.
+
+Deliberately absent: PPTP, L2TP, SSTP, IKEv2 and ShadowsocksR. PPTP's
+MS-CHAPv2 is broken well enough to be cracked in hours, so offering it
+would sell the appearance of protection; SSR is abandoned upstream and
+already fingerprinted; the rest use fixed ports that are among the first
+blocked, which is the opposite of the point.
 
 **Clients.** A Windows client (`apps/desktop-windows`, Tauri) that signs
 in, buys a plan, picks a location, connects, and updates itself. It walks
@@ -73,6 +88,33 @@ On a fresh box it asks which role this server plays:
 Re-running `sudo ./install.sh` on an already-installed box shows that
 role's management menu (status/logs, rebuild, uninstall, etc.) instead of
 asking again — the chosen role is recorded in `/etc/neoxify/role`.
+
+### Inbound ports your provider must allow
+
+Most cloud providers attach a firewall that permits only 22/80/443 and
+silently drops everything else. The installer cannot see or change it, and
+the symptom is specific and confusing: the panel works perfectly in a
+browser while every node sits `PENDING` forever, because the one port the
+agents need is the one being dropped. Check this before debugging
+anything else.
+
+**Panel server**
+
+| Port | Proto | Why |
+|---|---|---|
+| 22 | TCP | SSH |
+| 80 | TCP | Let's Encrypt HTTP-01, and the redirect to HTTPS |
+| 443 | TCP | Panel and API |
+| **50051** | **TCP** | **Agent gRPC. Nothing works without it and nothing else uses it.** |
+
+Ports 3000 and 4000 are the panel and backend containers. They bind to
+`127.0.0.1` deliberately — nginx proxies them, and they must *not* be
+reachable from outside.
+
+**Agent node** — whatever the installer was told to listen on, which is
+443 for REALITY plus any of: 2053 (VLESS+TLS, and the WebSocket path that
+shares it), 8443 (Trojan), the Shadowsocks port you chose, 51820/udp
+(WireGuard) and 1194/udp (OpenVPN).
 
 ## Repo layout
 

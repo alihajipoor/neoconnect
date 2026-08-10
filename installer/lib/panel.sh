@@ -233,6 +233,34 @@ action_install_panel() {
   echo
   echo "Panel installed. Visit: https://$domain"
   echo "Daily backups are scheduled for 3am via /etc/cron.d/neoxify-backup (see docs/backup-restore.md)."
+
+  # Said here, at the end, because it is the one remaining thing this
+  # script cannot do for you and the way it fails is genuinely baffling.
+  #
+  # Most providers attach a firewall permitting only 22/80/443. The panel
+  # is then perfect in a browser while every node sits PENDING forever,
+  # because agents speak gRPC on 50051 and nothing else in the product
+  # uses that port -- so nothing else looks wrong. Measured on a Hetzner
+  # box during a migration: 80 and 443 reachable, 50051 dropped, with an
+  # identically-configured host elsewhere serving it fine.
+  cat <<PORTS
+
+  ---------------------------------------------------------------
+  One thing left, and it is outside this server.
+
+  If your provider has a cloud firewall (Hetzner, AWS, GCP, Oracle,
+  Vultr and others attach one by default), open inbound TCP 50051.
+
+    22    SSH
+    80    Let's Encrypt renewals and the HTTPS redirect
+    443   panel and API
+    50051 agent gRPC   <-- the one that is usually missed
+
+  Without 50051 the panel works and every node stays PENDING with no
+  visible error. Ports 3000 and 4000 bind to localhost on purpose and
+  must NOT be opened.
+  ---------------------------------------------------------------
+PORTS
 }
 
 # Real bug found live (2026-07-24): a box whose original install's TLS
