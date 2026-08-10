@@ -72,6 +72,22 @@ enum Protocol {
   SHADOWSOCKS
   WIREGUARD
   OPENVPN
+  /// IKEv2/IPsec, served by strongSwan and dialled by the operating
+  /// system's own VPN client on both Windows and Android. The only
+  /// protocol here that needs no engine shipped with the app.
+  ///
+  /// Added against the M22 decision that excluded it, because real
+  /// customers turned out to have networks where it is the only thing
+  /// that connects. That is worth more than the reasoning it overturns.
+  ///
+  /// It is also the easiest protocol here to identify: fixed UDP 500 and
+  /// 4500, a handshake in the clear, no disguise. TCP encapsulation
+  /// (RFC 8229) would help against crude UDP blocking but not against
+  /// inspection, and neither platform's built-in client appears to
+  /// implement it. So it belongs on its own address, away from the
+  /// stealth protocols, or a censor blocking this one takes them with
+  /// it -- see the node topology notes in the plan.
+  IKEV2
 }
 
 /// How a protocol's bytes travel. Only meaningful for the Xray-based
