@@ -25,7 +25,6 @@ import com.wireguard.android.backend.Backend
 import com.wireguard.android.backend.GoBackend
 import com.wireguard.android.backend.Tunnel
 import com.wireguard.config.Config
-import neoxifyxray.Neoxifyxray
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.StringReader
@@ -124,16 +123,6 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
      * silently is the same dishonesty as a false "Connected". */
     private var activeProtocol: String? = null
 
-    /** Whether this process has ever started the xray engine.
-     *
-     * Gates every read of the Go library, so a customer who only uses
-     * WireGuard never loads it at all. Deliberately not derived from
-     * activeProtocol: that is cleared on disconnect, while the library
-     * stays loaded for the life of the process, and asking it after a
-     * disconnect is both safe and correct. */
-    @Volatile
-    private var xrayStarted = false
-
     @InvokeArg
     class XrayProfile {
         /** The complete xray-core config, built by the app.
@@ -231,33 +220,52 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             // second silently replaces the first.
             runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
 
+            // Stale state from a previous attempt would be read as this
+            // one's result, and the answer would arrive before the work.
+            NeoxifyTunService.clearState(activity)
+
             val intent = Intent(activity, NeoxifyTunService::class.java)
+                .putExtra(NeoxifyTunService.EXTRA_CONFIG, profile.config)
+                .putExtra(NeoxifyTunService.EXTRA_MTU, profile.mtu)
+                .putExtra(NeoxifyTunService.EXTRA_DNS, profile.dns)
+                .putStringArrayListExtra(NeoxifyTunService.EXTRA_APPS, ArrayList(profile.allowedApps))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 activity.startForegroundService(intent)
             } else {
                 activity.startService(intent)
             }
 
-            val service = awaitService()
-                ?: throw IllegalStateException("The VPN service did not start")
+            // The service runs in its own process, so there is no object
+            // to call and no exception to catch: it reports back through
+            // the state file instead. Waiting here keeps this command's
+            // contract unchanged for the ladder above, which still needs
+            // "did this protocol come up" answered before it moves on.
+            when (val outcome = awaitTunnelState()) {
+                null -> throw IllegalStateException("The VPN service did not start")
+                else -> if (outcome.first == NeoxifyTunService.STATE_ERROR) {
+                    throw IllegalStateException(outcome.second ?: "The tunnel could not be started")
+                }
+            }
 
-            service.start(profile.config, profile.mtu, profile.dns, profile.allowedApps)
-            xrayStarted = true
             activeProtocol = profile.protocol
             JSObject()
         }
     }
 
-    /** Waits briefly for the service to come up. Polling rather than
-     * binding because the wait is short and a ServiceConnection would add
-     * a lifecycle to unwind on every failure path. */
-    private fun awaitService(): NeoxifyTunService? {
-        val deadline = System.currentTimeMillis() + SERVICE_START_TIMEOUT_MS
+    /** Waits for the Xray process to say how it went.
+     *
+     * Polling a file rather than binding. The wait is short, a
+     * ServiceConnection would add a lifecycle to unwind on every failure
+     * path, and this survives the service process being restarted by the
+     * system mid-connect -- which a binding does not.
+     */
+    private fun awaitTunnelState(): Pair<String, String?>? {
+        val deadline = System.currentTimeMillis() + TUNNEL_START_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
-            NeoxifyTunService.instance?.let { return it }
-            Thread.sleep(50)
+            NeoxifyTunService.readState(activity)?.let { return it }
+            Thread.sleep(100)
         }
-        return NeoxifyTunService.instance
+        return null
     }
 
     @Command
@@ -287,20 +295,14 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun status(invoke: Invoke) = offMainThread(invoke, "status") { readStatus() }
 
     private fun readStatus(): JSObject {
-        // Two engines, either of which may be the live one -- but the
-        // xray one is asked only if it was ever started.
-        //
-        // Touching Neoxifyxray loads libgojni.so and starts a second Go
-        // runtime alongside the one inside WireGuard's libwg-go.so. Two
-        // of them initialising in the same process is a known way to
-        // crash, and status() runs on every dashboard load, so simply
-        // signing in was enough to bring the second runtime up for
-        // somebody who only ever uses WireGuard.
-        //
-        // Loading a 46MB engine to answer "is anything connected?" was
-        // wasteful regardless. It is now loaded when it is needed to
-        // carry traffic and not before.
-        val xrayUp = xrayStarted && runCatching { Neoxifyxray.running() }.getOrDefault(false)
+        // Two engines, either of which may be the live one.
+        // Read from the file the Xray process publishes, never by calling
+        // into the engine. Calling Neoxifyxray here would load a second
+        // Go runtime into this process alongside WireGuard's, which is
+        // the whole thing running that service separately exists to
+        // prevent -- and status runs on every dashboard load, so it
+        // would happen to customers who never touch a stealth protocol.
+        val xrayUp = NeoxifyTunService.readState(activity)?.first == NeoxifyTunService.STATE_UP
         val wireguardUp = try {
             backend.getState(tunnel) == Tunnel.State.UP
         } catch (e: Exception) {
@@ -447,6 +449,11 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
 
     companion object {
         private const val TAG = "NeoxifyVpn"
-        private const val SERVICE_START_TIMEOUT_MS = 5_000L
+        /** Covers the Xray process starting, the tunnel being
+         * established and xray-core loading a 46MB engine, so it is
+         * longer than the old service-start-only wait it replaces. Still
+         * inside the ladder's per-attempt budget, so a protocol that
+         * hangs does not stall the whole failover sweep. */
+        private const val TUNNEL_START_TIMEOUT_MS = 20_000L
     }
 }

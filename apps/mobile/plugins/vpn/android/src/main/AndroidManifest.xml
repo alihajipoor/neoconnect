@@ -21,11 +21,29 @@
 
         <!-- The Xray protocols' own TUN device. Separate from WireGuard's
              above because that one belongs to the WireGuard library and
-             cannot be reused; only one is ever active at a time. -->
+             cannot be reused; only one is ever active at a time.
+
+             Runs in its own process, and that is load-bearing rather
+             than tidiness. The app links two independent Go runtimes:
+             libwg-go.so inside WireGuard's GoBackend, built with go1.20,
+             and libgojni.so carrying xray-core, built with go1.26. Both
+             install signal handlers. With both live in one process, a
+             connect that tried Xray and then fell back to WireGuard
+             died on a SIGSEGV inside libwg-go.so - reproduced on an
+             emulator, null dereference, one frame, immediately after the
+             second tunnel came up.
+
+             A Go runtime cannot be unloaded once dlopen'd, so the only
+             way for the two never to coexist is for them never to share
+             an address space. The Xray engine loads here; WireGuard's
+             stays in the main process, untouched and still the proven
+             path. Nothing in the main process may call Neoxifyxray, or
+             it pulls the second runtime back in and undoes this. -->
         <service
             android:name="com.neoxify.vpn.NeoxifyTunService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:foregroundServiceType="systemExempted"
+            android:process=":xray"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.net.VpnService" />

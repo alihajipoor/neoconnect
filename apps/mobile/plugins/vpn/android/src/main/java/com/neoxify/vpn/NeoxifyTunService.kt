@@ -67,10 +67,56 @@ class NeoxifyTunService : VpnService(), Protector {
             // that never calls startForeground is killed by the system
             // anyway, with an ANR rather than this log line.
             instance = null
+            publish(STATE_ERROR, e.message ?: e.toString())
             stopSelf()
             return START_NOT_STICKY
         }
+
+        // The tunnel's details arrive in the Intent rather than through a
+        // method call on this object. They have to: this service runs in
+        // its own process now (see the manifest), so the plugin holds no
+        // reference it could call, and the static `instance` it used to
+        // use is a different static in a different address space.
+        val config = intent?.getStringExtra(EXTRA_CONFIG)
+        if (config != null) {
+            val mtu = intent.getIntExtra(EXTRA_MTU, 1500)
+            val dns = intent.getStringExtra(EXTRA_DNS) ?: "1.1.1.1"
+            val apps = intent.getStringArrayListExtra(EXTRA_APPS) ?: arrayListOf()
+            // Off the main thread: establish() and xray's startup both
+            // block, and this is the system's main-thread callback.
+            Thread({
+                try {
+                    start(config, mtu, dns, apps)
+                    publish(STATE_UP, null)
+                } catch (t: Throwable) {
+                    // Throwable: a native engine failing to load arrives
+                    // as an Error, and an uncaught one here would take
+                    // the process with it instead of failing the connect.
+                    Log.e(TAG, "starting the tunnel failed", t)
+                    publish(STATE_ERROR, t.message ?: t.toString())
+                    teardown()
+                    stopSelf()
+                }
+            }, "neoxify-xray-start").start()
+        }
         return START_STICKY
+    }
+
+    /** Reports state to the main process.
+     *
+     * A file in the app's own storage rather than a Binder or a
+     * broadcast. Both processes share this directory, it survives either
+     * one being restarted by the system, and it needs no lifecycle to
+     * unwind on the failure paths -- which for a VPN service are most of
+     * them. The payload is small and written whole, so a reader either
+     * sees the previous state or the new one.
+     */
+    private fun publish(state: String, detail: String?) {
+        try {
+            stateFile(this).writeText(if (detail == null) state else "$state\n$detail")
+        } catch (e: Exception) {
+            Log.w(TAG, "could not publish state", e)
+        }
     }
 
     /** Called by xray-core, from Go, for every outbound socket. */
@@ -79,6 +125,11 @@ class NeoxifyTunService : VpnService(), Protector {
     override fun onDestroy() {
         teardown()
         instance = null
+        // The main process reads the absence of this file as "nothing is
+        // running", so it has to go whenever this service does --
+        // including when the system kills the service rather than the
+        // customer disconnecting.
+        clearState(this)
         super.onDestroy()
     }
 
@@ -198,6 +249,39 @@ class NeoxifyTunService : VpnService(), Protector {
         private const val TAG = "NeoxifyTun"
         private const val CHANNEL_ID = "neoxify-vpn"
         private const val NOTIFICATION_ID = 1
+
+        // How the tunnel's details cross the process boundary. Everything
+        // the old in-process `start(...)` call took, as Intent extras.
+        const val EXTRA_CONFIG = "com.neoxify.vpn.CONFIG"
+        const val EXTRA_MTU = "com.neoxify.vpn.MTU"
+        const val EXTRA_DNS = "com.neoxify.vpn.DNS"
+        const val EXTRA_APPS = "com.neoxify.vpn.APPS"
+
+        const val STATE_UP = "up"
+        const val STATE_ERROR = "error"
+
+        /** Where this service tells the main process how it went.
+         *
+         * Both processes belong to the same app and share this
+         * directory, so no permissions or provider are involved. Absent
+         * means "not running", which is also the correct reading after
+         * the system kills either process. */
+        fun stateFile(context: android.content.Context): java.io.File =
+            java.io.File(context.filesDir, "xray-state")
+
+        /** Reads the published state, or null when nothing is running. */
+        fun readState(context: android.content.Context): Pair<String, String?>? = try {
+            val f = stateFile(context)
+            if (!f.exists()) null
+            else f.readText().split("\n", limit = 2).let { it[0] to it.getOrNull(1) }
+        } catch (e: Exception) {
+            Log.w(TAG, "could not read state", e)
+            null
+        }
+
+        fun clearState(context: android.content.Context) {
+            runCatching { stateFile(context).delete() }
+        }
 
         /** The running service, or null.
          *
