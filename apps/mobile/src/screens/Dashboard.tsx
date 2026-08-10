@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
+import { ChevronRight, Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "@shared/lib/customer";
 import { logout } from "@shared/lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "@shared/lib/types";
@@ -684,10 +684,21 @@ export function Dashboard({
               </div>
 
               <div className="animate-rise grid grid-cols-3 gap-2">
+                {/* Both open the picker. Customers tapped these tiles
+                    -- which highlight on touch and show the very value
+                    they wanted to change -- and reported the app broken
+                    when nothing happened, because the working control
+                    was a separate button further down showing the same
+                    text. The tile is the control now. */}
                 <Stat
                   icon={<Globe className="size-3" />}
                   label={t("dash.server")}
                   value={currentRoute ? currentRoute.location.region : "—"}
+                  onClick={() => setShowLocationPicker(true)}
+                  actionLabel={t("dash.change")}
+                  disabledReason={
+                    connectionState === "disconnected" ? undefined : t("dash.disconnectToChange")
+                  }
                 />
                 <Stat
                   icon={<Shield className="size-3" />}
@@ -696,6 +707,11 @@ export function Dashboard({
                     protocolUser
                       ? (CUSTOMER_PROTOCOL_LABELS[protocolUser.protocol] ?? protocolUser.protocol)
                       : "—"
+                  }
+                  onClick={() => setShowLocationPicker(true)}
+                  actionLabel={t("dash.change")}
+                  disabledReason={
+                    connectionState === "disconnected" ? undefined : t("dash.disconnectToChange")
                   }
                 />
                 <Stat
@@ -774,10 +790,15 @@ export function Dashboard({
               >
                 <span className="flex items-center gap-2">
                   <MapPin className="size-4 text-primary" />
-                  {currentRoute ? currentRoute.location.region : t("dash.changeLocation")}
+                  {t("dash.changeLocation")}
                 </span>
-                <span className="text-xs text-muted-foreground">{t("dash.change")}</span>
+                <ChevronRight className="size-4 text-muted-foreground" />
               </Button>
+              {connectionState !== "disconnected" ? (
+                <p className="-mt-1 text-center text-xs text-muted-foreground">
+                  {t("dash.disconnectToChange")}
+                </p>
+              ) : null}
             </>
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-4">

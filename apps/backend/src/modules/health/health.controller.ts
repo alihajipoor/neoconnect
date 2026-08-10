@@ -4,6 +4,29 @@ import { SkipThrottle } from "@nestjs/throttler";
 import { PrismaService } from "../../prisma/prisma.service";
 import { clientIpOf } from "../../common/client-ip";
 
+/** The caller's country, as a two-letter code, when the CDN told us.
+ *
+ * Cloudflare adds this to every proxied request, so it costs nothing --
+ * no GeoIP database to ship, license or keep current. It is only used to
+ * pick a first-run language, which is why a wrong or missing answer is
+ * harmless: the customer sees English and the language switch is right
+ * there in Settings.
+ *
+ * Absent whenever the request did not come through the CDN -- a node's
+ * API mirror, or the origin dialled directly -- and callers must treat
+ * that as "unknown" rather than as anywhere in particular.
+ *
+ * "XX" is Cloudflare's own value for an address it cannot place, and "T1"
+ * is what it reports for Tor. Both are noise here, so both are dropped
+ * rather than passed on as if they meant something.
+ */
+function countryOf(req: Request): string | undefined {
+  const raw = req.headers["cf-ipcountry"];
+  const code = (Array.isArray(raw) ? raw[0] : raw)?.trim().toUpperCase();
+  if (!code || code === "XX" || code === "T1") return undefined;
+  return code;
+}
+
 @Controller("health")
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}
@@ -33,7 +56,7 @@ export class HealthController {
   @SkipThrottle()
   @Get("ip")
   ip(@Ip() ip: string, @Req() req: Request) {
-    return { ip: clientIpOf(req) || ip };
+    return { ip: clientIpOf(req) || ip, country: countryOf(req) };
   }
 
   @Get()
