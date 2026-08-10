@@ -12,6 +12,10 @@ import { Settings } from "@shared/screens/Settings";
 import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
 
+/** How often a queued diagnostic report retries. Matches the desktop
+ * client so the two do not report at different rates for no reason. */
+const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
+
 /** The Android client.
  *
  * Every screen here except the Dashboard is the Windows client's,
@@ -59,8 +63,18 @@ export default function App() {
   // Anything the device could not report at the time -- which is every
   // "could not reach the control plane", since it cannot be reported
   // while it is true -- goes out now. Unawaited and silent by design.
+  //
+  // Retried on a timer as well as at startup. Flushing only on a cold
+  // start meant the reports that matter most never arrived: a customer
+  // whose network is being interfered with keeps the app open and keeps
+  // retrying, so the moment when the control plane is reachable again
+  // often came while the app was already running. The panel has
+  // recorded successes and not one failure from any customer, which is
+  // not what was happening -- only what we could see.
   useEffect(() => {
     void flushAttempts();
+    const timer = setInterval(() => void flushAttempts(), FLUSH_INTERVAL_MS);
+    return () => clearInterval(timer);
   }, []);
 
   // Deliberately no deep-link handling, unlike the Windows client.
