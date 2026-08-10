@@ -431,7 +431,17 @@ export function Dashboard({
           setExitIp(verdict.state === "throughTunnel" ? verdict.exitIp : null);
           // Only when it is not what they asked for. Announcing "switched
           // to Fast" to somebody who chose Fast is noise.
-          if (chosen && candidate.routeId !== chosen.routeId) setFailedOverTo(label);
+          //
+          // Keyed on chosenRouteId, not `chosen`. `chosen` falls back to
+          // all[0] so the unsupported-protocol notice has something to
+          // name, and all[0] is just whichever credential the API listed
+          // first -- nobody picked it. Testing against that told every
+          // customer on a fresh install "your usual protocol didn't get
+          // through" the first time they connected, when they had chosen
+          // nothing and nothing had failed. Seen twice while testing
+          // before it was recognised as a bug rather than the ladder
+          // reporting real work.
+          if (chosenRouteId && candidate.routeId !== chosenRouteId) setFailedOverTo(label);
           setConnectionState("connected");
           // Successes carry the denominator. A failure count without one
           // cannot distinguish "the tablet build is broken" from "one
