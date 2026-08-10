@@ -199,6 +199,15 @@ EOF
     install_openvpn
   fi
 
+  # Defaults to no, unlike the others. IKEv2 is the easiest protocol
+  # here to fingerprint, so it belongs on a node kept apart from the
+  # stealth ones rather than added everywhere out of habit.
+  echo
+  read -r -p "Install IKEv2 (strongSwan) on this node now? [y/N]: " install_ikev2_choice
+  if [[ "${install_ikev2_choice,,}" == "y" ]]; then
+    install_ikev2
+  fi
+
   cat <<EOF
 
 Done. "$node_name" is registered with its engines and routes, and should
@@ -1180,6 +1189,173 @@ choose_exit_protocol_config() {
 # only for this one API call), same shape as install_xray/
 # install_wireguard's own prompts -- no separate manual panel/curl step
 # required first.
+# IKEv2/IPsec via strongSwan.
+#
+# The only protocol here with no client-side component: Windows and
+# Android both dial IKEv2 with the operating system's own VPN client, so
+# nothing ships in the app and -- after two Go runtimes in one Android
+# process turned out to segfault it -- no third native engine either.
+#
+# The cost is that the client is not ours, which fixes two things:
+#
+#   * UDP 500 and 4500, always. Neither built-in client offers a way to
+#     say otherwise, so IKEv2 sits out the randomised-port work.
+#   * Customers must connect by hostname. The server presents a real
+#     certificate and Windows refuses one whose name does not match what
+#     was typed, so a node offering IKEv2 needs a DNS name, not just an
+#     address.
+#
+# Both are reasons to keep IKEv2 away from the stealth protocols: fixed
+# ports and a handshake in the clear make it the easiest thing here to
+# fingerprint, and a censor that blocks the address rather than the port
+# takes everything sharing it down too.
+install_ikev2() {
+  echo "Installing IKEv2 (strongSwan)..."
+
+  local hostname_default hostname_input listen_pool
+  hostname_default="$(hostname -f 2>/dev/null || true)"
+  read -r -p "DNS name clients will connect to (must resolve to this node) [$hostname_default]: " hostname_input
+  hostname_input="${hostname_input:-$hostname_default}"
+  if [[ -z "$hostname_input" ]]; then
+    echo "  IKEv2 needs a DNS name: the certificate is issued for it and Windows checks it." >&2
+    return 1
+  fi
+  if ! getent hosts "$hostname_input" >/dev/null 2>&1; then
+    echo "  $hostname_input does not resolve. Point it at this node first --" >&2
+    echo "  certbot cannot issue a certificate for a name that does not answer." >&2
+    return 1
+  fi
+
+  # libcharon-extra-plugins is not optional despite the name: it is what
+  # provides eap-mschapv2. Without it the connection loads cleanly and
+  # every authentication fails, which is a confusing way to discover a
+  # missing package.
+  apt-get install -y -qq strongswan strongswan-swanctl libcharon-extra-plugins certbot
+
+  echo "  Obtaining a certificate for $hostname_input..."
+  # Standalone binds port 80 for the challenge. A node has no web server
+  # of its own, so nothing is displaced; the panel installer uses the
+  # nginx plugin instead because there something would be.
+  if ! certbot certonly --standalone --non-interactive --agree-tos \
+      --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
+    echo "  certbot could not issue a certificate for $hostname_input." >&2
+    echo "  Check inbound TCP 80 reaches this node, including any cloud firewall." >&2
+    return 1
+  fi
+
+  # strongSwan reads its own tree, not Let's Encrypt's.
+  install -d -m 755 /etc/swanctl/x509 /etc/swanctl/x509ca /etc/swanctl/conf.d
+  install -d -m 700 /etc/swanctl/private
+  cp "/etc/letsencrypt/live/$hostname_input/cert.pem" /etc/swanctl/x509/node.pem
+  cp "/etc/letsencrypt/live/$hostname_input/chain.pem" /etc/swanctl/x509ca/chain.pem
+  cp "/etc/letsencrypt/live/$hostname_input/privkey.pem" /etc/swanctl/private/node.key
+  chmod 600 /etc/swanctl/private/node.key
+
+  # Renewal must refresh swanctl's copies too, or ninety days from now
+  # the node serves an expired certificate and every client refuses it.
+  install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+  {
+    echo "#!/bin/sh"
+    echo "# Installed by the Neoxify agent installer."
+    echo "set -e"
+    echo "cp /etc/letsencrypt/live/$hostname_input/cert.pem /etc/swanctl/x509/node.pem"
+    echo "cp /etc/letsencrypt/live/$hostname_input/chain.pem /etc/swanctl/x509ca/chain.pem"
+    echo "cp /etc/letsencrypt/live/$hostname_input/privkey.pem /etc/swanctl/private/node.key"
+    echo "chmod 600 /etc/swanctl/private/node.key"
+    echo "swanctl --load-creds >/dev/null 2>&1 || true"
+  } > /etc/letsencrypt/renewal-hooks/deploy/neoxify-ikev2.sh
+  chmod 755 /etc/letsencrypt/renewal-hooks/deploy/neoxify-ikev2.sh
+
+  listen_pool="10.68.0.0/24"
+  cat > /etc/swanctl/conf.d/neoxify.conf <<CONF
+# Managed by the Neoxify agent installer.
+connections {
+    neoxify-ikev2 {
+        version = 2
+        proposals = aes256gcm16-prfsha384-ecp384, aes256-sha256-modp2048, default
+        rekey_time = 0s
+        pools = neoxify-pool
+        local_addrs = %any
+        remote_addrs = %any
+        send_cert = always
+        local {
+            auth = pubkey
+            certs = node.pem
+            id = $hostname_input
+        }
+        remote {
+            auth = eap-mschapv2
+            eap_id = %any
+        }
+        children {
+            neoxify-ikev2 {
+                local_ts = 0.0.0.0/0, ::/0
+                rekey_time = 0s
+                dpd_action = clear
+                esp_proposals = aes256gcm16-ecp384, aes256-sha256, default
+            }
+        }
+    }
+}
+pools {
+    neoxify-pool {
+        addrs = $listen_pool
+        dns = 1.1.1.1, 8.8.8.8
+    }
+}
+CONF
+
+  # The agent owns this file from here on and rewrites it wholesale as
+  # customers come and go. Created empty rather than left absent so
+  # swanctl has something to load before the first customer exists.
+  if [[ ! -f /etc/swanctl/conf.d/neoxify-users.conf ]]; then
+    printf 'secrets {\n}\n' > /etc/swanctl/conf.d/neoxify-users.conf
+  fi
+  chmod 600 /etc/swanctl/conf.d/neoxify-users.conf
+
+  # Forwarding and NAT, or the tunnel comes up and carries nothing. That
+  # fault shipped once already for WireGuard and OpenVPN: handshake fine,
+  # no internet, and nothing in any log to say why. Uplink detected
+  # rather than assumed to be eth0, since providers differ.
+  local uplink
+  uplink="$(ip route show default | awk '{print $5; exit}')"
+  if [[ -z "$uplink" ]]; then
+    echo "  Could not determine this node's default interface; skipping NAT." >&2
+  else
+    printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/99-neoxify-ikev2.conf
+    sysctl -q -p /etc/sysctl.d/99-neoxify-ikev2.conf
+    iptables -t nat -C POSTROUTING -s "$listen_pool" -o "$uplink" -j MASQUERADE 2>/dev/null || \
+      iptables -t nat -A POSTROUTING -s "$listen_pool" -o "$uplink" -j MASQUERADE
+    iptables -C FORWARD -s "$listen_pool" -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$listen_pool" -j ACCEPT
+    iptables -C FORWARD -d "$listen_pool" -j ACCEPT 2>/dev/null || iptables -I FORWARD -d "$listen_pool" -j ACCEPT
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent >/dev/null 2>&1 || true
+    netfilter-persistent save >/dev/null 2>&1 || true
+  fi
+
+  systemctl enable --now strongswan >/dev/null 2>&1 || \
+    systemctl enable --now strongswan-starter >/dev/null 2>&1 || true
+  if ! swanctl --load-all >/dev/null 2>&1; then
+    echo "  strongSwan refused the configuration; swanctl --load-all shows why." >&2
+    return 1
+  fi
+
+  local config_id params
+  params="$(jq -n --arg host "$hostname_input" --arg pool "$listen_pool" \
+    '{endpointHost: $host, pool: $pool, auth: "eap-mschapv2"}')"
+  # 500 is what the panel records. 4500 is used as well, the moment NAT
+  # is detected, but one column holds one number and every connection
+  # starts on 500.
+  config_id="$(register_protocol_config "IKEV2" 500 "$params")" || return 1
+  create_route_for_config "IKEv2" "$config_id"
+
+  echo
+  echo "  IKEv2 is listening on UDP 500 and 4500."
+  echo "  Clients must connect to $hostname_input rather than this node's IP:"
+  echo "  the certificate names the host and Windows checks it."
+  echo "  If your provider has a cloud firewall, open inbound UDP 500 and 4500"
+  echo "  on it -- this script cannot."
+}
+
 install_openvpn() {
   echo "Installing OpenVPN..."
   apt-get install -y -qq openvpn
@@ -1351,14 +1527,16 @@ action_engines_agent() {
   1) Install/reconfigure Xray (VLESS+REALITY)
   2) Install/reconfigure WireGuard
   3) Install/reconfigure OpenVPN
-  4) Back
+  4) Install/reconfigure IKEv2 (strongSwan)
+  5) Back
 
 EOF
-  read -r -p "Choose [1-4]: " choice
+  read -r -p "Choose [1-5]: " choice
   case "$choice" in
     1) install_xray ;;
     2) install_wireguard ;;
     3) install_openvpn ;;
+    4) install_ikev2 ;;
     *) return ;;
   esac
 }
