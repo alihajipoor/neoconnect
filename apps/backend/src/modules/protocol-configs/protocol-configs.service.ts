@@ -102,12 +102,23 @@ export class ProtocolConfigsService {
     // Xray/WireGuard (their installers already regenerated fresh node-local
     // keys on re-run, so the old publicParamsJson here would just go stale
     // instead of being replaced).
+    // Transport is part of the identity: the same protocol on the same
+    // port carried two ways is two configs, not a clash. VLESS over TLS
+    // and VLESS inside a WebSocket share a port deliberately.
+    const transport = dto.transport ?? "TCP";
     const existing = await this.prisma.protocolConfig.findUnique({
-      where: { nodeId_protocol_listenPort: { nodeId: dto.nodeId, protocol: dto.protocol, listenPort: dto.listenPort } },
+      where: {
+        nodeId_protocol_listenPort_transport: {
+          nodeId: dto.nodeId,
+          protocol: dto.protocol,
+          listenPort: dto.listenPort,
+          transport,
+        },
+      },
     });
     if (existing) {
       throw new ConflictException(
-        `A ${dto.protocol} protocol config already exists on this node at port ${dto.listenPort} (id ${existing.id}). ` +
+        `A ${dto.protocol} protocol config already exists on this node at port ${dto.listenPort} over ${transport} (id ${existing.id}). ` +
           "Delete it first if you're genuinely reconfiguring -- note that for OPENVPN this invalidates every client cert already issued against its CA.",
       );
     }
@@ -178,16 +189,22 @@ export class ProtocolConfigsService {
     if (dto.listenPort !== undefined && dto.listenPort !== existing.listenPort) {
       const clash = await this.prisma.protocolConfig.findUnique({
         where: {
-          nodeId_protocol_listenPort: {
+          nodeId_protocol_listenPort_transport: {
             nodeId: existing.nodeId,
             protocol: existing.protocol,
             listenPort: dto.listenPort,
+            // The row's own transport: an update can move the port but
+            // not the carrier, so the question is whether that port is
+            // already taken by a config carried the same way. A
+            // WebSocket sibling there is not a collision -- sharing a
+            // port is the design.
+            transport: existing.transport,
           },
         },
       });
       if (clash) {
         throw new ConflictException(
-          `Another ${existing.protocol} config already uses port ${dto.listenPort} on this node (id ${clash.id}).`,
+          `Another ${existing.protocol} config already uses port ${dto.listenPort} on this node over ${existing.transport} (id ${clash.id}).`,
         );
       }
     }
