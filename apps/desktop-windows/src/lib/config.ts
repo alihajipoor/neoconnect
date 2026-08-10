@@ -37,8 +37,20 @@ export const PRODUCTION_API_BASE_URLS: readonly string[] = [
   // Different addresses from the panel, so a block on its IP does not
   // touch them. Last, because a node is a detour and the direct paths
   // above are quicker when they work.
-  "https://fi1.neoxify.com:2053/api",
-  "https://fr1.neoxify.com:2053/api",
+  //
+  // On .site, and that is the whole point of moving them. While these
+  // were .com subdomains the mirrors shared a registrable domain with
+  // the panel origin, so a name-based block -- DNS poisoning or SNI
+  // filtering on neoxify.com, neither of which cares about IP addresses
+  // -- would have taken out the panel and every fallback together. That
+  // is exactly the single point of failure the second domain exists to
+  // remove, and the nodes had been left outside it.
+  //
+  // The certificates on both nodes were expanded to cover the .site name
+  // alongside the .com one before this changed; a name the certificate
+  // does not carry fails the handshake before any request is sent.
+  "https://fi1.neoxify.site:2053/api",
+  "https://fr1.neoxify.site:2053/api",
 ];
 
 /** Dev talks to the local backend port; a real build talks to the public
