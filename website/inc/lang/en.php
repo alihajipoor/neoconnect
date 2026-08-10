@@ -50,7 +50,7 @@ return array(
     'meta.home.description' => 'Encrypted, low-latency connections built for gaming on networks that filter heavily. One app, several ways to connect, and no configuration files to import.',
 
     'meta.download.title' => 'Download — Neoxify',
-    'meta.download.description' => 'Get the Neoxify app for Windows. macOS, Android and iOS are in development.',
+    'meta.download.description' => 'Get the Neoxify app for Windows and Android. macOS and iOS are in development.',
 
     'meta.contact.title' => 'Contact — Neoxify',
     'meta.contact.description' => 'Questions about Neoxify? Send us a message and we will get back to you.',
@@ -86,8 +86,13 @@ return array(
     'home.hero.cta_primary' => 'Download for Windows',
     'home.hero.cta_primary_soon' => 'See download options',
     'home.hero.cta_secondary' => 'See plans',
-    'home.hero.note_available' => 'Windows app available now. macOS, Android and iOS are in development.',
-    'home.hero.note_soon' => 'Windows app releasing soon. macOS, Android and iOS are in development.',
+    'home.hero.note_available' => 'Windows and Android apps available now. macOS and iOS are in development.',
+    'home.hero.note_soon' => 'Windows app releasing soon. macOS and iOS are in development.',
+
+    'beta.badge' => 'Beta',
+    'beta.hero' => 'In beta — early, and moving fast.',
+    'beta.title' => 'Neoxify is in beta',
+    'beta.body' => 'The service works and people are using it every day, but it is early. Things change quickly and you may run into rough edges. If something breaks, tell us — support is inside the app, or use the contact form. Hearing about it is the whole point of this phase.',
 
     // -----------------------------------------------------------------
     // Home — features
@@ -242,7 +247,7 @@ return array(
     // -----------------------------------------------------------------
 
     'download.title' => 'Download Neoxify',
-    'download.subtitle' => 'One installer. The app handles accounts, plans and connections itself — there is nothing else to install alongside it.',
+    'download.subtitle' => 'One app per device. It handles accounts, plans and connections itself — there is nothing else to install alongside it.',
 
     'download.windows.name' => 'Windows',
     'download.windows.requirements' => 'Windows 10 or 11, 64-bit',
@@ -256,16 +261,32 @@ return array(
     'download.unreleased.cta' => 'Tell me when it is out',
 
     'download.autoupdate.title' => 'This is the only download you will need',
-    'download.autoupdate.body' => 'Once it is installed, the app keeps itself up to date — it checks for new versions and installs them on its own. You will not have to come back to this page for the next release.',
+    'download.autoupdate.android' => 'Android is the exception: the system does not let an app replace itself, so when a new version is out, download it from this page again and install over the top. Your account and settings are kept.',
+    'download.autoupdate.body' => 'Once it is installed, the Windows app keeps itself up to date — it checks for new versions and installs them on its own. You will not have to come back to this page for the next release.',
 
     'download.unsigned.title' => 'About the warning Windows will show you',
     'download.unsigned.body' => 'The installer is not code-signed yet, so Windows SmartScreen may show a blue "Windows protected your PC" screen the first time you run it. Choose More info, then Run anyway. A signing certificate is on the list before public launch. Until then, only ever download from this page — the button here always comes from us.',
 
-    'download.steps.title' => 'Installing',
+    'download.steps.title' => 'Installing on Windows',
     'download.steps.1' => 'Run the installer. It installs for your user account only and does not ask for administrator rights.',
     'download.steps.2' => 'Open Neoxify and create your account, or sign in if you already have one.',
     'download.steps.3' => 'Confirm your email address with the code we send you.',
     'download.steps.4' => 'Choose a location and connect. Windows will ask for permission the first time a tunnel is created.',
+
+
+    // --- Android ---------------------------------------------------
+    'download.android.name' => 'Android',
+    'download.android.requirements' => 'Android 7 or newer, 64-bit',
+    'download.android.button' => 'Download for Android',
+
+    'download.android.sideload.title' => 'Your phone will ask before installing',
+    'download.android.sideload.body' => 'Android only installs apps from outside the Play Store once you allow it. When you open the downloaded file, your phone will ask whether to permit installs from your browser — allow it, then tap Install. The warning is Android being careful about where the file came from, not a sign that anything is wrong with it.',
+
+    'download.android.steps.title' => 'Installing on Android',
+    'download.android.steps.1' => 'Tap the download button, then open the file when it finishes.',
+    'download.android.steps.2' => 'Allow your browser to install apps if your phone asks, then tap Install.',
+    'download.android.steps.3' => 'Open Neoxify, create your account or sign in, and confirm your email with the code we send you.',
+    'download.android.steps.4' => 'Choose a location and connect. Android will ask once for permission to create a VPN — tap OK.',
 
     'download.other.title' => 'Other platforms',
     'download.other.body' => 'These are in development. We would rather ship them properly than ship them early.',

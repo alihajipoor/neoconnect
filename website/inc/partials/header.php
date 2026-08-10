@@ -26,6 +26,9 @@ $nx_links = array(
     <a class="brand" href="<?php echo nx_esc(nx_url('home')); ?>">
       <span class="brand__mark"><?php echo nx_logo_mark(); ?></span>
       <span><?php echo nx_e('brand.name'); ?></span>
+      <?php if (nx_beta()): ?>
+        <span class="brand__beta"><?php echo nx_e('beta.badge'); ?></span>
+      <?php endif; ?>
     </a>
 
     <nav class="site-nav" aria-label="<?php echo nx_e('nav.menu'); ?>">

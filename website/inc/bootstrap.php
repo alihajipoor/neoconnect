@@ -250,10 +250,36 @@ function nx_windows_download_url()
     return trim((string) nx_cfg('windows_installer_url', ''));
 }
 
+/**
+ * Whether there is an Android build to link to.
+ *
+ * Separate from Windows rather than one "is the app out" flag: the two
+ * ship on their own schedules, and a page that hides Android because
+ * Windows is unset would be wrong in a way nobody would notice.
+ *
+ * @return bool
+ */
+function nx_android_available()
+{
+    return nx_android_download_url() !== '';
+}
+
+/** Download URL for the Android APK, or '' if unreleased. */
+function nx_android_download_url()
+{
+    return trim((string) nx_cfg('android_installer_url', ''));
+}
+
 /** URL of published checksums, or '' when none is configured. */
 function nx_windows_checksum_url()
 {
     return trim((string) nx_cfg('windows_checksums_url', ''));
+}
+
+/** Whether to show the beta badge and explanation. */
+function nx_beta()
+{
+    return (bool) nx_cfg('beta_enabled', false);
 }
 
 

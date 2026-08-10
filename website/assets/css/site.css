@@ -494,6 +494,32 @@ html[lang="fa"] .eyebrow {
   height: 100%;
 }
 
+/* Beta marker beside the wordmark. Cyan rather than violet so it reads as a
+   status, not as another call to action. */
+.brand__beta {
+  padding: 0.08rem 0.4rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(34, 211, 238, 0.4);
+  background: rgba(34, 211, 238, 0.12);
+  color: var(--highlight);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+html[lang="fa"] .brand__beta {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.hero__beta {
+  color: var(--highlight);
+  font-weight: 650;
+}
+
 .site-nav {
   display: none;
   align-items: center;

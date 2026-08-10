@@ -27,8 +27,8 @@ return array(
             'fa' => 'روی چه دستگاه‌هایی می‌توانم از آن استفاده کنم؟',
         ),
         'a' => array(
-            'en' => 'The Windows app is the one we ship today. macOS, Android and iOS clients are in development. Your plan decides how many devices can be connected at the same time.',
-            'fa' => 'در حال حاضر برنامه ویندوز را ارائه می‌کنیم. نسخه‌های مک، اندروید و iOS در حال توسعه هستند. تعداد دستگاه‌هایی که می‌توانند هم‌زمان متصل باشند به پلن شما بستگی دارد.',
+            'en' => 'Windows and Android today. macOS and iOS are in development. Your plan decides how many devices can be connected at the same time.',
+            'fa' => 'در حال حاضر ویندوز و اندروید. نسخه‌های مک و iOS در حال توسعه هستند. تعداد دستگاه‌هایی که می‌توانند هم‌زمان متصل باشند به پلن شما بستگی دارد.',
         ),
     ),
 

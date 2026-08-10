@@ -55,6 +55,32 @@ looks fine forever.
 in the repository, including agent releases, so it breaks the first time a
 non-desktop release is newer.
 
+### Android
+
+Same arrangement, its own endpoint:
+
+```php
+'android_installer_url' => 'https://connect.neoxify.site/api/updates/installer/android',
+```
+
+**One real difference, and the page reflects it.** The desktop build carries
+`tauri-plugin-updater` and updates itself; the Android build does not. So the
+Android card says to come back here for new versions, and the "this is the
+only download you will need" notice carries an explicit Android exception.
+Don't merge those into one cheerful claim unless the Android app gains an
+updater.
+
+Android also downloads as an APK rather than a Play Store install, so the page
+explains the "allow installs from this source" prompt up front. Somebody who
+meets that warning without being told reasonably assumes the file is suspect
+and stops.
+
+### Beta phase
+
+`beta_enabled` drives three things at once — a badge beside the wordmark, a
+line in the hero, and an explanation on the download page. Set it to `false`
+when the product leaves beta and all three disappear together.
+
 ### Other download settings
 
 - `windows_checksums_url` is empty by default. A checksum pinned to one release
