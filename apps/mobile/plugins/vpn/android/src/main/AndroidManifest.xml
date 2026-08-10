@@ -39,6 +39,26 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
+    <!-- Required by the `systemExempted` foreground-service type both
+         services above declare. Without it Android 14+ refuses the
+         startForeground() call with a SecurityException, and because that
+         call happens in onStartCommand -- on the main thread, dispatched
+         by the system, outside any of the plugin's try/catch -- the
+         process is killed outright.
+
+         That is not hypothetical: it is why every Xray protocol crashed
+         the app on 0.2.7. WireGuard was unaffected only because the
+         GoBackend service predates these rules and never calls
+         startForeground itself, which made the fault look like an Xray
+         problem when it was a manifest one.
+
+         `systemExempted` is the correct type here rather than a
+         workaround: the platform grants it to whichever app the user has
+         activated as their VPN (the android:activate_vpn appop, which is
+         one of the alternatives the check accepts). A VPN tunnel is not a
+         media, sync or location service, and there is no closer type. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+
     <!-- Android 11+ hides most installed packages from
          getInstalledApplications unless an app declares why it needs them.
          Custom mode is a per-app allow list, so the list of apps IS the
