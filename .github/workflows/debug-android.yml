@@ -11,10 +11,22 @@ name: Debug Android APK
 # release-android.yml, and a diagnosis is worth nothing if the build
 # itself is a variable.
 #
-# Debug rather than release: `--debug` produces an APK signed with the
-# standard Android debug key, which installs on an emulator without the
-# release keystore. It is deliberately NOT publishable -- no release is
-# created, the artifact expires, and the signing key is not ours.
+# Builds the RELEASE variant and signs it with a throwaway key generated
+# here, rather than `--debug`. Two reasons, one forced and one better:
+#
+#   - `--debug` does not build. D8 fails to dex
+#     com.wireguard.android:tunnel in the debug variant ("Attempt to
+#     create a global synthetic for 'Record desugaring' without a
+#     global-synthetics consumer") because that variant runs with
+#     enableGlobalSynthetics=false.
+#   - Reproducing a fault on a debug variant proves less anyway. Debug
+#     changes optimisation, assertions and native packaging, so a crash
+#     that only shows in release -- or only hides there -- would be
+#     invisible. This is the same variant customers run.
+#
+# The throwaway key is NOT the release keystore, so nothing built here
+# can update an installed app or be published. It exists only to satisfy
+# Android's "must be signed to install" rule on an emulator.
 on:
   workflow_dispatch:
     inputs:
@@ -83,15 +95,17 @@ jobs:
 
       - name: Build
         working-directory: apps/mobile
-        run: pnpm exec tauri android build --apk --debug --target ${{ inputs.target }}
+        run: pnpm exec tauri android build --apk --target ${{ inputs.target }}
 
-      - name: Collect the APK
+      - name: Sign with a throwaway key
         working-directory: apps/mobile
         run: |
           set -euo pipefail
-          apk=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)
-          echo "Built $apk"
-          cp "$apk" "Neoxify-debug-${{ inputs.target }}.apk"
+          keytool -genkeypair -v -keystore throwaway.jks -alias throwaway             -keyalg RSA -keysize 2048 -validity 30             -storepass throwaway -keypass throwaway             -dname "CN=Neoxify Debug, O=Neoxify, C=US"
+          unsigned=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-unsigned.apk' | head -1)
+          echo "Signing $unsigned"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign             --ks throwaway.jks --ks-key-alias throwaway             --ks-pass pass:throwaway --key-pass pass:throwaway             --out "Neoxify-debug-${{ inputs.target }}.apk" "$unsigned"
+          rm -f throwaway.jks
 
       - uses: actions/upload-artifact@v4
         with:
