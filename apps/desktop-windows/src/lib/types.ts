@@ -142,6 +142,11 @@ export interface RouteOption {
   id: string;
   name: string;
   protocol: Protocol;
+  /** How the protocol is carried. Needed to name the route: VLESS+TLS is
+   * sold as two different things depending on it, and without this the
+   * picker lists both under one name. Optional so an older backend that
+   * does not send it still works -- everything it served was TCP. */
+  transport?: string;
   isRelay: boolean;
   location: { region: string; nodeName: string };
   /** Entry endpoint the client dials. Used to measure latency locally --
