@@ -1304,6 +1304,12 @@ export function Dashboard({
         <LocationPicker
           subscriptionId={subscription.id}
           currentRouteId={protocolUser?.routeId}
+          // Latency cannot be measured from inside the tunnel; see
+          // the prop's own note. Anything but "disconnected" means
+          // routes are installed, including the verifying and
+          // degraded states where a tunnel exists but is not
+          // trusted yet.
+          tunnelActive={connectionState !== "disconnected"}
           onClose={() => setShowLocationPicker(false)}
           // Re-reads the provisioned connection rather than adopting the
           // switch response directly. Two reasons, one of which was a

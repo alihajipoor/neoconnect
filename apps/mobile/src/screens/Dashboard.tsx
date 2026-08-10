@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "@shared/lib/customer";
 import { logout } from "@shared/lib/auth";
@@ -63,9 +63,16 @@ const HANDSHAKE_STALE_SECS = 180;
  *
  * Returns as soon as there is proof, so a working connection stays fast.
  */
-async function confirmEgress(baselineIp: string | null): Promise<boolean> {
+async function confirmEgress(
+  baselineIp: string | null,
+  cancelled: () => boolean = () => false,
+): Promise<boolean> {
   const deadline = Date.now() + VERIFY_TIMEOUT_MS;
   for (;;) {
+    // Checked every pass, not only at the end: this loop is most of the
+    // time a hanging protocol spends in "checking connection", so a
+    // cancel that is not honoured here is a button that does nothing.
+    if (cancelled()) return false;
     const verdict = await verifyEgress(baselineIp);
     if (verdict.state === "throughTunnel") return true;
     // No baseline to compare against means the check cannot answer the
@@ -149,6 +156,16 @@ export function Dashboard({
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
+  /** Set when the customer presses the button during a connect.
+   *
+   * A ref rather than state because runLadder is one long async call:
+   * it captured its own copy of every state value when it started and
+   * would never see a later update. Without this the button did nothing
+   * at all while a protocol hung in "checking connection", and the only
+   * way out was to wait for the timeout -- reported from a real phone.
+   */
+  const cancelRef = useRef(false);
+
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
   const [baselineIp, setBaselineIp] = useState<string | null>(null);
@@ -305,6 +322,25 @@ export function Dashboard({
     setConnectionError(null);
     setPermissionDenied(false);
 
+    // Pressing the button during an attempt means stop, not start
+    // another. Handled before the connect path below, which would
+    // otherwise begin a second ladder on top of the running one.
+    if (connectionState === "connecting" || connectionState === "verifying") {
+      cancelRef.current = true;
+      setConnectionState("disconnecting");
+      try {
+        await disconnect();
+      } catch {
+        // The tunnel may not exist yet; the customer asked to stop
+        // either way, and reporting a teardown failure for something
+        // that was never up would be noise.
+      }
+      setConnectionState("disconnected");
+      setConnectedAt(null);
+      setExitIp(null);
+      return;
+    }
+
     if (connectionState === "connected" || connectionState === "degraded") {
       setConnectionState("disconnecting");
       try {
@@ -347,6 +383,7 @@ export function Dashboard({
   async function runLadder() {
     setFailedOverTo(null);
     setUnsupportedChoice(null);
+    cancelRef.current = false;
 
     const all = protocolUsers.length > 0 ? protocolUsers : [protocolUser!];
     const usable = all.filter((u) => SUPPORTED.has(u.protocol));
@@ -390,6 +427,10 @@ export function Dashboard({
     const attempts: string[] = [];
 
     for (const candidate of candidates) {
+      // The customer pressed stop. Whatever this attempt left behind is
+      // torn down by the toggle that set the flag, so this only has to
+      // stop walking the list.
+      if (cancelRef.current) return;
       const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
 
       // Taken while nothing is up. Captured through a live tunnel it
@@ -418,6 +459,7 @@ export function Dashboard({
             allowedApps,
           });
         }
+        if (cancelRef.current) return;
         setProtocolUser(candidate);
         setConnectedAt(Date.now());
         setConnectionState("verifying");
@@ -426,7 +468,9 @@ export function Dashboard({
         // something to send, so this request *is* that traffic. It forces
         // the handshake and answers the stronger question at the same
         // time -- did our packets actually leave via the server.
-        if (await confirmEgress(baseline)) {
+        const carried = await confirmEgress(baseline, () => cancelRef.current);
+        if (cancelRef.current) return;
+        if (carried) {
           const verdict = await verifyEgress(baseline);
           setExitIp(verdict.state === "throughTunnel" ? verdict.exitIp : null);
           // Only when it is not what they asked for. Announcing "switched
@@ -832,6 +876,12 @@ export function Dashboard({
         <LocationPicker
           subscriptionId={subscription.id}
           currentRouteId={protocolUser?.routeId}
+          // Latency cannot be measured from inside the tunnel; see
+          // the prop's own note. Anything but "disconnected" means
+          // routes are installed, including the verifying and
+          // degraded states where a tunnel exists but is not
+          // trusted yet.
+          tunnelActive={connectionState !== "disconnected"}
           onClose={() => setShowLocationPicker(false)}
           onSwitched={(routeId) => {
             setChosenRouteId(routeId ?? null);
