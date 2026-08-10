@@ -16,6 +16,7 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane"
 	"github.com/neoxify/neoxify-hub/agent/internal/dispatch"
 	"github.com/neoxify/neoxify-hub/agent/internal/enroll"
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/ikev2"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/openvpn"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/wireguard"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
@@ -42,6 +43,8 @@ func main() {
 	openvpnInterface := flag.String("openvpn-interface", "tun0", "OpenVPN server tun interface, shaped for per-plan speed caps")
 	openvpnMgmtAddr := flag.String("openvpn-mgmt-addr", "127.0.0.1:7505", "OpenVPN server's local Management Interface address (see installer/lib/agent.sh's install_openvpn)")
 	openvpnCcdDir := flag.String("openvpn-ccd-dir", "/etc/openvpn/ccd", "OpenVPN client-config-dir this node's server is configured with")
+	ikev2Secrets := flag.String("ikev2-secrets", "/etc/swanctl/conf.d/neoxify-users.conf", "swanctl file this agent owns and rewrites as customers come and go (see installer/lib/agent.sh's install_ikev2)")
+	ikev2Swanctl := flag.String("ikev2-swanctl", "swanctl", "path to swanctl, if it is not on PATH")
 	flag.Parse()
 
 	if *enrollInit {
@@ -98,6 +101,14 @@ func main() {
 	// discovered while the client is online. The tun interface it shapes is
 	// the one OpenVPN was configured with.
 	dispatcher.RegisterShaper("OPENVPN", shaper.New(*openvpnInterface))
+
+	// IKEv2, served by strongSwan. No shaper: unlike WireGuard there is no
+	// address assigned at provisioning time to target, and unlike OpenVPN
+	// there is no management interface to discover one from -- addresses
+	// come from strongSwan's own pool at connect time. Speed caps
+	// therefore do not apply to this protocol, the same gap the Xray ones
+	// have.
+	dispatcher.Register("IKEV2", ikev2.New(*ikev2Secrets, *ikev2Swanctl))
 	dispatcher.RegisterAddressDiscoverer("OPENVPN", openvpnProvisioner)
 	// Every node's Xray process can be a relay's exit fabric regardless
 	// of which protocols it terminates -- CONFIGURE_ROUTE/REMOVE_ROUTE
