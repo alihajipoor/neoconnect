@@ -497,6 +497,10 @@ install_xray() {
   # taking a port of its own -- see the fallback note in the template.
   # Loopback only, so the port never appears from outside.
   local vless_ws_path="" vless_ws_port="10086" vless_ws_is_new="y"
+  # Shadowsocks 2022 stands alone: its own encryption, no certificate, no
+  # dependency on the TLS block below. Offered separately for that reason
+  # -- a node with no domain can still serve it.
+  local ss_port="" ss_server_key="" ss_is_new="y"
 
   # Same reasoning as the REALITY identity above: re-running this on a
   # node that already serves these must not ask for ports and a domain
@@ -523,6 +527,17 @@ install_xray() {
       trojan_fallback="$(echo "$existing" | jq -r '.settings.fallbacks[0].dest')"
       echo
       echo "VLESS over TLS is already configured on port $vless_tls_port -- keeping it."
+    fi
+    existing="$(jq -c '.inbounds[]? | select(.tag=="shadowsocks-in")' "$config_path" 2>/dev/null)"
+    if [[ -n "$existing" ]]; then
+      ss_is_new="n"
+      ss_port="$(echo "$existing" | jq -r '.port')"
+      # Reused, never regenerated: the server key is half of every
+      # credential already issued on this node, so minting a new one
+      # would lock out every existing customer at once.
+      ss_server_key="$(echo "$existing" | jq -r '.settings.password')"
+      echo
+      echo "Shadowsocks 2022 is already configured on port $ss_port -- keeping it."
     fi
     existing="$(jq -c '.inbounds[]? | select(.tag=="vless-ws-in")' "$config_path" 2>/dev/null)"
     if [[ -n "$existing" ]]; then
@@ -614,6 +629,27 @@ install_xray() {
     fi
   fi
 
+  # Asked outside the certificate block above on purpose: Shadowsocks
+  # brings its own encryption, so it needs no domain and no certificate,
+  # and a node that declined those can still offer it.
+  if [[ "$ss_is_new" == "y" ]]; then
+    echo
+    echo "Shadowsocks 2022 (optional) looks like random bytes on the wire -- no"
+    echo "TLS handshake to fingerprint, and no certificate needed. Useful where"
+    echo "the certificate-based ports above are blocked. Pick an unremarkable"
+    echo "high port; the well-known 8388 is the first thing a scanner tries."
+    read -r -p "Port for Shadowsocks 2022, or 'skip' [skip]: " ss_port
+    ss_port="${ss_port:-skip}"
+    if [[ "${ss_port,,}" == "skip" ]]; then
+      ss_port=""
+    else
+      # 32 bytes, standard base64. Both are fixed by the cipher:
+      # blake3-aes-256-gcm derives from exactly 32 bytes, and xray decodes
+      # it with StdEncoding, so a base64url key fails to parse at startup.
+      ss_server_key="$(openssl rand -base64 32)"
+    fi
+  fi
+
   local template="$SCRIPT_DIR/assets/xray-config.json.template"
   read -r -p "Will this node relay other protocols (WireGuard/OpenVPN) to an exit node? [y/N]: " is_relay
   if [[ "${is_relay,,}" == "y" ]]; then
@@ -636,6 +672,8 @@ install_xray() {
     -e "s/__VLESS_WS_PORT__/${vless_ws_port:-10086}/g" \
     -e "s#__VLESS_WS_DEST__#127.0.0.1:${vless_ws_port:-10086}#g" \
     -e "s#__VLESS_WS_PATH__#${vless_ws_path:-/ws}#g" \
+    -e "s/__SHADOWSOCKS_PORT__/${ss_port:-0}/g" \
+    -e "s#__SHADOWSOCKS_SERVER_KEY__#${ss_server_key:-placeholder}#g" \
     "$template" > /usr/local/etc/xray/config.json
 
   # A declined Trojan inbound is removed rather than left listening on
@@ -651,6 +689,11 @@ install_xray() {
   # every request except that one, which is a stranger fingerprint than
   # simply not offering it.
   [[ -z "$vless_ws_path" ]] && unused_tags="$unused_tags vless-ws-in"
+  # A declined Shadowsocks inbound is removed rather than left listening
+  # on port 0 with a placeholder key -- xray refuses to start on a key it
+  # cannot decode to the cipher's length, and that would take the whole
+  # node down over an inbound the operator said no to.
+  [[ -z "$ss_port" ]] && unused_tags="$unused_tags shadowsocks-in"
   if [[ -n "${unused_tags// /}" ]]; then
     UNUSED_INBOUND_TAGS="$unused_tags" python3 - <<'PY' || echo "warning: could not remove the unused TLS inbounds -- edit /usr/local/etc/xray/config.json by hand" >&2
 import json
@@ -749,6 +792,19 @@ EOF
       '{"transport": "WS", "security": "TLS"}')" || return 1
     echo "  Registered (config $config_id)."
     create_route_for_config "Xray VLESS+TLS (WebSocket)" "$config_id"
+  fi
+
+  if [[ -n "$ss_port" && "$ss_is_new" == "y" ]]; then
+    echo "Registering Shadowsocks 2022 in the panel..."
+    # The server key travels to clients because Shadowsocks 2022
+    # authenticates with it and the customer's own key together -- half
+    # each. It identifies the listener; the per-user key is what
+    # identifies the customer and what gets revoked.
+    params="$(jq -n --arg k "$ss_server_key" '{method: "2022-blake3-aes-256-gcm", serverKey: $k}')"
+    config_id="$(register_protocol_config "SHADOWSOCKS" "$ss_port" "$params" \
+      '{"transport": "TCP", "security": "NONE"}')" || return 1
+    echo "  Registered (config $config_id)."
+    create_route_for_config "Shadowsocks 2022" "$config_id"
   fi
 
   echo "Xray is running on port $listen_port and is ready to use."

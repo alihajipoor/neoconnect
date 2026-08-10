@@ -20,6 +20,13 @@ const PROTOCOL_ORDER: Protocol[] = [
   "XRAY_VLESS_TLS",
   "XRAY_TROJAN",
   "XRAY_VMESS",
+  // After the certificate-presenting transports, before OpenVPN. It is
+  // fast and has no TLS handshake to fingerprint, but equally nothing to
+  // hide behind: a censor who finds the port blocks it outright, where a
+  // TLS-shaped transport has to be distinguished from real web traffic
+  // first. So it is the answer when the disguises have failed, not
+  // before they have been tried.
+  "SHADOWSOCKS",
   "OPENVPN",
 ];
 

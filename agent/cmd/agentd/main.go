@@ -33,6 +33,7 @@ func main() {
 	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
 	xrayTrojanTag := flag.String("xray-trojan-inbound-tag", "trojan-in", "tag of the Trojan+TLS inbound in Xray's config. Registered unconditionally: a tag that does not exist simply nacks any Trojan command with Xray's own error, which is clearer than the node silently not offering the protocol")
 	xrayVlessTlsTag := flag.String("xray-vless-tls-inbound-tag", "vless-tls-in", "tag of the VLESS+TLS inbound in Xray's config. Registered unconditionally for the same reason as the Trojan tag above")
+	xrayShadowsocksTag := flag.String("xray-shadowsocks-inbound-tag", "shadowsocks-in", "tag of the Shadowsocks 2022 inbound in Xray's config. Registered unconditionally for the same reason as the Trojan tag above")
 	xrayVlessWsTag := flag.String("xray-vless-ws-inbound-tag", "vless-ws-in", "tag of the VLESS+TLS-over-WebSocket inbound in Xray's config. Same account shape as the TCP VLESS inbound -- only the stream differs -- so it is registered as the WS transport of XRAY_VLESS_TLS, and a node without that inbound simply nacks any WS command with Xray's own error")
 	xrayAccessLog := flag.String("xray-access-log", "/var/log/xray/access.log", "Xray's access log, read to count how many places each user is connected from -- concurrency is not exposed by Xray's API. Harmless if absent: counts are simply not reported")
 	wgInterface := flag.String("wg-interface", "wg0", "name of the WireGuard interface this node manages")
@@ -78,6 +79,12 @@ func main() {
 	// control plane sends transport "WS" and the dispatcher routes it
 	// here, to the ws inbound, instead of to the TCP one above.
 	dispatcher.RegisterTransport("XRAY_VLESS_TLS", "WS", xrayProvisioner.ForVless(*xrayVlessWsTag, *xrayAccessLog))
+	// Shadowsocks 2022, on the same process again. A different credential
+	// shape -- a pre-shared key pair rather than a UUID -- but the same
+	// hot-add RPC and the same no-restart guarantee, verified live before
+	// this was built: a user added while another was mid-download did not
+	// disturb them.
+	dispatcher.Register("SHADOWSOCKS", xrayProvisioner.ForShadowsocks(*xrayShadowsocksTag, *xrayAccessLog))
 	dispatcher.Register("WIREGUARD", wireguard.New(*wgInterface))
 	// Per-user speed caps, WireGuard only for now: each peer has its own
 	// address assigned at provisioning time, which is what a tc rule needs

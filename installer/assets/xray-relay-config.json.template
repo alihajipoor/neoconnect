@@ -124,6 +124,19 @@
       "tag": "trojan-in"
     },
     {
+      "//": "Shadowsocks 2022. Its own encryption rather than TLS, so it needs no certificate and shares nothing with the listeners above -- which is the point of offering it: a censor blocking our certificate-presenting ports does not touch this one. On the wire it is indistinguishable from random bytes, so it has no handshake to fingerprint, and equally nothing to hide behind if the port itself is blocked. Only blake3-aes-*-gcm is usable here: xray-core rejects chacha20 for multi-user inbounds, and multi-user is what lets customers be added without a restart.",
+      "listen": "0.0.0.0",
+      "port": __SHADOWSOCKS_PORT__,
+      "protocol": "shadowsocks",
+      "settings": {
+        "method": "2022-blake3-aes-256-gcm",
+        "password": "__SHADOWSOCKS_SERVER_KEY__",
+        "clients": [],
+        "network": "tcp,udp"
+      },
+      "tag": "shadowsocks-in"
+    },
+    {
       "//": "VLESS+TLS inside a WebSocket -- see the note in xray-config.json.template. Loopback-only, no TLS of its own (the public inbound already terminated it), and acceptProxyProtocol paired with that fallback's \"xver\": 1 so customers do not all appear to arrive from 127.0.0.1.",
       "listen": "127.0.0.1",
       "port": __VLESS_WS_PORT__,

@@ -322,6 +322,14 @@ const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
   // fallback web page rather than by the tunnel -- which looks to the
   // customer exactly like a server that is up but broken.
   XRAY_VLESS_TLS: ["serverName", "path"],
+  // `serverKey` is the inbound's shared pre-shared key, and it does have
+  // to reach the client: Shadowsocks 2022 authenticates with the server
+  // key and the user's key together, so a customer holding only their
+  // own half cannot connect. Sharing it is inherent to the multi-user
+  // design rather than a leak -- it identifies the listener, while the
+  // per-user key is what identifies and authorises the customer, and
+  // revoking one customer means removing their key alone.
+  SHADOWSOCKS: ["method", "serverKey"],
   WIREGUARD: ["serverPublicKey", "endpoint", "subnetCidr", "dns"],
   // caCertPem is genuinely needed to verify the server, and already
   // travels in the per-user credentials. caKeyPem and serverKeyPem are

@@ -5,6 +5,7 @@ export const PROTOCOL_LABELS: Record<Protocol, string> = {
   XRAY_VLESS_TLS: "Xray VLESS+TLS",
   XRAY_VMESS: "Xray VMess",
   XRAY_TROJAN: "Xray Trojan",
+  SHADOWSOCKS: "Shadowsocks 2022",
   WIREGUARD: "WireGuard",
   OPENVPN: "OpenVPN",
 };
@@ -25,6 +26,11 @@ export const DEFAULT_PROTOCOL_PORT: Record<Protocol, number> = {
   XRAY_VLESS_TLS: 8443,
   XRAY_VMESS: 443,
   XRAY_TROJAN: 8443,
+  // No conventional port on purpose: 8388 is the documented default
+  // and therefore the first thing a scanner tries. An unremarkable high
+  // port is most of this protocol's defence, since it has no handshake
+  // to hide behind.
+  SHADOWSOCKS: 23456,
   WIREGUARD: 51820,
   OPENVPN: 1194,
 };
