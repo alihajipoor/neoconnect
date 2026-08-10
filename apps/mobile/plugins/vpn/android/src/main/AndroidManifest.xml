@@ -41,10 +41,10 @@
 
     <!-- Required by the `systemExempted` foreground-service type both
          services above declare. Without it Android 14+ refuses the
-         startForeground() call with a SecurityException, and because that
-         call happens in onStartCommand -- on the main thread, dispatched
-         by the system, outside any of the plugin's try/catch -- the
-         process is killed outright.
+         startForeground() call with a SecurityException, and because
+         that call happens in onStartCommand (on the main thread,
+         dispatched by the system, outside every try/catch the plugin
+         has) the process is killed outright.
 
          That is not hypothetical: it is why every Xray protocol crashed
          the app on 0.2.7. WireGuard was unaffected only because the
@@ -53,10 +53,15 @@
          problem when it was a manifest one.
 
          `systemExempted` is the correct type here rather than a
-         workaround: the platform grants it to whichever app the user has
-         activated as their VPN (the android:activate_vpn appop, which is
-         one of the alternatives the check accepts). A VPN tunnel is not a
-         media, sync or location service, and there is no closer type. -->
+         workaround. The platform grants it to whichever app the user
+         has activated as their VPN (the android:activate_vpn appop,
+         one of the alternatives the check accepts). A VPN tunnel is not
+         a media, sync or location service, and no closer type exists.
+
+         Note for anyone editing this comment: XML forbids a double
+         hyphen inside a comment, so the repo's usual em dash cannot be
+         used here. Writing one makes the manifest unparseable and the
+         build fails in processReleaseManifest, some way from the cause. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
 
     <!-- Android 11+ hides most installed packages from
