@@ -123,6 +123,26 @@ export function generateCredentials(
       // secret, since it appears in logs and stats queries.
       return { externalUserId: randomUUID(), credentials: { userKey } };
     }
+    case Protocol.IKEV2: {
+      // EAP-MSCHAPv2: a username and password, because that is what both
+      // platforms' built-in clients accept without the customer
+      // installing a certificate by hand. Certificates would be stronger
+      // and are the obvious upgrade, but they would mean shipping a
+      // per-user PKCS#12 to a device and getting the user to import it,
+      // which is exactly the friction using the OS client avoids.
+      //
+      // The username is not the customer's email or anything derived
+      // from it. strongSwan logs identities, and a node's logs should
+      // not become a list of who uses the service -- the same reasoning
+      // that keeps the secret out of externalUserId for Trojan and
+      // Shadowsocks.
+      const username = `nx-${randomBytes(8).toString("hex")}`;
+      // 32 bytes of base64url. Long enough that online guessing against
+      // EAP is pointless, and no punctuation that a phone's VPN settings
+      // field or a .mobileconfig would mangle.
+      const password = randomBytes(32).toString("base64url");
+      return { externalUserId: username, credentials: { username, password } };
+    }
     case Protocol.WIREGUARD: {
       if (!isWireGuardPublicParams(protocolConfig.publicParamsJson)) {
         throw new BadRequestException(

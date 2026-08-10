@@ -1,0 +1,26 @@
+-- IKEv2/IPsec as a protocol a node can offer.
+--
+-- Unlike every other protocol here, nothing ships in the app for it:
+-- Windows and Android both dial IKEv2 with the operating system's own
+-- client. The node runs strongSwan; the client runs whatever it already
+-- has. That also means no third native engine in the Android process,
+-- which matters after two Go runtimes in one address space turned out
+-- to segfault the client.
+--
+-- Added against the earlier decision to exclude it. That decision was
+-- sound in general -- IKEv2 has no censorship benefit and its ports are
+-- among the first blocked -- but customers turned out to have networks
+-- where it is the only protocol that connects, and that beats the
+-- argument. It is an alternative for people who currently have none.
+--
+-- Operationally it belongs on its own address. Fixed UDP 500 and 4500,
+-- a handshake in the clear and no disguise make it the easiest protocol
+-- here to fingerprint, and a censor that blocks the address rather than
+-- the port would take the stealth protocols sharing that address down
+-- with it.
+--
+-- Appended rather than inserted in protocol order: Postgres orders enum
+-- values by creation, existing rows sort by that order, and inserting
+-- with BEFORE would reorder every query that sorts on this column.
+
+ALTER TYPE "Protocol" ADD VALUE IF NOT EXISTS 'IKEV2';
