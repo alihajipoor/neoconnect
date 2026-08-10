@@ -19,7 +19,12 @@ import { describe, it } from "node:test";
 // Tests execute from dist-test/, so reach back to the actual sources rather
 // than scanning the compiled copy of them.
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-const ADMIN_HOST = "connect.neoxify.com";
+/** Both names, because the panel answers on both.
+ *
+ * The CDN domain is the one customers' apps actually reach it on now, so
+ * checking only the origin would have let the address this guard exists
+ * to keep out walk straight back in under its newer name. */
+const ADMIN_HOSTS = ["connect.neoxify.com", "connect.neoxify.site"];
 
 /** config.ts documents why the host is absent, so it is allowed to name it. */
 const ALLOWED = new Set(["config.ts", "no-admin-host.test.ts"]);
@@ -29,11 +34,13 @@ function sourceFiles(): string[] {
 }
 
 describe("the operator panel host", () => {
-  it("appears in no bot source file", () => {
-    const offenders = sourceFiles().filter((f) =>
-      readFileSync(join(SRC, f), "utf8").includes(ADMIN_HOST),
-    );
-    assert.deepEqual(offenders, [], `${ADMIN_HOST} must not appear in: ${offenders.join(", ")}`);
+  it("appears in no bot source file, under either of its names", () => {
+    for (const host of ADMIN_HOSTS) {
+      const offenders = sourceFiles().filter((f) =>
+        readFileSync(join(SRC, f), "utf8").includes(host),
+      );
+      assert.deepEqual(offenders, [], `${host} must not appear in: ${offenders.join(", ")}`);
+    }
   });
 
   /** Removing the field is what makes the rule hold by construction: a value
