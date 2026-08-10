@@ -79,11 +79,17 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Built for the SAME ABI as the APK. The release script defaults to
+      # arm64, and an x86_64 APK carrying an arm64 engine simply has no
+      # libgojni.so: the app then dies with UnsatisfiedLinkError on the
+      # first Xray connect, which is indistinguishable from a real crash
+      # until you look inside the APK.
       - name: Build the Xray engine
         working-directory: apps/mobile
         run: bash scripts/build-xray-aar.sh
         env:
           ANDROID_NDK_HOME: ${{ env.NDK_HOME }}
+          XRAY_AAR_TARGET: android/${{ inputs.target == 'x86_64' && 'amd64' || 'arm64' }}
 
       - name: Generate the Android project
         working-directory: apps/mobile
