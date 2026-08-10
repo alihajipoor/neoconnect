@@ -266,13 +266,50 @@ HTML
   # so an ordinary HTTPS request to the same port and name lands here. To
   # anyone probing, it is the fallback site -- the same disguise the
   # tunnel already relies on.
+  # Split the panel URL so proxy_pass can name the host in a variable,
+  # and find a resolver for it. systemd-resolved is what Ubuntu ships;
+  # a node without it would otherwise get a config nginx refuses to load.
+  local panel_scheme panel_host mirror_resolver
+  panel_scheme="${panel_api%%://*}"
+  [[ "$panel_scheme" == "$panel_api" ]] && panel_scheme="https"
+  panel_host="${panel_api#*://}"
+  panel_host="${panel_host%%/*}"
+  if grep -qs "127.0.0.53" /etc/resolv.conf; then
+    mirror_resolver="127.0.0.53"
+  else
+    mirror_resolver="$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf 2>/dev/null)"
+    [[ -z "$mirror_resolver" ]] && mirror_resolver="1.1.1.1"
+  fi
+
   local api_mirror=""
   if [[ -n "$panel_api" ]]; then
     printf -v api_mirror '%s\n' \
       "" \
       "    location /api/ {" \
-      "        proxy_pass ${panel_api%/}/;" \
-      "        proxy_set_header Host \$proxy_host;" \
+      "        # Re-resolved at runtime rather than once at config load." \
+      "        #" \
+      "        # nginx caches the address of a literal hostname in" \
+      "        # proxy_pass for the life of the process. When the panel" \
+      "        # moved to a new VPS the nodes carried on proxying to the" \
+      "        # old box, which was still up and answered every request" \
+      "        # with 502 because its backend was gone. Only customers" \
+      "        # reaching the API through a node mirror were affected --" \
+      "        # which is to say only the ones in Iran, the people this" \
+      "        # mirror exists for -- and they saw 502 the moment they" \
+      "        # opened the app. The node logged no upstream error," \
+      "        # because a 502 is a valid response, so nothing pointed" \
+      "        # at the cause." \
+      "        #" \
+      "        # A resolver plus a variable forces a fresh lookup, so a" \
+      "        # panel move is picked up within the TTL instead of" \
+      "        # needing a manual reload on every node. \$request_uri" \
+      "        # carries path and query through unchanged, which a" \
+      "        # variable proxy_pass does not do on its own." \
+      "        resolver ${mirror_resolver} valid=30s ipv6=off;" \
+      "        resolver_timeout 5s;" \
+      "        set \$neoxify_panel ${panel_host};" \
+      "        proxy_pass ${panel_scheme}://\$neoxify_panel\$request_uri;" \
+      "        proxy_set_header Host \$neoxify_panel;" \
       "        # The panel rate-limits per client address, so the real" \
       "        # one has to survive the hop -- otherwise every customer" \
       "        # arriving through this node looks like one very busy" \
