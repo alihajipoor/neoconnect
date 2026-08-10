@@ -1,0 +1,100 @@
+name: Debug Android APK
+
+# An on-demand debug build, for reproducing device-only faults on an
+# emulator when no physical phone is reachable.
+#
+# Exists because the Android client crashes on the Xray protocols and the
+# released APK is arm64-only: an arm64 image cannot be emulated usefully
+# on an x86_64 host, so diagnosing it locally needs an x86_64 build that
+# no release produces. Building here rather than on a workstation because
+# this toolchain -- NDK, gomobile, Gradle -- is already proven in
+# release-android.yml, and a diagnosis is worth nothing if the build
+# itself is a variable.
+#
+# Debug rather than release: `--debug` produces an APK signed with the
+# standard Android debug key, which installs on an emulator without the
+# release keystore. It is deliberately NOT publishable -- no release is
+# created, the artifact expires, and the signing key is not ours.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Android ABI to build"
+        required: true
+        default: x86_64
+        type: choice
+        options: [x86_64, aarch64]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+
+      # The Rust target name is not the Tauri target name: Tauri says
+      # "x86_64"/"aarch64", Rust wants the full triple. Getting this wrong
+      # fails late, inside Gradle, with a missing .so rather than an
+      # obviously wrong toolchain.
+      - name: Work out the Rust target
+        id: rust
+        run: |
+          case "${{ inputs.target }}" in
+            x86_64)  echo "triple=x86_64-linux-android"  >> "$GITHUB_OUTPUT" ;;
+            aarch64) echo "triple=aarch64-linux-android" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ steps.rust.outputs.triple }}
+
+      - name: Install the NDK
+        run: |
+          sdkmanager --install "ndk;26.1.10909125" "platforms;android-36" "build-tools;34.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the Xray engine
+        working-directory: apps/mobile
+        run: bash scripts/build-xray-aar.sh
+        env:
+          ANDROID_NDK_HOME: ${{ env.NDK_HOME }}
+
+      - name: Generate the Android project
+        working-directory: apps/mobile
+        run: pnpm exec tauri android init
+
+      - name: Apply the Neoxify launcher icon
+        working-directory: apps/mobile
+        run: pnpm exec tauri icon src-tauri/icons/icon.png
+
+      - name: Build
+        working-directory: apps/mobile
+        run: pnpm exec tauri android build --apk --debug --target ${{ inputs.target }}
+
+      - name: Collect the APK
+        working-directory: apps/mobile
+        run: |
+          set -euo pipefail
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)
+          echo "Built $apk"
+          cp "$apk" "Neoxify-debug-${{ inputs.target }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neoxify-debug-${{ inputs.target }}
+          path: apps/mobile/Neoxify-debug-${{ inputs.target }}.apk
+          retention-days: 7
