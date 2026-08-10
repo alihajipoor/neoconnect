@@ -82,7 +82,17 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         engine.execute {
             try {
                 invoke.resolve(work())
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // Throwable, not Exception. The engines here are native
+                // libraries, and a failure to load one arrives as an
+                // Error -- UnsatisfiedLinkError, ExceptionInInitializerError,
+                // OutOfMemoryError -- none of which is an Exception. Those
+                // escaped this handler, unwound the executor thread, and
+                // killed the process: the customer saw the app vanish with
+                // no message, and nothing reached the telemetry either.
+                // Observed for real as
+                // `UnsatisfiedLinkError: dlopen failed: library "libgojni.so" not found`.
+                //
                 // Passed through rather than flattened into "could not
                 // connect": the difference between a refused permission,
                 // an unreachable endpoint and a bad key is three

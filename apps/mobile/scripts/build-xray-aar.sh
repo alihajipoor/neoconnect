@@ -28,10 +28,19 @@ fi
 mkdir -p "$libs"
 cd "$src"
 
-# arm64 only, deliberately. It is every Android device sold for years,
-# and each extra ABI adds ~46MB of compiled Go to the APK for hardware
-# nobody is running this on.
-gomobile bind -target=android/arm64 -androidapi 24 -o "$aar" .
+# arm64 only by default, deliberately: it is every Android device sold
+# for years, and each extra ABI adds ~46MB of compiled Go to the APK for
+# hardware nobody is running this on.
+#
+# XRAY_AAR_TARGET overrides it, and exists for one reason -- an x86_64
+# emulator. Without a matching build the APK has no libgojni.so, the
+# class that loads it throws UnsatisfiedLinkError, and the app dies on
+# the first Xray connect. That looks exactly like a real fault and is
+# not one, which cost a full diagnosis cycle to tell apart. Releases do
+# not set it.
+target="${XRAY_AAR_TARGET:-android/arm64}"
+echo "Building the Xray engine for $target"
+gomobile bind -target="$target" -androidapi 24 -o "$aar" .
 
 # Unpacked, because an Android *library* module cannot depend on a local
 # .aar -- Gradle rejects it outright, since the nested .aar's classes and
