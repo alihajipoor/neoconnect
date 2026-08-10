@@ -366,7 +366,16 @@ model ProtocolConfig {
   routeEntries  Route[]        @relation("RouteEntry")
   routeExits    Route[]        @relation("RouteExit")
 
-  @@unique([nodeId, protocol, listenPort])
+  /// Transport is part of the identity, not an attribute of it.
+  ///
+  /// Without it this said a node may offer a protocol on a port exactly
+  /// once, which contradicts the whole reason `transport` exists: VLESS
+  /// over TLS and the same VLESS inside a WebSocket deliberately share
+  /// one port and one certificate, routed apart by request path. The
+  /// constraint predates the column and was never revisited, so
+  /// registering the WebSocket config failed on a real node -- caught by
+  /// deploying it, not by any test.
+  @@unique([nodeId, protocol, listenPort, transport])
   @@map("protocol_configs")
 }
 
