@@ -196,7 +196,7 @@ git tag android-v0.1.0 && git push origin android-v0.1.0
 
 GitHub Actions compiles xray-core with gomobile, builds and signs
 `Neoxify-<version>.apk`. The download
-link is `https://connect.neoxify.com/api/updates/installer/android`, which
+link is `https://connect.neoxify.site/api/updates/installer/android`, which
 resolves to the newest `android-v*` release.
 
 There is no silent in-app update, and that is a platform limit rather than

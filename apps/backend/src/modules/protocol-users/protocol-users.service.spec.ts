@@ -108,13 +108,13 @@ describe("ProtocolUsersService.listByCustomer", () => {
   it("passes through the certificate's domain a Trojan client must send as SNI", async () => {
     const service = serviceReturning(
       "XRAY_TROJAN",
-      { serverName: "fi1.neoxify.com" },
+      { serverName: "fi1.neoxify.site" },
       { password: "shared-secret" },
     );
 
     const [item] = await service.listByCustomer("customer-1");
 
-    expect(item.connection.publicParams).toEqual({ serverName: "fi1.neoxify.com" });
+    expect(item.connection.publicParams).toEqual({ serverName: "fi1.neoxify.site" });
   });
 
   // Same omission as the Trojan one above, found the same way and one

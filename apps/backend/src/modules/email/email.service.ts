@@ -30,7 +30,7 @@ export interface SendMailInput {
  * List-Unsubscribe-Post alongside a real endpoint when there is one.
  */
 function bulkHeaders(fromAddress: string): Record<string, string> {
-  const domain = fromAddress.split("@")[1] ?? "neoxify.com";
+  const domain = fromAddress.split("@")[1] ?? "neoxify.site";
   return {
     "List-Unsubscribe": `<mailto:${fromAddress}?subject=Unsubscribe>`,
     "List-Id": `Neoxify announcements <announcements.${domain}>`,

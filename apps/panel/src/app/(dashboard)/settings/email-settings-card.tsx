@@ -81,7 +81,7 @@ export function EmailSettingsCard({ settings }: { settings: EmailSettings }) {
               id="fromAddress"
               name="fromAddress"
               type="email"
-              placeholder="no-reply@neoxify.com"
+              placeholder="no-reply@neoxify.site"
               defaultValue={settings.fromAddress ?? ""}
             />
           </div>

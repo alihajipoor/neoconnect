@@ -11,13 +11,13 @@ describe("mirrorsFrom", () => {
     connection: {
       port: 2053,
       security: "TLS",
-      publicParams: { serverName: "fi1.neoxify.com" },
+      publicParams: { serverName: "fi1.neoxify.site" },
       ...over,
     },
   });
 
   it("builds a mirror from a TLS credential's own certificate name", () => {
-    expect(mirrorsFrom([user()])).toEqual(["https://fi1.neoxify.com:2053/api"]);
+    expect(mirrorsFrom([user()])).toEqual(["https://fi1.neoxify.site:2053/api"]);
   });
 
   /** REALITY proxies anything it does not recognise to the third-party
