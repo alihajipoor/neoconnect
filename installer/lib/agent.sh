@@ -687,6 +687,9 @@ install_xray() {
     echo "TLS handshake to fingerprint, and no certificate needed. Useful where"
     echo "the certificate-based ports above are blocked. Pick an unremarkable"
     echo "high port; the well-known 8388 is the first thing a scanner tries."
+    local ss_suggested
+    ss_suggested="$(suggest_free_port)"
+    echo "  $ss_suggested is free on this box if you want one picked for you."
     read -r -p "Port for Shadowsocks 2022, or 'skip' [skip]: " ss_port
     ss_port="${ss_port:-skip}"
     if [[ "${ss_port,,}" == "skip" ]]; then
@@ -896,6 +899,40 @@ enable_ip_forwarding() {
 # wg0 with an empty peer list -- same "never re-templated for users"
 # pattern as install_xray: peers are hot-added/removed entirely through
 # the agent's `wg set` calls (see agent/internal/protocols/wireguard).
+# A free, unremarkable high port to suggest as a default.
+#
+# 51820 and 1194 announce what they are. A scanner, or an ISP looking for
+# VPN traffic, finds them by port alone before inspecting a single byte,
+# and some networks drop them on that basis. Drawing one per node per
+# protocol removes that free signal, and means a blocked port costs one
+# protocol on one node rather than that protocol everywhere.
+#
+# This deliberately does not apply to REALITY, VLESS+TLS or Trojan: for
+# those the port *is* the disguise. TLS on 443 is indistinguishable from
+# browsing, while a TLS handshake on a random high port is itself the
+# anomaly. Nor to IKEv2, which has no say in the matter -- the protocol
+# fixes 500 and 4500 and neither platform client can be told otherwise.
+#
+# Still only a suggestion: the operator can type anything, including the
+# old default, because a node rebuilt to match an existing panel entry
+# has to be able to.
+suggest_free_port() {
+  local port
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    port=$(( 20000 + RANDOM % 40000 ))
+    # Skip anything already listening, TCP or UDP -- offering a port the
+    # box is already using turns into an engine that starts, binds
+    # nothing, and reports no error anyone reads.
+    if ! ss -lntu 2>/dev/null | awk '{print $5}' | grep -q ":${port}\$"; then
+      echo "$port"
+      return 0
+    fi
+  done
+  # Ten collisions in a 40000-wide range means ss is not telling us
+  # anything useful. Better to return the last draw than to loop.
+  echo "$port"
+}
+
 install_wireguard() {
   echo "Installing WireGuard..."
   apt-get install -y -qq wireguard wireguard-tools
@@ -906,8 +943,13 @@ install_wireguard() {
   private_key="$(cat /etc/wireguard/server_private.key)"
   public_key="$(cat /etc/wireguard/server_public.key)"
 
-  read -r -p "Listen port for WireGuard [51820]: " listen_port
-  listen_port="${listen_port:-51820}"
+  local suggested_port
+  suggested_port="$(suggest_free_port)"
+  echo "  A random high port is suggested rather than 51820, which identifies"
+  echo "  WireGuard to anyone scanning. Any port works; the clients read it"
+  echo "  from the panel rather than assuming."
+  read -r -p "Listen port for WireGuard [$suggested_port]: " listen_port
+  listen_port="${listen_port:-$suggested_port}"
   read -r -p "Client subnet, /24 only (e.g. 10.66.0.0/24) [10.66.0.0/24]: " subnet
   subnet="${subnet:-10.66.0.0/24}"
   local subnet_base="${subnet%.0/24}"
@@ -1433,8 +1475,13 @@ install_openvpn() {
   echo "Installing OpenVPN..."
   apt-get install -y -qq openvpn
 
-  read -r -p "Listen port for OpenVPN [1194]: " listen_port
-  listen_port="${listen_port:-1194}"
+  local suggested_port
+  suggested_port="$(suggest_free_port)"
+  echo "  A random high port is suggested rather than 1194, which identifies"
+  echo "  OpenVPN to anyone scanning. Any port works; the clients read it"
+  echo "  from the panel rather than assuming."
+  read -r -p "Listen port for OpenVPN [$suggested_port]: " listen_port
+  listen_port="${listen_port:-$suggested_port}"
   read -r -p "Protocol, udp or tcp [udp]: " proto
   proto="${proto:-udp}"
   read -r -p "Public endpoint host (this node's IP or DNS name) [$(curl -fsSL https://api.ipify.org || true)]: " endpoint_host

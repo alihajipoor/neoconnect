@@ -717,6 +717,14 @@ mod latency_probe {
     #[tokio::test]
     #[ignore]
     async fn measures_every_protocol_port_on_fi1() {
+        // fi1's ports as of 2026-08-11. Two of these are defaults and
+        // are on their way out: WireGuard and OpenVPN are moving to
+        // random high ports per node, because 51820 and 1194 identify
+        // the protocol to anyone scanning. Update them here when fi1
+        // moves, or this probe quietly measures closed ports and reports
+        // every protocol as unreachable. Nothing outside this ignored
+        // test reads them -- the connect path takes the port from the
+        // API.
         for (label, port) in [
             ("XRAY/tcp", 443u16),
             ("WIREGUARD/udp", 51820),
