@@ -131,9 +131,23 @@ object Ikev2Engine {
         // Android allows -- so the next protocol the ladder tries would
         // fail for a reason that has nothing to do with that protocol.
         stop(context)
+        // Deliberately does not name a cause. The first version said
+        // "UDP is likely blocked on this network", and the first time it
+        // fired for real the network was fine -- the node was serving an
+        // ECDSA certificate that Android's IKE library refuses, so it
+        // dropped the session and retried until this timeout. The
+        // customer was told to go and fix their internet for a fault
+        // that was entirely ours.
+        //
+        // A timeout here genuinely cannot distinguish the two: Android
+        // reports the same nothing whether packets are being dropped or
+        // the far end keeps rejecting us. So say what is known, offer
+        // the action that helps in either case, and leave the diagnosis
+        // to whoever can actually see both ends.
         throw IllegalStateException(
-            "No response from the server. UDP is likely blocked on this network; " +
-                "try a Stealth protocol instead."
+            "The connection did not complete. Try a Stealth protocol, which works on " +
+                "networks that block this one -- and tell support if it keeps happening, " +
+                "because this can also be a fault at the server."
         )
     }
 
