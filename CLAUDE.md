@@ -31,6 +31,33 @@ its platform while the other still calls the old shape. **Keep the
 shared plugin interface additive.** Do not unilaterally refactor a
 signature the other platform calls; add alongside instead.
 
+### Staying in sync — do this first
+
+GitHub is the only channel between the two machines, so anything the
+other one needs to know must be committed, not remembered.
+
+**At the start of every session, before touching anything:**
+
+```bash
+bash scripts/session-start.sh
+```
+
+It pulls, then prints `docs/journal/shared.md` and the *other* machine's
+log. Read them. If an entry says something is in flight, believe it.
+
+**After landing anything worth knowing about, append a journal entry and
+push in the same session.** The push is the handoff — an entry sitting
+unpushed helps nobody.
+
+`docs/journal/` holds the state git cannot: what is half-done, what is
+blocked and on whom, decisions taken but not yet built, and gotchas that
+cost real time. It is **not** a changelog — git already records what
+changed, and duplicating it just creates something that goes stale and
+misleads. Each machine writes only its own file (`windows.md`,
+`macos.md`) so they can never conflict; `shared.md` is for cross-cutting
+decisions and is edited rarely. Full protocol in
+`docs/journal/README.md`.
+
 ### Branching
 
 - **iOS work goes on a branch, never straight to main.** Main must stay
