@@ -49,3 +49,42 @@ export async function saveLastGood(map: LastGoodMap): Promise<void> {
     // Intentionally silent -- see above.
   }
 }
+
+const CHOSEN_KEY = "chosenRoute";
+
+/* The server the customer picked on purpose.
+ *
+ * Held only in React state until now, so it died with the process while
+ * the *displayed* server -- read from the cached provisioned route --
+ * survived. The two then disagreed silently: the dashboard said
+ * sg-singapore, the ladder had no pin, speed-first ordering put
+ * WireGuard at the head, and the connection came up in France with no
+ * notice, because from the ladder's point of view nothing had failed
+ * over. Observed exactly that on a clean install after signing out and
+ * back in.
+ *
+ * Persisting it is what makes the screen and the behaviour agree, and
+ * it restores the M23 promise that a deliberate choice is not quietly
+ * overridden -- which had been true only until the app was restarted.
+ *
+ * Same store as the network memory above: both are preferences, neither
+ * is a credential, and both should outlive a session being cleared. */
+export async function loadChosenRoute(): Promise<string | null> {
+  try {
+    const store = await getStore();
+    return (await store.get<string>(CHOSEN_KEY)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveChosenRoute(routeId: string | null): Promise<void> {
+  try {
+    const store = await getStore();
+    if (routeId) await store.set(CHOSEN_KEY, routeId);
+    else await store.delete(CHOSEN_KEY);
+    await store.save();
+  } catch {
+    // Intentionally silent -- see above.
+  }
+}

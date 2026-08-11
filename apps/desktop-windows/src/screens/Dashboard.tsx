@@ -9,7 +9,7 @@ import { customerProtocolLabel } from "../lib/protocol-labels";
 import { captureBaselineIp, verifyEgress, type EgressVerdict } from "../lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
-import { loadLastGood, saveLastGood } from "../lib/failover-store";
+import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
 import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
 import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
@@ -362,6 +362,10 @@ export function Dashboard({
     /** Region we meant to use, only when it differs from where we landed. */
     fromRegion: string | null;
     toRegion: string | null;
+    /** Whether `fromRegion` was actually dialled and failed, as opposed
+     * to never being attempted. Picks between two different sentences,
+     * because only one of them is true in each case. */
+    intendedWasTried: boolean;
   } | null>(null);
   /** Guards the ladder against running twice at once. The health poll
    * and the Connect button can both start one, and two of them
@@ -410,8 +414,26 @@ export function Dashboard({
    * to avoid. */
   const [offlineSince, setOfflineSince] = useState<number | null>(null);
 
+  // The stored pin is read *before* the first load, and handed to it
+  // directly rather than left to arrive via state.
+  //
+  // Loading it alongside lost the race: loadAll picked which credential
+  // the screen represents while chosenRouteId was still null, so a
+  // customer who had pinned Singapore/Built-in came back to
+  // Singapore/Compatible. The server name looked right purely because
+  // the first credential in the list happened to be Singapore too --
+  // the protocol gave it away.
+  //
+  // That is worse than cosmetic. The pin does reach the ladder by the
+  // time Connect is pressed, so the app would have connected on the
+  // pinned protocol while the tile named another, then announced a
+  // switch that never happened. Observed on a real restart.
   useEffect(() => {
-    void loadAll();
+    void (async () => {
+      const saved = await loadChosenRoute();
+      if (saved) setChosenRouteId((current) => current ?? saved);
+      await loadAll(saved ?? undefined);
+    })();
   }, []);
 
   // Ticks for as long as the screen is mounted, not just while connected.
@@ -749,6 +771,30 @@ export function Dashboard({
         preferredRouteId: null,
       });
 
+      // What the dashboard was promising before any of this ran.
+      //
+      // Captured up front because the loop replaces it, and because the
+      // honest question is not "did the ladder move past its own first
+      // pick" but "did the customer end up somewhere other than what
+      // the screen said". Those come apart whenever nothing is pinned:
+      // the SERVER field shows the provisioned route while the ladder
+      // orders by speed, so the app could show sg-singapore, connect to
+      // France, and say nothing -- index was still 0, so by the old
+      // test nothing had failed over.
+      const shownRouteId = protocolUser?.routeId ?? null;
+
+      // Whether the route on screen was actually dialled before we
+      // settled somewhere else.
+      //
+      // Without this the app tells the customer "Couldn't reach
+      // sg-singapore" in the one case it never tried Singapore at all --
+      // nothing pinned, ladder ordered by speed, WireGuard on another
+      // continent won at index 0. Observed exactly that. Asserting a
+      // failure that did not happen is the same dishonesty as the
+      // silence it replaced, just louder, and it sends the customer to
+      // support over a server that is fine.
+      let triedShownRoute = false;
+
       let lastError: ClassifiedError | null = null;
       // Why each attempt failed, in order. Kept because diagnosing the
       // first version of this needed a firewall rule and the server's
@@ -759,6 +805,7 @@ export function Dashboard({
         if (cancelRef.current) break;
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
+        if (candidate.routeId === shownRouteId) triedShownRoute = true;
 
         // Patient only for the last candidate. With another protocol
         // sitting untried, waiting out a long budget on this one is
@@ -870,12 +917,12 @@ export function Dashboard({
 
           if (verdict === "connected") {
             setConnectionState("connected");
-            if (index > 0) {
-              // The region is compared against the head of the list --
-              // what this attempt was meant to be -- rather than against
-              // whatever is on screen, which has already been updated by
-              // the time this runs.
-              const intended = routes.find((r) => r.id === candidates[0]?.routeId);
+            const movedFromShown = Boolean(shownRouteId) && candidate.routeId !== shownRouteId;
+            if (index > 0 || movedFromShown) {
+              // Compared against what was on screen when Connect was
+              // pressed, falling back to the head of the ladder. Using
+              // the head alone missed the case this exists for.
+              const intended = routes.find((r) => r.id === (shownRouteId ?? candidates[0]?.routeId));
               const landed = routes.find((r) => r.id === candidate.routeId);
               const from = intended?.location.region ?? null;
               const to = landed?.location.region ?? null;
@@ -883,6 +930,8 @@ export function Dashboard({
                 label,
                 fromRegion: from && to && from !== to ? from : null,
                 toRegion: to,
+                // Only "couldn't reach it" if we actually tried it.
+                intendedWasTried: triedShownRoute,
               });
             }
             // Remembered only on proof it carried traffic. Recording a
@@ -1140,12 +1189,21 @@ export function Dashboard({
                       {connectionState === "connected" && failedOverTo ? (
                         <p className="mt-1 text-xs text-amber-400/90">
                           {failedOverTo.fromRegion ? (
-                            // Crossed a border, so the country is named.
-                            t("dash.switchedServer", {
-                              from: failedOverTo.fromRegion,
-                              to: failedOverTo.toRegion ?? "",
-                              protocol: failedOverTo.label,
-                            })
+                            // Crossed a border, so the country is named
+                            // -- and which sentence depends on whether
+                            // that country was ever dialled. "Couldn't
+                            // reach it" is a claim about the server, and
+                            // it must not be made about one we skipped.
+                            t(
+                              failedOverTo.intendedWasTried
+                                ? "dash.switchedServer"
+                                : "dash.usedInstead",
+                              {
+                                from: failedOverTo.fromRegion,
+                                to: failedOverTo.toRegion ?? "",
+                                protocol: failedOverTo.label,
+                              },
+                            )
                           ) : (
                             <>
                               {t("dash.switchedTo")}{" "}
@@ -1362,6 +1420,10 @@ export function Dashboard({
             // candidate, which quietly disabled failover for anyone who
             // had ever opened this list.
             setChosenRouteId(routeId ?? null);
+            // Persisted, so the pin outlives the process. Without this
+            // the dashboard kept showing the chosen server after a
+            // restart while the ladder no longer honoured it.
+            void saveChosenRoute(routeId ?? null);
             // Passed explicitly: the state set above has not landed yet
             // when loadAll reads it, which is why the screen kept
             // showing the previous choice.
