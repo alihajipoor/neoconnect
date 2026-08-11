@@ -354,6 +354,20 @@ fn reject(field: &str, why: &str) -> ValidationError {
 /// A control character here is the injection primitive, so the check is
 /// a whitelist of printable ASCII rather than a blacklist of the
 /// characters we happened to think of.
+/// A VLESS `flow`, which is allowed to be absent.
+///
+/// Separate from [`check_single_line`] because that one treats empty as
+/// a mistake, which is right for a server name and wrong for this: the
+/// flow selects XTLS Vision, Vision cannot be carried inside a
+/// WebSocket, and so a WS credential correctly has none. Anything
+/// non-empty is still checked exactly as before.
+fn check_optional_flow(value: &str) -> Checked {
+    if value.is_empty() {
+        return Ok(());
+    }
+    check_single_line("flow", value, 64)
+}
+
 fn check_single_line(field: &str, value: &str, max_len: usize) -> Checked {
     if value.is_empty() {
         return Err(reject(field, "must not be empty"));
@@ -529,7 +543,13 @@ impl ConnectProfile {
                 // about rejecting nonsense early with a clear message
                 // rather than letting xray.exe fail opaquely.
                 check_key_like("uuid", &p.uuid, 64)?;
-                check_single_line("flow", &p.flow, 64)?;
+                // Optional for the same reason as the TLS variant. Every
+                // REALITY inbound deployed today is raw TCP and carries
+                // Vision, so this is not currently reachable -- but the
+                // mapper passes whatever the server issued straight
+                // through, and a flowless credential would fail here in
+                // exactly the way the WebSocket one did.
+                check_optional_flow(&p.flow)?;
                 check_endpoint("host", &format!("{}:{}", p.host, p.port))?;
                 check_key_like("realityPublicKey", &p.reality_public_key, 128)?;
                 check_key_like("shortId", &p.short_id, 64)?;
@@ -538,7 +558,19 @@ impl ConnectProfile {
             }
             ConnectProfile::XrayVlessTls(p) => {
                 check_key_like("uuid", &p.uuid, 64)?;
-                check_single_line("flow", &p.flow, 64)?;
+                // Empty is legitimate here, and rejecting it made the
+                // WebSocket transport impossible to connect at all.
+                //
+                // XTLS Vision is refused over a WebSocket, so the server
+                // issues WS credentials with no flow and the mapper
+                // deliberately passes an empty string through. The
+                // validator then answered "flow: must not be empty" and
+                // the connection never reached xray -- so the one
+                // transport added specifically to survive a censor was
+                // the one transport the client could not use. The node
+                // side was fine throughout, which is why this only
+                // showed up when the profile was driven end to end.
+                check_optional_flow(&p.flow)?;
                 check_endpoint("host", &format!("{}:{}", p.host, p.port))?;
                 // Not optional the way it arguably is for REALITY, where a
                 // missing name only weakens the disguise. Here the
@@ -709,6 +741,47 @@ mod tests {
         };
         mutate(&mut p);
         ConnectProfile::Shadowsocks(p)
+    }
+
+    fn vless_tls(mutate: impl FnOnce(&mut VlessTlsProfile)) -> ConnectProfile {
+        let mut p = VlessTlsProfile {
+            uuid: "3f2504e0-4f89-11d3-9a0c-0305e82c3301".into(),
+            flow: "xtls-rprx-vision".into(),
+            host: "203.0.113.5".into(),
+            port: 2053,
+            server_name: "fi1.neoxify.site".into(),
+            ws_path: None,
+        };
+        mutate(&mut p);
+        ConnectProfile::XrayVlessTls(p)
+    }
+
+    /// The WebSocket transport, which this validator used to make
+    /// impossible to use.
+    ///
+    /// Vision cannot be carried inside a WebSocket, so the server issues
+    /// these credentials with no flow and the mapper passes the empty
+    /// string straight through. Rejecting it meant the one transport
+    /// added specifically to survive a censor was the one transport the
+    /// client could never connect with -- while the node served it
+    /// perfectly the whole time.
+    #[test]
+    fn accepts_a_websocket_profile_whose_flow_is_empty() {
+        let profile = vless_tls(|p| {
+            p.flow = String::new();
+            p.ws_path = Some("/ws".into());
+        });
+        assert!(
+            profile.validate().is_ok(),
+            "an empty flow is what a WebSocket credential legitimately carries"
+        );
+    }
+
+    /// Empty is allowed; nonsense still is not. Relaxing the check must
+    /// not turn it off.
+    #[test]
+    fn still_rejects_a_flow_containing_control_characters() {
+        assert!(vless_tls(|p| p.flow = "xtls\nrprx".into()).validate().is_err());
     }
 
     #[test]
