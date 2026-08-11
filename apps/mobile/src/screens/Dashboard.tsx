@@ -28,6 +28,7 @@ import {
   type VpnStatus,
 } from "../lib/vpn";
 import { buildXrayConfig, isXrayProtocol, TUN_DNS, TUN_MTU } from "../lib/xray-config";
+import { loadChosenRoute, saveChosenRoute } from "../lib/route-preference";
 
 /** The Android dashboard.
  *
@@ -216,7 +217,16 @@ export function Dashboard({
   const [permissionDenied, setPermissionDenied] = useState(false);
 
   useEffect(() => {
-    void loadAll();
+    // The remembered route is read first and handed straight to
+    // loadAll, rather than set and left for a later render: loadAll
+    // resolves which credential to show against it, and passing it
+    // explicitly avoids a first pass that picks the wrong one and a
+    // second that corrects it.
+    void (async () => {
+      const remembered = await loadChosenRoute();
+      if (remembered) setChosenRouteId(remembered);
+      await loadAll(remembered ?? undefined);
+    })();
   }, []);
 
   useEffect(() => {
@@ -931,6 +941,11 @@ export function Dashboard({
           onClose={() => setShowLocationPicker(false)}
           onSwitched={(routeId) => {
             setChosenRouteId(routeId ?? null);
+            // Best-effort and deliberately not awaited: the customer's
+            // connection should not wait on a disk write, and losing
+            // the preference costs them one re-pick rather than a
+            // connection.
+            void saveChosenRoute(routeId ?? null);
             void loadAll(routeId);
           }}
         />
