@@ -98,7 +98,15 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
                 // different fixes, and the app shows this text under
                 // "show details" precisely so it survives to be read.
                 Log.e(TAG, "$what failed", e)
-                invoke.reject(e.message ?: e.toString())
+                // The operation is named even when the exception cannot
+                // usefully name itself. A message-less exception used to
+                // arrive as its bare class name, which after
+                // minification meant the telemetry recorded results like
+                // "v1.b" -- true, and worth nothing to whoever is
+                // reading it. Exception names now survive R8 as well
+                // (see consumer-rules.pro), so this is the second line
+                // of defence rather than the only one.
+                invoke.reject(e.message ?: "$what failed: $e")
             }
         }
     }

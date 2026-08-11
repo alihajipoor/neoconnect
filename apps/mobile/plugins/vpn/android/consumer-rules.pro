@@ -5,5 +5,18 @@
 # renaming them makes libgojni.so fail at runtime. That shipped in
 # android-v0.2.1, where the app closed itself the moment it read VPN
 # status, and only in release builds because debug does not minify.
+
+# Exception class names survive minification, so a failure with no
+# message says what it was rather than what R8 renamed it to.
+#
+# Without this the plugin's `e.message ?: e.toString()` fallback sent
+# the minified class name to the telemetry, and a real WireGuard
+# failure was recorded as `{"protocol":"Fast","result":"v1.b"}`. That
+# is indistinguishable from noise, in exactly the reports that exist
+# because a customer could not connect and nobody could see why.
+#
+# -keepnames, not -keep: only the names are preserved, so the classes
+# are still shrunk and their members still renamed.
+-keepnames class * extends java.lang.Throwable
 -keep class go.** { *; }
 -keep class neoxifyxray.** { *; }
