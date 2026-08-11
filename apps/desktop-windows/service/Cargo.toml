@@ -38,6 +38,17 @@ features = [
     # Adapter enumeration for routing -- see src/adapters.rs for why this
     # is done through the API rather than by parsing localised command output.
     "Win32_NetworkManagement_IpHelper",
+    # RasDialW and its structures, for the IKEv2 engine.
+    #
+    # These were hand-declared originally, on the reasoning that one
+    # function did not justify the dependency. That cost three wrong
+    # struct layouts in a row -- 2128 vs 2120 for RASDIALPARAMSW, then 48
+    # and 64 vs 72 for RASDIALEXTENSIONS -- each of which Windows
+    # reported as the same undifferentiated error 632, and one of which
+    # dialled successfully and then killed the service from inside
+    # RASAPI32. The generated bindings cannot get the layout wrong, and
+    # the dependency was already here.
+    "Win32_NetworkManagement_Rras",
     # IP_ADAPTER_ADDRESSES_LH is gated behind Ndis as well as WinSock.
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",

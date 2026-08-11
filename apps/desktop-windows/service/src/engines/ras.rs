@@ -1,4 +1,4 @@
-//! The RAS dial API, hand-declared.
+//! The RAS dial API.
 //!
 //! `rasdial.exe` cannot be used for this. It works for the older
 //! password protocols, but an IKEv2 entry authenticates with EAP, and
@@ -10,84 +10,63 @@
 //! this module was written.
 //!
 //! `RasDialW` takes the username and password in its parameters and
-//! dials without any of that, so the engine calls it directly. The
-//! structures are declared here rather than taken from a crate because
-//! the `windows` crate's `Networking::Ras` feature is not enabled in
-//! this build and one function does not justify it.
+//! dials without any of that, so the engine calls it directly.
+//!
+//! **The structures come from `windows-sys`, and hand-declaring them
+//! again would be a mistake worth naming.** They were hand-declared
+//! originally, on the reasoning that one function did not justify the
+//! dependency -- which was already present anyway. That produced three
+//! wrong layouts in a row and one memory-corrupting crash:
+//!
+//! * `RASDIALPARAMSW` is `#[repr(C, packed(4))]` and *does* contain
+//!   `szEncPassword`. Packed to 4, that still totals 2120 bytes -- the
+//!   same total as a naturally-aligned struct that stops at
+//!   `dwIfIndex`. So the hand-written version passed the `dwSize` check
+//!   by coincidence while placing `dwCallbackId` and `dwIfIndex` four
+//!   bytes off and omitting the trailing pointer entirely. RAS read a
+//!   pointer from the wrong offset, and the service died with
+//!   0xC0000005 inside RASAPI32.dll one second after the tunnel came
+//!   up. Nothing restarts it, so a single IKEv2 attempt left the
+//!   customer unable to connect on any protocol until they rebooted.
+//! * `RASDIALEXTENSIONS` is packed the same way, making it 60 bytes,
+//!   not the 72 a naturally-aligned reading gives. Windows answered
+//!   both wrong sizes with the same undifferentiated error 632.
+//! * `RDEOPT_NoUser` is 512. The hand-written constant said 16, which
+//!   is `RDEOPT_IgnoreSoftwareCompression` -- a different flag
+//!   entirely, silently.
+//!
+//! Only the three function signatures are still declared here, because
+//! `windows-sys` 0.59 ships the RAS types and constants but not these
+//! entry points. Signatures are not where the danger was.
 
 use std::ffi::c_void;
 
-/// `RASDIALPARAMSW`.
+use windows_sys::Win32::NetworkManagement::Rras::{RASDIALEXTENSIONS, RASDIALPARAMSW};
+
+/// A zeroed `RASDIALPARAMSW` with `dwSize` filled in.
 ///
-/// The fixed array lengths are the ones in `ras.h`: `RAS_MaxEntryName`
-/// 256, `RAS_MaxPhoneNumber` 128, `RAS_MaxCallbackNumber` 128, `UNLEN`
-/// 256, `PWLEN` 256, `DNLEN` 15, each plus a terminator.
-///
-/// The struct ends at `dwIfIndex`, and that is not an oversight.
-/// `ras.h` adds `szEncPassword` at `WINVER >= 0x0602`, which would make
-/// this 2128 bytes -- and Windows 11 rejects 2128 outright with error
-/// 632, "An incorrect structure size was detected". Measured, not
-/// assumed: the 2128 version was built and dialled, and that is what
-/// came back. 2120 is the size this API wants.
-///
-/// What the wrong size does *not* do is fail quietly, so the size is
-/// not the thing to suspect when a dial misbehaves. See [`ras_dial`]
-/// for the failure that actually bit here.
-#[repr(C)]
-pub struct RasDialParams {
-    pub dw_size: u32,
-    pub entry_name: [u16; 257],
-    pub phone_number: [u16; 129],
-    pub callback_number: [u16; 129],
-    pub user_name: [u16; 257],
-    pub password: [u16; 257],
-    pub domain: [u16; 16],
-    pub sub_entry: u32,
-    pub callback_id: usize,
-    pub if_index: u32,
+/// The generated type has no `Default`, and it must not simply be
+/// zeroed wholesale either: `dwSize` is what RAS validates the layout
+/// against.
+pub fn dial_params() -> RASDIALPARAMSW {
+    // SAFETY: every field is a plain integer, fixed array or pointer,
+    // for which an all-zero bit pattern is valid.
+    let mut params: RASDIALPARAMSW = unsafe { std::mem::zeroed() };
+    params.dwSize = std::mem::size_of::<RASDIALPARAMSW>() as u32;
+    params
 }
 
-impl Default for RasDialParams {
-    fn default() -> Self {
-        Self {
-            dw_size: std::mem::size_of::<Self>() as u32,
-            entry_name: [0; 257],
-            phone_number: [0; 129],
-            callback_number: [0; 129],
-            user_name: [0; 257],
-            password: [0; 257],
-            domain: [0; 16],
-            sub_entry: 0,
-            callback_id: 0,
-            if_index: 0,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The size Windows actually accepts, established by asking it.
-    ///
-    /// Pinned as a literal rather than derived, because deriving it from
-    /// the struct would make the test agree with whatever the struct
-    /// happens to say. 2128 -- the layout including `szEncPassword` --
-    /// was built and dialled on Windows 11 and came back as error 632,
-    /// "An incorrect structure size was detected". 2120 is the one that
-    /// dials.
-    #[test]
-    fn matches_the_layout_windows_accepts() {
-        assert_eq!(std::mem::size_of::<RasDialParams>(), 2120);
-    }
-
-    #[test]
-    fn default_reports_its_own_size() {
-        assert_eq!(
-            RasDialParams::default().dw_size as usize,
-            std::mem::size_of::<RasDialParams>()
-        );
-    }
+/// A zeroed `RASDIALEXTENSIONS` with `dwSize` filled in.
+///
+/// Unused while the dial passes null extensions, and kept because the
+/// service context may yet need `RDEOPT_NoUser`. Constructing it
+/// correctly is the point -- see the module note.
+#[allow(dead_code)]
+pub fn dial_extensions() -> RASDIALEXTENSIONS {
+    // SAFETY: as above -- plain data throughout.
+    let mut ext: RASDIALEXTENSIONS = unsafe { std::mem::zeroed() };
+    ext.dwSize = std::mem::size_of::<RASDIALEXTENSIONS>() as u32;
+    ext
 }
 
 /// Copies a string into one of the fixed fields, truncating rather than
@@ -104,87 +83,17 @@ pub fn set_field(dst: &mut [u16], value: &str) {
     dst[encoded.len()] = 0;
 }
 
-/// `RASDIALEXTENSIONS`, needed only for one flag.
-///
-/// Passing null here is legal and was what this did first. It is also
-/// how the service came to die: dialling with no extensions from
-/// LocalSystem authenticated fine, brought the tunnel up -- RasClient
-/// logged "link established" -- and then faulted inside RASAPI32.dll
-/// with 0xC0000005 before `RasDialW` ever returned. Nothing restarts
-/// the service, so that one attempt left the client unable to connect
-/// on *any* protocol until the machine was rebooted.
-/// The trailing `fSkipPppAuth` and `RASDEVSPECIFICINFO` are guarded on
-/// `WINVER >= 0x0601` in `ras.h` and are required: stopping after
-/// `RasEapInfo` gives 48 bytes and Windows 11 refuses it with 632.
-///
-/// The nested structs below are declared as structs rather than
-/// flattened into this one, and that distinction is the whole
-/// difference between 64 bytes and 72. `RASDEVSPECIFICINFO` has 8-byte
-/// alignment of its own, so in C it begins at offset 56; flattening its
-/// two members inline lets Rust place the leading `u32` at 52, which
-/// both shortens the struct and shifts every field after it. Windows
-/// reported that as the same generic 632 -- correct, and no help at all
-/// in locating it. Printing `size_of` was what found it.
-#[repr(C)]
-pub struct RasEapInfo {
-    pub size_of_eap_info: u32,
-    pub eap_info: *mut u8,
-}
-
-#[repr(C)]
-pub struct RasDevSpecificInfo {
-    pub size: u32,
-    pub dev_specific_info: *mut u8,
-}
-
-#[repr(C)]
-pub struct RasDialExtensions {
-    pub dw_size: u32,
-    pub dwf_options: u32,
-    pub hwnd_parent: *mut c_void,
-    pub reserved: usize,
-    pub reserved1: usize,
-    pub eap_info: RasEapInfo,
-    /// `BOOL`, so 4 bytes rather than Rust's 1-byte bool.
-    pub skip_ppp_auth: i32,
-    pub dev_specific: RasDevSpecificInfo,
-}
-
-/// `RDEOPT_NoUser`: dial on behalf of someone who is not logged on.
-///
-/// This is the flag a service is supposed to set. Without it RAS treats
-/// the dial as belonging to an interactive user and goes looking for a
-/// session that does not exist in session 0.
-pub const RDEOPT_NO_USER: u32 = 0x0000_0010;
-
-impl Default for RasDialExtensions {
-    fn default() -> Self {
-        Self {
-            dw_size: std::mem::size_of::<Self>() as u32,
-            dwf_options: RDEOPT_NO_USER,
-            hwnd_parent: std::ptr::null_mut(),
-            reserved: 0,
-            reserved1: 0,
-            eap_info: RasEapInfo { size_of_eap_info: 0, eap_info: std::ptr::null_mut() },
-            skip_ppp_auth: 0,
-            dev_specific: RasDevSpecificInfo { size: 0, dev_specific_info: std::ptr::null_mut() },
-        }
-    }
-}
-
 #[link(name = "rasapi32")]
 extern "system" {
-    /// The notifier is null, which makes the call synchronous: it
-    /// returns only when the tunnel is up or has failed, which is what
-    /// makes a failed connect observable here rather than something the
-    /// app discovers later.
-    ///
-    /// The extensions are *not* null -- see [`RasDialExtensions`].
+    /// A null notifier makes the call synchronous: it returns only when
+    /// the tunnel is up or has failed, which is what makes a failed
+    /// connect observable here rather than something the app discovers
+    /// later.
     #[link_name = "RasDialW"]
     pub fn ras_dial(
-        extensions: *const c_void,
+        extensions: *mut RASDIALEXTENSIONS,
         phonebook: *const u16,
-        params: *mut RasDialParams,
+        params: *mut RASDIALPARAMSW,
         notifier_type: u32,
         notifier: *const c_void,
         connection: *mut *mut c_void,
@@ -221,25 +130,44 @@ pub fn error_text(code: u32) -> Option<String> {
 }
 
 #[cfg(test)]
-mod layout {
+mod tests {
     use super::*;
 
-    /// 72, and the nested structs are why.
+    /// The sizes the packed layouts actually produce.
     ///
-    /// Flattening `RASDEVSPECIFICINFO` into the parent gives 64 and a
-    /// shifted layout, which Windows rejects with the same generic 632
-    /// as every other size mistake. Asserting the number here turns
-    /// that into a compile-time-ish check instead of a VM round trip.
+    /// Asserted so that swapping these types back for hand-written ones
+    /// fails here rather than at a customer's machine. 2120 is the
+    /// coincidence that made the original bug so quiet: a struct with
+    /// the wrong field offsets and a missing trailing pointer added up
+    /// to exactly the same total, so `dwSize` validation passed.
     #[test]
-    fn extensions_match_the_c_layout() {
-        assert_eq!(std::mem::size_of::<RasDialExtensions>(), 72);
+    fn the_packed_layouts_are_what_ras_expects() {
+        assert_eq!(std::mem::size_of::<RASDIALPARAMSW>(), 2120);
+        assert_eq!(std::mem::size_of::<RASDIALEXTENSIONS>(), 60);
+    }
+
+    /// Field offsets, not just the total.
+    ///
+    /// The total was never the problem -- it matched. Pinning
+    /// `dwCallbackId` catches the natural-alignment mistake directly:
+    /// packed to 4 it sits at 2100, and 8-byte alignment pushes it to
+    /// 2104, which is what RAS was reading a pointer from.
+    ///
+    /// `offset_of!` rather than taking a reference, because a reference
+    /// into a packed struct is refused by the compiler -- which is the
+    /// same hazard this test exists to guard, caught one level up.
+    #[test]
+    fn dw_callback_id_sits_where_packing_puts_it() {
+        assert_eq!(std::mem::offset_of!(RASDIALPARAMSW, dwCallbackId), 2100);
+        assert_eq!(std::mem::offset_of!(RASDIALPARAMSW, dwIfIndex), 2108);
+        assert_eq!(std::mem::offset_of!(RASDIALPARAMSW, szEncPassword), 2112);
     }
 
     #[test]
-    fn extensions_default_reports_its_own_size() {
+    fn params_report_their_own_size() {
         assert_eq!(
-            RasDialExtensions::default().dw_size as usize,
-            std::mem::size_of::<RasDialExtensions>()
+            dial_params().dwSize as usize,
+            std::mem::size_of::<RASDIALPARAMSW>()
         );
     }
 }
