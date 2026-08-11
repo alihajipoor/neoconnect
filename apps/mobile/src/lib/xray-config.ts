@@ -29,6 +29,38 @@ export const TUN_MTU = 1400;
 
 type Json = Record<string, unknown>;
 
+/** The one short ID a client sends, out of the list the server holds.
+ *
+ * The server's `publicParams` carries `shortIds`, an array -- the set it
+ * will accept -- and a client picks one. This read `params.shortId`,
+ * singular, which no server has ever sent, so every Android REALITY
+ * connection went out with an empty short ID.
+ *
+ * That failed in the worst possible way rather than an obvious one.
+ * REALITY's entire design is to hand an unauthenticated client to the
+ * site it is imitating, so the connection succeeded, the tunnel came
+ * up, and the customer was quietly browsing cloudflare.com instead of
+ * being proxied. The app's own evidence check caught it -- "up but not
+ * carrying traffic" -- and failed over to WireGuard, which is why it
+ * showed a green tick while REALITY had never worked at all.
+ *
+ * The desktop client has always read `shortIds[0]` and thrown when it
+ * is absent. This is the same, and the caller now validates it for the
+ * same reason: silently sending nothing is what made this invisible.
+ */
+function shortIdFrom(params: Record<string, unknown>): string | null {
+  const list = params.shortIds;
+  if (Array.isArray(list) && typeof list[0] === "string" && list[0].length > 0) {
+    return list[0];
+  }
+  // Accepted as a fallback only because a config written by hand might
+  // carry the singular form; never emitted by the backend.
+  if (typeof params.shortId === "string" && params.shortId.length > 0) {
+    return params.shortId;
+  }
+  return null;
+}
+
 function realityOutbound(user: ProtocolUser, params: Record<string, unknown>): Json {
   return {
     tag: "proxy",
@@ -54,7 +86,7 @@ function realityOutbound(user: ProtocolUser, params: Record<string, unknown>): J
         // on earth is itself the signal a censor watches for.
         fingerprint: "chrome",
         publicKey: params.publicKey ?? params.realityPublicKey,
-        shortId: params.shortId,
+        shortId: shortIdFrom(params),
       },
     },
   };
@@ -201,7 +233,15 @@ export function buildXrayConfig(user: ProtocolUser): string {
   let outbound: Json;
   switch (user.protocol) {
     case "XRAY_VLESS_REALITY":
-      if (!params.serverName || !(params.publicKey ?? params.realityPublicKey)) {
+      // shortId is checked alongside the rest, not left out of it.
+      // Omitting it from this list is what let an empty one through to
+      // a server that would then treat the customer as a stranger and
+      // send them to the camouflage site.
+      if (
+        !params.serverName ||
+        !(params.publicKey ?? params.realityPublicKey) ||
+        !shortIdFrom(params)
+      ) {
         throw new Error("This server is missing its REALITY parameters");
       }
       outbound = realityOutbound(user, params);
