@@ -30,6 +30,9 @@ const en = {
   "verify.noCode": "Didn't get a code? Resend it",
   "loc.title": "Choose location",
   "loc.disconnectFirst": "Disconnect first to switch servers",
+  // Shown when nothing is connected, where the line above would be
+  // false: it told customers to disconnect while they already were.
+  "loc.pickHint": "Pick a server and protocol",
   "loc.retry": "Retry",
 
   "nav.settings": "Settings",
@@ -228,6 +231,12 @@ const en = {
   "dash.verifying": "Checking connection...",
   "dash.verifyingHint": "Setting up your tunnel — trying each protocol until one works. Click to stop.",
   "dash.switchedTo": "Your usual protocol didn't get through. Now using",
+  // Used instead of the line above when failover crossed to a different
+  // country. Naming only the protocol was accurate and still misleading:
+  // a customer who chose Singapore deliberately was told "now using
+  // Fast" and had to notice the server field to learn they were in
+  // France. Whoever picked a country picked it for a reason.
+  "dash.switchedServer": "Couldn't reach {from}. Now on {to} over {protocol}",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this; reinstalling will if it doesn't.",
   "err.engineMissing": "Part of the installation is missing. Please reinstall Neoxify.",
@@ -273,6 +282,7 @@ const fa: Record<TranslationKey, string> = {
   "verify.noCode": "کد را دریافت نکردید؟ ارسال دوباره",
   "loc.title": "انتخاب موقعیت",
   "loc.disconnectFirst": "برای تغییر سرور ابتدا قطع کنید",
+  "loc.pickHint": "یک سرور و پروتکل انتخاب کنید",
   "loc.retry": "تلاش دوباره",
 
   "nav.settings": "تنظیمات",
@@ -458,6 +468,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.verifying": "در حال بررسی اتصال...",
   "dash.verifyingHint": "در حال برقراری تونل — هر پروتکل امتحان می‌شود. برای توقف کلیک کنید.",
   "dash.switchedTo": "پروتکل همیشگی شما عبور نکرد. اکنون از این استفاده می‌شود:",
+  "dash.switchedServer": "دسترسی به {from} ممکن نشد. اکنون {to} با {protocol}",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینه نئوکسیفای اجرا نمی‌شود. معمولاً راه‌اندازی دوباره برنامه مشکل را حل می‌کند.",
   "err.engineMissing": "بخشی از نصب ناقص است. لطفاً دوباره نصب کنید.",

@@ -349,7 +349,20 @@ export function Dashboard({
   /** Names the protocol we ended up on when it is not the one we
    * started with. Landing somewhere else without saying so is the same
    * dishonesty as a false "Connected". */
-  const [failedOverTo, setFailedOverTo] = useState<string | null>(null);
+  /** Where the ladder actually landed, when that is not where it set out
+   * to go.
+   *
+   * Carries the region as well as the protocol because failover can
+   * cross a border. Saying only "now using Fast" is true and
+   * insufficient: someone who chose Singapore chose it for a reason, and
+   * the fact that they are now leaving from France should not have to be
+   * inferred from a field elsewhere on the screen. */
+  const [failedOverTo, setFailedOverTo] = useState<{
+    label: string;
+    /** Region we meant to use, only when it differs from where we landed. */
+    fromRegion: string | null;
+    toRegion: string | null;
+  } | null>(null);
   /** Guards the ladder against running twice at once. The health poll
    * and the Connect button can both start one, and two of them
    * interleaving would have each tearing down the other's engine. */
@@ -857,7 +870,21 @@ export function Dashboard({
 
           if (verdict === "connected") {
             setConnectionState("connected");
-            if (index > 0) setFailedOverTo(label);
+            if (index > 0) {
+              // The region is compared against the head of the list --
+              // what this attempt was meant to be -- rather than against
+              // whatever is on screen, which has already been updated by
+              // the time this runs.
+              const intended = routes.find((r) => r.id === candidates[0]?.routeId);
+              const landed = routes.find((r) => r.id === candidate.routeId);
+              const from = intended?.location.region ?? null;
+              const to = landed?.location.region ?? null;
+              setFailedOverTo({
+                label,
+                fromRegion: from && to && from !== to ? from : null,
+                toRegion: to,
+              });
+            }
             // Remembered only on proof it carried traffic. Recording a
             // merely-started engine would teach the app to lead with a
             // protocol that does not actually work here.
@@ -1112,8 +1139,19 @@ export function Dashboard({
                           report when none of them do. */}
                       {connectionState === "connected" && failedOverTo ? (
                         <p className="mt-1 text-xs text-amber-400/90">
-                          {t("dash.switchedTo")}{" "}
-                          <span className="font-medium">{failedOverTo}</span>
+                          {failedOverTo.fromRegion ? (
+                            // Crossed a border, so the country is named.
+                            t("dash.switchedServer", {
+                              from: failedOverTo.fromRegion,
+                              to: failedOverTo.toRegion ?? "",
+                              protocol: failedOverTo.label,
+                            })
+                          ) : (
+                            <>
+                              {t("dash.switchedTo")}{" "}
+                              <span className="font-medium">{failedOverTo.label}</span>
+                            </>
+                          )}
                         </p>
                       ) : null}
 
