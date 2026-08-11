@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Check, Loader2, MapPin, Repeat, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
@@ -101,6 +101,55 @@ export function LocationPicker({
     );
   }
 
+  /* One tab stop for the whole list, arrow keys to move within it.
+   *
+   * Every row being its own tab stop meant reaching the last server took
+   * fifteen presses, and this list only grows as nodes are added. That
+   * is invisible with a mouse and miserable without one -- and "without
+   * one" includes anyone driving this over a remote desktop, which is
+   * how it was found.
+   *
+   * A disabled button cannot take focus, and the current route's row is
+   * disabled, so the roving stop has to skip it rather than land on it
+   * and silently do nothing. */
+  const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+
+  function selectable(i: number) {
+    return Boolean(routes[i]) && routes[i].id !== currentRouteId && switchingId === null;
+  }
+
+  useEffect(() => {
+    if (routes.length === 0 || selectable(focusedIndex)) return;
+    const next = routes.findIndex((_, i) => selectable(i));
+    if (next >= 0) setFocusedIndex(next);
+    // Deliberately not depending on focusedIndex: this only exists to
+    // rescue a stop that has become unreachable, and re-running it on
+    // every focus change would drag focus back the moment the customer
+    // arrowed onto a different row.
+  }, [routes, currentRouteId, switchingId]);
+
+  function moveFocus(delta: number) {
+    if (routes.length === 0) return;
+    let i = focusedIndex;
+    for (let n = 0; n < routes.length; n += 1) {
+      i = (i + delta + routes.length) % routes.length;
+      if (selectable(i)) break;
+    }
+    setFocusedIndex(i);
+    rowRefs.current[i]?.focus();
+  }
+
+  function onListKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveFocus(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveFocus(-1);
+    }
+  }
+
   async function handlePick(route: RouteOption) {
     if (route.id === currentRouteId || switchingId) return;
     setSwitchError(null);
@@ -120,7 +169,13 @@ export function LocationPicker({
       <div className="flex items-center justify-between border-b border-border px-5 py-4">
         <div>
           <h2 className="text-sm font-semibold">{t("loc.title")}</h2>
-          <p className="text-xs text-muted-foreground">{t("loc.disconnectFirst")}</p>
+          {/* Only true while a tunnel is up. Shown unconditionally it
+              told a disconnected customer to disconnect first, which
+              reads as the app not knowing its own state -- and this
+              screen's whole job is being trusted about what it reports. */}
+          <p className="text-xs text-muted-foreground">
+            {t(tunnelActive ? "loc.disconnectFirst" : "loc.pickHint")}
+          </p>
         </div>
         <button
           onClick={onClose}
@@ -145,13 +200,18 @@ export function LocationPicker({
             No locations available on your current plan.
           </p>
         ) : (
-          <div className="flex flex-col gap-2">
-            {routes.map((route) => {
+          <div className="flex flex-col gap-2" onKeyDown={onListKeyDown}>
+            {routes.map((route, index) => {
               const isCurrent = route.id === currentRouteId;
               const isSwitching = switchingId === route.id;
               return (
                 <button
                   key={route.id}
+                  ref={(el) => {
+                    rowRefs.current[index] = el;
+                  }}
+                  tabIndex={index === focusedIndex ? 0 : -1}
+                  onFocus={() => setFocusedIndex(index)}
                   onClick={() => void handlePick(route)}
                   disabled={isCurrent || switchingId !== null}
                   className={cn(
