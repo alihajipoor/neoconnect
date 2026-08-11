@@ -84,10 +84,23 @@ costs a few seconds and is within budget.
 - **Windows code signing (#91): account created, identity validation
   submitted 2026-08-11, status In Progress.** Azure Artifact Signing,
   Basic tier (~$10/mo), account `neoxify-signing` in resource group
-  `neoxify-signing`, **region West US 2** — the endpoint URI is
-  region-specific, so read it off the account rather than assuming the
-  East US one. Validating as an **individual**, so the publisher shown
-  to customers will be a personal legal name until the company exists.
+  `neoxify-signing`, **region West US 2**. Endpoint read off the account
+  overview rather than guessed: **`https://wus2.codesigning.azure.net/`**
+  — that is the `AZURE_SIGNING_ENDPOINT` value, and it is region-specific,
+  so the East US one would fail. Validating as an **individual**, so the
+  publisher shown to customers will be a personal legal name until the
+  company exists.
+
+  **Status 2026-08-11: Action Required, not failed.** The Azure record is
+  complete and stored; what is outstanding is the ID check at
+  credentials.microsoft.com, which returns "No access" — its anti-VPN /
+  anti-VM classifier rejecting a connection that is demonstrably clean
+  (no tunnel adapters, no engines running, ordinary US residential IP,
+  confirmed by checking rather than assuming). Resume via the "complete
+  your verification" link on the validation panel; **do not create a
+  second identity validation**, the existing one is fine. If it keeps
+  refusing, the documented path is to wait 24h then contact support with
+  the transaction ID.
 
   Two Azure gotchas worth not rediscovering: the subscription had to be
   upgraded from free credit to Pay-As-You-Go first (Artifact Signing
