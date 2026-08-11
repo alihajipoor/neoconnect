@@ -4,6 +4,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { CreateProtocolConfigDto } from "./dto/create-protocol-config.dto";
 import { UpdateProtocolConfigDto } from "./dto/update-protocol-config.dto";
 import { generateCa, signCert } from "./openvpn-pki";
+import { decryptCredentials, encryptCredentials } from "../protocol-users/credentials-crypto";
 
 /** publicParamsJson keys the backend owns, not the admin. An update must
  * carry these across untouched: they are generated once at create time
@@ -209,7 +210,7 @@ export class ProtocolConfigsService {
       }
     }
 
-    return this.prisma.protocolConfig.update({
+    const updated = await this.prisma.protocolConfig.update({
       where: { id },
       data: {
         ...(dto.listenPort !== undefined ? { listenPort: dto.listenPort } : {}),
@@ -217,6 +218,62 @@ export class ProtocolConfigsService {
         ...(dto.publicParamsJson ? { publicParamsJson: publicParamsJson as Prisma.InputJsonValue } : {}),
       },
     });
+
+    // Passed explicitly rather than read back off `updated`: the
+    // protocol never changes here, and the params are already computed
+    // above. Taking them from the return value would make this depend
+    // on exactly which columns the write happened to echo back.
+    await this.rewriteIssuedEndpoints(id, existing.protocol, publicParamsJson);
+    return updated;
+  }
+
+  /**
+   * Carries an endpoint change into credentials that were already issued.
+   *
+   * WireGuard and OpenVPN are the two protocols whose per-customer
+   * credentials embed the server's address and port -- baked in at
+   * generation, because both formats are a complete config file rather
+   * than a set of fields the client assembles. Everything else reads
+   * host and port from the `connection` block, which is derived fresh
+   * on every request and needs nothing done to it.
+   *
+   * Without this, moving a port did exactly half a migration: the row
+   * said the new port, the node listened on the new port, and every
+   * customer already provisioned went on dialling the old one until
+   * somebody deleted and recreated them by hand. Nothing reported it,
+   * because from the panel's point of view the change had succeeded.
+   *
+   * Only the endpoint is rewritten. Regenerating the credentials
+   * outright would hand out a new WireGuard key and consume another
+   * address from the node's pool, or reissue an OpenVPN certificate --
+   * churn that a port change does not call for, and that would drop
+   * anyone currently connected.
+   */
+  private async rewriteIssuedEndpoints(
+    configId: string,
+    protocol: Protocol,
+    publicParamsJson: Record<string, unknown> | undefined,
+  ) {
+    if (protocol !== Protocol.WIREGUARD && protocol !== Protocol.OPENVPN) {
+      return;
+    }
+
+    const endpoint = typeof publicParamsJson?.endpoint === "string" ? publicParamsJson.endpoint : null;
+    if (!endpoint) return;
+
+    const users = await this.prisma.protocolUser.findMany({
+      where: { protocolConfigId: configId },
+      select: { id: true, credentialsJson: true },
+    });
+
+    for (const user of users) {
+      const credentials = decryptCredentials(user.credentialsJson);
+      if (credentials.endpoint === endpoint) continue;
+      await this.prisma.protocolUser.update({
+        where: { id: user.id },
+        data: { credentialsJson: encryptCredentials({ ...credentials, endpoint }) },
+      });
+    }
   }
 
   /** Same unhandled-FK-500 class of bug as Nodes/Plans (see those
