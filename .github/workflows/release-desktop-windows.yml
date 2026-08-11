@@ -19,10 +19,24 @@ on:
 
 permissions:
   contents: write
+  # For the OIDC token azure/login exchanges for a short-lived Azure
+  # credential. Chosen over a client secret so there is no long-lived
+  # password in the repository at all.
+  id-token: write
 
 jobs:
   release:
     runs-on: windows-latest
+    # Signing is skipped, loudly, when the credentials are absent.
+    #
+    # It has to degrade rather than fail: releases predate the
+    # certificate and must keep working if it ever lapses. But a release
+    # that quietly ships unsigned is the silent-failure pattern this repo
+    # keeps getting bitten by, so the skip announces itself in the log
+    # and the verification step below refuses to pass a build that was
+    # supposed to be signed and is not.
+    env:
+      SIGNING_ENABLED: ${{ secrets.AZURE_CLIENT_ID != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -99,6 +113,67 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # Authenticode, so Windows names a real publisher instead of
+      # "Unknown". Distinct from the updater signature above: that one
+      # proves a payload came from this pipeline, this one proves who
+      # published it. Two keys, two purposes, neither substitutes.
+      - name: Announce that signing is skipped
+        if: env.SIGNING_ENABLED != 'true'
+        shell: bash
+        run: |
+          echo "::warning title=Unsigned release::AZURE_CLIENT_ID is not set, so this build is NOT Authenticode-signed. Windows will warn about an unknown publisher."
+
+      - name: Azure login
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Only the NSIS installer exists at this point. The bootstrapper is
+      # built afterwards, deliberately, because it embeds this file --
+      # signing it later would leave a signed wrapper around an unsigned
+      # payload.
+      - name: Sign the installer
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: apps/desktop-windows/target/release/bundle/nsis
+          files-folder-filter: exe
+          file-digest: SHA256
+          # Not on by default, and without it the signature is only
+          # valid for three days -- after which every installer already
+          # in the wild would start warning again. A timestamp
+          # countersignature keeps shipped builds trusted even once the
+          # certificate expires or is replaced, which it will be: since
+          # March 2026 these certificates max out at 460 days.
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Signing rewrote the installer, so the updater signature produced
+      # during the build no longer matches it.
+      #
+      # This is the step whose absence would break updating for every
+      # existing customer: the client refuses any payload whose Ed25519
+      # signature does not verify, so a stale .sig means the update
+      # downloads and is then rejected, forever, with no way to fix it
+      # from the server side. Regenerate over the signed bytes.
+      - name: Re-sign the updater payload
+        if: env.SIGNING_ENABLED == 'true'
+        working-directory: apps/desktop-windows
+        shell: bash
+        run: |
+          installer=$(ls target/release/bundle/nsis/*_x64-setup.exe | head -1)
+          echo "Regenerating the updater signature over $installer"
+          pnpm exec tauri signer sign "$installer"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
       # The branded single-click installer the website hands out. It
       # carries the NSIS installer above inside itself, so NEOXIFY_SETUP
       # has to point at an already-built one -- hence this step running
@@ -130,6 +205,56 @@ jobs:
       # used to say src-tauri/target and matched nothing -- which no
       # one noticed because no desktop-v* tag had ever been pushed, so
       # this workflow had never actually run.
+      # The bootstrapper is a fresh binary built after the signing step
+      # above, so it is unsigned until now -- and it is the one most
+      # customers actually download from the website.
+      - name: Sign the bootstrapper
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          # Absolute, which this input requires -- a relative path here
+          # matches nothing. Named explicitly rather than re-running
+          # files-folder over the whole directory, because re-signing
+          # the NSIS installer a second time would rewrite its bytes and
+          # invalidate the updater signature regenerated above.
+          files: ${{ github.workspace }}\apps\desktop-windows\target\release\bundle\nsis\Neoxify-Setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # A signing step that quietly does nothing is the failure mode
+      # worth guarding against: everything stays green and the release
+      # ships unsigned. Assert against the files themselves rather than
+      # trusting the steps above reported success.
+      #
+      # Timestamp presence is checked too, because a signature without
+      # one expires in three days and would take every already-installed
+      # copy's trust with it.
+      - name: Verify both binaries are signed and timestamped
+        if: env.SIGNING_ENABLED == 'true'
+        working-directory: apps/desktop-windows/target/release/bundle/nsis
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in Get-ChildItem -Filter *.exe) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            if ($sig.Status -ne 'Valid') {
+              Write-Host "::error::$($f.Name) is not validly signed: $($sig.Status)"
+              $failed = $true
+              continue
+            }
+            if ($null -eq $sig.TimeStamperCertificate) {
+              Write-Host "::error::$($f.Name) is signed but NOT timestamped -- the signature would expire in days."
+              $failed = $true
+              continue
+            }
+            Write-Host "$($f.Name): signed by $($sig.SignerCertificate.Subject), timestamped"
+          }
+          if ($failed) { exit 1 }
+
       - name: Generate checksum
         working-directory: apps/desktop-windows/target/release/bundle/nsis
         shell: bash
