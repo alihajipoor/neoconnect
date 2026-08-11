@@ -129,6 +129,49 @@ export function LocationPicker({
     // arrowed onto a different row.
   }, [routes, currentRouteId, switchingId]);
 
+  /* Put focus on a row as soon as there are rows.
+   *
+   * The roving tab stop above only responds once focus is already on a
+   * row, because the handler lives on the list and only sees events
+   * bubbling out of its children. Opening the sheet left focus outside
+   * it, so the first two Tab presses went to the header's close button
+   * and the arrow keys did nothing at all -- no movement, no focus ring,
+   * nothing to explain why. Found driving this by keyboard.
+   *
+   * Once per open, guarded by a ref rather than by state: re-running it
+   * would yank focus back to the top every time the customer arrowed
+   * away, which is the same bug wearing a different hat. */
+  const autoFocusedRef = useRef(false);
+  useEffect(() => {
+    if (loading || routes.length === 0 || autoFocusedRef.current) return;
+    const first = routes.findIndex((_, i) => selectable(i));
+    if (first < 0) return;
+    autoFocusedRef.current = true;
+    setFocusedIndex(first);
+    rowRefs.current[first]?.focus();
+  }, [loading, routes]);
+
+  /* Escape closes the sheet.
+   *
+   * It covers the whole overlay rather than the list, so it works while
+   * the list is still loading, while an error is showing, and wherever
+   * focus happens to be -- a dismissal that only works from one element
+   * is barely a dismissal.
+   *
+   * Deliberately inert mid-switch: the request is already with the
+   * server and closing here would not recall it, so honouring Escape
+   * would imply a cancellation that did not happen. Same rule the rest
+   * of this app follows about not claiming things it has not done. */
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape" || switchingId !== null) return;
+      event.preventDefault();
+      onClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [switchingId, onClose]);
+
   function moveFocus(delta: number) {
     if (routes.length === 0) return;
     let i = focusedIndex;
