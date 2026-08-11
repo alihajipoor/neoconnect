@@ -461,11 +461,34 @@ export function Dashboard({
     let lastError: ClassifiedError | null = null;
     const attempts: string[] = [];
 
+    /* Someone giving up is a result, and it used to be recorded as
+     * nothing at all.
+     *
+     * Every cancel path below returned straight out of the ladder, so a
+     * customer who waited, lost patience and pressed stop left no trace
+     * -- while the same connect, allowed to run to the end, would have
+     * reported in full. That hides the one signal a beta most wants:
+     * not which protocols fail, but which ones people abandon because
+     * they are too slow to be worth waiting for.
+     *
+     * OTHER rather than a CANCELLED of its own. The enum documents
+     * OTHER as "something else, with the detail in reason", which this
+     * is; if the count turns out to matter enough to filter on, it can
+     * be promoted to its own value then. */
+    const reportCancelled = () => {
+      void reportAttempt({
+        kind: "CONNECT",
+        outcome: "OTHER",
+        reason: `cancelled by the customer after ${attempts.length} of ${candidates.length} attempt(s)`,
+        attempts: attempts.length > 0 ? rungsFrom(attempts) : undefined,
+      });
+    };
+
     for (const candidate of candidates) {
       // The customer pressed stop. Whatever this attempt left behind is
       // torn down by the toggle that set the flag, so this only has to
       // stop walking the list.
-      if (cancelRef.current) return;
+      if (cancelRef.current) return reportCancelled();
       const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
 
       // Taken while nothing is up. Captured through a live tunnel it
@@ -515,7 +538,7 @@ export function Dashboard({
             allowedApps,
           });
         }
-        if (cancelRef.current) return;
+        if (cancelRef.current) return reportCancelled();
         setProtocolUser(candidate);
         setConnectedAt(Date.now());
         setConnectionState("verifying");
@@ -525,7 +548,7 @@ export function Dashboard({
         // the handshake and answers the stronger question at the same
         // time -- did our packets actually leave via the server.
         const carried = await confirmEgress(baseline, () => cancelRef.current);
-        if (cancelRef.current) return;
+        if (cancelRef.current) return reportCancelled();
         if (carried) {
           const verdict = await verifyEgress(baseline);
           setExitIp(verdict.state === "throughTunnel" ? verdict.exitIp : null);
