@@ -592,7 +592,7 @@ mod tests {
         let profile = payload(
             "XRAY_TROJAN",
             serde_json::json!({ "password": "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MEFCQ0RFRg" }),
-            serde_json::json!({ "serverName": "fi1.neoxify.com" }),
+            serde_json::json!({ "serverName": "fi1.neoxify.site" }),
         )
         .into_profile()
         .expect("should map");
@@ -633,7 +633,7 @@ mod tests {
         let profile = payload(
             "XRAY_VLESS_TLS",
             serde_json::json!({ "uuid": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "flow": "xtls-rprx-vision" }),
-            serde_json::json!({ "serverName": "fi1.neoxify.com" }),
+            serde_json::json!({ "serverName": "fi1.neoxify.site" }),
         )
         .into_profile()
         .expect("should map");

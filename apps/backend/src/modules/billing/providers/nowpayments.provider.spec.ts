@@ -46,17 +46,17 @@ describe("NowPaymentsProvider.createPayment", () => {
   // and nothing anywhere reports an error.
   it("tells NowPayments where to send the IPN callback", async () => {
     const fetchMock = mockFetch();
-    await build("https://connect.neoxify.com/api").createPayment(10, "txn-1");
+    await build("https://connect.neoxify.site/api").createPayment(10, "txn-1");
     expect(sentBody(fetchMock).ipn_callback_url).toBe(
-      "https://connect.neoxify.com/api/billing/webhooks/nowpayments",
+      "https://connect.neoxify.site/api/billing/webhooks/nowpayments",
     );
   });
 
   it("does not double up the slash when the base URL has a trailing one", async () => {
     const fetchMock = mockFetch();
-    await build("https://connect.neoxify.com/api/").createPayment(10, "txn-1");
+    await build("https://connect.neoxify.site/api/").createPayment(10, "txn-1");
     expect(sentBody(fetchMock).ipn_callback_url).toBe(
-      "https://connect.neoxify.com/api/billing/webhooks/nowpayments",
+      "https://connect.neoxify.site/api/billing/webhooks/nowpayments",
     );
   });
 

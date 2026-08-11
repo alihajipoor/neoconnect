@@ -19,9 +19,13 @@ export const PRODUCTION_API_BASE_URLS: readonly string[] = [
   // this, including two that cannot reach the origin below.
   "https://connect.neoxify.site/api",
 
-  // The origin. Still tried, because a CDN is one more party that can be
-  // unavailable, and on an unfiltered network this is the shortest path.
-  "https://connect.neoxify.com/api",
+  // The .com origin used to sit here, as a direct path that skipped the
+  // CDN. It has been removed deliberately: the whole point of the second
+  // domain is that losing one registrable name cannot take the product
+  // down, and a fallback on a domain we might not keep is a dependency
+  // wearing the costume of a safety net. The node mirrors below are the
+  // real answer to "the CDN is unavailable" -- different addresses,
+  // different domain, already proven from Iran.
 
   // The nodes, mirroring the API on the ports their VPN inbounds already
   // listen on.
