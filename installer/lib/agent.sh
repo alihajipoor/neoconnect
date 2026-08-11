@@ -1334,6 +1334,35 @@ CONF
 
   systemctl enable --now strongswan >/dev/null 2>&1 || \
     systemctl enable --now strongswan-starter >/dev/null 2>&1 || true
+
+  # Load the swanctl config at every boot, not only this one.
+  #
+  # Ubuntu 24.04 ships strongswan-starter, which reads the legacy
+  # ipsec.conf and knows nothing about the swanctl configuration this
+  # node actually uses. Without this the daemon comes back after a
+  # reboot listening on 500 and 4500 and accepting nobody. Found when
+  # the Singapore node was rebooted by its provider and came back with
+  # zero connections loaded -- which presents as "IKEv2 randomly stopped
+  # working", with the daemon running and the ports open.
+  cat > /etc/systemd/system/neoxify-swanctl-load.service <<UNIT
+[Unit]
+Description=Load Neoxify swanctl connections and credentials
+After=strongswan-starter.service
+Requires=strongswan-starter.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The unit reports started before its VICI socket is necessarily ready.
+ExecStartPre=/bin/sh -c "for i in 1 2 3 4 5 6 7 8 9 10; do swanctl --stats >/dev/null 2>&1 && exit 0; sleep 1; done; exit 0"
+ExecStart=/usr/sbin/swanctl --load-all
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable neoxify-swanctl-load >/dev/null 2>&1 || true
+
   if ! swanctl --load-all >/dev/null 2>&1; then
     echo "  strongSwan refused the configuration; swanctl --load-all shows why." >&2
     return 1
