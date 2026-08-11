@@ -1278,7 +1278,24 @@ install_ikev2() {
   # Standalone binds port 80 for the challenge. A node has no web server
   # of its own, so nothing is displaced; the panel installer uses the
   # nginx plugin instead because there something would be.
+  # RSA, explicitly, and not as a preference. certbot has issued ECDSA
+  # by default since 2.0, and Android's IKE library refuses an
+  # ECDSA-signed AUTH payload outright:
+  #
+  #   AuthenticationFailedException: Unrecognized ASN.1 objects for
+  #   Signature algorithm and Hash
+  #
+  # It gets there having accepted the whole certificate chain and
+  # negotiated everything else, then drops the session and retries
+  # forever -- so the customer sees a connection that never completes
+  # and nothing anywhere names a certificate. Windows is unaffected; it
+  # accepts ECDSA P-256. That asymmetry is what makes this easy to ship
+  # broken, because the desktop client works and only Android fails.
+  #
+  # Observed against sg1 from the emulator on 2026-08-11. Reissuing as
+  # RSA fixed it on the very next attempt with nothing else changed.
   if ! certbot certonly --standalone --non-interactive --agree-tos \
+      --key-type rsa --rsa-key-size 2048 \
       --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
     echo "  certbot could not issue a certificate for $hostname_input." >&2
     echo "  Check inbound TCP 80 reaches this node, including any cloud firewall." >&2
