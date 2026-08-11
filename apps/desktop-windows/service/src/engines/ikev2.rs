@@ -122,29 +122,25 @@ pub fn connect(profile: &Ikev2Profile) -> Result<(), String> {
 /// than something the app discovers later. See [`super::ras`] for why
 /// `rasdial.exe` cannot do this job.
 fn dial(username: &str, password: &str) -> Result<(), u32> {
-    let mut params = ras::RasDialParams::default();
-    ras::set_field(&mut params.entry_name, ENTRY_NAME);
-    ras::set_field(&mut params.user_name, username);
-    ras::set_field(&mut params.password, password);
+    let mut params = ras::dial_params();
+    ras::set_field(&mut params.szEntryName, ENTRY_NAME);
+    ras::set_field(&mut params.szUserName, username);
+    ras::set_field(&mut params.szPassword, password);
 
-    // Extensions carrying RDEOPT_NoUser, rather than the null this
-    // passed originally. This service runs as LocalSystem in session 0,
-    // and without the flag RAS treats the dial as an interactive user's
-    // and reaches for a session that is not there -- which it does
-    // *after* authenticating and bringing the tunnel up, so the symptom
-    // was a successful connection immediately followed by the whole
-    // service dying with 0xC0000005 inside RASAPI32.dll.
-    let mut extensions = ras::RasDialExtensions::default();
-
+    // Null extensions, which is the documented simple form and is what
+    // this passed originally. The crash that came out of it was never
+    // about extensions: it was RASDIALPARAMSW being declared with
+    // natural alignment instead of packed(4), which put two fields four
+    // bytes off and dropped the trailing pointer while still adding up
+    // to the size RAS validates. See [`super::ras`].
     let mut connection = ptr::null_mut();
-    // SAFETY: both structures are correctly sized (their dwSize fields
-    // are derived from the Rust types, and a wrong value is refused with
-    // 632 rather than accepted) and outlive the call; a null phonebook
+    // SAFETY: `params` is the generated RASDIALPARAMSW with its own
+    // `size_of` in `dwSize`, and it outlives the call; a null phonebook
     // means the system phonebook, which is where -AllUserConnection put
     // the entry; a null notifier makes the call synchronous.
     let code = unsafe {
         ras::ras_dial(
-            &mut extensions as *mut _ as *const std::ffi::c_void,
+            ptr::null_mut(),
             ptr::null(),
             &mut params,
             0,
@@ -238,21 +234,20 @@ fn dial_error(code: u32) -> String {
         628 => "The server ended the connection, usually because the credentials were \
                 refused. If this keeps happening, try another server."
             .into(),
-        // Ours, not the customer's, and currently unresolved -- so it
-        // says so instead of dressing a build problem up as a network
-        // one. Windows returns 632 for any mismatch between what our
-        // hand-declared RAS structures claim and what RASAPI32 expects,
-        // and the message is the same whichever structure is wrong.
+        // Ours, never the customer's. 632 is RAS refusing the size of a
+        // structure we passed it, which can only be a mistake in this
+        // build -- so the message says so rather than dressing it up as
+        // a network problem the customer could act on.
         //
-        // The alternative is worse and is why this path stays as it is:
-        // with the extensions omitted the dial *succeeds*, and then the
-        // whole service dies with an access violation inside RASAPI32,
-        // which leaves the customer unable to connect on any protocol at
-        // all until they reboot. Failing here costs them IKEv2; the
-        // other way costs them everything. See engines/ras.rs.
-        632 => "Built-in (IKEv2) is not working on Windows in this build -- this is a bug \
-                on our side, not a problem with your account or your network. Every other \
-                protocol is unaffected; please use one of those for now."
+        // Should be unreachable now that the structures come from
+        // windows-sys rather than being hand-declared (see
+        // engines/ras.rs), and the layouts are pinned by tests. Kept
+        // because "unreachable" and "unreached" are different things,
+        // and the alternative to a clear message here is a customer
+        // being told their network is at fault.
+        632 => "Built-in (IKEv2) could not start because of a bug in the app, not a problem \
+                with your account or your network. Please report this; every other protocol \
+                is unaffected in the meantime."
             .into(),
         other => ras::error_text(other)
             .unwrap_or_else(|| format!("The connection failed (Windows error {other}).")),
