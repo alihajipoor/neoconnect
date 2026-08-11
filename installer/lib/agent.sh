@@ -1247,9 +1247,37 @@ install_ikev2() {
   install -d -m 755 /etc/swanctl/x509 /etc/swanctl/x509ca /etc/swanctl/conf.d
   install -d -m 700 /etc/swanctl/private
   cp "/etc/letsencrypt/live/$hostname_input/cert.pem" /etc/swanctl/x509/node.pem
-  cp "/etc/letsencrypt/live/$hostname_input/chain.pem" /etc/swanctl/x509ca/chain.pem
   cp "/etc/letsencrypt/live/$hostname_input/privkey.pem" /etc/swanctl/private/node.key
   chmod 600 /etc/swanctl/private/node.key
+
+  # One certificate per file, and this is what makes Windows work at all.
+  # strongSwan reads only the first certificate out of a concatenated
+  # file, so copying chain.pem whole gave it the leaf and one
+  # intermediate -- two short of the path Windows needs to reach a root
+  # it trusts, since Let's Encrypt now chains through Root YE and ISRG
+  # Root X2 before X1. Windows then silently discarded the IKE_AUTH
+  # response and retransmitted its own request until the SA timed out,
+  # reporting "the connection was terminated by the remote computer",
+  # which points at the server rather than at the chain. Found by
+  # reading charon's log next to a real dial; nothing on the client said
+  # anything about certificates.
+  rm -f /etc/swanctl/x509ca/neoxify-ca*.pem
+  awk 'BEGIN{n=0} /BEGIN CERT/{n++} {print > ("/etc/swanctl/x509ca/neoxify-ca" n ".pem")}'       "/etc/letsencrypt/live/$hostname_input/chain.pem"
+  chmod 644 /etc/swanctl/x509ca/neoxify-ca*.pem
+
+  # Windows fragments its own IKE messages at roughly 576 bytes and
+  # ignores larger ones coming back. With charon's 1280-byte default the
+  # certificate chain arrived in pieces Windows would not reassemble.
+  cat > /etc/strongswan.d/neoxify-fragment.conf <<'FRAG'
+# Managed by the Neoxify agent installer.
+#
+# Note the directory: files under strongswan.d/charon/ are already
+# inside the charon section, so a charon { } wrapper there becomes
+# charon.charon and is silently ignored. This belongs one level up.
+charon {
+    fragment_size = 540
+}
+FRAG
 
   # Renewal must refresh swanctl's copies too, or ninety days from now
   # the node serves an expired certificate and every client refuses it.
@@ -1259,10 +1287,15 @@ install_ikev2() {
     echo "# Installed by the Neoxify agent installer."
     echo "set -e"
     echo "cp /etc/letsencrypt/live/$hostname_input/cert.pem /etc/swanctl/x509/node.pem"
-    echo "cp /etc/letsencrypt/live/$hostname_input/chain.pem /etc/swanctl/x509ca/chain.pem"
     echo "cp /etc/letsencrypt/live/$hostname_input/privkey.pem /etc/swanctl/private/node.key"
     echo "chmod 600 /etc/swanctl/private/node.key"
-    echo "swanctl --load-creds >/dev/null 2>&1 || true"
+    # Split on renewal too. Restoring a single chain.pem here would undo
+    # the fix above sixty days later, which is the worst possible time
+    # to discover it.
+    echo "rm -f /etc/swanctl/x509ca/neoxify-ca*.pem"
+    echo "awk 'BEGIN{n=0} /BEGIN CERT/{n++} {print > (\"/etc/swanctl/x509ca/neoxify-ca\" n \".pem\")}' /etc/letsencrypt/live/$hostname_input/chain.pem"
+    echo "chmod 644 /etc/swanctl/x509ca/neoxify-ca*.pem"
+    echo "swanctl --load-creds --clear >/dev/null 2>&1 || true"
   } > /etc/letsencrypt/renewal-hooks/deploy/neoxify-ikev2.sh
   chmod 755 /etc/letsencrypt/renewal-hooks/deploy/neoxify-ikev2.sh
 
