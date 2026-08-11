@@ -2,6 +2,7 @@ import { BadRequestException } from "@nestjs/common";
 import { Protocol } from "@prisma/client";
 import { ProtocolConfigsService } from "./protocol-configs.service";
 import { PrismaService } from "../../prisma/prisma.service";
+import { decryptCredentials, encryptCredentials } from "../protocol-users/credentials-crypto";
 
 /** Regression tests for the class of failure that produced three
  * unusable protocol configs in production: publicParamsJson passed
@@ -14,6 +15,10 @@ describe("ProtocolConfigsService", () => {
       create: jest.Mock;
       update: jest.Mock;
     };
+    protocolUser: {
+      findMany: jest.Mock;
+      update: jest.Mock;
+    };
   };
   let service: ProtocolConfigsService;
 
@@ -23,6 +28,10 @@ describe("ProtocolConfigsService", () => {
         findUnique: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: "config-1", ...data })),
         update: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: "config-1", ...data })),
+      },
+      protocolUser: {
+        findMany: jest.fn().mockResolvedValue([]),
+        update: jest.fn().mockResolvedValue({}),
       },
     };
     service = new ProtocolConfigsService(prisma as unknown as PrismaService);
@@ -207,6 +216,48 @@ describe("ProtocolConfigsService", () => {
       prisma.protocolConfig.findUnique.mockResolvedValueOnce({ id: "other-config" });
 
       await expect(service.update("config-1", { listenPort: 51821 })).rejects.toThrow(/already uses port/);
+    });
+
+    // Moving a port used to do exactly half a migration: the row said
+    // the new port, the node listened on the new port, and every
+    // customer already provisioned went on dialling the old one,
+    // because WireGuard and OpenVPN credentials are whole config files
+    // with the endpoint baked in at generation. Nothing reported it --
+    // from the panel the change had succeeded.
+    it("carries a new endpoint into credentials that were already issued", async () => {
+      existing();
+      prisma.protocolUser.findMany.mockResolvedValueOnce([
+        { id: "user-1", credentialsJson: encryptCredentials({ privateKey: "k", endpoint: "203.0.113.5:51820" }) },
+      ]);
+
+      await service.update("config-1", {
+        listenPort: 41820,
+        publicParamsJson: {
+          serverPublicKey: "old-key",
+          endpoint: "203.0.113.5:41820",
+          subnetCidr: "10.77.0.0/24",
+        },
+      });
+
+      expect(prisma.protocolUser.update).toHaveBeenCalledTimes(1);
+      const written = prisma.protocolUser.update.mock.calls[0][0].data;
+      const credentials = decryptCredentials(written.credentialsJson);
+      expect(credentials.endpoint).toBe("203.0.113.5:41820");
+      // The key is untouched: a port change must not hand out a new
+      // one, which would consume another pool address and drop anyone
+      // currently connected.
+      expect(credentials.privateKey).toBe("k");
+    });
+
+    it("leaves Xray credentials alone, since they carry no endpoint", async () => {
+      existing({
+        protocol: Protocol.XRAY_TROJAN,
+        publicParamsJson: { serverName: "fi1.neoxify.site" },
+      });
+
+      await service.update("config-1", { listenPort: 8444 });
+
+      expect(prisma.protocolUser.findMany).not.toHaveBeenCalled();
     });
   });
 });
