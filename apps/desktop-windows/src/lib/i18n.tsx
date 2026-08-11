@@ -237,6 +237,13 @@ const en = {
   // Fast" and had to notice the server field to learn they were in
   // France. Whoever picked a country picked it for a reason.
   "dash.switchedServer": "Couldn't reach {from}. Now on {to} over {protocol}",
+  // The same mismatch, without the accusation. Used when the server on
+  // screen was never dialled -- nothing was pinned, so the ladder took
+  // the fastest route, which was somewhere else. Saying "couldn't
+  // reach" here blames a server that was never asked, and points the
+  // customer at a problem that does not exist; it also buries the one
+  // thing they can act on, which is that pinning a choice makes it stick.
+  "dash.usedInstead": "Used {to} over {protocol}, not {from}. Pick a server to stay on it.",
   "dash.yourIp": "Your IP:",
   "err.serviceUnavailable": "The Neoxify background service isn't running. Restarting the app usually fixes this; reinstalling will if it doesn't.",
   "err.engineMissing": "Part of the installation is missing. Please reinstall Neoxify.",
@@ -469,6 +476,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.verifyingHint": "در حال برقراری تونل — هر پروتکل امتحان می‌شود. برای توقف کلیک کنید.",
   "dash.switchedTo": "پروتکل همیشگی شما عبور نکرد. اکنون از این استفاده می‌شود:",
   "dash.switchedServer": "دسترسی به {from} ممکن نشد. اکنون {to} با {protocol}",
+  "dash.usedInstead": "به‌جای {from}، {to} با {protocol} استفاده شد. برای ثابت‌ماندن، یک سرور انتخاب کنید.",
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینه نئوکسیفای اجرا نمی‌شود. معمولاً راه‌اندازی دوباره برنامه مشکل را حل می‌کند.",
   "err.engineMissing": "بخشی از نصب ناقص است. لطفاً دوباره نصب کنید.",
