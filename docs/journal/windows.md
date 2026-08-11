@@ -90,3 +90,33 @@ In priority order, all zero-overlap with `apps/mobile`:
 
 **Deliberately not touching `apps/mobile`** while iOS is live on the
 Mac. See `shared.md`.
+
+---
+
+## 2026-08-11 — Location picker keyboard fixes; 0.9.4 built, NOT released
+
+**Status:** done, awaiting release
+**Touches:** `apps/desktop-windows/src/components/LocationPicker.tsx`, desktop version files
+
+Two keyboard gaps closed (#90):
+
+- The sheet now focuses its first selectable row on open. The roving tab
+  stop only ever responded once focus was already on a row, so opening
+  the picker and pressing an arrow did nothing — no movement, no focus
+  ring, no explanation. Guarded by a ref so it fires once per open;
+  doing it on state would drag focus back to the top every time the
+  customer arrowed away.
+- Escape closes it, via a document-level listener so it works while
+  loading, while an error shows, and wherever focus is. **Inert
+  mid-switch on purpose** — the request is already with the server, so
+  honouring Escape would imply a cancellation that did not happen.
+
+Verified in the VM by keyboard only, which is how the bug was found:
+arrows work immediately on open, Escape closes without disturbing the
+pinned selection.
+
+**Version is bumped to 0.9.4 in the tree but no tag has been pushed.**
+Holding the release to bundle it with code signing (#91), so the next
+one is both this fix and signed — one restart for the beta testers
+instead of two. If signing drags, cut 0.9.4 on its own; nothing here
+depends on waiting.
