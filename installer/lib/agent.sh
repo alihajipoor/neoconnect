@@ -1266,6 +1266,17 @@ install_ikev2() {
   } > /etc/letsencrypt/renewal-hooks/deploy/neoxify-ikev2.sh
   chmod 755 /etc/letsencrypt/renewal-hooks/deploy/neoxify-ikev2.sh
 
+  # Run it once here rather than trusting it. A hook is only exercised
+  # sixty days after install, so a wrong path in it is invisible until
+  # the certificate expires and every client fails at the same moment --
+  # by which time nobody is looking at the installer. Running it now
+  # makes a bad path fail here, where the cause is obvious. It is a copy
+  # of files that were just copied, so there is nothing to undo.
+  if ! /etc/letsencrypt/renewal-hooks/deploy/neoxify-ikev2.sh; then
+    echo "  The certificate renewal hook does not work; IKEv2 would break in ninety days." >&2
+    return 1
+  fi
+
   listen_pool="10.68.0.0/24"
   cat > /etc/swanctl/conf.d/neoxify.conf <<CONF
 # Managed by the Neoxify agent installer.
