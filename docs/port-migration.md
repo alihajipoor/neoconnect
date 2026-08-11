@@ -1,6 +1,42 @@
 # Moving WireGuard, OpenVPN and Shadowsocks off their default ports
 
-Decided 2026-08-10. Not started.
+Decided 2026-08-10. **Done 2026-08-11.**
+
+## Outcome
+
+| Protocol | fi1 | fr1 | sg1 |
+|---|---|---|---|
+| WireGuard | 51820 -> **45312** | 51820 -> **38471** | not offered |
+| OpenVPN | 1194 -> **49266** | 1194 -> **52903** | 26471 (already custom) |
+| Shadowsocks | 41820 | 37651 | not offered |
+| REALITY / VLESS+TLS / Trojan | 443 / 2053 / 8443, unchanged by design | | |
+| IKEv2 | | | 500, fixed by the protocol |
+
+No default port is in use anywhere. Shadowsocks needed nothing -- both
+nodes were already on high ports, since its installer step has always
+refused 8388.
+
+**Add-then-retire turned out to be unnecessary, and the runbook below
+overstates what was required.** It assumed a second listener had to run
+alongside the first while clients moved across. In practice both nodes
+had zero live WireGuard and OpenVPN sessions at the time, and the
+clients re-fetch credentials on every launch, so a direct switch cost
+nothing and avoided running duplicate listeners. WireGuard's port even
+changes hot, via `wg set wg0 listen-port`, with peers retained -- 14 on
+each node, confirmed after the change.
+
+**The real blocker was elsewhere, and it was a bug.** Changing a
+config's port updated the row and did nothing else. WireGuard and
+OpenVPN bake `endpoint` into each customer's credentials at generation,
+so every provisioned customer would have gone on dialling the old port
+while the panel showed success. Fixed first, in
+`ProtocolConfigsService.update()`, which now rewrites the endpoint in
+every issued credential for the config. That is the thing to remember
+if a port ever moves again.
+
+Verified by connecting from the Android client on the new WireGuard
+port and reading fi1's own counters: handshake 23 seconds old, 11.77
+KiB received and 26.79 KiB sent.
 
 ## Why
 
