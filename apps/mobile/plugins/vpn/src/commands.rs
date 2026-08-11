@@ -5,7 +5,7 @@
 //! root of a library crate those two collide with each other. Official
 //! Tauri plugins put their commands in a submodule for the same reason.
 
-use crate::{Apps, Empty, Granted, VpnStatus, WireGuardProfile, XrayProfile};
+use crate::{Apps, Empty, Granted, Ikev2Profile, VpnStatus, WireGuardProfile, XrayProfile};
 #[cfg(target_os = "android")]
 use crate::Vpn;
 use tauri::{AppHandle, Runtime};
@@ -29,7 +29,7 @@ fn handle<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::State<'_, Vpn<R>>, St
     app.try_state::<Vpn<R>>().ok_or_else(unavailable)
 }
 
-// Six commands, each a single forwarding call. Written out rather than
+// Seven commands, each a single forwarding call. Written out rather than
 // generated: `#[tauri::command]` emits a macro named after the function,
 // and expanding that from inside a `macro_rules!` collides with itself.
 
@@ -94,6 +94,25 @@ pub async fn vpn_connect_xray<R: Runtime>(
         handle(&app)?
             .0
             .run_mobile_plugin::<Empty>("connectXray", profile)
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, profile);
+        Err(unavailable())
+    }
+}
+
+#[tauri::command]
+pub async fn vpn_connect_ikev2<R: Runtime>(
+    app: AppHandle<R>,
+    profile: Ikev2Profile,
+) -> Result<Empty, String> {
+    #[cfg(target_os = "android")]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<Empty>("connectIkev2", profile)
             .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "android"))]

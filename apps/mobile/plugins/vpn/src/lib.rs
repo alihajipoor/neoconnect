@@ -64,6 +64,22 @@ pub struct XrayProfile {
     pub allowed_apps: Vec<String>,
 }
 
+/// IKEv2's, which is barely a profile at all.
+///
+/// No config to build and no allowed-apps list: Android's platform VPN
+/// profile has no equivalent of `IncludedApplications`, so per-app
+/// routing is simply not available on this protocol and the caller
+/// refuses the combination rather than silently tunnelling everything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ikev2Profile {
+    /// The node's hostname. Never its address -- Android checks the
+    /// server's certificate against what was dialled.
+    pub server: String,
+    pub username: String,
+    pub password: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VpnStatus {

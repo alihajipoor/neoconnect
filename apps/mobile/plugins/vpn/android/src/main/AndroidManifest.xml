@@ -82,6 +82,13 @@
          build fails in processReleaseManifest, some way from the cause. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
 
+    <!-- IKEv2 only, and only on Android 11 and 12. There the platform
+         gives no way to ask how its own VPN profile is getting on, so
+         the engine falls back to asking ConnectivityManager whether a
+         VPN transport exists, which needs this. Android 13 added a real
+         profile state and stops needing it. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- Android 11+ hides most installed packages from
          getInstalledApplications unless an app declares why it needs them.
          Custom mode is a per-app allow list, so the list of apps IS the

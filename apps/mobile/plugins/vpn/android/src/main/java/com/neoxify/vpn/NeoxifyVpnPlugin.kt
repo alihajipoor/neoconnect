@@ -150,6 +150,19 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         var allowedApps: List<String> = emptyList()
     }
 
+    @InvokeArg
+    class Ikev2Profile {
+        /** The node's hostname, never its address.
+         *
+         * Android's platform client has no way to set the remote
+         * identity separately, so it validates the server's certificate
+         * against whatever was dialled. An IP therefore fails on the
+         * certificate rather than on anything real. */
+        lateinit var server: String
+        lateinit var username: String
+        lateinit var password: String
+    }
+
     /**
      * Whether the customer has already consented.
      *
@@ -268,6 +281,73 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         return null
     }
 
+    /**
+     * Brings up IKEv2 through Android's own client.
+     *
+     * Nothing of ours runs: the platform holds the tunnel, so there is
+     * no service to start, no descriptor to pass, and no engine to load.
+     * What this does have that the others do not is a second consent
+     * dialog -- the VpnService grant every protocol needs does not cover
+     * a platform VPN profile, which Android asks about separately and
+     * only once.
+     */
+    @Command
+    fun connectIkev2(invoke: Invoke) {
+        val profile = invoke.parseArgs(Ikev2Profile::class.java)
+        Ikev2Engine.unsupportedReason()?.let {
+            invoke.reject(it)
+            return
+        }
+
+        // Whatever is up comes down first. Android allows one VPN at a
+        // time across both mechanisms, and a live WireGuard tunnel would
+        // otherwise make the platform's own start fail for a reason that
+        // has nothing to do with IKEv2.
+        engine.execute {
+            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+            activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+
+            val consent = try {
+                Ikev2Engine.provision(activity, profile.server, profile.username, profile.password)
+            } catch (e: Throwable) {
+                Log.e(TAG, "provisioning the platform VPN failed", e)
+                invoke.reject(e.message ?: e.toString())
+                return@execute
+            }
+
+            if (consent != null) {
+                // Must be raised from the main thread, and the answer
+                // arrives in the callback below rather than here.
+                activity.runOnUiThread { startActivityForResult(invoke, consent, "ikev2ConsentResult") }
+                return@execute
+            }
+            finishIkev2(invoke)
+        }
+    }
+
+    @ActivityCallback
+    fun ikev2ConsentResult(invoke: Invoke, result: ActivityResult) {
+        if (result.resultCode != Activity.RESULT_OK) {
+            invoke.reject("Android needs your permission to use its built-in VPN.")
+            return
+        }
+        engine.execute { finishIkev2(invoke) }
+    }
+
+    /** Dials and waits, then answers the original call. Shared by the
+     * already-consented path and the just-consented one. */
+    private fun finishIkev2(invoke: Invoke) {
+        try {
+            Ikev2Engine.start(activity)
+            activeProtocol = "IKEV2"
+            invoke.resolve(JSObject())
+        } catch (e: Throwable) {
+            Log.e(TAG, "connectIkev2 failed", e)
+            activeProtocol = null
+            invoke.reject(e.message ?: e.toString())
+        }
+    }
+
     @Command
     fun disconnect(invoke: Invoke) {
         offMainThread(invoke, "disconnect") {
@@ -277,6 +357,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             // nothing.
             runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
             activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+            Ikev2Engine.stop(activity)
             activeProtocol = null
             JSObject()
         }
@@ -309,7 +390,20 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             Log.w(TAG, "state unavailable", e)
             false
         }
-        val up = xrayUp || wireguardUp
+        // The platform tunnel is the one that can be up without this
+        // process having started it -- it outlives us, because it was
+        // never ours. Asking Android rather than trusting a field is the
+        // only way a relaunch reports it correctly.
+        val ikev2Up = try {
+            Ikev2Engine.isUp(activity)
+        } catch (e: Exception) {
+            Log.w(TAG, "platform VPN state unavailable", e)
+            false
+        }
+        val up = xrayUp || wireguardUp || ikev2Up
+        // Recovered rather than left null after a relaunch: the field is
+        // process state and the tunnel is not.
+        if (ikev2Up && activeProtocol == null) activeProtocol = "IKEV2"
 
         var rx = 0L
         var tx = 0L

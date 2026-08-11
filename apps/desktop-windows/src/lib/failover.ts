@@ -28,6 +28,15 @@ const PROTOCOL_ORDER: Protocol[] = [
   // before they have been tried.
   "SHADOWSOCKS",
   "OPENVPN",
+  // Last, despite being the fastest to establish of any of these. Its
+  // ports are fixed at UDP 500 and 4500 -- it cannot be moved to a port
+  // nobody is watching the way the others can -- which makes it the
+  // first thing a filtering network drops, and a blocked attempt costs
+  // a full timeout because Windows dials it rather than us. It exists
+  // for the customers whose device or network will carry nothing else,
+  // and those customers pin it in the server list, which is tried ahead
+  // of this order entirely.
+  "IKEV2",
 ];
 
 function rank(protocol: Protocol): number {

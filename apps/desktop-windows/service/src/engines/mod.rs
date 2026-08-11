@@ -7,6 +7,7 @@
 //! job is to write the right config file and drive the right process,
 //! invisibly.
 
+mod ikev2;
 mod openvpn;
 pub mod routing;
 mod wireguard;
@@ -37,6 +38,11 @@ enum Active {
     /// there is no child process for us to hold -- liveness is queried
     /// from the service manager instead.
     WireguardTunnel,
+    /// Windows owns the IKEv2 tunnel: it is a RAS phonebook entry, not a
+    /// process, so there is nothing here to hold. Liveness is asked of
+    /// the operating system, the same way WireGuard's is asked of the
+    /// service manager.
+    Ikev2,
     Child {
         protocol: &'static str,
         child: Child,
@@ -61,7 +67,12 @@ pub struct Engines {
 
 impl Engines {
     pub fn new(exe_dir: PathBuf, config_dir: PathBuf) -> Self {
-        Self { exe_dir, config_dir, active: None, split_tunnel: SplitTunnel::new() }
+        Self {
+            exe_dir,
+            config_dir,
+            active: None,
+            split_tunnel: SplitTunnel::new(),
+        }
     }
 
     /// Replaces the customer's Custom-mode selection.
@@ -121,10 +132,34 @@ impl Engines {
         // tunnel for a customer who asked for one app.
         let passive = self.split_tunnel.wants_passive_tunnel();
 
+        // Refused rather than quietly downgraded. Custom mode works by
+        // pinning the selected apps' sockets to an adapter this service
+        // created, and Windows owns the IKEv2 interface -- there is
+        // nothing here to pin to. Connecting anyway would give the
+        // customer a full tunnel when they asked for one application,
+        // which is the same shape of lie as a false "Connected". The
+        // failover ladder treats this as a failed candidate and moves
+        // on, which is the right outcome.
+        if passive && matches!(profile, ConnectProfile::Ikev2(_)) {
+            return Err(
+                "Built-in (IKEv2) cannot be used with Custom mode, because Windows owns                  that tunnel and it always carries everything. Pick another protocol,                  or turn Custom mode off."
+                    .to_string(),
+            );
+        }
+
         match profile {
             ConnectProfile::Wireguard(p) => {
                 wireguard::connect(self, p, passive)?;
                 self.active = Some(Active::WireguardTunnel);
+            }
+            // Nothing is spawned and no routes are installed: Windows
+            // brings up the interface and routes it. Custom mode cannot
+            // apply here either, because the split tunnel works by
+            // pinning sockets to an adapter this service created, and
+            // this one belongs to the operating system.
+            ConnectProfile::Ikev2(p) => {
+                ikev2::connect(p)?;
+                self.active = Some(Active::Ikev2);
             }
             // Both Xray protocols take the same path: one engine, one
             // adapter, one set of routes -- only the outbound differs.
@@ -168,7 +203,11 @@ impl Engines {
                         return Err(e);
                     }
                 };
-                self.active = Some(Active::Child { protocol, child, routes });
+                self.active = Some(Active::Child {
+                    protocol,
+                    child,
+                    routes,
+                });
             }
             ConnectProfile::Openvpn(p) => {
                 let child = openvpn::connect(self, p, passive)?;
@@ -225,10 +264,19 @@ impl Engines {
                 // crash) would otherwise strand a tunnel up with nothing
                 // tracking it.
                 wireguard::remove_tunnel_if_present(self);
+                // Same reasoning: the phonebook entry outlives this
+                // process, so a crash or a service restart would leave
+                // "Neoxify" in the customer's Windows VPN list.
+                let _ = ikev2::disconnect();
                 Ok(())
             }
             Some(Active::WireguardTunnel) => wireguard::disconnect(self),
-            Some(Active::Child { mut child, mut routes, .. }) => {
+            Some(Active::Ikev2) => ikev2::disconnect(),
+            Some(Active::Child {
+                mut child,
+                mut routes,
+                ..
+            }) => {
                 // Routes first: leaving them pointed at an adapter that is
                 // about to disappear would black-hole all traffic until
                 // Windows noticed.
@@ -271,12 +319,35 @@ impl Engines {
     pub fn status(&mut self) -> (bool, Option<String>, TunnelHealth) {
         match &mut self.active {
             None => (false, None, TunnelHealth::Down),
+            Some(Active::Ikev2) => {
+                // Windows owns this tunnel, so its own view is the only
+                // truth available. There is no handshake to read the way
+                // WireGuard has, so health stays Unknown and the app's
+                // egress check is what actually proves traffic flows --
+                // the same position the Xray protocols are in.
+                let up = ikev2::is_connected();
+                (
+                    up,
+                    Some("IKEV2".to_string()),
+                    if up {
+                        TunnelHealth::Unknown
+                    } else {
+                        TunnelHealth::Down
+                    },
+                )
+            }
             Some(Active::WireguardTunnel) => {
                 if wireguard::tunnel_is_running() {
                     let health = match wireguard::handshake_health(self) {
-                        wireguard::HandshakeHealth::Alive { age_secs } => TunnelHealth::Alive { age_secs },
-                        wireguard::HandshakeHealth::Stale { age_secs } => TunnelHealth::Stale { age_secs },
-                        wireguard::HandshakeHealth::NeverHandshaked => TunnelHealth::NeverHandshaked,
+                        wireguard::HandshakeHealth::Alive { age_secs } => {
+                            TunnelHealth::Alive { age_secs }
+                        }
+                        wireguard::HandshakeHealth::Stale { age_secs } => {
+                            TunnelHealth::Stale { age_secs }
+                        }
+                        wireguard::HandshakeHealth::NeverHandshaked => {
+                            TunnelHealth::NeverHandshaked
+                        }
                         wireguard::HandshakeHealth::Unknown => TunnelHealth::Unknown,
                     };
                     (true, Some("WIREGUARD".into()), health)
@@ -285,7 +356,11 @@ impl Engines {
                     (false, None, TunnelHealth::Down)
                 }
             }
-            Some(Active::Child { protocol, child, routes }) => match child.try_wait() {
+            Some(Active::Child {
+                protocol,
+                child,
+                routes,
+            }) => match child.try_wait() {
                 // `Ok(Some(_))` means it has already exited.
                 Ok(Some(_)) | Err(_) => {
                     // An engine that died on its own leaves its routes
@@ -324,6 +399,11 @@ fn adapter_name_for(profile: &ConnectProfile) -> &'static str {
         | ConnectProfile::XrayTrojan(_)
         | ConnectProfile::Shadowsocks(_) => xray::ADAPTER_NAME,
         ConnectProfile::Openvpn(_) => openvpn::ADAPTER_NAME,
+        // Unreachable: connect() refuses IKEv2 outright while Custom
+        // mode is on, because Windows owns that adapter and nothing can
+        // be pinned to it. Named here anyway rather than left to a
+        // catch-all, so adding a protocol still has to answer this.
+        ConnectProfile::Ikev2(_) => "",
     }
 }
 
@@ -340,6 +420,9 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
         ConnectProfile::XrayVlessTls(p) => (p.host.clone(), p.port),
         ConnectProfile::XrayTrojan(p) => (p.host.clone(), p.port),
         ConnectProfile::Shadowsocks(p) => (p.host.clone(), p.port),
+        // The hostname, resolved below like any other. IKEv2 always
+        // starts on 500 even when it moves to 4500 for NAT traversal.
+        ConnectProfile::Ikev2(p) => (p.server.clone(), 500),
     };
 
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
@@ -362,7 +445,9 @@ fn split_host_port(endpoint: &str) -> Result<(String, u16), String> {
     let (host, port) = endpoint
         .rsplit_once(':')
         .ok_or_else(|| format!("{endpoint} is not host:port"))?;
-    let port = port.parse().map_err(|_| format!("{endpoint} has no valid port"))?;
+    let port = port
+        .parse()
+        .map_err(|_| format!("{endpoint} has no valid port"))?;
     Ok((host.to_string(), port))
 }
 
@@ -376,7 +461,10 @@ fn write_config(path: &Path, contents: &str) -> Result<(), String> {
 /// Runs a short-lived command to completion, hidden.
 fn run_hidden(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<std::process::ExitStatus> {
     use std::os::windows::process::CommandExt;
-    Command::new(exe).args(args).creation_flags(CREATE_NO_WINDOW).status()
+    Command::new(exe)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
 }
 
 /// Runs a short-lived command, hidden, and returns its stdout.

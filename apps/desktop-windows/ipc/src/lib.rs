@@ -34,7 +34,9 @@ pub enum Request {
     /// this profile. Deliberately not "connect only if disconnected" --
     /// switching servers is a normal action and the service owning the
     /// teardown ordering is more reliable than the UI sequencing it.
-    Connect { profile: ConnectProfile },
+    Connect {
+        profile: ConnectProfile,
+    },
     Disconnect,
     Status,
     /// Replaces the Custom-mode selection: which applications, if any,
@@ -44,7 +46,9 @@ pub enum Request {
     /// without dropping a live session, and sent on connect as well so
     /// the service never has to assume a previous setting survived a
     /// restart.
-    SetSplitTunnel { config: SplitTunnelConfig },
+    SetSplitTunnel {
+        config: SplitTunnelConfig,
+    },
     /// Asks the service to prove the tunnel is carrying traffic, using a
     /// socket pinned to it exactly as a selected app's traffic is.
     ///
@@ -149,7 +153,9 @@ pub enum Response {
         #[serde(default)]
         split_tunnel_active: bool,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Whether the far end is answering, separate from whether an engine is
@@ -192,6 +198,26 @@ pub enum ConnectProfile {
     XrayTrojan(TrojanProfile),
     Shadowsocks(ShadowsocksProfile),
     Openvpn(OpenvpnProfile),
+    #[serde(rename = "IKEV2")]
+    Ikev2(Ikev2Profile),
+}
+
+/// IKEv2, dialled by Windows itself.
+///
+/// The smallest profile here by some distance, because nothing about the
+/// tunnel is ours to configure: the operating system owns the ciphers,
+/// the interface and the routing. Three fields are all Windows needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ikev2Profile {
+    /// The server's DNS name, and it must be the name rather than the
+    /// address. Windows checks the server certificate against whatever
+    /// was dialled, and the node presents a certificate for its
+    /// hostname; an IP fails with a certificate error that points
+    /// nowhere near the real cause.
+    pub server: String,
+    pub username: String,
+    pub password: String,
 }
 
 /// Shadowsocks 2022.
@@ -343,6 +369,40 @@ fn check_single_line(field: &str, value: &str, max_len: usize) -> Checked {
 
 /// `host:port`, `ip:port`, or a bracketed IPv6 form. Kept strict because
 /// this string is written straight into an `Endpoint =` / `remote` line.
+/// A bare DNS name, with no port and no scheme.
+///
+/// Its own check rather than reusing check_endpoint, which requires a
+/// port. This value is interpolated into a PowerShell command that the
+/// service runs as SYSTEM, so the alphabet is restricted to what a
+/// hostname can actually contain -- no quotes, no semicolons, no
+/// whitespace, nothing that could end the string early or start a second
+/// statement. The quoting in the caller is the second line of defence,
+/// not the first.
+fn check_hostname(field: &str, value: &str) -> Checked {
+    check_single_line(field, value, 253)?;
+    if value.is_empty() {
+        return Err(reject(field, "must not be empty"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(reject(field, "must be a plain DNS name"));
+    }
+    if value.starts_with('-') || value.ends_with('-') || value.contains("..") {
+        return Err(reject(field, "is not a well-formed DNS name"));
+    }
+    // An address passes every check above and then fails at the far end
+    // of a slow negotiation, on a certificate error that names neither
+    // the address nor the reason. The only caller dials a name because
+    // the certificate is checked against it, so an address is never
+    // right here and is worth refusing where it can still be explained.
+    if value.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Err(reject(field, "must be a hostname, not an address"));
+    }
+    Ok(())
+}
+
 fn check_endpoint(field: &str, value: &str) -> Checked {
     check_single_line(field, value, 300)?;
     let (host, port) = value
@@ -378,7 +438,10 @@ fn check_key_like(field: &str, value: &str, max_len: usize) -> Checked {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_'))
     {
-        return Err(reject(field, "contains characters that aren't valid in a key"));
+        return Err(reject(
+            field,
+            "contains characters that aren't valid in a key",
+        ));
     }
     Ok(())
 }
@@ -418,7 +481,10 @@ fn check_pem(field: &str, value: &str) -> Checked {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
         {
-            return Err(reject(field, "contains a line that isn't a PEM header or base64"));
+            return Err(reject(
+                field,
+                "contains a line that isn't a PEM header or base64",
+            ));
         }
     }
     if !saw_begin || !saw_end {
@@ -434,7 +500,10 @@ fn check_cidr_list(field: &str, value: &str) -> Checked {
         .chars()
         .all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | ':' | '/' | ',' | ' '))
     {
-        return Err(reject(field, "contains characters that aren't valid in a CIDR list"));
+        return Err(reject(
+            field,
+            "contains characters that aren't valid in a CIDR list",
+        ));
     }
     Ok(())
 }
@@ -478,7 +547,10 @@ impl ConnectProfile {
                 // than as a TLS error from xray.exe.
                 check_single_line("serverName", &p.server_name, 300)?;
                 if p.server_name.trim().is_empty() {
-                    return Err(reject("serverName", "is required to verify the server's certificate"));
+                    return Err(reject(
+                        "serverName",
+                        "is required to verify the server's certificate",
+                    ));
                 }
                 Ok(())
             }
@@ -535,6 +607,21 @@ impl ConnectProfile {
                 }
                 Ok(())
             }
+            ConnectProfile::Ikev2(p) => {
+                // A DNS name specifically: Windows validates the server
+                // certificate against what was dialled, so an address
+                // here would fail every connect with a certificate error.
+                check_hostname("server", &p.server)?;
+                // Generated by the control plane as hex and base64url, but
+                // checked rather than trusted -- they reach a command line
+                // in a process running as SYSTEM.
+                check_single_line("username", &p.username, 128)?;
+                check_single_line("password", &p.password, 256)?;
+                if p.username.is_empty() || p.password.is_empty() {
+                    return Err(reject("credentials", "must not be empty"));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -546,7 +633,52 @@ impl ConnectProfile {
             ConnectProfile::XrayTrojan(_) => "XRAY_TROJAN",
             ConnectProfile::Shadowsocks(_) => "SHADOWSOCKS",
             ConnectProfile::Openvpn(_) => "OPENVPN",
+            ConnectProfile::Ikev2(_) => "IKEV2",
         }
+    }
+}
+
+#[cfg(test)]
+mod ikev2_validation {
+    use super::*;
+
+    fn profile(server: &str) -> ConnectProfile {
+        ConnectProfile::Ikev2(Ikev2Profile {
+            server: server.to_string(),
+            username: "nx-0123456789abcdef".to_string(),
+            password: "s3cret".to_string(),
+        })
+    }
+
+    #[test]
+    fn accepts_a_real_hostname() {
+        assert!(profile("sg1.neoxify.site").validate().is_ok());
+    }
+
+    /// The failure this validator exists for. Dialling the node's
+    /// address makes Windows check its certificate against
+    /// "172.236.143.200", which no certificate names, and the customer
+    /// sees a certificate error for something that is not a
+    /// certificate problem.
+    #[test]
+    fn refuses_an_address() {
+        let err = profile("172.236.143.200").validate().unwrap_err().to_string();
+        assert!(err.contains("hostname"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_shell_metacharacter() {
+        assert!(profile("sg1.neoxify.site'; calc; #").validate().is_err());
+    }
+
+    #[test]
+    fn refuses_empty_credentials() {
+        let bad = ConnectProfile::Ikev2(Ikev2Profile {
+            server: "sg1.neoxify.site".to_string(),
+            username: String::new(),
+            password: "s3cret".to_string(),
+        });
+        assert!(bad.validate().is_err());
     }
 }
 
@@ -589,14 +721,20 @@ mod tests {
     /// has to be rejected here, where there is still something to say.
     #[test]
     fn rejects_a_password_missing_its_server_half() {
-        let err = ss(|p| p.password = "onlyonekey".into()).validate().unwrap_err();
+        let err = ss(|p| p.password = "onlyonekey".into())
+            .validate()
+            .unwrap_err();
         assert!(err.to_string().contains("serverKey:userKey"), "{err}");
     }
 
     #[test]
     fn rejects_an_empty_half() {
-        assert!(ss(|p| p.password = ":justtheuserkey".into()).validate().is_err());
-        assert!(ss(|p| p.password = "justtheserverkey:".into()).validate().is_err());
+        assert!(ss(|p| p.password = ":justtheuserkey".into())
+            .validate()
+            .is_err());
+        assert!(ss(|p| p.password = "justtheserverkey:".into())
+            .validate()
+            .is_err());
     }
 
     /// Only the blake3-aes-gcm family works on a multi-user inbound.
@@ -631,17 +769,23 @@ mod tests {
 
     #[test]
     fn rejects_endpoint_without_port() {
-        assert!(wg(|p| p.endpoint = "203.0.113.5".into()).validate().is_err());
+        assert!(wg(|p| p.endpoint = "203.0.113.5".into())
+            .validate()
+            .is_err());
     }
 
     #[test]
     fn rejects_endpoint_with_bad_port() {
-        assert!(wg(|p| p.endpoint = "203.0.113.5:99999".into()).validate().is_err());
+        assert!(wg(|p| p.endpoint = "203.0.113.5:99999".into())
+            .validate()
+            .is_err());
     }
 
     #[test]
     fn rejects_key_containing_a_delimiter() {
-        assert!(wg(|p| p.private_key = "abc\"def".into()).validate().is_err());
+        assert!(wg(|p| p.private_key = "abc\"def".into())
+            .validate()
+            .is_err());
     }
 
     #[test]
@@ -684,7 +828,9 @@ mod tests {
 
     #[test]
     fn rejects_non_pem_certificate() {
-        assert!(ovpn(|p| p.ca_cert_pem = "just some text".into()).validate().is_err());
+        assert!(ovpn(|p| p.ca_cert_pem = "just some text".into())
+            .validate()
+            .is_err());
     }
 
     #[test]

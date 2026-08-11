@@ -80,6 +80,24 @@ export interface XrayProfile {
 export const connectXray = (profile: XrayProfile) =>
   invoke<void>("vpn_connect_xray", { profile });
 
+/** IKEv2's, which is barely a profile at all.
+ *
+ * No config and no `allowedApps`: Android's platform VPN profile has no
+ * equivalent of `IncludedApplications`, so per-app routing is not
+ * available on this protocol and the caller skips it rather than
+ * quietly tunnelling the whole device. */
+export interface Ikev2Profile {
+  /** The node's hostname. Never its address -- Android checks the
+   * server's certificate against what was dialled, and cannot be told a
+   * remote identity separately. */
+  server: string;
+  username: string;
+  password: string;
+}
+
+export const connectIkev2 = (profile: Ikev2Profile) =>
+  invoke<void>("vpn_connect_ikev2", { profile });
+
 export const disconnect = () => invoke<void>("vpn_disconnect");
 
 export const vpnStatus = () => invoke<VpnStatus>("vpn_status");

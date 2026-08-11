@@ -13,6 +13,7 @@ export const PROTOCOL_LABELS: Record<Protocol, string> = {
   SHADOWSOCKS: "Shadowsocks 2022",
   WIREGUARD: "WireGuard",
   OPENVPN: "OpenVPN",
+  IKEV2: "IKEv2/IPsec",
 };
 
 /** What a customer sees.
@@ -30,6 +31,7 @@ export const CUSTOMER_PROTOCOL_LABELS: Record<Protocol, string> = {
   SHADOWSOCKS: "Shadowsocks",
   WIREGUARD: "Fast",
   OPENVPN: "Compatible",
+  IKEV2: "Built-in",
 };
 
 /** What a customer sees for a credential, once its transport is known.
@@ -61,6 +63,7 @@ export const CUSTOMER_PROTOCOL_HINTS: Record<Protocol, string> = {
   SHADOWSOCKS: "No handshake to detect. Good when stealth ports are blocked.",
   WIREGUARD: "Fastest. Best when nothing is blocking you.",
   OPENVPN: "Slower, but works almost everywhere.",
+  IKEV2: "Uses your device's own VPN. Fast, but easy to block.",
 };
 
 /** The WebSocket variant's own hint. Not in the record above because
