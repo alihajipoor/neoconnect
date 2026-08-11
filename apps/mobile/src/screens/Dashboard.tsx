@@ -18,6 +18,7 @@ import { clearSnapshot, loadSnapshot, saveSnapshot } from "@shared/lib/credentia
 import { outcomeFromError, reportAttempt, rungsFrom } from "@shared/lib/attempts";
 import { loadAllowedApps } from "../lib/per-app";
 import {
+  connectIkev2,
   connectWireGuard,
   connectXray,
   disconnect,
@@ -100,6 +101,25 @@ function stateFromStatus(status: VpnStatus): ConnectionState {
 /** The subscription worth showing. PENDING and CANCELLED entitle nobody
  * to anything; SUSPENDED and EXPIRED are real subscriptions in a bad
  * state, and hiding those would be its own lie. */
+/** The hostname to dial for IKEv2.
+ *
+ * An error rather than a fallback to `connection.host` when it is
+ * missing. Android checks the server's certificate against the address
+ * it dialled and offers no way to set the remote identity separately,
+ * so the IP fails on the certificate -- at the end of a slow
+ * negotiation, with a message that says nothing about the real cause.
+ * Failing here is both faster and legible.
+ */
+function ikev2Server(user: ProtocolUser): string {
+  const host = user.connection?.publicParams?.endpointHost;
+  if (typeof host !== "string" || host.length === 0) {
+    throw new Error(
+      "This server has no hostname recorded, and IKEv2 cannot be dialled by address.",
+    );
+  }
+  return host;
+}
+
 function usableSubscription(all: Subscription[]): Subscription | null {
   const real = all.filter((s) => s.status !== "PENDING" && s.status !== "CANCELLED");
   return real.find((s) => s.status === "ACTIVE") ?? real[0] ?? null;
@@ -133,6 +153,11 @@ const SUPPORTED = new Set([
   // Carried by the xray-core already in the APK, so it costs nothing to
   // support here -- no second engine, no extra megabytes.
   "SHADOWSOCKS",
+  // No engine of ours at all: Android has spoken IKEv2 since 11 and the
+  // platform holds the tunnel. It costs the APK nothing, and it is the
+  // only protocol here that works on a device where a bundled engine
+  // will not load -- which is exactly why some customers ask for it.
+  "IKEV2",
 ]);
 
 export function Dashboard({
@@ -439,8 +464,29 @@ export function Dashboard({
       const baseline = await captureBaselineIp();
       setBaselineIp(baseline);
 
+      // Android's platform VPN profile has no per-app allowlist -- the
+      // API simply has none -- so with apps selected this protocol would
+      // route the whole device instead. Skipped with a reason rather
+      // than connected anyway: giving a customer a full tunnel when they
+      // asked for two apps is the same shape of lie as a false
+      // "Connected".
+      if (candidate.protocol === "IKEV2" && allowedApps.length > 0) {
+        attempts.push(`${label}: not available with selected apps`);
+        continue;
+      }
+
       try {
-        if (isXrayProtocol(candidate.protocol)) {
+        if (candidate.protocol === "IKEV2") {
+          await connectIkev2({
+            // The hostname, never connection.host -- Android validates
+            // the node's certificate against whatever it dialled, so an
+            // address fails on the certificate rather than on anything
+            // real, and only after a slow negotiation.
+            server: ikev2Server(candidate),
+            username: candidate.credentials.username,
+            password: candidate.credentials.password,
+          });
+        } else if (isXrayProtocol(candidate.protocol)) {
           await connectXray({
             config: buildXrayConfig(candidate),
             protocol: candidate.protocol,

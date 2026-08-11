@@ -14,9 +14,9 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, OpenvpnProfile, Request, Response, ShadowsocksProfile, SplitTunnelConfig,
-    TrojanProfile,
-    TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile, PIPE_NAME,
+    ConnectProfile, Ikev2Profile, OpenvpnProfile, Request, Response, ShadowsocksProfile,
+    SplitTunnelConfig, TrojanProfile, TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile,
+    PIPE_NAME,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -50,10 +50,9 @@ pub struct ConnectionInfo {
 }
 
 fn field<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
-    value
-        .get(key)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("this connection is missing '{key}' -- ask support to re-provision it"))
+    value.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
+        format!("this connection is missing '{key}' -- ask support to re-provision it")
+    })
 }
 
 impl ProtocolUserPayload {
@@ -148,7 +147,11 @@ impl ProtocolUserPayload {
                         .credentials
                         .get("flow")
                         .and_then(|v| v.as_str())
-                        .unwrap_or(if ws_path.is_some() { "" } else { "xtls-rprx-vision" })
+                        .unwrap_or(if ws_path.is_some() {
+                            ""
+                        } else {
+                            "xtls-rprx-vision"
+                        })
                         .to_string(),
                     host: self.connection.host.clone(),
                     port: self.connection.port,
@@ -224,6 +227,30 @@ impl ProtocolUserPayload {
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
             })),
+            "IKEV2" => {
+                // The hostname, deliberately, and an error rather than a
+                // fallback to `connection.host` when it is missing.
+                // Windows validates the server's certificate against the
+                // name it dialled, so dialling the IP fails with a
+                // certificate error that says nothing about the real
+                // cause -- and it fails at the very end of a slow
+                // handshake. Failing here instead is both faster and
+                // legible.
+                let server = self
+                    .connection
+                    .public_params
+                    .get("endpointHost")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .ok_or(
+                        "this server has no hostname recorded, and IKEv2 cannot be                          dialled by address -- ask support to re-register it",
+                    )?;
+                Ok(ConnectProfile::Ikev2(Ikev2Profile {
+                    server: server.to_string(),
+                    username: field(&self.credentials, "username")?.to_string(),
+                    password: field(&self.credentials, "password")?.to_string(),
+                }))
+            }
             other => Err(format!("unsupported protocol {other}")),
         }
     }
@@ -259,7 +286,8 @@ async fn call(request: &Request) -> Result<Response, String> {
         }
     };
 
-    let mut encoded = serde_json::to_string(request).map_err(|e| format!("could not encode request: {e}"))?;
+    let mut encoded =
+        serde_json::to_string(request).map_err(|e| format!("could not encode request: {e}"))?;
     encoded.push('\n');
 
     let mut reader = BufReader::new(client);
@@ -275,7 +303,8 @@ async fn call(request: &Request) -> Result<Response, String> {
         .await
         .map_err(|e| format!("could not read the background service's reply: {e}"))?;
 
-    serde_json::from_str(line.trim()).map_err(|e| format!("could not decode the background service's reply: {e}"))
+    serde_json::from_str(line.trim())
+        .map_err(|e| format!("could not decode the background service's reply: {e}"))
 }
 
 async fn call_expecting_ok(request: &Request) -> Result<(), String> {
@@ -385,7 +414,8 @@ pub async fn measure_latency(host: String, port: u16) -> Option<u32> {
         let started = std::time::Instant::now();
         // Resolution is inside the measurement on purpose: a customer
         // waiting to connect waits for that too.
-        match tokio::time::timeout(LATENCY_TIMEOUT, TcpStream::connect((host.as_str(), port))).await {
+        match tokio::time::timeout(LATENCY_TIMEOUT, TcpStream::connect((host.as_str(), port))).await
+        {
             Ok(Ok(_stream)) => Some(started.elapsed().as_millis() as u32),
             Ok(Err(_)) | Err(_) => None,
         }
@@ -393,7 +423,10 @@ pub async fn measure_latency(host: String, port: u16) -> Option<u32> {
 
     let icmp_host = host.clone();
     let icmp = async move {
-        tokio::task::spawn_blocking(move || icmp_latency(&icmp_host)).await.ok().flatten()
+        tokio::task::spawn_blocking(move || icmp_latency(&icmp_host))
+            .await
+            .ok()
+            .flatten()
     };
 
     tokio::pin!(tcp);
@@ -447,12 +480,15 @@ fn icmp_latency(host: &str) -> Option<u32> {
 
     // The endpoint may be a hostname; ICMP needs an address. Port is
     // irrelevant here and only satisfies the resolver.
-    let addr = (host, 0u16).to_socket_addrs().ok()?.find_map(|a| match a.ip() {
-        IpAddr::V4(v4) => Some(v4),
-        // IcmpSendEcho is IPv4-only; Icmp6SendEcho2 would be needed for
-        // v6, which no node uses today.
-        IpAddr::V6(_) => None,
-    })?;
+    let addr = (host, 0u16)
+        .to_socket_addrs()
+        .ok()?
+        .find_map(|a| match a.ip() {
+            IpAddr::V4(v4) => Some(v4),
+            // IcmpSendEcho is IPv4-only; Icmp6SendEcho2 would be needed for
+            // v6, which no node uses today.
+            IpAddr::V6(_) => None,
+        })?;
 
     unsafe {
         let handle = IcmpCreateFile();
@@ -494,9 +530,17 @@ fn icmp_latency(host: &str) -> Option<u32> {
 #[tauri::command]
 pub async fn vpn_status() -> Result<VpnStatus, String> {
     match call(&Request::Status).await? {
-        Response::State { connected, protocol, health, split_tunnel_active } => {
-            Ok(VpnStatus { connected, protocol, health, split_tunnel_active })
-        }
+        Response::State {
+            connected,
+            protocol,
+            health,
+            split_tunnel_active,
+        } => Ok(VpnStatus {
+            connected,
+            protocol,
+            health,
+            split_tunnel_active,
+        }),
         Response::Error { message } => Err(message),
         Response::Ok => Err("the background service returned an unexpected reply".into()),
     }
@@ -506,7 +550,11 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
 mod tests {
     use super::*;
 
-    fn payload(protocol: &str, credentials: serde_json::Value, public_params: serde_json::Value) -> ProtocolUserPayload {
+    fn payload(
+        protocol: &str,
+        credentials: serde_json::Value,
+        public_params: serde_json::Value,
+    ) -> ProtocolUserPayload {
         ProtocolUserPayload {
             protocol: protocol.into(),
             credentials,
@@ -573,9 +621,11 @@ mod tests {
         // Silently connecting with an empty password would be
         // indistinguishable from the server being a plain web server,
         // leaving the customer nothing to act on.
-        assert!(payload("XRAY_TROJAN", serde_json::json!({}), serde_json::json!({}))
-            .into_profile()
-            .is_err());
+        assert!(
+            payload("XRAY_TROJAN", serde_json::json!({}), serde_json::json!({}))
+                .into_profile()
+                .is_err()
+        );
     }
 
     #[test]
@@ -667,10 +717,17 @@ mod latency_probe {
     #[tokio::test]
     #[ignore]
     async fn measures_every_protocol_port_on_fi1() {
-        for (label, port) in [("XRAY/tcp", 443u16), ("WIREGUARD/udp", 51820), ("OPENVPN/udp", 1194)] {
+        for (label, port) in [
+            ("XRAY/tcp", 443u16),
+            ("WIREGUARD/udp", 51820),
+            ("OPENVPN/udp", 1194),
+        ] {
             let started = std::time::Instant::now();
             let result = super::measure_latency("204.168.161.100".into(), port).await;
-            println!("{label:>14} port {port:<6} -> {result:?}  (took {}ms)", started.elapsed().as_millis());
+            println!(
+                "{label:>14} port {port:<6} -> {result:?}  (took {}ms)",
+                started.elapsed().as_millis()
+            );
         }
     }
 }
@@ -694,7 +751,9 @@ mod latency_probe {
 /// to the wrong place.
 #[tauri::command]
 pub fn network_fingerprint() -> Option<String> {
-    use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute, SendARP, MIB_IPFORWARDROW};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetBestRoute, SendARP, MIB_IPFORWARDROW,
+    };
 
     unsafe {
         // Asking for the route to a public address gets the default
