@@ -1,0 +1,77 @@
+name: CI (iOS)
+
+# Compiles the iOS client. Nothing is published and nothing is signed --
+# this exists purely so iOS code has a compiler behind it.
+#
+# Why a build loop before any Swift is written: the iOS work is authored
+# from a Windows machine, and Xcode does not run there. Without this,
+# every Swift line would be unverifiable until someone opened the
+# project on a Mac, which is exactly how a workflow with three wrong
+# paths got written once already. A red build here is the earliest
+# honest signal available.
+#
+# Simulator target on purpose. A device build needs a signing identity
+# and an Apple team, neither of which exists yet -- VPN apps require an
+# organization enrolment (App Store guideline 5.4) and the company is
+# not formed. A simulator build needs no signing and still compiles
+# every Swift file, including the Network Extension.
+#
+# What this therefore does NOT prove, and must never be quoted as
+# proving: that the tunnel works. NEPacketTunnelProvider does not run in
+# the simulator at all. Only a real iPhone can establish that, and the
+# memory ceiling on extensions (~50MB, lower in practice on some
+# devices) means the Xray engine in particular has to be proven there
+# before anything is built on top of it. "CI is green" means "it
+# compiles" and nothing more.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/mobile/**"
+      - ".github/workflows/ci-ios.yml"
+  pull_request:
+    paths:
+      - "apps/mobile/**"
+      - ".github/workflows/ci-ios.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # The simulator on Apple-silicon runners. x86_64-apple-ios
+          # would be the Intel simulator; aarch64-apple-ios (no -sim) is
+          # the device target and is deliberately not built here.
+          targets: aarch64-apple-ios-sim
+
+      - run: pnpm install --frozen-lockfile
+
+      # Generated, not committed -- for now.
+      #
+      # `tauri ios init` only runs on macOS, so it cannot be run from the
+      # machine this is authored on. Regenerating each time keeps the
+      # repo free of a large Xcode project nobody here can open.
+      #
+      # This stops working the moment the Network Extension target is
+      # added, because that lives in the Xcode project and would be
+      # thrown away on every run. At that point gen/apple gets committed
+      # -- generated once on the Mac -- and this step becomes a no-op
+      # guard instead. Deliberately not pre-empted: committing a
+      # generated project before there is anything to customise in it
+      # just creates a merge-conflict surface.
+      - name: Generate the Xcode project
+        if: ${{ hashFiles('apps/mobile/src-tauri/gen/apple/**') == '' }}
+        working-directory: apps/mobile
+        run: pnpm tauri ios init --ci
+
+      - name: Build for the simulator
+        working-directory: apps/mobile
+        run: pnpm tauri ios build --target aarch64-sim --debug
