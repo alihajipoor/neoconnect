@@ -52,11 +52,32 @@ pub fn connect(profile: &Ikev2Profile) -> Result<(), String> {
     // before a packet is sent. Naming Eap makes Windows write its own
     // EAP configuration, and the default it writes is EAP type 26,
     // which is EAP-MSCHAPv2: what the node actually expects.
+    // Neither -SplitTunneling nor -RememberCredential is passed, and
+    // that is the fix rather than an omission.
+    //
+    // Both are [switch] parameters. `-SplitTunneling $false` therefore
+    // does not mean "off": it turns the switch *on* and leaves $false as
+    // a stray positional argument, which then binds to whichever
+    // parameter is next in line. Windows reports the resulting mess as
+    // "conflicting PPP Tunnel types are specified. Using L2TP is
+    // recommended", error 87 -- a message that names neither the
+    // parameter nor the real problem, and points at a tunnel type we
+    // never asked for.
+    //
+    // Omitting them is also semantically right: both default to false,
+    // and false is what was wanted. Full tunnel, credentials not
+    // persisted.
+    //
+    // Found by trying the variants one at a time on a clean Windows 11
+    // (the whole command failed; dropping -SplitTunneling made it
+    // succeed), because the error text ruled nothing out on its own.
+    // `-SplitTunneling:$false` would work too -- the colon is what binds
+    // a value to a switch -- but not passing it at all is harder to get
+    // wrong the next time.
     let script = format!(
         "Add-VpnConnection -Name '{name}' -ServerAddress '{server}' \
          -TunnelType Ikev2 -AuthenticationMethod Eap \
-         -EncryptionLevel Required -SplitTunneling $false \
-         -RememberCredential $false -AllUserConnection -Force -PassThru | Out-Null",
+         -EncryptionLevel Required -AllUserConnection -Force -PassThru | Out-Null",
         name = ENTRY_NAME,
         server = escape_single_quotes(&profile.server),
     );
@@ -106,14 +127,24 @@ fn dial(username: &str, password: &str) -> Result<(), u32> {
     ras::set_field(&mut params.user_name, username);
     ras::set_field(&mut params.password, password);
 
+    // Extensions carrying RDEOPT_NoUser, rather than the null this
+    // passed originally. This service runs as LocalSystem in session 0,
+    // and without the flag RAS treats the dial as an interactive user's
+    // and reaches for a session that is not there -- which it does
+    // *after* authenticating and bringing the tunnel up, so the symptom
+    // was a successful connection immediately followed by the whole
+    // service dying with 0xC0000005 inside RASAPI32.dll.
+    let mut extensions = ras::RasDialExtensions::default();
+
     let mut connection = ptr::null_mut();
-    // SAFETY: params is a correctly sized RASDIALPARAMSW that outlives
-    // the call; a null phonebook means the system phonebook, which is
-    // where -AllUserConnection put the entry; a null notifier makes the
-    // call synchronous.
+    // SAFETY: both structures are correctly sized (their dwSize fields
+    // are derived from the Rust types, and a wrong value is refused with
+    // 632 rather than accepted) and outlive the call; a null phonebook
+    // means the system phonebook, which is where -AllUserConnection put
+    // the entry; a null notifier makes the call synchronous.
     let code = unsafe {
         ras::ras_dial(
-            ptr::null(),
+            &mut extensions as *mut _ as *const std::ffi::c_void,
             ptr::null(),
             &mut params,
             0,
@@ -206,6 +237,22 @@ fn dial_error(code: u32) -> String {
         // the real node with a username that did not exist.
         628 => "The server ended the connection, usually because the credentials were \
                 refused. If this keeps happening, try another server."
+            .into(),
+        // Ours, not the customer's, and currently unresolved -- so it
+        // says so instead of dressing a build problem up as a network
+        // one. Windows returns 632 for any mismatch between what our
+        // hand-declared RAS structures claim and what RASAPI32 expects,
+        // and the message is the same whichever structure is wrong.
+        //
+        // The alternative is worse and is why this path stays as it is:
+        // with the extensions omitted the dial *succeeds*, and then the
+        // whole service dies with an access violation inside RASAPI32,
+        // which leaves the customer unable to connect on any protocol at
+        // all until they reboot. Failing here costs them IKEv2; the
+        // other way costs them everything. See engines/ras.rs.
+        632 => "Built-in (IKEv2) is not working on Windows in this build -- this is a bug \
+                on our side, not a problem with your account or your network. Every other \
+                protocol is unaffected; please use one of those for now."
             .into(),
         other => ras::error_text(other)
             .unwrap_or_else(|| format!("The connection failed (Windows error {other}).")),
