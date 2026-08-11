@@ -699,6 +699,113 @@ mod tests {
         assert!(err.contains("shortIds"), "unhelpful message: {err}");
     }
 
+    /// Shadowsocks is the one profile whose secret is assembled rather
+    /// than passed through: the server's half lives on the node's config
+    /// and the customer's half in their credentials, and the engine wants
+    /// them joined. Neither half alone authenticates anyone, and the
+    /// protocol answers a bad key with silence rather than a refusal --
+    /// so a mistake here does not surface as an error, it surfaces as a
+    /// server that appears to be down.
+    #[test]
+    fn maps_shadowsocks_by_joining_the_server_and_user_keys() {
+        let profile = payload(
+            "SHADOWSOCKS",
+            serde_json::json!({ "userKey": "dXNlcmtleWJhc2U2NHZhbHVlMDEyMzQ1Njc4OQ" }),
+            serde_json::json!({
+                "serverKey": "c2VydmVya2V5YmFzZTY0dmFsdWUwMTIzNDU2Nzg5",
+                "method": "2022-blake3-aes-256-gcm"
+            }),
+        )
+        .into_profile()
+        .expect("should map");
+        match &profile {
+            ConnectProfile::Shadowsocks(p) => {
+                assert_eq!(
+                    p.password,
+                    "c2VydmVya2V5YmFzZTY0dmFsdWUwMTIzNDU2Nzg5:dXNlcmtleWJhc2U2NHZhbHVlMDEyMzQ1Njc4OQ",
+                    "the two halves must be joined server-first"
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn shadowsocks_without_the_server_half_is_rejected() {
+        let err = payload(
+            "SHADOWSOCKS",
+            serde_json::json!({ "userKey": "dXNlcmtleWJhc2U2NHZhbHVlMDEyMzQ1Njc4OQ" }),
+            serde_json::json!({ "method": "2022-blake3-aes-256-gcm" }),
+        )
+        .into_profile()
+        .expect_err("should fail");
+        assert!(err.contains("server key"), "unhelpful message: {err}");
+    }
+
+    /// tls-crypt is the one OpenVPN value that is the server's rather
+    /// than the customer's, so it comes from the node's config. Getting
+    /// it wrong is not loud: a server using tls-crypt does not reject a
+    /// client that omits the key, it ignores the client entirely, and the
+    /// connection just never completes.
+    #[test]
+    fn maps_openvpn_pulling_the_tls_crypt_key_from_the_node() {
+        const PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQ==\n-----END CERTIFICATE-----\n";
+        const KEY: &str = "-----BEGIN OpenVPN Static key V1-----\nabcdef0123456789\n-----END OpenVPN Static key V1-----\n";
+        let profile = payload(
+            "OPENVPN",
+            serde_json::json!({
+                "certPem": PEM, "keyPem": PEM, "caCertPem": PEM,
+                "endpoint": "203.0.113.5:1194", "proto": "udp"
+            }),
+            serde_json::json!({ "tlsCryptKey": KEY }),
+        )
+        .into_profile()
+        .expect("should map");
+        match &profile {
+            ConnectProfile::Openvpn(p) => {
+                assert_eq!(p.tls_crypt_key.as_deref(), Some(KEY));
+                assert_eq!(p.proto, "udp");
+            }
+            _ => panic!("wrong variant"),
+        }
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn maps_an_ikev2_protocol_user_from_the_recorded_hostname() {
+        let profile = payload(
+            "IKEV2",
+            serde_json::json!({ "username": "cust-4f89", "password": "Zm9vYmFyYmF6cXV4MTIz" }),
+            serde_json::json!({ "endpointHost": "sg1.neoxify.site" }),
+        )
+        .into_profile()
+        .expect("should map");
+        match &profile {
+            ConnectProfile::Ikev2(p) => assert_eq!(p.server, "sg1.neoxify.site"),
+            _ => panic!("wrong variant"),
+        }
+        assert!(profile.validate().is_ok());
+    }
+
+    /// Windows checks the server's certificate against whatever was
+    /// dialled, and the node presents one for its hostname. Falling back
+    /// to `connection.host` would therefore turn a missing field into a
+    /// certificate error at the very end of a slow handshake, naming
+    /// neither the address nor the real cause -- so the absence is
+    /// refused here, where it can still be explained.
+    #[test]
+    fn ikev2_refuses_to_fall_back_to_the_address() {
+        let err = payload(
+            "IKEV2",
+            serde_json::json!({ "username": "cust-4f89", "password": "Zm9vYmFyYmF6cXV4MTIz" }),
+            serde_json::json!({}),
+        )
+        .into_profile()
+        .expect_err("should fail");
+        assert!(err.contains("hostname"), "unhelpful message: {err}");
+    }
+
     #[test]
     fn rejects_a_protocol_the_service_cannot_run() {
         let err = payload("XRAY_VMESS", serde_json::json!({}), serde_json::json!({}))
