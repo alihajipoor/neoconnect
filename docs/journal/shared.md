@@ -81,10 +81,25 @@ costs a few seconds and is within budget.
 
 **Status:** blocked
 
-- **Windows code signing (#91):** needs an Azure Artifact Signing
-  account (~$10/mo; open to US/Canada individuals, no company needed) or
-  Certum OV + SimplySign as the cheaper alternative. No free option
-  exists for anything Windows actually trusts. User is comparing prices.
+- **Windows code signing (#91): account created, identity validation
+  submitted 2026-08-11, status In Progress.** Azure Artifact Signing,
+  Basic tier (~$10/mo), account `neoxify-signing` in resource group
+  `neoxify-signing`, **region West US 2** — the endpoint URI is
+  region-specific, so read it off the account rather than assuming the
+  East US one. Validating as an **individual**, so the publisher shown
+  to customers will be a personal legal name until the company exists.
+
+  Two Azure gotchas worth not rediscovering: the subscription had to be
+  upgraded from free credit to Pay-As-You-Go first (Artifact Signing
+  refuses free/trial/sponsored, and the Upgrade button lives on the
+  *billing account* Summary tab, not the subscription blade); and
+  creating an identity validation needs the **Artifact Signing Identity
+  Verifier** role assigned explicitly — subscription Owner is not
+  enough. That is a *different* role from the **Certificate Profile
+  Signer** one the CI principal needs later.
+
+  Certum OV + SimplySign remains the fallback if Azure ever sours; no
+  free option exists for anything Windows actually trusts.
 - **Microsoft Store (#94):** viable as an **EXE** product (not MSIX —
   MSIX cannot carry the drivers). Hard-blocked on signing above.
 - **Apple organization enrolment:** App Store guideline 5.4 means an
