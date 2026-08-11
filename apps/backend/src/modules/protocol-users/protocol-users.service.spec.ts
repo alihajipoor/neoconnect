@@ -117,6 +117,27 @@ describe("ProtocolUsersService.listByCustomer", () => {
     expect(item.connection.publicParams).toEqual({ serverName: "fi1.neoxify.com" });
   });
 
+  // Same omission as the Trojan one above, found the same way and one
+  // protocol later: IKEV2 was missing from the whitelist, so the client
+  // received an empty publicParams and had nothing but the node's IP to
+  // dial. Windows and Android both check the server certificate against
+  // the address dialled, and no certificate names an IP -- so every
+  // IKEv2 connection would have failed, on a certificate error that says
+  // nothing about a missing server-side field.
+  it("passes through the hostname an IKEv2 client must dial", async () => {
+    const service = serviceReturning(
+      "IKEV2",
+      { endpointHost: "sg1.neoxify.site", pool: "10.68.0.0/24", auth: "eap-mschapv2" },
+      { username: "nx-0123456789abcdef", password: "s3cret" },
+    );
+
+    const [item] = await service.listByCustomer("customer-1");
+
+    // The pool is the server's own business and the auth method is
+    // implied by the credentials; neither should travel.
+    expect(item.connection.publicParams).toEqual({ endpointHost: "sg1.neoxify.site" });
+  });
+
   it("drops any key not explicitly allowed, so new ones are private by default", async () => {
     const service = serviceReturning(
       "WIREGUARD",

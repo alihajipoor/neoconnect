@@ -335,6 +335,15 @@ const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
   // travels in the per-user credentials. caKeyPem and serverKeyPem are
   // the secrets and are absent on purpose.
   OPENVPN: ["endpoint", "proto", "tlsCryptKey"],
+  // The hostname, and only the hostname. Both platform clients validate
+  // the node's certificate against whatever address they dialled and
+  // neither can be told a remote identity separately, so without this
+  // the client has only the node's IP -- which no certificate names.
+  //
+  // `pool` and `auth` stay behind: the address pool is the server's own
+  // business, and the authentication method is already implied by the
+  // credentials being a username and a password.
+  IKEV2: ["endpointHost"],
 };
 
 function connectionInfo(
