@@ -45,6 +45,28 @@ function nx_form_schema($form)
             'experience' => array('type' => 'textarea', 'required' => false, 'max' => 2000),
             'message'    => array('type' => 'textarea', 'required' => true,  'max' => 3000, 'min' => 20),
         ),
+
+        /* Requesting account deletion without installing the app.
+         *
+         * Google Play requires this to exist as a public web page for any
+         * app that offers account creation -- reachable by someone who has
+         * uninstalled, or who never installed on this device, and who
+         * therefore cannot use the in-app control. The URL is declared in
+         * the Play Console data safety form.
+         *
+         * Deliberately does not delete anything. A form on a marketing site
+         * cannot prove who is asking, and a request that deleted an account
+         * on the strength of a typed address would let anyone erase anyone.
+         * It raises a request that a human verifies; the self-service path
+         * is in the app, where the person is already authenticated.
+         *
+         * Just the address and an optional note: asking a departing customer
+         * for more is both rude and pointless, since the address is the only
+         * field that identifies the account. */
+        'deletion' => array(
+            'email'   => array('type' => 'email',    'required' => true,  'max' => 120),
+            'message' => array('type' => 'textarea', 'required' => false, 'max' => 2000),
+        ),
     );
 
     return isset($schemas[$form]) ? $schemas[$form] : array();
@@ -246,8 +268,19 @@ function nx_form_mail($form, $values)
         return false;
     }
 
-    $label = $form === 'reseller' ? 'Reseller application' : 'Contact form';
-    $subject = $label . ' - ' . $values['name'];
+    $labels = array(
+        'reseller' => 'Reseller application',
+        'deletion' => 'ACCOUNT DELETION REQUEST',
+        'contact'  => 'Contact form',
+    );
+    $label = isset($labels[$form]) ? $labels[$form] : 'Contact form';
+
+    // Deletion requests carry no name field -- the address is the only
+    // thing that identifies the account, and it is what has to be acted
+    // on. Falling back to it keeps the subject line useful instead of
+    // reading "ACCOUNT DELETION REQUEST - " with nothing after it.
+    $who = isset($values['name']) && $values['name'] !== '' ? $values['name'] : $values['email'];
+    $subject = $label . ' - ' . $who;
 
     $lines = array($label, str_repeat('=', strlen($label)), '');
     foreach ($values as $field => $value) {
