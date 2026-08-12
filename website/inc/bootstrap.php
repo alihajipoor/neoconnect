@@ -34,6 +34,13 @@ $NX_ROUTES = array(
     'contact'  => 'contact/',
     'reseller' => 'reseller/',
     'privacy'  => 'privacy/',
+    // Not linked from the navigation on purpose -- it is reached from the
+    // Play listing's data safety declaration and from the app, not browsed
+    // to. It still has to be registered here: an unregistered key falls
+    // back to 'home' below, which would leave the page rendering with the
+    // wrong canonical URL and a language switcher pointing at the
+    // homepage.
+    'delete-account' => 'delete-account/',
 );
 
 // Fall back rather than fatal, so a page that forgets to declare itself still
