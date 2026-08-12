@@ -1,0 +1,17 @@
+# Nothing in inc/ is ever requested directly -- these files are included by
+# the page files at the site root. Deny web access outright.
+#
+# This is the second line of defence, not the only one: every file in here
+# also starts with `defined('NX') || exit;`, so a direct request returns an
+# empty response even on a host that ignores .htaccess.
+
+# Apache 2.4+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+
+# Apache 2.2
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>
