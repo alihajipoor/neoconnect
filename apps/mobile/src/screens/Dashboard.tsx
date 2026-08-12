@@ -4,6 +4,7 @@ import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "@
 import { logout } from "@shared/lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "@shared/lib/types";
 import { formatBytes } from "@shared/lib/utils";
+import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
 import { captureBaselineIp, verifyEgress } from "@shared/lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "@shared/lib/connection-errors";
@@ -940,11 +941,24 @@ export function Dashboard({
                   <Tag className="size-5" />
                 </div>
                 <p className="text-sm font-semibold">{t("dash.noSubscription")}</p>
-                <p className="mt-1 text-xs text-muted-foreground">Choose a plan to start using Neoxify.</p>
-                <Button onClick={onBrowsePlans} className="mt-4 w-full justify-center gap-2">
-                  <Tag className="size-4" />
-                  {t("dash.viewPlans")}
-                </Button>
+                {/* A store build cannot sell, and cannot point at where
+                    to buy either -- both stores restrict steering a
+                    customer to an outside payment. What it must not do
+                    is leave them on a screen that explains nothing,
+                    which is what hiding the button alone would have
+                    done. So it says plainly what state the account is
+                    in and what will happen when that changes. */}
+                {IS_STORE_BUILD ? (
+                  <p className="mt-1 text-xs text-muted-foreground">{t("dash.noPlanStore")}</p>
+                ) : (
+                  <>
+                    <p className="mt-1 text-xs text-muted-foreground">{t("dash.noPlanHint")}</p>
+                    <Button onClick={onBrowsePlans} className="mt-4 w-full justify-center gap-2">
+                      <Tag className="size-4" />
+                      {t("dash.viewPlans")}
+                    </Button>
+                  </>
+                )}
               </Card>
             </div>
           )}
