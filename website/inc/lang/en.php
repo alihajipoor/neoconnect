@@ -28,6 +28,7 @@ return array(
     'nav.contact' => 'Contact',
     'nav.reseller' => 'Resellers',
     'nav.privacy' => 'Privacy',
+    'nav.signin' => 'Sign in',
     'nav.cta' => 'Get the app',
     'nav.menu' => 'Menu',
     'nav.close' => 'Close menu',
