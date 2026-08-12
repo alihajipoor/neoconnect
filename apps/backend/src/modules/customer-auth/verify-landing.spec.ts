@@ -1,6 +1,7 @@
 import { BadRequestException } from "@nestjs/common";
 import { CustomerAuthController } from "./customer-auth.controller";
 import { CustomerAuthService } from "./customer-auth.service";
+import { LoginGuardService } from "../login-guard/login-guard.service";
 import { verificationEmail } from "../email/templates";
 
 /** The link in the verification email is the one thing a customer
@@ -9,7 +10,13 @@ import { verificationEmail } from "../email/templates";
  * email points at, and what that page does, are both pinned here. */
 describe("email verification link", () => {
   function controllerWith(verify: jest.Mock) {
-    return new CustomerAuthController({ verifyEmail: verify } as unknown as CustomerAuthService);
+    // The login guard is irrelevant to these cases -- they exercise the
+    // verification landing page, which is reached from an emailed link
+    // and never goes near a credential check.
+    return new CustomerAuthController(
+      { verifyEmail: verify } as unknown as CustomerAuthService,
+      { enforce: jest.fn(), recordFailure: jest.fn(), recordSuccess: jest.fn() } as unknown as LoginGuardService,
+    );
   }
 
   describe("the link the email contains", () => {

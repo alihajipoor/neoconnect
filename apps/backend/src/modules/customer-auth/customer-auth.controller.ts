@@ -6,10 +6,12 @@ import {
   Header,
   HttpCode,
   HttpStatus,
+  Ip,
   Post,
   Query,
   UseGuards,
 } from "@nestjs/common";
+import { LoginGuardService } from "../login-guard/login-guard.service";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { CustomerAuthService } from "./customer-auth.service";
@@ -37,7 +39,10 @@ import { ChangePasswordDto } from "./dto/change-password.dto";
 @ApiTags("customer-auth")
 @Controller("customer-auth")
 export class CustomerAuthController {
-  constructor(private readonly customerAuthService: CustomerAuthService) {}
+  constructor(
+    private readonly customerAuthService: CustomerAuthService,
+    private readonly loginGuard: LoginGuardService,
+  ) {}
 
   // Same brute-force reasoning as admin login. Registration no longer
   // grants a free trial directly (see CustomerAuthService.register()'s
@@ -46,15 +51,29 @@ export class CustomerAuthController {
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("register")
   @HttpCode(HttpStatus.OK)
-  register(@Body() dto: RegisterCustomerDto) {
+  register(@Body() dto: RegisterCustomerDto, @Ip() ip: string) {
+    // Challenge enforced, but a failure here is deliberately NOT
+    // recorded against the address being registered. Doing so would let
+    // anyone raise a real customer's login difficulty just by
+    // repeatedly attempting to register their email -- turning a
+    // protection into a way to slow down the person it protects.
+    this.loginGuard.enforce("customer", dto.challenge, undefined, ip);
     return this.customerAuthService.register(dto);
   }
 
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("login")
   @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto) {
-    return this.customerAuthService.login(dto.email, dto.password);
+  async login(@Body() dto: LoginDto, @Ip() ip: string) {
+    this.loginGuard.enforce("customer", dto.challenge, dto.email, ip);
+    try {
+      const result = await this.customerAuthService.login(dto.email, dto.password);
+      this.loginGuard.recordSuccess("customer", dto.email);
+      return result;
+    } catch (err) {
+      this.loginGuard.recordFailure("customer", dto.email, ip);
+      throw err;
+    }
   }
 
   @Post("refresh")

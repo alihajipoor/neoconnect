@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Ip, Post, UseGuards } from "@nestjs/common";
+import { LoginGuardService } from "../login-guard/login-guard.service";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { AuthService } from "./auth.service";
@@ -18,6 +19,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly adminsService: AdminsService,
+    private readonly loginGuard: LoginGuardService,
   ) {}
 
   // Deliberately NOT gated by RolesGuard/@Roles like AdminsController's
@@ -35,11 +37,30 @@ export class AuthController {
   // whole API where an attacker gets to guess a secret (a password)
   // rather than needing to already have one, so it's the one place
   // brute-force resistance actually matters.
+  //
+  // The @Throttle above caps attempts per address. It is necessary and
+  // not sufficient: it cannot see a distributed attack aimed at one
+  // account, and it cannot be tightened much without hurting the many
+  // legitimate users who share an address behind carrier-grade NAT. The
+  // LoginGuardService covers both by tracking the ACCOUNT as well, and
+  // by making each successive attempt cost more CPU rather than by
+  // locking anyone out.
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("login")
   @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto.email, dto.password);
+  async login(@Body() dto: LoginDto, @Ip() ip: string) {
+    this.loginGuard.enforce("admin", dto.challenge, dto.email, ip);
+    try {
+      const result = await this.authService.login(dto.email, dto.password);
+      // Reached on a correct password even when MFA is still outstanding
+      // -- the secret being guessed here is the password, and it was not
+      // guessed wrong.
+      this.loginGuard.recordSuccess("admin", dto.email);
+      return result;
+    } catch (err) {
+      this.loginGuard.recordFailure("admin", dto.email, ip);
+      throw err;
+    }
   }
 
   // Same brute-force reasoning as login above -- this is the endpoint that

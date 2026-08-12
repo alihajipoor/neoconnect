@@ -6,6 +6,7 @@ import configuration from "./config/configuration";
 import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./modules/health/health.module";
 import { AuthModule } from "./modules/auth/auth.module";
+import { LoginGuardModule } from "./modules/login-guard/login-guard.module";
 import { AdminsModule } from "./modules/admins/admins.module";
 import { CustomersModule } from "./modules/customers/customers.module";
 import { PlansModule } from "./modules/plans/plans.module";
@@ -48,6 +49,8 @@ import { ClientAttemptsModule } from "./modules/client-attempts/client-attempts.
     // verification is what protects them, and a legitimate provider
     // retry storm shouldn't get blocked) -- see billing/webhooks.controller.ts.
     ThrottlerModule.forRoot([{ name: "default", ttl: 60_000, limit: 100 }]),
+    // @Global, so both auth modules share one set of failure counters.
+    LoginGuardModule,
     PrismaModule,
     HealthModule,
     AuthModule,
