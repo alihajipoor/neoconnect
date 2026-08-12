@@ -87,3 +87,11 @@ jobs:
       # on a fresh box, for someone with no idea what changed.
       - name: Installer covers every backend env var
         run: bash scripts/check-installer-drift.sh
+
+      # Same class of silence, different pair of files. Shadowsocks and
+      # IKEv2 were both live on real nodes while the panel could offer
+      # neither, so a plan created there quietly granted a narrower set
+      # of protocols than intended -- and an absent checkbox is
+      # indistinguishable from a deliberate choice not to offer it.
+      - name: Panel offers every protocol the schema has
+        run: bash scripts/check-protocol-drift.sh
