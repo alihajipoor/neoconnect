@@ -32,12 +32,20 @@ cd "$src"
 # for years, and each extra ABI adds ~46MB of compiled Go to the APK for
 # hardware nobody is running this on.
 #
-# XRAY_AAR_TARGET overrides it, and exists for one reason -- an x86_64
-# emulator. Without a matching build the APK has no libgojni.so, the
-# class that loads it throws UnsatisfiedLinkError, and the app dies on
-# the first Xray connect. That looks exactly like a real fault and is
-# not one, which cost a full diagnosis cycle to tell apart. Releases do
-# not set it.
+# XRAY_AAR_TARGET overrides it. Originally for one reason -- an x86_64
+# emulator, where without a matching build the APK has no libgojni.so,
+# the class that loads it throws UnsatisfiedLinkError, and the app dies
+# on the first Xray connect. That looks exactly like a real fault and is
+# not one, which cost a full diagnosis cycle to tell apart.
+#
+# The release workflow now sets it too, to `android/arm64,android/arm`,
+# because the Play bundle carries 32-bit as well. Play splits an AAB per
+# ABI on delivery, so that costs a customer nothing; the universal APK
+# has no such trick and pays the ~46MB in full, which is the tradeoff to
+# revisit if the direct download gets uncomfortably large. Do not
+# "simplify" this back to arm64 without checking the AAB still builds
+# both -- a 64-bit-only bundle silently excludes every 32-bit handset
+# from the store listing entirely.
 target="${XRAY_AAR_TARGET:-android/arm64}"
 echo "Building the Xray engine for $target"
 gomobile bind -target="$target" -androidapi 24 -o "$aar" .
