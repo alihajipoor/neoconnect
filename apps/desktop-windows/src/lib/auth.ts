@@ -92,6 +92,31 @@ export async function logout(): Promise<void> {
   await clearTokens();
 }
 
+/** Deletes the signed-in customer's own account, permanently.
+ *
+ * Required to exist by both app stores for any app that offers account
+ * creation -- Apple 5.1.1(v) and Play's data deletion policy -- so this
+ * is a condition of being listed, not a courtesy.
+ *
+ * The server revokes every credential on every node before it returns,
+ * and bumps the token version so any other signed-in device stops
+ * working too. Local tokens are cleared afterwards regardless of what
+ * the server said: if the account really is gone, keeping them would
+ * leave the app trying to use credentials that can only fail, and if the
+ * call failed the worst outcome is one unnecessary sign-in.
+ *
+ * Returns how many credentials were revoked, which the caller can show
+ * -- the customer deserves to know their access is actually gone rather
+ * than being told it is.
+ */
+export async function deleteAccount() {
+  const result = await apiRequest<{ deleted: boolean; credentialsRevoked: number }>("/customer/me", {
+    method: "DELETE",
+  });
+  await clearTokens();
+  return result;
+}
+
 /** Changes the password of the signed-in customer.
  *
  * The backend revokes every session on success, including this app's own,

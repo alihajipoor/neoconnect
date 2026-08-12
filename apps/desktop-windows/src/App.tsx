@@ -242,6 +242,7 @@ export default function App() {
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
         onOpenSupport={() => setScreen("support")}
+        onLoggedOut={() => setScreen("login")}
         customSection={<CustomModeCard />}
       />
     );
