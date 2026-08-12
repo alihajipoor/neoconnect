@@ -30,17 +30,39 @@ has to be cuttable immediately.
 
 ## 2026-08-11 — Windows is holding the Android work
 
-**Status:** in flight — sequencing decision
+**Status:** superseded by the entry below — see "Windows has taken
+apps/mobile back"
 
-Task #92 (splitting Android into Play and direct-APK flavors) is
+Task #92 (splitting Android into Play and direct-APK flavors) was
 **deliberately not started**, because it is the one Windows-side task
 that collides hard with iOS in `apps/mobile`.
 
-Windows is doing only zero-overlap work meanwhile: code signing (#91),
+Windows was doing only zero-overlap work meanwhile: code signing (#91),
 desktop picker fixes (#90), backend.
 
-**Mac: you have `apps/mobile` to yourself for now.** If that changes,
-this entry gets updated first.
+---
+
+## 2026-08-11 — Windows has taken `apps/mobile` back
+
+**Status:** in flight — **Mac read this before starting iOS**
+
+Priorities changed: Google Play listing moved ahead of iOS, because it
+needs no company (iOS publishing does, and the company is ~6-8 weeks
+out once D-U-N-S and Apple verification are counted).
+
+So **Windows is now working in `apps/mobile`** on #92 — the AAB build
+and the Play/direct-APK flavor split. This reverses the entry above.
+
+**Mac: coordinate before touching `apps/mobile/src/**` or
+`apps/mobile/plugins/vpn/src/*.rs`.** Nothing has been written on the
+iOS side yet, so there is no conflict *right now*, and the iOS-only
+paths (`plugins/vpn/ios/**`, `gen/apple/**`, `ci-ios.yml`) stay clear
+either way. If iOS work starts in earnest, say so here and Windows will
+stop.
+
+Reminder of the rule that matters: keep the shared plugin interface
+additive. The flavor split should not change any signature the iOS side
+will need to implement.
 
 ---
 
