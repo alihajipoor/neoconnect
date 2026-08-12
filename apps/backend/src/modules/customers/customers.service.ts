@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import * as argon2 from "argon2";
-import { randomBytes } from "node:crypto";
-import { PaymentStatus, Prisma } from "@prisma/client";
+import { randomBytes, randomUUID } from "node:crypto";
+import { CustomerStatus, PaymentStatus, Prisma, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
@@ -149,5 +149,100 @@ export class CustomersService {
       this.prisma.subscription.deleteMany({ where: { customerId: id } }),
       this.prisma.customer.delete({ where: { id } }),
     ]);
+  }
+
+  /** The customer deleting their own account.
+   *
+   * Deliberately not `remove()` above, which refuses when a settled
+   * payment exists. That refusal is right for an operator clearing out
+   * an account -- a paid invoice is a financial record -- but it cannot
+   * apply here: **both app stores require account deletion to be
+   * available**, so "you have paid us, therefore you may not leave" is
+   * not an answer we are allowed to give. Apple 5.1.1(v) and Play's data
+   * deletion policy both make it a condition of being listed at all.
+   *
+   * So this anonymises rather than deletes. The customer stops existing
+   * in every sense they can observe -- they cannot sign in, their
+   * address is gone, their credentials stop working -- while the invoice
+   * and payment rows survive with nothing personal attached to them.
+   * That is the shape that satisfies both the store requirement and the
+   * accounting one, which is why it is not simply `remove()` with the
+   * guard taken out.
+   *
+   * Remaining paid time is forfeited. Blocking deletion until a
+   * subscription expires is not an option for the same reason as above.
+   * The client must say so plainly before the customer confirms.
+   */
+  async deleteOwnAccount(id: string) {
+    await this.get(id);
+
+    // Every credential on every node, first and outside the
+    // transaction. This is the part that actually matters: a customer
+    // whose row is gone but whose WireGuard peer is still configured on
+    // the node keeps a working tunnel indefinitely, and nothing would
+    // ever report it.
+    //
+    // Note the plural. Since failover began provisioning a credential on
+    // every route the plan allows, one customer holds several, spread
+    // across different nodes -- so this is N deletions, not one, and
+    // treating it as one would leave working credentials behind on every
+    // node but the first.
+    const protocolUsers = await this.prisma.protocolUser.findMany({
+      where: { subscription: { customerId: id } },
+      select: { nodeId: true, protocol: true, externalUserId: true },
+    });
+
+    for (const user of protocolUsers) {
+      await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", {
+        protocol: user.protocol,
+        externalUserId: user.externalUserId,
+      });
+    }
+
+    // Unique, so it cannot collide with a real address or with another
+    // deleted account, and `.invalid` is reserved by RFC 2606 precisely
+    // so it can never be a deliverable domain. A future bug that tries
+    // to email this address fails loudly instead of reaching a stranger
+    // who happens to own the mailbox.
+    const anonymisedEmail = `deleted-${randomUUID()}@deleted.invalid`;
+
+    // Hashed rather than set to a sentinel string: argon2.verify throws
+    // on input that is not a valid hash, so a sentinel would turn a
+    // login attempt against a deleted account into a 500 rather than a
+    // clean rejection.
+    const unusablePassword = await argon2.hash(randomBytes(32).toString("hex"));
+
+    await this.prisma.$transaction([
+      // The rows the nodes were just told to forget.
+      this.prisma.protocolUser.deleteMany({ where: { subscription: { customerId: id } } }),
+      // Ends the subscription without deleting it -- the invoices below
+      // point at it, and an invoice for a subscription that no longer
+      // exists is worse than useless to an accountant.
+      this.prisma.subscription.updateMany({
+        where: { customerId: id },
+        data: { status: SubscriptionStatus.CANCELLED },
+      }),
+      this.prisma.customer.update({
+        where: { id },
+        data: {
+          email: anonymisedEmail,
+          passwordHash: unusablePassword,
+          telegramId: null,
+          referralCode: null,
+          status: CustomerStatus.DISABLED,
+          // Kills every outstanding refresh token immediately. Without
+          // this the app keeps working until the access token expires,
+          // which is a deleted account still carrying traffic.
+          tokenVersion: { increment: 1 },
+          emailVerifiedAt: null,
+          emailVerificationCode: null,
+          emailVerificationCodeExpiresAt: null,
+          passwordResetCode: null,
+          passwordResetCodeExpiresAt: null,
+        },
+      }),
+    ]);
+
+    return { deleted: true, credentialsRevoked: protocolUsers.length };
   }
 }

@@ -23,7 +23,7 @@ describe("CustomersService", () => {
     paymentTransaction: { count: jest.Mock; deleteMany: jest.Mock };
     invoice: { deleteMany: jest.Mock };
     protocolUser: { findMany: jest.Mock; deleteMany: jest.Mock };
-    subscription: { deleteMany: jest.Mock };
+    subscription: { deleteMany: jest.Mock; updateMany: jest.Mock };
     usageRecord: { deleteMany: jest.Mock };
     $transaction: jest.Mock;
   };
@@ -41,7 +41,10 @@ describe("CustomersService", () => {
       paymentTransaction: { count: jest.fn().mockResolvedValue(0), deleteMany: jest.fn() },
       invoice: { deleteMany: jest.fn() },
       protocolUser: { findMany: jest.fn().mockResolvedValue([]), deleteMany: jest.fn() },
-      subscription: { deleteMany: jest.fn() },
+      // updateMany as well as deleteMany: self-deletion cancels
+      // subscriptions rather than removing them, because the surviving
+      // invoices point at them.
+      subscription: { deleteMany: jest.fn(), updateMany: jest.fn() },
       usageRecord: { deleteMany: jest.fn() },
       // The real $transaction takes an array of prepared operations; the
       // mocked members above are plain jest.fn()s, so simply resolving is
@@ -181,6 +184,82 @@ describe("CustomersService", () => {
       const where = prisma.paymentTransaction.count.mock.calls[0][0].where;
       expect(where.status.in).toEqual(["CONFIRMED", "REFUNDED"]);
       expect(prisma.customer.delete).toHaveBeenCalled();
+    });
+  });
+
+  describe("deleteOwnAccount", () => {
+    it("revokes the credential on every node, not just the first", async () => {
+      // The security-critical property. Since failover began giving each
+      // customer a credential on every eligible route, one account holds
+      // several spread across nodes -- and any this misses keeps working
+      // indefinitely, with nothing to report it.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.protocolUser.findMany.mockResolvedValue([
+        { nodeId: "node-a", protocol: "WIREGUARD", externalUserId: "wg-1" },
+        { nodeId: "node-b", protocol: "XRAY_VLESS_REALITY", externalUserId: "xr-1" },
+        { nodeId: "node-c", protocol: "IKEV2", externalUserId: "ike-1" },
+      ]);
+
+      const result = await service.deleteOwnAccount("customer-1");
+
+      expect(agentGateway.enqueueCommand).toHaveBeenCalledTimes(3);
+      expect(agentGateway.enqueueCommand.mock.calls.map((c) => c[0])).toEqual(["node-a", "node-b", "node-c"]);
+      expect(result.credentialsRevoked).toBe(3);
+    });
+
+    it("succeeds for a customer with settled payments, unlike the admin delete", async () => {
+      // Both stores require deletion to be available. "You have paid us,
+      // so you may not leave" is not an answer we are allowed to give,
+      // even though remove() rightly refuses it for an operator purge.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.paymentTransaction.count.mockResolvedValue(4);
+
+      await expect(service.deleteOwnAccount("customer-1")).resolves.toEqual(
+        expect.objectContaining({ deleted: true }),
+      );
+    });
+
+    it("anonymises rather than deleting, so financial records survive", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(prisma.customer.delete).not.toHaveBeenCalled();
+      expect(prisma.invoice.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.paymentTransaction.deleteMany).not.toHaveBeenCalled();
+
+      const data = prisma.customer.update.mock.calls[0][0].data;
+      expect(data.email).toMatch(/^deleted-.*@deleted\.invalid$/);
+      expect(data.telegramId).toBeNull();
+      expect(data.status).toBe("DISABLED");
+    });
+
+    it("bumps tokenVersion, so existing sessions die immediately", async () => {
+      // Without this the app keeps working until the access token
+      // expires -- a deleted account still carrying traffic.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(prisma.customer.update.mock.calls[0][0].data.tokenVersion).toEqual({ increment: 1 });
+    });
+
+    it("leaves a password that argon2 can reject rather than choke on", async () => {
+      // A sentinel string would make argon2.verify throw, turning a
+      // login attempt against a deleted account into a 500 instead of a
+      // clean rejection.
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      const hash = prisma.customer.update.mock.calls[0][0].data.passwordHash;
+      await expect(argon2.verify(hash, "whatever the customer used to type")).resolves.toBe(false);
+    });
+
+    it("throws NotFoundException for an account that is already gone", async () => {
+      prisma.customer.findUnique.mockResolvedValue(null);
+      await expect(service.deleteOwnAccount("missing")).rejects.toThrow(NotFoundException);
+      expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
     });
   });
 });

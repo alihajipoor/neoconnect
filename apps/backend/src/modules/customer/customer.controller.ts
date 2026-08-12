@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   Param,
@@ -63,6 +64,27 @@ export class CustomerController {
   @Get("me")
   me(@CurrentCustomer() customer: AuthenticatedCustomer) {
     return this.customersService.get(customer.sub);
+  }
+
+  /* Deleting your own account.
+   *
+   * Required to exist, not a nicety: Apple 5.1.1(v) and Google Play's
+   * data deletion policy both make in-app account deletion a condition
+   * of listing an app that offers account creation. Neither store cares
+   * that we would rather keep the customer.
+   *
+   * DELETE on /me rather than a POST to /me/delete because it is exactly
+   * what the verb means, and because a stray POST is likelier than a
+   * stray DELETE.
+   *
+   * There is no confirmation parameter here on purpose -- confirming is
+   * the client's job, in the client's language, where the customer can
+   * be told what they are giving up. A backend flag would only be
+   * theatre, since anything that can call this can set it.
+   */
+  @Delete("me")
+  deleteAccount(@CurrentCustomer() customer: AuthenticatedCustomer) {
+    return this.customersService.deleteOwnAccount(customer.sub);
   }
 
   @Get("subscriptions")
