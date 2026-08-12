@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /inc/
+Disallow: /data/
+
+# Generated rather than a static file so the URLs always match the domain in
+# inc/config.php. If you move the site to a different domain, update the line
+# below to match -- it is the one absolute URL on the site that config.php
+# cannot fill in for you.
+Sitemap: https://neoxify.net/sitemap.php

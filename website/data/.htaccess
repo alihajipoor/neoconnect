@@ -1,0 +1,15 @@
+# Form submissions and the CSRF secret live here. Never web-accessible.
+#
+# Belt and braces: every file written into this directory also begins with
+# `<?php exit; ?>` (see NX_FILE_GUARD in inc/security.php), so even on a host
+# that ignores .htaccess a direct request executes the guard and returns
+# nothing rather than dumping submissions to whoever asked for them.
+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>

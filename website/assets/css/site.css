@@ -1,0 +1,2409 @@
+/* ==========================================================================
+   Neoxify website
+   --------------------------------------------------------------------------
+   Hand-written CSS, no build step -- this ships as-is to shared hosting.
+
+   Design tokens are lifted from the admin panel (apps/panel/src/app/
+   globals.css) so the marketing site, the panel and the native clients read
+   as one product: dark only, violet primary, cyan reserved as a secondary
+   highlight so it never competes with a primary action.
+
+   Direction: every directional rule uses CSS logical properties
+   (margin-inline, padding-inline, inset-inline, text-align: start), so the
+   Persian pages mirror correctly from <html dir="rtl"> alone. There is no
+   separate RTL stylesheet to keep in sync -- please keep it that way and
+   avoid left/right properties when adding to this file.
+
+   No @import and no external URL of any kind -- the one @font-face below
+   points at a file in this repository. The audience is largely on networks
+   where a third-party CDN request is slow at best and blocked at worst, and
+   a blocked font request is a visibly broken page.
+   ========================================================================== */
+
+/* ==========================================================================
+   0. Typeface
+   --------------------------------------------------------------------------
+   Vazirmatn, self-hosted. One variable file (~110KB) covers weights 100-900
+   for BOTH languages -- it has a genuine Latin set alongside the Persian, so
+   English and Persian share one typeface and the brand reads as one thing.
+
+   Self-hosted, never a CDN: a webfont fetched from a third party is exactly
+   the kind of request that fails on the networks this audience is on, and a
+   failed font request is a visibly broken page.
+
+   SIL Open Font Licence 1.1 -- see assets/fonts/OFL.txt, which ships with the
+   site because the licence requires the copyright notice to travel with it.
+   ========================================================================== */
+
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("../fonts/vazirmatn-variable.woff2") format("woff2");
+  /* Single variable file serving the whole range, rather than one request
+     per weight. */
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ==========================================================================
+   1. Tokens
+   ========================================================================== */
+
+:root {
+  /* Surfaces */
+  --bg: #0a0a10;
+  --bg-soft: #0e0e15;
+  --card: #131319;
+  --card-hover: #17171f;
+  --elevated: #1a1a22;
+
+  /* Text */
+  --fg: #f4f4f8;
+  --fg-muted: #9797a8;
+  --fg-subtle: #6c6c80;
+
+  /* Accents */
+  --primary: #8b5cf6;
+  --primary-soft: #a78bfa;
+  --primary-deep: #6d3fd4;
+  --highlight: #22d3ee;
+  --success: #10b981;
+  --danger: #ef4444;
+
+  /* Lines */
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+
+  /* Shape */
+  --radius: 0.75rem;
+  --radius-lg: 1.25rem;
+  --radius-pill: 999px;
+
+  /* Rhythm */
+  --container: 72rem;
+  --gutter: clamp(1.25rem, 4vw, 2.5rem);
+  --section-y: clamp(4.5rem, 10vw, 8rem);
+
+  /* Type */
+  --font-sans: "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* Elevation */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.8);
+  --shadow-glow: 0 0 32px -8px var(--primary);
+}
+
+/* Persian needs a noticeably taller line than Latin to stay readable. The
+   fallbacks after Vazirmatn only matter for the moment before the webfont
+   lands (font-display: swap) or if it fails to load entirely. */
+html[lang="fa"] {
+  --font-sans: "Vazirmatn", "Segoe UI", Tahoma, "Iranian Sans", "IRANSans",
+    system-ui, "Noto Naskh Arabic", sans-serif;
+  --line-body: 1.95;
+}
+
+html[lang="en"] {
+  --line-body: 1.7;
+}
+
+/* ==========================================================================
+   2. Base
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+  scroll-padding-block-start: 6rem;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: var(--line-body, 1.7);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+/* A soft violet wash at the top of every page, so no page starts as a flat
+   black rectangle. Cheap, and it ties the pages together. */
+body::before {
+  content: "";
+  position: fixed;
+  inset-block-start: -14rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  width: min(70rem, 140vw);
+  height: 32rem;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(139, 92, 246, 0.16),
+    transparent 65%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+img,
+svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary-soft);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: rgba(139, 92, 246, 0.4);
+  color: #fff;
+}
+
+/* ==========================================================================
+   3. Typography
+   ========================================================================== */
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+  font-weight: 650;
+  text-wrap: balance;
+}
+
+/* Persian doesn't take negative tracking well -- it tightens the joins. */
+html[lang="fa"] h1,
+html[lang="fa"] h2,
+html[lang="fa"] h3,
+html[lang="fa"] h4 {
+  letter-spacing: 0;
+  line-height: 1.5;
+}
+
+h1 {
+  font-size: clamp(2.35rem, 6vw, 4rem);
+}
+h2 {
+  font-size: clamp(1.85rem, 4vw, 2.75rem);
+}
+h3 {
+  font-size: clamp(1.1rem, 2vw, 1.3rem);
+}
+
+p {
+  margin: 0;
+}
+
+.lead {
+  font-size: clamp(1.03rem, 1.7vw, 1.2rem);
+  color: var(--fg-muted);
+  max-width: 46ch;
+}
+
+.gradient-text {
+  background: linear-gradient(100deg, var(--primary-soft), var(--highlight));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--highlight);
+  margin-block-end: 1rem;
+}
+
+html[lang="fa"] .eyebrow {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.eyebrow::before {
+  content: "";
+  width: 1.5rem;
+  height: 1px;
+  background: linear-gradient(to right, transparent, var(--highlight));
+}
+
+/* Gradients have no logical-property equivalent, so the one directional rule
+   in this file that can't be expressed logically gets flipped by hand. */
+[dir="rtl"] .eyebrow::before {
+  transform: scaleX(-1);
+}
+
+/* ==========================================================================
+   4. Layout
+   ========================================================================== */
+
+.container {
+  width: 100%;
+  max-width: var(--container);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+  position: relative;
+  z-index: 1;
+}
+
+.section {
+  padding-block: var(--section-y);
+  position: relative;
+}
+
+.section--tight {
+  padding-block: clamp(3rem, 7vw, 5rem);
+}
+
+.section-head {
+  max-width: 44rem;
+  margin-block-end: clamp(2.5rem, 5vw, 4rem);
+}
+
+.section-head--center {
+  margin-inline: auto;
+  text-align: center;
+}
+
+.section-head--center .eyebrow::before {
+  display: none;
+}
+
+.section-head p {
+  color: var(--fg-muted);
+  margin-block-start: 1rem;
+  font-size: 1.05rem;
+}
+
+.grid {
+  display: grid;
+  gap: 1.25rem;
+}
+
+/* Grid and flex children default to min-width:auto, so one stubborn
+   unwrappable child can push a whole column past the viewport. Letting them
+   shrink is the general guard against exactly the overflow that the
+   full-width button above caused. */
+.grid > *,
+.download-main > *,
+.form-layout > * {
+  min-width: 0;
+}
+
+@media (min-width: 40rem) {
+  .grid--2 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .grid--3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 62rem) {
+  .grid--3 {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.skip-link {
+  position: absolute;
+  inset-inline-start: 0.75rem;
+  inset-block-start: -100%;
+  z-index: 100;
+  background: var(--primary);
+  color: #fff;
+  padding: 0.65rem 1rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  inset-block-start: 0.75rem;
+}
+
+/* ==========================================================================
+   5. Buttons
+   ========================================================================== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 0.8rem 1.4rem;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease,
+    border-color 0.2s ease;
+  white-space: nowrap;
+}
+
+/* Icons inside buttons MUST be sized here. The inline SVGs carry a viewBox
+   but no width/height, so without this they fall back to the SVG default and
+   render enormous -- a download icon was rendering at 234px inside a button
+   before this rule existed. */
+.btn svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex-shrink: 0;
+}
+
+.btn--lg svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+}
+
+.btn:active {
+  transform: translateY(0);
+}
+
+.btn--primary {
+  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
+  color: #fff;
+  box-shadow: 0 6px 20px -8px var(--primary);
+}
+
+.btn--primary:hover {
+  box-shadow: 0 10px 28px -8px var(--primary);
+}
+
+.btn--ghost {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.btn--ghost:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.btn--lg {
+  padding: 0.95rem 1.75rem;
+  font-size: 1rem;
+}
+
+.btn--block {
+  width: 100%;
+  /* Buttons are nowrap by default, which is right for a button sitting in a
+     row. A full-width one is different: on a 320px screen the label's
+     min-content width was forcing its whole grid column wider than the
+     viewport and making the download page scroll sideways. Let it wrap. */
+  white-space: normal;
+}
+
+.btn[aria-disabled="true"],
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* Arrow glyphs have to point the other way when the page is mirrored. */
+[dir="rtl"] .btn .icon-arrow {
+  transform: scaleX(-1);
+}
+
+/* ==========================================================================
+   6. Header
+   ========================================================================== */
+
+.site-header {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 50;
+  background: rgba(10, 10, 16, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-block-end: 1px solid var(--border);
+}
+
+.site-header__inner {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  min-height: 4.25rem;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  font-weight: 650;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  flex-shrink: 0;
+}
+
+/* The mark carries the gradient itself now, so the filled tile the old bolt
+   sat inside would be gradient on gradient. A soft glow gives it presence
+   without a plate. */
+.brand__mark {
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 10px rgba(139, 92, 246, 0.5));
+}
+
+.brand__mark svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* Beta marker beside the wordmark. Cyan rather than violet so it reads as a
+   status, not as another call to action. */
+.brand__beta {
+  padding: 0.08rem 0.4rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(34, 211, 238, 0.4);
+  background: rgba(34, 211, 238, 0.12);
+  color: var(--highlight);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+html[lang="fa"] .brand__beta {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.hero__beta {
+  color: var(--highlight);
+  font-weight: 650;
+}
+
+.site-nav {
+  display: none;
+  align-items: center;
+  gap: 0.35rem;
+  margin-inline-start: auto;
+}
+
+.site-nav a {
+  padding: 0.5rem 0.8rem;
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  font-size: 0.93rem;
+  font-weight: 500;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.site-nav a:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.site-nav a[aria-current="page"] {
+  color: var(--fg);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-inline-start: auto;
+}
+
+.lang-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.lang-switch:hover {
+  color: var(--fg);
+  border-color: var(--primary);
+}
+
+.lang-switch svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  opacity: 0.8;
+}
+
+.nav-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+.nav-toggle svg {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.nav-toggle .icon-close {
+  display: none;
+}
+
+.nav-toggle[aria-expanded="true"] .icon-close {
+  display: block;
+}
+
+.nav-toggle[aria-expanded="true"] .icon-menu {
+  display: none;
+}
+
+/* Mobile drawer. Hidden by the `hidden` attribute when JS is present; when JS
+   is absent the nav simply stays visible in the flow, which is a usable
+   fallback rather than a dead button. */
+.mobile-nav {
+  border-block-start: 1px solid var(--border);
+  padding-block: 0.75rem 1.25rem;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.mobile-nav a {
+  padding: 0.7rem 0.6rem;
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  font-weight: 500;
+}
+
+.mobile-nav a:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fg);
+}
+
+.mobile-nav .btn {
+  margin-block-start: 0.6rem;
+}
+
+/* Below ~480px the brand, the language switch, the CTA and the hamburger do
+   not all fit on one line -- they were overflowing the viewport by about
+   20px, which is enough to make the whole page scroll sideways. The CTA is
+   the one to drop: it is repeated inside the mobile drawer, so nothing is
+   actually lost. */
+@media (max-width: 30rem) {
+  .site-header__inner {
+    gap: 0.75rem;
+  }
+  .header-actions {
+    gap: 0.4rem;
+  }
+  .header-actions > .btn {
+    display: none;
+  }
+}
+
+@media (min-width: 56rem) {
+  .site-nav {
+    display: flex;
+  }
+  .header-actions {
+    margin-inline-start: 0;
+  }
+  .nav-toggle,
+  .mobile-nav {
+    display: none !important;
+  }
+}
+
+/* ==========================================================================
+   7. Hero
+   ========================================================================== */
+
+.hero {
+  position: relative;
+  padding-block: clamp(4rem, 11vw, 8.5rem) clamp(3.5rem, 8vw, 6rem);
+  isolation: isolate;
+  overflow: hidden;
+}
+
+/* The panel's glow-backdrop treatment, ported to plain CSS. */
+.hero::before,
+.hero::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  border-radius: var(--radius-pill);
+  filter: blur(120px);
+  opacity: 0.32;
+  pointer-events: none;
+}
+
+.hero::before {
+  width: 32rem;
+  height: 32rem;
+  background: var(--primary);
+  inset-block-start: -12rem;
+  inset-inline-start: -10rem;
+}
+
+.hero::after {
+  width: 26rem;
+  height: 26rem;
+  background: var(--highlight);
+  inset-block-end: -12rem;
+  inset-inline-end: -8rem;
+  opacity: 0.22;
+}
+
+.hero__inner {
+  display: grid;
+  gap: clamp(2.5rem, 6vw, 4rem);
+  align-items: center;
+}
+
+@media (min-width: 62rem) {
+  .hero__inner {
+    grid-template-columns: 1.05fr 0.95fr;
+  }
+}
+
+.hero h1 {
+  margin-block-end: 1.35rem;
+}
+
+.hero h1 span {
+  display: block;
+}
+
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+  margin-block-start: 2rem;
+}
+
+.hero__note {
+  margin-block-start: 1.25rem;
+  font-size: 0.9rem;
+  color: var(--fg-subtle);
+}
+
+/* ==========================================================================
+   7b. App mockup
+   --------------------------------------------------------------------------
+   A CSS recreation of the real desktop app -- same header, subscription card,
+   circular Connect button and "Change location" control as
+   apps/desktop-windows/src/screens/Dashboard.tsx. It is a drawing, not a
+   screenshot, but it is drawn from the actual product rather than invented.
+
+   The macOS window and the phone carry visible "Soon" badges because those
+   clients genuinely do not exist yet, and the download page says so. The
+   hero must not contradict it.
+
+   Whole thing is aria-hidden with a text alternative on the wrapper: it is
+   an illustration, and reading out two dozen fake UI labels helps nobody.
+   ========================================================================== */
+
+.mockup {
+  position: relative;
+  width: 100%;
+  max-width: 30rem;
+  margin-inline: auto;
+  aspect-ratio: 1 / 1;
+  /* Keeps the mirrored layout from flipping the composition into an
+     arrangement the shadows were not designed for. */
+  direction: ltr;
+}
+
+.device {
+  position: absolute;
+  border-radius: 0.9rem;
+  border: 1px solid var(--border-strong);
+  background: var(--card);
+  box-shadow: 0 24px 48px -20px rgba(0, 0, 0, 0.9),
+    0 2px 8px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+/* Window chrome ---------------------------------------------------------- */
+
+.device__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.7rem;
+  background: rgba(255, 255, 255, 0.04);
+  border-block-end: 1px solid var(--border);
+}
+
+.device__dots {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.device__dots i {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.device__title {
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--fg-subtle);
+  margin-inline-start: auto;
+}
+
+.device__soon {
+  position: absolute;
+  inset-block-end: 0.55rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: rgba(34, 211, 238, 0.16);
+  border: 1px solid rgba(34, 211, 238, 0.4);
+  color: var(--highlight);
+  font-size: 0.58rem;
+  font-weight: 700;
+  white-space: nowrap;
+  backdrop-filter: blur(4px);
+}
+
+/* macOS window, behind and dimmed ---------------------------------------- */
+
+.device--mac {
+  inset-block-start: 0;
+  inset-inline-end: 0;
+  width: 58%;
+  z-index: 1;
+  opacity: 0.55;
+}
+
+/* The shared badge position is bottom-centre, which works for the phone but
+   put the macOS one directly behind the app window in front of it -- about
+   two thirds of it was covered, so it read as a fragment of a word. The top
+   corner is the part of this window nothing overlaps. */
+.device--mac .device__soon {
+  inset-block-start: 0.5rem;
+  inset-block-end: auto;
+  inset-inline-start: auto;
+  inset-inline-end: 0.5rem;
+  transform: none;
+}
+
+.device--mac .device__body {
+  height: 7.5rem;
+  background: linear-gradient(
+    170deg,
+    rgba(139, 92, 246, 0.14),
+    rgba(19, 19, 25, 0.95)
+  );
+}
+
+/* Windows app, front and full ------------------------------------------- */
+
+.device--win {
+  inset-block-start: 12%;
+  inset-inline-start: 0;
+  width: 74%;
+  z-index: 2;
+}
+
+/* Phone ------------------------------------------------------------------ */
+
+.device--phone {
+  inset-block-end: 0;
+  inset-inline-end: 1%;
+  width: 27%;
+  z-index: 3;
+  border-radius: 1.4rem;
+  padding: 0.35rem;
+  background: #1b1b24;
+}
+
+.device--phone .phone__screen {
+  border-radius: 1.1rem;
+  background: linear-gradient(170deg, rgba(139, 92, 246, 0.16), var(--bg) 60%);
+  aspect-ratio: 9 / 17;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+}
+
+.phone__notch {
+  position: absolute;
+  inset-block-start: 0.35rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  width: 32%;
+  height: 0.5rem;
+  border-radius: var(--radius-pill);
+  background: #1b1b24;
+  z-index: 2;
+}
+
+/* The app interface ------------------------------------------------------ */
+
+.app {
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.55rem;
+  font-size: 0.62rem;
+}
+
+.app__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 650;
+  font-size: 0.66rem;
+}
+
+.app__mark {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex-shrink: 0;
+}
+
+.app__mark svg {
+  width: 100%;
+  height: 100%;
+}
+
+.app__muted {
+  color: var(--fg-subtle);
+  font-size: 0.58rem;
+}
+
+.app__head-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.app__head-actions i {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 0.25rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+}
+
+.app__card {
+  padding: 0.6rem;
+  border-radius: 0.55rem;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  gap: 0.3rem;
+}
+
+.app__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.app__pill {
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--radius-pill);
+  background: rgba(16, 185, 129, 0.18);
+  color: #6ee7b7;
+  font-size: 0.55rem;
+  font-weight: 700;
+}
+
+.app__meter {
+  height: 0.25rem;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  margin-block-start: 0.15rem;
+}
+
+.app__meter i {
+  display: block;
+  height: 100%;
+  /* 84 of 300 GB, matching the label beside it. */
+  width: 28%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--highlight));
+}
+
+.app__connect {
+  display: grid;
+  place-items: center;
+  padding-block: 0.5rem;
+}
+
+.app__orb {
+  position: relative;
+  width: 4.4rem;
+  height: 4.4rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 0.6rem;
+  color: #6ee7b7;
+  background: rgba(16, 185, 129, 0.16);
+  box-shadow: 0 0 40px -8px var(--success);
+}
+
+.app__orb--sm {
+  width: 2.6rem;
+  height: 2.6rem;
+  font-size: 0.42rem;
+}
+
+/* Slow breathing ring, to suggest a live connection without animating
+   anything that implies a measured figure. */
+.app__orb::after {
+  content: "";
+  position: absolute;
+  inset: -0.35rem;
+  border-radius: 50%;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+  animation: nx-pulse 3.2s ease-out infinite;
+}
+
+@keyframes nx-pulse {
+  0% {
+    transform: scale(0.92);
+    opacity: 0.9;
+  }
+  70% {
+    transform: scale(1.14);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.app__loc {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.4rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-strong);
+  color: var(--fg-muted);
+  font-size: 0.58rem;
+}
+
+.app__loc svg {
+  width: 0.7rem;
+  height: 0.7rem;
+}
+
+/* On narrow screens the composition gets cramped, so the two supporting
+   devices step back and the real app takes the full width. */
+@media (max-width: 30rem) {
+  .device--mac {
+    display: none;
+  }
+  .device--win {
+    width: 82%;
+    inset-block-start: 6%;
+  }
+  .device--phone {
+    width: 30%;
+  }
+}
+
+/* ==========================================================================
+   8. Cards
+   ========================================================================== */
+
+.card {
+  position: relative;
+  padding: 1.6rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.2s ease, background 0.2s ease,
+    transform 0.2s ease;
+}
+
+.card {
+  overflow: hidden;
+}
+
+.card:hover {
+  border-color: var(--border-strong);
+  background: var(--card-hover);
+  transform: translateY(-2px);
+}
+
+/* A violet filament along the top edge on hover. Subtle enough that a grid
+   of six doesn't turn into a light show. */
+.card::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.card:hover::after {
+  opacity: 0.9;
+}
+
+.card h3 {
+  margin-block-end: 0.6rem;
+}
+
+.card p {
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+.card__icon {
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  margin-block-end: 1.1rem;
+  background: rgba(34, 211, 238, 0.1);
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  color: var(--highlight);
+}
+
+.card__icon svg {
+  width: 1.3rem;
+  height: 1.3rem;
+}
+
+/* Numbered steps */
+.step {
+  position: relative;
+  padding-block-start: 0.5rem;
+}
+
+.step__num {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--primary-soft);
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.28);
+  margin-block-end: 1.1rem;
+}
+
+[dir="rtl"] .step__num {
+  direction: ltr;
+}
+
+.step h3 {
+  margin-block-end: 0.5rem;
+}
+
+.step p {
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+/* ==========================================================================
+   9. Pricing
+   ========================================================================== */
+
+.plan {
+  display: flex;
+  flex-direction: column;
+  padding: 1.75rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+}
+
+.plan--featured {
+  border-color: rgba(139, 92, 246, 0.45);
+  background: linear-gradient(
+    170deg,
+    rgba(139, 92, 246, 0.12),
+    var(--card) 45%
+  );
+  box-shadow: var(--shadow-card), 0 0 40px -18px var(--primary);
+}
+
+.plan__badge {
+  position: absolute;
+  inset-block-start: -0.75rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  padding: 0.3rem 0.8rem;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(135deg, var(--primary), var(--highlight));
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* translateX(-50%) centres the wrong way once the axis is flipped. */
+[dir="rtl"] .plan__badge {
+  transform: translateX(50%);
+}
+
+.plan-wrap {
+  position: relative;
+}
+
+.plan__name {
+  font-size: 1.15rem;
+  font-weight: 650;
+}
+
+.plan__tagline {
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+  margin-block-start: 0.35rem;
+  min-height: 2.6em;
+}
+
+.plan__price {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-block: 1.25rem 0.25rem;
+  /* Prices read left-to-right in both locales -- "$6.99/month" mirrored
+     would render as nonsense. */
+  direction: ltr;
+}
+
+[dir="rtl"] .plan__price {
+  justify-content: flex-end;
+}
+
+.plan__amount {
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.plan__period {
+  color: var(--fg-subtle);
+  font-size: 0.9rem;
+}
+
+.plan__features {
+  list-style: none;
+  margin: 1.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.7rem;
+  flex: 1;
+}
+
+.plan__features li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  font-size: 0.92rem;
+  color: var(--fg-muted);
+}
+
+.plan__features svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin-block-start: 0.2rem;
+  color: var(--success);
+  flex-shrink: 0;
+}
+
+.plan .btn {
+  margin-block-start: 1.75rem;
+}
+
+.pricing-note {
+  margin-block-start: 2rem;
+  text-align: center;
+  color: var(--fg-subtle);
+  font-size: 0.88rem;
+}
+
+.trial-banner {
+  margin-block-start: 1.5rem;
+  padding: 0.9rem 1.2rem;
+  border-radius: var(--radius);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  background: rgba(16, 185, 129, 0.08);
+  color: #6ee7b7;
+  font-size: 0.92rem;
+  text-align: center;
+}
+
+/* ==========================================================================
+   10. FAQ
+   ========================================================================== */
+
+.faq {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 48rem;
+  margin-inline: auto;
+}
+
+.faq details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.faq details[open] {
+  border-color: var(--border-strong);
+}
+
+.faq summary {
+  padding: 1.1rem 1.35rem;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  list-style: none;
+}
+
+.faq summary::-webkit-details-marker {
+  display: none;
+}
+
+.faq summary::after {
+  content: "";
+  margin-inline-start: auto;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-inline-end: 2px solid var(--fg-subtle);
+  border-block-end: 2px solid var(--fg-subtle);
+  transform: rotate(45deg);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.faq details[open] summary::after {
+  transform: rotate(-135deg);
+}
+
+.faq__answer {
+  padding: 0 1.35rem 1.25rem;
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+/* ==========================================================================
+   11. Download page
+   ========================================================================== */
+
+.download-hero {
+  padding-block: clamp(3.5rem, 8vw, 5.5rem) 0;
+}
+
+.download-main {
+  display: grid;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (min-width: 56rem) {
+  .download-main {
+    grid-template-columns: 1.2fr 0.8fr;
+  }
+}
+
+.download-card {
+  padding: clamp(1.75rem, 4vw, 2.5rem);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  background: linear-gradient(
+    160deg,
+    rgba(139, 92, 246, 0.1),
+    var(--card) 55%
+  );
+  box-shadow: var(--shadow-card);
+}
+
+.download-card__head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-block-end: 1.5rem;
+}
+
+.download-card__icon {
+  width: 3.25rem;
+  height: 3.25rem;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+
+.download-card__icon svg {
+  width: 1.6rem;
+  height: 1.6rem;
+  color: var(--fg);
+}
+
+.download-card__meta {
+  color: var(--fg-subtle);
+  font-size: 0.88rem;
+  margin-block-start: 0.2rem;
+}
+
+.download-card__links {
+  margin-block-start: 1rem;
+  font-size: 0.85rem;
+  color: var(--fg-subtle);
+}
+
+.download-card__links a {
+  color: var(--highlight);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.badge-soon {
+  display: inline-block;
+  padding: 0.25rem 0.7rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--highlight);
+  background: rgba(34, 211, 238, 0.12);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+}
+
+.notice {
+  padding: 1.25rem 1.4rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.notice--warn {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.notice h3 {
+  font-size: 1rem;
+  margin-block-end: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.notice h3 svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  color: var(--highlight);
+  flex-shrink: 0;
+}
+
+.notice p {
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+}
+
+/* Platform tiles -- the main event on the download page. Someone arriving
+   here is looking for their own platform and a button, so the grid leads with
+   a recognisable brand glyph and puts the button directly under it.
+
+   auto-fit with a minimum means four across on a desktop, two on a tablet and
+   one on a phone, without a media query per breakpoint. */
+.platform-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
+}
+
+/* Between phone and desktop, auto-fit lands on three across and leaves the
+   fourth tile stranded on its own row. Two-by-two is the better shape. */
+@media (min-width: 40rem) and (max-width: 61.99rem) {
+  .platform-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.platform-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 1.75rem 1.25rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+/* A platform you can actually download carries the brand tint; one that is
+   not built yet is visibly dimmer. The difference should be obvious at a
+   glance, before reading a word. */
+.platform-tile--ready {
+  border-color: rgba(139, 92, 246, 0.32);
+  background: linear-gradient(170deg, rgba(139, 92, 246, 0.13), var(--card) 55%);
+}
+
+.platform-tile--ready:hover {
+  transform: translateY(-3px);
+  border-color: rgba(139, 92, 246, 0.55);
+}
+
+.platform-tile--soon {
+  opacity: 0.6;
+}
+
+.platform-tile__glyph {
+  display: grid;
+  place-items: center;
+  width: 3.5rem;
+  height: 3.5rem;
+  margin-block-end: 1rem;
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+}
+
+.platform-tile__glyph svg {
+  width: 2.4rem;
+  height: 2.4rem;
+}
+
+.platform-tile--ready .platform-tile__glyph {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+}
+
+.platform-tile__name {
+  font-size: 1.15rem;
+  margin-block-end: 0.4rem;
+}
+
+.platform-tile__meta {
+  color: var(--fg-muted);
+  font-size: 0.88rem;
+  margin-block-end: 1.25rem;
+}
+
+/* Pushed to the bottom so the buttons line up across tiles of different
+   text lengths. */
+.platform-tile__cta {
+  margin-block-start: auto;
+  width: 100%;
+}
+
+.platform-tile__note {
+  margin-block-start: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--fg-subtle);
+}
+
+.platform-tile .badge-soon {
+  margin-block-end: 0.75rem;
+}
+
+.steps-list {
+  counter-reset: step;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+}
+
+.steps-list li {
+  counter-increment: step;
+  display: flex;
+  gap: 0.9rem;
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+.steps-list li::before {
+  content: counter(step);
+  flex-shrink: 0;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: var(--radius-pill);
+  display: grid;
+  place-items: center;
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  color: var(--primary-soft);
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+/* ==========================================================================
+   12. Forms
+   ========================================================================== */
+
+.form-layout {
+  display: grid;
+  gap: 1.75rem;
+  align-items: start;
+}
+
+@media (min-width: 56rem) {
+  .form-layout {
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 2.5rem;
+  }
+}
+
+.form-card {
+  padding: clamp(1.5rem, 4vw, 2.25rem);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+}
+
+.field {
+  display: grid;
+  gap: 0.45rem;
+  margin-block-end: 1.15rem;
+}
+
+.field__label {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.field__flag {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--fg-subtle);
+}
+
+.field__hint {
+  font-size: 0.82rem;
+  color: var(--fg-subtle);
+}
+
+.input,
+.textarea,
+.select {
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: rgba(10, 10, 16, 0.6);
+  color: var(--fg);
+  font-size: 0.95rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--fg-subtle);
+}
+
+.input:focus,
+.textarea:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
+}
+
+.textarea {
+  min-height: 9rem;
+  resize: vertical;
+  line-height: 1.65;
+}
+
+.select {
+  appearance: none;
+  cursor: pointer;
+  /* Room for the chevron drawn by the wrapper, on whichever side is "end". */
+  padding-inline-end: 2.5rem;
+}
+
+.select-wrap {
+  position: relative;
+}
+
+.select-wrap::after {
+  content: "";
+  position: absolute;
+  inset-inline-end: 1rem;
+  inset-block-start: 50%;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-block-start: -0.35rem;
+  border-inline-end: 2px solid var(--fg-subtle);
+  border-block-end: 2px solid var(--fg-subtle);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.field--error .input,
+.field--error .textarea,
+.field--error .select {
+  border-color: var(--danger);
+}
+
+.field__error {
+  font-size: 0.83rem;
+  color: #fca5a5;
+}
+
+/* Off-screen rather than display:none -- a bot reading the DOM should still
+   find the honeypot, which is the entire point of it, and a screen reader
+   should still reach .sr-only labels. */
+.honeypot,
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.alert {
+  padding: 1rem 1.2rem;
+  border-radius: var(--radius);
+  margin-block-end: 1.5rem;
+  font-size: 0.93rem;
+}
+
+.alert--success {
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.1);
+  color: #6ee7b7;
+}
+
+.alert--error {
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.09);
+  color: #fca5a5;
+}
+
+.alert h3 {
+  font-size: 1rem;
+  margin-block-end: 0.3rem;
+  color: inherit;
+}
+
+.aside-card {
+  padding: 1.5rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.aside-card + .aside-card {
+  margin-block-start: 1rem;
+}
+
+.aside-card h3 {
+  font-size: 1rem;
+  margin-block-end: 0.5rem;
+}
+
+.aside-card p {
+  color: var(--fg-muted);
+  font-size: 0.93rem;
+}
+
+.aside-card a {
+  color: var(--highlight);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  /* Email addresses stay LTR inside Persian sentences. */
+  unicode-bidi: isolate;
+}
+
+/* ==========================================================================
+   13. CTA band + footer
+   ========================================================================== */
+
+.cta-band {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  background: linear-gradient(
+    140deg,
+    rgba(139, 92, 246, 0.18),
+    rgba(34, 211, 238, 0.08) 60%,
+    var(--card)
+  );
+  padding: clamp(2.25rem, 6vw, 3.5rem);
+  text-align: center;
+}
+
+.cta-band h2 {
+  margin-block-end: 0.75rem;
+}
+
+.cta-band p {
+  color: var(--fg-muted);
+  max-width: 34rem;
+  margin-inline: auto;
+  margin-block-end: 1.75rem;
+}
+
+.site-footer {
+  border-block-start: 1px solid var(--border);
+  padding-block: 3rem 2rem;
+  margin-block-start: var(--section-y);
+}
+
+.site-footer__grid {
+  display: grid;
+  gap: 2rem;
+}
+
+@media (min-width: 48rem) {
+  .site-footer__grid {
+    grid-template-columns: 1.5fr 1fr 1fr;
+  }
+}
+
+.site-footer h4 {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-subtle);
+  margin-block-end: 0.9rem;
+}
+
+html[lang="fa"] .site-footer h4 {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.site-footer ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.site-footer a {
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+}
+
+.site-footer a:hover {
+  color: var(--fg);
+}
+
+.site-footer__about p {
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+  margin-block-start: 0.9rem;
+  max-width: 30rem;
+}
+
+.site-footer__bottom {
+  margin-block-start: 2.5rem;
+  padding-block-start: 1.5rem;
+  border-block-start: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  align-items: center;
+  color: var(--fg-subtle);
+  font-size: 0.85rem;
+}
+
+.site-footer__bottom p {
+  margin-inline-end: auto;
+}
+
+/* ==========================================================================
+   13b. Assurance strip
+   ========================================================================== */
+
+.assurance {
+  border-block: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.assurance__inner {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.85rem 2.75rem;
+  padding-block: 1.15rem;
+}
+
+.assurance__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+
+.assurance__item svg {
+  width: 1rem;
+  height: 1rem;
+  color: var(--highlight);
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   13c. Encryption flow diagram
+   --------------------------------------------------------------------------
+   Conceptual, and captioned as such. It shows where the encryption sits --
+   between the device and our servers -- rather than implying the tunnel
+   extends all the way to the destination, which would be untrue.
+   ========================================================================== */
+
+.flow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: clamp(1.25rem, 3vw, 2rem);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.flow__node {
+  display: grid;
+  place-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  min-width: 6.5rem;
+  padding: 1rem 0.75rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--card);
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.flow__node svg {
+  width: 1.4rem;
+  height: 1.4rem;
+  color: var(--primary-soft);
+}
+
+.flow__node--end svg {
+  color: var(--fg-subtle);
+}
+
+.flow__link {
+  flex: 1 1 3rem;
+  display: grid;
+  place-items: center;
+  gap: 0.45rem;
+}
+
+.flow__line {
+  width: 100%;
+  height: 2px;
+  border-radius: 2px;
+  background-image: linear-gradient(
+    90deg,
+    var(--primary) 0 6px,
+    transparent 6px 12px
+  );
+  background-size: 12px 2px;
+  animation: nx-flow 0.9s linear infinite;
+}
+
+/* The unencrypted leg beyond our servers is deliberately grey and static --
+   it is not part of what we protect. */
+.flow__link--plain .flow__line {
+  background-image: linear-gradient(
+    90deg,
+    var(--border-strong) 0 6px,
+    transparent 6px 12px
+  );
+  animation: none;
+}
+
+@keyframes nx-flow {
+  to {
+    background-position: 12px 0;
+  }
+}
+
+.flow__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: var(--radius-pill);
+  background: rgba(139, 92, 246, 0.14);
+  border: 1px solid rgba(139, 92, 246, 0.38);
+  color: var(--primary-soft);
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.flow__tag svg {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.flow__caption {
+  margin-block-start: 1rem;
+  font-size: 0.83rem;
+  color: var(--fg-subtle);
+  text-align: center;
+}
+
+@media (max-width: 48rem) {
+  .flow {
+    flex-direction: column;
+  }
+  .flow__node {
+    width: 100%;
+  }
+  .flow__link {
+    flex: 0 0 auto;
+  }
+  .flow__line {
+    width: 2px;
+    height: 2rem;
+    background-image: linear-gradient(
+      180deg,
+      var(--primary) 0 6px,
+      transparent 6px 12px
+    );
+    background-size: 2px 12px;
+    animation-name: nx-flow-v;
+  }
+  .flow__link--plain .flow__line {
+    background-image: linear-gradient(
+      180deg,
+      var(--border-strong) 0 6px,
+      transparent 6px 12px
+    );
+  }
+}
+
+@keyframes nx-flow-v {
+  to {
+    background-position: 0 12px;
+  }
+}
+
+/* ==========================================================================
+   13d. Step connectors
+   ========================================================================== */
+
+@media (min-width: 62rem) {
+  .steps-grid .step {
+    position: relative;
+  }
+
+  /* Hairline joining each step's number to the next, so the three read as a
+     sequence rather than three unrelated cards. */
+  .steps-grid .step:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    inset-block-start: 1.75rem;
+    inset-inline-start: 3.5rem;
+    inset-inline-end: -1.25rem;
+    height: 1px;
+    background: linear-gradient(to right, var(--border-strong), transparent);
+  }
+
+  [dir="rtl"] .steps-grid .step:not(:last-child)::after {
+    background: linear-gradient(to left, var(--border-strong), transparent);
+  }
+}
+
+/* ==========================================================================
+   13e. Launch banner
+   --------------------------------------------------------------------------
+   An inline strip at the top of the home page, deliberately NOT a modal. It
+   sits in the flow, so it covers nothing, needs no scroll lock or focus
+   handling, and renders fine with JavaScript off -- the script only hides it
+   again for someone who already dismissed it.
+
+   Styled off the .notice card so it reads as part of the page rather than an
+   ad bolted on top, with a violet tint to earn a little more attention than a
+   plain notice gets.
+
+   Note the background: two layered backgrounds rather than a pseudo-element
+   at z-index -1. That trick breaks the instant the element becomes its own
+   stacking context -- which is exactly what turned the modal this replaced
+   into a solid gradient with unreadable text on top of it.
+   ========================================================================== */
+
+.banner-wrap {
+  padding-block-start: 1.5rem;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius);
+  border: 1px solid rgba(139, 92, 246, 0.32);
+  background: linear-gradient(
+      100deg,
+      rgba(139, 92, 246, 0.14),
+      rgba(34, 211, 238, 0.06) 55%,
+      transparent
+    ),
+    var(--card);
+  box-shadow: var(--shadow-card);
+}
+
+.banner[hidden] {
+  display: none;
+}
+
+.banner__icon {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  background: rgba(139, 92, 246, 0.16);
+  border: 1px solid rgba(139, 92, 246, 0.34);
+  color: var(--primary-soft);
+}
+
+.banner__icon svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.banner__text {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.banner__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.65rem;
+  font-weight: 650;
+  font-size: 1rem;
+}
+
+.banner__pill {
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.banner__body {
+  margin-block-start: 0.3rem;
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+}
+
+.banner__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.banner__x {
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.banner__x:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.banner__x svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+@media (max-width: 48rem) {
+  .banner {
+    flex-wrap: wrap;
+  }
+  .banner__actions {
+    width: 100%;
+  }
+  .banner__actions .btn {
+    flex: 1;
+  }
+}
+
+/* ==========================================================================
+   13f. Long-form prose (privacy statement)
+   ========================================================================== */
+
+.privacy__updated {
+  margin-block-start: 1rem;
+  font-size: 0.85rem;
+  color: var(--fg-subtle);
+}
+
+.prose {
+  max-width: 44rem;
+  color: var(--fg-muted);
+}
+
+.prose h2 {
+  font-size: clamp(1.15rem, 2.2vw, 1.35rem);
+  color: var(--fg);
+  margin-block: 2.5rem 0.85rem;
+}
+
+.prose h2:first-child {
+  margin-block-start: 0;
+}
+
+.prose p {
+  margin-block-end: 0.9rem;
+  font-size: 0.98rem;
+}
+
+.prose ul {
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.prose li {
+  position: relative;
+  padding-inline-start: 1.25rem;
+  font-size: 0.98rem;
+}
+
+.prose li::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  inset-block-start: 0.6em;
+  width: 0.35rem;
+  height: 0.35rem;
+  border-radius: 50%;
+  background: var(--primary);
+}
+
+.prose a {
+  color: var(--highlight);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  unicode-bidi: isolate;
+}
+
+/* ==========================================================================
+   14. Utilities
+   --------------------------------------------------------------------------
+   A deliberately small set. They exist so no template needs a style="..."
+   attribute, which in turn lets the Content-Security-Policy in .htaccess
+   stay strict (no 'unsafe-inline'). If you are tempted to add an inline
+   style to a page, add a class here instead.
+   ========================================================================== */
+
+.u-flush-top {
+  padding-block-start: 0;
+}
+
+.u-center {
+  text-align: center;
+}
+
+.u-center-actions {
+  justify-content: center;
+}
+
+.u-narrow {
+  max-width: 40rem;
+  margin-inline: auto;
+}
+
+.u-push-end {
+  margin-inline-start: auto;
+}
+
+.u-mt-sm {
+  margin-block-start: 1rem;
+}
+.u-mt-md {
+  margin-block-start: 1.5rem;
+}
+.u-mb-xs {
+  margin-block-end: 0.5rem;
+}
+.u-mb-md {
+  margin-block-end: 1.5rem;
+}
+.u-mb-lg {
+  margin-block-end: 2.5rem;
+}
+.u-mb-xl {
+  margin-block-end: 3rem;
+}
+.u-my-lead {
+  margin-block: 1.25rem 2rem;
+}
+
+.h-md {
+  font-size: 1.35rem;
+}
+.h-sm {
+  font-size: 1.2rem;
+}
+.h-xs {
+  font-size: 1.05rem;
+}
+
+.text-body {
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+}
+
+/* ==========================================================================
+   15. Motion
+   ========================================================================== */
+
+/* Scroll reveal is opt-IN, applied by JavaScript rather than assumed here.
+ *
+ * .reveal on its own hides nothing. assets/js/site.js adds .is-armed only
+ * once it has an IntersectionObserver in hand and is about to observe the
+ * element, then .is-visible when it scrolls into view.
+ *
+ * The ordering matters: if this stylesheet hid .reveal by default, any error
+ * in the script -- or any browser where the observer never fires -- would
+ * leave real content permanently invisible. Done this way, the worst case is
+ * a page that appears without animating.
+ */
+.reveal {
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+
+.reveal.is-armed {
+  opacity: 0;
+  transform: translateY(14px);
+}
+
+.reveal.is-armed.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  /* Never arm the reveal animation for someone who asked for less motion. */
+  .reveal.is-armed {
+    opacity: 1;
+    transform: none;
+  }
+}
