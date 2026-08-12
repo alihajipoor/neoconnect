@@ -38,7 +38,11 @@ jobs:
       - uses: android-actions/setup-android@v3
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
+          # Both, because the release now builds both. Without the armv7
+          # target installed the build fails at link time with a message
+          # about a missing std, which reads like a toolchain fault
+          # rather than a missing target.
+          targets: aarch64-linux-android, armv7-linux-androideabi
 
       - name: Install the NDK
         run: |
@@ -89,6 +93,12 @@ jobs:
         run: bash scripts/build-xray-aar.sh
         env:
           ANDROID_NDK_HOME: ${{ env.NDK_HOME }}
+          # The script defaults to arm64 alone, deliberately, so a local
+          # build stays fast. A release cannot: an APK carrying 32-bit
+          # Rust but only 64-bit Xray would install on an older phone and
+          # then fail the moment a customer picked a stealth protocol --
+          # working WireGuard, dead Xray, and nothing saying why.
+          XRAY_AAR_TARGET: android/arm64,android/arm
 
       - name: Generate the Android project
         working-directory: apps/mobile
@@ -105,11 +115,21 @@ jobs:
         working-directory: apps/mobile
         run: pnpm exec tauri icon src-tauri/icons/icon.png
 
-      - name: Build
+      # The APK is the DIRECT build: the one the website hands out and the
+      # one Iranian customers use, since Play does not serve them. It
+      # keeps in-app purchase and voucher redemption, because nobody
+      # distributes it but us and no store's rules reach it.
+      #
+      # armv7 alongside aarch64 because plenty of the handsets this
+      # product exists for are 32-bit, and a 64-bit-only build is not
+      # merely slower for them -- it does not install.
+      - name: Build the direct APK
         working-directory: apps/mobile
-        run: pnpm exec tauri android build --apk --target aarch64
+        env:
+          VITE_DISTRIBUTION: direct
+        run: pnpm exec tauri android build --apk --target aarch64 --target armv7
 
-      - name: Sign
+      - name: Sign the direct APK
         working-directory: apps/mobile
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -118,7 +138,15 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#android-v}"
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
-          unsigned=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-unsigned.apk' | head -1)
+          # Universal, so one download works on both architectures. The
+          # per-ABI splits exist too, but a website download link cannot
+          # ask which chip the phone has.
+          unsigned=$(find src-tauri/gen/android/app/build/outputs/apk -name '*universal*-unsigned.apk' | head -1)
+          if [ -z "$unsigned" ]; then
+            echo "No universal APK was produced -- a per-ABI split would install on only half the devices." >&2
+            find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' >&2
+            exit 1
+          fi
           echo "Signing $unsigned"
           "$ANDROID_HOME/build-tools/34.0.0/apksigner" sign \
             --ks keystore.jks \
@@ -130,6 +158,75 @@ jobs:
           "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "Neoxify-$version.apk"
           rm -f keystore.jks
           sha256sum "Neoxify-$version.apk" > sha256sums.txt
+
+      # The AAB is the STORE build, and it is a different artifact in two
+      # ways at once: Play requires an App Bundle rather than an APK for
+      # new apps, and Play's rules forbid the in-app selling the direct
+      # build carries. So it is built separately with the store flavour
+      # rather than repackaged from the same output.
+      #
+      # Play splits an AAB per ABI on delivery, so including armv7 costs
+      # a customer nothing in download size -- only build time here.
+      - name: Build the Play AAB
+        working-directory: apps/mobile
+        env:
+          VITE_DISTRIBUTION: store
+        run: pnpm exec tauri android build --aab --target aarch64 --target armv7
+
+      - name: Sign the Play AAB
+        working-directory: apps/mobile
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#android-v}"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
+          unsigned=$(find src-tauri/gen/android/app/build/outputs/bundle -name '*.aab' | head -1)
+          if [ -z "$unsigned" ]; then
+            echo "No .aab was produced -- Play will not accept an APK for a new app." >&2
+            exit 1
+          fi
+          echo "Signing $unsigned"
+          # jarsigner, not apksigner: apksigner signs APKs and refuses a
+          # bundle. This is the *upload* key. Play re-signs with the app
+          # signing key -- which must be this same key, uploaded at
+          # enrolment, or Play-delivered installs and sideloaded ones
+          # become different identities that cannot update each other.
+          jarsigner -verbose:summary \
+            -keystore keystore.jks \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -keypass "$ANDROID_KEYSTORE_PASSWORD" \
+            -signedjar "Neoxify-$version.aab" \
+            "$unsigned" neoxify
+          jarsigner -verify "Neoxify-$version.aab"
+          rm -f keystore.jks
+          sha256sum "Neoxify-$version.aab" >> sha256sums.txt
+
+      # A store build that still contains the purchase flow is the
+      # failure that gets an app removed, and it would look completely
+      # normal until review. Assert it against the artifact rather than
+      # trusting the env var was read.
+      #
+      # Checks the direct APK too, in the opposite direction: if the
+      # flavour ever got crossed, the customers who *can* buy in-app
+      # would quietly lose the ability, which nothing else would report.
+      - name: Check each artifact carries the right flavour
+        working-directory: apps/mobile
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#android-v}"
+          # A marker from the purchase screen's own code. The i18n
+          # dictionaries carry the same key in both builds, so presence
+          # alone proves nothing -- the store bundle legitimately
+          # contains two copies as translations. Compare the counts.
+          direct_hits=$(unzip -p "Neoxify-$version.apk" 'assets/*' 2>/dev/null | grep -ao 'plans.toAddress' | wc -l)
+          store_hits=$(unzip -p "Neoxify-$version.aab" 'base/assets/*' 2>/dev/null | grep -ao 'plans.toAddress' | wc -l)
+          echo "purchase-code marker: direct=$direct_hits store=$store_hits"
+          if [ "$store_hits" -ge "$direct_hits" ]; then
+            echo "::error::The Play AAB carries as much purchase code as the direct APK -- the store flavour did not apply." >&2
+            exit 1
+          fi
 
       # The tag's own annotation is the human-written changelog -- see the
       # `git tag -a` message. Without passing it, action-gh-release falls
@@ -154,6 +251,11 @@ jobs:
         with:
           files: |
             apps/mobile/Neoxify-*.apk
+            # For uploading to Play Console by hand. Safe to publish
+            # beside the APK: the /updates/installer/android matcher is
+            # anchored to `.apk$`, so a phone following the download link
+            # can never be handed a bundle it cannot install.
+            apps/mobile/Neoxify-*.aab
             apps/mobile/sha256sums.txt
           body: ${{ steps.tagmsg.outputs.body }}
           generate_release_notes: true
