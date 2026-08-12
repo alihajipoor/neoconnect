@@ -30,23 +30,44 @@ export interface Customer {
   updatedAt: string;
 }
 
+/// Mirrors the `Protocol` enum in prisma/schema.prisma. Hand-maintained,
+/// which is how it drifted: SHADOWSOCKS and IKEV2 both shipped and
+/// neither reached this file, so the panel could not offer them.
 export type Protocol =
   | "XRAY_VLESS_REALITY"
   | "XRAY_VLESS_TLS"
   | "XRAY_VMESS"
   | "XRAY_TROJAN"
-  | "WIREGUARD"
   | "SHADOWSOCKS"
-  | "OPENVPN";
+  | "WIREGUARD"
+  | "OPENVPN"
+  | "IKEV2";
 
-export const ALL_PROTOCOLS: Protocol[] = [
-  "XRAY_VLESS_REALITY",
-  "XRAY_VLESS_TLS",
-  "XRAY_VMESS",
-  "XRAY_TROJAN",
-  "WIREGUARD",
-  "OPENVPN",
-];
+/* Every protocol, in the order the forms should list them.
+ *
+ * Derived from a Record rather than written out as an array, because an
+ * array cannot be checked for completeness and this one silently was
+ * not: SHADOWSOCKS was in the union above but missing here, and IKEV2
+ * was in neither. The plan form and the protocol-config form both
+ * iterate this, so two live protocols could not be granted to a plan or
+ * configured on a node at all -- and with failover provisioning every
+ * allowed route, customers on a panel-created plan would simply never
+ * receive them.
+ *
+ * A Record<Protocol, true> makes the next omission a compile error
+ * instead of an absence nobody notices. */
+const PROTOCOL_PRESENCE: Record<Protocol, true> = {
+  XRAY_VLESS_REALITY: true,
+  XRAY_VLESS_TLS: true,
+  XRAY_VMESS: true,
+  XRAY_TROJAN: true,
+  SHADOWSOCKS: true,
+  WIREGUARD: true,
+  OPENVPN: true,
+  IKEV2: true,
+};
+
+export const ALL_PROTOCOLS = Object.keys(PROTOCOL_PRESENCE) as Protocol[];
 
 export type NodeRole = "RELAY" | "EXIT" | "STANDALONE";
 export type NodeStatus = "PENDING" | "ONLINE" | "OFFLINE" | "DISABLED";

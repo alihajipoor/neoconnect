@@ -8,6 +8,11 @@ export const PROTOCOL_LABELS: Record<Protocol, string> = {
   SHADOWSOCKS: "Shadowsocks 2022",
   WIREGUARD: "WireGuard",
   OPENVPN: "OpenVPN",
+  // Named for what it is, not what customers see. The clients label it
+  // "Built-in", because to a customer the salient fact is that it needs
+  // no engine shipped with the app; to an operator picking a protocol
+  // for a node, that would be meaningless.
+  IKEV2: "IKEv2/IPsec",
 };
 
 // Conventional default listen port per protocol -- matches what the
@@ -33,4 +38,11 @@ export const DEFAULT_PROTOCOL_PORT: Record<Protocol, number> = {
   SHADOWSOCKS: 23456,
   WIREGUARD: 51820,
   OPENVPN: 1194,
+  // IKEv2 actually needs both UDP 500 and 4500 -- 4500 is where the
+  // traffic goes once NAT traversal kicks in, which on a real customer
+  // network is always. `listenPort` holds one number, so it holds 500,
+  // matching what the installer registers (installer/lib/agent.sh).
+  // Changing it here without changing the installer would produce a
+  // config that disagrees with the node it describes.
+  IKEV2: 500,
 };
