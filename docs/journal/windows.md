@@ -184,3 +184,60 @@ omission inside the panel is a compile error, and
 `scripts/check-protocol-drift.sh` compares the panel's union against the
 Prisma enum on every commit. Verified the check *fails* when a protocol
 is removed, not merely that it passes.
+
+---
+
+## 2026-08-11 — M25 started: deletion, store flavour, AAB, public voucher lookup
+
+**Status:** four pieces done, none released
+**Touches:** `apps/backend/src/modules/{customers,customer,vouchers}`, `apps/desktop-windows/src/lib/{distribution,i18n}`, `apps/mobile/src/**`, `release-android.yml`
+
+The operator specified a full milestone (M25 in the plan): two mobile
+flavours, website commerce, voucher links, and a reseller programme.
+Build order is deletion -> flavours -> voucher links -> website ->
+resellers. First four items of the backend are in.
+
+**Account deletion.** `DELETE /customer/me`, anonymising rather than
+purging. The design turned on an existing detail: `CustomersService.remove()`
+already refuses when a settled payment exists, correctly, because a paid
+invoice is a financial record — but that is exactly the answer both
+stores forbid for self-deletion. So this is a separate path that keeps
+the invoices and strips the person. The part that matters is
+deprovisioning across **every** node, since failover gives each customer
+a credential on every eligible route.
+
+**Store flavour.** `VITE_DISTRIBUTION=store` compiles out purchase and
+voucher redemption. Desktop and the direct APK default to `direct` and
+are untouched.
+
+Worth remembering how that was verified, because the first measurement
+looked like failure: grepping the store bundle for a purchase marker
+found two hits. Those two are the English and Persian **translation
+dictionaries**, which ship regardless. Only the differential settles it
+— direct 3-4, store 2, bundle 8K smaller. An absolute count cannot tell
+"the screen shipped" from "its translation shipped".
+
+**AAB build.** Play needs a bundle, and a bundle signed with `jarsigner`,
+not `apksigner`, which refuses one. Both ABIs now: Play splits per ABI
+so 32-bit costs a customer nothing there, while the universal APK pays
+~46MB in full — flagged to measure on the first release rather than
+guessed. Two things that would have failed the build: the Rust toolchain
+had only aarch64, and the Xray AAR script defaults to arm64 alone, which
+would have shipped 32-bit Rust with 64-bit-only Xray — installing fine,
+connecting fine over WireGuard, dying the moment anyone chose a stealth
+protocol.
+
+**Public voucher lookup.** `GET /vouchers/:code/preview`, unauthenticated,
+so a link recipient learns what a code is worth before being asked to
+register. Its own controller: the existing one is admin-guarded at class
+level, and a public route added there would inherit the guard while
+looking correct. Unknown, spent, expired and deactivated answer
+identically on purpose — distinguishing them would let a reseller's
+stock be enumerated.
+
+**Website is on a branch.** Step 4 needs a decision first: the site lives
+in `website/` on `worktree-website`, unmerged, last touched 9 August.
+See task #96.
+
+Nothing here is released. The Android workflow changes have never run —
+they need an `android-v*` tag, and that should wait for device testing.
