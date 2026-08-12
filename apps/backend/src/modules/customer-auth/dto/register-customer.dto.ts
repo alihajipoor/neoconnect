@@ -1,6 +1,8 @@
 import { ApiPropertyOptional } from "@nestjs/swagger";
-import { IsOptional, IsString, Length } from "class-validator";
+import { IsOptional, IsString, Length, ValidateNested } from "class-validator";
+import { Type } from "class-transformer";
 import { CreateCustomerDto } from "../../customers/dto/create-customer.dto";
+import { ChallengeSolutionDto } from "../../login-guard/dto/challenge-solution.dto";
 
 /** Signup, which is [`CreateCustomerDto`] plus the one thing only a
  * self-signing-up customer can supply.
@@ -18,4 +20,12 @@ export class RegisterCustomerDto extends CreateCustomerDto {
   @IsString()
   @Length(4, 32)
   referralCode?: string;
+
+  /** Solved proof-of-work, when the client supports it. Optional for the
+   * same back-compatibility reason as on LoginDto. */
+  @ApiPropertyOptional({ type: () => ChallengeSolutionDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ChallengeSolutionDto)
+  challenge?: ChallengeSolutionDto;
 }
