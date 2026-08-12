@@ -85,6 +85,13 @@ const en = {
   "dash.location": "Location",
   "dash.viewPlans": "View plans",
   "dash.noSubscription": "No active subscription",
+  "dash.noPlanHint": "Choose a plan to start using Neoxify.",
+  // Store builds only. They may not sell, and may not point at where to
+  // buy either, so this cannot be a call to action. What it can do is
+  // leave the customer knowing where they stand and that nothing is
+  // broken -- which is the whole difference between an empty state and
+  // a dead end.
+  "dash.noPlanStore": "Your account is ready. As soon as a plan is added to it, it appears here and you can connect.",
 
   "plans.title": "Choose a plan",
   "plans.subtitle": "Pick a plan to start connecting.",
@@ -342,6 +349,8 @@ const fa: Record<TranslationKey, string> = {
   "dash.location": "موقعیت",
   "dash.viewPlans": "مشاهده پلن‌ها",
   "dash.noSubscription": "اشتراک فعالی ندارید",
+  "dash.noPlanHint": "برای شروع استفاده از نئوکسیفای یک پلن انتخاب کنید.",
+  "dash.noPlanStore": "حساب شما آماده است. به‌محض افزوده‌شدن یک پلن، همین‌جا نمایش داده می‌شود و می‌توانید متصل شوید.",
 
   "plans.title": "انتخاب پلن",
   "plans.subtitle": "برای شروع اتصال یک پلن انتخاب کنید.",

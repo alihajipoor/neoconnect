@@ -9,6 +9,7 @@ import { Plans } from "@shared/screens/Plans";
 import { Referrals } from "@shared/screens/Referrals";
 import { Support } from "@shared/screens/Support";
 import { Settings } from "@shared/screens/Settings";
+import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
 
@@ -160,7 +161,13 @@ export default function App() {
   if (screen === "support") {
     return <Support onBack={() => setScreen("settings")} />;
   }
-  if (screen === "plans") {
+  // Unreachable in a store build, and unreachable rather than merely
+  // unlinked: the condition is a build-time constant, so the bundler
+  // drops this branch and the Plans screen -- with its purchase flow and
+  // its voucher field -- is not present in the artifact at all. Hiding
+  // the entrance would still ship the room, which is what a reviewer
+  // looks for and what a determined customer finds.
+  if (screen === "plans" && !IS_STORE_BUILD) {
     return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;
   }
   return (
