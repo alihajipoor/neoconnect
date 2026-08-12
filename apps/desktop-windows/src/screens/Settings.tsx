@@ -9,8 +9,9 @@ import {
   Languages,
   LifeBuoy,
   Loader2,
+  Trash2,
 } from "lucide-react";
-import { changePassword } from "../lib/auth";
+import { changePassword, deleteAccount } from "../lib/auth";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { Button, Card, Input, Label } from "../components/ui";
 import { cn } from "../lib/utils";
@@ -33,11 +34,18 @@ export function Settings({
   onBack,
   onOpenReferrals,
   onOpenSupport,
+  onLoggedOut,
   customSection,
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
   onOpenSupport: () => void;
+  /** Where to send someone whose account no longer exists.
+   *
+   * The same callback the app already uses for signing out, because the
+   * end state is identical -- no session, back at the login screen. The
+   * difference is only that there is nothing to sign back into. */
+  onLoggedOut: () => void;
   /** Custom mode's pane, supplied by the platform rather than imported.
    *
    * Language and password are the same product on every platform and
@@ -133,7 +141,12 @@ export function Settings({
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
           {section === "custom" ? customSection : null}
           {section === "general" ? <LanguageSection /> : null}
-          {section === "account" ? <PasswordSection /> : null}
+          {section === "account" ? (
+            <div className="flex flex-col gap-4">
+              <PasswordSection />
+              <DeleteAccountSection onDeleted={onLoggedOut} />
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -277,6 +290,119 @@ function PasswordSection() {
           {busy ? t("settings.changing") : t("settings.changePassword")}
         </Button>
       </form>
+    </Card>
+  );
+}
+
+/** Deleting your own account.
+ *
+ * Present because both stores require it of any app offering account
+ * creation -- Apple 5.1.1(v), Play's data deletion policy -- and absent
+ * from neither build, since it is not a transaction and no store
+ * objects to it.
+ *
+ * Two-step, and the second step asks for the word rather than another
+ * button. A second button is a reflex; typing something is a decision.
+ * This is the one action in the app that cannot be undone, and the
+ * confirmation names what actually goes rather than asking "are you
+ * sure" about an unspecified thing.
+ */
+function DeleteAccountSection({ onDeleted }: { onDeleted: () => void }) {
+  const { t } = useI18n();
+  const [confirming, setConfirming] = useState(false);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Matched case-insensitively and trimmed: the point is deliberateness,
+  // not typing accuracy, and failing someone on a capital letter after
+  // they decided to leave is just rude.
+  const phrase = t("settings.deleteConfirmWord");
+  const matches = typed.trim().toLowerCase() === phrase.toLowerCase();
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setBusy(true);
+
+    const result = await deleteAccount();
+    setBusy(false);
+
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    // No success state on this screen -- there is no account left for it
+    // to belong to. Straight back to the login screen.
+    onDeleted();
+  }
+
+  return (
+    <Card className="flex flex-col gap-3 border-destructive/30">
+      <div className="flex items-center gap-2">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-destructive/15 text-destructive">
+          <Trash2 className="size-4" />
+        </div>
+        <div>
+          <p className="text-sm font-semibold">{t("settings.deleteAccount")}</p>
+          <p className="text-xs text-muted-foreground">{t("settings.deleteAccountHint")}</p>
+        </div>
+      </div>
+
+      {confirming ? (
+        <form onSubmit={submit} className="flex flex-col gap-3">
+          {/* Named, not vague. Someone deleting an account with paid time
+              left should learn that here and not afterwards. */}
+          <p className="text-xs text-muted-foreground">{t("settings.deleteWarning")}</p>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="delete-confirm">{t("settings.deleteTypeToConfirm", { word: phrase })}</Label>
+            <Input
+              id="delete-confirm"
+              value={typed}
+              onChange={(event) => setTyped(event.target.value)}
+              autoComplete="off"
+              autoFocus
+            />
+          </div>
+
+          {error ? <p className="text-xs text-destructive">{error}</p> : null}
+
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              className="flex-1 justify-center border border-white/10"
+              onClick={() => {
+                setConfirming(false);
+                setTyped("");
+                setError(null);
+              }}
+              disabled={busy}
+            >
+              {t("settings.deleteCancel")}
+            </Button>
+            <Button
+              type="submit"
+              variant="destructive"
+              className="flex-1 justify-center gap-2"
+              disabled={!matches || busy}
+            >
+              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+              {busy ? t("settings.deleting") : t("settings.deleteConfirm")}
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <Button
+          variant="ghost"
+          className="justify-center gap-2 border border-destructive/40 text-destructive"
+          onClick={() => setConfirming(true)}
+        >
+          <Trash2 className="size-4" />
+          {t("settings.deleteAccount")}
+        </Button>
+      )}
     </Card>
   );
 }
