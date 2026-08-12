@@ -98,6 +98,21 @@ return array(
     // behind a CDN, so it is not the same address to block. Either resolves to
     // the newest release -- the endpoint reads the version from the published
     // filename, so this link never needs editing when a version ships.
+    // Where a customer signs in, sees their subscription and buys.
+    //
+    // Not on this site, deliberately. This is a PHP marketing site with no
+    // sessions and no calls to the API; the account area lives on the
+    // control plane, which already holds the customer database, the auth
+    // endpoints and the payment providers. Putting a login form here would
+    // mean a second place that handles credentials and holds a token, for
+    // no gain -- so the buttons are links, not forms.
+    //
+    // Empty until that area exists, following the same rule as the Android
+    // link below: an unset URL renders no button at all, rather than a
+    // button that leads nowhere. Set it and the header, the mobile drawer
+    // and the pricing section all gain a sign-in link at once.
+    'customer_portal_url' => '',
+
     'windows_installer_url' => 'https://connect.neoxify.site/api/updates/installer/windows',
 
     // The Android APK, same arrangement as Windows above: one URL that

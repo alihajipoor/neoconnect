@@ -36,6 +36,7 @@ return array(
     'nav.contact' => 'تماس با ما',
     'nav.reseller' => 'نمایندگی',
     'nav.privacy' => 'حریم خصوصی',
+    'nav.signin' => 'ورود',
     'nav.cta' => 'دریافت برنامه',
     'nav.menu' => 'منو',
     'nav.close' => 'بستن منو',

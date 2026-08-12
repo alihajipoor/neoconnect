@@ -12,6 +12,12 @@ defined('NX') || exit;
 
 $nx_current = nx_page();
 
+/* Sign-in lives on the control plane, not here -- see `customer_portal_url`
+ * in config.php for why. Read once and reused by both the desktop header
+ * and the mobile drawer below, so the two cannot disagree about whether
+ * the account area exists. */
+$nx_portal = (string) nx_cfg('customer_portal_url');
+
 /** page key => href. Pricing is a section of the home page, not its own page. */
 $nx_links = array(
     'download' => nx_url('download'),
@@ -50,6 +56,12 @@ $nx_links = array(
         <span><?php echo nx_e('lang.switch'); ?></span>
       </a>
 
+      <?php if ($nx_portal !== ''): ?>
+        <a class="btn btn--ghost" href="<?php echo nx_esc($nx_portal); ?>">
+          <?php echo nx_e('nav.signin'); ?>
+        </a>
+      <?php endif; ?>
+
       <a class="btn btn--primary" href="<?php echo nx_esc(nx_url('download')); ?>">
         <?php echo nx_e('nav.cta'); ?>
       </a>
@@ -70,6 +82,9 @@ $nx_links = array(
       <?php foreach ($nx_links as $nx_key => $nx_href): ?>
         <a href="<?php echo nx_esc($nx_href); ?>"><?php echo nx_e('nav.' . $nx_key); ?></a>
       <?php endforeach; ?>
+      <?php if ($nx_portal !== ''): ?>
+        <a href="<?php echo nx_esc($nx_portal); ?>"><?php echo nx_e('nav.signin'); ?></a>
+      <?php endif; ?>
       <a class="btn btn--primary" href="<?php echo nx_esc(nx_url('download')); ?>">
         <?php echo nx_e('nav.cta'); ?>
       </a>
