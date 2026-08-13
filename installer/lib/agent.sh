@@ -101,8 +101,45 @@ EOF
   local token
   token="$(get_admin_bearer_token)" || exit 1
 
-  local detected_ip
-  detected_ip="$(curl -fsSL https://api.ipify.org || true)"
+  # Two independent readings, because neither is right on its own and
+  # getting this wrong is silent: the node enrols, looks healthy, and
+  # every client dials an address that accepts nothing.
+  #
+  #   egress_ip    what the internet sees us come FROM (api.ipify.org)
+  #   iface_ip     the address on the interface holding the default route
+  #
+  # They disagree in two opposite situations. On a cloud VM behind 1:1
+  # NAT the interface holds a private address and ipify is correct. On a
+  # host whose outbound traffic is NAT'd or proxied through a different
+  # address than it accepts inbound on -- seen for real on the Iran node,
+  # where ipify reported 31.171.101.2 while inbound only worked on
+  # 185.222.28.186 -- the interface address is correct and ipify is
+  # actively wrong.
+  #
+  # Nothing here can tell those apart, so when they differ we say so and
+  # make it a deliberate choice instead of defaulting into a broken node.
+  local egress_ip iface_ip detected_ip
+  egress_ip="$(curl -fsSL --max-time 10 https://api.ipify.org || true)"
+  iface_ip="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)"
+
+  # Prefer the interface address when it is a real public one: it is the
+  # address we actually accept connections on, which is what a client
+  # needs. A private interface address means we are behind NAT and the
+  # egress reading is the useful one.
+  if [[ -n "$iface_ip" && ! "$iface_ip" =~ ^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
+    detected_ip="$iface_ip"
+  else
+    detected_ip="$egress_ip"
+  fi
+
+  if [[ -n "$egress_ip" && -n "$iface_ip" && "$egress_ip" != "$iface_ip" ]]; then
+    echo
+    echo "  NOTE: this host's outbound address differs from its interface address."
+    echo "    interface (what we accept connections on): $iface_ip"
+    echo "    outbound  (what the internet sees):        $egress_ip"
+    echo "  Customers must be given the one that accepts INBOUND connections."
+    echo "  Suggesting $detected_ip -- override it below if that is wrong."
+  fi
 
   echo
   read -r -p "Name for this node (e.g. finland-1): " node_name
