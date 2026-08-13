@@ -5,7 +5,8 @@
   },
   "api": {
     "tag": "api",
-    "services": ["HandlerService", "StatsService", "LoggerService"]
+    "//": "RoutingService is here, not only in the relay variant, because a node picks its template from one prompt answered before anyone knows what it will be asked to do. CONFIGURE_ROUTE needs AddRule; without it HandlerService.AddOutbound succeeds and the rule that points traffic at that outbound fails with \"unknown service xray.app.router.command.RoutingService\", so the relay half-configures itself and reports nothing wrong. An Xray-entry relay needs nothing else from the relay variant -- the tun bridge there is only for WireGuard/OpenVPN entries -- so carrying this one service makes that whole case work on a node that answered no. It listens on 127.0.0.1:10085 and is inert until called. Cost of being wrong the other way, found 2026-08-13 on the first relay built from this template: a live Iran node that could not carry a single route.",
+    "services": ["HandlerService", "RoutingService", "StatsService", "LoggerService"]
   },
   "stats": {},
   "policy": {

@@ -189,6 +189,40 @@ export class RoutesService {
       throw new BadRequestException(`Relayed routes' exit protocol config must be ${SUPPORTED_EXIT_PROTOCOL}`);
     }
 
+    // One exit per entry, because Xray cannot route two of them apart.
+    //
+    // CONFIGURE_ROUTE installs a routing rule whose only match condition
+    // is the entry inbound's tag (see agent/internal/relay buildRoutingRule).
+    // Two relayed routes on the same entry config therefore produce two
+    // rules with identical match criteria, and Xray takes the first --
+    // so the second route exists, provisions credentials, and appears in
+    // the customer's location picker while its traffic leaves via the
+    // first route's exit.
+    //
+    // Measured 2026-08-13 rather than reasoned: ir1 was given routes to
+    // both finland1 and france-1, and a credential issued on the FRANCE
+    // route exited at 204.168.161.100 -- finland1. A picker entry saying
+    // France while the traffic leaves Finland is the same class of lie
+    // as a false "Connected", so this refuses at creation instead.
+    //
+    // Lifting this needs the entry inbound tag to become a property of
+    // the ProtocolConfig rather than of the protocol (it is a per-protocol
+    // agent flag today), so one node can host several entry inbounds.
+    const conflicting = await this.prisma.route.findFirst({
+      where: {
+        entryProtocolConfigId: dto.entryProtocolConfigId,
+        exitProtocolConfigId: { not: null },
+      },
+      select: { id: true, name: true },
+    });
+    if (conflicting) {
+      throw new BadRequestException(
+        `Entry protocol config already relays via route "${conflicting.name}". A relay entry can serve only one exit: ` +
+          `both routes would match the same Xray inbound and the second would silently use the first one's exit. ` +
+          `Delete that route first, or add a separate entry protocol config for this exit.`,
+      );
+    }
+
     // One shared uplink credential for the whole route -- the exit node
     // never sees individual end customers, only the relay's aggregate
     // traffic. usedAddresses is irrelevant for Xray, passed empty.

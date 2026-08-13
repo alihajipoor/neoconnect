@@ -85,6 +85,25 @@ export class ProtocolUsersService {
     if (!route) throw new BadRequestException("Route not found");
     if (!route.isEnabled) throw new BadRequestException("Route is not enabled");
 
+    // relayOnly is enforced here, not only in provisionAll's route filter.
+    //
+    // Measured 2026-08-13: with the filter living solely in provisionAll,
+    // POST /protocol-users happily returned 201 for a direct route on a
+    // relay-only plan. Every provisioning path -- the customer picker's
+    // switchRoute, the admin panel, renewal, a backfill -- funnels through
+    // create(), so this is the one place that actually holds. A filter
+    // that only shapes what gets *offered* is not enforcement; it just
+    // means the plan's defining promise depends on nobody asking directly.
+    //
+    // Ultimate is sold as the Iran relay path specifically, at more money
+    // for less data, so serving it from a direct route is not a lenient
+    // edge case -- it is selling one product and delivering another.
+    if (subscription.plan.relayOnly && route.exitProtocolConfigId === null) {
+      throw new BadRequestException(
+        `The ${subscription.plan.name} plan is served only by relay routes, and "${route.name}" is a direct route`,
+      );
+    }
+
     const protocolConfig = route.entryProtocolConfig;
 
     const usedAddresses =
