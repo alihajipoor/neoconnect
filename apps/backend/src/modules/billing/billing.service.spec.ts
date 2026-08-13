@@ -35,6 +35,10 @@ describe("BillingService.confirmPayment expiry", () => {
       // ConfigService. These cases exercise renewal and expiry, none of
       // which reads config -- but the constructor takes it now.
       { get: jest.fn() } as never,
+      // PaymentSettingsService. Only the purchase paths consult it, to
+      // resolve which crypto provider is configured; these cases cover
+      // renewal and expiry.
+      { availableProviders: jest.fn().mockResolvedValue([]) } as never,
       { issueForPayment: jest.fn().mockResolvedValue({}) } as never,
     );
     return { service, prisma };

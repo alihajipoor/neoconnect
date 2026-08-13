@@ -122,11 +122,12 @@ export class PaymentSettingsService {
    * "Card" and getting an error because nothing was ever configured is the
    * exact failure this replaces.
    */
-  async availableProviders(): Promise<("STRIPE" | "NOWPAYMENTS")[]> {
+  async availableProviders(): Promise<("STRIPE" | "NOWPAYMENTS" | "PLISIO")[]> {
     const row = await this.row();
-    const available: ("STRIPE" | "NOWPAYMENTS")[] = [];
+    const available: ("STRIPE" | "NOWPAYMENTS" | "PLISIO")[] = [];
     if (row.stripeEnabled && row.stripeSecretKeyEncrypted) available.push("STRIPE");
     if (row.nowPaymentsEnabled && row.nowPaymentsApiKeyEncrypted) available.push("NOWPAYMENTS");
+    if (row.plisioEnabled && row.plisioApiKeyEncrypted) available.push("PLISIO");
     return available;
   }
 

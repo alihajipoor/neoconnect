@@ -6,6 +6,7 @@ import { CreatePaymentDto } from "./dto/create-payment.dto";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
 import { PlisioProvider } from "./providers/plisio.provider";
 import { ConfigService } from "@nestjs/config";
+import { PaymentSettingsService } from "../payment-settings/payment-settings.service";
 import { StripeProvider } from "./providers/stripe.provider";
 import { InvoicesService } from "../invoices/invoices.service";
 
@@ -20,6 +21,7 @@ export class BillingService {
     private readonly nowpayments: NowPaymentsProvider,
     private readonly plisio: PlisioProvider,
     private readonly config: ConfigService,
+    private readonly paymentSettings: PaymentSettingsService,
     private readonly invoices: InvoicesService,
   ) {}
 
@@ -72,7 +74,7 @@ export class BillingService {
       return { transactionId: transaction.id, provider: "STRIPE" as const, clientSecret };
     }
 
-    if (dto.provider === "PLISIO") {
+    if ((await this.resolveCryptoProvider(dto.provider as "NOWPAYMENTS" | "PLISIO")) === "PLISIO") {
       const invoice = await this.plisio.createInvoice({
         orderNumber: transaction.id,
         orderName: subscription.plan.name,
@@ -141,7 +143,7 @@ export class BillingService {
       return { transactionId: transaction.id, provider: "STRIPE" as const, checkoutUrl: url };
     }
 
-    if (dto.provider === "PLISIO") {
+    if ((await this.resolveCryptoProvider(dto.provider as "NOWPAYMENTS" | "PLISIO")) === "PLISIO") {
       const invoice = await this.plisio.createInvoice({
         orderNumber: transaction.id,
         orderName: subscription.plan.name,
@@ -344,5 +346,35 @@ export class BillingService {
       );
     }
     return `${base.replace(/\/$/, "")}/billing/webhooks/plisio`;
+  }
+
+  /**
+   * Which crypto provider a request should actually use.
+   *
+   * Every client shipped so far hardcodes NOWPAYMENTS behind its
+   * "Crypto" button -- desktop 0.9.x and the current Android build both
+   * do -- so switching providers server-side would strand every
+   * installed app on a provider with no key, which is exactly what
+   * happened: pressing Crypto returned "Internal server error".
+   *
+   * The customer pressed "pay with crypto", not "pay with NowPayments".
+   * Honouring that intent means resolving to whichever crypto provider
+   * is actually configured rather than the name the client happened to
+   * send. An explicit PLISIO request is always honoured; a NOWPAYMENTS
+   * request falls through to Plisio only when NowPayments genuinely
+   * cannot serve it.
+   *
+   * Remove once the shipped clients ask /customer/billing/providers and
+   * send the right name themselves.
+   */
+  private async resolveCryptoProvider(requested: "NOWPAYMENTS" | "PLISIO") {
+    if (requested === "PLISIO") return "PLISIO" as const;
+    const available = await this.paymentSettings.availableProviders();
+    if (available.includes("NOWPAYMENTS")) return "NOWPAYMENTS" as const;
+    if (available.includes("PLISIO")) {
+      this.logger.log("Crypto requested as NOWPAYMENTS but only Plisio is configured -- using Plisio");
+      return "PLISIO" as const;
+    }
+    return "NOWPAYMENTS" as const;
   }
 }
