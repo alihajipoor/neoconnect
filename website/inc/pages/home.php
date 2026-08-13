@@ -312,11 +312,28 @@ require NX_INC . '/partials/announcement.php';
                 ?></span>
               </li>
 
-              <?php if (!empty($nx_plan['connections'])): ?>
+              <?php
+              /* Three distinct cases, which empty() cannot tell apart:
+                 the key absent (say nothing), the key present but null
+                 (no device limit -- mirrors the backend's nullable
+                 maxConcurrentConnections), and a real number.
+                 The previous `!empty()` treated null as "say nothing", so
+                 the unlimited-devices plan advertised no device line at
+                 all -- and a count of 1 rendered as "1 devices". */
+              if (array_key_exists('connections', $nx_plan)):
+                  $nx_conn = $nx_plan['connections'];
+                  if ($nx_conn === null) {
+                      $nx_conn_text = nx_e('home.pricing.connections_unlimited');
+                  } elseif ((int) $nx_conn === 1) {
+                      $nx_conn_text = nx_e('home.pricing.connections_one');
+                  } else {
+                      $nx_conn_text = nx_e('home.pricing.connections',
+                          array('count' => nx_num((int) $nx_conn)));
+                  }
+              ?>
                 <li>
                   <?php echo nx_icon('check'); ?>
-                  <span><?php echo nx_e('home.pricing.connections', array(
-                      'count' => (int) $nx_plan['connections'])); ?></span>
+                  <span><?php echo $nx_conn_text; ?></span>
                 </li>
               <?php endif; ?>
 
@@ -350,15 +367,30 @@ require NX_INC . '/partials/announcement.php';
               <?php endforeach; ?>
             </ul>
 
-            <?php
-            /* Goes to the customer area with this plan preselected, and
-               only falls back to the download page when no portal is
-               configured. See nx_buy_url(). */
-            ?>
-            <a class="btn <?php echo !empty($nx_plan['highlight']) ? 'btn--primary' : 'btn--ghost'; ?> btn--block"
-               href="<?php echo nx_esc(nx_buy_url(isset($nx_plan['id']) ? $nx_plan['id'] : '')); ?>">
-              <?php echo nx_e('home.pricing.cta'); ?>
-            </a>
+            <?php if (!empty($nx_plan['coming_soon'])): ?>
+              <?php
+              /* A plan we cannot deliver yet is shown but not sold. A
+                 disabled button rather than a link, and a <button> rather
+                 than a styled <a>, so that keyboard and screen-reader
+                 users get the same "not available" that sighted users
+                 get instead of following a link to a purchase that would
+                 fail. */
+              ?>
+              <button class="btn btn--ghost btn--block" type="button" disabled
+                      aria-disabled="true">
+                <?php echo nx_e('home.pricing.coming_soon'); ?>
+              </button>
+            <?php else: ?>
+              <?php
+              /* Goes to the customer area with this plan preselected, and
+                 only falls back to the download page when no portal is
+                 configured. See nx_buy_url(). */
+              ?>
+              <a class="btn <?php echo !empty($nx_plan['highlight']) ? 'btn--primary' : 'btn--ghost'; ?> btn--block"
+                 href="<?php echo nx_esc(nx_buy_url(isset($nx_plan['id']) ? $nx_plan['id'] : '')); ?>">
+                <?php echo nx_e('home.pricing.cta'); ?>
+              </a>
+            <?php endif; ?>
           </article>
         </div>
       <?php endforeach; ?>
