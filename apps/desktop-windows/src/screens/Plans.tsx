@@ -43,7 +43,18 @@ function PlanFact({
   );
 }
 
-export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack: () => void }) {
+export function Plans({
+  onActivated,
+  onBack,
+  voucherCode,
+}: {
+  onActivated: () => void;
+  onBack: () => void;
+  /** Prefills the redeem field, set by the web portal when the customer
+   * arrived on a /r/CODE link. Undefined in the desktop and Android
+   * clients, which have no link to arrive from. */
+  voucherCode?: string;
+}) {
   const { t } = useI18n();
   const [plans, setPlans] = useState<SubscriptionPlan[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -210,7 +221,7 @@ export function Plans({ onActivated, onBack }: { onActivated: () => void; onBack
       {/* Above the plans, because somebody holding a code is not
           shopping -- making them scan the list first to find the one
           thing that does not involve paying is the wrong way round. */}
-      <RedeemVoucher onRedeemed={onActivated} />
+      <RedeemVoucher onRedeemed={onActivated} initialCode={voucherCode} />
 
       {/* A grid, not a column. Plans are meant to be compared, and on a
           desktop-width window putting them side by side does that in one

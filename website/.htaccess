@@ -43,6 +43,16 @@ ErrorDocument 404 /404.php
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteRule ^sitemap\.xml$ sitemap.php [L]
+
+    # Voucher short links: /r/ABCD1234EFGH -> r/index.php?c=ABCD1234EFGH
+    #
+    # The code is passed as a query parameter rather than left in the
+    # path, because PATH_INFO is not enabled on every shared host. r/
+    # index.php reads PATH_INFO as a fallback, so the link still works
+    # where mod_rewrite is missing entirely -- it just needs the uglier
+    # /r/index.php/CODE form. QSA is deliberately absent: nothing else
+    # belongs on this URL.
+    RewriteRule ^r/([A-Za-z0-9-]{1,32})/?$ r/index.php?c=$1 [L]
 </IfModule>
 
 # ---------------------------------------------------------------------

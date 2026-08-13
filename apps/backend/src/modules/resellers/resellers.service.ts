@@ -303,10 +303,16 @@ export class ResellersService {
 
   // ------------------------------------------------------------ private
 
+  /** The short form, /r/CODE, rather than /account/?voucher=CODE.
+   *
+   * Both work -- /r/ only normalises the code and redirects -- but this
+   * one gets pasted into chat, read aloud and printed, and a query
+   * string reads like a tracking URL. It is also short enough to type
+   * from a printed card, which the query form is not. */
   private async activationUrl(code: string): Promise<string> {
     const links = await this.appLinks.get();
     const site = (links.websiteUrl ?? DEFAULT_WEBSITE).replace(/\/$/, "");
-    return `${site}/account/?voucher=${encodeURIComponent(code)}`;
+    return `${site}/r/${encodeURIComponent(code)}`;
   }
 
   /** Best-effort, like every other send in this codebase: a mail failure

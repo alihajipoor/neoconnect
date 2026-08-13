@@ -197,13 +197,13 @@ export function Account({
       </Card>
 
       <nav className="mt-auto grid grid-cols-3 gap-2 pt-2">
-        <Button variant="secondary" onClick={onOpenSettings}>
+        <Button variant="outline" onClick={onOpenSettings}>
           {c.settings}
         </Button>
-        <Button variant="secondary" onClick={onOpenSupport}>
+        <Button variant="outline" onClick={onOpenSupport}>
           {c.support}
         </Button>
-        <Button variant="secondary" onClick={onOpenReferrals}>
+        <Button variant="outline" onClick={onOpenReferrals}>
           {c.referrals}
         </Button>
       </nav>

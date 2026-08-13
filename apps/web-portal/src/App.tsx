@@ -143,6 +143,11 @@ export default function App() {
         onOpenReferrals={() => setScreen("referrals")}
         onOpenSupport={() => setScreen("support")}
         onLoggedOut={() => setScreen("login")}
+        // Android slots its per-app split-tunnel card in here. The web
+        // has no equivalent -- nothing on this page can touch a tunnel --
+        // so it is explicitly empty rather than omitted, which the prop
+        // does not allow.
+        customSection={null}
       />
     );
   } else if (screen === "referrals") {
@@ -151,7 +156,13 @@ export default function App() {
     content = <Support onBack={() => setScreen("settings")} />;
   } else if (screen === "plans") {
     content = (
-      <Plans onActivated={() => setScreen("account")} onBack={() => setScreen("account")} />
+      <Plans
+        onActivated={() => setScreen("account")}
+        onBack={() => setScreen("account")}
+        // Prefilled from the /r/CODE link they followed, so the code is
+        // already in the box and they only confirm.
+        voucherCode={voucher ?? undefined}
+      />
     );
   } else {
     content = (

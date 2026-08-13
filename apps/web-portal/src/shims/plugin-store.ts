@@ -22,9 +22,13 @@ export class Store {
     return `neoxify:${this.name}:${key}`;
   }
 
-  async get<T>(key: string): Promise<T | null> {
+  // `undefined`, not `null`, for a missing key -- that is what Tauri's
+  // real Store returns, and the shared code is typed against it. Getting
+  // this wrong compiled here but failed the portal's own `tsc -b`, which
+  // is what `pnpm build` runs.
+  async get<T>(key: string): Promise<T | undefined> {
     const raw = localStorage.getItem(this.key(key));
-    if (raw === null) return null;
+    if (raw === null) return undefined;
     try {
       return JSON.parse(raw) as T;
     } catch {
@@ -32,7 +36,7 @@ export class Store {
       // absent rather than thrown, matching the desktop store's
       // behaviour of degrading to "no session" instead of trapping the
       // app on its loading screen.
-      return null;
+      return undefined;
     }
   }
 

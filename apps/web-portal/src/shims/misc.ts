@@ -69,6 +69,22 @@ export async function getVersion(): Promise<string> {
 // A web page is always current -- there is nothing to update and no
 // installer to fetch. Reporting "no update available" is accurate here,
 // unlike on the desktop where it would be a claim we had checked.
-export async function check(): Promise<null> {
+//
+// `Update` has to be exported as a type even though check() never
+// returns one: the shared updates.ts imports it, and without it the
+// portal's `tsc -b` fails (which `pnpm build` runs) and every property
+// access on the result narrows to `never`.
+export interface Update {
+  version: string;
+  currentVersion: string;
+  body?: string;
+  /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+  download(onEvent?: (event: any) => void): Promise<void>;
+  install(): Promise<void>;
+  /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+  downloadAndInstall(onEvent?: (event: any) => void): Promise<void>;
+}
+
+export async function check(): Promise<Update | null> {
   return null;
 }
