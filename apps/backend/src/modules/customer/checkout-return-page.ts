@@ -13,8 +13,12 @@
 export function checkoutReturnPage(cancelled: boolean): string {
   const headline = cancelled ? "Payment cancelled" : "Almost there";
   const detail = cancelled
-    ? "Nothing was charged. You can start again from the Neoxify app whenever you're ready."
-    : "Thanks &mdash; we're confirming your payment now. Head back to the Neoxify app; your subscription activates there automatically, usually within a few seconds.";
+    ? "Nothing was charged. You can start again whenever you're ready."
+    // Deliberately does not say "go back to the app": this page is
+    // reached from the web portal as often as from the desktop client,
+    // and telling a browser customer to open an app they may not have
+    // installed is a dead end at the moment they have just paid.
+    : "Thanks &mdash; we&rsquo;re confirming your payment now. Your subscription activates on its own, usually within a minute; you don&rsquo;t need to stay on this page.";
 
   return `<!doctype html>
 <html lang="en">
@@ -26,17 +30,20 @@ export function checkoutReturnPage(cancelled: boolean): string {
   :root { color-scheme: light; }
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
-    background: #f4f4fa; color: #1e1b2e; padding: 24px;
+    background: #0b0b12; color: #e9e9f0; padding: 24px;
+    background-image:
+      radial-gradient(60rem 40rem at 15% -10%, rgba(139,92,246,.20), transparent 70%),
+      radial-gradient(55rem 38rem at 85% 110%, rgba(34,211,238,.14), transparent 70%);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   }
-  .card { background: #fff; border-radius: 16px; max-width: 460px; width: 100%;
+  .card { background: #14141f; border: 1px solid rgba(255,255,255,.08); border-radius: 16px; max-width: 460px; width: 100%;
           box-shadow: 0 4px 24px rgba(139,92,246,.12); overflow: hidden; }
-  .bar { background-image: linear-gradient(135deg,#8b5cf6 0%,#7c3aed 60%,#5b21b6 100%);
+  .bar { background-image: linear-gradient(135deg,#8b5cf6 0%,#22d3ee 100%);
          padding: 22px 28px; color:#fff; font-weight:700; font-size:18px; }
   .body { padding: 30px 28px 28px; }
   h1 { margin: 0 0 12px; font-size: 20px; }
   p { margin: 0 0 14px; line-height: 1.6; font-size: 15px; }
-  .muted { color:#6b7280; font-size:13px; }
+  .muted { color:#9ca3b8; font-size:13px; }
 </style>
 </head>
 <body><div class="card"><div class="bar">&#9889; Neoxify</div><div class="body">
