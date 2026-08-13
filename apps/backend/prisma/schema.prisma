@@ -452,6 +452,21 @@ model ProtocolConfig {
   // TCP + REALITY.
   transport        Transport         @default(TCP)
   security         TransportSecurity @default(NONE)
+  /// Which Xray inbound on the node this config is served by.
+  ///
+  /// Null means the node's default inbound for that protocol -- the tag
+  /// the agent was started with, which is what every existing row uses
+  /// and what every non-relay node will keep using.
+  ///
+  /// It exists because a relay may run two inbounds of one protocol, one
+  /// per exit it forwards to. A relayed route's Xray routing rule matches
+  /// on the entry inbound tag and nothing else, so two routes sharing an
+  /// inbound means the second silently egresses through the first one's
+  /// exit -- measured 2026-08-13, a credential on the France route came
+  /// out in Finland. Making the tag a property of the config rather than
+  /// of the protocol is what lets one node offer the same protocol to
+  /// more than one exit.
+  inboundTag       String?
   publicParamsJson Json
   isEnabled        Boolean           @default(true)
   createdAt        DateTime          @default(now())

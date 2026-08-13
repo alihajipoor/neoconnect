@@ -36,6 +36,10 @@ type Provisioner struct {
 	inboundTag string
 	kind       accountKind
 	ownsConn   bool
+	// Kept so a provisioner can be re-pointed at another inbound of the
+	// same kind (see WithInboundTag) without the caller having to know
+	// where this node writes its access log.
+	accessLogPath string
 	// Whether this provisioner reports the Xray process's usage stats.
 	// Exactly one may -- see StatsSince.
 	reportsStats bool
@@ -78,15 +82,16 @@ func New(apiAddr, inboundTag, accessLogPath string) (*Provisioner, error) {
 		return nil, fmt.Errorf("connect to xray api at %s: %w", apiAddr, err)
 	}
 	return &Provisioner{
-		apiAddr:      apiAddr,
-		inboundTag:   inboundTag,
-		kind:         kindVLESS,
-		ownsConn:     true,
-		reportsStats: true,
-		conn:         conn,
-		handlerConn:  hcommand.NewHandlerServiceClient(conn),
-		statsConn:    scommand.NewStatsServiceClient(conn),
-		sessions:     NewSessionCounter(accessLogPath, sessionWindow),
+		apiAddr:       apiAddr,
+		inboundTag:    inboundTag,
+		kind:          kindVLESS,
+		ownsConn:      true,
+		accessLogPath: accessLogPath,
+		reportsStats:  true,
+		conn:          conn,
+		handlerConn:   hcommand.NewHandlerServiceClient(conn),
+		statsConn:     scommand.NewStatsServiceClient(conn),
+		sessions:      NewSessionCounter(accessLogPath, sessionWindow),
 	}, nil
 }
 
@@ -113,10 +118,11 @@ func (p *Provisioner) SessionCounts() (map[string]int, error) {
 // attribute Trojan sessions to VLESS users.
 func (p *Provisioner) ForInbound(kind accountKind, inboundTag, accessLogPath string) *Provisioner {
 	return &Provisioner{
-		apiAddr:    p.apiAddr,
-		inboundTag: inboundTag,
-		kind:       kind,
-		ownsConn:   false,
+		apiAddr:       p.apiAddr,
+		inboundTag:    inboundTag,
+		kind:          kind,
+		ownsConn:      false,
+		accessLogPath: accessLogPath,
 		// Deliberately false: stats are per-process, not per-inbound.
 		reportsStats: false,
 		conn:         p.conn,
@@ -143,6 +149,20 @@ func (p *Provisioner) ForShadowsocks(inboundTag, accessLogPath string) *Provisio
 // connection, which is the config file's business and not this code's.
 func (p *Provisioner) ForVless(inboundTag, accessLogPath string) *Provisioner {
 	return p.ForInbound(kindVLESS, inboundTag, accessLogPath)
+}
+
+// WithInboundTag re-points this provisioner at a different inbound of
+// the same account kind on the same Xray process.
+//
+// Exists because a relay node can now run two inbounds of one protocol
+// -- one per exit it forwards to -- so the protocol no longer identifies
+// the listener. The control plane names the inbound in the command and
+// the dispatcher calls this; nothing about the account shape changes,
+// only which listener the user is added to. A user added to the wrong
+// inbound gets a credential that authenticates nowhere, which is the
+// same silent failure the Transport field was introduced to prevent.
+func (p *Provisioner) WithInboundTag(inboundTag string) *Provisioner {
+	return p.ForInbound(p.kind, inboundTag, p.accessLogPath)
 }
 
 func (p *Provisioner) Close() error {
