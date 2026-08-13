@@ -199,7 +199,7 @@ return array(
     'home.mockup.subscription' => 'اشتراک',
     'home.mockup.status' => 'فعال',
     'home.mockup.expires' => 'تمدید تا ۲۴ روز دیگر',
-    'home.mockup.used' => '۸۴ از ۲۰۰ گیگابایت مصرف‌شده',
+    'home.mockup.used' => '۸۴ گیگابایت مصرف در این ماه',
     'home.mockup.connected' => 'متصل',
     'home.mockup.location' => 'تغییر موقعیت',
 
@@ -214,10 +214,13 @@ return array(
     'home.pricing.per_month' => '/ ماهانه',
     'home.pricing.per_days' => 'برای :days روز',
     'home.pricing.cta' => 'شروع کنید',
+    'home.pricing.coming_soon' => 'به‌زودی',
     'home.pricing.data' => ':amount حجم',
     'home.pricing.data_unlimited' => 'حجم نامحدود',
     'home.pricing.data_period' => ':amount در هر :days روز',
     'home.pricing.connections' => 'اتصال هم‌زمان تا :count دستگاه',
+    'home.pricing.connections_one' => 'هر بار روی یک دستگاه',
+    'home.pricing.connections_unlimited' => 'اتصال هم‌زمان بدون محدودیت دستگاه',
 
     'home.pricing.speed_both' => 'تا :down مگابیت بر ثانیه دانلود و :up مگابیت بر ثانیه آپلود',
     'home.pricing.speed_down' => 'تا :down مگابیت بر ثانیه دانلود',

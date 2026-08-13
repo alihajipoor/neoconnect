@@ -427,6 +427,37 @@ function nx_buy_url($planId = '')
 }
 
 
+/**
+ * Render a number in the current locale's own digits.
+ *
+ * Every hand-written Persian string on this site uses Persian digits
+ * (۸۴, ۲۴), so a number substituted into one through :count arrived as a
+ * Latin numeral and produced a mixed-script line -- "تا 2 دستگاه" beside
+ * "۸۴ گیگابایت". Small, and exactly the sort of thing that reads as
+ * carelessness to the audience it is aimed at.
+ *
+ * Deliberately NOT applied to prices. Those are US dollars, are quoted
+ * that way everywhere including the payment pages, and a price in
+ * Persian digits that does not match the checkout screen would be a real
+ * confusion rather than a nicety.
+ *
+ * @param int|string $value
+ * @return string
+ */
+function nx_num($value)
+{
+    $value = (string) $value;
+    if (nx_locale() !== 'fa') {
+        return $value;
+    }
+    return str_replace(
+        array('0', '1', '2', '3', '4', '5', '6', '7', '8', '9'),
+        array('۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹'),
+        $value
+    );
+}
+
+
 /** Whether the site should advertise the free trial. */
 function nx_free_trial_enabled()
 {

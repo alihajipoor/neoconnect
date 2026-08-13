@@ -211,10 +211,11 @@ return array(
     'home.mockup.subscription' => 'Subscription',
     'home.mockup.status' => 'Active',
     'home.mockup.expires' => 'Renews in 24 days',
-    // Shows a Pro allowance, so it has to track Pro's real cap in
-    // inc/content/plans.php. It said "of 300 GB" long after Pro became
-    // 200 GB -- an illustration of a plan nobody could buy.
-    'home.mockup.used' => '84 GB of 200 GB used',
+    // No "of N GB" any more: Starter and Pro are both unlimited, so a
+    // denominator here would invent a cap that no purchasable plan has.
+    // This has already been wrong twice by trailing a plan change, which
+    // is why it now states only what was used.
+    'home.mockup.used' => '84 GB used this month',
     'home.mockup.connected' => 'Connected',
     'home.mockup.location' => 'Change location',
 
@@ -229,11 +230,20 @@ return array(
     'home.pricing.per_month' => '/month',
     'home.pricing.per_days' => 'per :days days',
     'home.pricing.cta' => 'Get started',
+    // Replaces the buy button on a plan whose infrastructure is not live
+    // yet -- see 'coming_soon' in inc/content/plans.php.
+    'home.pricing.coming_soon' => 'Coming soon',
     'home.pricing.data' => ':amount of data',
     // Matches the app's own "Unlimited" label for a plan with no cap.
     'home.pricing.data_unlimited' => 'Unlimited data',
     'home.pricing.data_period' => ':amount every :days days',
     'home.pricing.connections' => 'Up to :count devices connected at once',
+    // Separate strings rather than an :count that reads "1 devices", and
+    // an explicit unlimited case -- without it a plan with no device limit
+    // rendered no device line at all, silently dropping the very thing it
+    // is selling.
+    'home.pricing.connections_one' => 'One device at a time',
+    'home.pricing.connections_unlimited' => 'Unlimited devices at once',
 
     // Only rendered when a plan actually has a speed cap configured. Worded
     // as "up to" because that is what these are -- a ceiling the agent
