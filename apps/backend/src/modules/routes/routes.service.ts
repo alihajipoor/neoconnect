@@ -163,8 +163,27 @@ export class RoutesService {
       include: { node: true },
     });
     if (!exitProtocolConfig) throw new BadRequestException("Exit protocol config not found");
-    if (exitProtocolConfig.node.role !== "EXIT") {
-      throw new BadRequestException("A relayed route's exit protocol config must be on an EXIT-role node");
+
+    // EXIT or STANDALONE, not EXIT alone.
+    //
+    // Relaxed 2026-08-13, when the Iran relay needed an exit and both
+    // candidates were STANDALONE. A STANDALONE node already terminates
+    // customer traffic and egresses to the internet -- that is precisely
+    // what standalone means -- so it can carry a relay's uplink without
+    // any change to how it works. The original EXIT-only rule assumed a
+    // fleet large enough to dedicate machines to each job; on a
+    // three-node fleet it would have forced buying a server to do a job
+    // Finland already does, or flipping the role on nodes serving live
+    // customers to satisfy a check rather than a requirement.
+    //
+    // RELAY is still excluded, and that one is a real constraint rather
+    // than bookkeeping: pointing a relay's uplink at another relay
+    // builds a chain that either loops or adds a hop nobody asked for,
+    // and neither has an exit at the end of it.
+    if (exitProtocolConfig.node.role === "RELAY") {
+      throw new BadRequestException(
+        "A relayed route's exit cannot be another RELAY node -- pick an EXIT or STANDALONE node",
+      );
     }
     if (exitProtocolConfig.protocol !== SUPPORTED_EXIT_PROTOCOL) {
       throw new BadRequestException(`Relayed routes' exit protocol config must be ${SUPPORTED_EXIT_PROTOCOL}`);
