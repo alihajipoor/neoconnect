@@ -199,7 +199,7 @@ return array(
     'home.mockup.subscription' => 'اشتراک',
     'home.mockup.status' => 'فعال',
     'home.mockup.expires' => 'تمدید تا ۲۴ روز دیگر',
-    'home.mockup.used' => '۸۴ از ۳۰۰ گیگابایت مصرف‌شده',
+    'home.mockup.used' => '۸۴ از ۲۰۰ گیگابایت مصرف‌شده',
     'home.mockup.connected' => 'متصل',
     'home.mockup.location' => 'تغییر موقعیت',
 
