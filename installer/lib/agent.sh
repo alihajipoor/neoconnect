@@ -1209,7 +1209,9 @@ create_route_for_config() {
   fi
 }
 
-# Lists Xray configs on EXIT nodes and asks which one this relay should
+# Lists Xray configs on nodes that can act as an exit -- EXIT or
+# STANDALONE, matching what RoutesService actually accepts since
+# 2026-08-13 -- and asks which one this relay should
 # forward to. Cached after the first answer so a node installing three
 # engines is asked once, not once per engine.
 choose_exit_protocol_config() {
@@ -1231,14 +1233,17 @@ choose_exit_protocol_config() {
     [ $configs[]
       | select(.protocol == "XRAY_VLESS_REALITY")
       | . as $c
-      | ($nodes[] | select(.id == $c.nodeId and .role == "EXIT")) as $n
+      | ($nodes[] | select(.id == $c.nodeId and (.role == "EXIT" or .role == "STANDALONE"))) as $n
       | {id: $c.id, label: ($n.name + " (" + $n.region + ") port " + ($c.listenPort|tostring))}
     ]')"
 
   count="$(echo "$candidates" | jq 'length')"
   if [[ "$count" == "0" ]]; then
-    echo "ERROR: no Xray engine on an EXIT-role node was found to relay through." >&2
-    echo "  Install an exit node first (role EXIT, with Xray), then re-run this on the relay." >&2
+    echo "ERROR: no Xray engine was found on a node this relay could forward to." >&2
+    echo "  An exit must be an EXIT or STANDALONE node running Xray VLESS+REALITY." >&2
+    echo "  (STANDALONE counts: it already terminates traffic and egresses to the" >&2
+    echo "   internet, which is exactly what an exit does. Only another RELAY is" >&2
+    echo "   refused -- chaining relays either loops or adds a hop with no exit.)" >&2
     return 1
   fi
 
