@@ -148,10 +148,30 @@ export class ProtocolUsersService {
     });
     if (!subscription) throw new BadRequestException("Subscription not found");
 
+    // Relayed and direct routes are mutually exclusive per plan, and the
+    // filter runs in BOTH directions on purpose.
+    //
+    // A relayOnly plan (Ultimate) must never be served by a direct
+    // route: it is sold as the Iran relay path, and a direct one would
+    // be a different product under the same name -- the exact dishonesty
+    // the plan is priced against.
+    //
+    // A normal plan must never pick up a RELAYED route, which is the
+    // expensive direction. Relayed traffic crosses two servers and the
+    // Iran side costs more per gigabyte, so without this every Starter
+    // and Pro customer would be quietly provisioned onto the relay the
+    // moment one exists -- paying twice over to serve people who never
+    // asked for it. This half is why the flag had to land before the
+    // first relay route did.
+    const relayFilter = subscription.plan.relayOnly
+      ? { exitProtocolConfigId: { not: null } }
+      : { exitProtocolConfigId: null };
+
     const [routes, existing] = await Promise.all([
       this.prisma.route.findMany({
         where: {
           isEnabled: true,
+          ...relayFilter,
           entryProtocolConfig: { protocol: { in: subscription.plan.protocolsAllowed }, isEnabled: true },
         },
         select: { id: true },
@@ -159,6 +179,19 @@ export class ProtocolUsersService {
       }),
       this.prisma.protocolUser.findMany({ where: { subscriptionId }, select: { routeId: true } }),
     ]);
+
+    // Fail loudly rather than provisioning nothing. A relayOnly plan
+    // with no relayed route means the relay is down, not yet built, or
+    // disabled -- and the customer has paid. Silence here would look
+    // like a working subscription that simply never connects, which is
+    // the worst way for this to fail; an error at least surfaces to the
+    // operator and the purchase flow.
+    if (routes.length === 0 && subscription.plan.relayOnly) {
+      throw new BadRequestException(
+        `The ${subscription.plan.name} plan is served only by relay routes, and none is available right now. ` +
+          `No credentials were created -- enable a relayed route before selling this plan.`,
+      );
+    }
 
     const already = new Set(existing.map((u) => u.routeId));
     const created = [];
