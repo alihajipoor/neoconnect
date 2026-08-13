@@ -229,6 +229,9 @@ return array(
     'home.pricing.all_locations' => 'تمام موقعیت‌های سرور',
     'home.pricing.relay_routes' => 'مسیرهای بهینه‌شده برای شبکه‌های محدودشده',
     'home.pricing.support' => 'پشتیبانی مستقیم در برنامه',
+    'home.pricing.relay_only' => 'فقط مسیرهای رله — نه سرورهای معمولی',
+    'home.pricing.relay_premium' => 'مسیر دو‌مرحله‌ای ویژه از طریق رله‌ی ایران',
+    'home.pricing.relay_gaming' => 'ساخته‌شده برای تأخیر کم روی شبکه‌های فیلترشده',
     'home.pricing.trial' => 'حساب‌های جدید با :days روز استفاده رایگان شروع می‌شوند — بدون نیاز به کارت بانکی.',
     'home.pricing.note' => 'قیمت‌ها به دلار آمریکا هستند.',
 

@@ -359,7 +359,18 @@ require NX_INC . '/partials/announcement.php';
                 </li>
               <?php endif; ?>
 
-              <?php foreach (array('all_modes', 'all_locations', 'relay_routes', 'support') as $nx_perk): ?>
+              <?php
+              /* Perks are per plan, with the standard set as the default.
+                 They used to be one hardcoded list for every card, which
+                 made the relay-only plan advertise "Every connection
+                 option included" and "Every server location" -- both the
+                 opposite of what it is. A plan can now state its own; see
+                 'perks' in inc/content/plans.php. */
+              $nx_perks = isset($nx_plan['perks']) && is_array($nx_plan['perks'])
+                  ? $nx_plan['perks']
+                  : array('all_modes', 'all_locations', 'relay_routes', 'support');
+              ?>
+              <?php foreach ($nx_perks as $nx_perk): ?>
                 <li>
                   <?php echo nx_icon('check'); ?>
                   <span><?php echo nx_e('home.pricing.' . $nx_perk); ?></span>
