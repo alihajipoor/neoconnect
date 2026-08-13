@@ -1,6 +1,7 @@
 import { apiRequest, publicRequest } from "./api";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { clearTokens, setTokens } from "./session";
+import { solveChallengeFor } from "./pow";
 import type { ApiResult } from "./api";
 import type { AttemptKind } from "./attempts";
 import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from "./types";
@@ -31,12 +32,23 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>): void {
  * comment. The app must always follow this up by showing the verify
  * screen, never a dashboard. */
 export async function register(email: string, password: string, referralCode?: string) {
+  // Solved before the attempt, not in response to being refused: the
+  // server raises the required difficulty as failures accumulate, so
+  // carrying a solution is what keeps signup usable once an address or
+  // an account has drawn attention. Undefined when the challenge
+  // endpoint could not be reached, which the server tolerates.
+  const challenge = await solveChallengeFor("customer");
   const result = await publicRequest<RequiresVerification>("/customer-auth/register", {
     method: "POST",
     // Omitted entirely when blank rather than sent as "": the backend
     // treats a supplied-but-wrong code as an error, and an empty string
     // is not a code somebody typed.
-    body: JSON.stringify({ email, password, ...(referralCode ? { referralCode } : {}) }),
+    body: JSON.stringify({
+      email,
+      password,
+      ...(referralCode ? { referralCode } : {}),
+      ...(challenge ? { challenge } : {}),
+    }),
   });
   reportAuth("REGISTER", result);
   return result;
@@ -46,9 +58,13 @@ export async function register(email: string, password: string, referralCode?: s
  * `requiresVerification` results are never persisted, so an unverified
  * account can't end up with stray tokens sitting in the store. */
 export async function login(email: string, password: string) {
+  // The email is sent with the challenge request so the server can
+  // price this attempt against that account's own recent failures --
+  // the case per-address rate limiting cannot see.
+  const challenge = await solveChallengeFor("customer", email);
   const result = await publicRequest<LoginResult>("/customer-auth/login", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
   });
   if (result.ok && !("requiresVerification" in result.data)) {
     await setTokens(result.data);

@@ -107,11 +107,20 @@ return array(
     // mean a second place that handles credentials and holds a token, for
     // no gain -- so the buttons are links, not forms.
     //
-    // Empty until that area exists, following the same rule as the Android
-    // link below: an unset URL renders no button at all, rather than a
-    // button that leads nowhere. Set it and the header, the mobile drawer
-    // and the pricing section all gain a sign-in link at once.
-    'customer_portal_url' => '',
+    // The customer area now ships inside this site, at /account/ -- a
+    // static React build of the very same screens the Windows and
+    // Android apps use, talking straight to the customer API. It needs
+    // no PHP, no session and no server runtime, which is what lets it
+    // live on ordinary shared hosting alongside these pages.
+    //
+    // A root-relative path rather than an absolute URL so it follows the
+    // site wherever it is hosted, and so a visitor on the Persian pages
+    // is not bounced to a different origin mid-journey.
+    //
+    // Still honours the empty-means-hidden rule: blank this and every
+    // sign-in link disappears again, which is the switch to reach for if
+    // the account area ever has to be taken down.
+    'customer_portal_url' => '/account/',
 
     'windows_installer_url' => 'https://connect.neoxify.site/api/updates/installer/windows',
 

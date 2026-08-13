@@ -1,0 +1,57 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* The clients' own theme -- the violet/cyan dark palette the panel and
+   both apps already use. Imported rather than copied so the portal can
+   never drift into looking like a different product. */
+@import "../../desktop-windows/src/theme.css";
+
+/* Tailwind v4 scans the project it is run from. The screens live in a
+   sibling package, so without this every class they use would be
+   absent from the stylesheet and the portal would render as unstyled
+   HTML -- which is the failure mode that looks like a broken build. */
+@source "../../desktop-windows/src";
+
+/* Re-declare Vazirmatn with a path resolvable from HERE.
+   theme.css asks for "./assets/Vazirmatn-variable.woff2", which is
+   correct relative to itself but not relative to this file, so the
+   bundler left it untouched and it would 404 from /account/assets/.
+   Persian text would then silently fall back to a system font -- easy
+   to miss from an English browser, and Persian is not a minority case
+   for this product. Declared after the import so it wins. */
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("../../desktop-windows/src/assets/Vazirmatn-variable.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@layer base {
+  html {
+    /* The apps are fixed-size native windows; a web page is not.
+       Deliberately NOT importing the desktop's globals.css, which sets
+       overflow:hidden on the body for exactly that reason and would
+       silently cut off anything below the fold here. */
+    color-scheme: dark;
+  }
+
+  body {
+    min-height: 100dvh;
+    background: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* The screens were laid out for a 400x640 window. On a desktop browser
+   that would strand a narrow column against a wide empty page, so the
+   app shell below centres it and gives it a little room to breathe
+   without touching any of the shared components. */
+.portal-frame {
+  width: 100%;
+  max-width: 30rem;
+  margin-inline: auto;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
