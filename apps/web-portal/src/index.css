@@ -63,24 +63,39 @@
   width: 100%;
   max-width: 30rem;
   margin-inline: auto;
-
-  /* A DEFINITE height, not min-height. The auth screens are
-     `flex h-full ... justify-center`, and height:100% only resolves
-     against a parent whose height is definite -- with min-height it
-     stayed auto, the screen collapsed to its content, and the card sat
-     jammed against the top of the window with the glow boxed in behind
-     it. That was the reported bug. */
-  height: 100dvh;
-  display: flex;
-  flex-direction: column;
 }
 
-/* Screens taller than the viewport -- Settings, Plans, Support -- must
-   still be reachable. The shared screens set overflow-hidden because a
-   native window never scrolls; here the frame owns the scrolling so
-   nothing is cut off on a short laptop screen or a phone in landscape. */
+/* Give the screen itself the viewport height, rather than making the
+   frame a fixed-height scroll container.
+
+   The screens are `flex h-full ... justify-center`. height:100% needs a
+   parent with a definite height, so the first attempt gave the frame
+   `height:100dvh` plus `overflow-y:auto` on the child -- which centred
+   the card but put a SCROLLBAR DOWN THE MIDDLE OF THE PAGE, floating at
+   the column's edge with content either side of it. That is the line in
+   the second report.
+
+   min-height here does the same centring job without any of that: the
+   screen is at least a full viewport tall so `justify-center` has room
+   to work, and a screen with more content than that simply grows and
+   the WINDOW scrolls, with the scrollbar where a scrollbar belongs.
+   Also means Settings, Plans and Support are never clipped. */
 .portal-frame > * {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
+  min-height: 100dvh;
+}
+
+/* Turn off the screens' own corner glow inside the portal.
+
+   .glow-backdrop drops two blurred blobs at the corners of the element
+   it sits on. In a 400x640 app window that element IS the whole screen,
+   so the glow fills it. Here it is a 30rem column in a wide page, so the
+   glow stopped dead at the column's edges and drew a visible rectangle
+   down the middle -- the "phone screenshot pasted on a page" look.
+
+   The body already carries the same two tints across the full viewport,
+   so nothing is lost by removing these: the atmosphere moves from the
+   column to the page, which is where it belongs on a browser. */
+.portal-frame .glow-backdrop::before,
+.portal-frame .glow-backdrop::after {
+  content: none;
 }
