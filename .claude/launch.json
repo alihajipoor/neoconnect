@@ -2,22 +2,11 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "panel-dev",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@neoxify/panel", "run", "dev"],
-      "port": 3000
-    },
-    {
-      "name": "desktop-dev",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@neoxify/desktop-windows", "run", "dev"],
-      "port": 1420
-    },
-    {
-      "name": "mobile-dev",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@neoxify/mobile", "run", "dev"],
-      "port": 1420
+      "name": "web-portal",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "preview", "--port", "4173", "--strictPort"],
+      "cwd": "apps/web-portal",
+      "port": 4173
     }
   ]
 }

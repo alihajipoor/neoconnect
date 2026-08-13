@@ -5,3 +5,9 @@ build/
 # and a stray one here would otherwise be committed by `git add website`, or
 # worse, uploaded to the host and served publicly.
 *.zip
+
+# Built by `pnpm --filter @neoxify/web-portal build`, which writes the
+# customer portal straight into account/. Generated output, not source:
+# the source is apps/web-portal plus the shared screens it imports.
+# Rebuild before packaging the site, or the zip ships a stale portal.
+account/

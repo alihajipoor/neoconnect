@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "types": ["vite/client"],
+
+    // Mirrors the aliases in vite.config.ts. Vite resolves at build
+    // time and TypeScript resolves here; both have to agree or the
+    // build succeeds while the editor shows errors (or worse, the
+    // reverse).
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["../desktop-windows/src/*"],
+      "@tauri-apps/plugin-store": ["./src/shims/plugin-store.ts"],
+      "@tauri-apps/plugin-http": ["./src/shims/misc.ts"],
+      "@tauri-apps/api/core": ["./src/shims/misc.ts"],
+      "@tauri-apps/api/app": ["./src/shims/misc.ts"],
+      "@tauri-apps/plugin-opener": ["./src/shims/misc.ts"],
+      "@tauri-apps/plugin-clipboard-manager": ["./src/shims/misc.ts"],
+      "@tauri-apps/plugin-process": ["./src/shims/misc.ts"],
+      "@tauri-apps/plugin-updater": ["./src/shims/misc.ts"]
+    }
+  },
+  "include": ["src", "vite.config.ts", "../desktop-windows/src"]
+}
