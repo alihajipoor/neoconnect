@@ -127,13 +127,58 @@ export class SubscriptionsService {
    * node it lives on. Dropping the subscription row first would orphan
    * them: the rows would go, and the users would carry on existing in
    * the engines with nothing left to say they should not. */
+  /**
+   * Delete a subscription and everything that cannot outlive it.
+   *
+   * This used to be a bare `subscription.delete()`, which threw a 500 at
+   * the operator for any subscription that had ever carried traffic:
+   * UsageRecord.subscriptionId is NOT NULL, so Postgres refused the
+   * delete on a foreign key. Deleting a fresh subscription worked and
+   * deleting a real one did not, which is the worst way for this to
+   * fail -- it looks fine until the row actually matters.
+   *
+   * What happens to each dependent is a deliberate split, not a cascade:
+   *
+   *   Usage records are deleted. They are per-subscription telemetry and
+   *   mean nothing once the subscription is gone. The counter they feed
+   *   (dataUsedBytes) goes with the row.
+   *
+   *   Invoices, payments and voucher redemptions are DETACHED, not
+   *   deleted. Those are money and anti-abuse history: an invoice is a
+   *   record of a real charge (it keeps planNameSnapshot precisely so it
+   *   can stand alone), and a redemption is what stops a one-time code
+   *   being spent twice. Deleting a subscription must not quietly erase
+   *   either -- that would let a customer re-redeem a used voucher.
+   *
+   * Protocol users are removed first and outside the transaction,
+   * because removing one enqueues a DELETE_USER for the node: the
+   * credential has to stop working on the server, not merely disappear
+   * from our database. Doing it first means a failure part-way leaves
+   * credentials revoked and the row still present -- recoverable and
+   * safe -- rather than the row gone and the credential still live.
+   */
   async remove(id: string) {
     await this.get(id);
+
     const users = await this.prisma.protocolUser.findMany({ where: { subscriptionId: id } });
     for (const user of users) {
       await this.protocolUsers.remove(user.id);
     }
-    await this.prisma.subscription.delete({ where: { id } });
+
+    await this.prisma.$transaction([
+      this.prisma.usageRecord.deleteMany({ where: { subscriptionId: id } }),
+      this.prisma.invoice.updateMany({ where: { subscriptionId: id }, data: { subscriptionId: null } }),
+      this.prisma.paymentTransaction.updateMany({
+        where: { subscriptionId: id },
+        data: { subscriptionId: null },
+      }),
+      this.prisma.voucherRedemption.updateMany({
+        where: { subscriptionId: id },
+        data: { subscriptionId: null },
+      }),
+      this.prisma.subscription.delete({ where: { id } }),
+    ]);
+
     return { deleted: true };
   }
 
