@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { Users, CreditCard, ShieldCheck } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { getSession } from "@/lib/session";
@@ -6,6 +7,18 @@ import { StatCard } from "@/components/dashboard/stat-card";
 
 export default async function OverviewPage() {
   const session = await getSession();
+
+  // A reseller must never land here. Hiding this from their sidebar was
+  // not enough: /overview is where sign-in redirects by default, so a
+  // reseller logging in went straight to the operator's dashboard and
+  // was shown the total customer count and active-plan figures. Found by
+  // actually signing in as one -- the API tests could not have caught
+  // it, because the page's own data comes from endpoints a reseller is
+  // legitimately allowed to call.
+  //
+  // Redirected rather than blanked, so they land somewhere useful.
+  if (session?.role === "RESELLER") redirect("/reseller");
+
   const isSuperAdmin = session?.role === "SUPERADMIN";
 
   const [customers, plans, admins] = await Promise.all([
