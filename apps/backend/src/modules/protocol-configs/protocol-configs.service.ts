@@ -149,6 +149,23 @@ export class ProtocolConfigsService {
         nodeId: dto.nodeId,
         protocol: dto.protocol,
         listenPort: dto.listenPort,
+        // Both of these were computed above and then not written, so
+        // every config created through this endpoint took the schema
+        // defaults (TCP/NONE) no matter what the caller sent.
+        //
+        // Two failures came out of that, found while registering ir1 on
+        // 2026-08-13. A VLESS+TLS config and its WebSocket twin
+        // deliberately share a port and differ only by transport, so
+        // both landing on TCP made the second one collide with the first
+        // on the unique constraint -- surfacing as a raw 500. And the
+        // REALITY config was stored claiming security NONE, which
+        // describes an inbound that does not exist: anything building a
+        // client config from that row gets one that cannot connect.
+        //
+        // `transport` reuses the value the duplicate check already
+        // resolved, so the row and the check can never disagree.
+        transport,
+        security: dto.security ?? "NONE",
         publicParamsJson: publicParamsJson as Prisma.InputJsonValue,
         isEnabled: dto.isEnabled ?? true,
       },

@@ -11,6 +11,17 @@ import { CreateRouteDto } from "./dto/create-route.dto";
 // other Xray sub-protocol would need work there first, not here.
 const SUPPORTED_EXIT_PROTOCOL = "XRAY_VLESS_REALITY";
 
+// Protocols the node serves from its Xray process, which is what decides
+// whether a relayed route is wired by inbound tag or by client subnet.
+// Not the same as "starts with XRAY_": Shadowsocks is one of these.
+const XRAY_SERVED_PROTOCOLS = new Set([
+  "XRAY_VLESS_REALITY",
+  "XRAY_VLESS_TLS",
+  "XRAY_VMESS",
+  "XRAY_TROJAN",
+  "SHADOWSOCKS",
+]);
+
 @Injectable()
 export class RoutesService {
   private readonly logger = new Logger(RoutesService.name);
@@ -249,7 +260,13 @@ export class RoutesService {
       credentials: uplinkCredentials,
     });
 
-    const entryIsXray = entryProtocolConfig.protocol.startsWith("XRAY_");
+    // Shadowsocks is served by Xray too, despite the enum name not
+    // saying so -- it is an inbound in the same process, with its own
+    // tag. Keying off the "XRAY_" prefix sent it down the
+    // WireGuard/OpenVPN branch, which demands a client subnet it has no
+    // reason to have, so a Shadowsocks relay route could never be
+    // created. Found on ir1, 2026-08-13.
+    const entryIsXray = XRAY_SERVED_PROTOCOLS.has(entryProtocolConfig.protocol);
     await this.agentGateway.enqueueCommand(entryProtocolConfig.nodeId, "CONFIGURE_ROUTE", {
       routeId: route.id,
       entryInboundTag: entryIsXray ? entryInboundTag(entryProtocolConfig) : "",
@@ -306,19 +323,44 @@ export class RoutesService {
  * The config's own `inboundTag` wins when it has one. That is what lets a
  * relay serve two exits: a second inbound of the same protocol, on its
  * own port with its own tag, gets its own routing rule instead of
- * colliding with the first one's. Falling back to the per-protocol
- * default keeps every existing config working untouched -- those rows
- * have no tag and are served by the inbound the agent was started with.
+ * colliding with the first one's.
  *
- * The defaults are the tags the installer's templates write -- see
- * installer/assets/xray-config.json.template ("vless-in").
+ * Otherwise the node's default tag for that protocol and transport,
+ * which is what the installer's templates write -- see
+ * installer/assets/xray-relay-config.json.template. Every Xray-family
+ * protocol is listed, not just REALITY: with only REALITY here, a relay
+ * offering the full protocol set could carry exactly one of them, and
+ * the other four failed route creation with "No known inbound tag".
+ * Measured on ir1, 2026-08-13, against a node the installer had just
+ * configured with all five.
+ *
+ * Transport is part of the key for VLESS+TLS specifically, because its
+ * TCP and WebSocket forms are deliberately two inbounds sharing one port
+ * and one certificate -- the same reason the CREATE_USER payload has to
+ * carry transport.
  */
-function entryInboundTag(entryProtocolConfig: { protocol: string; inboundTag: string | null }): string {
+function entryInboundTag(entryProtocolConfig: {
+  protocol: string;
+  transport?: string | null;
+  inboundTag: string | null;
+}): string {
   if (entryProtocolConfig.inboundTag) return entryProtocolConfig.inboundTag;
-  if (entryProtocolConfig.protocol === "XRAY_VLESS_REALITY") return "vless-in";
-  throw new BadRequestException(
-    `No known inbound tag for entry protocol ${entryProtocolConfig.protocol} -- set inboundTag on the protocol config`,
-  );
+
+  const isWebSocket = entryProtocolConfig.transport === "WS";
+  switch (entryProtocolConfig.protocol) {
+    case "XRAY_VLESS_REALITY":
+      return "vless-in";
+    case "XRAY_VLESS_TLS":
+      return isWebSocket ? "vless-ws-in" : "vless-tls-in";
+    case "XRAY_TROJAN":
+      return "trojan-in";
+    case "SHADOWSOCKS":
+      return "shadowsocks-in";
+    default:
+      throw new BadRequestException(
+        `No known inbound tag for entry protocol ${entryProtocolConfig.protocol} -- set inboundTag on the protocol config`,
+      );
+  }
 }
 
 function entrySubnetCidr(publicParamsJson: unknown): string {
