@@ -44,7 +44,7 @@ resolve_agent_release_base() {
   # Newest non-draft, non-prerelease tag that looks like v1.2.3 -- the
   # agent's own scheme. `desktop-v*` does not match, which is the point.
   tag="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=50" 2>/dev/null     | jq -r '[.[] | select(.draft==false and .prerelease==false)
-              | select(.tag_name | test("^v[0-9]+\.[0-9]+\.[0-9]+$"))]
+              | select(.tag_name | test("^v[0-9]+[.][0-9]+[.][0-9]+$"))]
              | first | .tag_name // empty')"
 
   if [[ -z "$tag" ]]; then
