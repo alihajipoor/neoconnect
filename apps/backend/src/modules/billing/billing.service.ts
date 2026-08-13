@@ -1,9 +1,11 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from "@nestjs/common";
 import { Prisma, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreatePaymentDto } from "./dto/create-payment.dto";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
+import { PlisioProvider } from "./providers/plisio.provider";
+import { ConfigService } from "@nestjs/config";
 import { StripeProvider } from "./providers/stripe.provider";
 import { InvoicesService } from "../invoices/invoices.service";
 
@@ -16,6 +18,8 @@ export class BillingService {
     private readonly protocolUsersService: ProtocolUsersService,
     private readonly stripe: StripeProvider,
     private readonly nowpayments: NowPaymentsProvider,
+    private readonly plisio: PlisioProvider,
+    private readonly config: ConfigService,
     private readonly invoices: InvoicesService,
   ) {}
 
@@ -51,7 +55,10 @@ export class BillingService {
         // this function returns.
         providerRef: `pending-${subscription.id}-${Date.now()}`,
         amountUsd: subscription.plan.priceUsd,
-        currency: dto.provider === "STRIPE" ? "usd" : "usdttrc20",
+        // Plisio prices in USD and lets the customer pick the coin on
+        // its hosted page, so there is no single pay-currency to record
+        // up front the way NowPayments has.
+        currency: dto.provider === "NOWPAYMENTS" ? "usdttrc20" : "usd",
         status: "PENDING",
       },
     });
@@ -63,6 +70,23 @@ export class BillingService {
       );
       await this.prisma.paymentTransaction.update({ where: { id: transaction.id }, data: { providerRef } });
       return { transactionId: transaction.id, provider: "STRIPE" as const, clientSecret };
+    }
+
+    if (dto.provider === "PLISIO") {
+      const invoice = await this.plisio.createInvoice({
+        orderNumber: transaction.id,
+        orderName: subscription.plan.name,
+        amountUsd: String(subscription.plan.priceUsd),
+        callbackUrl: this.plisioCallbackUrl(),
+      });
+      await this.prisma.paymentTransaction.update({
+        where: { id: transaction.id },
+        data: { providerRef: invoice.txnId },
+      });
+      // checkoutUrl, not payAddress: Plisio hosts the payment page, so
+      // the client opens a URL exactly as it does for Stripe rather than
+      // rendering an address to send coins to.
+      return { transactionId: transaction.id, provider: "PLISIO" as const, checkoutUrl: invoice.invoiceUrl };
     }
 
     const payment = await this.nowpayments.createPayment(Number(subscription.plan.priceUsd), transaction.id);
@@ -101,7 +125,7 @@ export class BillingService {
         provider: dto.provider,
         providerRef: `pending-${subscription.id}-${Date.now()}`,
         amountUsd: subscription.plan.priceUsd,
-        currency: dto.provider === "STRIPE" ? "usd" : "usdttrc20",
+        currency: dto.provider === "NOWPAYMENTS" ? "usdttrc20" : "usd",
         status: "PENDING",
       },
     });
@@ -115,6 +139,23 @@ export class BillingService {
       );
       await this.prisma.paymentTransaction.update({ where: { id: transaction.id }, data: { providerRef } });
       return { transactionId: transaction.id, provider: "STRIPE" as const, checkoutUrl: url };
+    }
+
+    if (dto.provider === "PLISIO") {
+      const invoice = await this.plisio.createInvoice({
+        orderNumber: transaction.id,
+        orderName: subscription.plan.name,
+        amountUsd: String(subscription.plan.priceUsd),
+        callbackUrl: this.plisioCallbackUrl(),
+        // Where Plisio sends the customer after paying. Only the
+        // customer-facing purchase has somewhere to send them back to.
+        successUrl: returnUrl,
+      });
+      await this.prisma.paymentTransaction.update({
+        where: { id: transaction.id },
+        data: { providerRef: invoice.txnId },
+      });
+      return { transactionId: transaction.id, provider: "PLISIO" as const, checkoutUrl: invoice.invoiceUrl };
     }
 
     const payment = await this.nowpayments.createPayment(Number(subscription.plan.priceUsd), transaction.id);
@@ -283,5 +324,25 @@ export class BillingService {
     }
 
     return this.get(id);
+  }
+
+  /** Where Plisio posts invoice updates.
+   *
+   * Built from the configured public API address rather than hardcoded,
+   * because a callback aimed at the wrong host is a payment that is
+   * taken and never confirmed -- the customer is charged and gets
+   * nothing, which is the worst failure this file can produce.
+   *
+   * The provider appends ?json=true itself; without it Plisio posts
+   * PHP-serialised data that nothing here can parse.
+   */
+  private plisioCallbackUrl(): string {
+    const base = this.config.get<string>("publicApiUrl");
+    if (!base) {
+      throw new ServiceUnavailableException(
+        "PUBLIC_API_URL is not configured, so Plisio has nowhere to confirm payments to.",
+      );
+    }
+    return `${base.replace(/\/$/, "")}/billing/webhooks/plisio`;
   }
 }

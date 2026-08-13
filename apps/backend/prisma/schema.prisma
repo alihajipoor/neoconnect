@@ -146,6 +146,9 @@ enum EnrollmentTokenStatus {
 enum PaymentProvider {
   STRIPE
   NOWPAYMENTS
+  /// Appended, never inserted: Postgres orders enum values by creation
+  /// and existing rows sort by that order.
+  PLISIO
 }
 
 enum PaymentStatus {
@@ -837,6 +840,17 @@ model PaymentSettings {
   nowPaymentsEnabled            Boolean @default(false)
   nowPaymentsApiKeyEncrypted    String?
   nowPaymentsIpnSecretEncrypted String?
+
+  /// Crypto, second provider. Added ALONGSIDE NowPayments rather than
+  /// replacing it: NowPayments enforces a per-currency minimum above the
+  /// cheapest plan, so a 3.99 subscription could not be paid in crypto at
+  /// all. Both run until a real Plisio payment is proven end to end, and
+  /// existing PaymentTransaction rows still reference the old provider.
+  ///
+  /// No IPN-secret field on purpose: Plisio signs callbacks with the API
+  /// key itself, unlike NowPayments which uses a separate secret.
+  plisioEnabled         Boolean @default(false)
+  plisioApiKeyEncrypted String?
 
   updatedAt DateTime @updatedAt
 

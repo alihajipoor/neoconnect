@@ -104,7 +104,9 @@ export function Plans({
     // Cards open Stripe's own page in the system browser: card details
     // never touch this process, and 3-D Secure is Stripe's problem
     // rather than ours.
-    if (payment.data.provider === "STRIPE") {
+    // Branch on the payload, not the provider name: anything that hands
+    // back a URL gets opened.
+    if ("checkoutUrl" in payment.data) {
       // A failure here must not stop the screen advancing. The payment
       // is already created and the URL is valid -- only the browser
       // handoff failed -- and the waiting screen is where "Reopen
@@ -152,7 +154,7 @@ export function Plans({
               {error}
             </p>
           ) : null}
-          {payment.provider === "STRIPE" ? (
+          {"checkoutUrl" in payment ? (
             <>
               <p className="text-sm text-muted-foreground">
                 Finish the payment in your browser. This screen updates on its own once it clears.

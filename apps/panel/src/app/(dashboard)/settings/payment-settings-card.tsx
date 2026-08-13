@@ -64,15 +64,23 @@ export function PaymentSettingsCard({ settings }: { settings: PaymentSettings })
   // on with nothing behind it.
   const [stripeOn, setStripeOn] = useState(settings.stripeEnabled);
   const [cryptoOn, setCryptoOn] = useState(settings.nowPaymentsEnabled);
+  const [plisioOn, setPlisioOn] = useState(settings.plisioEnabled);
 
   function handleSubmit(formData: FormData) {
     const stripeSecretKey = String(formData.get("stripeSecretKey") ?? "") || undefined;
     const nowPaymentsApiKey = String(formData.get("nowPaymentsApiKey") ?? "") || undefined;
+    const plisioApiKey = String(formData.get("plisioApiKey") ?? "") || undefined;
 
     // Enabling a provider with no key would put a button in the app that
     // fails when pressed -- the exact problem this screen exists to end.
     if (stripeOn && !stripeSecretKey && !settings.stripeSecretKeySet) {
       toast.error("Add a Stripe secret key before enabling card payments.");
+      return;
+    }
+    // Same guard as NowPayments: enabling a provider with no key gives
+    // customers a crypto button that fails at the last step.
+    if (plisioOn && !plisioApiKey && !settings.plisioApiKeySet) {
+      toast.error("Add a Plisio API key before enabling Plisio");
       return;
     }
     if (cryptoOn && !nowPaymentsApiKey && !settings.nowPaymentsApiKeySet) {
@@ -86,6 +94,8 @@ export function PaymentSettingsCard({ settings }: { settings: PaymentSettings })
         stripePublishableKey: String(formData.get("stripePublishableKey") ?? "").trim() || undefined,
         stripeSecretKey,
         stripeWebhookSecret: String(formData.get("stripeWebhookSecret") ?? "") || undefined,
+        plisioEnabled: plisioOn,
+        plisioApiKey,
         nowPaymentsEnabled: cryptoOn,
         nowPaymentsApiKey,
         nowPaymentsIpnSecret: String(formData.get("nowPaymentsIpnSecret") ?? "") || undefined,
@@ -167,6 +177,39 @@ export function PaymentSettingsCard({ settings }: { settings: PaymentSettings })
             isSet={settings.nowPaymentsIpnSecretSet}
             hint="Used to verify payment callbacks. Without it, confirmations are rejected."
           />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-start gap-3">
+            <div>
+              <CardTitle>Crypto — Plisio</CardTitle>
+              <CardDescription>
+                A second crypto provider. NowPayments enforces a per-currency minimum above the
+                cheapest plan, so a $3.99 subscription cannot be paid there at all. Both can run at
+                once; retire NowPayments only once a real Plisio payment has gone through.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={plisioOn} onCheckedChange={(v) => setPlisioOn(v === true)} />
+            Accept crypto payments via Plisio
+          </label>
+
+          <SecretField
+            id="plisioApiKey"
+            label="API key"
+            isSet={settings.plisioApiKeySet}
+            hint="From Plisio > API. There is no separate IPN secret: Plisio signs callbacks with this same key, so it verifies confirmations too."
+          />
+
+          <p className="text-xs text-muted-foreground">
+            In Plisio, set Status URL to <code>{"{API}/billing/webhooks/plisio"}</code> — leave
+            Success and Failed URLs pointing at your site&apos;s account page.
+          </p>
         </CardContent>
       </Card>
 

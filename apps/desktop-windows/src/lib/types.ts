@@ -49,7 +49,7 @@ export type Protocol =
   | "OPENVPN"
   | "IKEV2";
 
-export type PaymentProvider = "STRIPE" | "NOWPAYMENTS";
+export type PaymentProvider = "STRIPE" | "NOWPAYMENTS" | "PLISIO";
 
 /** What starting a payment gives back.
  *
@@ -59,7 +59,13 @@ export type PaymentProvider = "STRIPE" | "NOWPAYMENTS";
  * confirmed by the provider's webhook, so the app watches its own
  * subscription instead of trusting anything here. */
 export type PaymentStart =
-  | { transactionId: string; provider: "STRIPE"; checkoutUrl: string }
+  /* Both hosted-page providers carry a checkoutUrl. Kept as one shape
+     rather than two so the UI branches on WHAT IT WAS GIVEN -- a URL to
+     open, or an address to copy -- rather than on the provider name. A
+     name check is what silently broke when Plisio was added: it is
+     crypto, so the old code took the address branch and rendered an
+     empty panel. */
+  | { transactionId: string; provider: "STRIPE" | "PLISIO"; checkoutUrl: string }
   | {
       transactionId: string;
       provider: "NOWPAYMENTS";

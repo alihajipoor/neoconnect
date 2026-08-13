@@ -33,4 +33,14 @@ export class UpdatePaymentSettingsDto {
   @IsOptional()
   @IsString()
   nowPaymentsIpnSecret?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  plisioEnabled?: boolean;
+
+  /** Plisio has no separate IPN secret -- it signs callbacks with this
+   * same key -- so there is deliberately no second field here. */
+  @IsOptional()
+  @IsString()
+  plisioApiKey?: string;
 }

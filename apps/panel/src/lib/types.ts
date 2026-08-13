@@ -213,6 +213,8 @@ export interface PaymentSettings {
   nowPaymentsEnabled: boolean;
   nowPaymentsApiKeySet: boolean;
   nowPaymentsIpnSecretSet: boolean;
+  plisioEnabled: boolean;
+  plisioApiKeySet: boolean;
   updatedAt: string;
 }
 
