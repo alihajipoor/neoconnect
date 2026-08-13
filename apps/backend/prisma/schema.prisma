@@ -338,6 +338,18 @@ model SubscriptionPlan {
   // by BillingService.confirmPayment() to provision the first
   // ProtocolUser once payment actually clears -- see
   // apps/backend/src/modules/billing/billing.service.ts.
+  /// When true this plan is served ONLY by relayed Routes -- ones with
+  /// an exit config, i.e. traffic that crosses an Iran-reachable relay
+  /// and then an exit abroad. Ultimate is sold on exactly that path, so
+  /// a direct route would be a different product wearing its name.
+  ///
+  /// The inverse is enforced too: a plan WITHOUT this flag never picks
+  /// up a relayed route. That is the expensive direction -- relayed
+  /// traffic crosses two servers and the Iran side costs more per
+  /// gigabyte, so quietly provisioning every customer onto it would be
+  /// paying twice to serve people who never asked for it.
+  relayOnly Boolean @default(false)
+
   defaultRouteId           String?
   createdAt                DateTime   @default(now())
   updatedAt                DateTime   @updatedAt
