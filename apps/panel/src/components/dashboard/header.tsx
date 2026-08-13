@@ -1,14 +1,21 @@
 import { logoutAction } from "@/app/actions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import type { SessionAdmin } from "@/lib/session";
+import type { AdminRole, SessionAdmin } from "@/lib/session";
 import { LogOut } from "lucide-react";
 
-const ROLE_BADGE_VARIANT = {
+// Typed as a total map over AdminRole rather than a loose object, so
+// adding a role fails the build here instead of rendering `undefined` as
+// a badge variant. That is exactly what caught RESELLER.
+const ROLE_BADGE_VARIANT: Record<AdminRole, "highlight" | "secondary" | "outline"> = {
   SUPERADMIN: "highlight",
   SUPPORT: "secondary",
   BILLING: "secondary",
-} as const;
+  // Visually distinct on purpose: a reseller is an outsider with a panel
+  // login, and the operator glancing at a screenshot should be able to
+  // tell that apart from staff without reading the word.
+  RESELLER: "outline",
+};
 
 export function DashboardHeader({ session }: { session: SessionAdmin }) {
   const initial = session.email.charAt(0).toUpperCase();

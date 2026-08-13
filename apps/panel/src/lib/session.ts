@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 export const ACCESS_COOKIE = "neoxify_access";
 export const REFRESH_COOKIE = "neoxify_refresh";
 
-export type AdminRole = "SUPERADMIN" | "SUPPORT" | "BILLING";
+export type AdminRole = "SUPERADMIN" | "SUPPORT" | "BILLING" | "RESELLER";
 
 export interface SessionAdmin {
   sub: string;

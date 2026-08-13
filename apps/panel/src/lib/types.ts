@@ -3,7 +3,7 @@
 // api-types package in the monorepo plan for a future OpenAPI-generated
 // version once the API surface stabilizes.
 
-export type AdminRole = "SUPERADMIN" | "SUPPORT" | "BILLING";
+export type AdminRole = "SUPERADMIN" | "SUPPORT" | "BILLING" | "RESELLER";
 
 export interface AdminUser {
   id: string;
@@ -351,4 +351,37 @@ export interface ClientAttempt {
 export interface ClientAttemptSummaryRow {
   outcome: ClientAttemptOutcome;
   count: number;
+}
+
+// --------------------------------------------------------------- reseller
+
+/** One plan's remaining voucher capacity for a reseller. */
+export interface ResellerBalance {
+  plan: { id: string; name: string; priceUsd: string; durationDays: number };
+  balance: number;
+}
+
+/** A code a reseller issued, as their history list shows it. */
+export interface ResellerVoucher {
+  id: string;
+  code: string;
+  plan: { id: string; name: string };
+  recipientEmail: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  isActive: boolean;
+  redeemedCount: number;
+  redeemedAt: string | null;
+  /** Computed by the backend, not the UI: the delete control and the
+   * rule the server enforces must not be able to disagree. */
+  canRevoke: boolean;
+}
+
+/** The operator's view of a reseller. */
+export interface ResellerSummary {
+  id: string;
+  email: string;
+  createdAt: string;
+  balances: { balance: number; plan: { id: string; name: string } }[];
+  vouchersIssued: number;
 }
