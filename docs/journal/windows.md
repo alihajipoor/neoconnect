@@ -241,3 +241,109 @@ See task #96.
 
 Nothing here is released. The Android workflow changes have never run —
 they need an `android-v*` tag, and that should wait for device testing.
+
+---
+
+## 2026-08-13 — Plisio live; reseller programme; relay NOT started
+
+**Status:** Plisio and reseller done. Relay is next and is unstarted.
+**Touches:** `apps/backend/**`, `apps/panel/**`, `apps/web-portal/**`,
+`website/**`, `apps/desktop-windows/src/{lib,components,screens}/**`
+(shared with mobile — the client changes below are additive)
+
+### Plisio replaces NowPayments as the crypto route — PROVEN with real money
+
+NowPayments' per-currency minimum sits above the cheapest plan, so a
+$3.99 subscription could not be paid in crypto at all. For customers who
+can only pay in crypto that means it could not be bought.
+
+Verified end to end today with a real payment: invoice created, hosted
+page opened, paid in TRX, callback verified, subscription ACTIVE. About
+two minutes on TRON, not the 15–60 Plisio's generic copy claims.
+
+**The one thing worth carrying forward:** the callback verification is
+transcribed from Plisio's own Node SDK (`Plisio/plisio-sdk-nodejs`,
+`verifyCallbackData`), not inferred. Remove `verify_hash`, sort keys,
+**coerce `expire_utc` to String**, **URL-decode `tx_urls`**, JSON
+stringify, HMAC-SHA1 with the **API key** (there is no separate IPN
+secret), hex. Those two coercions are not guessable and either one wrong
+rejects every genuine callback — payments taken and never confirmed.
+`?json=true` on the callback URL is mandatory or Plisio posts
+PHP-serialised data.
+
+`mismatch` deliberately does not activate: Plisio applies the site's
+underpayment tolerance before reporting, so one reaching us is outside
+it. Logged for a human, left PENDING.
+
+Both providers still run. NowPayments wins when configured; Plisio is
+the fallback. **The server resolves which crypto provider to use**,
+because every shipped client hardcodes NOWPAYMENTS behind its Crypto
+button — changing the clients cannot fix the ones already installed.
+Remove that bridge once shipped clients read
+`/customer/billing/providers`.
+
+### Three bugs, all the same shape: compiled, reasoned, never run
+
+Worth recording as a pattern rather than three incidents.
+
+1. **Panel `/overview` leaked to resellers.** Hidden from their sidebar,
+   but it is the post-login landing page and had no role guard — a
+   reseller saw the total customer count. No API test could have caught
+   it: the data comes from endpoints a reseller may legitimately call.
+   It was the *composition* that leaked. Found by signing in as one.
+2. **The web portal's Crypto button rendered a blank panel.** The fix
+   was written, typechecked — and the bundle was never rebuilt. The
+   deployed JS still had the old `provider === "STRIPE"` check.
+3. **Deleting a subscription 500'd** once it had carried traffic
+   (`usage_records_subscriptionId_fkey`, NOT NULL). Deleting a *fresh*
+   one worked, so it looked healthy until the row mattered.
+
+Typecheck-and-assume is not verification. Anything customer-facing gets
+driven in the thing that ships.
+
+### Reseller programme — backend, panel, email, short links
+
+17/17 against the API plus a full UI walkthrough. Both race-sensitive
+paths avoid read-then-write: spending is `updateMany` with a
+`balance > 0` guard inside the same transaction as the insert; revoking
+guards `redeemedCount: 0` and ownership in the WHERE clause, so a code
+redeemed a millisecond earlier simply matches nothing.
+
+Adding the RESELLER role turned the sidebar's "no `roles` means everyone
+sees it" default into a leak, since a reseller is an outsider with a
+panel login. RESELLER is now an **allowlist** — new pages are hidden
+from them until deliberately allowed.
+
+Voucher short links live at `/r/CODE`, prefilling the redeem field.
+
+### Also landed
+
+- **Rate limits were one global bucket.** `main.ts` never set
+  `trust proxy`, so every request looked like nginx. Login was 5
+  attempts/minute for the *entire* user base and one script could lock
+  everyone out. Measured before and after against production.
+- **Login proof-of-work**, escalating per account. Not a CAPTCHA:
+  reCAPTCHA needs to reach Google, which is exactly what Iranian
+  customers cannot rely on. Challenge is waived below 5 recent failures
+  so shipped clients keep working — **remove that grace** once they
+  solve challenges.
+- Plans restructured: Starter/Pro unlimited (1 and 2 devices), Ultimate
+  30 GB, unlimited devices, relay-only, shown but not sellable.
+- Customer portal at `neoxify.net/account/`, built from the apps' own
+  screens via 8 Vite aliases.
+
+### NEXT — relay, and the ordering is not optional
+
+Iran VPS exists (`ir1.neoxify.site`). Decisions taken: full protocol set
+on the relay, routes to **both** Finland and France, Ultimate goes on
+sale if tests pass, clients **built and held** — publish nothing to the
+beta testers.
+
+**`relayOnly` enforcement must land before any relay Route exists.**
+`provisionAll()` gives every enabled Route whose entry protocol the plan
+allows to every subscription. Create a relay route first and all 15 live
+customers are provisioned onto Iran bandwidth that costs double. Verify
+the inverse explicitly — that is the expensive direction.
+
+Full sequence in task #99. Prove it from the relay's own access log and
+an exit IP that matches the exit node, not from route rows.
