@@ -422,3 +422,88 @@ hostname, which is what that override is for.
 proxying. They will hit this the next time they reconnect.** The
 installer still does not set `grpcTarget` — unfixed, and it is a
 fleet-wide latent outage.
+
+## 2026-08-13 (night) — ir1 rebuilt: five protocols, and France works
+
+Six relay routes live, all proven by exit IP:
+
+| Entry on ir1 | Port | Exit |
+|---|---|---|
+| VLESS+REALITY | 443 | finland1 (204.168.161.100, measured) |
+| VLESS+TLS | 2053 | finland1 |
+| VLESS+TLS over WebSocket | 2053 `/ws` | finland1 |
+| Trojan+TLS | 8443 | finland1 |
+| Shadowsocks 2022 | 46731 | finland1 |
+| VLESS+REALITY | **8444** | **france-1 (104.105.205.233, measured)** |
+
+Real Let's Encrypt certificate on `ir1.neoxify.site`, expiring 2026-11-11,
+which is what makes Trojan and the two TLS variants possible at all.
+
+### Two exits from one relay: how
+
+`ProtocolConfig.inboundTag` (nullable). Null keeps today's behaviour --
+the agent uses the inbound it was started with -- so no existing row or
+non-relay node changes. A relay runs a second listener of the same
+protocol on its own port with its own tag, and its route's rule matches
+that tag instead of colliding. Proven by two credentials on the same
+node, same keys, same camouflage, differing only in port: 443 came out
+in Finland, 8444 in France.
+
+The agent refuses a named inbound it cannot target rather than falling
+back to the default. The fallback is what silently puts a customer on
+another country's exit.
+
+### Four bugs, none visible without running it
+
+- **create() never wrote transport or security.** It resolved
+  `transport` for the duplicate check and dropped both from the row, so
+  every config took TCP/NONE. The WebSocket twin then collided with its
+  TCP sibling (raw 500), and the REALITY config was stored claiming
+  security NONE -- a row describing an inbound the node is not running.
+  finland1/france-1 have correct values, so this was reachable only on
+  a freshly registered node.
+- **entryInboundTag knew only REALITY**, so a relay with five protocols
+  could carry one.
+- **Shadowsocks is served by Xray but does not start with `XRAY_`**, so
+  relay wiring sent it down the WireGuard branch demanding a subnet.
+- **The DTO rejected `inboundTag`** -- column, lookup and agent all
+  understood it; the input did not.
+
+### The installer still cannot do this unattended
+
+Three scripted runs desynced, each differently, because the prompt
+sequence depends on node state: an existing REALITY listener skips the
+port and camouflage questions, and a partial run leaves Trojan/WS
+configured, which skips more. Answers then fall through to the main
+menu. `NEOXIFY_ADMIN_TOKEN` removed the credential prompts, which were
+the worst offenders, but the flow is still not driveable from a fixed
+answer list. **Run it interactively, or teach it a non-interactive
+mode -- do not feed it a here-doc.**
+
+Also: `install_xray` skips panel registration when local REALITY keys
+exist (`reality_is_new=n`). Local keys are treated as proof of a panel
+row, so a node whose row was deleted can never re-register through the
+installer. Worked around by moving the config aside; worth fixing.
+
+### Stale agent release
+
+ir1 ran an agent with no Shadowsocks provisioner, and `Update Agent`
+pulled **v0.2.1**, which still lacked it -- the newest published release
+predates Shadowsocks. Built from source and installed by hand; that
+binary also carries the inboundTag support. **The agent release is
+behind main, so `Update Agent` does not deliver current code to any
+node.** Cut a `v*` tag before relying on it.
+
+### Still open
+
+- France has REALITY only. The other four protocols need a second
+  listener each on ir1 (own tag, own port), same mechanism, now that it
+  is proven.
+- REALITY-to-France sits on 8444, not 443. One address means one 443, so
+  the second exit is inherently on a less-unblockable port. A second
+  IPv4 on ir1 removes that.
+- WireGuard, OpenVPN and IKEv2 are not installed on ir1 -- Xray-family
+  only so far.
+- The two Ultimate subscribers still hold 16 direct-route credentials
+  each from before relayOnly. Not removed: doing so mid-session drops a
+  live customer.
