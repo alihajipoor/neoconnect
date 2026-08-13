@@ -747,7 +747,15 @@ install_xray() {
   fi
 
   local template="$SCRIPT_DIR/assets/xray-config.json.template"
-  read -r -p "Will this node relay other protocols (WireGuard/OpenVPN) to an exit node? [y/N]: " is_relay
+  # Worded for the role, not for two of the protocols it affects. The old
+  # wording named WireGuard/OpenVPN only, which reads as "no" to anyone
+  # building an Xray-entry relay -- and that is the common case, since
+  # REALITY is the transport an Iran relay is actually reached on. ir1
+  # was installed that way on 2026-08-13 and could not carry a route.
+  # The base template now carries RoutingService so that answer is no
+  # longer fatal, but the question should still be answerable correctly.
+  echo "A RELAY node is one customers connect to so it can forward them on to an exit node elsewhere (typically an Iran-reachable box fronting servers abroad). This is about the node's role -- answer yes for any relay, whichever protocol customers arrive on."
+  read -r -p "Is this a RELAY node? [y/N]: " is_relay
   if [[ "${is_relay,,}" == "y" ]]; then
     template="$SCRIPT_DIR/assets/xray-relay-config.json.template"
     echo "Using the relay config variant (adds a dormant tun bridge -- see docs/architecture.md, \"Multi-Hop Relay Chaining\"). Routes are wired up from the panel/API, not here."

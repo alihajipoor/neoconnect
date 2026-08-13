@@ -77,3 +77,63 @@ describe("provisionAll: relay-only plans", () => {
     await expect(service.provisionAll("sub-1")).resolves.toEqual([]);
   });
 });
+
+/**
+ * The same rule at the chokepoint every provisioning path goes through.
+ *
+ * provisionAll's filter decides what gets OFFERED. It does not decide
+ * what can be created: POST /protocol-users, the picker's switchRoute,
+ * the admin panel and renewal all call create() with a routeId directly.
+ * Verified against the live backend on 2026-08-13 -- a direct route on a
+ * relay-only plan returned 201 with only the filter in place.
+ */
+describe("create: relay-only plans", () => {
+  function serviceFor(relayOnly: boolean, exitProtocolConfigId: string | null) {
+    const prisma = {
+      subscription: {
+        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", plan: { name: "Ultimate", relayOnly } }),
+      },
+      route: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: "route-1",
+          name: exitProtocolConfigId ? "ir1 relay -> finland1" : "finland1 direct",
+          isEnabled: true,
+          exitProtocolConfigId,
+          entryProtocolConfig: { id: "cfg-1", nodeId: "n1", protocol: "XRAY_VLESS_REALITY", node: {} },
+        }),
+      },
+      protocolUser: { create: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
+    return {
+      service: new ProtocolUsersService(prisma as never, agentGateway as never),
+      prisma,
+      agentGateway,
+    };
+  }
+
+  it("refuses a DIRECT route on a relay-only plan", async () => {
+    const { service, prisma, agentGateway } = serviceFor(true, null);
+    await expect(service.create({ subscriptionId: "sub-1", routeId: "route-1" })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    // No row written and no CREATE_USER sent to a node -- a rejected
+    // request must not leave an account running on an engine.
+    expect(prisma.protocolUser.create).not.toHaveBeenCalled();
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
+  it("allows a RELAYED route on a relay-only plan", async () => {
+    const { service, prisma } = serviceFor(true, "exit-cfg-1");
+    await service.create({ subscriptionId: "sub-1", routeId: "route-1" }).catch(() => undefined);
+    expect(prisma.protocolUser.create).toHaveBeenCalled();
+  });
+
+  it("leaves normal plans on direct routes alone", async () => {
+    // The regression that would matter most: every existing customer is
+    // on a normal plan and a direct route.
+    const { service, prisma } = serviceFor(false, null);
+    await service.create({ subscriptionId: "sub-1", routeId: "route-1" }).catch(() => undefined);
+    expect(prisma.protocolUser.create).toHaveBeenCalled();
+  });
+});
