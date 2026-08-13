@@ -211,7 +211,10 @@ return array(
     'home.mockup.subscription' => 'Subscription',
     'home.mockup.status' => 'Active',
     'home.mockup.expires' => 'Renews in 24 days',
-    'home.mockup.used' => '84 GB of 300 GB used',
+    // Shows a Pro allowance, so it has to track Pro's real cap in
+    // inc/content/plans.php. It said "of 300 GB" long after Pro became
+    // 200 GB -- an illustration of a plan nobody could buy.
+    'home.mockup.used' => '84 GB of 200 GB used',
     'home.mockup.connected' => 'Connected',
     'home.mockup.location' => 'Change location',
 

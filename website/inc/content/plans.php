@@ -10,6 +10,23 @@
  *  These must match the SubscriptionPlan rows in the admin panel, because
  *  those are what a customer is actually billed. This file is marketing copy
  *  describing them -- it does not drive billing and cannot override it.
+ *
+ *  RECONCILED against the live subscription_plans rows on 2026-08-12, after
+ *  the drift below was spotted on a real pricing page. Three of the numbers
+ *  here promised MORE than the panel delivers, which is the direction that
+ *  costs you a refund and a trust problem rather than merely a sale:
+ *
+ *      Pro data       300 GB advertised -> 200 GB actual
+ *      Pro devices         3 advertised -> 2 actual
+ *      Ultimate devices    5 advertised -> 2 actual
+ *
+ *  Two understated it, and were corrected in the customer's favour too:
+ *  Starter allows 2 devices (not 1), and Ultimate's data is genuinely
+ *  unlimited (not 1 TB).
+ *
+ *  If you change a plan in the panel, change it here in the same sitting.
+ *  Nothing enforces the match -- the drift above went unnoticed precisely
+ *  because nothing complains.
  * ============================================================================
  *
  * This is the only file to edit to change plans, prices or what each plan
@@ -64,7 +81,7 @@ return array(
             'price' => 3.99,
             'duration_days' => 30,
             'data_gb' => 100,
-            'connections' => 1,
+            'connections' => 2,
             'down_mbps' => null,
             'up_mbps' => null,
             'highlight' => false,
@@ -73,14 +90,18 @@ return array(
         array(
             'id' => 'pro',
             'name' => array('en' => 'Pro', 'fa' => 'حرفه‌ای'),
+            /* Was "across more than one device", which stopped meaning
+               anything once every tier turned out to allow two. Data is
+               what actually separates the plans, so that is what this
+               says now. */
             'tagline' => array(
-                'en' => 'For daily use across more than one device.',
-                'fa' => 'برای استفاده روزانه روی بیش از یک دستگاه.',
+                'en' => 'Twice the data, for heavier daily use.',
+                'fa' => 'دو برابر حجم، برای استفاده روزانه‌ی سنگین‌تر.',
             ),
             'price' => 6.99,
             'duration_days' => 30,
-            'data_gb' => 300,
-            'connections' => 3,
+            'data_gb' => 200,
+            'connections' => 2,
             'down_mbps' => null,
             'up_mbps' => null,
             'highlight' => true,
@@ -95,8 +116,8 @@ return array(
             ),
             'price' => 11.99,
             'duration_days' => 30,
-            'data_gb' => 1024,
-            'connections' => 5,
+            'data_gb' => null,
+            'connections' => 2,
             'down_mbps' => null,
             'up_mbps' => null,
             'highlight' => false,
