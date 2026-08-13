@@ -258,6 +258,14 @@ return array(
     'home.pricing.all_locations' => 'Every server location',
     'home.pricing.relay_routes' => 'Optimised routes for restricted networks',
     'home.pricing.support' => 'Support directly in the app',
+    // Relay-plan perks. The four above are the standard-plan set and two
+    // of them are flatly untrue of a relay-only plan -- it is neither
+    // "every connection option" nor "every server location", it is one
+    // premium path. Saying so is also the sell, since that path is what
+    // the higher price buys.
+    'home.pricing.relay_only' => 'Relay routes only — not the standard servers',
+    'home.pricing.relay_premium' => 'Premium two-hop path through our Iran relay',
+    'home.pricing.relay_gaming' => 'Built for low latency on filtered networks',
     'home.pricing.trial' => 'New accounts start with a :days-day free trial — no card required.',
     'home.pricing.note' => 'Prices are in US dollars.',
 

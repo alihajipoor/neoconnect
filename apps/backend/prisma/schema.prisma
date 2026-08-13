@@ -15,6 +15,18 @@ enum AdminRole {
   SUPERADMIN
   SUPPORT
   BILLING
+
+  /// A reseller: someone who buys subscription capacity from the operator
+  /// up front, outside every payment system, and hands it on to their own
+  /// customers as vouchers.
+  ///
+  /// A panel role rather than a separate account type because what a
+  /// reseller does IS administrative -- minting a voucher against a plan
+  /// -- and the panel already has the RBAC, the audit log and the session
+  /// handling that would otherwise have to be built again. They see only
+  /// their own section; RolesGuard is what keeps them out of everything
+  /// else, so every reseller endpoint must be explicitly gated.
+  RESELLER
 }
 
 enum CustomerStatus {
@@ -189,7 +201,46 @@ model AdminUser {
 
   enrollmentTokens EnrollmentToken[]
 
+  /// Only ever populated for RESELLER accounts.
+  resellerBalances ResellerTokenBalance[]
+  issuedVouchers   Voucher[]              @relation("VoucherIssuer")
+
   @@map("admin_users")
+}
+
+/// How many vouchers of one plan a reseller may still mint.
+///
+/// Per plan rather than a single wallet, because that is how the capacity
+/// is actually sold -- "10 Starter, 5 Pro" -- and a shared balance would
+/// let someone who paid for ten cheap plans mint ten expensive ones.
+///
+/// There is deliberately no separate Reseller entity. The AdminUser with
+/// role RESELLER *is* the reseller: it already carries the identity, the
+/// login, the disable switch and the audit trail, and a parallel table
+/// holding the same person would be one more thing to keep in step for no
+/// behaviour we need. Revisit only if a reseller ever needs to exist
+/// before having a login, or to have several.
+model ResellerTokenBalance {
+  id          String           @id @default(uuid())
+  adminUserId String
+  adminUser   AdminUser        @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  planId      String
+  plan        SubscriptionPlan @relation(fields: [planId], references: [id])
+
+  /// Never negative. Spending is a single conditional UPDATE with a
+  /// `balance > 0` guard rather than a read then a write -- the same race
+  /// the voucher redemption counter already avoids, and without the guard
+  /// two concurrent generates would both see 1 and both succeed.
+  balance Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One row per reseller per plan; the pair is the natural key and the
+  /// constraint is what makes an upsert on grant safe.
+  @@unique([adminUserId, planId])
+  @@index([planId])
+  @@map("reseller_token_balances")
 }
 
 model Customer {
@@ -291,8 +342,9 @@ model SubscriptionPlan {
   subscriptions     Subscription[]
   freeTrialSettings FreeTrialSettings[]
   referralSettings  ReferralSettings[]
-  defaultRoute      Route?              @relation(fields: [defaultRouteId], references: [id])
+  defaultRoute      Route?                 @relation(fields: [defaultRouteId], references: [id])
   Voucher           Voucher[]
+  resellerBalances  ResellerTokenBalance[]
 
   @@map("subscription_plans")
 }
@@ -934,11 +986,25 @@ model Voucher {
   /// Operator-facing label: which campaign or person it was cut for.
   note      String?
 
+  /// The reseller who minted this, or null for one the operator cut
+  /// directly. Every reseller query scopes on it, so a reseller can only
+  /// ever see and revoke their own codes -- and it is what makes the
+  /// token refund on delete safe to attribute.
+  issuedByAdminId String?
+  issuedBy        AdminUser? @relation("VoucherIssuer", fields: [issuedByAdminId], references: [id])
+
+  /// Who it was emailed to, when it was emailed at all. Kept so the
+  /// reseller's history list can show it and offer a resend; null for a
+  /// code generated to hand over in person, which is a supported case
+  /// rather than an incomplete one.
+  recipientEmail String?
+
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
   redemptions VoucherRedemption[]
 
   @@index([planId])
+  @@index([issuedByAdminId])
   @@map("vouchers")
 }
 

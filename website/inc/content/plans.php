@@ -148,6 +148,16 @@ return array(
             'up_mbps' => null,
             'highlight' => false,
 
+            /* Its own perks, because the default set is written for the
+               standard plans and two of those lines are the opposite of
+               the truth here: this plan is NOT "every connection option"
+               and NOT "every server location", it is one premium relay
+               path and nothing else. Stating the restriction plainly is
+               also the sell -- that path is what the price buys.
+               No claim about guaranteed connectivity anywhere: nothing
+               can promise that on a filtered network. */
+            'perks' => array('relay_only', 'relay_premium', 'relay_gaming', 'support'),
+
             /* Shown, but not sellable. The relay node this plan depends on
                does not exist yet -- every node today is STANDALONE and not
                one route is relayed -- so the card renders with a
