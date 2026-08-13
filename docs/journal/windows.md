@@ -347,3 +347,78 @@ the inverse explicitly — that is the expensive direction.
 
 Full sequence in task #99. Prove it from the relay's own access log and
 an exit IP that matches the exit node, not from route rows.
+
+## 2026-08-13 (later) — the Iran relay carries traffic
+
+**Proven, not inferred.** A credential on `ir1 relay -> finland1` exits
+at **204.168.161.100** (finland1) while the machine's own address is
+50.34.35.228, and ir1's access log shows
+`[vless-in -> route-c1b3f538-...-out]`. Both, together, are the standard
+this needed.
+
+Ultimate is **live**: `relayOnly=true`, default route = the relay,
+`isActive=true`, $9.99 / 32 GB / unlimited devices. The re-assert sweep
+has already given both existing Ultimate subscribers their relay
+credential, one of whom is a real paying customer.
+
+### Three things that reported success while being wrong
+
+- **The base Xray template had no `RoutingService`.** Only the relay
+  template variant did, and the variant is picked by a prompt that asked
+  about *WireGuard/OpenVPN* relaying. An Iran relay is reached over
+  REALITY, so the honest answer to that question was "no" — and then
+  `AddOutbound` succeeds, `AddRule` fails, and the node looks configured.
+  M9 proved relay chaining in WSL2 against a hand-written config, so no
+  relay had ever actually been built by the installer. Prompt now asks
+  about the role; base template carries the service so a wrong answer is
+  survivable.
+- **Two relayed routes on one entry silently share an exit.** The
+  routing rule matches the entry inbound tag and nothing else, so Xray
+  takes the first. A credential issued on the **France** route exited in
+  **Finland**. The route existed, provisioned, and would have shown in
+  the picker as France. Route creation now refuses the second one, and
+  the France route was deleted rather than left lying.
+- **`relayOnly` was only a filter, not a rule.** `POST /protocol-users`
+  returned 201 for a direct route on a relay-only plan against the live
+  backend. `provisionAll` decides what is *offered*; `create()` is what
+  every path goes through. Enforced there now.
+
+All three re-verified against the deployed backend, not just in tests.
+
+### ir1 is not finished, and neither is the plan it backs
+
+- **One protocol on the relay: REALITY.** The decision was the full set.
+  Trojan / VLESS+TLS / WS need a real certificate for `ir1.neoxify.site`;
+  WireGuard, OpenVPN and Shadowsocks are not installed. So an Ultimate
+  customer today has **exactly one credential and no failover** — on the
+  plan sold as the one that always connects. This is the most important
+  gap on the board.
+- **One exit: Finland.** France needs the entry inbound tag to become a
+  property of the `ProtocolConfig` instead of a per-protocol agent flag,
+  so one node can host several entry inbounds. Until then, one exit per
+  relay node is a real limit, not a config choice.
+- ir1 was recovered by hand after two failed installer runs — its Xray
+  config and its `ProtocolConfig` row were written directly, not by the
+  installer. **A reinstall from the fixed installer is the honest way to
+  get the rest of the protocols**, and would also prove the installer
+  changes above, which are currently only reasoned.
+- The two Ultimate subscribers still hold their 16 pre-existing
+  direct-route credentials. `provisionAll` only adds. Not harmful — they
+  have more access, not less — but `relayOnly` is not retroactive, and
+  removing them mid-session would drop a live customer, so it was not
+  done unilaterally.
+
+### The gRPC trap that cost the most time
+
+`connect.neoxify.site` is Cloudflare-proxied, and Cloudflare does not
+carry port 50051. The agent derives its gRPC target from the panel URL's
+host when `grpcTarget` is empty — which the installer always leaves
+empty — so a freshly enrolled node dials a Cloudflare address forever
+(`dial tcp 188.114.98.0:50051: i/o timeout`). Fixed on ir1 by setting
+`grpcTarget` to the panel's real IP; TLS still validates against the
+hostname, which is what that override is for.
+
+**The existing nodes are only fine because their streams predate the
+proxying. They will hit this the next time they reconnect.** The
+installer still does not set `grpcTarget` — unfixed, and it is a
+fleet-wide latent outage.
