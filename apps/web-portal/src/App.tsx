@@ -45,43 +45,50 @@ type Screen =
  * shared URL. Kept in memory for the session so it survives the sign-in
  * or registration the recipient may still have to do.
  */
-function takeVoucherFromUrl(): string | null {
+function takeFromUrl(key: string): string | null {
   const params = new URLSearchParams(window.location.search);
-  const code = params.get("voucher");
-  if (!code) return null;
-  params.delete("voucher");
+  const value = params.get(key);
+  if (!value) return null;
+  params.delete(key);
   const query = params.toString();
   window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
-  return code;
+  return value;
 }
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>("loading");
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
-  const [voucher] = useState<string | null>(() => takeVoucherFromUrl());
+  const [voucher] = useState<string | null>(() => takeFromUrl("voucher"));
+  // Set by the website's pricing buttons (nx_buy_url). Someone who has
+  // already picked a plan and pressed Buy must not be dropped back onto
+  // a list of plans -- that is the moment a sale is lost.
+  const [wantsPlans] = useState<boolean>(() => takeFromUrl("plan") !== null);
 
   useEffect(() => {
     getTokens()
       .then((tokens) => {
         if (!tokens) return setScreen("login");
-        // Someone arriving on a voucher link who is already signed in
-        // goes straight to where they can redeem it, rather than to an
-        // account page that says nothing about the link they followed.
-        setScreen(voucher ? "plans" : "account");
+        // Someone arriving on a voucher or a pricing link who is already
+        // signed in goes straight to where they can act on it, rather
+        // than to an account page that says nothing about the link they
+        // followed.
+        setScreen(voucher || wantsPlans ? "plans" : "account");
       })
       .catch(() => setScreen("login"));
-  }, [voucher]);
+  }, [voucher, wantsPlans]);
 
   function goToVerify(email: string, password: string) {
     setPendingAuth({ email, password });
     setScreen("verify");
   }
 
-  /** Where a successful sign-in lands. A voucher link overrides the
-   * usual destination for the same reason as above. */
+  /** Where a successful sign-in lands. A voucher or pricing link
+   * overrides the usual destination for the same reason as above --
+   * including after a brand-new registration, which is the whole
+   * journey the website's Buy buttons start. */
   function afterAuth() {
-    setScreen(voucher ? "plans" : "account");
+    setScreen(voucher || wantsPlans ? "plans" : "account");
   }
 
   let content: React.ReactNode;

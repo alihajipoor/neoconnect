@@ -367,6 +367,66 @@ function nx_pick_list($item, $key, $locale = null)
     return array();
 }
 
+// ---------------------------------------------------------------------
+// Customer area
+// ---------------------------------------------------------------------
+
+/**
+ * The customer area's URL, or '' when it is switched off.
+ *
+ * @return string
+ */
+function nx_portal_url()
+{
+    return trim((string) nx_cfg('customer_portal_url', ''));
+}
+
+/** @return bool whether there is a customer area to link to at all */
+function nx_portal_available()
+{
+    return nx_portal_url() !== '';
+}
+
+/**
+ * Where a "Get this plan" button should go.
+ *
+ * The pricing cards used to point at the download page, because for a
+ * long time there was nowhere to actually buy anything -- the app was
+ * the only place an account could exist. That is no longer true, and a
+ * pricing button that answers "how do I buy this?" with "here is an
+ * installer" loses the sale at the exact moment someone decided to pay.
+ *
+ * The plan id rides along, but be clear about what it does today: the
+ * portal uses it only to open ON the plans screen instead of the
+ * account page. It does NOT yet preselect that specific plan, because
+ * the API keys plans by uuid while this file keys them by a slug, and
+ * matching them on the display name is a guess this is not willing to
+ * make silently. Carried anyway so the link is already right when
+ * preselection is built.
+ *
+ * Falls back to the download page when the portal is switched off, so
+ * blanking customer_portal_url restores exactly the old behaviour
+ * rather than rendering dead buttons.
+ *
+ * @param string $planId  the content file's plan key
+ * @return string
+ */
+function nx_buy_url($planId = '')
+{
+    if (!nx_portal_available()) {
+        return nx_url('download');
+    }
+
+    $url = nx_portal_url();
+    $planId = trim((string) $planId);
+    if ($planId === '') {
+        return $url;
+    }
+
+    return $url . (strpos($url, '?') === false ? '?' : '&') . 'plan=' . rawurlencode($planId);
+}
+
+
 /** Whether the site should advertise the free trial. */
 function nx_free_trial_enabled()
 {

@@ -37,21 +37,50 @@
 
   body {
     min-height: 100dvh;
-    background: var(--background);
     color: var(--foreground);
     -webkit-font-smoothing: antialiased;
+
+    /* The page itself carries the glow, not just the column.
+       .glow-backdrop puts its blurred blobs at the corners of whatever
+       element it is on, which in a fixed 400x640 app window IS the
+       screen. On a wide browser that element is a narrow centred
+       column, so the glow stopped at its edges and the result read as a
+       phone screenshot pasted onto a dark page. Painting the same two
+       tints across the viewport makes the column sit in the page
+       instead of on top of it. */
+    background:
+      radial-gradient(60rem 40rem at 15% -10%, color-mix(in oklab, var(--primary) 16%, transparent), transparent 70%),
+      radial-gradient(55rem 38rem at 85% 110%, color-mix(in oklab, var(--highlight) 13%, transparent), transparent 70%),
+      var(--background);
+    background-attachment: fixed;
   }
 }
 
 /* The screens were laid out for a 400x640 window. On a desktop browser
-   that would strand a narrow column against a wide empty page, so the
-   app shell below centres it and gives it a little room to breathe
-   without touching any of the shared components. */
+   that would strand a narrow column against a wide empty page, so this
+   centres it without touching any of the shared components. */
 .portal-frame {
   width: 100%;
   max-width: 30rem;
   margin-inline: auto;
-  min-height: 100dvh;
+
+  /* A DEFINITE height, not min-height. The auth screens are
+     `flex h-full ... justify-center`, and height:100% only resolves
+     against a parent whose height is definite -- with min-height it
+     stayed auto, the screen collapsed to its content, and the card sat
+     jammed against the top of the window with the glow boxed in behind
+     it. That was the reported bug. */
+  height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+/* Screens taller than the viewport -- Settings, Plans, Support -- must
+   still be reachable. The shared screens set overflow-hidden because a
+   native window never scrolls; here the frame owns the scrolling so
+   nothing is cut off on a short laptop screen or a phone in landscape. */
+.portal-frame > * {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }

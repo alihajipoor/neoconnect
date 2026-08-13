@@ -350,8 +350,13 @@ require NX_INC . '/partials/announcement.php';
               <?php endforeach; ?>
             </ul>
 
+            <?php
+            /* Goes to the customer area with this plan preselected, and
+               only falls back to the download page when no portal is
+               configured. See nx_buy_url(). */
+            ?>
             <a class="btn <?php echo !empty($nx_plan['highlight']) ? 'btn--primary' : 'btn--ghost'; ?> btn--block"
-               href="<?php echo nx_esc(nx_url('download')); ?>">
+               href="<?php echo nx_esc(nx_buy_url(isset($nx_plan['id']) ? $nx_plan['id'] : '')); ?>">
               <?php echo nx_e('home.pricing.cta'); ?>
             </a>
           </article>
