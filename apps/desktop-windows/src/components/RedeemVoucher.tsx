@@ -13,9 +13,23 @@ import { Button, Card, Input } from "./ui";
  * or mistypes and retries -- is a bad trade for saving one click. This
  * shows what the code is worth and then asks.
  */
-export function RedeemVoucher({ onRedeemed }: { onRedeemed: () => void }) {
+/** `initialCode` seeds the field from a voucher link the customer
+ * followed, so the common path is arrive-and-confirm rather than
+ * arrive-and-retype-twelve-characters -- which is most of why the link
+ * exists instead of just handing out the code.
+ *
+ * Optional, and unused by the desktop and Android clients, which have no
+ * link to arrive from. Adding it as an optional prop rather than
+ * changing the signature keeps those two compiling untouched. */
+export function RedeemVoucher({
+  onRedeemed,
+  initialCode,
+}: {
+  onRedeemed: () => void;
+  initialCode?: string;
+}) {
   const { t } = useI18n();
-  const [code, setCode] = useState("");
+  const [code, setCode] = useState(initialCode ?? "");
   const [found, setFound] = useState<{ plan: SubscriptionPlan; expiresAt: string | null } | null>(
     null,
   );
