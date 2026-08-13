@@ -5,13 +5,14 @@ import { PaymentSettingsModule } from "../payment-settings/payment-settings.modu
 import { BillingController } from "./billing.controller";
 import { BillingService } from "./billing.service";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
+import { PlisioProvider } from "./providers/plisio.provider";
 import { StripeProvider } from "./providers/stripe.provider";
 import { CheckoutReturnController, WebhooksController } from "./webhooks.controller";
 
 @Module({
   imports: [ProtocolUsersModule, InvoicesModule, PaymentSettingsModule],
   controllers: [BillingController, WebhooksController, CheckoutReturnController],
-  providers: [BillingService, StripeProvider, NowPaymentsProvider],
+  providers: [BillingService, StripeProvider, NowPaymentsProvider, PlisioProvider],
   exports: [BillingService],
 })
 export class BillingModule {}

@@ -15,6 +15,12 @@ export interface NowPaymentsCredentials {
   ipnSecret?: string;
 }
 
+/** Plisio needs only the API key: it signs callbacks with that same key
+ * rather than a separate IPN secret. */
+export interface PlisioCredentials {
+  apiKey: string;
+}
+
 @Injectable()
 export class PaymentSettingsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -44,6 +50,8 @@ export class PaymentSettingsService {
       nowPaymentsEnabled: row.nowPaymentsEnabled,
       nowPaymentsApiKeySet: Boolean(row.nowPaymentsApiKeyEncrypted),
       nowPaymentsIpnSecretSet: Boolean(row.nowPaymentsIpnSecretEncrypted),
+      plisioEnabled: row.plisioEnabled,
+      plisioApiKeySet: Boolean(row.plisioApiKeyEncrypted),
       updatedAt: row.updatedAt,
     };
   }
@@ -68,6 +76,10 @@ export class PaymentSettingsService {
         nowPaymentsEnabled: dto.nowPaymentsEnabled,
         ...(dto.nowPaymentsApiKey
           ? { nowPaymentsApiKeyEncrypted: encryptCredentials({ v: dto.nowPaymentsApiKey }) }
+          : {}),
+        plisioEnabled: dto.plisioEnabled,
+        ...(dto.plisioApiKey
+          ? { plisioApiKeyEncrypted: encryptCredentials({ v: dto.plisioApiKey }) }
           : {}),
         ...(dto.nowPaymentsIpnSecret
           ? { nowPaymentsIpnSecretEncrypted: encryptCredentials({ v: dto.nowPaymentsIpnSecret }) }
@@ -116,5 +128,13 @@ export class PaymentSettingsService {
     if (row.stripeEnabled && row.stripeSecretKeyEncrypted) available.push("STRIPE");
     if (row.nowPaymentsEnabled && row.nowPaymentsApiKeyEncrypted) available.push("NOWPAYMENTS");
     return available;
+  }
+
+  /** Null when disabled or unconfigured, so callers fail closed rather
+   * than attempting a request with an empty key. */
+  async plisio(): Promise<PlisioCredentials | null> {
+    const row = await this.row();
+    if (!row.plisioEnabled || !row.plisioApiKeyEncrypted) return null;
+    return { apiKey: decryptCredentials(row.plisioApiKeyEncrypted).v };
   }
 }

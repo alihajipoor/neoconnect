@@ -1,10 +1,11 @@
-import { BadRequestException, Controller, Get, Header, Headers, Post, Query, Req, type RawBodyRequest } from "@nestjs/common";
+import { BadRequestException, Controller, Get, Header, Headers, Post, Query, Req, type RawBodyRequest, Logger } from "@nestjs/common";
 import { SkipThrottle } from "@nestjs/throttler";
 import type { Request } from "express";
 import { BillingService } from "./billing.service";
 import { checkoutReturnPage } from "../customer/checkout-return-page";
 import { NowPaymentsProvider } from "./providers/nowpayments.provider";
 import { StripeProvider } from "./providers/stripe.provider";
+import { PlisioProvider } from "./providers/plisio.provider";
 
 // Intentionally unauthenticated (no JwtAuthGuard) -- these are called by
 // Stripe/NowPayments themselves, not a logged-in admin or customer.
@@ -39,10 +40,13 @@ export class CheckoutReturnController {
 @SkipThrottle()
 @Controller("billing/webhooks")
 export class WebhooksController {
+  private readonly logger = new Logger(WebhooksController.name);
+
   constructor(
     private readonly billingService: BillingService,
     private readonly stripe: StripeProvider,
     private readonly nowpayments: NowPaymentsProvider,
+    private readonly plisio: PlisioProvider,
   ) {}
 
   @Post("stripe")
@@ -84,6 +88,58 @@ export class WebhooksController {
       await this.billingService.confirmPayment(transactionId, body);
     } else if (body.payment_status === "failed" || body.payment_status === "expired") {
       await this.billingService.markFailed(transactionId, body);
+    }
+
+    return { received: true };
+  }
+
+  /**
+   * Plisio invoice updates.
+   *
+   * No signature HEADER to read: Plisio puts verify_hash inside the body
+   * and signs the body with the API key. The provider transcribes their
+   * exact algorithm -- see verifyCallback -- because two of its steps
+   * (stringifying expire_utc, URL-decoding tx_urls) are not guessable
+   * and getting them wrong rejects every genuine callback.
+   *
+   * order_number is our PaymentTransaction id, which is what makes this
+   * safe to act on once the hash checks out.
+   */
+  @Post("plisio")
+  async plisioWebhook(@Req() req: Request) {
+    const body = req.body as Record<string, unknown>;
+
+    if (!(await this.plisio.verifyCallback(body))) {
+      // Deliberately terse: a forged callback should learn nothing about
+      // why it was rejected.
+      throw new BadRequestException("Invalid callback signature");
+    }
+
+    const transactionId = typeof body.order_number === "string" ? body.order_number : undefined;
+    if (!transactionId) {
+      throw new BadRequestException("Missing order_number in callback");
+    }
+
+    switch (this.plisio.classify(String(body.status ?? ""))) {
+      case "paid":
+        await this.billingService.confirmPayment(transactionId, body);
+        break;
+      case "failed":
+        await this.billingService.markFailed(transactionId, body);
+        break;
+      case "review":
+        // Money arrived but not the right amount, and outside the
+        // underpayment tolerance Plisio already applied. Neither
+        // confirmed nor failed: activating would give away a plan for
+        // whatever was sent, and failing would write off a real payment.
+        // Left PENDING so it shows up as an unresolved transaction for a
+        // human, and logged loudly because nothing else will surface it.
+        this.logger.error(
+          `Plisio reported a MISMATCH on transaction ${transactionId} -- payment received but the amount does not match. Needs manual review.`,
+        );
+        break;
+      case "pending":
+        break;
     }
 
     return { received: true };

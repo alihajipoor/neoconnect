@@ -39,6 +39,8 @@ export default () => ({
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
     nowpaymentsApiKey: process.env.NOWPAYMENTS_API_KEY,
     nowpaymentsIpnSecret: process.env.NOWPAYMENTS_IPN_SECRET,
+    // No IPN secret: Plisio signs callbacks with the API key itself.
+    plisioApiKey: process.env.PLISIO_API_KEY,
   },
   security: {
     // AES-256-GCM key for ProtocolUser.credentialsJson envelope

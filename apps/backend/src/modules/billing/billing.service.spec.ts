@@ -29,8 +29,12 @@ describe("BillingService.confirmPayment expiry", () => {
     const service = new BillingService(
       prisma as never,
       { create: jest.fn(), setEnabled: jest.fn(), provisionAll: jest.fn().mockResolvedValue([]) } as never,
-      {} as never,
-      {} as never,
+      {} as never, // stripe
+      {} as never, // nowpayments
+      {} as never, // plisio
+      // ConfigService. These cases exercise renewal and expiry, none of
+      // which reads config -- but the constructor takes it now.
+      { get: jest.fn() } as never,
       { issueForPayment: jest.fn().mockResolvedValue({}) } as never,
     );
     return { service, prisma };

@@ -85,6 +85,9 @@ export async function updatePaymentSettingsAction(input: {
   nowPaymentsEnabled: boolean;
   nowPaymentsApiKey?: string;
   nowPaymentsIpnSecret?: string;
+  plisioEnabled: boolean;
+  /** Plisio has no separate IPN secret: it signs callbacks with this key. */
+  plisioApiKey?: string;
 }): Promise<MutationResult<void>> {
   const result = await apiMutate<void>("/payment-settings", {
     method: "PATCH",
