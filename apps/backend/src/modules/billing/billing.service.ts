@@ -47,11 +47,22 @@ export class BillingService {
     });
     if (!subscription) throw new BadRequestException("Subscription not found");
 
+    // Resolved BEFORE the row is written, not after. Recording
+    // dto.provider meant a Plisio payment was filed as NOWPAYMENTS --
+    // the bridge swapped the provider at call time but the row had
+    // already been created with the name the client sent. Revenue then
+    // reconciles against the wrong provider, which is quiet and
+    // expensive to untangle later.
+    const provider =
+      dto.provider === "STRIPE"
+        ? ("STRIPE" as const)
+        : await this.resolveCryptoProvider(dto.provider as "NOWPAYMENTS" | "PLISIO");
+
     const transaction = await this.prisma.paymentTransaction.create({
       data: {
         customerId: subscription.customerId,
         subscriptionId: subscription.id,
-        provider: dto.provider,
+        provider,
         // Placeholder until the provider call below returns a real
         // reference -- never exposed to a caller, overwritten before
         // this function returns.
@@ -60,12 +71,16 @@ export class BillingService {
         // Plisio prices in USD and lets the customer pick the coin on
         // its hosted page, so there is no single pay-currency to record
         // up front the way NowPayments has.
-        currency: dto.provider === "NOWPAYMENTS" ? "usdttrc20" : "usd",
+        // NowPayments is invoiced in one fixed coin; Stripe and Plisio
+        // are priced in USD (Plisio lets the payer pick the coin, so
+        // recording usdttrc20 for it was simply wrong -- this test was
+        // paid in TRX).
+        currency: provider === "NOWPAYMENTS" ? "usdttrc20" : "usd",
         status: "PENDING",
       },
     });
 
-    if (dto.provider === "STRIPE") {
+    if (provider === "STRIPE") {
       const { providerRef, clientSecret } = await this.stripe.createPaymentIntent(
         Number(subscription.plan.priceUsd),
         transaction.id,
@@ -74,7 +89,7 @@ export class BillingService {
       return { transactionId: transaction.id, provider: "STRIPE" as const, clientSecret };
     }
 
-    if ((await this.resolveCryptoProvider(dto.provider as "NOWPAYMENTS" | "PLISIO")) === "PLISIO") {
+    if (provider === "PLISIO") {
       const invoice = await this.plisio.createInvoice({
         orderNumber: transaction.id,
         orderName: subscription.plan.name,
@@ -120,19 +135,34 @@ export class BillingService {
     });
     if (!subscription) throw new BadRequestException("Subscription not found");
 
+    // Resolved BEFORE the row is written, not after. Recording
+    // dto.provider meant a Plisio payment was filed as NOWPAYMENTS --
+    // the bridge swapped the provider at call time but the row had
+    // already been created with the name the client sent. Revenue then
+    // reconciles against the wrong provider, which is quiet and
+    // expensive to untangle later.
+    const provider =
+      dto.provider === "STRIPE"
+        ? ("STRIPE" as const)
+        : await this.resolveCryptoProvider(dto.provider as "NOWPAYMENTS" | "PLISIO");
+
     const transaction = await this.prisma.paymentTransaction.create({
       data: {
         customerId: subscription.customerId,
         subscriptionId: subscription.id,
-        provider: dto.provider,
+        provider,
         providerRef: `pending-${subscription.id}-${Date.now()}`,
         amountUsd: subscription.plan.priceUsd,
-        currency: dto.provider === "NOWPAYMENTS" ? "usdttrc20" : "usd",
+        // NowPayments is invoiced in one fixed coin; Stripe and Plisio
+        // are priced in USD (Plisio lets the payer pick the coin, so
+        // recording usdttrc20 for it was simply wrong -- this test was
+        // paid in TRX).
+        currency: provider === "NOWPAYMENTS" ? "usdttrc20" : "usd",
         status: "PENDING",
       },
     });
 
-    if (dto.provider === "STRIPE") {
+    if (provider === "STRIPE") {
       const { providerRef, url } = await this.stripe.createCheckoutSession(
         Number(subscription.plan.priceUsd),
         transaction.id,
@@ -143,7 +173,7 @@ export class BillingService {
       return { transactionId: transaction.id, provider: "STRIPE" as const, checkoutUrl: url };
     }
 
-    if ((await this.resolveCryptoProvider(dto.provider as "NOWPAYMENTS" | "PLISIO")) === "PLISIO") {
+    if (provider === "PLISIO") {
       const invoice = await this.plisio.createInvoice({
         orderNumber: transaction.id,
         orderName: subscription.plan.name,
