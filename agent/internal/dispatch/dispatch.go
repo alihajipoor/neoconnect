@@ -13,6 +13,7 @@ import (
 
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
 	"github.com/neoxify/neoxify-hub/agent/internal/relay"
 	"github.com/neoxify/neoxify-hub/agent/internal/shaper"
 )
@@ -39,6 +40,28 @@ type commandPayload struct {
 	// port and a certificate, and a user added to the wrong one of those
 	// gets a credential that silently never connects.
 	Transport string `json:"transport"`
+	// Which Xray inbound to add this user to, when the (protocol,
+	// transport) pair is no longer enough to say.
+	//
+	// A relay node runs one inbound per exit it forwards to, because a
+	// relayed route's Xray routing rule matches on the entry inbound tag
+	// and nothing else -- two routes sharing an inbound means the second
+	// silently uses the first one's exit. So one node can now hold two
+	// REALITY inbounds, and only the control plane knows which of them a
+	// given credential belongs to.
+	//
+	// Empty means "the inbound this node was configured with for that
+	// protocol", which is every command written before this field and
+	// every non-relay node after it.
+	InboundTag string `json:"inboundTag"`
+}
+
+// retargetable is implemented by provisioners that can be re-pointed at
+// another inbound in the same engine. Only the Xray family can: the
+// WireGuard and OpenVPN provisioners each manage a single interface or
+// daemon, and there is no second listener for a tag to name.
+type retargetable interface {
+	WithInboundTag(inboundTag string) *xray.Provisioner
 }
 
 // Dispatcher holds one provisioner per protocol this node runs. A node
@@ -217,6 +240,21 @@ func (d *Dispatcher) Execute(ctx context.Context, cmd *pb.Command) (success bool
 	provisioner, ok := d.provisioners[provisionerKey(payload.Protocol, payload.Transport)]
 	if !ok {
 		return false, fmt.Sprintf("no provisioner registered for %s on this node", describeTarget(payload.Protocol, payload.Transport))
+	}
+
+	// Re-point at the named inbound when the control plane named one.
+	//
+	// Refusing rather than falling back to the default is deliberate: the
+	// fallback would add the user to the wrong relay inbound, which
+	// authenticates fine and then routes their traffic out of the wrong
+	// country. A command that cannot be carried out as written should
+	// fail and be visible in the outbox, not half-succeed.
+	if payload.InboundTag != "" {
+		r, canRetarget := provisioner.(retargetable)
+		if !canRetarget {
+			return false, fmt.Sprintf("%s cannot be targeted at a named inbound (%q) on this node", describeTarget(payload.Protocol, payload.Transport), payload.InboundTag)
+		}
+		provisioner = r.WithInboundTag(payload.InboundTag)
 	}
 
 	user := common.ProtocolUser{ExternalUserID: payload.ExternalUserID, Credentials: payload.Credentials}

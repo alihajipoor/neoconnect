@@ -252,7 +252,7 @@ export class RoutesService {
     const entryIsXray = entryProtocolConfig.protocol.startsWith("XRAY_");
     await this.agentGateway.enqueueCommand(entryProtocolConfig.nodeId, "CONFIGURE_ROUTE", {
       routeId: route.id,
-      entryInboundTag: entryIsXray ? entryInboundTag(entryProtocolConfig.protocol) : "",
+      entryInboundTag: entryIsXray ? entryInboundTag(entryProtocolConfig) : "",
       entrySubnetCidr: entryIsXray ? "" : entrySubnetCidr(entryProtocolConfig.publicParamsJson),
       exit: {
         address: exitProtocolConfig.node.publicIp,
@@ -301,12 +301,24 @@ export class RoutesService {
   }
 }
 
-/** Xray inbounds are tagged `<protocol-lowercased-with-dashes>-in` by the
- * installer's config templates -- see installer/assets/xray-config.json.template
- * ("vless-in"). Only XRAY_VLESS_REALITY exists today. */
-function entryInboundTag(protocol: string): string {
-  if (protocol === "XRAY_VLESS_REALITY") return "vless-in";
-  throw new BadRequestException(`No known inbound tag for entry protocol ${protocol}`);
+/** Which Xray inbound on the relay this route's rule should match.
+ *
+ * The config's own `inboundTag` wins when it has one. That is what lets a
+ * relay serve two exits: a second inbound of the same protocol, on its
+ * own port with its own tag, gets its own routing rule instead of
+ * colliding with the first one's. Falling back to the per-protocol
+ * default keeps every existing config working untouched -- those rows
+ * have no tag and are served by the inbound the agent was started with.
+ *
+ * The defaults are the tags the installer's templates write -- see
+ * installer/assets/xray-config.json.template ("vless-in").
+ */
+function entryInboundTag(entryProtocolConfig: { protocol: string; inboundTag: string | null }): string {
+  if (entryProtocolConfig.inboundTag) return entryProtocolConfig.inboundTag;
+  if (entryProtocolConfig.protocol === "XRAY_VLESS_REALITY") return "vless-in";
+  throw new BadRequestException(
+    `No known inbound tag for entry protocol ${entryProtocolConfig.protocol} -- set inboundTag on the protocol config`,
+  );
 }
 
 function entrySubnetCidr(publicParamsJson: unknown): string {
