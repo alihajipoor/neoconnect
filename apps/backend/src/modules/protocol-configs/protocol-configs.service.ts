@@ -166,6 +166,7 @@ export class ProtocolConfigsService {
         // resolved, so the row and the check can never disagree.
         transport,
         security: dto.security ?? "NONE",
+        inboundTag: dto.inboundTag ?? null,
         publicParamsJson: publicParamsJson as Prisma.InputJsonValue,
         isEnabled: dto.isEnabled ?? true,
       },

@@ -1,4 +1,4 @@
-import { IsBoolean, IsEnum, IsInt, IsObject, IsOptional, IsUUID, Max, Min } from "class-validator";
+import { IsBoolean, IsEnum, IsInt, IsObject, IsOptional, IsString, IsUUID, Matches, Max, Min } from "class-validator";
 import { Protocol, Transport, TransportSecurity } from "@prisma/client";
 
 export class CreateProtocolConfigDto {
@@ -37,6 +37,24 @@ export class CreateProtocolConfigDto {
   @IsOptional()
   @IsEnum(TransportSecurity)
   security?: TransportSecurity;
+
+  /** Which Xray inbound on the node serves this config.
+   *
+   * Omit for the node's default inbound for that protocol -- the tag the
+   * agent was started with, which is what every ordinary node uses.
+   *
+   * Set it when a node runs more than one inbound of the same protocol.
+   * That happens on a relay serving several exits: a relayed route's
+   * routing rule matches on the entry inbound tag and nothing else, so
+   * two routes sharing an inbound means the second silently egresses
+   * through the first one's exit. A second listener with its own tag is
+   * what keeps them apart. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9-]{1,64}$/, {
+    message: "inboundTag must match the tag in the node's Xray config (lowercase letters, digits and dashes)",
+  })
+  inboundTag?: string;
 
   @IsOptional()
   @IsBoolean()
