@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Neoxify">
+  <!-- The mark on its own dark plate, for anywhere the background is not
+       ours to choose: a social profile picture, an app icon, a store
+       listing tile.
+
+       The transparent neoxify-mark.svg is the wrong file for those. Most
+       platforms composite a profile picture onto white in at least one
+       place (notifications, light mode, embeds), and the violet-to-cyan
+       ring largely disappears against it.
+
+       Plate colour is the app's own background, so the icon reads as
+       the same product as the client someone just installed.
+
+       Full-bleed square with no built-in rounding: every platform applies
+       its own mask — a circle on most social networks, a squircle on
+       Android, a rounded square on Windows. Baking corners in here would
+       show up as a dark halo inside their mask. -->
+  <defs>
+    <linearGradient id="nx-brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <radialGradient id="nx-glow" cx="0.5" cy="0.42" r="0.55">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" fill="#0b0b12"/>
+  <rect width="512" height="512" fill="url(#nx-glow)"/>
+
+  <!-- The mark, scaled from its 64-unit box and inset so it keeps clear
+       of a circular crop. 320/64 = 5x, centred at 96,96. -->
+  <g transform="translate(96 96) scale(5)">
+    <circle cx="32" cy="32" r="21" stroke="url(#nx-brand)" stroke-width="7"
+            stroke-linecap="round" stroke-dasharray="96 36"
+            transform="rotate(-58 32 32)"/>
+    <circle cx="32" cy="32" r="8" fill="url(#nx-brand)"/>
+  </g>
+</svg>

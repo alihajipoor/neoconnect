@@ -7,6 +7,7 @@ import { PrismaModule } from "./prisma/prisma.module";
 import { HealthModule } from "./modules/health/health.module";
 import { AuthModule } from "./modules/auth/auth.module";
 import { LoginGuardModule } from "./modules/login-guard/login-guard.module";
+import { ResellersModule } from "./modules/resellers/resellers.module";
 import { AdminsModule } from "./modules/admins/admins.module";
 import { CustomersModule } from "./modules/customers/customers.module";
 import { PlansModule } from "./modules/plans/plans.module";
@@ -51,6 +52,7 @@ import { ClientAttemptsModule } from "./modules/client-attempts/client-attempts.
     ThrottlerModule.forRoot([{ name: "default", ttl: 60_000, limit: 100 }]),
     // @Global, so both auth modules share one set of failure counters.
     LoginGuardModule,
+    ResellersModule,
     PrismaModule,
     HealthModule,
     AuthModule,

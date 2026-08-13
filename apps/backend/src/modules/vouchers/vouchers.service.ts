@@ -4,20 +4,16 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../prisma/prisma.service";
+import { normalise, randomCode } from "./voucher-code";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreateVoucherDto } from "./dto/create-voucher.dto";
 import { UpdateVoucherDto } from "./dto/update-voucher.dto";
 
-/// Characters a code is generated from.
-///
-/// No O/0, I/1 or similar: a voucher gets read off a screen, a sticker
-/// or a chat message and typed by hand, and the pairs people confuse
-/// are the ones that turn a working code into a support message.
-const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const CODE_LENGTH = 12;
+// The code alphabet, length and the two helpers now live in
+// ./voucher-code, shared with the reseller programme so both mint
+// identical codes.
 
 @Injectable()
 export class VouchersService {
@@ -207,18 +203,3 @@ export class VouchersService {
   }
 }
 
-/** Uppercased and stripped of the spacing and dashes people add when
- * reading a code aloud, so "abcd-efgh 1234" and "ABCDEFGH1234" are the
- * same voucher. */
-function normalise(code: string) {
-  return code.replace(/[\s-]/g, "").toUpperCase();
-}
-
-function randomCode() {
-  const bytes = randomBytes(CODE_LENGTH);
-  let code = "";
-  for (let i = 0; i < CODE_LENGTH; i += 1) {
-    code += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
-  }
-  return code;
-}
