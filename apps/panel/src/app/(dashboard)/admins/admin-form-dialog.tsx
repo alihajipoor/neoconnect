@@ -17,7 +17,9 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 
-const ROLES: AdminRole[] = ["SUPERADMIN", "SUPPORT", "BILLING"];
+// RESELLER included so the operator can create one here -- it is the
+// only way a reseller account comes into existence.
+const ROLES: AdminRole[] = ["SUPERADMIN", "SUPPORT", "BILLING", "RESELLER"];
 
 export function AdminFormDialog({ admin, trigger }: { admin?: AdminUser; trigger: React.ReactNode }) {
   const [open, setOpen] = useState(false);

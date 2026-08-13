@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
@@ -26,14 +26,44 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
   { href: "/client-attempts", label: "Client Attempts", icon: Activity },
   { href: "/announcements", label: "Announcements", icon: Megaphone, roles: ["SUPERADMIN"] },
   { href: "/admins", label: "Admins", icon: ShieldCheck, roles: ["SUPERADMIN"] },
+  // The reseller's own section: their balances, their codes. Also shown
+  // to SUPERADMIN so the operator can see what a reseller sees while
+  // helping one.
+  { href: "/reseller", label: "My Codes", icon: Ticket, roles: ["RESELLER", "SUPERADMIN"] },
+  // The operator's view of every reseller and their capacity. Granting
+  // capacity is giving away subscriptions, so it sits with the role that
+  // manages admins.
+  { href: "/resellers", label: "Resellers", icon: Handshake, roles: ["SUPERADMIN"] },
   // No `roles` restriction -- every admin manages their own account
   // security regardless of role, unlike /admins (managing OTHER admins).
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
+/**
+ * RESELLER is an allowlist, not a filter.
+ *
+ * Every other role sees anything without a `roles` restriction, which
+ * was safe while all three were staff. A reseller is an outsider with a
+ * panel login, so that default is exactly wrong for them: adding the
+ * role would silently have handed them Customers, Nodes, Protocol
+ * Configs, Routes and Client Attempts, because none of those carries a
+ * restriction.
+ *
+ * Listing what they MAY see means the next page someone adds is hidden
+ * from resellers until it is deliberately allowed, rather than exposed
+ * until someone notices. The backend gates each endpoint too -- this is
+ * the navigation, not the security boundary -- but a menu full of pages
+ * that 403 is its own kind of broken.
+ */
+const RESELLER_ALLOWED = new Set(["/reseller", "/settings"]);
+
 export function SidebarNav({ role }: { role: AdminRole }) {
   const pathname = usePathname();
-  const items = NAV_ITEMS.filter((item) => !item.roles || item.roles.includes(role));
+  const items = NAV_ITEMS.filter((item) =>
+    role === "RESELLER"
+      ? RESELLER_ALLOWED.has(item.href)
+      : !item.roles || item.roles.includes(role),
+  );
 
   return (
     <nav className="flex flex-col gap-1 p-3">
