@@ -28,7 +28,13 @@ export class NowPaymentsProvider {
     const configured = await this.paymentSettings.nowPayments();
     const apiKey = configured?.apiKey ?? this.config.get<string>("billing.nowpaymentsApiKey");
     if (!apiKey) {
-      throw new Error("NowPayments is not configured -- add an API key in Settings > Payments");
+      // ServiceUnavailableException, not a bare Error: a bare one
+      // reaches the customer as "Internal server error", which tells
+      // them nothing and looks like the product is broken rather than
+      // unconfigured. Reported from real use.
+      throw new ServiceUnavailableException(
+        "Crypto payments are not configured. Please pay by card, or contact support.",
+      );
     }
     return apiKey;
   }
