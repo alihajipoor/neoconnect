@@ -1061,6 +1061,20 @@ get_admin_bearer_token() {
   #
   # 0600 and removed on exit. It holds a 15-minute access token, which
   # deserves no less care than the password that produced it.
+  # An already-minted token, for a run that cannot answer prompts.
+  #
+  # The credential prompts sit in the *middle* of the engine flow, not at
+  # the start, so a scripted install that feeds answers on stdin has to
+  # predict exactly where they land. Two real installs died that way: one
+  # had the admin email swallowed by a port prompt, and the node ended up
+  # registered with a garbage listen port. Supplying the token instead
+  # removes the two prompts whose position is hardest to predict, and it
+  # keeps the password out of any answer file.
+  if [[ -n "${NEOXIFY_ADMIN_TOKEN:-}" ]]; then
+    echo "$NEOXIFY_ADMIN_TOKEN"
+    return 0
+  fi
+
   if [[ -s "$ADMIN_TOKEN_CACHE" ]]; then
     cat "$ADMIN_TOKEN_CACHE"
     return 0
