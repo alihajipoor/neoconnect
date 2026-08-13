@@ -424,3 +424,95 @@ export function invoiceOverdueEmail(params: {
     }`,
   };
 }
+
+/** A row of platform download links, laid out as a table so it survives
+ * Outlook, which ignores flexbox entirely.
+ *
+ * Every href goes through the API's own `/updates/installer/*` redirects
+ * rather than a GitHub release URL. Those redirect to whatever the
+ * current release is (verified live: they resolve to desktop-v0.9.4 and
+ * android-v0.2.9 today), so an email sent months ago still hands someone
+ * the current build. A pasted release URL would rot the day after it was
+ * sent, and this email is the one a reseller forwards repeatedly.
+ */
+function downloadRow(publicApiUrl?: string): string {
+  const base = publicApiUrl ? publicApiUrl.replace(/\/$/, "") : "";
+  if (!base) {
+    // No configured public address means we cannot build a link that
+    // works outside our own network. Saying where to go beats printing
+    // a broken one.
+    return paragraph("Download the app from neoxify.net to get started.");
+  }
+
+  const cell = (label: string, sub: string, href: string) =>
+    `<td style="padding:0 6px 10px 0;" valign="top">
+      <a href="${href}" style="display:block;padding:12px 14px;border:1px solid #e4dcfb;border-radius:10px;text-decoration:none;background:#faf8ff;">
+        <span style="display:block;font-size:14px;font-weight:700;color:${PRIMARY_DARK};">${label}</span>
+        <span style="display:block;font-size:12px;color:${MUTED};">${sub}</span>
+      </a>
+    </td>`;
+
+  return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 18px 0;width:100%;">
+    <tr>
+      ${cell("Windows", "Installer", `${base}/updates/installer/windows`)}
+      ${cell("Android", "APK", `${base}/updates/installer/android`)}
+    </tr>
+  </table>`;
+}
+
+/**
+ * The email a reseller sends when they hand a subscription to one of
+ * their own customers.
+ *
+ * This is a stranger's first contact with the product -- they did not
+ * sign up, they were given something by someone they bought from -- so
+ * it has to answer "what is this, is it real, what do I do" in one
+ * screen: what they have been given, the code itself, one button that
+ * activates it, and where to get the app.
+ *
+ * The activation link carries the code so the common path is a single
+ * tap. The code is also printed, because a link that arrives mangled by
+ * a mail client, or is read on a different device from the one being set
+ * up, must not be a dead end -- and because a reseller may have handed
+ * the same code over verbally.
+ *
+ * Deliberately does not name the reseller. They are a business
+ * relationship of the operator's, not a brand the recipient knows, and a
+ * name they do not recognise on an unexpected email reads as phishing.
+ */
+export function resellerVoucherEmail(params: {
+  code: string;
+  planName: string;
+  activationUrl: string;
+  publicApiUrl?: string;
+  expiresAt?: Date | null;
+}) {
+  const expiry = params.expiresAt
+    ? `This code expires on ${params.expiresAt.toISOString().slice(0, 10)}.`
+    : "This code does not expire.";
+
+  return {
+    subject: `Your Neoxify ${params.planName} subscription is ready`,
+    html: shell({
+      preheader: `Activate your ${params.planName} plan with code ${params.code}.`,
+      bodyHtml: `
+        ${heading("Your subscription is ready")}
+        ${paragraph(
+          `You've been given a <strong>${params.planName}</strong> plan on Neoxify. Activate it with the code below — no payment needed.`,
+        )}
+        ${bigCode(params.code)}
+        ${button(params.activationUrl, "Activate my plan")}
+        ${paragraph("Then install the app and sign in with the same email:")}
+        ${downloadRow(params.publicApiUrl)}
+        ${fineprint(
+          `${expiry} If the button doesn't work, go to neoxify.net/account and enter the code by hand.`,
+        )}
+      `,
+    }),
+    text:
+      `Your Neoxify ${params.planName} subscription is ready.\n\n` +
+      `Activation code: ${params.code}\n` +
+      `Activate here: ${params.activationUrl}\n\n` +
+      `${expiry}\n`,
+  };
+}
