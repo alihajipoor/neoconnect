@@ -52,7 +52,7 @@
         "decryption": "none",
         "fallbacks": [
           {
-            "//": "The WebSocket carrier, on the same port and the same certificate as this inbound. A path rather than a port of its own is the entire point: a second listener is a second thing to fingerprint and block, while an HTTP upgrade on a normal HTTPS port is what ordinary web applications do all day. Matched before the ALPN entry below because WebSocket upgrades are HTTP/1.1, so they never reach the h2 bucket.",
+            "//": "The WebSocket carrier, on the same port and the same certificate as this inbound. A path rather than a port of its own is the entire point: a second listener is a second thing to fingerprint and block, while an HTTP upgrade on a normal HTTPS port is what ordinary web applications do all day. Order in this array does not select it -- xray-core keys fallbacks into a [name][alpn][path] map, so a JSON list is unordered here (proxy/vless/inbound/inbound.go). Two properties make this entry win regardless of the h2 entry below: at startup every path registered under the empty ALPN is copied into each named-ALPN bucket that lacks it, and the path itself is found by sniffing the first request line, which does not depend on the negotiated ALPN. That matters because the ALPN really is h2 for these connections -- our clients advertise Chrome's list and this inbound prefers h2 -- so the tempting simplification of dropping either entry breaks the other one.",
             "path": "__VLESS_WS_PATH__",
             "dest": "__VLESS_WS_DEST__",
             "xver": 1
@@ -92,7 +92,7 @@
         "clients": [],
         "fallbacks": [
           {
-            "//": "The WebSocket carrier, on the same port and the same certificate as this inbound. A path rather than a port of its own is the entire point: a second listener is a second thing to fingerprint and block, while an HTTP upgrade on a normal HTTPS port is what ordinary web applications do all day. Matched before the ALPN entry below because WebSocket upgrades are HTTP/1.1, so they never reach the h2 bucket.",
+            "//": "The WebSocket carrier, on the same port and the same certificate as this inbound. A path rather than a port of its own is the entire point: a second listener is a second thing to fingerprint and block, while an HTTP upgrade on a normal HTTPS port is what ordinary web applications do all day. Order in this array does not select it -- xray-core keys fallbacks into a [name][alpn][path] map, so a JSON list is unordered here (proxy/vless/inbound/inbound.go). Two properties make this entry win regardless of the h2 entry below: at startup every path registered under the empty ALPN is copied into each named-ALPN bucket that lacks it, and the path itself is found by sniffing the first request line, which does not depend on the negotiated ALPN. That matters because the ALPN really is h2 for these connections -- our clients advertise Chrome's list and this inbound prefers h2 -- so the tempting simplification of dropping either entry breaks the other one.",
             "path": "__VLESS_WS_PATH__",
             "dest": "__VLESS_WS_DEST__",
             "xver": 1
