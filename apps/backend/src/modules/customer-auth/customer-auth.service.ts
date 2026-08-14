@@ -32,8 +32,40 @@ const VERIFY_EMAIL_CODE_TTL_MS = 24 * 60 * 60 * 1000;
 // reset code is a live credential sitting in an inbox.
 const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * Wrong guesses at one account's reset code before the code is burned.
+ *
+ * Six digits is a million-value space, and the per-IP throttle is the
+ * only other thing standing in front of it. Per-IP is exactly the limit
+ * that a distributed attacker walks around: 5/minute from each of a
+ * thousand addresses is 150,000 guesses inside the code's thirty-minute
+ * life, which is a one-in-seven chance at a *chosen* account. Counting
+ * the guesses against the ACCOUNT is the only measure that sees that
+ * shape -- the same reasoning as LoginGuardService's account counters.
+ *
+ * Burning the code rather than locking the account is deliberate. A
+ * lockout would hand anyone who knows an email address a way to deny
+ * the owner their own reset; burning the code costs the real customer
+ * one more "email me a code" press and costs the attacker their whole
+ * window.
+ */
+const RESET_CODE_MAX_ATTEMPTS = 5;
+
 @Injectable()
 export class CustomerAuthService {
+  /**
+   * Wrong reset-code guesses, keyed by lowercased email.
+   *
+   * Process-local, like LoginGuardService's counters, and for the same
+   * reasons: it holds minutes of bookkeeping rather than records, and
+   * there is one backend instance (infra/docker-compose.prod.yml). A
+   * restart forgets the counter but NOT its effect -- burning a code is
+   * a database write, so nothing an attacker already lost comes back.
+   * Only ever written for an address that has a live code, so it cannot
+   * be grown without bound by naming addresses that do not exist.
+   */
+  private readonly resetCodeAttempts = new Map<string, number>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
@@ -320,6 +352,11 @@ export class CustomerAuthService {
         passwordResetCodeExpiresAt: new Date(Date.now() + PASSWORD_RESET_CODE_TTL_MS),
       },
     });
+    // A new code gets a fresh budget. Without this a customer who ran
+    // their guesses down would find the replacement burned on its first
+    // wrong keystroke -- and an attacker gains nothing, since asking for
+    // a new code invalidates the one they were guessing at.
+    this.resetCodeAttempts.delete(this.resetCodeKey(customer.email));
 
     await this.emailService.sendMail({ to: customer.email, ...passwordResetEmail(code) });
   }
@@ -338,21 +375,52 @@ export class CustomerAuthService {
   async resetPasswordByCode(email: string, code: string, newPassword: string): Promise<void> {
     const customer = await this.prisma.customer.findUnique({ where: { email } });
 
-    if (
-      !customer ||
-      customer.status !== "ACTIVE" ||
-      !customer.passwordResetCode ||
-      customer.passwordResetCode !== code ||
-      !customer.passwordResetCodeExpiresAt ||
-      customer.passwordResetCodeExpiresAt < new Date()
-    ) {
+    const codeIsLive =
+      !!customer &&
+      customer.status === "ACTIVE" &&
+      !!customer.passwordResetCode &&
+      !!customer.passwordResetCodeExpiresAt &&
+      customer.passwordResetCodeExpiresAt >= new Date();
+
+    if (!customer || !codeIsLive || customer.passwordResetCode !== code) {
+      // Count the miss against the account, and burn the code once the
+      // guesses run out -- see RESET_CODE_MAX_ATTEMPTS. Only when a live
+      // code exists: counting misses for addresses with no code running
+      // would let anyone fill this map by naming strangers.
+      if (customer && codeIsLive) {
+        await this.recordResetCodeMiss(customer.id, email);
+      }
       // Deliberately identical whatever went wrong -- a distinct "no such
       // account" would turn this into an account-enumeration oracle, which
-      // is the very thing forgotPassword() goes to lengths to avoid.
+      // is the very thing forgotPassword() goes to lengths to avoid. The
+      // burn is silent for the same reason: an attacker must not be able
+      // to tell "wrong code" from "wrong code, and that was your last".
       throw new BadRequestException("Invalid or expired reset code");
     }
 
+    this.resetCodeAttempts.delete(this.resetCodeKey(email));
     await this.applyNewPassword(customer.id, newPassword);
+  }
+
+  private resetCodeKey(email: string): string {
+    return email.trim().toLowerCase();
+  }
+
+  /** Tally a wrong guess, and clear the code when the budget is spent. */
+  private async recordResetCodeMiss(customerId: string, email: string): Promise<void> {
+    const key = this.resetCodeKey(email);
+    const attempts = (this.resetCodeAttempts.get(key) ?? 0) + 1;
+
+    if (attempts < RESET_CODE_MAX_ATTEMPTS) {
+      this.resetCodeAttempts.set(key, attempts);
+      return;
+    }
+
+    this.resetCodeAttempts.delete(key);
+    await this.prisma.customer.update({
+      where: { id: customerId },
+      data: { passwordResetCode: null, passwordResetCodeExpiresAt: null },
+    });
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {

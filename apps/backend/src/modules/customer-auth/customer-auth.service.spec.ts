@@ -428,6 +428,74 @@ describe("CustomerAuthService", () => {
 
       expect(missing).toBe(wrong);
     });
+
+    /**
+     * A six-digit code guarded only by a per-IP throttle is guessable by
+     * anyone with a few hundred addresses: 5/minute each, across the
+     * code's thirty-minute life, is six figures of attempts aimed at one
+     * chosen account. Counting misses against the ACCOUNT is what sees
+     * that; the per-IP limit never can.
+     */
+    describe("guess budget", () => {
+      const wrongGuess = () =>
+        service
+          .resetPasswordByCode("customer@example.com", "000000", "new-password")
+          .catch(() => undefined);
+
+      it("burns the code after five wrong guesses, whatever address they come from", async () => {
+        prisma.customer.findUnique.mockResolvedValue(withCode());
+
+        for (let i = 0; i < 4; i += 1) await wrongGuess();
+        expect(prisma.customer.update).not.toHaveBeenCalled();
+
+        await wrongGuess();
+        expect(prisma.customer.update).toHaveBeenCalledWith({
+          where: { id: "customer-1" },
+          data: { passwordResetCode: null, passwordResetCodeExpiresAt: null },
+        });
+      });
+
+      it("says nothing different on the guess that burns it", async () => {
+        // An attacker who could tell "wrong" from "wrong, and spent"
+        // would know exactly when to ask for a fresh window.
+        prisma.customer.findUnique.mockResolvedValue(withCode());
+        const messages: string[] = [];
+        for (let i = 0; i < 5; i += 1) {
+          messages.push(
+            await service
+              .resetPasswordByCode("customer@example.com", "000000", "new-password")
+              .then(() => "resolved")
+              .catch((e: Error) => e.message),
+          );
+        }
+        expect(new Set(messages).size).toBe(1);
+      });
+
+      it("gives a newly requested code a fresh budget", async () => {
+        // Otherwise a customer who fumbled five times would find the
+        // replacement burned on its first typo, which is a lockout by
+        // another name.
+        prisma.customer.findUnique.mockResolvedValue(withCode());
+        for (let i = 0; i < 4; i += 1) await wrongGuess();
+
+        await service.forgotPassword("customer@example.com");
+        prisma.customer.update.mockClear();
+
+        for (let i = 0; i < 4; i += 1) await wrongGuess();
+        expect(prisma.customer.update).not.toHaveBeenCalled();
+      });
+
+      it("does not count misses for an address with no live code", async () => {
+        // The map would otherwise be growable by anyone naming strangers.
+        prisma.customer.findUnique.mockResolvedValue(null);
+        for (let i = 0; i < 10; i += 1) {
+          await service
+            .resetPasswordByCode("nobody@example.com", "000000", "x")
+            .catch(() => undefined);
+        }
+        expect(prisma.customer.update).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe("changePassword", () => {
