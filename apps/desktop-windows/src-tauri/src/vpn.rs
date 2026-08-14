@@ -107,10 +107,10 @@ impl ProtocolUserPayload {
                 // variant presents its own, so the only server-side thing
                 // needed is the name to verify it against.
                 //
-                // Unlike Trojan below there is no host fallback. A wrong
-                // SNI here fails the certificate check outright, so
-                // guessing would turn a fixable misconfiguration into a
-                // TLS error with nothing pointing at the cause.
+                // No host fallback, here or in Trojan below. A wrong
+                // SNI fails the certificate check outright, so guessing
+                // would turn a fixable misconfiguration into a TLS
+                // error with nothing pointing at the cause.
                 let server_name = self
                     .connection
                     .public_params
@@ -165,15 +165,33 @@ impl ProtocolUserPayload {
                 // REALITY uses: the password is this customer's, the
                 // domain is the server's.
                 //
-                // Falls back to the host only when the node did not
-                // record one, which is an operator misconfiguration --
-                // sending no SNI at all would be worse, since a TLS
-                // handshake without one stands out immediately.
+                // Refused when the node recorded no name, rather than
+                // falling back to the host as this used to.
+                //
+                // The fallback was written to avoid an SNI-less
+                // handshake, and it produced exactly that. Nodes are
+                // registered by IP, and uTLS -- the stack xray.exe uses
+                // for the "chrome" fingerprint -- drops an IP literal
+                // from the extension entirely (hostnameInSNI in
+                // utls@v1.8.3 returns "" for anything net.ParseIP
+                // accepts). So the disguise became a Chrome-shaped
+                // ClientHello carrying no server name at all, which is
+                // about the loudest thing that can be sent to a filter,
+                // and the certificate check then failed anyway: our
+                // certificates are issued for names, and none of them
+                // carries an IP SAN. The fallback could not have
+                // connected on any node we run; it only made the
+                // failure look like a network problem instead of a
+                // missing field. Same refusal as VLESS+TLS below, and
+                // the same wording the Android client uses.
                 let params = &self.connection.public_params;
                 let server_name = params
                     .get("serverName")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(&self.connection.host)
+                    .ok_or_else(|| {
+                        "this server's TLS settings are missing 'serverName' -- ask support to re-provision it"
+                            .to_string()
+                    })?
                     .to_string();
                 Ok(ConnectProfile::XrayTrojan(TrojanProfile {
                     password: field(&self.credentials, "password")?.to_string(),
@@ -601,19 +619,22 @@ mod tests {
     }
 
     /// The certificate name is the server's, not the customer's, so it
-    /// comes from the node's config -- but a node that never recorded one
-    /// must still produce a usable profile rather than an empty SNI,
-    /// which would stand out on the wire far more than the wrong name.
+    /// comes from the node's config. This used to fall back to the host
+    /// on the theory that a wrong name beats no name -- but the host is
+    /// an IP, uTLS omits an IP literal from SNI altogether, and the
+    /// certificate check fails against it regardless. The fallback
+    /// produced the conspicuous handshake it was meant to prevent, so a
+    /// node missing this field is now a refusal the customer can report.
     #[test]
-    fn trojan_falls_back_to_the_host_when_the_node_records_no_server_name() {
-        let profile = payload(
+    fn trojan_without_a_server_name_is_rejected() {
+        let err = payload(
             "XRAY_TROJAN",
             serde_json::json!({ "password": "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MEFCQ0RFRg" }),
             serde_json::json!({}),
         )
         .into_profile()
-        .expect("should map");
-        assert!(profile.validate().is_ok());
+        .expect_err("should refuse");
+        assert!(err.contains("serverName"), "unhelpful message: {err}");
     }
 
     #[test]
@@ -641,10 +662,11 @@ mod tests {
         assert!(profile.validate().is_ok());
     }
 
-    /// Deliberately unlike Trojan, which falls back to the host. Here the
-    /// certificate is checked against this name, so guessing produces a
-    /// TLS failure with nothing pointing at the missing field -- exactly
-    /// the shape of bug that made Trojan unusable from the app.
+    /// The certificate is checked against this name, so guessing
+    /// produces a TLS failure with nothing pointing at the missing
+    /// field -- exactly the shape of bug that made Trojan unusable from
+    /// the app. Trojan now refuses for the same reason; see
+    /// trojan_without_a_server_name_is_rejected.
     #[test]
     fn vless_over_tls_without_a_server_name_is_rejected() {
         assert!(payload(
@@ -660,14 +682,21 @@ mod tests {
     fn maps_xray_pulling_reality_params_from_the_connection_field() {
         // The whole reason `connection` exists: these values are not in
         // the per-user credentials for this protocol.
+        //
+        // The camouflage name here was www.microsoft.com, copied from a
+        // node that had it. It is the one domain this project knows to
+        // be a bad choice -- endpoint security software intercepts it,
+        // and REALITY then fails with "received real certificate" (see
+        // docs/detection-resistance.md) -- so it does not belong in a
+        // fixture people copy from.
         let profile = payload(
             "XRAY_VLESS_REALITY",
             serde_json::json!({ "uuid": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "flow": "xtls-rprx-vision" }),
             serde_json::json!({
                 "realityPublicKey": "3Qc9mFkJz8xN2pQrStUvWxYz0123456789abcdefgh",
                 "shortIds": ["0123abcd"],
-                "serverName": "www.microsoft.com",
-                "dest": "www.microsoft.com:443"
+                "serverName": "www.speedtest.net",
+                "dest": "www.speedtest.net:443"
             }),
         )
         .into_profile()
@@ -675,7 +704,7 @@ mod tests {
         match &profile {
             ConnectProfile::XrayVlessReality(p) => {
                 assert_eq!(p.short_id, "0123abcd");
-                assert_eq!(p.server_name, "www.microsoft.com");
+                assert_eq!(p.server_name, "www.speedtest.net");
                 assert_eq!(p.host, "203.0.113.5");
                 assert_eq!(p.port, 443);
             }
