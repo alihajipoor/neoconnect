@@ -1694,3 +1694,74 @@ pins the inbound tag being carried (without it a France rule is restored
 onto the Finland listener — tunnelled, wrong country), the enabled-and-
 relayed filter, skipping a route with no uplink credential, and that the
 fast sweep does not drag user re-assertion along with it.
+
+## 2026-08-14 — Two production steps waiting on the owner, in this order
+
+**Status:** blocked on the owner. Nothing is half-applied; production is
+unchanged and healthy. Both steps below are ready and neither has been
+started.
+
+### The order is not obvious and matters
+
+Do the backend deploy **first**. The ir1 config change needs an Xray
+restart, and a restart is exactly the event that empties the relay's
+hot-added routes. With the blackhole in place that window becomes an
+outage instead of a leak, which is the right trade -- but the width of
+the window is set by the backend's route re-assert sweep. Undeployed that
+is still ten minutes; deployed it is sixty seconds.
+
+Doing ir1 first would mean up to ten minutes of blackholed traffic for
+real customers, to fix a leak that lasts the same ten minutes. Deploy
+first and it costs about a minute.
+
+### 1. Deploy the backend
+
+Production is at 29c5250, the commit this session started from -- nine
+behind. Checked before proposing it: **no Prisma migrations, no schema
+change, no new environment variables**. Only two of the nine commits
+touch the running backend (the voucher link and the route sweep); the
+rest are journal, workflows and client versions.
+
+    ssh -i ~/.ssh/ovh_neo root@167.233.65.166 \
+      'cd /root/neoconnect && git pull --ff-only origin main && \
+       docker compose -f infra/docker-compose.yml up -d --build backend'
+
+The API is not in the VPN data path, so customer tunnels are unaffected;
+the panel and API blink for a few seconds.
+
+Note for whoever runs this from an agent session: the SSH command above
+was refused by the **permission classifier**, not by the server. Those
+two are indistinguishable from the error text, and this journal has
+recorded mistaking one for the other before.
+
+### 2. Make ir1 fail closed
+
+Checked first, and the answer was cleaner than expected: in ir1's entire
+access log the `direct` outbound is used **exactly once**, and that once
+is the leak itself. Nothing legitimate depends on the fallback, so
+replacing it as the default breaks nothing.
+
+`outbounds` is currently `[{"protocol":"freedom","tag":"direct"}]`.
+Prepend a blackhole so it becomes the default:
+
+    "outbounds": [
+      { "protocol": "blackhole", "tag": "blocked" },
+      { "protocol": "freedom",  "tag": "direct"  }
+    ]
+
+`direct` stays in the list so anything referencing it by tag still
+resolves. Then `systemctl restart xray`, and confirm within a minute that
+the relay routes came back -- `grep 'route-.*-out' /var/log/xray/access.log`
+should show sessions again.
+
+**This is a live Iran relay with real customers and it is the one action
+here that can cause a visible outage.** Worth doing with the owner
+present, not unattended.
+
+### Also still open, unchanged
+
+- An Iranian tester on WireGuard. Still the highest-value unknown, and
+  still nothing in this session moved it.
+- Xray on a real Android handset; the emulator could not answer it.
+- ir1 still allows password SSH on port 22. Key auth is confirmed
+  working now, so this is safe to close whenever.
