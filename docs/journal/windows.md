@@ -1457,3 +1457,90 @@ directive sat above `local` rather than above the `for` it reports on.
 2. The Android emulator matrix, against 0.2.10.
 3. The app-level path: failover ladder and connection verification, which
    this matrix deliberately bypassed.
+
+## 2026-08-14 — Iran-relay matrix: 11/12, and WireGuard never reaches ir1
+
+**Status:** 27 of 28 routes now proven end to end. One real failure, two
+anomalies worth a look, nothing changed on any node.
+
+### Results
+
+All 12 ir1 routes raised from the VM. **11 pass**, each confirmed by an
+exit IP matching the exit the route is wired to — not the host dialled.
+That distinction matters and is why this needed its own harness: every
+relay route enters ir1 and leaves from finland1 or france-1, so a check
+comparing the exit against the dialled host would have failed all twelve.
+
+**The multi-exit design is proven at the node.** ir1's own access log
+shows each inbound mapping to its own distinct outbound:
+
+    vless-in          -> route-1fcd952f-...-out
+    vless-fr-in       -> route-66fa6da6-...-out
+    trojan-in         -> route-215ffa1d-...-out
+    trojan-fr-in      -> route-b383ba7d-...-out
+    shadowsocks-in    -> route-8d9cfe06-...-out
+    shadowsocks-fr-in -> route-13660d34-...-out
+    vless-tls-in / -fr-in, vless-ws-in / -fr-in likewise
+
+That is `ProtocolConfig.inboundTag` doing its job — the mechanism that
+previously let two routes on one config silently share an exit.
+
+### WireGuard over the relay: zero bytes ever received
+
+`Iran relay / WIREGUARD` (ir1:51064) produced **no egress at all** while
+the service's connect returned `{"status":"ok"}`.
+
+Settled at the node rather than guessed. ir1 is serving WireGuard
+correctly — `wg0` up, `wg-quick@wg0` active, udp/51064 listening — and:
+
+- **2 peers configured, not one has ever completed a handshake**
+- **zero bytes received on any peer**
+
+So the packets never arrived. This reproduces the cross-border DPI drop
+with node-side proof, which the earlier Germany test could only infer
+from the client side.
+
+**It says nothing about the customer path, and must not be quoted as
+though it does.** This rig is in the US, so its traffic crosses Iran's
+international gateway inbound — the same path the Germany test took. A
+customer inside Iran reaches ir1 over domestic traffic that never touches
+that filter. The open question from the previous entry stands exactly
+where it was: it still needs one Iranian tester.
+
+**`phantun-server` is `inactive` on ir1** — the workaround that was
+proven to fix this is not running.
+
+### Two anomalies, not yet explained
+
+Both from ir1's access log, filtered to this rig's address:
+
+1. **One session shows `[vless-fr-in >> direct]`** — egressing at ir1
+   itself instead of through the relay route. Every other session on that
+   inbound shows the route outbound, and the measured exit IP was
+   france-1, so this is not the whole connection. But `>> direct` on a
+   relay inbound means traffic leaving inside Iran, which is the failure
+   mode the restart-drops-routes entry describes. Worth finding out
+   whether it is a first-packet artifact before the route applies, or
+   something that recurs.
+2. **`vless-in` shows two different outbound tags** (`route-1fcd952f`
+   and `route-c1b3f538`) for one inbound within a single run. Both
+   exited at finland1 so nothing was mis-routed, but one inbound should
+   map to one route.
+
+### Also noticed
+
+The **Ultimate** plan has `relayOnly = true`, yet
+`GET /customer/protocol-users` returns **all 28** routes for that
+account, direct ones included — not the 12 relay routes alone. Either
+the flag means something narrower than its name suggests or it is not
+being applied at this endpoint. Not tested further.
+
+### Method, and its ceiling
+
+Same as the direct matrix: the service's named pipe, profiles built to
+mirror `into_profile`. It proves engines, routing and egress. The app's
+failover ladder and its own connection verification sit above this and
+are still unverified — in particular, the service returning `ok` for the
+dead WireGuard tunnel is a statement about the service layer, not
+evidence that the app would have shown a customer "Connected". That
+needs the GUI to answer and has not been tested.
