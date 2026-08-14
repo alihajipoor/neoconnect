@@ -1,5 +1,6 @@
 import "server-only";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
 export const ACCESS_COOKIE = "neoxify_access";
 export const REFRESH_COOKIE = "neoxify_refresh";
@@ -35,6 +36,31 @@ export async function getSession(): Promise<SessionAdmin | null> {
   if (payload.exp * 1000 < Date.now()) return null;
 
   return { sub: payload.sub, email: payload.email, role: payload.role };
+}
+
+/**
+ * Send outsider roles away from a staff-only page.
+ *
+ * A reseller is not staff: they hold a panel login so they can mint
+ * their own vouchers, and nothing else here is theirs. The sidebar has
+ * hidden the rest from them since M25, but hiding a link does not stop
+ * anyone typing the URL -- and /overview leaked exactly that way once
+ * already, found by signing in as a reseller rather than by reading
+ * code.
+ *
+ * This is the second layer, not the boundary: JwtAuthGuard on the
+ * backend refuses an outsider role on any endpoint that does not name
+ * it, so a page reached anyway renders nothing of anyone else's. What
+ * this adds is landing them somewhere that works instead of on a screen
+ * full of 403s.
+ *
+ * Call it at the top of every page that is not the reseller's own.
+ */
+export async function requireStaff(): Promise<SessionAdmin> {
+  const session = await getSession();
+  if (!session) redirect("/login");
+  if (session.role === "RESELLER") redirect("/reseller");
+  return session;
 }
 
 export async function getAccessToken(): Promise<string | null> {

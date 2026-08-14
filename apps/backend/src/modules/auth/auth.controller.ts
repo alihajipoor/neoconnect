@@ -9,10 +9,23 @@ import { MfaEnableDto } from "./dto/mfa-enable.dto";
 import { MfaVerifyDto } from "./dto/mfa-verify.dto";
 import { RefreshDto } from "./dto/refresh.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { RolesGuard } from "../../common/guards/roles.guard";
+import { ALL_ADMIN_ROLES, Roles } from "../../common/decorators/roles.decorator";
 import { CurrentAdmin } from "../../common/decorators/current-admin.decorator";
 import { AuthenticatedAdmin } from "./types";
 import { AdminsService } from "../admins/admins.service";
 
+/**
+ * Sign-in, and the account-security settings an admin manages for
+ * themselves.
+ *
+ * The authenticated routes below all carry @Roles(...ALL_ADMIN_ROLES).
+ * That is not decoration: JwtAuthGuard denies outsider roles (RESELLER)
+ * on any admin endpoint that declares no roles at all, so without this a
+ * reseller could sign in and then be unable to read their own account,
+ * enable MFA, or sign out. These are the endpoints where "every role,
+ * including the outsiders" is the right answer, and they now say so.
+ */
 @ApiTags("auth")
 @Controller("auth")
 export class AuthController {
@@ -22,13 +35,14 @@ export class AuthController {
     private readonly loginGuard: LoginGuardService,
   ) {}
 
-  // Deliberately NOT gated by RolesGuard/@Roles like AdminsController's
-  // GET /admins/:id -- every admin, regardless of role, needs to be able
-  // to see and manage their OWN security settings (MFA status), not just
-  // SUPERADMINs managing other admins' accounts.
+  // Open to every role, unlike AdminsController's GET /admins/:id --
+  // every admin needs to see and manage their OWN security settings
+  // (MFA status), not just SUPERADMINs managing other admins' accounts.
+  // Returns the caller's own record only: the id comes from the token.
   @Get("me")
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ALL_ADMIN_ROLES)
   me(@CurrentAdmin() admin: AuthenticatedAdmin) {
     return this.adminsService.get(admin.sub);
   }
@@ -80,14 +94,16 @@ export class AuthController {
 
   @Post("logout")
   @HttpCode(HttpStatus.NO_CONTENT)
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ALL_ADMIN_ROLES)
   async logout(@CurrentAdmin() admin: AuthenticatedAdmin) {
     await this.authService.revokeAllSessions(admin.sub);
   }
 
   @Post("mfa/setup")
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ALL_ADMIN_ROLES)
   setupMfa(@CurrentAdmin() admin: AuthenticatedAdmin) {
     return this.authService.setupMfa(admin.sub);
   }
@@ -95,7 +111,8 @@ export class AuthController {
   @Post("mfa/enable")
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ALL_ADMIN_ROLES)
   async enableMfa(@CurrentAdmin() admin: AuthenticatedAdmin, @Body() dto: MfaEnableDto) {
     await this.authService.enableMfa(admin.sub, dto.code);
   }
@@ -103,7 +120,8 @@ export class AuthController {
   @Post("mfa/disable")
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ALL_ADMIN_ROLES)
   async disableMfa(@CurrentAdmin() admin: AuthenticatedAdmin, @Body() dto: MfaDisableDto) {
     await this.authService.disableMfa(admin.sub, dto.password);
   }

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { requireStaff } from "@/lib/session";
 import { notFound } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Mail, Users } from "lucide-react";
 import { apiFetch } from "@/lib/api";
@@ -21,6 +22,7 @@ export default async function CustomerDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  await requireStaff();
   const { id } = await params;
 
   const customer = await apiFetch<Customer>(`/customers/${id}`).catch(() => null);

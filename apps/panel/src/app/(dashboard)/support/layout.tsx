@@ -1,4 +1,5 @@
 import { apiFetch } from "@/lib/api";
+import { requireStaff } from "@/lib/session";
 import type { SupportSettings, SupportTicket } from "@/lib/types";
 import { TicketRail } from "./ticket-rail";
 
@@ -9,6 +10,7 @@ import { TicketRail } from "./ticket-rail";
  * way rather than as a table you bounce in and out of.
  */
 export default async function SupportLayout({ children }: { children: React.ReactNode }) {
+  await requireStaff();
   const [tickets, settings] = await Promise.all([
     apiFetch<SupportTicket[]>("/support/tickets"),
     apiFetch<SupportSettings>("/support/settings"),
