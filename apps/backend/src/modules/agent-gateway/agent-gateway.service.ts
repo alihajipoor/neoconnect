@@ -39,12 +39,21 @@ const SWEEP_INTERVAL_MS = 30_000;
 // of writes on every node every minute.
 const REASSERT_INTERVAL_MS = 10 * 60_000;
 
+/** How often relayed routes are re-asserted onto connected nodes.
+ *
+ * Separate from REASSERT_INTERVAL_MS, and far shorter, because this
+ * interval is the width of the window in which a relay customer's
+ * traffic egresses at the relay instead of at the exit. See the comment
+ * at the sweep itself for why the two cannot share a schedule. */
+const ROUTE_REASSERT_INTERVAL_MS = 60_000;
+
 @Injectable()
 export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AgentGatewayService.name);
   private server?: grpc.Server;
   private sweepHandle?: NodeJS.Timeout;
   private reassertHandle?: NodeJS.Timeout;
+  private routeReassertHandle?: NodeJS.Timeout;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -113,11 +122,47 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Provisioning re-assert sweep failed: ${err}`);
       });
     }, REASSERT_INTERVAL_MS);
+
+    // Routes get their own, much faster sweep. The two re-assertions look
+    // alike but they are not comparable in either cost or consequence.
+    //
+    // Cost: re-asserting users sends one CREATE_USER per user per sweep,
+    // which is why it is deliberately infrequent. Routes are a dozen rows
+    // on the busiest relay we run, so this is nearly free.
+    //
+    // Consequence: a late user re-assert is an outage -- the customer
+    // cannot authenticate, notices immediately, and nothing leaks. A late
+    // ROUTE re-assert is worse than an outage. With no rule matching the
+    // entry inbound, traffic falls through to the relay's own `direct`
+    // outbound and leaves from the relay itself, so a customer routing
+    // through Iran to get out of Iran egresses in Iran, while the app
+    // shows a healthy connection and says nothing.
+    //
+    // That is not hypothetical: ir1's access log recorded exactly one
+    // such session, 2026-08-13 23:50:51, on a real customer's credential.
+    // At the shared 10-minute interval the window after any `systemctl
+    // restart xray` was up to ten minutes wide.
+    //
+    // A static catch-all rule routing unmatched relay traffic to a
+    // blackhole would close the window entirely and was the first thing
+    // tried. It cannot work as written: the agent adds route rules with
+    // ShouldAppend=true (agent/internal/relay/provisioner.go), so any
+    // rule already in config.json is evaluated FIRST and would blackhole
+    // every relay route instead of only the unmatched ones. Making the
+    // relay fail closed needs the default outbound changed on the node
+    // itself, which is a live-node change and is not this commit's to
+    // make.
+    this.routeReassertHandle = setInterval(() => {
+      this.reassertRoutesOnConnectedNodes().catch((err) => {
+        this.logger.warn(`Route re-assert sweep failed: ${err}`);
+      });
+    }, ROUTE_REASSERT_INTERVAL_MS);
   }
 
   onModuleDestroy() {
     if (this.sweepHandle) clearInterval(this.sweepHandle);
     if (this.reassertHandle) clearInterval(this.reassertHandle);
+    if (this.routeReassertHandle) clearInterval(this.routeReassertHandle);
     this.server?.forceShutdown();
   }
 
@@ -141,6 +186,18 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private async reassertAllConnectedNodes() {
     for (const nodeId of this.registry.connectedNodeIds()) {
       await this.reassertProvisionedUsers(nodeId, { persist: false });
+      await this.reassertConfiguredRoutes(nodeId, { persist: false });
+    }
+  }
+
+  /** Routes only, on the fast sweep.
+   *
+   * Deliberately does NOT re-assert users: that is the expensive half and
+   * it is already covered by reassertAllConnectedNodes above. Running it
+   * at this cadence would multiply CREATE_USER traffic tenfold to shorten
+   * a window that only routes are exposed to. */
+  private async reassertRoutesOnConnectedNodes() {
+    for (const nodeId of this.registry.connectedNodeIds()) {
       await this.reassertConfiguredRoutes(nodeId, { persist: false });
     }
   }
