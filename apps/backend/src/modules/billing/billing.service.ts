@@ -56,7 +56,7 @@ export class BillingService {
     const provider =
       dto.provider === "STRIPE"
         ? ("STRIPE" as const)
-        : await this.resolveCryptoProvider(dto.provider as "NOWPAYMENTS" | "PLISIO");
+        : await this.resolveCryptoProvider(dto.provider);
 
     const transaction = await this.prisma.paymentTransaction.create({
       data: {
@@ -144,7 +144,7 @@ export class BillingService {
     const provider =
       dto.provider === "STRIPE"
         ? ("STRIPE" as const)
-        : await this.resolveCryptoProvider(dto.provider as "NOWPAYMENTS" | "PLISIO");
+        : await this.resolveCryptoProvider(dto.provider);
 
     const transaction = await this.prisma.paymentTransaction.create({
       data: {

@@ -54,7 +54,7 @@ describe("PublicVouchersController", () => {
     ];
 
     const messages = new Set<string>();
-    for (const [label, row] of cases) {
+    for (const [, row] of cases) {
       prisma.voucher.findUnique.mockResolvedValue(row);
       await expect(controller.preview("ABCD2345EFGH")).rejects.toThrow(NotFoundException);
       try {
