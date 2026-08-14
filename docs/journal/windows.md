@@ -1544,3 +1544,81 @@ are still unverified — in particular, the service returning `ok` for the
 dead WireGuard tunnel is a statement about the service layer, not
 evidence that the app would have shown a customer "Connected". That
 needs the GUI to answer and has not been tested.
+
+## 2026-08-14 — Android 0.2.10 on the emulator: the app is honest, Xray did not run
+
+**Status:** partial. The app-level path was exercised for the first time
+and behaved well; the Xray family did not establish on this emulator and
+that result is **not** transferable to a real phone.
+
+### The app tells the truth about its own state
+
+This is the first test in this campaign that covered the layer the two
+desktop matrices deliberately skipped — the UI, the failover ladder and
+the connection verification. Checked by comparing what the screen said
+against an independently measured exit IP every time:
+
+- Connected, showing "Your IP: 104.105.205.233" — measured exit was
+  **104.105.205.233**. Agreed exactly.
+- "You're not protected" — measured exit was the rig's own WAN address.
+  Agreed.
+- Mid-ladder it says "Checking connection... trying each protocol until
+  one works", which is what was actually happening.
+
+No state was claimed that had not happened. That is the product
+requirement and it holds here.
+
+**Defect 3 from `android-0.2.8-findings.md` is fixed.** Picking
+Compatible no longer fails over silently: the app says "Compatible isn't
+in the Android app yet, so it will connect with Fast instead", and names
+where it landed (`fr-france`). The old behaviour was to appear to try and
+then quietly end up on Fast.
+
+### Xray did not establish here, and the emulator is the suspect
+
+Both attempts — Compatible, and Stealth (REALITY) on ir1 — ended on
+WireGuard to france-1 through the ladder. ir1's access log shows **no
+session at all** from this rig during the Android run (the last entries
+are from the VM matrix an hour earlier), so the Xray attempts did not
+reach the relay.
+
+Do not read this as "REALITY is broken on Android". The AVD is
+**x86_64 running an arm64-v8a APK through translation**, and the Xray
+engine is a native arm64 library. That is a strong candidate cause and it
+does not exist on a real handset. Against it: the 0.2.8 findings came
+from a real phone where the Xray protocols did connect (France
+Shadowsocks worked, Finland's did not). **Needs a real device to
+separate.**
+
+The failover itself worked correctly and honestly throughout, which is
+the part this run does establish.
+
+### Smaller things seen
+
+- The picker lists **indistinguishable duplicates** — "ir1 · Shadowsocks"
+  twice, "Stealth" twice, "Stealth Lite" twice, "Stealth Web" twice.
+  These are the finland1 and france-1 exit pairs, and nothing in the row
+  says which exit a customer would get. Only the latency differs, by a
+  few ms.
+- The orange "Compatible isn't in the Android app yet" notice **persists
+  after switching to another protocol**. It was still on screen with
+  Stealth selected.
+- Installing over the previous debug build failed with
+  `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Expected, and a useful reminder
+  of why the release workflow refuses an unsigned or differently-signed
+  APK: it is not a lesser build, it is one no customer can upgrade to.
+
+### Method note
+
+Driven over adb: `input tap`/`input text` plus screenshots. Two traps
+worth recording. PowerShell's `>` corrupts `adb exec-out screencap`
+output by re-encoding it — use `screencap` to the device then `adb pull`.
+And there is no `curl` or `wget` on the image; `toybox nc` works but its
+DNS does not, so exit-IP checks have to use a literal address.
+
+### Still open
+
+1. Xray on a **real** Android device, against 0.2.10.
+2. The remaining Android routes; only two were driven here.
+3. The desktop app's own UI and ladder — the Windows matrices drove the
+   service pipe, so that layer is still untested on desktop.
