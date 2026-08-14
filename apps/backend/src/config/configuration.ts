@@ -1,3 +1,11 @@
+/** Parses LOGIN_CHALLENGE_GRACE_FAILURES, treating unset/empty/garbage
+ * as "leave the default alone". */
+function challengeGrace(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 export default () => ({
   port: parseInt(process.env.PORT ?? "4000", 10),
   databaseUrl: process.env.DATABASE_URL,
@@ -24,6 +32,24 @@ export default () => ({
     refreshSecret: process.env.CUSTOMER_JWT_REFRESH_SECRET,
     accessTtl: process.env.CUSTOMER_JWT_ACCESS_TTL ?? "15m",
     refreshTtl: process.env.CUSTOMER_JWT_REFRESH_TTL ?? "7d",
+  },
+  loginGuard: {
+    // How many recent failures a sign-in attempt may carry before a
+    // solved proof-of-work challenge becomes mandatory. 0 = required on
+    // every attempt, which is the desired end state and the one-variable
+    // way to get there.
+    //
+    // Do NOT set it to 0 while customers are running a client that
+    // cannot solve one: no desktop or Android build released so far
+    // ships pow.ts, so 0 today refuses their first attempt, not just
+    // their sixth. See LoginGuardService's comment for how that was
+    // established.
+    //
+    // An empty value counts as unset, not as 0: docker-compose passes
+    // through variables that are merely absent from .env as "", and
+    // "" -> Number() -> 0 would silently switch enforcement on and lock
+    // out every customer on a released client.
+    challengeGraceFailures: challengeGrace(process.env.LOGIN_CHALLENGE_GRACE_FAILURES),
   },
   agentGateway: {
     grpcPort: parseInt(process.env.AGENT_GRPC_PORT ?? "50051", 10),

@@ -84,6 +84,12 @@ services:
       INTEGRATIONS_SERVICE_TOKEN: ${INTEGRATIONS_SERVICE_TOKEN:-}
       # Public address of this API, used to build links inside emails.
       PUBLIC_API_URL: ${PUBLIC_API_URL:-}
+      # Recent failures tolerated before a sign-in must carry a solved
+      # proof-of-work challenge. Unset = 5. Set to 0 to require one on
+      # every attempt -- but ONLY once every customer is on a client
+      # that can solve one, which no released build can yet. See
+      # modules/login-guard/login-guard.service.ts.
+      LOGIN_CHALLENGE_GRACE_FAILURES: ${LOGIN_CHALLENGE_GRACE_FAILURES:-}
     volumes:
       - /etc/neoxify/certs:/etc/neoxify/certs:ro
     ports:
