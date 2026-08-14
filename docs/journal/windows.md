@@ -870,3 +870,45 @@ Windows and Android apps.
 ir1 the same way phantun was proven — real handshake plus an exit IP —
 *before* touching either app. The lesson of tonight is that the platform
 matrix of a dependency is worth five minutes up front.
+
+### wstunnel proven too — and it is the one with a client half
+
+```
+handshake=1786693718  tx=3700  rx=6876
+EXIT IP: 204.168.161.100   (finland1)
+```
+
+Same result as phantun, over WebSocket instead of fake TCP, through the
+same Iran relay. Now a systemd service on ir1
+(`installer/assets/neoxify-wstunnel.service`, active + enabled, listening
+on 8447, `--restrict-to 127.0.0.1:51064` so the node is not an open
+forwarder).
+
+**Why this is the path and phantun is not**, despite both working:
+
+| | phantun | wstunnel |
+|---|---|---|
+| Windows client | **none** | `windows_amd64` |
+| Android client | needs raw tun + iptables, impossible unrooted | `android_arm64` |
+| Client privileges | root / CAP_NET_ADMIN | none, userspace |
+| Node-side NAT rules | DNAT + MASQUERADE required | none |
+
+wstunnel needs no tun and no iptables at either end, which is why its
+unit has no companion helper script. Keep phantun — proven, relay-only,
+unadvertised — but the apps will speak wstunnel.
+
+### Where this actually stands
+
+Node side is **done and proven twice over**. The client half is not
+started: the Windows and Android apps must bundle the `wstunnel` binary,
+start it on connect (`wstunnel client -L 'udp://<local>:127.0.0.1:<wg-port>?timeout_sec=0' ws://<node>:8447`),
+point WireGuard's `Endpoint` at that local UDP port, and stop it on
+disconnect. On Windows that belongs in the LocalSystem helper service,
+which already owns the tunnel lifecycle.
+
+Also still to do before this is a product: run wstunnel over **TLS on
+443** rather than plain ws on 8447 (a plain WebSocket on an odd port is
+itself a fingerprint), and give OpenVPN its own instance.
+
+`Iran relay / WIREGUARD` and `/ OPENVPN` remain **disabled**. Ten
+Xray-family relay routes stay enabled and verified.

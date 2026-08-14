@@ -1,0 +1,35 @@
+[Unit]
+# Carries a UDP engine (WireGuard, OpenVPN) inside a WebSocket so it
+# survives a network that drops the protocol by fingerprint.
+#
+# Chosen over phantun for one reason: phantun ships Linux binaries only
+# and needs a raw tun plus iptables on the client, which an unrooted
+# Android app cannot provide and Windows has no build for. wstunnel runs
+# entirely in userspace -- it opens a local UDP port and tunnels it --
+# and ships windows_amd64 and android_arm64. Both were proven against
+# the Iran relay on 2026-08-14 with a real handshake and an exit IP
+# matching the exit node; only this one has a client half we can ship.
+#
+# Needs no NAT rules and no CAP_NET_ADMIN, which is why there is no
+# companion helper script here.
+Description=Neoxify wstunnel WebSocket fronting for UDP engines
+Documentation=https://github.com/erebe/wstunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/neoxify/wstunnel.env
+# --restrict-to pins the only destination this tunnel may reach. Without
+# it the node is an open forwarder for anyone who finds the port.
+ExecStart=/usr/local/bin/wstunnel server --restrict-to ${RESTRICT_TO} ${LISTEN_URL}
+Restart=always
+RestartSec=3
+DynamicUser=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
