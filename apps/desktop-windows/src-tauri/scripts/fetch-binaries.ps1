@@ -183,7 +183,15 @@ Invoke-WebRequest -Uri $wstunnelUrl -OutFile $wstunnelTgz
 # on a machine with Git for Windows on PATH, a bare `tar` resolves to
 # MSYS tar, which reads "C:" as a remote host and fails with
 # "Cannot connect to C: resolve failed" -- caught doing exactly that.
-$systemTar = Join-Path $env:SystemRoot "System32	ar.exe"
+# Built one segment at a time on purpose. Written as
+# "System32\tar.exe" this line shipped with a literal TAB byte where
+# the \t was meant to be -- something along the way read \t as an
+# escape -- so the path became "System32<TAB>ar.exe" and Test-Path
+# failed with "Illegal characters in path". The wstunnel step
+# therefore never succeeded once, and no released installer has ever
+# contained wstunnel.exe, despite the commit that added this saying
+# otherwise. Separate segments have no backslash to misread.
+$systemTar = Join-Path (Join-Path $env:SystemRoot "System32") "tar.exe"
 if (-not (Test-Path $systemTar)) { throw "Windows tar.exe not found at $systemTar -- needed to extract the wstunnel release." }
 & $systemTar -xzf $wstunnelTgz -C $wstunnelTemp
 if ($LASTEXITCODE -ne 0) { throw "could not extract the wstunnel archive" }
