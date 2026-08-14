@@ -716,8 +716,12 @@ install_xray() {
     # The counter is deliberately never read: the loop bounds the number
     # of attempts, and nothing inside needs to know which attempt it is.
     # Named rather than `_` so the intent is legible at the loop head.
-    # shellcheck disable=SC2034
     local dest_attempt
+    # The directive must sit immediately above the `for`, not above the
+    # `local`: shellcheck reports the assignment at the loop head, and a
+    # directive only applies to the command that follows it. Placed on
+    # the `local` line it silences nothing and CI stays red.
+    # shellcheck disable=SC2034
     for dest_attempt in 1 2 3; do
       read -r -p "Camouflage destination [$dest_default]: " dest || dest=""
       dest="${dest:-$dest_default}"
