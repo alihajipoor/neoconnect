@@ -1361,3 +1361,99 @@ links are ever wanted back; installing
   with ~20 errors that look like missing schema fields
   (`issuedByAdminId`, `resellerTokenBalance`, `AdminRole.RESELLER`).
   `pnpm run prisma:generate` in `apps/backend`, not a code problem.
+
+## 2026-08-14 — Desktop protocol matrix: 16/16 direct routes carry traffic
+
+**Status:** the 16 direct routes are proven. The 12 Iran-relay routes are
+not yet run. Three releases cut; two release pipelines were broken and
+are fixed.
+
+### The matrix
+
+Every direct route was raised on the clean Win11 VM against production
+and checked for a real exit, not a "Connected" label. **16 of 16 pass** —
+every protocol on finland1 and france-1 (REALITY, VLESS+TLS over TCP and
+over WebSocket, Trojan, WireGuard, OpenVPN, Shadowsocks) plus OpenVPN and
+**IKEv2** on singapore-1.
+
+IKEv2 answers an open question from the restriction-matrix entry: it had
+0 usage records all-time against 15 credentials, and the worry was an
+unmetered path around every cap. It connects and egresses correctly, so
+it is unused rather than broken.
+
+**How, and what it does not cover.** The harness drives the service's
+named pipe (`\.\pipe\neoconnect-service`) with the same `ConnectProfile`
+shape the app builds, replicating `ProtocolUserPayload::into_profile`
+field for field. So this proves the engines, the routing and the egress.
+It does **not** exercise the app's UI, its failover ladder, or its own
+connection verification — those sit above this layer and are still
+unverified. Do not quote 16/16 as "the app works".
+
+Ground truth was taken for one route rather than assumed for all:
+france-1 Trojan was re-run holding the tunnel open, and france-1's own
+`/var/log/xray/access.log` shows `trojan-in >> direct` sessions from the
+rig's WAN address, including the DNS lookup and the fetch the script
+generated. Service state, exit IP and the node's log agree.
+
+**A harness bug worth not repeating.** The first run recorded
+france-1/Trojan as HARNESS-ERROR. It had passed — connected, correct exit
+IP — and then my own script threw, because it rewrote the whole log file
+on every line and collided with a host-side read over the shared folder.
+A verdict column that can be corrupted by the recorder is worth less than
+it looks; the fix is to write once at the end.
+
+### Driving the VM without its password
+
+The rig auto-logs in with a blank password, and `guestcontrol` refuses
+that: it does a secondary logon, which Windows blocks for blank-password
+accounts by policy, and the error is indistinguishable from a wrong
+password. Rather than change the VM, attach a **transient shared folder**
+(`VBoxManage sharedfolder add ... --transient --automount`) and type one
+line into the Run dialog. Scripts and results then move over the shared
+folder, which also survives the tunnel taking over the default route —
+an HTTP channel would not. Scope the share to a subfolder; do not expose
+one holding credentials.
+
+### Two release pipelines that had never worked
+
+Both found by cutting releases, not by reading:
+
+- **`fetch-binaries.ps1` had a literal TAB byte** where `\t` belonged, so
+  the path to Windows' tar was `System32<TAB>ar.exe` and `Test-Path`
+  threw "Illegal characters in path". The wstunnel step had therefore
+  **never succeeded since 766ef25**, and no released installer ever
+  contained `wstunnel.exe` — confirmed independently against the 0.9.4
+  build on the VM, whose `resources/` had every other engine and not that
+  one. The journal recorded the bundling as done and fetch-proven. It was
+  neither. desktop-v0.9.5 is the first release that actually carries it.
+- **The Android store-flavour guard had never run green.** Two defects:
+  under `set -euo pipefail`, `grep | wc -l` dies when grep matches
+  nothing, so the step was killed before printing a single number and two
+  releases failed saying literally nothing; and it counted the marker
+  inside the packaged APK/AAB, where it cannot appear at all because
+  Tauri embeds the web bundle into the native library compressed. It now
+  counts `dist/` between the two builds and reports `direct=3 store=2`,
+  matching the original hand measurement. A guard that cannot report "0"
+  cannot be debugged from its own output.
+
+Also: mobile `src-tauri/Cargo.toml` was still 0.2.8 while the other two
+version fields said 0.2.9, so android-v0.2.9 built its Rust crate under
+the previous version. The tag guard only compares against
+`tauri.conf.json`, which is why nothing caught it.
+
+### Released
+
+`desktop-v0.9.5`, `android-v0.2.10`, agent `v0.2.2`. CI on main is green;
+it had been red since the detection-resistance pass on a shellcheck
+SC2034, and the first attempt at that fix silenced nothing because the
+directive sat above `local` rather than above the `for` it reports on.
+
+### Next
+
+1. The 12 relay routes, on the Ultimate account. ir1 SSH works now, and
+   the outbound tag in its access log (`route-<uuid>-out`) is the only
+   thing that distinguishes which exit a relay session took — exit IP
+   alone cannot, when two routes share an entry.
+2. The Android emulator matrix, against 0.2.10.
+3. The app-level path: failover ladder and connection verification, which
+   this matrix deliberately bypassed.
