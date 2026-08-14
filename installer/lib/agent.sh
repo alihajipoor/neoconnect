@@ -279,11 +279,35 @@ ensure_fallback_site() {
   # Deliberately dull and impersonal. A page claiming to be some real
   # organisation would be a lie told to whoever looks, and a page saying
   # "VPN" would undo the entire point.
-  cat > /var/www/neoxify-fallback/index.html <<'HTML'
+  #
+  # Different on every node, which is the part that took a second pass.
+  # This page is what an active prober gets when it opens the TLS port
+  # and speaks ordinary HTTPS -- and until now every node in the fleet
+  # returned the same 118 bytes. That is a fingerprint of *us*: probe a
+  # suspected address, hash the response, compare against a known
+  # Neoxify node, and the whole fleet is enumerable without breaking a
+  # single tunnel. Varying the text, the title and the length means a
+  # match has to be made some other way.
+  #
+  # Not idempotent by design: a re-run picks again. Nothing depends on
+  # the page's contents, and a node whose disguise changes occasionally
+  # is if anything the more ordinary-looking one.
+  local fb_pages=(
+    "Welcome|This site is being set up."
+    "Coming soon|Content will appear here shortly."
+    "Index of /|Nothing to see here yet."
+    "Under construction|This page is not finished."
+    "Hello|Server is running."
+  )
+  local fb_choice="${fb_pages[RANDOM % ${#fb_pages[@]}]}"
+  local fb_title="${fb_choice%%|*}"
+  local fb_body="${fb_choice##*|}"
+  cat > /var/www/neoxify-fallback/index.html <<HTML
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>It works</title></head>
-<body><h1>It works</h1><p>This server is up.</p></body>
+<head><meta charset="utf-8"><title>${fb_title}</title></head>
+<body><h1>${fb_title}</h1><p>${fb_body}</p>
+<!-- $(openssl rand -hex 8) --></body>
 </html>
 HTML
 
@@ -495,6 +519,86 @@ HOOK
   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh
 }
 
+# Candidate camouflage destinations for REALITY, checked against this
+# node before any of them is offered.
+#
+# Two groups, and which one is right depends on where this node is
+# hosted -- see the note printed with the prompt. The list is short on
+# purpose: it is a starting point that has been verified reachable, not
+# a claim that these are the only good answers. Anything the operator
+# knows to be a better fit for this node's address wins.
+#
+# What is NOT here is as deliberate as what is:
+#   * cloudflare.com, google.com and the other stock tutorial answers.
+#     Their address ranges are published, so "SNI says Cloudflare, the
+#     packet is going to a Hetzner box" is a check a filter runs at line
+#     rate with no inspection at all. The same argument rules out any
+#     centrally-hosted property -- Google, Fastly, Apple, Akamai.
+#   * www.microsoft.com. Endpoint security software on real customer
+#     machines intercepts it, and REALITY then fails with "received real
+#     certificate" because the interceptor's certificate arrives instead
+#     of the expected one. Found live on a customer's machine; see
+#     docs/detection-resistance.md.
+REALITY_DEST_CANDIDATES_IR=(
+  www.digikala.com
+  www.aparat.com
+  divar.ir
+)
+REALITY_DEST_CANDIDATES_ABROAD=(
+  www.speedtest.net
+  www.asus.com
+  www.leboncoin.fr
+)
+
+# Checks a candidate the way REALITY will actually use it.
+#
+# REALITY hands any connection that fails authentication straight to this
+# host, so the disguise is only as good as this handshake: a dest that is
+# unreachable from the node, or that cannot do TLS 1.3, produces a node
+# that drops probers instead of proxying them to a real site -- which is
+# a louder signal than having no disguise at all. h2 matters because the
+# inbound advertises it, and X25519 because REALITY reuses the
+# handshake's key share.
+#
+# Returns 0 and prints nothing on success; prints the reason it failed
+# otherwise. Deliberately quiet about *why* it succeeded -- the caller
+# prints its own summary.
+probe_reality_dest() {
+  local host="$1" port="${2:-443}" out=""
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "openssl is not installed, so this could not be checked"
+    return 1
+  fi
+  # tr -d '\0' because s_client relays whatever the server sends and
+  # command substitution warns on every NUL byte in it -- noise the
+  # operator would read as an error. pipefail (set at the top of this
+  # file) keeps openssl's own exit status as the pipeline's, so a failed
+  # handshake is still a failed probe.
+  out="$(timeout 8 openssl s_client -connect "${host}:${port}" -servername "$host" \
+    -alpn h2 -tls1_3 </dev/null 2>/dev/null | tr -d '\0')" || {
+    echo "no TLS 1.3 handshake from this server"
+    return 1
+  }
+  if ! grep -q "ALPN protocol: h2" <<<"$out"; then
+    echo "does not offer HTTP/2"
+    return 1
+  fi
+  if ! grep -q "Verify return code: 0 (ok)" <<<"$out"; then
+    echo "certificate did not verify from this server (intercepted, or a broken chain)"
+    return 1
+  fi
+  # Advisory rather than fatal: a dest that negotiates something else
+  # still works, it just gives REALITY less to hide behind. Reported
+  # only when s_client actually printed the line -- not every build
+  # does, and treating a missing line as a missing X25519 would flag
+  # every candidate on those boxes.
+  if grep -q "Server Temp Key" <<<"$out" && ! grep -qi "Server Temp Key: *X25519" <<<"$out"; then
+    echo "ok, but does not negotiate X25519"
+    return 0
+  fi
+  return 0
+}
+
 # Installs xray-core, generates a REALITY keypair, and writes a config
 # with an empty client list -- users are hot-added/removed entirely
 # through the agent's HandlerService calls (see
@@ -541,24 +645,115 @@ install_xray() {
     listen_port="${listen_port:-443}"
     # REALITY presents this site's TLS identity to anyone inspecting the
     # connection, so it has to be a real HTTPS host that is (a) reachable
-    # from where customers are -- google.com is filtered in Iran, which is
-    # the main market -- and (b) not something local security software
-    # intercepts. Traffic to an intercepted domain fails with "received
-    # real certificate", because the interceptor's certificate arrives
-    # instead of the one REALITY expects. Found live: www.microsoft.com is
-    # intercepted by security software on a real user's machine and broke
-    # every connection until the domain was changed.
+    # from this node -- the handshake is forwarded there, and a dest that
+    # refuses this server's address disguises nothing -- (b) reachable
+    # from where customers are, and (c) not something local security
+    # software intercepts. Traffic to an intercepted domain fails with
+    # "received real certificate", because the interceptor's certificate
+    # arrives instead of the one REALITY expects. Found live:
+    # www.microsoft.com is intercepted by security software on a real
+    # user's machine and broke every connection until the domain was
+    # changed.
+    #
+    # The fourth criterion is the one that used to be missing, and it is
+    # the one an automated filter can act on cheapest: the name has to be
+    # plausible *for this node's IP address*. cloudflare.com was the
+    # default here, and Cloudflare publishes its address ranges -- so a
+    # ClientHello claiming that name, sent to an address in nobody's CDN,
+    # is a mismatch that costs a censor one table lookup and no
+    # inspection whatsoever. A long-tail site hosted on ordinary
+    # infrastructure in the same country as the node is a far harder
+    # thing to check at scale than a household name.
     #
     # Whatever is chosen here must also be set as dest/serverName on the
     # Protocol Config -- the client takes its SNI from the panel, and a
-    # mismatch fails exactly the same way as interception does.
+    # mismatch fails exactly the same way as interception does. The
+    # registration below does that automatically.
     echo
     echo "REALITY disguises this node's traffic as HTTPS to another site."
-    echo "Pick one that is popular, reachable from your customers' countries,"
-    echo "and supports TLS 1.3 -- avoid placeholder domains like example.com."
-    read -r -p "Camouflage destination [cloudflare.com:443]: " dest
-    dest="${dest:-cloudflare.com:443}"
-    server_name="${dest%%:*}"
+    echo "Three things make a good choice, in order of how cheaply a filter"
+    echo "can catch a bad one:"
+    echo "  1. Plausible for THIS node's IP. Prefer a site hosted in the same"
+    echo "     country as this server. A big CDN's name on an address outside"
+    echo "     that CDN's published ranges is a mismatch checked at line rate."
+    echo "  2. Not blocked where your customers are, and not blocking this"
+    echo "     server -- the handshake is forwarded there on every probe."
+    echo "  3. TLS 1.3 and HTTP/2, verified below rather than assumed."
+    echo
+    echo "Checking a few candidates from this server (a few seconds each)..."
+    local candidate reason first_ok=""
+    local group_label
+    for group_label in "hosted in Iran" "hosted abroad"; do
+      echo "  -- $group_label --"
+      local -a group
+      if [[ "$group_label" == "hosted in Iran" ]]; then
+        group=("${REALITY_DEST_CANDIDATES_IR[@]}")
+      else
+        group=("${REALITY_DEST_CANDIDATES_ABROAD[@]}")
+      fi
+      for candidate in "${group[@]}"; do
+        if reason="$(probe_reality_dest "$candidate" 443)"; then
+          if [[ -n "$reason" ]]; then
+            echo "     $candidate -- $reason"
+          else
+            echo "     $candidate -- TLS 1.3, h2, X25519, certificate verified"
+          fi
+          [[ -z "$first_ok" ]] && first_ok="$candidate"
+        else
+          echo "     $candidate -- unusable from here ($reason)"
+        fi
+      done
+    done
+    echo
+    echo "Pick the group that matches where THIS server is, not where your"
+    echo "customers are. Anything you know to be a better fit beats this list."
+    local dest_default="${first_ok:-www.speedtest.net}:443"
+    # Bounded rather than `while true`: an install driven from a pipe
+    # runs out of stdin, every `read` then returns immediately with an
+    # empty answer, and an unbounded loop would spin forever printing
+    # the same rejection. Three passes is enough for a human and
+    # terminates for everything else.
+    local dest_attempt
+    for dest_attempt in 1 2 3; do
+      read -r -p "Camouflage destination [$dest_default]: " dest || dest=""
+      dest="${dest:-$dest_default}"
+      server_name="${dest%%:*}"
+      local dest_port="${dest##*:}"
+      [[ "$dest_port" == "$dest" ]] && { dest_port="443"; dest="${server_name}:443"; }
+      # Placeholder and reserved names are refused outright: they are not
+      # a weaker disguise, they are an advertisement. example.com has no
+      # traffic to blend into, and a bare IP or localhost is not a TLS
+      # identity at all.
+      case "${server_name,,}" in
+        example.com|www.example.com|example.org|example.net|localhost|127.0.0.1|"")
+          echo "  $server_name is a placeholder, not a disguise -- pick a real site." >&2
+          dest=""
+          continue
+          ;;
+        www.microsoft.com|microsoft.com)
+          echo "  Endpoint security software intercepts this one, which breaks REALITY" >&2
+          echo "  with 'received real certificate' on the customer's machine. See" >&2
+          echo "  docs/detection-resistance.md. Pick something else." >&2
+          dest=""
+          continue
+          ;;
+      esac
+      if reason="$(probe_reality_dest "$server_name" "$dest_port")"; then
+        [[ -n "$reason" ]] && echo "  Note: $reason."
+        break
+      fi
+      echo "  $server_name is not usable as a dest from this server: $reason." >&2
+      read -r -p "  Use it anyway? [y/N]: " force_dest || force_dest=""
+      [[ "${force_dest,,}" == "y" ]] && break
+      # Cleared so the loop cannot fall out of its last iteration still
+      # holding a name the operator just declined.
+      dest=""
+    done
+    if [[ -z "$dest" ]]; then
+      echo "No usable camouflage destination was chosen; falling back to $dest_default." >&2
+      dest="$dest_default"
+      server_name="${dest%%:*}"
+    fi
   fi
 
   # The certificate-presenting stealth protocols: Trojan, and VLESS over
@@ -674,14 +869,26 @@ install_xray() {
     # VLESS. Both are kept -- an existing Trojan deployment should not be
     # broken by that -- but a new node has no reason to prefer the one
     # upstream is walking away from.
+    # 8443, 2053, 2083, 2087 and 2096 are the ports ordinary HTTPS
+    # services already use, and for a listener whose disguise is "a web
+    # server" the port is part of the disguise -- see
+    # suggest_plausible_tls_port. None is as unblockable as 443, which
+    # REALITY is holding. The suggestion is drawn at random from that set
+    # rather than fixed at 2053, so nodes do not all answer TLS on the
+    # same alternative port: that pattern is one scan away from being a
+    # list of every node we run.
     if [[ "$vless_tls_is_new" == "y" ]]; then
-      read -r -p "Port for VLESS over TLS, or 'skip' [2053]: " vless_tls_port
-      vless_tls_port="${vless_tls_port:-2053}"
+      local vless_tls_suggested
+      vless_tls_suggested="$(suggest_plausible_tls_port "")"
+      vless_tls_suggested="${vless_tls_suggested:-2053}"
+      read -r -p "Port for VLESS over TLS, or 'skip' [$vless_tls_suggested]: " vless_tls_port
+      vless_tls_port="${vless_tls_port:-$vless_tls_suggested}"
       [[ "${vless_tls_port,,}" == "skip" ]] && vless_tls_port=""
     fi
     if [[ "$trojan_is_new" == "y" ]]; then
-      # 8443, 2053, 2083, 2087 and 2096 are the commonly-open choices.
-      # None is as unblockable as 443, which REALITY is holding.
+      local trojan_suggested
+      trojan_suggested="$(suggest_plausible_tls_port "${vless_tls_port:-}")"
+      [[ -n "$trojan_suggested" ]] && echo "  $trojan_suggested is free here and is an ordinary HTTPS port."
       read -r -p "Port for Trojan over TLS, or 'skip' [skip]: " trojan_port
       trojan_port="${trojan_port:-skip}"
       [[ "${trojan_port,,}" == "skip" ]] && trojan_port=""
@@ -702,8 +909,20 @@ install_xray() {
       echo "On the wire it is an HTTP upgrade to a long-lived connection -- what"
       echo "ordinary web apps do -- which survives some filtering that plain TLS"
       echo "does not. No extra port is opened."
-      read -r -p "Path for the WebSocket, or 'skip' [/ws]: " vless_ws_path
-      vless_ws_path="${vless_ws_path:-/ws}"
+      # Generated rather than defaulted to /ws. The path is the only
+      # thing separating the tunnel from the static page on the same
+      # port, and /ws is the default in every tutorial ever written --
+      # so it is the first string an active prober sends, and a node
+      # that upgrades it has answered the question. The clients read
+      # this from the panel and never assume it, so a random path costs
+      # nothing (verified in apps/desktop-windows src-tauri/src/vpn.rs
+      # and apps/mobile/src/lib/xray-config.ts: both take
+      # publicParams.path).
+      local ws_suggested
+      ws_suggested="$(suggest_ws_path)"
+      echo "A random path is suggested: /ws is what a prober tries first."
+      read -r -p "Path for the WebSocket, or 'skip' [$ws_suggested]: " vless_ws_path
+      vless_ws_path="${vless_ws_path:-$ws_suggested}"
       if [[ "${vless_ws_path,,}" == "skip" ]]; then
         vless_ws_path=""
       elif [[ "$vless_ws_path" != /* ]]; then
@@ -976,6 +1195,63 @@ suggest_free_port() {
   # Ten collisions in a 40000-wide range means ss is not telling us
   # anything useful. Better to return the last draw than to loop.
   echo "$port"
+}
+
+# A free port from the set ordinary HTTPS services already answer on.
+#
+# The opposite consideration to suggest_free_port, and the reason both
+# exist. For a listener whose entire disguise is "this is a web server",
+# the port is part of the disguise: TLS on 2087 is unremarkable --
+# Cloudflare publishes 2053/2083/2087/2096 as alternative HTTPS ports and
+# plenty of ordinary sites answer on them -- while the identical
+# handshake on 46731 is an anomaly before a single byte is inspected. For
+# Shadowsocks and the UDP engines the reasoning inverts, because they
+# have no "normal service" story to tell on any port; there the only win
+# is not sitting on the protocol's well-known one.
+#
+# Shuffled rather than ordered, because every Neoxify node answering TLS
+# on 2053 is a set a censor enumerates with one scan. Diversity across
+# nodes is worth as much here as the choice of port itself.
+#
+# Prints nothing if all of them are taken -- the caller decides whether
+# that is fatal or just means falling back to its own default.
+suggest_plausible_tls_port() {
+  local taken="${1:-}"
+  local ports=(8443 2053 2083 2087 2096)
+  local i j tmp
+  for (( i = ${#ports[@]} - 1; i > 0; i-- )); do
+    j=$(( RANDOM % (i + 1) ))
+    tmp="${ports[i]}"
+    ports[i]="${ports[j]}"
+    ports[j]="$tmp"
+  done
+  local port
+  for port in "${ports[@]}"; do
+    [[ "$port" == "$taken" ]] && continue
+    if ! ss -lntu 2>/dev/null | awk '{print $5}' | grep -q ":${port}\$"; then
+      echo "$port"
+      return 0
+    fi
+  done
+  echo ""
+}
+
+# A WebSocket path no scanner already has on a list.
+#
+# /ws is the default in every v2ray/xray tutorial ever written, which
+# makes it the first thing an active prober sends -- and a node that
+# upgrades /ws to a WebSocket while answering every other path with a
+# static page has identified itself. A per-node random path costs
+# nothing (the client reads it from the panel, never assumes it) and
+# turns "probe one path" into "probe the whole URL space".
+#
+# The prefix is cosmetic: it makes the path look like a real
+# application's endpoint rather than a random blob, for the case where
+# someone is reading a log rather than matching a string.
+suggest_ws_path() {
+  local prefixes=(assets static media live cdn api/v2)
+  local prefix="${prefixes[RANDOM % ${#prefixes[@]}]}"
+  printf '/%s/%s\n' "$prefix" "$(openssl rand -hex 6)"
 }
 
 install_wireguard() {
