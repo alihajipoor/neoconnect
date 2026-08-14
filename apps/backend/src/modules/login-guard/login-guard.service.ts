@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, Optional } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { createHash } from "node:crypto";
 import { mint, verify, type Challenge, type Solution } from "./proof-of-work";
 
@@ -40,23 +41,33 @@ const FAILURE_WINDOW_MS = 30 * 60 * 1000;
  * Failures before a challenge stops being optional.
  *
  * This threshold exists entirely for the clients already installed on
- * customers' machines. Desktop 0.9.x and the current Android build know
- * nothing about proof of work, and there are live beta users on both --
- * so requiring a solution from the first attempt would lock every one
- * of them out the moment this deploys. Below the threshold an attempt
- * with no challenge is allowed through; above it, a solution is
- * mandatory and an old client will be refused.
+ * customers' machines. Below it an attempt with no challenge is allowed
+ * through; at or above it, a solution is mandatory and a client that
+ * cannot produce one is refused.
  *
- * Five is chosen to sit well above human mistyping and well below
- * anything worth calling an attack, and the window is only 30 minutes.
- * A customer on an old build who really does fail five times waits it
- * out or signs in on the website, which does solve challenges.
+ * Five sits well above human mistyping and well below anything worth
+ * calling an attack, and the window is only 30 minutes. The cost of it
+ * is real and worth stating plainly: an attacker gets five free guesses
+ * per account and five per source address per window.
  *
- * REMOVE THE GRACE once the shipped clients solve challenges: until
- * then an attacker gets five free guesses per account per window, which
- * is the actual cost of not breaking existing users.
+ * SET `LOGIN_CHALLENGE_GRACE_FAILURES=0` TO CLOSE IT. That is the whole
+ * removal -- no code change, no redeploy of anything but the variable.
+ *
+ * It is not zero by default today because zero locks out every live
+ * beta customer, which was checked rather than assumed on 2026-08-14:
+ * `git cat-file -e desktop-v0.9.4:apps/desktop-windows/src/lib/pow.ts`
+ * fails, and so does the android-v0.2.9 equivalent. pow.ts landed on
+ * 2026-08-12; the newest tag of either client is 2026-08-11. So NO
+ * released build can solve a challenge, and flipping this to 0 would
+ * refuse the very first sign-in attempt from every one of them -- not
+ * only attempts after a failure. Already-signed-in apps keep working on
+ * their refresh tokens; anyone who signs out, reinstalls, or adds a
+ * device is locked out until a new release.
+ *
+ * Flip it the day a desktop and an Android build carrying pow.ts are
+ * released and the beta testers are on them.
  */
-const CHALLENGE_REQUIRED_AFTER_FAILURES = 5;
+const CHALLENGE_GRACE_DEFAULT_FAILURES = 5;
 
 /** How often expired bookkeeping is swept out. */
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -108,7 +119,20 @@ export class LoginGuardService {
   /** Challenge ids already redeemed, so a solution cannot be replayed. */
   private readonly spentChallenges = new Map<string, number>();
 
-  constructor() {
+  /** Recent failures tolerated before a solution becomes mandatory. */
+  private readonly graceFailures: number;
+
+  constructor(@Optional() config?: ConfigService) {
+    const configured = config?.get<number>("loginGuard.challengeGraceFailures");
+    this.graceFailures =
+      typeof configured === "number" && Number.isFinite(configured) && configured >= 0
+        ? configured
+        : CHALLENGE_GRACE_DEFAULT_FAILURES;
+
+    if (this.graceFailures === 0) {
+      this.logger.log("Proof of work is required on every sign-in attempt (no grace).");
+    }
+
     // Bookkeeping is process-local and intentionally so: it holds
     // minutes of counters, not durable records, and a restart merely
     // returns everyone to baseline difficulty. Worth knowing if the
@@ -198,9 +222,10 @@ export class LoginGuardService {
 
     if (!solution) {
       // Let it through while nothing suspicious has happened, so the
-      // clients already in customers' hands keep working. See
-      // CHALLENGE_REQUIRED_AFTER_FAILURES.
-      if (failures < CHALLENGE_REQUIRED_AFTER_FAILURES) return;
+      // clients already in customers' hands keep working. Zero grace
+      // means every attempt must carry a solution. See
+      // CHALLENGE_GRACE_DEFAULT_FAILURES.
+      if (failures < this.graceFailures) return;
       throw new BadRequestException(
         "Too many recent sign-in attempts. Please sign in at neoxify.net, or wait 30 minutes and try again.",
       );

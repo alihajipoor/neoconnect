@@ -1,4 +1,5 @@
 import { BadRequestException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { LoginGuardService } from "./login-guard.service";
 import { isSolved, mint, verify, type Challenge, type Solution } from "./proof-of-work";
 
@@ -61,6 +62,13 @@ describe("proof of work", () => {
     }
   });
 });
+
+/** A service with the grace threshold set, the way ConfigService would.
+ * Undefined means "no LOGIN_CHALLENGE_GRACE_FAILURES set", i.e. the
+ * default of 5. */
+function guardWithGrace(grace: number | undefined): LoginGuardService {
+  return new LoginGuardService({ get: () => grace } as unknown as ConfigService);
+}
 
 describe("LoginGuardService", () => {
   let guard: LoginGuardService;
@@ -140,10 +148,55 @@ describe("LoginGuardService", () => {
     expect(() => guard.enforce("customer", undefined, EMAIL, "192.0.2.5")).not.toThrow();
   });
 
+  it("treats a blank or absent LOGIN_CHALLENGE_GRACE_FAILURES as the default", () => {
+    // "" is what docker-compose passes for a variable that is merely
+    // absent from .env, and Number("") is 0 -- which would silently
+    // switch enforcement on and lock out every customer on a released
+    // client. configuration.ts filters it out; this pins the behaviour
+    // one layer down as well.
+    const blank = guardWithGrace(undefined);
+    expect(() => blank.enforce("customer", undefined, EMAIL, IP)).not.toThrow();
+  });
+
   it("keeps admin and customer pressure separate", () => {
     for (let i = 0; i < 12; i += 1) guard.recordFailure("customer", EMAIL, IP);
     expect(guard.issue("admin", EMAIL, "192.0.2.1").difficulty).toBe(
       new LoginGuardService().issue("admin", EMAIL, "192.0.2.1").difficulty,
     );
+  });
+});
+
+/**
+ * The grace exists only for clients that cannot solve a challenge, and
+ * is meant to be closed. Closing it is one variable
+ * (LOGIN_CHALLENGE_GRACE_FAILURES=0), so both settings are pinned here
+ * -- the second of these is the behaviour the operator is buying when
+ * they flip it, and the first is what happens to every customer still
+ * on a released build if they flip it too early.
+ */
+describe("LoginGuardService with the grace closed", () => {
+  const IP = "203.0.113.9";
+  const EMAIL = "closed@example.com";
+
+  it("refuses the very FIRST attempt that carries no solution", () => {
+    // Not the sixth. This is why the default cannot be 0 while
+    // desktop-v0.9.4 and android-v0.2.9 -- neither of which contains
+    // pow.ts -- are what customers are running.
+    const guard = guardWithGrace(0);
+    expect(() => guard.enforce("customer", undefined, EMAIL, IP)).toThrow(BadRequestException);
+  });
+
+  it("still accepts a properly solved challenge with no failures recorded", () => {
+    const guard = guardWithGrace(0);
+    const solution = solve(guard.issue("customer", EMAIL, IP));
+    expect(() => guard.enforce("customer", solution, EMAIL, IP)).not.toThrow();
+  });
+
+  it("gives an attacker no free guesses at all", () => {
+    const guard = guardWithGrace(0);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect(() => guard.enforce("admin", undefined, EMAIL, IP)).toThrow(BadRequestException);
+      guard.recordFailure("admin", EMAIL, IP);
+    }
   });
 });
