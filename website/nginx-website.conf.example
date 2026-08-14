@@ -1,0 +1,121 @@
+# Neoxify website -- nginx server block.
+#
+# WHY THIS FILE EXISTS. The site ships a carefully written .htaccess:
+# security headers, a deny rule over data/, ErrorDocument 404, and the
+# /r/CODE voucher rewrite. neoxify.net is served by **nginx**, which
+# never reads .htaccess, so on the live host every one of those is
+# inert. Measured on 2026-08-14 against https://neoxify.net, not
+# inferred:
+#
+#   - `fetch('/account/')` response headers carry NO
+#     Content-Security-Policy, X-Frame-Options, X-Content-Type-Options,
+#     Referrer-Policy or Permissions-Policy. `server: nginx/1.24.0
+#     (Ubuntu)`.
+#   - `GET /r/ABCD2345` returns 200 and the marketing page, not a 302 to
+#     /account/?voucher=ABCD2345. The voucher short links resellers hand
+#     out do not work.
+#   - `GET /nonexistent-page-xyz` returns 200 and the home page, so
+#     404.php never runs and every mistyped URL is indexable.
+#
+# The .htaccess stays: it is correct, and it is what a shared Apache or
+# LiteSpeed host would use. This is the same posture for the host the
+# site actually runs on.
+#
+# Not deployed by anything in this repo -- copy it onto the web host by
+# hand, adjust the paths and the php-fpm socket, `nginx -t`, reload.
+
+server {
+    listen 443 ssl http2;
+    server_name neoxify.net www.neoxify.net;
+
+    root /var/www/neoxify.net;
+    index index.php;
+
+    # ssl_certificate / ssl_certificate_key: leave whatever certbot
+    # already wrote for this host. Nothing here changes TLS.
+
+    # ------------------------------------------------------------------
+    # Security headers -- the .htaccess set, verbatim
+    # ------------------------------------------------------------------
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()" always;
+
+    # connect-src is wider than 'self' on purpose: /account/ is the
+    # customer portal and every call it makes goes to another origin --
+    # connect.neoxify.site first, then the node mirrors on their VPN
+    # ports, then mirrors derived at runtime from the customer's own
+    # credentials, which cannot be enumerated here. All are
+    # neoxify.site names on nonstandard ports by design. See the same
+    # header in .htaccess for the full reasoning.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'" always;
+
+    # nginx REPLACES inherited add_header directives in any block that
+    # adds one of its own. Every location below that needs headers must
+    # therefore repeat them, or silently serve without.
+
+    # ------------------------------------------------------------------
+    # Form submissions and the CSRF secret
+    # ------------------------------------------------------------------
+    # Second layer only: every file written into data/ begins with
+    # `<?php exit; ?>` (NX_FILE_GUARD in inc/security.php). This is the
+    # first layer that .htaccess was supposed to be providing and was
+    # not.
+    location ^~ /data/ {
+        deny all;
+        return 404;
+    }
+
+    # Nothing under inc/ is a page. Its files all begin with
+    # `defined('NX') || exit;`, which is why a direct request currently
+    # returns 200 with an empty body rather than source -- but relying
+    # on that in every future file is a rule someone eventually breaks.
+    location ^~ /inc/ {
+        deny all;
+        return 404;
+    }
+
+    location ~ /\. {
+        deny all;
+        return 404;
+    }
+
+    # ------------------------------------------------------------------
+    # Voucher short links: /r/ABCD2345 -> r/index.php?c=ABCD2345
+    # ------------------------------------------------------------------
+    # The code alphabet is A-Z and 2-9; r/index.php re-validates against
+    # ^[A-Z0-9]{1,32}$ and redirects to /account/?voucher=... Without
+    # this rule the link lands on the home page with nothing prefilled,
+    # which is what the live site does today.
+    location ~ "^/r/([A-Za-z0-9-]{1,32})/?$" {
+        rewrite ^ /r/index.php?c=$1 last;
+    }
+
+    location = /sitemap.xml {
+        rewrite ^ /sitemap.php last;
+    }
+
+    # ------------------------------------------------------------------
+    # Pages
+    # ------------------------------------------------------------------
+    # A missing page must be a real 404 rendered by 404.php, not a 200
+    # showing the home page -- which is what happens now, and puts every
+    # mistyped URL in the index.
+    error_page 404 /404.php;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location ~ \.php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        # PATH_INFO is what lets /r/index.php/CODE work on a host with no
+        # rewrite at all -- r/index.php reads it as a fallback.
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+        fastcgi_pass unix:/run/php/php-fpm.sock;
+    }
+}

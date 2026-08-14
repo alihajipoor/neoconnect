@@ -154,6 +154,16 @@ browser request executes it and returns nothing, and `data/.htaccess` denies
 access outright — two independent layers, because a shared host that quietly
 ignores `.htaccess` should not be able to leak anyone's message.
 
+> **The live host is one of those, and it is not shared hosting.**
+> neoxify.net is served by nginx, which never reads `.htaccess` at all —
+> so on the live site the guard line is the *only* layer, and the CSP,
+> the other security headers, `ErrorDocument 404` and the `/r/CODE`
+> rewrite are all inert. Measured 2026-08-14 against the running site,
+> not assumed: no CSP header on any response, `GET /r/ABCD2345` returns
+> the home page with a 200 instead of redirecting, and so does any
+> mistyped URL. `nginx-website.conf.example` in this directory is the
+> same posture written for nginx; it has to be installed by hand.
+
 ### The domain split, and why it affects mail
 
 The site is served from **neoxify.net**. Support mail goes to
