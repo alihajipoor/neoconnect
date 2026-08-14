@@ -141,6 +141,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private async reassertAllConnectedNodes() {
     for (const nodeId of this.registry.connectedNodeIds()) {
       await this.reassertProvisionedUsers(nodeId, { persist: false });
+      await this.reassertConfiguredRoutes(nodeId, { persist: false });
     }
   }
 
@@ -264,6 +265,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
 
     await this.replayQueuedCommands(node.id);
     await this.reassertProvisionedUsers(node.id);
+    await this.reassertConfiguredRoutes(node.id);
     return node.id;
   }
 
@@ -291,6 +293,62 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * Safe to run when nothing was lost: CREATE_USER is idempotent on the
    * agent side (create-if-not-exists), the same property
    * replayQueuedCommands already relies on. */
+  /** Re-sends CONFIGURE_ROUTE for every relayed route entering this node.
+   *
+   * The sibling of reassertProvisionedUsers, and needed for the same
+   * reason: a relay's outbound and routing rule are hot-added over
+   * Xray's gRPC API, so an Xray restart empties them exactly as it
+   * empties the inbound's users. Re-asserting users alone left the node
+   * with customers who authenticate and a router with nowhere to send
+   * them.
+   *
+   * That failure is worse than an outage and is why this exists.
+   * With no rule matching the entry inbound, traffic falls through to
+   * the relay's own `direct` outbound and egresses *at the relay* --
+   * measured on ir1, 2026-08-13, where a customer on the France route
+   * came out at the Iran node's own address. The tunnel works, the app
+   * reports a healthy connection, and the customer's traffic leaves from
+   * the country they were trying to route around.
+   *
+   * Only enabled, relayed routes: a direct route installs no rule, so
+   * there is nothing to restore.
+   */
+  private async reassertConfiguredRoutes(nodeId: string, opts: { persist: boolean } = { persist: true }) {
+    const routes = await this.prisma.route.findMany({
+      where: { isEnabled: true, exitProtocolConfigId: { not: null }, entryProtocolConfig: { nodeId } },
+      include: {
+        entryProtocolConfig: true,
+        exitProtocolConfig: { include: { node: { select: { publicIp: true } } } },
+      },
+    });
+    if (routes.length === 0) return;
+
+    for (const route of routes) {
+      if (!route.exitProtocolConfig || !route.uplinkCredentialsJson) continue;
+      const entry = route.entryProtocolConfig;
+      const exit = route.exitProtocolConfig;
+      const entryIsXray = XRAY_SERVED_ON_NODE.has(entry.protocol);
+      const payload = {
+        routeId: route.id,
+        entryInboundTag: entryIsXray ? defaultInboundTag(entry) : "",
+        entrySubnetCidr: entryIsXray ? "" : subnetCidrOf(entry.publicParamsJson),
+        exit: {
+          address: exit.node.publicIp,
+          port: exit.listenPort,
+          protocol: exit.protocol,
+          publicParams: exit.publicParamsJson,
+          uplinkCredentials: JSON.parse(route.uplinkCredentialsJson) as Record<string, string>,
+        },
+      };
+      if (opts.persist) {
+        await this.enqueueCommand(nodeId, "CONFIGURE_ROUTE", payload);
+      } else {
+        this.writeCommand(nodeId, `reassert-route:${route.id}`, "CONFIGURE_ROUTE", payload);
+      }
+    }
+    this.logger.log(`Re-asserted ${routes.length} relay route(s) on node ${nodeId}`);
+  }
+
   private async reassertProvisionedUsers(nodeId: string, opts: { persist: boolean } = { persist: true }) {
     const users = await this.prisma.protocolUser.findMany({
       where: { nodeId, status: "ACTIVE" },
@@ -408,4 +466,39 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     }
     return command;
   }
+}
+
+/** Which protocols this node serves from its Xray process. Not the same
+ * as "starts with XRAY_" -- Shadowsocks is one of them. Mirrors
+ * RoutesService; see the note there. */
+const XRAY_SERVED_ON_NODE = new Set(["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS", "XRAY_VMESS", "XRAY_TROJAN", "SHADOWSOCKS"]);
+
+/** The inbound a route's rule should match: the config's own tag when it
+ * has one, else the node default the installer templates write. Mirrors
+ * entryInboundTag in RoutesService. */
+function defaultInboundTag(config: { protocol: string; transport: string | null; inboundTag: string | null }): string {
+  if (config.inboundTag) return config.inboundTag;
+  switch (config.protocol) {
+    case "XRAY_VLESS_REALITY":
+      return "vless-in";
+    case "XRAY_VLESS_TLS":
+      return config.transport === "WS" ? "vless-ws-in" : "vless-tls-in";
+    case "XRAY_TROJAN":
+      return "trojan-in";
+    case "SHADOWSOCKS":
+      return "shadowsocks-in";
+    default:
+      return "";
+  }
+}
+
+/** The client subnet a WireGuard/OpenVPN relay entry bridges into Xray.
+ *
+ * Narrowed rather than stringified: publicParamsJson is Json, so a
+ * String() on it would turn a malformed value into "[object Object]" and
+ * hand the agent a subnet it would try to route. Empty means absent, and
+ * the agent rejects the command rather than guessing. */
+function subnetCidrOf(publicParamsJson: unknown): string {
+  const subnet = (publicParamsJson as Record<string, unknown> | null)?.subnetCidr;
+  return typeof subnet === "string" ? subnet : "";
 }

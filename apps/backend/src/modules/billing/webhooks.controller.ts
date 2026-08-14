@@ -120,7 +120,12 @@ export class WebhooksController {
       throw new BadRequestException("Missing order_number in callback");
     }
 
-    switch (this.plisio.classify(String(body.status ?? ""))) {
+    // Narrowed rather than String()-ed: body is untrusted webhook JSON, so
+    // `status` could be an object, and stringifying one yields
+    // "[object Object]" -- which classify() would read as an unknown status
+    // rather than as a malformed callback.
+    const status = typeof body.status === "string" ? body.status : "";
+    switch (this.plisio.classify(status)) {
       case "paid":
         await this.billingService.confirmPayment(transactionId, body);
         break;
