@@ -507,3 +507,84 @@ node.** Cut a `v*` tag before relying on it.
 - The two Ultimate subscribers still hold 16 direct-route credentials
   each from before relayOnly. Not removed: doing so mid-session drops a
   live customer.
+
+## 2026-08-14 — France on all five protocols, and the restart bug
+
+Ten relay routes, every one verified by exit IP:
+
+| Entry on ir1 | Port | Exit |
+|---|---|---|
+| VLESS+REALITY | 443 | finland1 |
+| VLESS+TLS | 2053 | finland1 |
+| VLESS+TLS / WebSocket | 2053 `/ws` | finland1 |
+| Trojan+TLS | 8443 | finland1 |
+| Shadowsocks 2022 | 46731 | finland1 |
+| VLESS+REALITY | 8444 | france-1 |
+| VLESS+TLS | 2054 | france-1 |
+| VLESS+TLS / WebSocket | 2054 `/ws` | france-1 |
+| Trojan+TLS | 8445 | france-1 |
+| Shadowsocks 2022 | 46732 | france-1 |
+
+France gets its own WebSocket carrier (`vless-ws-fr-in`, loopback 10087)
+and its own fallback targets. Sharing the Finland carrier would have
+sent WS traffic out of Finland however it arrived, because the routing
+rule keys on the inbound tag, not on the port it came in through.
+
+### The bug that mattered most: an engine restart stripped every route
+
+`reassertProvisionedUsers` rebuilt users after a restart and nothing
+rebuilt **routes** -- but a relay's outbound and routing rule are
+hot-added over the same gRPC API and die with the same restart.
+
+The failure is not an outage. With no rule matching the entry inbound,
+traffic falls through to the relay's own `direct` outbound and egresses
+**at the relay**. Measured: a customer on the France route came out at
+**185.222.28.186 -- the Iran node's own address** -- while the tunnel
+worked and the app reported a healthy connection. For this product that
+is the worst failure available, and reconnect is automatic, so no
+operator care could have avoided it.
+
+Fixed by `reassertConfiguredRoutes`, called wherever users are
+re-asserted. Verified by restarting Xray on ir1 with no manual
+intervention: 10 routes and 30 users rebuilt, zero failures, all ten
+exits correct afterwards.
+
+Second half of the same bug: the user re-assert selected only
+`transport`, not `inboundTag`, so after a restart every France customer
+was rebuilt on the Finland listeners and got "invalid request user id".
+
+### Do not re-queue CONFIGURE_ROUTE by node
+
+Re-queuing every CONFIGURE_ROUTE row for a node replays commands for
+**deleted** routes too. That re-adds a rule matching the same inbound,
+it wins on order, and it points at an uplink credential that was removed
+with the route -- so traffic is accepted at the relay and dies upstream.
+Cost an hour. Filter by routes that still exist, or just let the
+reconnect re-assert do it.
+
+Also: `ConfigureRoute` treats a duplicate *outbound* as success but not a
+duplicate *rule*, so re-sending fails with `duplicate ruleTag`. Harmless
+now that re-assert follows a restart, but it makes manual replay noisy.
+**Still unfixed.**
+
+### CI was red on every push, and had been for hours
+
+`@neoxify/backend#lint`, five errors -- four of them older than tonight.
+The job is *named* "TypeScript (backend + panel)" but runs
+`turbo run lint typecheck build test`, and I had been checking `tsc` and
+`jest` only. Green now, and the full turbo command passes locally
+(16/16). **Run the turbo command, not the individual tools.**
+
+### Harness notes, since they cost more than the real bugs
+
+- Python's `open(path, "w")` on Windows writes CRLF. A path read back
+  from such a file keeps the `\r`, so the extension becomes `.json\r`
+  and Xray answers "Failed to get format" -- which reads like a bad
+  config, not a bad path. Same for `os.path.join` producing a backslash
+  in an otherwise forward-slash path.
+- A VLESS+TLS inbound rejects a client with no `flow`
+  ("account ... is rejected since the client flow is empty"). Carry the
+  flow from the credential for the TCP variant; omit it for WebSocket.
+- A failed REALITY handshake logs **nothing** server-side -- it is
+  proxied to the camouflage site by design. Absence of a log entry is
+  not evidence the traffic never arrived.
