@@ -129,6 +129,25 @@ jobs:
           VITE_DISTRIBUTION: direct
         run: pnpm exec tauri android build --apk --target aarch64 --target armv7
 
+      # Counted here, on dist/, rather than later on the packaged
+      # artifact. Tauri embeds the web bundle into the native library
+      # compressed, so the marker is not greppable in the APK or the AAB
+      # at all -- an earlier version of this check scanned both whole
+      # archives and found direct=0 store=0, which says nothing about the
+      # flavour. dist/ is also where the original hand measurement was
+      # taken ("direct 3-4, store 2, bundle 8K smaller").
+      #
+      # It has to run between the two builds: the store build overwrites
+      # dist/ in place, so after it there is no direct bundle left to
+      # compare against.
+      - name: Count purchase markers in the direct bundle
+        working-directory: apps/mobile
+        run: |
+          set -euo pipefail
+          n=$( { grep -raoE 'plans\.toAddress' dist/ || true; } | wc -l | tr -d '[:space:]' )
+          echo "direct bundle markers: $n"
+          echo "DIRECT_MARKERS=$n" >> "$GITHUB_ENV"
+
       - name: Sign the direct APK
         working-directory: apps/mobile
         env:
@@ -173,6 +192,14 @@ jobs:
           VITE_DISTRIBUTION: store
         run: pnpm exec tauri android build --aab --target aarch64 --target armv7
 
+      - name: Count purchase markers in the store bundle
+        working-directory: apps/mobile
+        run: |
+          set -euo pipefail
+          n=$( { grep -raoE 'plans\.toAddress' dist/ || true; } | wc -l | tr -d '[:space:]' )
+          echo "store bundle markers: $n"
+          echo "STORE_MARKERS=$n" >> "$GITHUB_ENV"
+
       - name: Sign the Play AAB
         working-directory: apps/mobile
         env:
@@ -215,51 +242,34 @@ jobs:
         working-directory: apps/mobile
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#android-v}"
 
-          # A marker from the purchase screen's own code
-          # (apps/desktop-windows/src/screens/Plans.tsx, shared into mobile
-          # through the @shared alias). The i18n dictionaries carry the
-          # same key in both builds, so presence alone proves nothing --
-          # the store bundle legitimately contains two copies as
-          # translations. Only the differential settles it.
-          marker='plans\.toAddress'
-
-          # Counted over the WHOLE archive, not a guessed path. The first
-          # version of this greped 'assets/*' inside the APK, which
-          # matched nothing: Tauri does not necessarily put the web
-          # bundle where that assumed, and the hand measurement this was
-          # modelled on had been done on the dist JS rather than on the
-          # packaged artifact. Zero hits on both sides then made the
-          # comparison meaningless.
-          #
-          # The `|| true` on each stage is load-bearing under `pipefail`:
-          # grep exits 1 when it matches nothing, which killed the whole
-          # step before it could print a single number. A check that
-          # cannot report "0" cannot be debugged from its own output --
-          # this failed for two releases saying nothing at all.
-          count_marker() {
-            { unzip -p "$1" 2>/dev/null || true; } \
-              | { grep -aoE "$marker" || true; } \
-              | wc -l | tr -d '[:space:]'
-          }
-
-          direct_hits=$(count_marker "Neoxify-$version.apk")
-          store_hits=$(count_marker "Neoxify-$version.aab")
+          # Compares the two counts taken from dist/ between the builds,
+          # rather than re-deriving anything from the packaged artifacts.
+          # Grepping the APK and the AAB cannot work: Tauri embeds the web
+          # bundle into the native library compressed, and a version of
+          # this check that scanned both whole archives measured
+          # direct=0 store=0 -- no signal at all, in either direction.
+          direct_hits="${DIRECT_MARKERS:-0}"
+          store_hits="${STORE_MARKERS:-0}"
           echo "purchase-code marker: direct=$direct_hits store=$store_hits"
 
-          # A marker the check cannot find at all means the check is
-          # broken, not that the build is clean. Failing here rather than
-          # passing is the whole point: the dangerous outcome is a store
-          # bundle full of purchase code waved through by a guard that
-          # was silently looking at nothing.
+          # The i18n dictionaries carry the key in both builds, so the
+          # store bundle legitimately keeps a couple of copies as
+          # translations. Only the differential distinguishes "the screen
+          # shipped" from "its translation shipped".
+          #
+          # Zero on the direct side means the check is broken, not that
+          # the build is clean, and it fails here rather than passing.
+          # The dangerous outcome is a store bundle full of purchase code
+          # waved through by a guard that was silently looking at
+          # nothing, which is exactly what happened twice.
           if [ "$direct_hits" -eq 0 ]; then
-            echo "::error::Found no purchase marker in the DIRECT apk either -- this check is broken, not the build. The marker string or the artifact layout changed." >&2
+            echo "::error::No purchase marker in the DIRECT bundle -- this check is broken, not the build. The marker string or the build layout changed." >&2
             exit 1
           fi
 
           if [ "$store_hits" -ge "$direct_hits" ]; then
-            echo "::error::The Play AAB carries as much purchase code as the direct APK -- the store flavour did not apply." >&2
+            echo "::error::The store bundle carries as much purchase code as the direct one -- the store flavour did not apply." >&2
             exit 1
           fi
 
