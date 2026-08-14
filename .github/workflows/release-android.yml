@@ -216,13 +216,48 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#android-v}"
-          # A marker from the purchase screen's own code. The i18n
-          # dictionaries carry the same key in both builds, so presence
-          # alone proves nothing -- the store bundle legitimately
-          # contains two copies as translations. Compare the counts.
-          direct_hits=$(unzip -p "Neoxify-$version.apk" 'assets/*' 2>/dev/null | grep -ao 'plans.toAddress' | wc -l)
-          store_hits=$(unzip -p "Neoxify-$version.aab" 'base/assets/*' 2>/dev/null | grep -ao 'plans.toAddress' | wc -l)
+
+          # A marker from the purchase screen's own code
+          # (apps/desktop-windows/src/screens/Plans.tsx, shared into mobile
+          # through the @shared alias). The i18n dictionaries carry the
+          # same key in both builds, so presence alone proves nothing --
+          # the store bundle legitimately contains two copies as
+          # translations. Only the differential settles it.
+          marker='plans\.toAddress'
+
+          # Counted over the WHOLE archive, not a guessed path. The first
+          # version of this greped 'assets/*' inside the APK, which
+          # matched nothing: Tauri does not necessarily put the web
+          # bundle where that assumed, and the hand measurement this was
+          # modelled on had been done on the dist JS rather than on the
+          # packaged artifact. Zero hits on both sides then made the
+          # comparison meaningless.
+          #
+          # The `|| true` on each stage is load-bearing under `pipefail`:
+          # grep exits 1 when it matches nothing, which killed the whole
+          # step before it could print a single number. A check that
+          # cannot report "0" cannot be debugged from its own output --
+          # this failed for two releases saying nothing at all.
+          count_marker() {
+            { unzip -p "$1" 2>/dev/null || true; } \
+              | { grep -aoE "$marker" || true; } \
+              | wc -l | tr -d '[:space:]'
+          }
+
+          direct_hits=$(count_marker "Neoxify-$version.apk")
+          store_hits=$(count_marker "Neoxify-$version.aab")
           echo "purchase-code marker: direct=$direct_hits store=$store_hits"
+
+          # A marker the check cannot find at all means the check is
+          # broken, not that the build is clean. Failing here rather than
+          # passing is the whole point: the dangerous outcome is a store
+          # bundle full of purchase code waved through by a guard that
+          # was silently looking at nothing.
+          if [ "$direct_hits" -eq 0 ]; then
+            echo "::error::Found no purchase marker in the DIRECT apk either -- this check is broken, not the build. The marker string or the artifact layout changed." >&2
+            exit 1
+          fi
+
           if [ "$store_hits" -ge "$direct_hits" ]; then
             echo "::error::The Play AAB carries as much purchase code as the direct APK -- the store flavour did not apply." >&2
             exit 1
