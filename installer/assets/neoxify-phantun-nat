@@ -1,0 +1,46 @@
+#!/bin/sh
+# Kernel-side plumbing phantun needs, applied before each start.
+#
+# phantun does not bind a socket. It synthesises TCP on a tun device, so
+# two things have to be true for its port to be reachable at all:
+#
+#   1. inbound TCP on that port is DNAT-ed to the tun's peer address, and
+#   2. the tun subnet is NAT-ed back out the real interface.
+#
+# Re-applied on every start rather than once at install: iptables rules
+# do not survive a reboot on a stock box, and the failure that produces
+# is the quiet kind -- phantun runs, logs "Listening", and every client
+# times out waiting for a SYN+ACK that the kernel never delivered to it.
+#
+# Takes the instance name (e.g. "wireguard"), reading its settings from
+# /etc/neoxify/phantun-<instance>.env.
+set -e
+
+if [ -z "$1" ]; then
+    echo "usage: neoxify-phantun-nat <instance>" >&2
+    exit 2
+fi
+
+ENV_FILE="/etc/neoxify/phantun-$1.env"
+if [ ! -f "$ENV_FILE" ]; then
+    echo "neoxify-phantun-nat: no such instance config: $ENV_FILE" >&2
+    exit 2
+fi
+# shellcheck source=/dev/null
+. "$ENV_FILE"
+
+# The real egress interface, not a hardcoded eth0 -- providers differ,
+# and a wrong interface here means the DNAT rule never matches.
+IFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -o 'dev [^ ]*' | cut -d' ' -f2 | head -1)
+if [ -z "$IFACE" ]; then
+    echo "neoxify-phantun-nat: could not determine the default interface" >&2
+    exit 2
+fi
+
+sysctl -qw net.ipv4.ip_forward=1
+
+iptables -t nat -C PREROUTING -p tcp -i "$IFACE" --dport "$TCP_PORT" -j DNAT --to-destination "$TUN_PEER" 2>/dev/null \
+    || iptables -t nat -A PREROUTING -p tcp -i "$IFACE" --dport "$TCP_PORT" -j DNAT --to-destination "$TUN_PEER"
+
+iptables -t nat -C POSTROUTING -s "$TUN_SUBNET" -j MASQUERADE 2>/dev/null \
+    || iptables -t nat -A POSTROUTING -s "$TUN_SUBNET" -j MASQUERADE

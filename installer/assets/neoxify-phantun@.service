@@ -1,0 +1,32 @@
+[Unit]
+# phantun fronts a UDP protocol with fake TCP, so a censor that drops the
+# UDP protocol by fingerprint sees an ordinary TCP flow instead.
+#
+# Built for the Iran relay specifically. Measured 2026-08-14: a real
+# WireGuard handshake sent from Germany left the client and never reached
+# ir1, while the same host's TCP arrived fine -- so WireGuard and OpenVPN
+# cannot reach an Iran node in the clear, and this is what makes them
+# reachable. Templated per protocol: one instance per UDP engine being
+# fronted, each with its own TCP port and tun subnet.
+Description=Neoxify phantun UDP-over-TCP fronting for %i
+Documentation=https://github.com/dndx/phantun
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/neoxify/phantun-%i.env
+# The DNAT and MASQUERADE rules, reapplied every start -- iptables does
+# not survive a reboot, and without them phantun listens and every client
+# times out.
+ExecStartPre=/usr/local/bin/neoxify-phantun-nat %i
+ExecStart=/usr/local/bin/phantun_server --local ${TCP_PORT} --remote 127.0.0.1:${UDP_PORT}
+Restart=always
+RestartSec=3
+# Needed to create the tun device. Everything else stays unprivileged.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
