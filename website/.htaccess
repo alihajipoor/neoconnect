@@ -28,9 +28,26 @@ ErrorDocument 404 /404.php
     # or script, fix the template rather than weakening this header.
     #
     # 'self' only, with data: for images because the favicon and any inline
-    # SVG data URIs need it. There are no third-party origins at all, by
-    # design -- see the note at the top of the stylesheet.
-    Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'"
+    # SVG data URIs need it. No third-party origins load anything here.
+    #
+    # connect-src is the one exception, and it is not optional: /account/
+    # is the customer portal, and every call it makes -- sign in, plans,
+    # purchase, vouchers -- goes to a DIFFERENT origin. 'self' alone
+    # blocks all of them, and the portal then renders perfectly and fails
+    # at the first request with nothing on screen to explain it.
+    #
+    # It is a wildcard over neoxify.site rather than one hostname because
+    # the portal reuses the apps' endpoint ladder (apps/desktop-windows/
+    # src/lib/api-endpoints.ts): connect.neoxify.site first, then the node
+    # mirrors on their VPN ports, then further mirrors derived at runtime
+    # from whatever credentials the customer holds. Those last ones cannot
+    # be enumerated here -- any node may become one -- and every one of
+    # them is a neoxify.site name on a nonstandard port by design. Naming
+    # only the panel would leave the portal with no failover on exactly
+    # the filtered networks the ladder exists for.
+    #
+    # Nothing else on the site makes an XHR at all.
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'"
 </IfModule>
 
 # ---------------------------------------------------------------------
