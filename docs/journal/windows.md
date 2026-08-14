@@ -1302,3 +1302,62 @@ is not the giveaway a plain OpenVPN server's is.
 5. **wstunnel must be `wss://` before a customer sees it.** Noted in the
    unit file itself now, since there is no installer path for it yet and
    the only running instance is the ir1 proving run on plain ws://8447.
+
+## 2026-08-14 — Reseller voucher links were dead in production
+
+**Status:** fixed in the backend and tested. **The website and the web
+host were not touched, and nothing about nginx changed.**
+
+Every activation email a reseller's customer has ever received carried a
+link that did not work. `activationUrl()` emitted the short form,
+`https://neoxify.net/r/CODE`, whose redirect is defined in
+`website/.htaccess` — a file only Apache reads. neoxify.net is served by
+nginx, which does not read it. So the rule has never existed on the live
+host, and the link landed on the marketing homepage with no code, no
+prefill and no error.
+
+Measured against the live site, not reasoned about:
+
+- `GET /r/ABCD2345` → **200 and the home page**
+- `GET /nonexistent-page-xyz` → 200 and the **byte-identical** home page
+  (`sha256` prefix `5ce7256f8c66` on both, and on `/a/b/c/deep` and
+  `/sitemap.xml`). So nginx falls every unresolved path back to the root
+  `index.php`, and `404.php` never runs
+- `GET /r/index.php?c=ABCD2345` → **302 to `/account/?voucher=ABCD2345`**
+- `GET /r/index.php/ABCD2345` → **200**. The `PATH_INFO` fallback written
+  into `r/index.php` for exactly this case is inert too; the live fastcgi
+  block does not populate it. Worth knowing before anyone relies on it
+
+The fix is the long form, `/account/?voucher=CODE`, which the portal
+already reads (`apps/web-portal/src/App.tsx`). One line, ships with a
+normal backend deploy, needs nothing from the web host.
+
+`resellers.service.spec.ts` is new and is the first test this module has
+had. It asserts the URL *shape*, deliberately — a test that only checked
+for a non-empty link would have passed throughout the whole outage. It
+was run against the old `/r/` line first and all four cases failed, then
+against the fix and all four passed. Full backend `lint typecheck test`:
+36 suites, 339 tests.
+
+### Not done, and deliberately
+
+A PHP front controller in `website/index.php` would make `/r/CODE` work
+with no server config at all — the catch-all means PHP already receives
+those requests — and would also fix the 404s and add the missing security
+headers from PHP. It was written and then **reverted**, because there is
+no PHP on this machine (none in CI either, and `website/` has no tests),
+so it could not be run even once. Shipping unexecuted routing to the live
+marketing site is how a mistake takes real pages down. The patch is kept
+at `scratchpad/website-shortlink-frontcontroller.patch` if the short
+links are ever wanted back; installing
+`website/nginx-website.conf.example` is the other route.
+
+### Open
+
+- **Links already handed out in `/r/CODE` form stay broken.** This fixes
+  only links generated from now on. Nobody has checked how many were
+  emailed or to whom.
+- A stale generated Prisma client in a fresh worktree fails `typecheck`
+  with ~20 errors that look like missing schema fields
+  (`issuedByAdminId`, `resellerTokenBalance`, `AdminRole.RESELLER`).
+  `pnpm run prisma:generate` in `apps/backend`, not a code problem.
