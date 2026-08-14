@@ -155,6 +155,46 @@ foreach ($file in $divertFiles) {
 Remove-Item $divertTemp -Recurse -Force
 Write-Host "  $($divertFiles -join ', ')"
 
+# --- wstunnel --------------------------------------------------------
+# Carries WireGuard's UDP inside a WebSocket, for networks that drop the
+# protocol outright.
+#
+# Needed because a real WireGuard handshake cannot reach the Iran relay:
+# measured 2026-08-14, the packets left the client and never arrived,
+# while TCP to the same node did. wstunnel opens a local UDP port and
+# tunnels it, so WireGuard talks to 127.0.0.1 and never knows. Chosen
+# over phantun purely on portability -- phantun ships Linux binaries only
+# and needs a raw tun plus iptables, which is fine on a server and
+# impossible in a Windows app.
+#
+# Pinned, like every other engine here: a silent upstream bump is how a
+# working build starts shipping something nobody tested.
+$wstunnelVersion = "10.6.2"
+$wstunnelTemp = Join-Path $env:TEMP "neoconnect-wstunnel-fetch"
+if (Test-Path $wstunnelTemp) { Remove-Item $wstunnelTemp -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $wstunnelTemp | Out-Null
+
+$wstunnelTgz = Join-Path $wstunnelTemp "wstunnel.tar.gz"
+$wstunnelUrl = "https://github.com/erebe/wstunnel/releases/download/v$wstunnelVersion/wstunnel_${wstunnelVersion}_windows_amd64.tar.gz"
+Write-Host "Downloading $wstunnelUrl ..."
+Invoke-WebRequest -Uri $wstunnelUrl -OutFile $wstunnelTgz
+# The release is a .tar.gz, not a zip, so Expand-Archive cannot be
+# reused. Windows 10+ ships tar, but it must be called by full path:
+# on a machine with Git for Windows on PATH, a bare `tar` resolves to
+# MSYS tar, which reads "C:" as a remote host and fails with
+# "Cannot connect to C: resolve failed" -- caught doing exactly that.
+$systemTar = Join-Path $env:SystemRoot "System32	ar.exe"
+if (-not (Test-Path $systemTar)) { throw "Windows tar.exe not found at $systemTar -- needed to extract the wstunnel release." }
+& $systemTar -xzf $wstunnelTgz -C $wstunnelTemp
+if ($LASTEXITCODE -ne 0) { throw "could not extract the wstunnel archive" }
+$wstunnelExe = Join-Path $wstunnelTemp "wstunnel.exe"
+if (-not (Test-Path $wstunnelExe)) {
+    throw "wstunnel.exe was not in the $wstunnelVersion archive -- check the release layout before bumping the version."
+}
+Copy-Item $wstunnelExe (Join-Path $resourcesDir "wstunnel.exe") -Force
+Remove-Item $wstunnelTemp -Recurse -Force
+Write-Host "  wstunnel.exe"
+
 # --- Helper service --------------------------------------------------
 # Built from this repo rather than downloaded, but it belongs in
 # resources/ next to the engines: the service resolves every engine
