@@ -713,6 +713,10 @@ install_xray() {
     # empty answer, and an unbounded loop would spin forever printing
     # the same rejection. Three passes is enough for a human and
     # terminates for everything else.
+    # The counter is deliberately never read: the loop bounds the number
+    # of attempts, and nothing inside needs to know which attempt it is.
+    # Named rather than `_` so the intent is legible at the loop head.
+    # shellcheck disable=SC2034
     local dest_attempt
     for dest_attempt in 1 2 3; do
       read -r -p "Camouflage destination [$dest_default]: " dest || dest=""
