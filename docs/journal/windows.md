@@ -718,3 +718,62 @@ them it is one flag each. Ten Xray-family relay routes remain enabled and
 verified. OpenVPN was never client-tested at all — it is disabled for the
 same reason, by inference rather than measurement, and that inference is
 untested.
+
+## 2026-08-14 — WireGuard into Iran is DPI-dropped. Measured both ends.
+
+Captured on **both** ends of the same handshake:
+
+- Client (panel box) egress: **4 packets leave** —
+  `167.233.65.166.45455 > 185.222.28.186.51064: UDP, length 148`
+- ir1 ingress: **0 arrive**, 0 return. Client ends `tx=592, rx=0,
+  handshake=0`.
+
+They are dropped in transit. Not provisioning: wg0's public key was
+confirmed by deriving it from the client's own private key
+(`wg pubkey` → `5jSnst…`, matching the peer at 10.66.0.2), the peer was
+present, 51064 was listening, `iptables -L INPUT` empty.
+
+**What identifies the filter.** In a capture proven open by a TCP
+control in the same pcap, from the same host to the same ip:port:
+
+| sent | arrived |
+|---|---|
+| TCP SYN to 443 (control) | yes |
+| UDP 13 bytes | yes |
+| UDP 148 bytes, type byte 0x01 + random body | **yes** |
+| real WireGuard handshake, 148 bytes | **no** |
+
+So size, port and protocol number are all fine — a *valid* handshake is
+what gets dropped. A real initiation carries a `mac1` computed over the
+responder's public key; a DPI box that validates that field drops the
+genuine article and ignores a malformed lookalike. That is the only
+hypothesis consistent with all four rows, and it is the documented
+Iranian behaviour.
+
+**So WireGuard and OpenVPN cannot reach an Iran relay in the clear, and
+no amount of node-side configuration changes that.** The tun bridge is
+fine and stays built.
+
+### phantun is the answer, and it was never built
+
+The architecture has said from the start that the client→relay leg for
+WireGuard/OpenVPN needs **phantun** (UDP-over-TCP), and that "relay
+installs phantun". `grep phantun installer/lib/agent.sh` → nothing. It
+is not on ir1 and there is no client half either. That is the real
+remaining work, and it is a milestone, not a patch: phantun server on
+the relay, phantun client bundled in the Windows and Android apps, plus
+config plumbing so the client knows to dial TCP instead of UDP.
+
+Both routes stay **disabled** (rows kept, credentials removed). Ten
+Xray-family relay routes remain enabled and verified — and this is
+exactly why REALITY/Trojan/WS/Shadowsocks matter for Iran: they already
+survive this path.
+
+### tcpdump buffering produced three wrong answers tonight
+
+`tcpdump -w file` buffers ~4KB before flushing. Reading the pcap while
+the capture is still running shows **zero packets** even when packets
+arrived. That is what produced the earlier "UDP is blocked" and
+"WireGuard-shaped packets are blocked" conclusions, both of which were
+wrong. Use `-U`, **and** put a control packet you know arrives into the
+same capture so an empty result is distinguishable from a dead capture.
