@@ -912,3 +912,75 @@ itself a fingerprint), and give OpenVPN its own instance.
 
 `Iran relay / WIREGUARD` and `/ OPENVPN` remain **disabled**. Ten
 Xray-family relay routes stay enabled and verified.
+
+## NEXT SESSION — start here, in this order
+
+Everything below is ready to execute. No discovery needed.
+
+### 0. Correct a wrong conclusion I recorded earlier
+
+I tested WireGuard client->ir1 **from Germany**, which crosses Iran's
+international gateway inbound. **Customers connect from inside Iran to
+an Iran VPS — domestic traffic that never touches that filter.** The
+"WireGuard is DPI-dropped" finding is real for cross-border only and
+says nothing about the customer path. All 12 relay routes are enabled
+and wired (54 CONFIGURE_ROUTE executed, 0 failures).
+
+**First action: have an Iranian tester pick WireGuard on Ultimate.** If
+it connects, wstunnel is unnecessary. If not, wstunnel is half-built —
+`wstunnel.exe` already bundles into the Windows build (fetch proven,
+`wstunnel-cli 10.6.2`), and ir1 has the unit + `/etc/neoxify/wstunnel.env`
+ready, so the server side is one `systemctl enable --now
+neoxify-wstunnel` away.
+
+### 1. Security review (do this first — highest cost if wrong)
+
+The user's explicit worry: "I don't want someone to hack my client area
+or website or turn it down." Concrete surface to audit:
+- `customer-auth` + `auth`: token TTLs, `tokenVersion` revocation, the
+  reset/verify token reuse window. Login proof-of-work exists (M98) but
+  the `CHALLENGE_REQUIRED_AFTER_FAILURES = 5` grace was left in for old
+  clients — **remove it now that shipped clients solve challenges**.
+- Rate limits: `trust proxy` is fixed, but re-check every public
+  endpoint has a throttle, especially `/customer-auth/*`, voucher
+  preview, and the Plisio webhook.
+- The Plisio callback verifies `verify_hash`; confirm no code path
+  accepts a callback without it.
+- `website/` PHP: the `/r/CODE` handler whitelists `^[A-Z0-9]{1,32}$` —
+  check the rest of `inc/` for unescaped output and any SQL built by
+  concatenation.
+- Panel RBAC: RESELLER is allowlisted in `sidebar-nav.tsx` and
+  `/overview` redirects — verify no other page leaks cross-tenant data
+  (the last leak was found only by signing in as a reseller, not by
+  reading code).
+- ir1 exposes SSH on 22 with a password the user shared in chat and
+  intends to rotate. **Recommend key-only auth and rotating it.**
+
+### 2. Restriction matrix per protocol
+
+Already measured (2026-08-14): data caps enforced to the engine, device
+limits summed across protocols. Two open items:
+- **IKEv2 has 0 usage records all-time** with 15 credentials and an
+  enabled route. Code reads real SA counters, so it is probably unused
+  rather than broken — but if broken it is an unmetered path around
+  every cap. One real IKEv2 connection settles it.
+- Speed caps (`maxDownloadMbps`) apply to WireGuard/OpenVPN only; all
+  Xray protocols are uncapped (task #81). Currently no plan sets them,
+  so nothing is mis-sold today.
+
+### 3. Detection resistance pass
+
+- ir1 REALITY camouflage is `cloudflare.com`. Review `dest`/SNI per node
+  rather than inheriting the default.
+- If wstunnel is ever enabled, it must run **TLS on 443**, not plain
+  `ws://` on 8447 — a bare WebSocket on an odd port is its own
+  fingerprint.
+- Ports in use on ir1: 443, 2053, 2054, 8443, 8444, 8445, 46731, 46732.
+  The France set (2054/8445/46732/8444) sits on non-standard ports;
+  consider whether those read as suspicious in aggregate.
+
+### 4. Then releases, then the emulator/VM matrix
+
+Only after the above. Build and hold per the standing decision, then run
+every protocol on the Android emulator and the Windows VM against the
+real relay, checking exit IP each time — not just "it connected".
