@@ -57,14 +57,33 @@ async function bootstrap() {
     }),
   );
 
-  const config = new DocumentBuilder()
-    .setTitle("Neoxify Control Plane API")
-    .setDescription("Admin panel + agent orchestration backend")
-    .setVersion("0.1.0")
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup("docs", app, document);
+  // Swagger UI, off in production.
+  //
+  // It was on, and reachable unauthenticated at
+  // connect.neoxify.site/api/docs -- confirmed by opening it on
+  // 2026-08-14. It is a complete map of the control plane: every admin
+  // route, every DTO, every required field, including the ones that
+  // provision credentials and delete routes. None of that is a
+  // vulnerability by itself and none of it is secret in a public repo,
+  // but handing an attacker the index saves them the only slow part of
+  // finding the endpoints worth trying, and the customers this serves
+  // are worth the two lines.
+  //
+  // ENABLE_API_DOCS=true turns it back on deliberately, for a box where
+  // someone wants it. Opt-in rather than opt-out: an unset variable on a
+  // new deployment should mean closed.
+  const docsEnabled =
+    process.env.ENABLE_API_DOCS === "true" || process.env.NODE_ENV !== "production";
+  if (docsEnabled) {
+    const config = new DocumentBuilder()
+      .setTitle("Neoxify Control Plane API")
+      .setDescription("Admin panel + agent orchestration backend")
+      .setVersion("0.1.0")
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup("docs", app, document);
+  }
 
   const port = process.env.PORT ? Number(process.env.PORT) : 4000;
   await app.listen(port);
