@@ -1622,3 +1622,75 @@ DNS does not, so exit-IP checks have to use a literal address.
 2. The remaining Android routes; only two were driven here.
 3. The desktop app's own UI and ladder — the Windows matrices drove the
    service pipe, so that layer is still untested on desktop.
+
+## 2026-08-14 — The relay's Iran-egress window was ten minutes wide
+
+**Status:** narrowed to one minute and covered by tests. **Not closed**,
+and closing it needs a change on the node itself. Nothing on ir1 was
+touched.
+
+Chasing the `[vless-fr-in >> direct]` line from the relay matrix produced
+the most serious finding of the session, and it is not hypothetical.
+
+### What is actually on the node
+
+ir1's `config.json` holds eleven relay inbounds, **one** outbound
+(`direct`), and **one** routing rule (`api-in -> api`). Every
+`route-<uuid>-out` outbound and every rule pointing an inbound at one is
+hot-added over Xray's gRPC API and exists only in the running process.
+That is by design — the backend re-asserts them — but it means a restart
+leaves the inbounds listening with nothing routing them.
+
+Traffic does not stop when that happens. It falls through to `direct` and
+**leaves from the relay**, so a customer routing through Iran to get out
+of Iran egresses in Iran, while the app shows a healthy connection.
+
+`xray` on ir1 started 01:09:26 UTC today; `config.json` was written the
+same second. Grepping the whole access log for relay inbounds egressing
+direct returns exactly one session: **2026-08-13 23:50:51**, on protocol
+user `02475929-...`, which is neither of the test accounts. A real
+customer.
+
+### Why it was ten minutes
+
+`reassertConfiguredRoutes` already existed and is correctly wired — on
+agent connect, and on a periodic sweep, because `systemctl restart xray`
+leaves the control stream up so there is no reconnect to react to. The
+sweep ran on `REASSERT_INTERVAL_MS`, ten minutes, **shared with user
+re-assertion**.
+
+Those two are not comparable. Re-asserting users is one CREATE_USER per
+user per sweep and being late is an outage: the customer cannot
+authenticate, notices, and nothing leaks. Re-asserting routes is a dozen
+rows on the busiest relay we run and being late is a privacy failure that
+is invisible to the person it happens to.
+
+Routes now have their own sweep at 60s. That is a tenfold narrowing for
+almost no traffic, and it does not touch the expensive half.
+
+### What would actually close it, and why it is not here
+
+Failing closed. Unmatched relay traffic should be dropped, not sent out
+`direct`.
+
+The obvious form does not work: a catch-all rule in `config.json` would
+be evaluated **before** every hot-added route rule, because the agent
+adds them with `ShouldAppend: true`
+(`agent/internal/relay/provisioner.go`), so it would blackhole every
+relay route rather than only the unmatched ones. Checked before writing
+it, not after.
+
+The form that would work is changing the node's **default outbound** —
+the first entry in `outbounds` — from `direct` to a blackhole, so
+unmatched traffic dies instead of leaking. That is a live-node config
+change on a relay with real customers on it, and it needs the owner and a
+maintenance window. It also needs checking against whatever else on that
+node relies on `direct` being the fallback.
+
+### Tests
+
+`agent-gateway.route-reassert.spec.ts` is new; this path had none. It
+pins the inbound tag being carried (without it a France rule is restored
+onto the Finland listener — tunnelled, wrong country), the enabled-and-
+relayed filter, skipping a route with no uplink credential, and that the
+fast sweep does not drag user re-assertion along with it.
