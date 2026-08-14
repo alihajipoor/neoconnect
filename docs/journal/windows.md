@@ -588,3 +588,68 @@ The job is *named* "TypeScript (backend + panel)" but runs
 - A failed REALITY handshake logs **nothing** server-side -- it is
   proxied to the camouflage site by design. Absence of a log entry is
   not evidence the traffic never arrived.
+
+## 2026-08-14 (later) — WireGuard/OpenVPN on ir1, and the limits audit
+
+### WireGuard and OpenVPN: installed, registered, NOT routable
+
+Both engines are running on ir1 (`wg0` 10.66.0.1/24, `tun0` 10.77.0.1/24)
+and both are registered in the panel. **Their relay routes were created
+and then deleted again, deliberately.**
+
+ir1's Xray config has **no tun inbound at all** — no `relay-tun-in`, no
+`relay-tun` interface, no `ip rule`, nothing in table 100. A
+WireGuard/OpenVPN relay entry is bridged into Xray through that tun
+inbound, because unlike the Xray protocols there is no inbound tag to
+match on; the rule is scoped to the client subnet instead. With no
+bridge, a customer on those routes connects fine and their traffic
+egresses **at ir1 — in Iran**, since the installer's own MASQUERADE rule
+NATs it straight out. Same silent-leak shape as the restart bug.
+
+So the routes are gone until the bridge exists. The engines stay
+installed and registered; recreate the routes once `relay-tun` is real
+and proven. **This is the M9 follow-up that was never live-tested** —
+the plan says so explicitly, and this is the first time it was exercised.
+
+Fixed on the way: `install_openvpn` never sent `subnetCidr`, so an
+OpenVPN relay route could never be created at all ("missing subnetCidr")
+even with a working bridge.
+
+### Limits audit — measured, not read
+
+**Data cap: works, proven end to end.** A test Ultimate subscription
+pushed past its cap was SUSPENDED by the sweep, all 10 credentials
+flipped to DISABLED across 4 protocols, 10 DISABLE_USER commands were
+executed by the agent, and a connection attempt with a suspended
+credential was **rejected by the relay itself** —
+`proxy/trojan: not a valid user`. Not a status field: the engine.
+
+Usage is really being reported, last 7 days fleet-wide:
+
+| Protocol | records | traffic |
+|---|---|---|
+| VLESS+REALITY | 1830 | 2.40 GB |
+| VLESS+TLS | 188 | 1.22 GB |
+| OpenVPN | 246 | 0.75 GB |
+| Shadowsocks | 99 | 0.14 GB |
+| WireGuard | 405 | 0.02 GB |
+| Trojan | 21 | 0.001 GB |
+| **IKEv2** | **0** | **0** |
+
+**Device limit: enforced across all protocols, better than assumed.**
+All four provisioners implement `SessionCounts` (Xray, WireGuard,
+OpenVPN, IKEv2 — not Xray-only as dispatch.go's comment implies), and
+`ConcurrencyService` **sums distinct sources per subscription across
+protocols**, so two devices on two different protocols count as two. Three
+consecutive over-limit polls before action, which is what keeps a
+wifi-to-mobile handover from looking like sharing.
+
+### IKEv2 is the one unknown
+
+15 credentials, an enabled route (`singapore-1 / IKEv2`), and **zero
+usage records all time**. The accounting code is real — it reads per-SA
+byte counters from `swanctl` — so the likely explanation is that nobody
+has ever connected over IKEv2, not that it is broken. **I could not
+distinguish the two**, and the difference matters: if it is broken,
+IKEv2 is an unmetered path around every data cap. Needs one real IKEv2
+connection to settle, and until then no cap claim should include it.
