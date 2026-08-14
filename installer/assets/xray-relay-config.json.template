@@ -51,7 +51,7 @@
         "decryption": "none",
         "fallbacks": [
           {
-            "//": "The WebSocket carrier, sharing this port and certificate -- see the note in xray-config.json.template. Matched ahead of the ALPN entry because a WebSocket upgrade is HTTP/1.1 and never reaches the h2 bucket.",
+            "//": "The WebSocket carrier, sharing this port and certificate -- see the note in xray-config.json.template. Not selected by its position: fallbacks are a [name][alpn][path] map, path entries are copied into every ALPN bucket at startup, and the path is sniffed from the request line regardless of the negotiated ALPN (which for these connections is h2).",
             "path": "__VLESS_WS_PATH__",
             "dest": "__VLESS_WS_DEST__",
             "xver": 1
@@ -91,7 +91,7 @@
         "clients": [],
         "fallbacks": [
           {
-            "//": "The WebSocket carrier, sharing this port and certificate -- see the note in xray-config.json.template. Matched ahead of the ALPN entry because a WebSocket upgrade is HTTP/1.1 and never reaches the h2 bucket.",
+            "//": "The WebSocket carrier, sharing this port and certificate -- see the note in xray-config.json.template. Not selected by its position: fallbacks are a [name][alpn][path] map, path entries are copied into every ALPN bucket at startup, and the path is sniffed from the request line regardless of the negotiated ALPN (which for these connections is h2).",
             "path": "__VLESS_WS_PATH__",
             "dest": "__VLESS_WS_DEST__",
             "xver": 1

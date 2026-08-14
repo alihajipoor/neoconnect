@@ -12,6 +12,16 @@
 #
 # Needs no NAT rules and no CAP_NET_ADMIN, which is why there is no
 # companion helper script here.
+#
+# LISTEN_URL must be wss:// before this is offered to a customer, not
+# ws://. A bare WebSocket on an odd port is a fingerprint in its own
+# right -- unencrypted HTTP framing carrying fixed-size UDP payloads,
+# visible to any DPI box without decrypting anything -- and it gives up
+# the one property the transport is here for. The proving run on ir1
+# used ws://0.0.0.0:8447 because it was a proving run; a customer-facing
+# instance shares 443 with the TLS inbound (SNI routing) or takes an
+# ordinary HTTPS port of its own with a real certificate. See
+# docs/detection-resistance.md.
 Description=Neoxify wstunnel WebSocket fronting for UDP engines
 Documentation=https://github.com/erebe/wstunnel
 After=network-online.target
