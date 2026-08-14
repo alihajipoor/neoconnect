@@ -303,16 +303,28 @@ export class ResellersService {
 
   // ------------------------------------------------------------ private
 
-  /** The short form, /r/CODE, rather than /account/?voucher=CODE.
+  /** The long form, /account/?voucher=CODE, rather than the short /r/CODE.
    *
-   * Both work -- /r/ only normalises the code and redirects -- but this
-   * one gets pasted into chat, read aloud and printed, and a query
-   * string reads like a tracking URL. It is also short enough to type
-   * from a printed card, which the query form is not. */
+   * This used to emit /r/CODE, and the reasoning was sound: it gets
+   * pasted into chat, read aloud and printed, and a query string reads
+   * like a tracking URL. What that reasoning missed is that /r/CODE has
+   * never worked on the live site, so every activation email sent so far
+   * carried a link that silently landed on the marketing homepage.
+   *
+   * The redirect it depends on is defined in website/.htaccess, which
+   * only Apache reads. neoxify.net is served by nginx, which does not.
+   * Measured 2026-08-14, not inferred: GET /r/ABCD2345 returns 200 and
+   * the homepage, while GET /account/?voucher=ABCD2345 reaches the
+   * portal with the code carried in -- the web portal reads the param in
+   * apps/web-portal/src/App.tsx.
+   *
+   * So this is the form that works on the host we actually run. Going
+   * back to /r/CODE means installing website/nginx-website.conf.example
+   * on the web host first, and not before. */
   private async activationUrl(code: string): Promise<string> {
     const links = await this.appLinks.get();
     const site = (links.websiteUrl ?? DEFAULT_WEBSITE).replace(/\/$/, "");
-    return `${site}/r/${encodeURIComponent(code)}`;
+    return `${site}/account/?voucher=${encodeURIComponent(code)}`;
   }
 
   /** Best-effort, like every other send in this codebase: a mail failure
