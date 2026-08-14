@@ -777,3 +777,60 @@ arrived. That is what produced the earlier "UDP is blocked" and
 "WireGuard-shaped packets are blocked" conclusions, both of which were
 wrong. Use `-U`, **and** put a control packet you know arrives into the
 same capture so an empty result is distinguishable from a dead capture.
+
+## 2026-08-14 — phantun works. WireGuard reaches Iran.
+
+**WireGuard over phantun to ir1, then out through the relay:**
+
+```
+handshake=1786681655  tx=3508  rx=5948
+EXIT IP: 204.168.161.100   (finland1)
+```
+
+Real handshake, traffic both ways, exit at the relay's exit node.
+Re-verified against the **systemd-managed** service, not just a
+hand-started process. This is the thing that was specified in M9 and
+never built.
+
+### Shipped (node side)
+
+- `installer/assets/neoxify-phantun@.service` — templated, one instance
+  per fronted UDP engine, `CAP_NET_ADMIN` for the tun and nothing more.
+- `installer/assets/neoxify-phantun-nat` — the DNAT + MASQUERADE the
+  kernel needs, reapplied **on every start**. iptables does not survive
+  a reboot and the failure is silent: phantun logs "Listening" and every
+  client times out on a SYN+ACK the kernel never delivered to it.
+- `install_wireguard` calls `setup_phantun` on **RELAY nodes only**, and
+  records `phantunTcpEndpoint` in the registered params so the app dials
+  TCP instead of a UDP port that will never answer. Added to the
+  client-visible whitelist; absent elsewhere, and a client that ignores
+  it behaves exactly as before.
+
+### Two traps worth keeping
+
+- **Docker sets `-P FORWARD DROP`.** The panel box runs Docker, so
+  phantun_client's synthesised SYN appeared on `tun0 In` and never on
+  `eth0 Out`. Cost a full wrong diagnosis ("TCP 8446 is blocked to ir1")
+  before I captured on the client side. A real customer device does not
+  have this; it was purely the test host.
+- **phantun binds no socket.** `ss -lnt` shows nothing on its port,
+  because it synthesises TCP on a tun device. Absence there is normal
+  and is not evidence it failed to start.
+
+### State
+
+`Iran relay / WIREGUARD` and `/ OPENVPN` remain **disabled**. The node
+side is done and proven; the apps do not speak phantun yet, so a
+customer handed a WireGuard credential today would still dial UDP and
+fail. Ten Xray-family relay routes stay enabled and verified.
+
+### Next, in order
+
+1. **Client half**: bundle `phantun_client` into the Windows and Android
+   apps and have the connect path prefer `phantunTcpEndpoint` when the
+   credential carries one, pointing WireGuard at the local UDP port
+   phantun opens. This is what unblocks the two disabled routes.
+2. OpenVPN gets the same treatment — a second phantun instance on its
+   own TCP port. Untested for OpenVPN specifically; the mechanism is
+   protocol-agnostic but that is inference, not measurement.
+3. Then releases, then the emulator protocol matrix.
