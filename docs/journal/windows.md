@@ -984,3 +984,184 @@ limits summed across protocols. Two open items:
 Only after the above. Build and hold per the standing decision, then run
 every protocol on the Android emulator and the Windows VM against the
 real relay, checking exit IP each time — not just "it connected".
+
+## 2026-08-14 — Security audit of the account surfaces
+
+**Status:** six fixes landed, all with tests; three items need the
+operator. Nothing was deployed — production is untouched.
+
+The brief was the owner's own worry: "I don't want someone to hack my
+client area or website or turn it down." Static review plus tests, plus
+read-only requests to the public site. What follows separates what was
+proven from what was not, because two of these were live and one was a
+total bypass.
+
+### Anyone with an admin password had MFA for decoration
+
+`AuthService.login()` signs the MFA challenge token with
+`jwt.accessSecret` — the same secret as an access token — and hands it
+back **after the password is accepted and before the TOTP code**.
+`JwtStrategy.validate()` copied `sub` through without checking anything,
+and `RolesGuard` only rejects where a route declares `@Roles()`. Most
+admin controllers declare none. So that token authenticated against
+`GET /customers`, `GET /protocol-users` and `DELETE /routes` for five
+minutes, renewable by logging in again.
+
+`types.ts` asserted this was impossible: "a mfaToken has no `role`, so
+it can't pass as an access token to JwtStrategy.validate() either." The
+comment was the only thing enforcing it. **A stated invariant that no
+code checks is a comment, and this one had been wrong since MFA landed.**
+
+Same shape on the customer side, and worse in reach: the verify-email
+token (24h, real customer id, `purpose: "verify-email"`) was accepted as
+a full session. It is emailed in cleartext and travels in the query
+string of the GET landing page, so it also lives in nginx logs and
+browser history. Anyone who saw one held the account for a day. The
+invoice-document token too — its `sub` is an *invoice* id, which every
+handler downstream would have used as a customer id.
+
+Both strategies now validate positively: a `purpose` claim is refused
+outright, and the fields a real access token carries are required.
+
+### A reseller was an admin everywhere nobody had said otherwise
+
+M25 made the panel sidebar an allowlist and its comment says "the
+backend gates each endpoint too — this is the navigation, not the
+security boundary". **It did not.** One request with a reseller's own
+token returned:
+
+| Endpoint | What it hands over |
+|---|---|
+| `GET /customers` | every customer's email |
+| `GET /protocol-users` | every customer's **decrypted** VPN credentials |
+| `GET /protocol-configs` | `publicParamsJson`, which carries `caKeyPem` |
+| `GET /routes` | relay uplink credentials |
+| `PATCH /customers/:id` | accepts a new password — for anyone |
+| `DELETE /routes/:id` | takes a route down |
+
+Nothing had to be guessed. The `/overview` leak found on 2026-08-13 was
+this same root cause caught one page at a time; this is the class.
+
+The check went into `JwtAuthGuard`, not `RolesGuard`, because several of
+those controllers never include `RolesGuard` in their chain — a fix
+there would have compiled, passed review and never run. Default is now
+deny for outsider roles on any endpoint that does not name them, so the
+next controller someone adds is closed until it says otherwise.
+
+`ALL_ADMIN_ROLES` is derived from a `Record<AdminRole, true>`, so adding
+a role to the Prisma enum is a compile error rather than a silent grant
+— the same trick as the protocol-drift guard, and for the same reason:
+RESELLER already inherited "everyone" once.
+
+### The proof-of-work grace: the premise was false, and it was checkable
+
+The plan said to remove `CHALLENGE_REQUIRED_AFTER_FAILURES = 5` because
+shipped clients now solve challenges. They do not:
+
+```
+git cat-file -e desktop-v0.9.4:apps/desktop-windows/src/lib/pow.ts   # fails
+git cat-file -e android-v0.2.9:apps/desktop-windows/src/lib/pow.ts   # fails
+```
+
+`pow.ts` landed 2026-08-12. The newest tag of either client is
+2026-08-11. **No released build contains a solver** — only the panel and
+the web portal do.
+
+That matters more than it looks, because with the grace closed a missing
+solution is refused on the **first** attempt, not the sixth. Flipping it
+today would refuse every sign-in from every beta tester's app. Running
+apps keep working on their refresh tokens; anyone who signs out,
+reinstalls or adds a device would be locked out of the product until a
+release exists.
+
+So the removal is **wired, not performed**:
+`LOGIN_CHALLENGE_GRACE_FAILURES=0` closes it with no code change, and
+tests pin both settings — including that the first unsolved attempt is
+refused, which is the fact that decides when it is safe to flip.
+
+One trap found while wiring it: docker-compose passes `""` for a
+variable merely absent from `.env`, and `Number("")` is `0`. Left
+unguarded, an empty value would have switched enforcement on by accident
+and locked out every customer. Empty now means unset.
+
+### The website's security headers have never once been applied
+
+`website/.htaccess` is careful and correct, and **neoxify.net runs
+nginx**, which never reads it. Measured against the live site, not
+reasoned about:
+
+- no CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy or
+  Permissions-Policy on any response; `server: nginx/1.24.0 (Ubuntu)`
+- `GET /r/ABCD2345` → **200 and the marketing page**, not a redirect to
+  `/account/?voucher=…`. The voucher short links resellers hand out do
+  not work, and that is the reseller programme's delivery path
+- `GET /nonexistent-page-xyz` → 200 and the home page, so `404.php`
+  never runs and every mistyped URL is indexable
+
+The site is on **74.208.24.198 (IONOS)** — its own host, not the panel
+box. `website/nginx-website.conf.example` is the same posture written
+for nginx. It has to be installed by hand; this session deployed
+nothing.
+
+Also fixed in both files: `connect-src 'self'` blocks every call
+`/account/` makes. The portal reuses the apps' endpoint ladder
+(`connect.neoxify.site`, then node mirrors on their VPN ports, then
+mirrors derived at runtime from the customer's own credentials), so the
+allowance has to be `https://*.neoxify.site:*` — naming only the panel
+would leave the portal with no failover on exactly the filtered networks
+the ladder exists for.
+
+### Also closed
+
+- **The reset code had no guess budget.** Six digits, thirty minutes,
+  and only a per-IP throttle — which is the control a distributed
+  attacker walks around: 5/min from a thousand addresses is ~150k
+  guesses at a chosen account inside one code's life. Misses now count
+  against the account and the fifth burns the code. Burning, not
+  locking: a lockout would let anyone who knows an email address deny
+  the owner their own reset. The response does not change on the guess
+  that burns it, or it would tell an attacker when to ask for a fresh
+  window.
+- **Swagger UI was live at `/api/docs`, unauthenticated** — confirmed by
+  opening it, not by reading `main.ts`. Now opt-in via
+  `ENABLE_API_DOCS`.
+
+### Checked and found sound
+
+Worth recording so nobody re-audits them: the Plisio callback has no
+path that acts without `verifyCallback`, and `confirmPayment` is
+idempotent on `status !== "PENDING"`; every customer-facing endpoint
+scopes through `getOwned`; the PHP site has **no SQL and no `eval` /
+`exec` / `include $var` anywhere**, every echo is an internal value, and
+`/r/` whitelists before redirecting; `trust proxy` is still `1`;
+`ServiceTokenGuard` fails closed and compares digests; the proof-of-work
+implementation itself (HMAC, single use, difficulty floor, stockpiling
+check) is correct.
+
+### What still needs the operator
+
+1. **`ir1` SSH on 22 with a password shared in chat.** Key-only auth and
+   rotate it. Not something to change under a sleeping owner with live
+   customers on the node.
+2. **The nginx config for the website** has to be installed by hand
+   before any of its headers exist. Until then the site's only real
+   protection is the `<?php exit; ?>` guard line — which does work:
+   `/inc/config.php` returns 200 with an empty body.
+3. **Decide when to set `LOGIN_CHALLENGE_GRACE_FAILURES=0`.** It is a
+   release question, not a code one.
+
+### What could not be settled statically
+
+- Whether `data/` is writable on the web host. `/data/secret.php` 404s,
+  which is as consistent with "never written" as with "protected". If it
+  is not writable, `nx_secret()` silently falls back to a value derived
+  from the install path and PHP version — guessable — and
+  `nx_rate_limit_ok()` fails open, so the contact form has no rate limit
+  at all. One `ls -la` on the host settles it.
+- Whether the reseller exposure was ever used. There is one reseller
+  account and no audit trail on those reads. Nothing suggests it was.
+- The panel guards are typechecked and built, not driven. The last three
+  bugs in this area all compiled. **Sign in as a reseller and try
+  `/customers` by URL before believing this is closed** — that is how
+  the `/overview` leak was found, and reading the code is what missed
+  it.
