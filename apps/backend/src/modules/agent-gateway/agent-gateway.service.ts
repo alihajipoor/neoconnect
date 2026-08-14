@@ -294,11 +294,22 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private async reassertProvisionedUsers(nodeId: string, opts: { persist: boolean } = { persist: true }) {
     const users = await this.prisma.protocolUser.findMany({
       where: { nodeId, status: "ACTIVE" },
-      // For the transport only. Without it every re-assert after an
-      // engine restart would rebuild WebSocket customers on the TCP
-      // inbound -- silently, and for everyone at once, since re-assert is
-      // exactly the path that runs when a node comes back.
-      include: { protocolConfig: { select: { transport: true } } },
+      // For the transport and the inbound tag. Without either, every
+      // re-assert after an engine restart rebuilds customers on the
+      // wrong inbound -- silently, and for everyone at once, since
+      // re-assert is exactly the path that runs when a node comes back.
+      //
+      // transport: WebSocket customers would be rebuilt on the TCP
+      // inbound.
+      //
+      // inboundTag: worse. A relay runs one inbound per exit, so a
+      // customer on the France listener would be rebuilt on the Finland
+      // one -- or, if their credential is not on the inbound they dial
+      // at all, rejected outright. Measured 2026-08-14: after an Xray
+      // restart on ir1, all five France routes returned "invalid request
+      // user id" while Finland kept working, because the re-assert had
+      // put every France customer on the default inbounds.
+      include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
     });
     if (users.length === 0) return;
 
@@ -306,6 +317,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       const payload = {
         protocol: user.protocol,
         transport: user.protocolConfig.transport,
+        // Omitted entirely when null, so the payload stays byte-identical
+        // to what every non-relay node already receives.
+        ...(user.protocolConfig.inboundTag ? { inboundTag: user.protocolConfig.inboundTag } : {}),
         externalUserId: user.externalUserId,
         credentials: decryptCredentials(user.credentialsJson),
       };
