@@ -1165,3 +1165,140 @@ check) is correct.
   `/customers` by URL before believing this is closed** — that is how
   the `/overview` leak was found, and reading the code is what missed
   it.
+
+## 2026-08-14 — Detection-resistance pass (NEXT SESSION item 3)
+
+**Status:** installer, templates, one client behaviour and a new doc
+changed. **Nothing was deployed and no live node was touched.** Every
+conclusion below is analysis of code, of xray-core's source, and of
+probes run from this dev machine — not a measurement against an Iranian
+filter. `docs/detection-resistance.md` has the full reasoning; this is
+what changed and what is still open.
+
+### The camouflage default was losing to a table lookup
+
+`cloudflare.com:443` was the REALITY `dest` default for every node, and
+ir1 uses it. Cloudflare publishes its address ranges. So a ClientHello
+claiming that name, sent to an address in nobody's CDN, is a mismatch a
+filter catches with one lookup and zero inspection — the cheapest check
+available to it, and the one the old prompt never mentioned. The same
+argument rules out every centrally-hosted household name.
+
+Three changes, all in `install_xray`:
+
+- `probe_reality_dest` opens a real TLS 1.3 connection to a candidate
+  **from the node**, with `-alpn h2`, and checks the negotiated ALPN,
+  that the certificate verifies, and X25519 as advisory. The list can no
+  longer promise something that box cannot reach — which matters most
+  for exactly the case we care about, an Iranian VPS dialling a property
+  that geo-blocks it. A `dest` the node cannot reach turns every prober
+  into a failure instead of into a convincing web page, which is louder
+  than having no disguise at all.
+- Candidates are probed and printed in two groups, Iran-hosted and
+  abroad, with the criterion stated: **pick for where the node is, not
+  where the customers are.** Default is whichever passed first.
+- `www.microsoft.com` and the placeholder domains are refused by name
+  with the reason. Microsoft is the one this project has already been
+  burned by (M9: endpoint security intercepts it, REALITY then fails
+  with "received real certificate"). It was also still sitting in a
+  desktop test fixture as an example to copy; replaced.
+
+The probe is real code that ran: `www.digikala.com`, `www.aparat.com`,
+`divar.ir`, `www.speedtest.net`, `www.asus.com` and `www.leboncoin.fr`
+all pass from here; `www.varzesh3.com`, `www.zoho.com` and `www.snapp.ir`
+do not, and the Iranian ones among those probably fail *because* the
+probe ran from outside Iran. That is the argument for probing on the
+node rather than shipping a list.
+
+### Every node returned the same 118 bytes to a prober
+
+The Trojan/VLESS+TLS fallback site was byte-identical on every node.
+That is a fleet fingerprint obtainable without breaking a single tunnel:
+open the port, speak ordinary HTTPS, hash the response, compare. It now
+picks from several dull placeholder pages and embeds a random build id,
+so the length and the bytes differ per node. Still impersonating nobody.
+
+### `/ws` is the first string a prober sends
+
+It was the default path, and it is the default in every xray tutorial
+ever written. Now generated per node (`suggest_ws_path`). Verified first
+that this costs nothing: both clients read `path` from `publicParams`
+and neither has ever hardcoded it.
+
+### Ports: two different arguments, previously conflated
+
+For a listener whose disguise is "a web server", the port is part of the
+disguise — TLS on 2087 is unremarkable, the same handshake on 46731 is
+an anomaly before inspection. For Shadowsocks and the UDP engines the
+reasoning inverts: they have no normal-service story on any port, so a
+random high port is right and a Cloudflare-adjacent one would be worse.
+`suggest_plausible_tls_port` now draws at random from
+8443/2053/2083/2087/2096 for the two TLS prompts, which also stops every
+node answering on 2053 — that pattern is one scan from being a list of
+our nodes. `suggest_free_port` is unchanged and now says why it differs.
+
+### A fallback comment was right by accident, and worth correcting
+
+The templates claimed the WebSocket path fallback is "matched before"
+the h2 entry because WS upgrades are HTTP/1.1. Both halves are wrong.
+Read from xray-core v1.260327.0 (`proxy/vless/inbound/inbound.go`):
+fallbacks are a `[name][alpn][path]` map, so the JSON list has no order;
+and these connections **do** negotiate h2, because our clients advertise
+Chrome's ALPN list and the inbound prefers h2. It works because path
+entries under the empty ALPN are copied into every named-ALPN bucket at
+startup, and because the path is sniffed from the request line
+regardless of ALPN. Anyone "simplifying" either entry on the old comment
+would have broken the WebSocket transport.
+
+Related, and deliberately *not* changed: the clients keep `alpn:
+["h2","http/1.1"]` even for WebSocket. The ALPN list is plaintext in the
+ClientHello and has to match what a Chrome-fingerprinted hello carries;
+the HTTP/1.1 framing that follows is inside TLS where no passive filter
+sees it. `WithNextProto("http/1.1")` in xray's ws dialer only applies
+when no ALPN is configured, so this is our list, not a default.
+
+### Trojan's SNI fallback produced the thing it was written to prevent
+
+`vpn.rs` fell back to the node's host as `serverName` when a node
+recorded none, reasoning that a wrong name beats no name. The host is an
+IP, and uTLS drops an IP literal from the SNI extension entirely
+(`hostnameInSNI`, utls v1.8.3 — read, not guessed). So it sent a
+Chrome-shaped ClientHello with no server name at all, and the
+certificate check failed anyway since none of our certificates carries
+an IP SAN. It could not have connected on any node we run. Now a
+refusal naming the field, matching VLESS+TLS, IKEv2 and the Android
+client. 14 Rust tests pass.
+
+### Checked and sound
+
+`fingerprint: "chrome"` is set in all three places that build an
+outbound — both clients and the relay's own uplink in
+`agent/internal/relay/provisioner.go`, which crosses the same filter a
+customer does. No client hardcodes anything that varies per node.
+`allowInsecure` appears nowhere and a test asserts it. Shadowsocks sets
+`uot` on both clients. OpenVPN uses `tls-crypt`, so its control channel
+is not the giveaway a plain OpenVPN server's is.
+
+### Needs the owner or a live test
+
+1. **Certificate transparency publishes the fleet.** Every
+   `*.neoxify.site` node name is in CT logs the moment it is issued —
+   enumerable with no probing at all. Unrelated per-node domains, or a
+   DNS-01 wildcard, both cost something. Owner decision.
+2. **ir1's aggregate port profile** (443, 2053, 2054, 8443, 8444, 8445,
+   46731, 46732). The `+1` pairs come from adding a second inbound per
+   relayed exit by hand, and 2054/8445 are ports nothing else uses.
+   Changing a serving node needs the owner.
+3. **Which `dest` ir1 should actually use.** The probe answers
+   "reachable with TLS 1.3 from this box"; it cannot answer "unremarkable
+   from inside Iran". A domestic Iranian site is the reasoned choice for
+   an Iran-hosted relay — needs a test from an Iranian network first.
+4. **Failed attempts are training data.** Failover starts with
+   WireGuard, and the per-network memory only remembers what worked.
+   Every first connection on a filtered network therefore emits a
+   recognisable WireGuard handshake. Remembering failures per network
+   would cut it to once; the current order is a recorded product
+   decision, so it was left alone.
+5. **wstunnel must be `wss://` before a customer sees it.** Noted in the
+   unit file itself now, since there is no installer path for it yet and
+   the only running instance is the ir1 proving run on plain ws://8447.
