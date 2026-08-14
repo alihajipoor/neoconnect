@@ -834,3 +834,39 @@ fail. Ten Xray-family relay routes stay enabled and verified.
    own TCP port. Untested for OpenVPN specifically; the mechanism is
    protocol-agnostic but that is inference, not measurement.
 3. Then releases, then the emulator protocol matrix.
+
+### Blocker found immediately after: phantun has no client for our platforms
+
+`phantun` releases are **Linux only** — aarch64/armv7/i686/x86_64/mips,
+no Windows, no macOS. And on Android an unrooted app cannot do what
+phantun_client needs: it wants its own raw tun device plus iptables NAT,
+while an app only gets the system-owned `VpnService` descriptor.
+
+So **the client half as designed cannot be built.** The node side I
+shipped is correct and proven, but nothing on Windows or Android can
+talk to it. That is why the two routes stay disabled — this is now a
+harder gap than "not wired up yet".
+
+**The replacement is wstunnel**, which the M22 plan already named as the
+"WStunnel" equivalent. It ships `windows_amd64` and `android_arm64`
+binaries and runs entirely in userspace — it opens a local UDP port and
+carries it over WebSocket/TLS, no client TUN and no root. That is the
+property phantun lacks and the only reason phantun looked right was that
+the architecture named it before anyone checked its platform matrix.
+
+Sketch, not yet built or tested:
+- relay: `wstunnel server wss://0.0.0.0:<port>` (can share 443 behind the
+  existing SNI-routing thinking in M22)
+- client: `wstunnel client -L 'udp://<local>:127.0.0.1:<wg-port>?timeout_sec=0' wss://ir1:<port>`
+- WireGuard `Endpoint` points at the local UDP port, exactly as it points
+  at phantun's today
+
+**Do not delete the phantun work.** It is proven, it is relay-only, it is
+not advertised to any client (both routes disabled), and it remains the
+right tool for a Linux client or a router. But it is not the path to the
+Windows and Android apps.
+
+**Recommendation before building further:** prove wstunnel end to end on
+ir1 the same way phantun was proven — real handshake plus an exit IP —
+*before* touching either app. The lesson of tonight is that the platform
+matrix of a dependency is worth five minutes up front.
