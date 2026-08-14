@@ -1573,11 +1573,20 @@ install_openvpn() {
   local token config_json
   token="$(get_admin_bearer_token)" || return 1
 
+  # The tunnel subnet, matching the `server 10.77.0.0 255.255.255.0` line
+  # in the server config written above. It has to reach the panel: a
+  # relayed OpenVPN route is wired by scoping the Xray routing rule to the
+  # client subnet, because unlike the Xray protocols there is no inbound
+  # tag to match on. Without it, route creation fails with "missing
+  # subnetCidr" and the engine ends up installed, registered, and
+  # unroutable -- which is exactly what happened on ir1, 2026-08-14.
+  local ovpn_subnet="10.77.0.0/24"
+
   config_json="$(curl -sSL -X POST "$panel_url/protocol-configs" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $token" \
-    -d "$(jq -n --arg nodeId "$node_id" --argjson listenPort "$listen_port" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" \
-      '{nodeId: $nodeId, protocol: "OPENVPN", listenPort: $listenPort, publicParamsJson: {proto: $proto, endpoint: $endpoint}}')")"
+    -d "$(jq -n --arg nodeId "$node_id" --argjson listenPort "$listen_port" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" --arg subnet "$ovpn_subnet" \
+      '{nodeId: $nodeId, protocol: "OPENVPN", listenPort: $listenPort, publicParamsJson: {proto: $proto, endpoint: $endpoint, subnetCidr: $subnet}}')")"
 
   local ca_cert server_cert server_key config_id
   config_id="$(echo "$config_json" | jq -r '.id // empty')"
@@ -1659,7 +1668,7 @@ EOF
   systemctl restart openvpn-server@server
 
   apt-get install -y -qq iptables
-  local default_iface ovpn_subnet="10.77.0.0/24"
+  local default_iface  # ovpn_subnet is set above, at registration
   default_iface="$(detect_default_iface)"
   if [[ -z "$default_iface" ]]; then
     echo "ERROR: could not detect the default outbound network interface -- required so client traffic can actually reach the internet." >&2

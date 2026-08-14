@@ -114,7 +114,19 @@ func (p *Provisioner) ConfigureRoute(ctx context.Context, payload ConfigureRoute
 		Config:       serial.ToTypedMessage(&router.Config{Rule: []*router.RoutingRule{rule}}),
 		ShouldAppend: true,
 	}); err != nil {
-		return fmt.Errorf("AddRule: %w", err)
+		// Same idempotency contract as AddOutbound above, which was
+		// already tolerant of its duplicate. This half was not, so
+		// re-sending a CONFIGURE_ROUTE for a route that is already wired
+		// failed the whole command -- and re-sending is exactly what the
+		// control plane now does on every reconnect. The route was fine;
+		// the outbox filled with failures that hid the real ones.
+		//
+		// Xray's text here is "duplicate ruleTag <tag>", from
+		// app/router/router.go's AddRule -- a different phrasing from
+		// AddOutbound's "existing tag found", so it needs its own match.
+		if !strings.Contains(err.Error(), "duplicate ruleTag") {
+			return fmt.Errorf("AddRule: %w", err)
+		}
 	}
 
 	// Only WireGuard/OpenVPN entries need OS-level help -- an Xray-based
