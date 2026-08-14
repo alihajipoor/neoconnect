@@ -415,7 +415,14 @@ const CLIENT_VISIBLE_PUBLIC_PARAMS: Record<string, readonly string[]> = {
   // per-user key is what identifies and authorises the customer, and
   // revoking one customer means removing their key alone.
   SHADOWSOCKS: ["method", "serverKey"],
-  WIREGUARD: ["serverPublicKey", "endpoint", "subnetCidr", "dns"],
+  // phantunTcpEndpoint is how a client reaches this tunnel on a network
+  // that drops WireGuard outright. Measured on the Iran relay
+  // 2026-08-14: a real handshake left the client and never arrived,
+  // while TCP to the same node did -- so on those nodes `endpoint` is
+  // unreachable and this is the address that works. Absent everywhere
+  // else, and a client that does not understand it just uses `endpoint`
+  // as before.
+  WIREGUARD: ["serverPublicKey", "endpoint", "subnetCidr", "dns", "phantunTcpEndpoint"],
   // caCertPem is genuinely needed to verify the server, and already
   // travels in the per-user credentials. caKeyPem and serverKeyPem are
   // the secrets and are absent on purpose.

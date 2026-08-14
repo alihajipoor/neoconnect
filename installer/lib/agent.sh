@@ -1033,11 +1033,79 @@ EOF
   local config_id params
   params="$(jq -n --arg pk "$public_key" --arg ep "${endpoint_host}:${listen_port}" --arg subnet "$subnet" --arg dns "$dns" \
     '{serverPublicKey: $pk, endpoint: $ep, subnetCidr: $subnet, dns: $dns}')"
+  # On a relay, the client cannot reach this UDP port at all (see
+  # setup_phantun), so it is fronted with TCP and the registered params
+  # have to say so -- otherwise the app builds a config pointing at a
+  # port that will never answer.
+  local phantun_tcp_port=""
+  if [[ "${node_is_relay:-n}" == "y" ]]; then
+    phantun_tcp_port="$(suggest_free_port)"
+    setup_phantun "wireguard" "$listen_port" "$phantun_tcp_port" "192.168.201.0/24" "192.168.201.2"
+    if systemctl is-active --quiet neoxify-phantun@wireguard; then
+      params="$(echo "$params" | jq --argjson port "$phantun_tcp_port" --arg host "$endpoint_host"         '. + {phantunTcpEndpoint: ($host + ":" + ($port|tostring))}')"
+    fi
+  fi
+
   config_id="$(register_protocol_config "WIREGUARD" "$listen_port" "$params")" || return 1
   echo "  Registered (config $config_id)."
   create_route_for_config "WireGuard" "$config_id"
 
   echo "WireGuard is running on port $listen_port and is ready to use."
+}
+
+# Fronts a UDP engine with phantun so it survives a network that drops
+# the protocol outright.
+#
+# Measured on the Iran relay, 2026-08-14: a real WireGuard handshake sent
+# from Germany left the client and never arrived, while TCP from the same
+# host to the same node arrived fine. Raw WireGuard and OpenVPN simply
+# cannot reach an Iran node -- and no amount of node-side configuration
+# changes that, because the packets die in transit. phantun wraps the UDP
+# in synthesised TCP, which does get through: verified end to end, real
+# handshake, and an exit IP matching the relay's exit node.
+#
+# Relay nodes only. Elsewhere the UDP arrives unmolested and this would
+# be a second daemon and a second port for no benefit.
+setup_phantun() {
+    local instance="$1" udp_port="$2" tcp_port="$3" tun_subnet="$4" tun_peer="$5"
+
+    if [[ ! -x /usr/local/bin/phantun_server ]]; then
+        echo "Installing phantun..."
+        local url
+        url="$(curl -fsSL https://api.github.com/repos/dndx/phantun/releases/latest \
+            | grep -oE 'https://[^"]*x86_64-unknown-linux-musl[^"]*\.zip' | head -1)"
+        if [[ -z "$url" ]]; then
+            echo "WARNING: could not find a phantun release to download -- skipping." >&2
+            echo "  WireGuard/OpenVPN will not be reachable from a network that filters them." >&2
+            return 0
+        fi
+        command -v unzip >/dev/null 2>&1 || apt-get install -y -qq unzip
+        local tmp
+        tmp="$(mktemp -d)"
+        curl -fsSL -o "$tmp/ph.zip" "$url" || { echo "WARNING: phantun download failed." >&2; rm -rf "$tmp"; return 0; }
+        unzip -o -q "$tmp/ph.zip" -d "$tmp"
+        install -m 755 "$tmp/phantun_server" /usr/local/bin/phantun_server
+        rm -rf "$tmp"
+    fi
+
+    install -d -m 755 /etc/neoxify
+    cat > "/etc/neoxify/phantun-$instance.env" <<ENV
+TCP_PORT=$tcp_port
+UDP_PORT=$udp_port
+TUN_SUBNET=$tun_subnet
+TUN_PEER=$tun_peer
+ENV
+    install -m 755 "$SCRIPT_DIR/assets/neoxify-phantun-nat" /usr/local/bin/neoxify-phantun-nat
+    install -m 644 "$SCRIPT_DIR/assets/neoxify-phantun@.service" /etc/systemd/system/neoxify-phantun@.service
+    systemctl daemon-reload
+    systemctl enable --now "neoxify-phantun@$instance" >/dev/null 2>&1
+
+    if systemctl is-active --quiet "neoxify-phantun@$instance"; then
+        echo "  phantun is fronting $instance on TCP $tcp_port (clients dial TCP, not UDP $udp_port)."
+        echo "  If your provider has a cloud firewall, open inbound TCP $tcp_port on it -- this script cannot."
+    else
+        echo "WARNING: phantun failed to start for $instance -- check journalctl -u neoxify-phantun@$instance" >&2
+    fi
 }
 
 # Prompts for panel admin credentials and exchanges them for a fresh
