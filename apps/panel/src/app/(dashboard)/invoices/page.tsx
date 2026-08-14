@@ -1,5 +1,5 @@
 import { apiFetch } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { getSession, requireStaff } from "@/lib/session";
 import type { Invoice, InvoiceStatus, InvoiceSummary } from "@/lib/types";
 import { InvoicesView } from "./invoices-view";
 
@@ -10,6 +10,7 @@ export default async function InvoicesPage({
 }: {
   searchParams: Promise<{ status?: string }>;
 }) {
+  await requireStaff();
   const { status } = await searchParams;
   const session = await getSession();
   // Voiding changes what the books say -- the backend gates it to

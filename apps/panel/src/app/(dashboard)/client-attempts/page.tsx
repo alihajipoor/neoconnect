@@ -1,4 +1,5 @@
 import { apiFetch } from "@/lib/api";
+import { requireStaff } from "@/lib/session";
 import type {
   ClientAttempt,
   ClientAttemptOutcome,
@@ -16,6 +17,7 @@ export default async function ClientAttemptsPage({
 }: {
   searchParams: Promise<{ outcome?: string; failures?: string }>;
 }) {
+  await requireStaff();
   const { outcome, failures } = await searchParams;
 
   // Failures-only is the default. A beta log dominated by successful

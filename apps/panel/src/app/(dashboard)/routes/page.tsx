@@ -1,9 +1,10 @@
 import { apiFetch } from "@/lib/api";
-import { getSession } from "@/lib/session";
+import { getSession, requireStaff } from "@/lib/session";
 import type { Node, ProtocolConfig, Route } from "@/lib/types";
 import { RoutesTable } from "./routes-table";
 
 export default async function RoutesPage() {
+  await requireStaff();
   const [routes, protocolConfigs, nodes, session] = await Promise.all([
     apiFetch<Route[]>("/routes"),
     apiFetch<ProtocolConfig[]>("/protocol-configs"),
