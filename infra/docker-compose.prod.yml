@@ -90,6 +90,10 @@ services:
       # that can solve one, which no released build can yet. See
       # modules/login-guard/login-guard.service.ts.
       LOGIN_CHALLENGE_GRACE_FAILURES: ${LOGIN_CHALLENGE_GRACE_FAILURES:-}
+      # Swagger UI at /api/docs. Off here because NODE_ENV is production;
+      # set to "true" only if you deliberately want the whole control
+      # plane's routes and payload shapes published unauthenticated.
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
     volumes:
       - /etc/neoxify/certs:/etc/neoxify/certs:ro
     ports:
