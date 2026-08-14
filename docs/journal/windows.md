@@ -653,3 +653,68 @@ has ever connected over IKEv2, not that it is broken. **I could not
 distinguish the two**, and the difference matters: if it is broken,
 IKEv2 is an unmetered path around every data cap. Needs one real IKEv2
 connection to settle, and until then no cap claim should include it.
+
+## 2026-08-14 (later still) — the tun bridge works; WireGuard still cannot reach ir1
+
+### The bridge is fixed and verified
+
+ir1 now has the tun inbound, and the bridge the agent builds on top of it
+is real and inspectable:
+
+```
+relay-tun   <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP>
+32764: from 10.77.0.0/24 lookup 100
+32765: from 10.66.0.0/24 lookup 100
+table 100: default dev relay-tun
+```
+
+Both CONFIGURE_ROUTE commands executed cleanly. Everything the M9 design
+calls for on the relay side is in place — this is the first time that
+half has ever existed on a real node.
+
+**Why it was missing:** the relay template has the tun inbound and always
+did. ir1's config was rewritten from the *base* template during the third
+(desynced) installer run, so the node ended up relay-roled with a
+non-relay config. Nothing detects that mismatch.
+
+**Prerequisites, all already satisfied and worth recording:** the xray
+unit ships `AmbientCapabilities=CAP_NET_ADMIN`, so xray creates the
+device despite `User=nobody`; `/dev/net/tun` exists; and this xray build
+accepts `"protocol": "tun"` (`Configuration OK`).
+
+### But WireGuard does not complete a handshake to ir1
+
+Tested from the panel server with `AllowedIPs = 1.1.1.1/32` so only that
+one destination could enter the tunnel. Result, twice:
+`latest-handshake 0`, `rx 0`, `tx 740`. The client talks, nothing answers.
+
+Not a provisioning fault, and each of these was checked:
+- wg0's real public key **matches** the registered `serverPublicKey`
+- the test peer exists on wg0 with the right address (10.66.0.4/32)
+- wg0 listens on 51064, no local firewall (`iptables -L INPUT` empty)
+
+**I could not isolate the cause.** A 13-byte UDP probe to 51064 appeared
+to arrive; a 148-byte WireGuard-shaped one and a 148-byte random one did
+not. That pattern hints at size- or fingerprint-based filtering on the
+path into Iran, but my capture windows were not reliably open across
+both tests, so it is a hypothesis and nothing more. **Do not repeat the
+"send a probe, grep a pcap" approach without pinning the capture window
+open first** — it produced a confident wrong answer once already tonight.
+
+### phantun was never built
+
+The architecture has always said the client→relay leg for
+WireGuard/OpenVPN needs **phantun** (UDP-over-TCP), and that "relay
+installs phantun". It does not: `grep phantun installer/lib/agent.sh`
+returns nothing, and it is not on ir1. That is the designed answer to
+exactly the symptom above, and it is the missing piece — not the bridge.
+
+### State left behind
+
+`Iran relay / WIREGUARD` and `Iran relay / OPENVPN` are **disabled, not
+deleted**, and their credentials removed. The engines stay installed and
+registered and the bridge stays up, so once a client can actually reach
+them it is one flag each. Ten Xray-family relay routes remain enabled and
+verified. OpenVPN was never client-tested at all — it is disabled for the
+same reason, by inference rather than measurement, and that inference is
+untested.
