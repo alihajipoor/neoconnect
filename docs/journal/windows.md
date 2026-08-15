@@ -1765,3 +1765,39 @@ present, not unattended.
 - Xray on a real Android handset; the emulator could not answer it.
 - ir1 still allows password SSH on port 22. Key auth is confirmed
   working now, so this is safe to close whenever.
+
+## 2026-08-14 — Backend deployed; step 2 (ir1) still outstanding
+
+**Status:** step 1 of the two production steps is **done and verified**.
+Step 2 has not been started.
+
+Production moved 29c5250 -> e8477fe. No migrations, no schema change, no
+new environment variables — checked before, and unchanged after.
+
+Verified in production rather than assumed: the route sweep now logs
+every 60s (12:33:02, 12:33:57, 12:34:57, 12:35:57), re-asserting **12
+relay routes** on ir1 each time. User re-assertion stayed on its ten
+minute schedule — four log lines in four minutes is one sweep across four
+nodes, one line per node, not four sweeps. The split is doing what it was
+written to do.
+
+**The Iran-egress window is ~60s now, down from ~10min. It is still not
+zero.** Closing it is step 2, unchanged and still needing the owner:
+prepend a blackhole outbound on ir1 so unmatched relay traffic dies
+instead of leaving from the relay, then restart Xray. Now that the 60s
+sweep is live, that restart costs about a minute of relay downtime rather
+than ten.
+
+### One process note
+
+The deploy command in the earlier entry was wrong: it named
+`infra/docker-compose.yml`, which is the local-development stack
+(Postgres, Redis, MailHog only), and failed with `no such service:
+backend`. Production is `infra/docker-compose.prod.yml`. It came from
+grepping the README for `docker compose` and taking the first hit without
+reading that it sat under "Getting started".
+
+There was no deployment runbook to find, which is the actual gap, so
+README now has one — including that `name: neoxify` in the prod compose
+is what stops a second stack being started beside the live one when the
+checkout directory is called something else.
