@@ -45,13 +45,19 @@ const handshakeFreshFor = 3 * time.Minute
 // here -- when a device moves network, WireGuard updates the endpoint on
 // the same peer rather than creating a second one.
 func (p *Provisioner) SessionCounts() (map[string]int, error) {
+	// The case the comment below used to describe and not handle: a node
+	// that simply does not offer WireGuard reports nothing instead of an
+	// error every poll. See notServingWireguard for why the interface,
+	// and not the missing binary alone, is what decides.
+	if p.notServingWireguard() {
+		return nil, nil
+	}
 	out, err := exec.Command("wg", "show", p.iface, "dump").Output()
 	if err != nil {
-		// A node whose WireGuard is not running has no sessions to
-		// report. Returning an error would be read as "unknown", and the
-		// caller logs it rather than assuming zero -- which is right, but
-		// on a node that simply does not offer WireGuard it would be
-		// noise on every poll.
+		// WireGuard IS set up here, so a failure now is real and stays an
+		// error: "unknown" is the honest answer, and the caller logs it
+		// rather than recording zero usage for peers that are still
+		// transferring.
 		return nil, err
 	}
 
