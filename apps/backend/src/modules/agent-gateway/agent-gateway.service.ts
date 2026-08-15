@@ -37,7 +37,31 @@ const SWEEP_INTERVAL_MS = 30_000;
 // back the way it should be, without anyone noticing or intervening.
 // Ten minutes trades a little recovery latency for not putting a burst
 // of writes on every node every minute.
-const REASSERT_INTERVAL_MS = 10 * 60_000;
+/** How often provisioned users are re-asserted onto connected nodes.
+ *
+ * Was ten minutes, which meant that after any `systemctl restart xray`
+ * the node authenticated **nobody** for up to ten minutes: the inbounds
+ * listen, the routes are restored within a minute, and every customer is
+ * rejected with "invalid request user id" the whole time. Measured on
+ * ir1 while changing its REALITY dest — the tunnel came back only once
+ * this sweep ran.
+ *
+ * The ten minutes was chosen to bound cost, and that cost is smaller
+ * than it looks: the sweep writes straight onto the stream
+ * (`persist: false`), so it stores nothing. What it spends is one
+ * CREATE_USER per active user per sweep. Measured 2026-08-15 with 270
+ * active users across four nodes, 105 on the busiest — about four
+ * messages a second fleet-wide at this interval, against an idempotent
+ * create-if-not-exists on the agent.
+ *
+ * It does scale linearly with the customer base, so this is the number
+ * to revisit if that grows by an order of magnitude — a node with
+ * thousands of users would want the engine-restart signal instead of a
+ * faster poll. That signal does not exist today: `Heartbeat` carries
+ * cpu, memory and connection count and nothing about the engine, so
+ * detecting a restart properly needs a proto change, an agent change and
+ * an agent rollout. Polling is what is available without one. */
+const REASSERT_INTERVAL_MS = 60_000;
 
 /** How often relayed routes are re-asserted onto connected nodes.
  *
@@ -123,35 +147,42 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       });
     }, REASSERT_INTERVAL_MS);
 
-    // Routes get their own, much faster sweep. The two re-assertions look
-    // alike but they are not comparable in either cost or consequence.
+    // Routes sweep separately from users. Both now run at 60s, so the
+    // split is no longer about cadence -- it is so each half can be
+    // reasoned about, and retimed, without dragging the other with it.
+    // Users are the half that scales with the customer base; routes are a
+    // dozen rows on the busiest relay we run.
     //
-    // Cost: re-asserting users sends one CREATE_USER per user per sweep,
-    // which is why it is deliberately infrequent. Routes are a dozen rows
-    // on the busiest relay we run, so this is nearly free.
+    // Why either needs to be fast, and they need it for different
+    // reasons:
     //
-    // Consequence: a late user re-assert is an outage -- the customer
-    // cannot authenticate, notices immediately, and nothing leaks. A late
-    // ROUTE re-assert is worse than an outage. With no rule matching the
-    // entry inbound, traffic falls through to the relay's own `direct`
-    // outbound and leaves from the relay itself, so a customer routing
-    // through Iran to get out of Iran egresses in Iran, while the app
-    // shows a healthy connection and says nothing.
+    // A late USER re-assert is a plain outage. The inbounds listen, the
+    // routes are ready, and every customer is rejected with "invalid
+    // request user id" until the sweep runs. At the old ten minutes that
+    // was a ten-minute outage after any `systemctl restart xray` --
+    // measured on ir1 on 2026-08-15, where the tunnel came back only once
+    // this sweep fired.
     //
-    // That is not hypothetical: ir1's access log recorded exactly one
-    // such session, 2026-08-13 23:50:51, on a real customer's credential.
-    // At the shared 10-minute interval the window after any `systemctl
-    // restart xray` was up to ten minutes wide.
+    // A late ROUTE re-assert is worse than an outage, because nothing
+    // stops. With no rule matching the entry inbound, traffic falls
+    // through to the relay's own default outbound and leaves from the
+    // relay itself, so a customer routing through Iran to get out of Iran
+    // egresses in Iran while the app shows a healthy connection. ir1's
+    // access log recorded exactly one such session, 2026-08-13 23:50:51,
+    // on a real customer's credential.
     //
-    // A static catch-all rule routing unmatched relay traffic to a
-    // blackhole would close the window entirely and was the first thing
-    // tried. It cannot work as written: the agent adds route rules with
-    // ShouldAppend=true (agent/internal/relay/provisioner.go), so any
-    // rule already in config.json is evaluated FIRST and would blackhole
-    // every relay route instead of only the unmatched ones. Making the
-    // relay fail closed needs the default outbound changed on the node
-    // itself, which is a live-node change and is not this commit's to
-    // make.
+    // ir1 now also fails closed -- its first outbound is a blackhole, so
+    // unmatched relay traffic is dropped rather than leaked. That makes
+    // the route window an outage instead of an exposure, but only on
+    // nodes configured that way, and only Xray-entry routes are covered
+    // by the rule at all. The sweep is still what ends the window.
+    //
+    // Note a static catch-all *rule* cannot do the same job: the agent
+    // adds route rules with ShouldAppend=true
+    // (agent/internal/relay/provisioner.go), so any rule already in
+    // config.json is evaluated FIRST and would blackhole every relay
+    // route rather than only the unmatched ones. It has to be the default
+    // outbound, which is a per-node config change.
     this.routeReassertHandle = setInterval(() => {
       this.reassertRoutesOnConnectedNodes().catch((err) => {
         this.logger.warn(`Route re-assert sweep failed: ${err}`);
@@ -186,16 +217,19 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private async reassertAllConnectedNodes() {
     for (const nodeId of this.registry.connectedNodeIds()) {
       await this.reassertProvisionedUsers(nodeId, { persist: false });
-      await this.reassertConfiguredRoutes(nodeId, { persist: false });
+      // Routes are deliberately NOT re-asserted here. They have their own
+      // sweep on the same interval, and doing both from both timers would
+      // send every CONFIGURE_ROUTE twice a minute for nothing. See
+      // reassertRoutesOnConnectedNodes.
     }
   }
 
-  /** Routes only, on the fast sweep.
+  /** Routes only.
    *
-   * Deliberately does NOT re-assert users: that is the expensive half and
-   * it is already covered by reassertAllConnectedNodes above. Running it
-   * at this cadence would multiply CREATE_USER traffic tenfold to shorten
-   * a window that only routes are exposed to. */
+   * Deliberately does NOT re-assert users; the other sweep owns those.
+   * Keeping the halves apart means the interval of the one that scales
+   * with the customer base (users) can be changed without also slowing
+   * the one that guards against traffic leaving from a relay. */
   private async reassertRoutesOnConnectedNodes() {
     for (const nodeId of this.registry.connectedNodeIds()) {
       await this.reassertConfiguredRoutes(nodeId, { persist: false });

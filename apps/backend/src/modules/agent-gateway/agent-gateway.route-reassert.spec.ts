@@ -141,6 +141,21 @@ describe("AgentGatewayService route re-assertion", () => {
     expect(written).toHaveLength(0);
   });
 
+  it("the user sweep does not also re-send routes", async () => {
+    // The mirror of the test below, and the reason both exist: the two
+    // sweeps run on the same interval now, so if either one starts doing
+    // the other's work every CONFIGURE_ROUTE goes out twice a minute for
+    // nothing. Cheap today at a dozen routes; not a habit to acquire.
+    const { service, prisma } = build([buildRoute()]);
+
+    await (
+      service as unknown as { reassertAllConnectedNodes(): Promise<void> }
+    ).reassertAllConnectedNodes();
+
+    expect(prisma.protocolUser.findMany).toHaveBeenCalled();
+    expect(prisma.route.findMany).not.toHaveBeenCalled();
+  });
+
   it("the fast sweep restores routes without re-sending every user", async () => {
     // The reason routes get their own interval. Re-asserting users is one
     // message per user per sweep; running that at the route cadence would
