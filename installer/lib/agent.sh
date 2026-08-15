@@ -539,13 +539,43 @@ HOOK
 #     certificate" because the interceptor's certificate arrives instead
 #     of the expected one. Found live on a customer's machine; see
 #     docs/detection-resistance.md.
+#   * A country's own big CDN, which is the same mistake wearing local
+#     clothes. Measured while choosing ir1's dest: varzesh3.com resolves
+#     into AbrArvan's published anycast range and divar.ir/zoomit.ir into
+#     Sotoon's. Claiming one of those names from an address in an
+#     ordinary hosting block is exactly the one-lookup mismatch
+#     cloudflare.com was rejected for.
+#   * A household name on its own branded block. digikala.com answers
+#     from a range registered "Digikala-B4" and aparat.com from
+#     "SABAIDEA-NETWORK". Those are trivial to enumerate and to check,
+#     and they are the names a filter has most reason to have mapped
+#     already.
+#
+# What is left, and what these lists now hold, is the awkward middle: a
+# real site with real traffic, hosted on some hosting company's address
+# space rather than on a CDN or its own vanity block. The check a censor
+# would need is then per-domain rather than per-range, which is the whole
+# point.
+#
+# The IR entries were each verified from ir1 itself -- TLS 1.3, ALPN h2,
+# certificate verified -- and their address blocks looked up. Do not take
+# that as permanent: hosting moves, and the probe below is what decides,
+# not this list.
 REALITY_DEST_CANDIDATES_IR=(
-  www.digikala.com
-  www.aparat.com
-  divar.ir
+  # MobinhostInfrastructure -- an ordinary Iranian hosting block, the
+  # same shape of address as a VPS. This is what ir1 uses.
+  www.torob.com
+  # SHTL-NET-INFRA-HSTG, Shatel's own hosting infrastructure.
+  www.shatel.ir
+  # Sotoon CDN, so weaker than the two above on the range argument, but
+  # kept as a third option that does pass the handshake checks.
+  www.zoomit.ir
 )
 REALITY_DEST_CANDIDATES_ABROAD=(
-  www.speedtest.net
+  # NOTE: www.speedtest.net used to head this list and has been removed.
+  # It resolves into Cloudflare (104.17.x), so it carried the very
+  # problem the list exists to avoid, and it failed the h2 check from
+  # ir1 anyway.
   www.asus.com
   www.leboncoin.fr
 )
