@@ -2051,3 +2051,42 @@ singapore-1 having no Xray at all is itself worth a second look, since
 the dispatcher registers the relay provisioner on every node on the
 assumption that any node's Xray process can serve as a relay exit — that
 one cannot.
+
+## 2026-08-15 — singapore-1 has no Xray, and that is fine
+
+**Status:** checked and sound. No code change. Recorded so nobody
+re-audits it.
+
+The worry was that `cmd/agentd/main.go` registers the relay provisioner
+on every node "regardless of which protocols it terminates", while
+singapore-1 runs no Xray at all — so it might be silently unusable as a
+relay exit while the panel happily offered it.
+
+It cannot be offered, and two independent checks stop it:
+
+- `routes.service.ts` refuses at creation unless the exit protocol config
+  is `SUPPORTED_EXIT_PROTOCOL` (XRAY_VLESS_REALITY), and separately
+  refuses a RELAY node as an exit.
+- `agent/internal/relay/provisioner.go` refuses again at execution:
+  `unsupported exit protocol %q` for anything but REALITY.
+
+singapore-1 has no REALITY config, so it never becomes a candidate. The
+main.go comment is justifying that *registration* is harmless on a node
+that never receives CONFIGURE_ROUTE — not claiming every node can be an
+exit. Misread on my part.
+
+The absence is also deliberate rather than drift: the installer asks per
+engine, `Install Xray (VLESS+REALITY) on this node now? [Y/n]` defaulting
+to yes and `Install IKEv2 (strongSwan)? [y/N]` defaulting to no. Someone
+answered n to the first and y to the second.
+
+### Worth a product decision, not a fix
+
+singapore-1 is the least-used node by a distance: 30 protocol users
+against 105 each on finland1 and france-1, two of the eight protocols,
+and one of those two is IKEv2, which has no usage records at all. It is
+serving OpenVPN to a few people.
+
+Re-running the installer there and accepting Xray would give it the
+Xray family and make it eligible as a relay exit beside finland1 and
+france-1. Leaving it is also defensible. Owner's call.
