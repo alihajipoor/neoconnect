@@ -1999,3 +1999,55 @@ pins it in both directions.
 backend re-asserts users **and** routes on connect. It executed 42
 commands within seconds on ir1. After any deliberate Xray restart that
 still beats waiting a minute, and it touches nothing else.
+
+## 2026-08-15 — Agent v0.2.3 on all four nodes; IKEv2 noise gone
+
+**Status:** done. All four nodes moved off `dev` builds onto a released
+agent for the first time.
+
+    node          sha           IKEv2 errs   all errs
+    ir1           5938954761c8      0            0
+    finland1      5938954761c8      0            0
+    france-1      5938954761c8      0            0
+    singapore-1   5938954761c8      0           33   <- different cause, below
+
+Counted from each node's own agent start, which matters: a five-minute
+window looked like ir1 was still erroring, and every one of those lines
+turned out to carry the **old** process's PID from before the restart.
+Scope log windows to `ActiveEnterTimestamp`, not to a round number.
+
+Each rollout verified the release checksum on the node before installing,
+and kept the previous binary at `/root/agentd.backup-dev-*`. Worth having
+kept: every node was on a hand-built `dev` binary, and there is no way to
+tell from the outside whether one carried local changes that never
+reached git.
+
+### The agent restart does not disturb customers
+
+Measured rather than asserted, on finland1 across its restart:
+**166 established customer connections before, 168 after.** It went up.
+The agent holds the control stream, not the tunnels, so restarting it
+re-asserts users and routes without touching a single session. That makes
+it the safe lever after any deliberate Xray restart, and safe to run mid-
+evening with gamers online — unlike an Xray restart, which is not.
+
+### singapore-1 has the same bug for two more protocols
+
+Found while verifying the rollout, and pre-existing rather than caused by
+it:
+
+    WIREGUARD StatsSince: exec: "wg": executable file not found in $PATH
+    XRAY_VLESS_REALITY StatsSince: dial tcp 127.0.0.1:10085: connection refused
+
+singapore-1 serves OpenVPN and IKEv2 only. It has no `wg` and no Xray, so
+those two provisioners poll engines that were never installed, twice a
+minute, exactly as IKEv2 did on ir1.
+
+The same discriminator would work for WireGuard — the `wg` binary either
+exists or it does not. **Xray is harder and should probably stay loud**:
+on the other three nodes Xray is the main engine and "connection refused
+on the local API" means it is down, which is worth waking up for.
+singapore-1 having no Xray at all is itself worth a second look, since
+the dispatcher registers the relay provisioner on every node on the
+assumption that any node's Xray process can serve as a relay exit — that
+one cannot.
