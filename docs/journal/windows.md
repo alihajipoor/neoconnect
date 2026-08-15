@@ -2090,3 +2090,45 @@ serving OpenVPN to a few people.
 Re-running the installer there and accepting Xray would give it the
 Xray family and make it eligible as a relay exit beside finland1 and
 france-1. Leaving it is also defensible. Owner's call.
+
+## 2026-08-15 — Agent v0.2.4: WireGuard polling noise gone too
+
+**Status:** done, all four nodes, verified from each node's own agent
+start.
+
+    node          wg errs   IKEv2 errs   all errs
+    finland1         0          0           0
+    france-1         0          0           0
+    ir1              0          0           0
+    singapore-1      0          0           3  <- Xray, deliberately loud
+
+Same bug as IKEv2, different discriminator. This provisioner keeps no
+user map — peers live in the kernel via `wg set` — so the interface is
+the signal instead: if `wg0` exists, WireGuard is set up here and a
+failing poll means usage going uncounted while peers keep transferring,
+which must stay loud. If it does not exist there are no peers to miss.
+
+Both conditions, not the interface alone, so a node with WireGuard
+installed whose interface is down still reports. That is a fault, not an
+absence.
+
+`SessionCounts` already carried a comment describing this exact noise and
+returned the error anyway. It now handles the case it described.
+
+### What is deliberately still noisy
+
+singapore-1 logs `XRAY_VLESS_REALITY StatsSince: xray QueryStats: rpc
+... connection refused` every 30s, and that is on purpose. On the other
+three nodes Xray is the main engine, and a refused local API means it is
+down — worth waking up for. Installing Xray on singapore-1 would end it
+(and give the node the Xray family and relay-exit eligibility); so would
+a per-node "this engine is not installed" flag. Neither is a silent-fix
+candidate.
+
+### A testing note worth keeping
+
+The first version of the WireGuard test consulted the real `/usr/bin/wg`
+and skipped when it was absent — so the case it existed to cover ran
+nowhere, on this machine or in CI. The tool lookup is now injected
+alongside the sysfs path and all three cases are deterministic. A test
+that skips everywhere is not a test.
