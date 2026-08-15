@@ -89,6 +89,36 @@ Re-running `sudo ./install.sh` on an already-installed box shows that
 role's management menu (status/logs, rebuild, uninstall, etc.) instead of
 asking again — the chosen role is recorded in `/etc/neoxify/role`.
 
+### Deploying an update to a running panel server
+
+```bash
+cd /root/neoconnect          # wherever the repo was checked out
+git pull --ff-only origin main
+docker compose -f infra/docker-compose.prod.yml up -d --build backend
+```
+
+`infra/docker-compose.prod.yml`, **not** `infra/docker-compose.yml` — the
+latter is the local-development stack further down this file and contains
+only Postgres, Redis and MailHog, so `up --build backend` against it fails
+with `no such service: backend`. That mistake is easy to make from a
+grep, which is why it is written down here.
+
+Name the service you actually changed (`backend`, `panel`,
+`discord-bot`); rebuilding all of them takes far longer for no benefit.
+The project name is pinned as `name: neoxify` at the top of the prod
+compose file, so this targets the running containers whatever the
+checkout directory is called — without that, compose would derive the
+project from the directory and start a *second* stack alongside the live
+one.
+
+**Check for schema changes first.** `git diff <deployed>..origin/main --
+apps/backend/prisma/` — if it is non-empty the migration has to be run
+against production before the new image starts, or the container comes up
+against a schema it does not expect.
+
+The API is not in the VPN data path: customer tunnels stay up across a
+backend restart, and only the panel and API blink for a few seconds.
+
 ### Inbound ports your provider must allow
 
 Most cloud providers attach a firewall that permits only 22/80/443 and
