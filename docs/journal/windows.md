@@ -1869,3 +1869,84 @@ ir1, the access log should show `>> blocked` where it previously showed
   question, which was previously read as "unused rather than broken".
 - ir1's REALITY `dest` is still `cloudflare.com`, the default the
   detection-resistance pass argued against. Unchanged and still open.
+
+## 2026-08-15 — ir1's REALITY dest is no longer cloudflare.com
+
+**Status:** done and verified on both REALITY inbounds. Installer
+candidate lists corrected in source.
+
+### What it is now
+
+`www.torob.com` on both ir1 REALITY inbounds — 443 (exits finland1) and
+8444 (exits france-1) — set on the node **and** in
+`protocol_configs.publicParamsJson`, since the client takes its SNI from
+the panel and a mismatch fails the same way interception does.
+
+### How it was chosen, which is the part worth keeping
+
+Candidates were probed **from ir1**, not from a dev machine, using the
+installer's own criteria. That immediately mattered: `www.varzesh3.com`
+fails from here and passes from ir1, exactly the artifact the previous
+entry predicted.
+
+Then each survivor's address block was looked up, and that is what
+actually decided it:
+
+    ir1              185.222.28.186   VUNIFY-NETWORK      ordinary IR hosting
+    www.torob.com    81.12.31.29      MobinhostInfra      ordinary IR hosting
+    www.shatel.ir    85.15.17.13      SHTL-NET-INFRA      ISP hosting
+    www.varzesh3.com 185.143.232.202  AbrArvan ANYCAST    a CDN
+    divar/zoomit     185.166.104.x    Sotoon-CDN          a CDN
+    www.digikala.com 185.188.107.10   Digikala-B4         own branded block
+    www.aparat.com   185.147.179.11   SABAIDEA-NETWORK    own branded block
+
+The reason cloudflare.com was wrong is that its ranges are published, so
+"SNI says X, packet goes to a non-X address" is one lookup. **An Iranian
+CDN is the same mistake in local clothes**, and a household name on its
+own branded block is barely better — those are the domains a filter has
+most reason to have mapped. torob.com sits in a hosting company's space,
+the same shape of address as ir1 itself, so the check becomes per-domain
+instead of per-range.
+
+Worth noting `www.speedtest.net` was the first entry in the "abroad"
+list and resolves into Cloudflare (104.17.x) — it carried the exact
+problem the list exists to avoid. Removed.
+
+### Verified, not assumed
+
+A throwaway xray client on one node dialling ir1 and exposing loopback
+SOCKS, then one curl. Client host chosen so a correct answer cannot be
+the client's own address:
+
+- client on france-1 -> ir1:443 -> **204.168.161.100 (finland1)**
+- client on finland1 -> ir1:8444 -> **104.105.205.233 (france-1)**
+
+### The failure in the middle, and what it taught
+
+The first test after the restart returned nothing, and the access log
+said `rejected proxy/vless/encoding: invalid request user id`. That is
+not a REALITY failure — a wrong SNI is silently proxied to the dest
+instead — it is VLESS user auth, meaning the restart had emptied the
+hot-added **users**.
+
+Routes now come back in 60s. **Users are still on the ten-minute sweep**,
+so after any Xray restart the node authenticates nobody for up to ten
+minutes while its routes sit ready. That is now the dominant outage after
+a restart, and it is worth deciding whether the user sweep needs the same
+treatment the route sweep just got.
+
+There is a manual lever: `systemctl restart neoxify-agentd` on the node
+forces a reconnect, and the backend re-asserts users on connect. It
+executed 42 commands within seconds and the tunnel worked immediately
+afterwards. Cheap, does not touch Xray, and is the thing to reach for
+after any deliberate Xray restart.
+
+### Also
+
+ir1 had 43 established connections before this restart and 0 three
+minutes after, which looks alarming and is not — the clients' failover
+ladder moves them to other nodes and they return on reconnect. Same
+pattern as the earlier restart. Do not read an empty relay as a broken
+one; test it instead.
+
+Backup: `/root/xray-config.backup-dest-20260815T154905Z.json`.
