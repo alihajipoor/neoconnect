@@ -14,7 +14,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,12 +29,55 @@ import (
 type Provisioner struct {
 	iface string
 
+	// Where interfaces appear, so notServingWireguard can be tested
+	// without a real wg device. Always /sys/class/net in production.
+	sysNetDir string
+	// How the wg tool is located. Injected for the same reason: without
+	// it the "installed but interface down" case can only be exercised on
+	// a machine that happens to have WireGuard tools, so the test skipped
+	// everywhere it mattered and proved nothing.
+	lookPath func(string) (string, error)
+
 	mu       sync.Mutex
 	lastSeen map[string][2]uint64 // pubkey -> cumulative [rx, tx] at last poll
 }
 
 func New(iface string) *Provisioner {
-	return &Provisioner{iface: iface, lastSeen: make(map[string][2]uint64)}
+	return &Provisioner{
+		iface:     iface,
+		sysNetDir: "/sys/class/net",
+		lookPath:  exec.LookPath,
+		lastSeen:  make(map[string][2]uint64),
+	}
+}
+
+// notServingWireguard reports whether there is no WireGuard here to poll:
+// the interface does not exist and the `wg` tool is not even installed.
+//
+// The same problem the IKEv2 provisioner had, and the same shape of fix,
+// but a different discriminator because this provisioner keeps no user
+// map -- peers live in the kernel, added with `wg set`, so there is
+// nothing in memory to count.
+//
+// The interface is the better signal anyway. If wg0 exists, WireGuard is
+// set up here and a polling failure is real: a node whose usage stops
+// being counted while its peers keep transferring is an unmetered path
+// around every data cap, which must stay loud. If wg0 does not exist
+// there are no peers and no traffic to miss, whatever the reason.
+//
+// Both conditions rather than the interface alone, so that a node which
+// has WireGuard installed but whose interface is currently down still
+// reports -- that is a fault worth seeing, not an absence.
+//
+// Measured 2026-08-15: singapore-1 (OpenVPN and IKEv2 only) has neither
+// the binary nor wg0 and was logging two errors a minute about both
+// StatsSince and SessionCounts; finland1 has both plus sixteen peers.
+func (p *Provisioner) notServingWireguard() bool {
+	if _, err := os.Stat(filepath.Join(p.sysNetDir, p.iface)); err == nil {
+		return false
+	}
+	_, err := p.lookPath("wg")
+	return err != nil
 }
 
 func (p *Provisioner) CreateUser(ctx context.Context, user common.ProtocolUser) error {
@@ -78,6 +123,9 @@ func (p *Provisioner) SetEnabled(ctx context.Context, externalUserID string, ena
 }
 
 func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, error) {
+	if p.notServingWireguard() {
+		return nil, nil
+	}
 	out, err := exec.CommandContext(ctx, "wg", "show", p.iface, "transfer").Output()
 	if err != nil {
 		return nil, fmt.Errorf("wg show %s transfer: %w", p.iface, err)
