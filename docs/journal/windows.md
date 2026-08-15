@@ -1950,3 +1950,52 @@ pattern as the earlier restart. Do not read an empty relay as a broken
 one; test it instead.
 
 Backup: `/root/xray-config.backup-dest-20260815T154905Z.json`.
+
+## 2026-08-15 — User re-assert is 60s too; a restart now costs a minute
+
+**Status:** done, deployed and verified in production.
+
+After `systemctl restart xray` the node authenticates nobody until the
+user sweep runs. The inbounds listen, the routes come back within a
+minute, and every customer is rejected with `invalid request user id`
+for the whole gap. At ten minutes that was a ten-minute outage on every
+customer of that node — which, in customer-visible terms, was the larger
+of the two problems found yesterday.
+
+Both halves now sweep at 60s.
+
+### The cost was smaller than the old comment implied
+
+The ten minutes existed to bound cost, and the sweep already writes onto
+the stream instead of storing commands (`persist: false`), so it persists
+nothing. What it spends is one idempotent CREATE_USER per active user.
+Measured before changing it: **270 active users across four nodes, 105 on
+the busiest** — roughly four messages a second fleet-wide at 60s.
+
+It does scale linearly with the customer base. The code now says so, and
+says what to reach for instead of a faster poll: a signal that the engine
+restarted. That does not exist — `Heartbeat` carries cpu, memory and
+connection count and nothing about the engine — so having one means a
+proto change, an agent change and an agent rollout to nodes still running
+`dev` builds. Polling is what is available without that.
+
+### Verified in production, not just deployed
+
+Three minutes of logs after the deploy:
+
+    users:  3 sweeps x 105 (finland1), 105 (france-1), 30 (ir1), 30 (sg1)
+    routes: 3 sweeps x 12 (ir1)
+    stamps: 4:08:17 -> 4:09:17, 60s apart
+
+270 is exactly the active-user count in the database, and the route lines
+appear once per sweep rather than twice — which is the thing to watch,
+since both timers now share an interval and either one drifting into the
+other's work would double CONFIGURE_ROUTE traffic for nothing. A test
+pins it in both directions.
+
+### The manual lever is still worth knowing
+
+`systemctl restart neoxify-agentd` on a node forces a reconnect, and the
+backend re-asserts users **and** routes on connect. It executed 42
+commands within seconds on ir1. After any deliberate Xray restart that
+still beats waiting a minute, and it touches nothing else.
