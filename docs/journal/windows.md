@@ -1801,3 +1801,71 @@ There was no deployment runbook to find, which is the actual gap, so
 README now has one — including that `name: neoxify` in the prod compose
 is what stops a second stack being started beside the live one when the
 checkout directory is called something else.
+
+## 2026-08-15 — ir1 now fails closed, and the relay was proven after it
+
+**Status:** done and verified. Both production steps are complete.
+
+### The change
+
+ir1's `outbounds` was `[{freedom,direct}]`. It is now:
+
+    [{"protocol":"blackhole","tag":"blocked"},
+     {"protocol":"freedom","tag":"direct"}]
+
+Xray sends unmatched traffic to the first outbound, so during any window
+where the hot-added route rules are missing, relay traffic is dropped
+instead of leaving from the relay. `direct` stays in the list so anything
+naming it by tag still resolves.
+
+Backup at `/root/xray-config.backup-20260815T151413Z.json`. Restart was
+15:16:14 UTC, clean, no errors in the journal.
+
+Checked first, and the answer made the change easy: across the whole
+access log the `direct` outbound had been used **exactly once**, and that
+once was the leak. Nothing legitimate depended on the fallback.
+
+### Proving it afterwards, which mattered more than expected
+
+Twenty minutes after the restart ir1 had **zero** established connections,
+where it had fourteen before. That looked like an outage. It was not: the
+clients' failover ladder had moved them to other nodes when ir1 dropped,
+and they do not come back until they reconnect. Worth knowing before
+reading an empty relay as a broken one.
+
+The relay was then proven directly rather than inferred, without touching
+any node's config: a throwaway xray **client** on france-1, dialling
+ir1:443 with the test account's REALITY credential and exposing it as a
+loopback SOCKS proxy, then one curl through it. Path france-1 -> ir1 ->
+exit. Result **204.168.161.100 = finland1**, which is the exit that route
+is wired to. Process killed and config removed afterwards.
+
+That client test is worth keeping as a technique: it exercises the real
+relay path, needs no VM, changes nothing, and routes nothing but the one
+request.
+
+**The IPv4 trap caught this run too.** The first attempt used
+`--socks5-hostname`, which makes the *proxy* resolve the name, so `-4` did
+not constrain the remote lookup and the answer came back as
+`2a01:4f9:c013:864::1`. That is finland1's IPv6 -- a correct result that
+matches nothing in an IPv4 table and reads as total failure. `--socks5`
+with local resolution gives the IPv4 answer.
+
+### What is proven and what is not
+
+Proven: matched relay traffic still works after the change, on the exact
+path a customer takes.
+
+Not proven: the fail-closed behaviour itself, which by construction is
+only observable during a restart window. The next time Xray restarts on
+ir1, the access log should show `>> blocked` where it previously showed
+`>> direct`. That is the line to look for.
+
+### Noticed in passing, unrelated to this change
+
+- ir1's agent logs `swanctl: executable file not found in $PATH` every 30s
+  when collecting IKEv2 stats. strongSwan's CLI is not installed there.
+  Possibly relevant to the standing "IKEv2 has 0 usage records all-time"
+  question, which was previously read as "unused rather than broken".
+- ir1's REALITY `dest` is still `cloudflare.com`, the default the
+  detection-resistance pass argued against. Unchanged and still open.
