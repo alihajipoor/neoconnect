@@ -120,6 +120,61 @@ func (p *Provisioner) SetEnabled(ctx context.Context, externalUserID string, ena
 	return p.terminate(ctx, externalUserID)
 }
 
+// notServingIkev2 reports whether there is nothing here to poll: no user
+// has been provisioned on this node, and strongSwan's CLI is not even
+// installed.
+//
+// Both halves are load-bearing, and the reason is the difference between
+// two situations that look identical from inside this file.
+//
+// A relay or Xray-only node never serves IKEv2 and has no swanctl. It
+// still registers this provisioner, deliberately -- registration is
+// unconditional so that an IKEV2 command arriving at a node that cannot
+// serve it fails loudly rather than being silently ignored (see the flag
+// comments in cmd/agentd/main.go). But the stats poll runs every 30s
+// regardless of commands, so on those nodes it produced two errors a
+// minute, forever, about a protocol the node was never asked to serve.
+// Measured on ir1, which has twelve protocol configs and not one of them
+// IKEV2.
+//
+// A node that *does* serve IKEv2 and has lost strongSwan is the opposite
+// case and must stay loud: its customers authenticate against a dead
+// engine, or worse, its usage stops being counted while sessions carry
+// on -- an unmetered path around every data cap, which is exactly the
+// failure the restriction-matrix work was worried about. That node has
+// provisioned users, so `len(p.users) > 0` keeps the error.
+//
+// The user count is the discriminator rather than the binary's absence
+// alone, because after an agent restart the in-memory set is empty until
+// the control plane re-asserts. On a real IKEv2 node swanctl is present,
+// so the second half is false and nothing is suppressed during that
+// window.
+func (p *Provisioner) notServingIkev2() bool {
+	p.mu.Lock()
+	provisioned := len(p.users)
+	p.mu.Unlock()
+	if provisioned > 0 {
+		return false
+	}
+	return !p.swanctlAvailable()
+}
+
+// swanctlAvailable reports whether the configured swanctl can be found.
+//
+// Honours an explicit path as a path and a bare name as a PATH lookup,
+// matching how exec.Command would resolve it -- checking only PATH would
+// call a node with `-ikev2-swanctl=/usr/sbin/swanctl` unavailable, and
+// stat'ing a bare name would look for "swanctl" in the working
+// directory.
+func (p *Provisioner) swanctlAvailable() bool {
+	if strings.ContainsAny(p.swanctl, `/\`) {
+		_, err := os.Stat(p.swanctl)
+		return err == nil
+	}
+	_, err := exec.LookPath(p.swanctl)
+	return err == nil
+}
+
 // StatsSince reports traffic since the last call, per user.
 //
 // strongSwan reports totals per SA, and an SA is replaced on every rekey
@@ -133,6 +188,9 @@ func (p *Provisioner) SetEnabled(ctx context.Context, externalUserID string, ena
 // last observed growth and is then forgotten; a new one starts from
 // zero, which is correct because it genuinely has carried nothing yet.
 func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, error) {
+	if p.notServingIkev2() {
+		return nil, nil
+	}
 	sas, err := p.listSAs(ctx)
 	if err != nil {
 		return nil, err
@@ -202,6 +260,9 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 // SAs from the same place, and charging that against the limit would
 // disconnect somebody who did nothing wrong.
 func (p *Provisioner) SessionCounts() (map[string]int, error) {
+	if p.notServingIkev2() {
+		return nil, nil
+	}
 	sas, err := p.listSAs(context.Background())
 	if err != nil {
 		return nil, err
