@@ -7,6 +7,12 @@
       "runtimeArgs": ["vite", "preview", "--port", "4173", "--strictPort"],
       "cwd": "apps/web-portal",
       "port": 4173
+    },
+    {
+      "name": "mobile",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "apps/mobile", "dev"],
+      "port": 1420
     }
   ]
 }

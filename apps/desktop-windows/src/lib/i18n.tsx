@@ -289,6 +289,33 @@ const en = {
   "plans.copyAddress": "Copy address",
 
   "common.loading": "Loading...",
+
+  // The prominent disclosure shown once, before sign-in, on store
+  // builds. Google Play requires an in-app explanation of why the app
+  // needs VpnService and what data is collected, accepted by a
+  // deliberate tap -- a privacy policy link alone does not satisfy it.
+  // Worded as plainly as the policy it summarises: someone deciding
+  // whether to trust a VPN in Iran is the reader.
+  "disclosure.title": "Before you connect",
+  "disclosure.subtitle": "What this app does, and what we collect. Please read it once.",
+  "disclosure.vpnHeading": "Why Neoxify needs VPN permission",
+  "disclosure.vpnBody":
+    "Neoxify is a VPN. Android asks for your permission to create a VPN connection, and the app cannot work without it.",
+  "disclosure.vpnBody2":
+    "While you are connected, the app builds an encrypted tunnel and sends your device's internet traffic through the server you pick, so your connection stays private and can reach sites your network blocks. In Custom mode you choose which apps use the tunnel and the rest connect normally. Nothing is routed through the tunnel while you are disconnected.",
+  "disclosure.dataHeading": "What we collect, and why",
+  "disclosure.dataEmail":
+    "Your email address and account ID — to create your account, sign you in, and contact you about it.",
+  "disclosure.dataSupport":
+    "Support messages you send from inside the app — so we can answer them.",
+  "disclosure.dataDiagnostics":
+    "Connection diagnostics — whether a connection worked, which server and protocol, the app version and any error message — so we can find and fix faults.",
+  "disclosure.dataServerLogs":
+    "Our VPN servers keep operational logs, which can include records of connections, so the service can be run and faults diagnosed.",
+  "disclosure.dataNotSold":
+    "We do not sell your data and we do not share it for advertising. In Custom mode, the list of apps you choose never leaves this device.",
+  "disclosure.privacyLink": "Read the full privacy policy",
+  "disclosure.accept": "Accept and continue",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -532,6 +559,27 @@ const fa: Record<TranslationKey, string> = {
   "plans.copyAddress": "کپی آدرس",
 
   "common.loading": "در حال بارگذاری...",
+
+  "disclosure.title": "پیش از اتصال",
+  "disclosure.subtitle": "این برنامه چه می‌کند و ما چه اطلاعاتی جمع‌آوری می‌کنیم. لطفاً یک بار بخوانید.",
+  "disclosure.vpnHeading": "چرا نئوکسیفای به دسترسی وی‌پی‌ان نیاز دارد",
+  "disclosure.vpnBody":
+    "نئوکسیفای یک وی‌پی‌ان است. اندروید برای ساختن اتصال وی‌پی‌ان از شما اجازه می‌گیرد و برنامه بدون آن کار نمی‌کند.",
+  "disclosure.vpnBody2":
+    "تا زمانی که متصل هستید، برنامه یک تونل رمزنگاری‌شده می‌سازد و ترافیک اینترنت دستگاه شما را از سروری که انتخاب می‌کنید عبور می‌دهد، تا اتصال شما خصوصی بماند و به سایت‌هایی که شبکه‌تان مسدود کرده دسترسی داشته باشید. در حالت سفارشی، خودتان انتخاب می‌کنید کدام برنامه‌ها از تونل استفاده کنند و بقیه به‌طور عادی متصل می‌شوند. وقتی قطع هستید، هیچ ترافیکی از تونل عبور نمی‌کند.",
+  "disclosure.dataHeading": "چه اطلاعاتی جمع‌آوری می‌کنیم و چرا",
+  "disclosure.dataEmail":
+    "آدرس ایمیل و شناسه حساب شما — برای ساخت حساب، ورود شما، و تماس با شما درباره حساب.",
+  "disclosure.dataSupport":
+    "پیام‌های پشتیبانی که از داخل برنامه می‌فرستید — تا بتوانیم پاسخ دهیم.",
+  "disclosure.dataDiagnostics":
+    "اطلاعات عیب‌یابی اتصال — اینکه اتصال برقرار شد یا نه، کدام سرور و پروتکل، نسخه برنامه و متن خطا — تا بتوانیم اشکالات را پیدا و برطرف کنیم.",
+  "disclosure.dataServerLogs":
+    "سرورهای وی‌پی‌ان ما گزارش‌های عملیاتی نگه می‌دارند که می‌تواند شامل سوابق اتصال باشد، تا سرویس اداره شود و اشکالات تشخیص داده شوند.",
+  "disclosure.dataNotSold":
+    "ما اطلاعات شما را نمی‌فروشیم و برای تبلیغات با کسی به اشتراک نمی‌گذاریم. در حالت سفارشی، فهرست برنامه‌هایی که انتخاب می‌کنید هرگز از این دستگاه خارج نمی‌شود.",
+  "disclosure.privacyLink": "خواندن متن کامل سیاست حریم خصوصی",
+  "disclosure.accept": "می‌پذیرم و ادامه می‌دهم",
 };
 
 const DICTIONARIES: Record<Language, Record<TranslationKey, string>> = { en, fa };
