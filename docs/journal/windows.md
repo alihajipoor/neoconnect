@@ -2478,3 +2478,96 @@ missing file and the server reads absent counts as "unknown" rather than
 while nodes are still logging would have the app tell customers
 something untrue about us, which is the one thing this product does not
 do.
+
+## 2026-08-16 (night) — Access log off on every live node; egress proof rebuilt, not yet closed
+
+**Status:** rollout done on all three Xray nodes. The data is gone. One
+verification is **outstanding and must not be read as passing** — see the
+end.
+
+Node list taken from the database, not from client config or
+known_hosts: finland1 204.168.161.100, france-1 104.105.205.233, ir1
+185.222.28.186. singapore-1 has no Xray at all (0 configs) and was
+correctly skipped.
+
+    node       -test        restart  logs removed          rotate  mode
+    finland1   OK           21:38    access.log            1*      750
+    france-1   OK           21:39    access.log + 7 .gz    1       750
+    ir1        see below    21:42    access.log + 2 .gz    1       750
+
+\* finland1 had **no logrotate rule at all**, so its log had been growing
+unbounded since install. It was given the installer's rule rather than
+edited.
+
+### `xray -test` passed, and on ir1 it needed proving
+
+`access: "none"` had never been past a real xray binary. finland1 and
+france-1 both returned `Configuration OK`.
+
+ir1 returned `Failed to start: device or resource busy`. That is **not**
+the config: ir1 is the only node with a `tun` inbound, and `-test`
+tries to create `relay-tun` while the running instance already holds it.
+Established rather than assumed, two ways:
+
+- the same new config with the tun inbound deleted returns
+  `Configuration OK`;
+- the **pre-change** config -- the one that was running successfully at
+  that moment -- fails `-test` with the identical error.
+
+So on a relay node `-test` cannot pass while Xray is up, whatever the
+config says. Worth knowing before someone reads that error as a fault.
+
+### The egress check had to be rebuilt before it could be removed
+
+The access log was how "relayed traffic does not egress in Iran" had been
+proven all along -- `grep -c '-> direct'`. Turning it off removes the
+evidence for the property the relay exists to provide.
+
+ir1 had only `statsInboundUplink/Downlink` enabled, so after the change it
+would have had no way to answer that question at all. **Outbound byte
+counters were enabled on ir1 in the same edit** (`statsOutboundUplink`,
+`statsOutboundDownlink`). They are per-outbound-tag totals: no addresses,
+no destinations, no user tags, so they restore the safety check without
+restoring the thing the log was removed for. This is on ir1 only and is
+**not yet in the templates** -- see below.
+
+### What is proven on ir1 after the restart
+
+- Routes re-asserted: five `CONFIGURE_ROUTE` commands at 21:43:13, ~70s
+  after the restart, by the 60s sweep.
+- All three policy rules intact (10.66, 10.77 and the new 10.68), table
+  100 still `default dev relay-tun`.
+- Traffic forced down the customer path (`curl --interface 10.66.0.1`)
+  moved through `relay-tun` and showed a **1167-byte delta on the xray
+  relay outbounds**, so the bridge carries traffic to the exit.
+- `outbound>>>direct` and `outbound>>>blocked` both **0** throughout.
+- `access.log` has **not** reappeared on any node after traffic.
+- Agent: zero errors with the file gone, as designed.
+
+### What is NOT proven, and must not be recorded as if it were
+
+**No exit IP was obtained after the restart, on any node.** The
+node-originated test (`--interface 10.66.0.1`) reaches the relay outbound
+but never completes -- `rc=35` on HTTPS, empty on plain HTTP -- so a
+request originating on the node itself is not a valid stand-in for a
+customer's. And no customer traffic has flowed through ir1 since the
+restart: WireGuard moved 1628 bytes in 60s, which is keepalive, and every
+xray customer inbound reads zero.
+
+So the honest statement is: **nothing is leaking, and the relay demonstrably
+carries bytes to its exit outbound, but "the exit IP matches the exit
+node" has not been re-verified since these restarts.** The 11/12 relay
+matrix that did prove it was run *before* today's restarts. A real client
+dial through each node is still owed.
+
+### Follow-ups this created
+
+- Put `statsOutboundUplink/Downlink` in both xray templates, so a fresh
+  node can answer the egress question without the access log. Right now
+  only ir1 can.
+- The `direct` outbound still exists on ir1 as the second outbound. It
+  reads 0, but the fail-closed property rests on `blocked` being first,
+  not on `direct` being absent.
+- `ProvisioningBackfillService`'s docstring still says provisionAll "only
+  fills gaps". It reconciles in both directions now and revoked 36
+  credentials at boot tonight; the comment is stale and misleading.
