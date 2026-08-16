@@ -63,4 +63,21 @@ export class CreatePlanDto {
   @IsOptional()
   @IsUUID()
   defaultRouteId?: string;
+
+  /** Which routes this plan may be served by.
+   *
+   * Omitted or empty means NO RESTRICTION -- every route the plan's
+   * protocols and its relay policy already allow, which is how every
+   * plan behaved before this field existed. That default is what keeps
+   * a newly built route reaching existing plans without anyone editing
+   * them.
+   *
+   * A non-empty list only ever narrows. relayOnly and protocolsAllowed
+   * still apply on top, so listing a direct route on a relay-only plan
+   * grants nothing -- what gets provisioned is the intersection.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  allowedRouteIds?: string[];
 }

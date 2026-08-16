@@ -34,7 +34,7 @@ describe("commands name the inbound", () => {
     const protocolConfig = { ...CONFIG, inboundTag };
     const prisma = {
       subscription: {
-        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", plan: { name: "Ultimate", relayOnly: true } }),
+        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", plan: { name: "Ultimate", relayOnly: true, allowedRoutes: [] } }),
       },
       route: {
         findUnique: jest.fn().mockResolvedValue({

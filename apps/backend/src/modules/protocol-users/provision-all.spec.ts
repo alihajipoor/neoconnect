@@ -11,7 +11,7 @@ describe("ProtocolUsersService.provisionAll", () => {
       subscription: {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
-          plan: { protocolsAllowed: ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS", "WIREGUARD"] },
+          plan: { protocolsAllowed: ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS", "WIREGUARD"], allowedRoutes: [] },
         }),
       },
       route: { findMany: jest.fn().mockResolvedValue(ROUTES) },
