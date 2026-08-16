@@ -12,6 +12,7 @@ import { Settings } from "@shared/screens/Settings";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
+import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/ProminentDisclosure";
 
 /** How often a queued diagnostic report retries. Matches the desktop
  * client so the two do not report at different rates for no reason. */
@@ -38,6 +39,7 @@ const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
  */
 type Screen =
   | "loading"
+  | "disclosure"
   | "login"
   | "register"
   | "forgot"
@@ -55,11 +57,35 @@ export default function App() {
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
 
+  // The disclosure gates everything, including a session that is already
+  // signed in. Play wants it shown before the data collection begins,
+  // and someone upgrading from an earlier build has never seen it -- so
+  // "has a token" is not evidence of having been told.
   useEffect(() => {
-    getTokens()
-      .then((tokens) => setScreen(tokens ? "dashboard" : "login"))
-      .catch(() => setScreen("login"));
+    void (async () => {
+      if (!(await hasAcceptedDisclosure())) {
+        setScreen("disclosure");
+        return;
+      }
+      try {
+        const tokens = await getTokens();
+        setScreen(tokens ? "dashboard" : "login");
+      } catch {
+        setScreen("login");
+      }
+    })();
   }, []);
+
+  /** Where to land once the disclosure is accepted -- the same decision
+   * the effect above makes, deferred until now because it was skipped. */
+  async function afterDisclosure() {
+    try {
+      const tokens = await getTokens();
+      setScreen(tokens ? "dashboard" : "login");
+    } catch {
+      setScreen("login");
+    }
+  }
 
   // Anything the device could not report at the time -- which is every
   // "could not reach the control plane", since it cannot be reported
@@ -100,6 +126,9 @@ export default function App() {
         Loading...
       </div>
     );
+  }
+  if (screen === "disclosure") {
+    return <ProminentDisclosure onAccept={() => void afterDisclosure()} />;
   }
   if (screen === "login") {
     return (
