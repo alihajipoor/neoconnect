@@ -2395,3 +2395,86 @@ both `vpnBody2` and `dataNotSold` describe Custom mode, which iOS has no
 per-app split tunnel for. Apple asks for much the same disclosure, so
 the screen is worth keeping — the strings need a platform split before
 an iOS build ships.
+
+## 2026-08-16 (evening) — The Xray access log goes off, and concurrency goes with it
+
+**Status: source only. Nothing has been rolled out, and all four live
+nodes are still writing the log this describes.** The installer is now
+correct for a fresh install; production is not.
+
+### The decision
+
+`"access": "none"` in both Xray templates. What the file bought was not
+worth what it held.
+
+It held, per line: the customer's own IP, the destination they reached,
+a timestamp and a user tag — and logrotate kept `rotate 7` of them. Eight
+days, on every node, of a map from identifiable customers to the sites
+they visited. Our users are in Iran and the boxes are not ours
+physically.
+
+The sharpest part is that **we were not using any of it**. The agent
+extracts the source address and the user tag only (`sessions.go`);
+destinations were pure collateral. And the codebase already holds the
+opposite standard a few files away — `ClientAttempt.ip` carries the
+comment that it is "personal data about people in a country where that
+matters, so it is kept briefly and joined to nothing", with a sweep job
+enforcing it, while this file hoarded the same class of data for a week,
+joined to a user id, swept by nobody.
+
+That inconsistency is what settled it, more than the Play question that
+started it.
+
+### What it costs — say this plainly
+
+**VLESS per-user concurrency limits are no longer enforced.** Not
+degraded, not approximate: not enforced. Xray's stats API reports bytes,
+not sessions, so the access log was the only place that information
+existed. Account sharing on VLESS is now invisible to us. OpenVPN and
+WireGuard never used it and are unaffected.
+
+If it has to come back, the shape to reach for is a FIFO rather than a
+file: point `access` at a pipe and have the agent keep only
+`(time, source, user)` in memory, so destinations never reach disk.
+Untested, and it carries a real hazard — a FIFO with no reader blocks
+the writer, so an agent crash could stall Xray on a live node. It needs
+a non-blocking open and a drain fallback before it goes anywhere near
+one.
+
+### Also changed
+
+`rotate 7` to `rotate 1`, and `/var/log/xray` to mode 750. Nothing
+should be written there now, so this only matters in the case it is
+sized for: someone turning the log on to debug and forgetting it. A
+week's retention left configured would have quietly restored the whole
+problem the moment anyone did.
+
+### Unverified
+
+This has **not** been run past an actual xray binary. `"none"` is the
+documented disable value and both templates still parse as JSON with the
+placeholders substituted, which is all that has been checked. On each
+node, before restarting the service:
+
+    xray run -test -config /usr/local/etc/xray/config.json
+
+No agent change was needed: `SessionCounter` already returns nil on a
+missing file and the server reads absent counts as "unknown" rather than
+"zero", so nothing reports a false zero.
+
+### The rollout, in this order
+
+1. ~~Installer source~~ — done, this commit.
+2. Roll to the four live nodes. Not scriptable; the prompt sequence
+   depends on node state, so it is a per-node interactive re-run or a
+   hand-edit plus `systemctl restart xray`.
+3. **Delete `/var/log/xray/access.log*` on each node.** Step 2 only stops
+   new writes; the eight days already on disk stay until removed. This is
+   the step that actually fixes the thing.
+4. Only then: remove `disclosure.dataServerLogs` from the mobile app and
+   untick "web browsing history" on the Play Data safety form.
+
+**Order 3 before 4 is load-bearing.** Removing the disclosure string
+while nodes are still logging would have the app tell customers
+something untrue about us, which is the one thing this product does not
+do.
