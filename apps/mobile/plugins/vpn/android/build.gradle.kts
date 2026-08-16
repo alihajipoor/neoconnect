@@ -41,8 +41,22 @@ dependencies {
     //
     // Bundling the real engine rather than reimplementing the protocol is
     // the same decision the node agent and the Windows client both made:
-    // an upstream fix becomes a version bump instead of a rewrite.
-    implementation("com.wireguard.android:tunnel:1.0.20230706")
+    // an upstream fix becomes a version bump instead of a rewrite -- and
+    // this bump is that case arriving.
+    //
+    // 1.0.20260102, not 1.0.20230706, for Play's 16 KB page size rule.
+    // This AAR ships libwg-go.so, libwg.so and libwg-quick.so prebuilt,
+    // so unlike the Go and Rust libraries no NDK setting on our side can
+    // change how they are linked -- the version IS the fix. Measured
+    // from the published artifacts rather than inferred from dates:
+    // 1.0.20230706 has 4096-byte load alignment on arm64-v8a and x86_64,
+    // 1.0.20260102 has 16384 on both.
+    //
+    // The jump raises the library's own minSdk from 21 to 24, which
+    // costs nothing here because this module already floors at 24 --
+    // check that still holds before bumping again, since a silent rise
+    // would drop older handsets that this product exists to serve.
+    implementation("com.wireguard.android:tunnel:1.0.20260102")
 
     // xray-core, compiled by gomobile and then split in two: Gradle
     // rejects a local .aar inside a library module, but takes the jar and

@@ -72,10 +72,16 @@ jobs:
         with:
           targets: ${{ steps.rust.outputs.triple }}
 
+      # Pinned to the same NDK as release-android.yml, deliberately. The
+      # release build needs r28 because from that version the NDK aligns
+      # 64-bit libraries to 16 KB, which Play now requires; there is no
+      # reason for a debug build to differ, and a good reason not to --
+      # a debug APK built on a different toolchain is no longer evidence
+      # about the thing being shipped. Bump both together.
       - name: Install the NDK
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "platforms;android-36" "build-tools;34.0.0"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+          sdkmanager --install "ndk;28.2.13676358" "platforms;android-36" "build-tools;34.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - run: pnpm install --frozen-lockfile
 
