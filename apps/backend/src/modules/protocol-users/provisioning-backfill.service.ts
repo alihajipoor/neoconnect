@@ -17,10 +17,24 @@ import { ProtocolUsersService } from "./protocol-users.service";
  * its own -- an admin-only endpoint would need someone to hold a token
  * and remember to call it.
  *
- * Cheap to repeat: provisionAll only fills gaps, so once the fleet is
- * caught up this is a handful of queries and no commands at all. It runs
- * detached from startup so a slow or failing sweep can never stop the
- * API coming up.
+ * Cheap to repeat, but no longer only additive. provisionAll reconciles
+ * in both directions now: it adds the routes a plan allows and REVOKES
+ * the credentials it does not, issuing DELETE_USER to the node. So once
+ * the fleet is caught up this is a handful of queries and no commands --
+ * but the first boot after a plan's rules change is a destructive sweep,
+ * not a top-up. On 2026-08-16 that boot revoked 36 credentials: 32 from
+ * two Ultimate subscriptions still holding direct routes from before
+ * relayOnly existed, and 6 from two Starter subscriptions.
+ *
+ * That is the intended behaviour -- a rule the customers who predate it
+ * are exempt from is not a rule -- but it is worth knowing that this
+ * service is the thing that usually applies it, at the least expected
+ * moment. Revocation keys off plan policy and never off whether a route
+ * happens to be reachable, so a route disabled for maintenance does not
+ * cause one (see provisionAll).
+ *
+ * It runs detached from startup so a slow or failing sweep can never
+ * stop the API coming up.
  */
 @Injectable()
 export class ProvisioningBackfillService implements OnModuleInit {
