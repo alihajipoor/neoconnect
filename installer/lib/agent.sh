@@ -1299,6 +1299,42 @@ suggest_ws_path() {
   printf '/%s/%s\n' "$prefix" "$(openssl rand -hex 6)"
 }
 
+# NATs a VPN client subnet out this node's own uplink -- and deliberately
+# does nothing on a relay.
+#
+# On an ordinary node this rule is the whole point: without it the tunnel
+# comes up and carries nothing, which shipped once already for both
+# WireGuard and OpenVPN.
+#
+# On a relay it is a trapdoor. The client's traffic is meant to leave at
+# the EXIT node, reached through relay-tun, and is NATed there; this rule
+# is never the intended path. It is reachable only when the policy route
+# into relay-tun is missing -- the window after a reboot before the agent
+# re-asserts routes, or indefinitely if the panel is unreachable and it
+# never does. In that window the rule silently turns the relay into a
+# direct exit: an Iranian customer's traffic egresses in Iran, from the
+# censored network they bought this to leave, while the app still shows
+# the exit's location. Nothing reports it, because from every counter's
+# point of view the tunnel is working.
+#
+# Without the rule the same failure is a tunnel that carries nothing --
+# visible, honest, and recoverable. That is the trade this makes.
+#
+# Measured on ir1, 2026-08-16: the policy rules live only in the running
+# kernel and are re-added by the agent on CONFIGURE_ROUTE, so the gap is
+# real rather than theoretical.
+masquerade_client_subnet() {
+  local subnet="$1" iface="$2"
+
+  if [[ "${node_is_relay:-n}" == "y" ]]; then
+    echo "  Relay node: not NATing $subnet out $iface -- this traffic must exit at the exit node."
+    return 0
+  fi
+
+  iptables -t nat -C POSTROUTING -s "$subnet" -o "$iface" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s "$subnet" -o "$iface" -j MASQUERADE
+}
+
 install_wireguard() {
   echo "Installing WireGuard..."
   apt-get install -y -qq wireguard wireguard-tools
@@ -1337,13 +1373,25 @@ install_wireguard() {
   # PostUp/PostDown re-run on every wg-quick@wg0 start/stop (including
   # every boot, since the unit is enabled below) -- the -C/-D idempotent
   # check-then-add avoids duplicate rules piling up across restarts.
+  # The NAT hooks are omitted entirely on a relay -- see
+  # masquerade_client_subnet for why a relay must not be able to fall
+  # back to egressing in its own country. wg-quick's PostUp is the one
+  # place this cannot go through that helper, since the rule has to be
+  # re-applied by the unit on every boot rather than added once here.
+  local wg_nat_hooks=""
+  if [[ "${node_is_relay:-n}" == "y" ]]; then
+    echo "  Relay node: wg0 will not NAT ${subnet} -- this traffic must exit at the exit node."
+  else
+    wg_nat_hooks="PostUp = iptables -t nat -C POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE
+PostDown = iptables -t nat -D POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || true"
+  fi
+
   cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 Address = ${server_ip}/24
 ListenPort = ${listen_port}
 PrivateKey = ${private_key}
-PostUp = iptables -t nat -C POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE
-PostDown = iptables -t nat -D POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || true
+${wg_nat_hooks}
 EOF
   chmod 600 /etc/wireguard/wg0.conf
 
@@ -1747,11 +1795,37 @@ install_ikev2() {
   #
   # Observed against sg1 from the emulator on 2026-08-11. Reissuing as
   # RSA fixed it on the very next attempt with nothing else changed.
-  if ! certbot certonly --standalone --non-interactive --agree-tos \
-      --key-type rsa --rsa-key-size 2048 \
-      --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
+  # Standalone binds port 80 itself, which is fine on a bare node and
+  # not fine here. Installing nginx for the Trojan fallback also enables
+  # nginx's stock default site, and that one *does* listen on 0.0.0.0:80
+  # even though the fallback vhost is loopback-only -- so by the time
+  # this runs, port 80 is usually taken and standalone fails with an
+  # address-in-use that reads like a firewall problem.
+  #
+  # Webroot serves the challenge through whatever already holds the port
+  # instead, with no restart and no window where the fallback site is
+  # down. Standalone stays as the fallback for a node that genuinely has
+  # nothing on 80.
+  local acme_ok="n"
+  if [[ -d /var/www/html ]] && ss -tlnp 2>/dev/null | grep -qE "[^0-9]:80\b"; then
+    echo "  Something already serves port 80; using the webroot challenge."
+    if certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos \
+        --key-type rsa --rsa-key-size 2048 \
+        --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
+      acme_ok="y"
+    fi
+  fi
+  if [[ "$acme_ok" != "y" ]]; then
+    if certbot certonly --standalone --non-interactive --agree-tos \
+        --key-type rsa --rsa-key-size 2048 \
+        --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
+      acme_ok="y"
+    fi
+  fi
+  if [[ "$acme_ok" != "y" ]]; then
     echo "  certbot could not issue a certificate for $hostname_input." >&2
-    echo "  Check inbound TCP 80 reaches this node, including any cloud firewall." >&2
+    echo "  Check inbound TCP 80 reaches this node, including any cloud firewall," >&2
+    echo "  and that whatever holds port 80 serves /var/www/html." >&2
     return 1
   fi
 
@@ -1880,8 +1954,7 @@ CONF
   else
     printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/99-neoxify-ikev2.conf
     sysctl -q -p /etc/sysctl.d/99-neoxify-ikev2.conf
-    iptables -t nat -C POSTROUTING -s "$listen_pool" -o "$uplink" -j MASQUERADE 2>/dev/null || \
-      iptables -t nat -A POSTROUTING -s "$listen_pool" -o "$uplink" -j MASQUERADE
+    masquerade_client_subnet "$listen_pool" "$uplink"
     iptables -C FORWARD -s "$listen_pool" -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$listen_pool" -j ACCEPT
     iptables -C FORWARD -d "$listen_pool" -j ACCEPT 2>/dev/null || iptables -I FORWARD -d "$listen_pool" -j ACCEPT
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent >/dev/null 2>&1 || true
@@ -2064,9 +2137,7 @@ EOF
     exit 1
   fi
   enable_ip_forwarding
-  if ! iptables -t nat -C POSTROUTING -s "$ovpn_subnet" -o "$default_iface" -j MASQUERADE 2>/dev/null; then
-    iptables -t nat -A POSTROUTING -s "$ovpn_subnet" -o "$default_iface" -j MASQUERADE
-  fi
+  masquerade_client_subnet "$ovpn_subnet" "$default_iface"
   # OpenVPN's systemd unit has no PostUp/PostDown-style hook the way
   # wg-quick does, so the rule above needs to be persisted separately to
   # survive a reboot -- iptables-persistent's own systemd unit restores
