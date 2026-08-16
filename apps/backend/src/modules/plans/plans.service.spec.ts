@@ -52,7 +52,7 @@ describe("PlansService", () => {
     agentGateway = { enqueueCommand: jest.fn() };
     // Plans reconciles existing customers when a plan's route selection
     // changes, so it now holds ProtocolUsersService too.
-    protocolUsers = { provisionAll: jest.fn().mockResolvedValue([]) };
+    protocolUsers = { provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [] }) };
     service = new PlansService(prisma as any, agentGateway as any, protocolUsers as any);
   });
 

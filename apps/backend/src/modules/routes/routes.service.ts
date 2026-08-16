@@ -60,7 +60,7 @@ export class RoutesService {
     let added = 0;
     for (const subscription of subscriptions) {
       try {
-        added += (await this.protocolUsersService.provisionAll(subscription.id)).length;
+        added += (await this.protocolUsersService.provisionAll(subscription.id)).created.length;
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         this.logger.warn(`Could not backfill route ${routeId} onto subscription ${subscription.id}: ${reason}`);

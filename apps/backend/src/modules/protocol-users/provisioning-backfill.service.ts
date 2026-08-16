@@ -63,10 +63,13 @@ export class ProvisioningBackfillService implements OnModuleInit {
     });
 
     let added = 0;
+    let revoked = 0;
     let failed = 0;
     for (const subscription of subscriptions) {
       try {
-        added += (await this.protocolUsersService.provisionAll(subscription.id)).length;
+        const result = await this.protocolUsersService.provisionAll(subscription.id);
+        added += result.created.length;
+        revoked += result.revoked.length;
       } catch (err) {
         failed += 1;
         const reason = err instanceof Error ? err.message : String(err);
@@ -77,12 +80,24 @@ export class ProvisioningBackfillService implements OnModuleInit {
     // Silent when there was nothing to do, which is the steady state --
     // a line every boot saying "0" is noise that trains you to ignore
     // the line that matters.
-    if (added > 0 || failed > 0) {
-      this.logger.log(
-        `Provisioning backfill: added ${added} credential(s) across ${subscriptions.length} subscription(s)` +
-          (failed > 0 ? `, ${failed} skipped` : ""),
-      );
+    //
+    // `revoked` is part of that condition, not just part of the message.
+    // Without it a boot that deleted credentials and created none would
+    // print nothing at all: the most destructive sweep this service can
+    // perform would be its quietest. Reported at warn rather than log
+    // when anything was revoked, because a sweep that removed a
+    // customer's access is not routine even when it is correct.
+    if (added > 0 || revoked > 0 || failed > 0) {
+      const summary =
+        `Provisioning backfill: added ${added} credential(s), revoked ${revoked}, ` +
+        `across ${subscriptions.length} subscription(s)` +
+        (failed > 0 ? `, ${failed} skipped` : "");
+      if (revoked > 0) {
+        this.logger.warn(summary);
+      } else {
+        this.logger.log(summary);
+      }
     }
-    return { added, failed, considered: subscriptions.length };
+    return { added, revoked, failed, considered: subscriptions.length };
   }
 }

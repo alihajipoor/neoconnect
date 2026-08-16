@@ -172,7 +172,7 @@ export class VouchersService {
       customerId,
       planId: voucher.planId,
     });
-    const protocolUsers = await this.protocolUsersService.provisionAll(subscription.id);
+    const { created: protocolUsers } = await this.protocolUsersService.provisionAll(subscription.id);
 
     await this.prisma.voucherRedemption.update({
       where: { id: redemption.id },

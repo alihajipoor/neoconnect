@@ -31,7 +31,7 @@ describe("ProtocolUsersService.provisionAll", () => {
   it("provisions one credential per allowed route", async () => {
     const { service, create } = build();
 
-    const created = await service.provisionAll("sub-1");
+    const { created } = await service.provisionAll("sub-1");
 
     expect(created).toHaveLength(3);
     expect(create.mock.calls.map((c) => c[0].routeId).sort()).toEqual([
@@ -47,7 +47,7 @@ describe("ProtocolUsersService.provisionAll", () => {
   it("skips routes the subscription already has instead of recreating them", async () => {
     const { service, create } = build(["route-reality", "route-wg"]);
 
-    const created = await service.provisionAll("sub-1");
+    const { created } = await service.provisionAll("sub-1");
 
     expect(created).toHaveLength(1);
     expect(create).toHaveBeenCalledTimes(1);
@@ -57,7 +57,7 @@ describe("ProtocolUsersService.provisionAll", () => {
   it("does nothing at all when every route is already provisioned", async () => {
     const { service, create } = build(["route-reality", "route-tls", "route-wg"]);
 
-    await expect(service.provisionAll("sub-1")).resolves.toEqual([]);
+    await expect(service.provisionAll("sub-1")).resolves.toEqual({ created: [], revoked: [] });
     expect(create).not.toHaveBeenCalled();
   });
 
