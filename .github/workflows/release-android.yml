@@ -44,10 +44,26 @@ jobs:
           # rather than a missing target.
           targets: aarch64-linux-android, armv7-linux-androideabi
 
+      # r28, not r26, and the version is load-bearing rather than
+      # housekeeping. From r28 the NDK links 64-bit libraries with
+      # 16 KB-aligned load segments by default; r26 predates the option
+      # entirely and emits 4 KB. Play rejects a bundle whose 64-bit
+      # libraries are 4 KB-aligned, and the devices that enforce it do
+      # not degrade -- the loader cannot map the library, so the app
+      # fails at startup rather than misbehaving later.
+      #
+      # This fixes exactly two of the five libraries in the bundle:
+      # libgojni.so (gomobile) and libmobile_lib.so (cargo). The three
+      # WireGuard ones arrive prebuilt in an AAR and are a dependency
+      # version, not a toolchain setting -- see build.gradle.kts.
+      #
+      # Keep in step with debug-android.yml. If the two drift, the
+      # artifact people actually test stops being built the way the
+      # released one is.
       - name: Install the NDK
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "platforms;android-36" "build-tools;34.0.0"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+          sdkmanager --install "ndk;28.2.13676358" "platforms;android-36" "build-tools;34.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - run: pnpm install --frozen-lockfile
 
@@ -272,6 +288,27 @@ jobs:
             echo "::error::The store bundle carries as much purchase code as the direct one -- the store flavour did not apply." >&2
             exit 1
           fi
+
+      # Play requires every 64-bit native library to have 16 KB-aligned
+      # load segments, and a device with 16 KB pages cannot map a
+      # 4 KB-aligned one at all -- the app fails at startup rather than
+      # running slowly. Asserted against the finished artifacts because
+      # the alignment has three independent sources and setting the NDK
+      # only governs two of them: cargo and gomobile follow the NDK,
+      # while the WireGuard libraries arrive prebuilt in an AAR and
+      # follow whatever version build.gradle.kts names.
+      #
+      # This ran late once, on Play's own preview screen, after 0.2.10
+      # had been tagged, built, signed and uploaded -- every one of those
+      # steps having reported success. It costs a second here.
+      #
+      # Both artifacts, not just the bundle: the APK is what the website
+      # hands to Iranian customers, who cannot reach Play at all and
+      # would therefore hit the same startup failure with no store
+      # check anywhere in their path to catch it.
+      - name: Check native libraries are 16 KB aligned
+        working-directory: apps/mobile
+        run: python3 scripts/check-elf-alignment.py Neoxify-*.aab Neoxify-*.apk
 
       # The tag's own annotation is the human-written changelog -- see the
       # `git tag -a` message. Without passing it, action-gh-release falls
