@@ -363,11 +363,21 @@ function entryInboundTag(entryProtocolConfig: {
   }
 }
 
-function entrySubnetCidr(publicParamsJson: unknown): string {
+// Exported for its own spec. The rule it encodes -- which key a relay
+// entry's client subnet lives under -- is worth pinning apart from
+// create(), which needs an exit node, an uplink credential and a
+// reachable agent before it reaches this line.
+export function entrySubnetCidr(publicParamsJson: unknown): string {
   const params = publicParamsJson as Record<string, unknown> | null;
-  const subnet = params?.subnetCidr;
+  // `pool` is IKEv2's name for the same field -- strongSwan's own term,
+  // which its config was written against. Accepting both is what lets
+  // IKEv2 be a relay entry at all; without it this threw about a
+  // missing subnetCidr on a config that was never going to have one.
+  const subnet = params?.subnetCidr ?? params?.pool;
   if (typeof subnet !== "string") {
-    throw new BadRequestException("Entry protocol config's publicParamsJson is missing subnetCidr (required for WireGuard/OpenVPN relay entries)");
+    throw new BadRequestException(
+      "Entry protocol config's publicParamsJson is missing subnetCidr (or pool, for IKEv2) -- required for non-Xray relay entries",
+    );
   }
   return subnet;
 }
