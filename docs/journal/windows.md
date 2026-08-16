@@ -2571,3 +2571,65 @@ dial through each node is still owed.
 - `ProvisioningBackfillService`'s docstring still says provisionAll "only
   fills gaps". It reconciles in both directions now and revoked 36
   credentials at boot tonight; the comment is stale and misleading.
+
+## 2026-08-16 (night, later) — ir1 has all eight protocols; IKEv2 is wired end to end
+
+**Status:** installed, registered, routed and provisioned. **Not dialled.**
+No IKEv2 client has connected, so the same gap as every other protocol
+after tonight's restarts applies: configuration is proven, egress is not.
+
+ir1 was the only node missing IKEv2 (`swanctl` absent entirely). It now
+serves all eight.
+
+### Two things that would have shipped broken
+
+**The certificate had to be a second one.** ir1's existing Let's Encrypt
+cert is ECDSA -- fine for Xray, and refused outright by Android's IKE
+library, which accepts the whole chain and then fails AUTH forever while
+Windows works. A separate RSA cert (`--cert-name ir1-ikev2`) was issued
+by webroot against nginx's existing docroot, so Xray's cert was never
+touched and the six live protocols never restarted.
+
+**The renewal hook needed a lineage guard the installer's version does
+not have.** With two certs for one hostname, certbot runs every deploy
+hook for every lineage, so the ECDSA renewal would have copied itself
+over IKEv2's credentials ~60 days from now and broken Android silently.
+The guard was proven by invoking the hook with the ECDSA lineage and
+watching the RSA key stay put, not by reading it.
+
+### The relay adaptation the installer gets wrong
+
+`install_ikev2` MASQUERADEs its pool straight out the uplink. On a relay
+that is a leak: IKEv2 traffic would egress **in Iran**. It was installed
+here with **no NAT rule at all** and the pool policy-routed into
+`relay-tun` like WireGuard's 10.66 and OpenVPN's 10.77, so the failure
+mode is "does not route" rather than "routes, in Iran". Relayed traffic
+is NAT'd at the exit anyway, so the rule buys nothing on this node.
+
+**The installer still needs this.** A fresh relay node built today would
+get the NAT rule and leak.
+
+### A code fix, not just a config one
+
+IKEv2 could not be a relay entry at all. `entrySubnetCidr` and
+`subnetCidrOf` read only `subnetCidr`; IKEv2's config calls that field
+`pool`, strongSwan's own word. Route creation threw about a missing field
+the config was never going to have. Fixed in ced0e00 with a spec.
+
+### Created through the real service, not SQL
+
+The Route was made by calling `RoutesService.create()` inside the backend
+container via a Nest application context. SQL would have written a row
+with no `uplinkCredentialsJson`, which the re-assert sweep skips -- a
+route that exists, looks enabled, and is silently never wired.
+
+Result: 13 relay routes on ir1, both Ultimate subscriptions provisioned
+(13 relay credentials each, one of them IKEv2), two EAP secrets written
+into `/etc/swanctl/conf.d/neoxify-users.conf` by the agent, and the
+`from 10.68.0.0/24 lookup 100` rule in place.
+
+### Owed
+
+- An actual IKEv2 dial, checking the exit IP is finland1 and not ir1.
+- The installer fixes above: relay nodes must not NAT the IKEv2 pool, and
+  a node holding two certs for one hostname needs the hook guard.
