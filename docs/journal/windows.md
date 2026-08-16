@@ -2318,3 +2318,80 @@ discovering it in a log:
   credential.
 
 Not deployed, precisely so that is a decision rather than a side effect.
+## 2026-08-16 (later still) — Play's VPN declaration, and the disclosure the app did not have
+
+Filling Play Console's `BIND_VPN_SERVICE` declaration for Android. Most
+of it is answerable from the code; one field was not answerable at all,
+because the thing it asks for a video of did not exist.
+
+### The declaration answers, and where each comes from
+
+Core purpose **yes**, general VPN service **yes** (it is a consumer VPN
+sold to the public — "no" is for corporate/academic-only apps and is
+contradicted by the first screen a reviewer sees). Monetization **no**:
+there is no ad injection, no ad blocking and no traffic resale.
+
+Data collection **yes**, and the ticked types are **email address, user
+IDs, other in-app messages, diagnostics** — nothing else across all
+fourteen categories.
+
+Two answers are worth recording because they are non-obvious and both
+were nearly wrong:
+
+- **Purchase history is NOT ticked.** The store AAB has no purchase flow
+  to collect it with: `IS_STORE_BUILD` eliminates the Plans branch at
+  build time and `release-android.yml` sets `VITE_DISTRIBUTION: store`
+  only on the AAB step. "Free app but declares purchases" is not what a
+  reviewer flags — but declaring data the artifact cannot produce is.
+- **Installed apps is NOT ticked**, even though the split-tunnel picker
+  enumerates every launchable package. The list is local (`per-app.ts`,
+  no network call in the file), and Play's "collected" means transmitted
+  off device. Related: the manifest uses a `<queries><intent>` filter,
+  **not** `QUERY_ALL_PACKAGES`. Swapping it for the latter to "fix" a
+  picker showing too few entries would pull in a separate sensitive
+  permission declaration and its own review.
+
+### Still undecided: web browsing history
+
+The nodes' Xray config sets `"access": "/var/log/xray/access.log"`, and
+those lines carry the destination per user. That is Play's "web browsing
+history" as defined, and it is on the public Data safety card.
+
+Setting it to `"none"` removes the answer but breaks VLESS concurrency
+detection — Xray's stats API reports bytes, not sessions, so the access
+log is the only place that information exists (`sessions.go`). Waiting on
+a call. **Whatever is chosen, the node config and the declaration have to
+match**, and `disclosure.dataServerLogs` in the app has to come out if
+the log goes.
+
+### What got built
+
+The **prominent disclosure** field is required and needs its own video,
+separate from the "video instructions" one. The app had nothing to film:
+no privacy link in Settings, Login or Register, let alone a runtime
+disclosure with an accept action. A store-listing policy URL does not
+satisfy it — the requirement is in-app, before collection starts.
+
+So `apps/mobile/src/components/ProminentDisclosure.tsx` now gates the
+app ahead of Login, in English and Persian, with acceptance recorded in
+its own `disclosure.json` store so it survives a sign-out. It gates a
+signed-in session too: someone upgrading has never seen it, so a token
+is not evidence of having been told.
+
+Verified: both apps typecheck, and the gate order was driven live in the
+dev server — disclosure renders first, accept lands on Login, no console
+errors. **Not** verified: the Persian rendering was never put on screen
+(`dir` is set on `documentElement` and the markup has no directional
+classes, so RTL should follow, but "should" is the word). Nothing has
+been run on a device.
+
+### For the Mac session
+
+`apps/mobile/src/App.tsx` gained a `disclosure` screen — additive, one
+branch ahead of `login`. iOS inherits it as-is, which is mostly a gift,
+but **two lines of the copy are Android-specific and will be false on
+iOS**: `disclosure.vpnBody` says "Android asks for your permission", and
+both `vpnBody2` and `dataNotSold` describe Custom mode, which iOS has no
+per-app split tunnel for. Apple asks for much the same disclosure, so
+the screen is worth keeping — the strings need a platform split before
+an iOS build ships.
