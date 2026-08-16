@@ -11,9 +11,20 @@ export interface PlanInput {
   durationDays: number;
   priceUsd: number;
   maxConcurrentConnections?: number;
+  /** Per-user speed caps in Mbit/s. Omitted means uncapped -- never 0,
+   * which the node reads as a limit of zero and cuts the customer off. */
+  maxDownloadMbps?: number;
+  maxUploadMbps?: number;
   protocolsAllowed: Protocol[];
   isActive?: boolean;
   defaultRouteId?: string;
+  /** Which routes this plan may be served by.
+   *
+   * An empty array is meaningful and is sent deliberately: it clears any
+   * restriction back to "every route this plan's protocols and relay
+   * policy allow". Omitting the field leaves the current selection
+   * alone, so the form always sends it. */
+  allowedRouteIds?: string[];
 }
 
 export async function createPlan(input: PlanInput): Promise<MutationResult<SubscriptionPlan>> {

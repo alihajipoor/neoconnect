@@ -1,19 +1,46 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { rateLimitFor } from "../protocol-users/rate-limit";
+import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreatePlanDto } from "./dto/create-plan.dto";
 import { UpdatePlanDto } from "./dto/update-plan.dto";
 
+/** Order-insensitive comparison of two id lists.
+ *
+ * The panel submits the selection in whatever order the checkboxes were
+ * ticked, and Prisma returns it in its own; comparing them directly
+ * would report a change on every save and reprovision the whole plan for
+ * nothing.
+ */
+function sameIds(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort();
+  const right = [...b].sort();
+  return left.every((id, i) => id === right[i]);
+}
+
 @Injectable()
 export class PlansService {
+  private readonly logger = new Logger(PlansService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
+    private readonly protocolUsers: ProtocolUsersService,
   ) {}
 
+  // The route selection comes back with every plan read, because the
+  // admin form needs it to render which boxes are ticked and there is no
+  // separate endpoint for it. Ids only -- the panel already loads the
+  // full route list to draw the choices.
+  private static readonly withRoutes = { allowedRoutes: { select: { id: true } } };
+
   list() {
-    return this.prisma.subscriptionPlan.findMany({ orderBy: { priceUsd: "asc" } });
+    return this.prisma.subscriptionPlan.findMany({
+      orderBy: { priceUsd: "asc" },
+      include: PlansService.withRoutes,
+    });
   }
 
   /** Customer-facing: only plans that are actually purchasable right now
@@ -27,7 +54,10 @@ export class PlansService {
   }
 
   async get(id: string) {
-    const plan = await this.prisma.subscriptionPlan.findUnique({ where: { id } });
+    const plan = await this.prisma.subscriptionPlan.findUnique({
+      where: { id },
+      include: PlansService.withRoutes,
+    });
     if (!plan) {
       throw new NotFoundException("Plan not found");
     }
@@ -48,7 +78,11 @@ export class PlansService {
         protocolsAllowed: dto.protocolsAllowed,
         isActive: dto.isActive ?? true,
         defaultRouteId: dto.defaultRouteId,
+        allowedRoutes: dto.allowedRouteIds?.length
+          ? { connect: dto.allowedRouteIds.map((id) => ({ id })) }
+          : undefined,
       },
+      include: PlansService.withRoutes,
     });
   }
 
@@ -73,14 +107,78 @@ export class PlansService {
         protocolsAllowed: dto.protocolsAllowed,
         isActive: dto.isActive,
         defaultRouteId: dto.defaultRouteId,
+        // `set` rather than `connect`, so deselecting actually removes.
+        // undefined leaves the selection alone; an explicit empty array
+        // clears it back to "no restriction".
+        allowedRoutes: dto.allowedRouteIds === undefined ? undefined : { set: dto.allowedRouteIds.map((id) => ({ id })) },
       },
+      include: PlansService.withRoutes,
     });
 
     if (plan.maxDownloadMbps !== before.maxDownloadMbps || plan.maxUploadMbps !== before.maxUploadMbps) {
       await this.reapplyRateLimits(plan);
     }
 
+    // Editing which routes a plan may use has to reach the customers
+    // already on it, or the change is only a promise about future
+    // purchases. reapplyRateLimits exists for exactly this reason on the
+    // speed caps; this is the same argument for the thing that decides
+    // whether a credential should exist at all.
+    //
+    // Compared by content rather than trusting that the DTO mentioning
+    // the field means it changed -- the panel form submits every field
+    // on every save, so a name edit would otherwise reprovision the
+    // whole plan.
+    const routesChanged =
+      dto.allowedRouteIds !== undefined &&
+      !sameIds(
+        before.allowedRoutes.map((r) => r.id),
+        plan.allowedRoutes.map((r) => r.id),
+      );
+    if (routesChanged) {
+      await this.reprovisionPlan(plan.id);
+    }
+
     return plan;
+  }
+
+  /** Re-runs provisioning for every subscription on this plan.
+   *
+   * provisionAll reconciles in both directions, so this adds credentials
+   * for routes the plan has gained and revokes ones for routes it has
+   * lost. That second half is the point: without it, deselecting a route
+   * would leave every existing customer still holding a working
+   * credential for it, and the setting would describe nothing.
+   *
+   * One failing subscription must not stop the rest -- the same reason
+   * routes.service.ts and the backfill both catch per subscription. A
+   * relay-only plan with its relay down throws from provisionAll by
+   * design, and that must not abort the sweep for everyone else.
+   */
+  private async reprovisionPlan(planId: string) {
+    const subscriptions = await this.prisma.subscription.findMany({
+      where: { planId },
+      select: { id: true },
+    });
+
+    let failed = 0;
+    for (const subscription of subscriptions) {
+      try {
+        await this.protocolUsers.provisionAll(subscription.id);
+      } catch (error) {
+        failed += 1;
+        this.logger.warn(
+          `Reprovisioning subscription ${subscription.id} after a plan route change failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    this.logger.log(
+      `Plan ${planId} route selection changed: reprovisioned ${subscriptions.length - failed} of ${
+        subscriptions.length
+      } subscription(s)`,
+    );
   }
 
   /** Pushes changed speed caps to everyone already on this plan.

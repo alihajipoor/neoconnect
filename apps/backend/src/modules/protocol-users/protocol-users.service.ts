@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { decryptCredentials, encryptCredentials } from "./credentials-crypto";
@@ -8,6 +8,8 @@ import { generateCredentials } from "./generate-credentials";
 
 @Injectable()
 export class ProtocolUsersService {
+  private readonly logger = new Logger(ProtocolUsersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
@@ -77,7 +79,7 @@ export class ProtocolUsersService {
       // run uncapped until something happened to re-provision them.
       this.prisma.subscription.findUnique({
         where: { id: dto.subscriptionId },
-        include: { plan: true },
+        include: { plan: { include: { allowedRoutes: { select: { id: true } } } } },
       }),
       this.prisma.route.findUnique({
         where: { id: dto.routeId },
@@ -105,9 +107,37 @@ export class ProtocolUsersService {
     // Ultimate is sold as the Iran relay path specifically, at more money
     // for less data, so serving it from a direct route is not a lenient
     // edge case -- it is selling one product and delivering another.
-    if (subscription.plan.relayOnly && route.exitProtocolConfigId === null) {
+    // Both directions, because the plans are mutually exclusive and only
+    // one half was ever enforced here. provisionAll's filter has always
+    // run both ways; create() checked relayOnly plans alone, which left
+    // the expensive direction open -- POST /protocol-users would happily
+    // put a Starter or Pro subscription on the Iran relay, where traffic
+    // crosses two servers and costs double for someone who never asked
+    // for it. That is the same shape of hole the relayOnly half already
+    // went through once: a filter that only decides what gets *offered*
+    // is not enforcement while any path can ask directly.
+    const wantsRelay = route.exitProtocolConfigId !== null;
+    if (subscription.plan.relayOnly !== wantsRelay) {
       throw new BadRequestException(
-        `The ${subscription.plan.name} plan is served only by relay routes, and "${route.name}" is a direct route`,
+        subscription.plan.relayOnly
+          ? `The ${subscription.plan.name} plan is served only by relay routes, and "${route.name}" is a direct route`
+          : `The ${subscription.plan.name} plan is served only by direct routes, and "${route.name}" is a relay route`,
+      );
+    }
+
+    // The plan's explicit route selection, enforced at the same
+    // chokepoint for the same reason: provisionAll's filter decides what
+    // is offered, and every other path -- the picker, the admin panel,
+    // renewal, a backfill -- arrives here with a routeId instead. A
+    // selection that only shaped the offer would be a setting the admin
+    // could see and nothing could rely on.
+    //
+    // Empty means unrestricted, so the check is skipped entirely rather
+    // than treated as "nothing is allowed".
+    const selectedRouteIds = subscription.plan.allowedRoutes.map((r) => r.id);
+    if (selectedRouteIds.length > 0 && !selectedRouteIds.includes(route.id)) {
+      throw new BadRequestException(
+        `The ${subscription.plan.name} plan is not served by "${route.name}"`,
       );
     }
 
@@ -171,7 +201,7 @@ export class ProtocolUsersService {
   async provisionAll(subscriptionId: string) {
     const subscription = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
-      include: { plan: true },
+      include: { plan: { include: { allowedRoutes: { select: { id: true } } } } },
     });
     if (!subscription) throw new BadRequestException("Subscription not found");
 
@@ -194,18 +224,62 @@ export class ProtocolUsersService {
       ? { exitProtocolConfigId: { not: null } }
       : { exitProtocolConfigId: null };
 
-    const [routes, existing] = await Promise.all([
+    // The plan's own route selection, if it has one.
+    //
+    // Empty means no restriction, which is why this is a conditional
+    // spread rather than an `id: { in: [] }` -- that would match nothing
+    // and silently strip every unrestricted plan of every route, which
+    // is every plan that existed before the feature.
+    //
+    // Narrows only. It sits alongside relayFilter rather than replacing
+    // it, so a direct route selected on a relay-only plan still grants
+    // nothing: what is provisioned is the intersection of the two.
+    const selected = subscription.plan.allowedRoutes.map((r) => r.id);
+    const selectionFilter = selected.length > 0 ? { id: { in: selected } } : {};
+
+    // Two different questions, and conflating them would churn live
+    // customers.
+    //
+    // What the PLAN allows is a policy question -- relay vs direct, and
+    // the protocols sold with it. What can be provisioned RIGHT NOW is
+    // additionally a question of whether the route and its engine happen
+    // to be enabled, which is operational and temporary.
+    //
+    // Revocation below keys off the first and never the second. An
+    // operator disabling a route for ten minutes of maintenance must not
+    // cause every customer's credential on it to be deleted from the
+    // node and rebuilt on re-enable: that turns a quiet maintenance
+    // window into a fleet-wide reprovision, and drops anyone connected
+    // through it for a reason that had nothing to do with their plan.
+    // Two queries rather than one broader one, so each answers exactly
+    // one of those questions and neither has to be read as also meaning
+    // the other.
+    const [routes, allowedByPolicy, existing] = await Promise.all([
+      // What can be provisioned now: policy AND currently reachable.
       this.prisma.route.findMany({
         where: {
           isEnabled: true,
           ...relayFilter,
+          ...selectionFilter,
           entryProtocolConfig: { protocol: { in: subscription.plan.protocolsAllowed }, isEnabled: true },
         },
         select: { id: true },
         orderBy: { name: "asc" },
       }),
-      this.prisma.protocolUser.findMany({ where: { subscriptionId }, select: { routeId: true } }),
+      // What the plan allows at all, ignoring whether it happens to be
+      // up. Only revocation reads this.
+      this.prisma.route.findMany({
+        where: {
+          ...relayFilter,
+          ...selectionFilter,
+          entryProtocolConfig: { protocol: { in: subscription.plan.protocolsAllowed } },
+        },
+        select: { id: true },
+      }),
+      this.prisma.protocolUser.findMany({ where: { subscriptionId }, select: { id: true, routeId: true } }),
     ]);
+
+    const allowedRouteIds = new Set(allowedByPolicy.map((r) => r.id));
 
     // Fail loudly rather than provisioning nothing. A relayOnly plan
     // with no relayed route means the relay is down, not yet built, or
@@ -220,7 +294,45 @@ export class ProtocolUsersService {
       );
     }
 
-    const already = new Set(existing.map((u) => u.routeId));
+    // Revoke what the plan no longer allows, before adding what it does.
+    //
+    // provisionAll used to only ever add, which left the flag true of
+    // future provisioning and false of the customers who already
+    // existed: the two live Ultimate subscribers kept the 16 direct-route
+    // credentials they had been given before relayOnly was introduced.
+    // The plan is sold as the Iran relay path, so a subscriber quietly
+    // holding direct credentials is being sold one product and handed
+    // another -- and on the other side, a normal plan holding a relay
+    // credential is billing us twice over for traffic nobody asked to
+    // send through Iran.
+    //
+    // Ordered after the "no relay route available" throw above on
+    // purpose. If the relay is down, a relayOnly subscription keeps
+    // whatever it has rather than being stripped to nothing by an
+    // outage: revoking there would turn a node problem into a customer
+    // with no credentials at all.
+    //
+    // Sequential, like the creation loop, because each revocation is an
+    // agent command and the failure of one should not leave the rest
+    // unattempted in a Promise.all rejection.
+    const revoked: string[] = [];
+    for (const user of existing) {
+      if (allowedRouteIds.has(user.routeId)) continue;
+      await this.remove(user.id);
+      revoked.push(user.id);
+    }
+    if (revoked.length > 0) {
+      this.logger.warn(
+        `provisionAll(${subscriptionId}): revoked ${revoked.length} credential(s) on routes the ` +
+          `${subscription.plan.name} plan does not allow`,
+      );
+    }
+
+    // Rebuilt from the rows that survived, not from the pre-revocation
+    // read: a route that was just revoked must be eligible to be created
+    // again if policy allows it, and would otherwise be skipped as
+    // "already present" while no longer existing.
+    const already = new Set(existing.filter((u) => allowedRouteIds.has(u.routeId)).map((u) => u.routeId));
     const created = [];
     for (const route of routes) {
       if (already.has(route.id)) continue;

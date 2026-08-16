@@ -28,6 +28,7 @@ const baseDto = {
 describe("PlansService", () => {
   let service: PlansService;
   let agentGateway: { enqueueCommand: jest.Mock };
+  let protocolUsers: { provisionAll: jest.Mock };
   let prisma: {
     subscriptionPlan: { findMany: jest.Mock; findUnique: jest.Mock; create: jest.Mock; update: jest.Mock; delete: jest.Mock };
     subscription: { count: jest.Mock };
@@ -49,14 +50,19 @@ describe("PlansService", () => {
       protocolUser: { findMany: jest.fn().mockResolvedValue([]) },
     };
     agentGateway = { enqueueCommand: jest.fn() };
-    service = new PlansService(prisma as any, agentGateway as any);
+    // Plans reconciles existing customers when a plan's route selection
+    // changes, so it now holds ProtocolUsersService too.
+    protocolUsers = { provisionAll: jest.fn().mockResolvedValue([]) };
+    service = new PlansService(prisma as any, agentGateway as any, protocolUsers as any);
   });
 
   describe("list", () => {
     it("orders by price ascending", async () => {
       prisma.subscriptionPlan.findMany.mockResolvedValue([]);
       await service.list();
-      expect(prisma.subscriptionPlan.findMany).toHaveBeenCalledWith({ orderBy: { priceUsd: "asc" } });
+      expect(prisma.subscriptionPlan.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ orderBy: { priceUsd: "asc" } }),
+      );
     });
   });
 

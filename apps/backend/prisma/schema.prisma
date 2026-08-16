@@ -354,6 +354,28 @@ model SubscriptionPlan {
   createdAt                DateTime   @default(now())
   updatedAt                DateTime   @updatedAt
 
+  /// Which Routes this plan may be served by, chosen per plan.
+  ///
+  /// EMPTY MEANS NO RESTRICTION -- every route the plan's protocols and
+  /// its relay policy already allow. That is deliberate and is what
+  /// makes this additive: every plan that existed before this field did
+  /// keeps behaving exactly as it did, and a route added later reaches
+  /// them without anyone editing a plan.
+  ///
+  /// Non-empty narrows; it never widens. The relayOnly rule and
+  /// protocolsAllowed still apply on top, so selecting a direct route on
+  /// a relayOnly plan grants nothing -- the intersection is what gets
+  /// provisioned. Picking routes is a way to serve less than the policy
+  /// permits, not a way around the policy.
+  ///
+  /// relayOnly is kept alongside this rather than replaced by it because
+  /// the two answer different questions. A flag covers routes that do
+  /// not exist yet: when a second Iran relay is built, every Ultimate
+  /// subscription should pick it up automatically. An explicit list
+  /// cannot do that -- a new route would reach nobody until someone
+  /// remembered to edit each plan, and nothing would report the silence.
+  allowedRoutes     Route[]                @relation("PlanAllowedRoutes")
+
   subscriptions     Subscription[]
   freeTrialSettings FreeTrialSettings[]
   referralSettings  ReferralSettings[]
@@ -513,6 +535,11 @@ model Route {
   protocolUsers       ProtocolUser[]
   freeTrialSettings   FreeTrialSettings[]
   defaultForPlans     SubscriptionPlan[]
+  /// Plans that have explicitly selected this route. See
+  /// SubscriptionPlan.allowedRoutes -- an empty selection there means no
+  /// restriction, so a route being in no plan's list does not mean it
+  /// serves nobody.
+  allowedOnPlans      SubscriptionPlan[]  @relation("PlanAllowedRoutes")
 
   @@map("routes")
 }

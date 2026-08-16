@@ -162,6 +162,17 @@ export interface SubscriptionPlan {
   protocolsAllowed: Protocol[];
   isActive: boolean;
   defaultRouteId: string | null;
+  /** When true, this plan is served only by relayed routes (and a plan
+   * without it is served only by direct ones). Not editable from the
+   * plan form -- shown so the route picker can say which of the routes
+   * listed can actually apply. */
+  relayOnly: boolean;
+  /** Which routes this plan may be served by.
+   *
+   * EMPTY MEANS NO RESTRICTION -- every route the plan's protocols and
+   * relay policy already allow. Anything reading this must treat an
+   * empty list as "all", never as "none". */
+  allowedRoutes: { id: string }[];
   createdAt: string;
   updatedAt: string;
 }
