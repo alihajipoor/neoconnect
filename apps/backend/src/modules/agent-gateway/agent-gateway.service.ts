@@ -590,6 +590,16 @@ function defaultInboundTag(config: { protocol: string; transport: string | null;
  * hand the agent a subnet it would try to route. Empty means absent, and
  * the agent rejects the command rather than guessing. */
 function subnetCidrOf(publicParamsJson: unknown): string {
-  const subnet = (publicParamsJson as Record<string, unknown> | null)?.subnetCidr;
+  const params = publicParamsJson as Record<string, unknown> | null;
+  // Two names for one thing. WireGuard and OpenVPN configs call the
+  // client subnet `subnetCidr`; IKEv2 calls it `pool`, because that is
+  // strongSwan's own word for it and the config was written to match
+  // the daemon rather than its siblings.
+  //
+  // Reading only the first name is what kept IKEv2 from ever being a
+  // relay entry: this returned "" for it, and the agent then refused
+  // the route with "missing entrySubnetCidr" -- a message that names a
+  // field the IKEv2 config never had.
+  const subnet = params?.subnetCidr ?? params?.pool;
   return typeof subnet === "string" ? subnet : "";
 }
