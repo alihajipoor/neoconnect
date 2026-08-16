@@ -1,7 +1,8 @@
 {
   "log": {
     "loglevel": "warning",
-    "access": "/var/log/xray/access.log"
+    "access": "none",
+    "//": "Deliberately off, and the cost is real: the agent counted distinct source addresses from this file to enforce per-user concurrency, and Xray exposes that nowhere else -- its stats API reports bytes, not sessions. So VLESS concurrency limits are not enforced on this node. What the file bought was not worth what it held. Each line carries the customer's own IP, the destination they reached and a user tag, and logrotate kept eight days of them; on a service whose users are in Iran, that is a map from identifiable customers to the sites they visited, sitting on a box we do not physically control. The agent already treats client IPs as dangerous enough to sweep (see ClientAttempt.ip) while this file hoarded the same class of data for a week, joined to a user id. Turning it on again means declaring 'web browsing history' on the Play Data safety card, so change this and apps/mobile's disclosure.dataServerLogs string together, in that order. If concurrency enforcement has to come back, stream it instead: point this at a FIFO and have the agent keep only (time, source, user) in memory -- untested, and a FIFO with no reader blocks the writer, so it needs a non-blocking open before it goes near a live node."
   },
   "api": {
     "tag": "api",

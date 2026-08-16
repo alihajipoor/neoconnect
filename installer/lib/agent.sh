@@ -1081,15 +1081,22 @@ with open(path, "w") as handle:
 PY
   fi
 
-  # Xray exposes no way to ask how many connections a user has, so the
-  # agent counts distinct client addresses from the access log instead --
-  # without this, concurrent-connection limits can't be enforced at all.
-  # Rotated so it can't fill the disk on a busy node.
-  install -d -m 755 /var/log/xray
+  # Both templates set "access": "none", so in normal operation nothing
+  # is written here at all and this rule matches nothing -- `missingok`
+  # covers that. It stays for the case it is now sized for: an operator
+  # turning the access log on to debug something and forgetting it.
+  #
+  # `rotate 1` rather than the 7 this used to keep. The old setting held
+  # eight days of customer IP + destination + user tag on every node,
+  # which is the thing the templates now refuse to create; leaving a
+  # week's retention configured would quietly restore it the moment
+  # anyone flipped the log back on. One day is enough to read a log you
+  # are actively watching, and is a poor archive by design.
+  install -d -m 750 /var/log/xray
   cat > /etc/logrotate.d/xray <<'EOF'
 /var/log/xray/*.log {
   daily
-  rotate 7
+  rotate 1
   compress
   missingok
   notifempty
