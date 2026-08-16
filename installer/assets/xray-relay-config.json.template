@@ -1,7 +1,8 @@
 {
   "log": {
     "loglevel": "warning",
-    "access": "/var/log/xray/access.log"
+    "access": "none",
+    "//": "Off for the reasons set out in xray-config.json.template, and more so here: a relay is the Iran-reachable box, so its access log would hold customers' own IP addresses alongside the destinations they reached, on the node most exposed to seizure. Concurrency enforcement is lost with it -- see the note in the base template before turning this back on."
   },
   "api": {
     "tag": "api",
