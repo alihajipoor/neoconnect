@@ -242,7 +242,7 @@ export class CustomerAuthService {
     // same failover the paid one does -- they are the likeliest to be on
     // a network that blocks something, and the likeliest to give up if
     // the first attempt fails.
-    const protocolUsers = await this.protocolUsersService.provisionAll(subscription.id);
+    const { created: protocolUsers } = await this.protocolUsersService.provisionAll(subscription.id);
 
     // trialRouteId stays the preferred one, and stays first in the
     // response so an older client reading only the first entry still

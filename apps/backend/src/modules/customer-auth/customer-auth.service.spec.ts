@@ -54,7 +54,7 @@ describe("CustomerAuthService", () => {
     config = { get: jest.fn((key: string) => `config:${key}`) };
     customersService = { create: jest.fn() };
     subscriptionsService = { create: jest.fn() };
-    protocolUsersService = { create: jest.fn(), provisionAll: jest.fn().mockResolvedValue([]) };
+    protocolUsersService = { create: jest.fn(), provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [] }) };
     freeTrialSettingsService = { get: jest.fn() };
     // Resolves to "no referrer" by default, which is what the existing
     // cases here describe. A test that cares supplies its own.
@@ -161,10 +161,13 @@ describe("CustomerAuthService", () => {
       // Every route the plan allows, so the client can fail over without
       // asking us. The operator's chosen trial route must still come
       // first in the response.
-      protocolUsersService.provisionAll.mockResolvedValue([
-        { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
-        { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
-      ]);
+      protocolUsersService.provisionAll.mockResolvedValue({
+        created: [
+          { id: "pu-2", routeId: "route-2", credentials: { uuid: "y" } },
+          { id: "pu-1", routeId: "route-1", credentials: { uuid: "x" } },
+        ],
+        revoked: [],
+      });
 
       const result = await service.verifyEmail("token");
 
@@ -249,7 +252,7 @@ describe("CustomerAuthService", () => {
         trialRouteId: "route-1",
       });
       subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
-      protocolUsersService.provisionAll.mockResolvedValue([{ id: "pu-1", routeId: "route-1" }]);
+      protocolUsersService.provisionAll.mockResolvedValue({ created: [{ id: "pu-1", routeId: "route-1" }], revoked: [] });
 
       const result = await service.verifyEmailByCode("customer@example.com", "111111");
 

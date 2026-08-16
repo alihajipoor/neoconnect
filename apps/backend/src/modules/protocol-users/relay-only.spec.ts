@@ -74,7 +74,7 @@ describe("provisionAll: relay-only plans", () => {
     // nothing to provision when no route matches its protocols, and
     // throwing there would break ordinary purchases.
     const { service } = serviceFor(NORMAL);
-    await expect(service.provisionAll("sub-1")).resolves.toEqual([]);
+    await expect(service.provisionAll("sub-1")).resolves.toEqual({ created: [], revoked: [] });
   });
 });
 

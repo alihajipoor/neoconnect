@@ -28,7 +28,7 @@ describe("BillingService.confirmPayment expiry", () => {
     };
     const service = new BillingService(
       prisma as never,
-      { create: jest.fn(), setEnabled: jest.fn(), provisionAll: jest.fn().mockResolvedValue([]) } as never,
+      { create: jest.fn(), setEnabled: jest.fn(), provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [] }) } as never,
       {} as never, // stripe
       {} as never, // nowpayments
       {} as never, // plisio

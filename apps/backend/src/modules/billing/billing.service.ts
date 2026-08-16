@@ -310,8 +310,10 @@ export class BillingService {
     });
 
     // Re-enable before provisioning: a renewal after a quota suspension
-    // has users that exist but are switched off, and provisionAll only
-    // fills gaps -- it would leave a disabled row disabled.
+    // has users that exist but are switched off, and provisionAll works
+    // in whole credentials rather than their status -- it adds the ones
+    // a plan lacks and revokes the ones it no longer allows, and would
+    // leave a disabled row sitting there disabled either way.
     const existingUsers = await this.prisma.protocolUser.findMany({ where: { subscriptionId } });
     for (const user of existingUsers.filter((u) => u.status === "DISABLED")) {
       await this.protocolUsersService.setEnabled(user.id, true);
@@ -322,7 +324,7 @@ export class BillingService {
     // reach us. defaultRouteId still decides which the client tries
     // first; it no longer decides which exist.
     const provisioned = await this.protocolUsersService.provisionAll(subscriptionId);
-    if (existingUsers.length === 0 && provisioned.length === 0) {
+    if (existingUsers.length === 0 && provisioned.created.length === 0) {
       this.logger.warn(
         `Subscription ${subscriptionId} (plan ${subscription.planId}) had a payment confirmed but no enabled route matches its allowed protocols -- no protocol user was provisioned`,
       );

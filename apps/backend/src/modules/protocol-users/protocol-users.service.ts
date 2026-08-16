@@ -341,7 +341,14 @@ export class ProtocolUsersService {
       // provisioned in parallel can pick the same one.
       created.push(await this.create({ subscriptionId, routeId: route.id }));
     }
-    return created;
+
+    // Both halves, named. This used to return the created users alone,
+    // which was the whole story when it could only add -- and once it
+    // could also revoke, every caller was structurally unable to see
+    // that half. The backfill in particular summarised a sweep as
+    // "added N" while the same sweep deleted credentials from live
+    // nodes. Returning one array again would rebuild that blind spot.
+    return { created, revoked };
   }
 
   /** Customer-facing: the location picker's "switch server" action.

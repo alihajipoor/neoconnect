@@ -123,7 +123,7 @@ type Fake = ReturnType<typeof fakePrisma>;
 function buildService(prisma: Fake, settings: typeof SETTINGS = SETTINGS) {
   const settingsService = { get: jest.fn(() => Promise.resolve(settings)) };
   const subscriptionsService = { create: jest.fn(() => Promise.resolve({ id: "sub-new" })) };
-  const protocolUsersService = { provisionAll: jest.fn(() => Promise.resolve([])) };
+  const protocolUsersService = { provisionAll: jest.fn(() => Promise.resolve({ created: [], revoked: [] })) };
   const emailService = { sendMail: jest.fn(() => Promise.resolve(true)) };
 
   const service = new ReferralsService(
