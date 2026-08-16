@@ -2633,3 +2633,23 @@ into `/etc/swanctl/conf.d/neoxify-users.conf` by the agent, and the
 - An actual IKEv2 dial, checking the exit IP is finland1 and not ir1.
 - The installer fixes above: relay nodes must not NAT the IKEv2 pool, and
   a node holding two certs for one hostname needs the hook guard.
+### Addendum, same evening — the disclosure's language toggle
+
+The disclosure now carries a language switch, above the text it governs.
+
+Not cosmetic. Language is detected from the OS locale and then from the
+country Cloudflare reports, so a customer on an Iranian IP is switched to
+Persian about a second after first paint — and the disclosure is the one
+screen where that is unrecoverable, because Settings does not exist yet
+at that point. Consenting to a document you cannot read is not consent.
+Choosing here also persists, which stops the country default overriding
+on later launches.
+
+It also unblocks filming Video B for Play: from an Iranian IP the
+disclosure would otherwise flip to Persian mid-shot and a reviewer could
+not read it.
+
+**Correcting the earlier entry:** the Persian rendering *has* now been
+put on screen. `dir=rtl` applies, all four data bullets render, the
+accept button reaches Login in Persian, and there is no horizontal
+overflow. Still nothing run on a device.

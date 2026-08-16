@@ -3,7 +3,7 @@ import { load, type Store } from "@tauri-apps/plugin-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button, Card } from "@shared/components/ui";
 import { LogoMark } from "@shared/components/Logo";
-import { useI18n } from "@shared/lib/i18n";
+import { LANGUAGES, useI18n, type Language } from "@shared/lib/i18n";
 
 /** The in-app prominent disclosure Google Play requires of a VPN app.
  *
@@ -86,7 +86,7 @@ const PRIVACY_URL = "https://neoxify.net/privacy";
 const PRIVACY_URL_FA = "https://neoxify.net/fa/privacy";
 
 export function ProminentDisclosure({ onAccept }: { onAccept: () => void }) {
-  const { t, language } = useI18n();
+  const { t, language, setLanguage } = useI18n();
   const [pending, setPending] = useState(false);
 
   async function accept() {
@@ -103,6 +103,31 @@ export function ProminentDisclosure({ onAccept }: { onAccept: () => void }) {
       </div>
 
       <Card className="animate-rise w-full max-w-sm" style={{ animationDelay: "90ms" }}>
+        {/* Above the text it governs, not buried in Settings -- Settings
+            does not exist yet at this point, and consenting to a document
+            you cannot read is not consent. The language is detected here
+            (OS locale, then the country the CDN reports), so a customer
+            can land on the wrong one through no choice of their own; this
+            is the only screen where that is unrecoverable. Choosing here
+            also persists, so the country default stops overriding on
+            later launches. */}
+        <div className="mb-5 flex gap-2">
+          {(Object.keys(LANGUAGES) as Language[]).map((code) => (
+            <Button
+              key={code}
+              variant={code === language ? "default" : "ghost"}
+              onClick={() => setLanguage(code)}
+              className={
+                code === language
+                  ? "h-8 flex-1 justify-center"
+                  : "h-8 flex-1 justify-center border border-white/10"
+              }
+            >
+              {LANGUAGES[code].nativeLabel}
+            </Button>
+          ))}
+        </div>
+
         <h1 className="mb-1 text-lg font-semibold">{t("disclosure.title")}</h1>
         <p className="mb-5 text-sm text-muted-foreground">{t("disclosure.subtitle")}</p>
 
