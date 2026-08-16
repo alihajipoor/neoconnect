@@ -2132,3 +2132,91 @@ and skipped when it was absent — so the case it existed to cover ran
 nowhere, on this machine or in CI. The tool lookup is now injected
 alongside the sysfs path and all three cases are deterministic. A test
 that skips everywhere is not a test.
+
+## 2026-08-16 — Android 0.2.11: Play's 16 KB page rule, and what it caught
+
+**Status:** fixed in source and gated in CI. Not yet proven on a real
+16 KB device — see the open question at the bottom.
+
+Play refused the 0.2.10 production release on its final preview screen:
+*"Your app does not support 16 KB memory page sizes."* Every step before
+it had reported success — tag guard, both builds, both signings, the
+flavour guard, the upload. The first thing that disagreed was the last
+screen before publishing.
+
+### What was actually wrong
+
+Every 64-bit native library in the bundle had 4096-byte load-segment
+alignment. Play requires 16384. This is not a performance note: a device
+using 16 KB pages cannot map a 4 KB-aligned library at all, so the app
+dies at startup on newer hardware, whose owners will blame the app.
+
+Measured from the shipped `Neoxify-0.2.10.aab` rather than reasoned
+about, which is what showed the real shape of the problem — the five
+libraries have three independent producers and only two of them answer
+to our NDK setting:
+
+    libgojni.so        arm64-v8a  4096   gomobile  -> NDK
+    libmobile_lib.so   arm64-v8a  4096   cargo     -> NDK
+    libwg-go.so        arm64-v8a  4096   prebuilt AAR
+    libwg-quick.so     arm64-v8a  4096   prebuilt AAR
+    libwg.so           arm64-v8a  4096   prebuilt AAR
+
+32-bit ABIs are exempt and correctly stay at 4096. No 32-bit Android
+device uses 16 KB pages, and the compliant WireGuard AAR still ships its
+armeabi-v7a and x86 libraries at 4096 — failing those would be failing
+correct output.
+
+### The two halves of the fix
+
+**NDK 26.1.10909125 -> 28.2.13676358 (r28c).** From r28 the NDK links
+64-bit libraries 16 KB-aligned by default; r26 predates the option
+entirely. That covers gomobile and cargo. Bumped in `debug-android.yml`
+as well, so the artifact people test is built like the one shipped.
+
+**`com.wireguard.android:tunnel` 1.0.20230706 -> 1.0.20260102.** These
+three arrive prebuilt, so no toolchain setting on our side reaches them
+— the dependency version *is* the fix. Verified by downloading both from
+Maven Central and reading the ELF headers: the old one is 4096 on
+arm64-v8a and x86_64, the new one 16384 on both.
+
+Checked before taking the 2.5-year jump, because "it compiles" would not
+have been evidence:
+
+- All four types we import still exist, and `javap` shows the five
+  signatures we call (`GoBackend(Context)`, `setState`, `getState`,
+  `onStateChange`, `Config.parse`) byte-for-byte identical.
+- The library's own `minSdk` rises 21 -> 24. Costs nothing here because
+  the plugin module already floors at 24 — but check that again before
+  the next bump. A silent rise would drop exactly the older handsets
+  this product exists to serve, and nothing would report it.
+
+### The gate
+
+`apps/mobile/scripts/check-elf-alignment.py` reads the load-segment
+alignment of every `.so` in an APK/AAB and fails on any 64-bit library
+under 16384. It runs in `release-android.yml` after both signings and
+before the release is created, so a misaligned build cannot become a
+published artifact.
+
+It checks the APK too, not only the bundle. The APK is what the website
+hands to Iranian customers, who cannot reach Play at all — they would hit
+the same startup failure with no store check anywhere in their path.
+
+It fails when it finds **nothing** to judge, not just when it finds
+something bad. Both earlier build guards in this repo were at some point
+waved through by a check that had quietly stopped looking at anything
+(the flavour guard measured `direct=0 store=0` and passed), and an empty
+result is not a clean result.
+
+Tested against known-bad, known-good and empty inputs before wiring in:
+the 0.2.10 bundle fails, the new WireGuard AAR passes, a jar with no
+`.so` fails as broken.
+
+### Open
+
+Nobody has run 0.2.11 on a device with 16 KB pages. CI proves the
+alignment is correct in the artifact, which is exactly what Play checks,
+and no more than that. The startup path on such a device is still
+unobserved — as is the Xray-on-real-hardware item that emulator testing
+could not settle.
