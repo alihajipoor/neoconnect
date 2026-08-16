@@ -2220,3 +2220,101 @@ alignment is correct in the artifact, which is exactly what Play checks,
 and no more than that. The startup path on such a device is still
 unobserved — as is the Xray-on-real-hardware item that emulator testing
 could not settle.
+
+## 2026-08-16 (later) — plans decide their own routes; the Ultimate leftovers are finally addressed
+
+**Status:** written and tested, **not deployed**. No database is reachable
+from this machine, so nothing has run against real data and nobody has
+clicked the panel form. The migration and the reconciliation both need a
+deploy before any of this is true of production.
+
+### relayOnly was not the stale task it looked like
+
+The task board said "make relayOnly actually restrict Ultimate to relay
+routes". It already did, in both directions, at both `create()` and
+`provisionAll()`, with tests — that landed on 2026-08-13. Reading the
+code first rather than the task saved building it twice.
+
+What was actually outstanding was the thing the 08-13 entry recorded and
+left: `provisionAll` only ever adds, so the two live Ultimate subscribers
+kept the 16 direct-route credentials they had from before the flag. That
+is why `GET /customer/protocol-users` returned all 28 routes for an
+Ultimate account — the rows genuinely exist. The enforcement was never
+broken; it was never retroactive.
+
+### The hole that was still open
+
+`create()` rejected a direct route on a relay-only plan and said nothing
+about a relay route on a normal one. `provisionAll`'s filter has always
+run both ways, so this was invisible from the offering side — but
+`POST /protocol-users` would put a Starter or Pro subscription on the
+Iran relay, which is the direction that costs money. Exactly the lesson
+already written down in this journal ("a filter that only shapes what
+gets offered is not enforcement"), still half-applied.
+
+### Reconciliation, and the distinction that makes it safe
+
+`provisionAll` now revokes as well as adds. The load-bearing decision:
+revocation keys off **plan policy**, never off whether a route is
+currently reachable.
+
+Keying it off `isEnabled` would have meant that disabling a route for ten
+minutes of maintenance deletes every customer's credential on it and
+rebuilds them on re-enable — a fleet-wide reprovision, and everyone
+connected through it dropped, for a reason that had nothing to do with
+their plan. Two queries now, one per question, rather than one query read
+as answering both.
+
+It is also ordered after the "no relay route available" throw, so an
+outage cannot strip a paying subscription of everything it holds.
+
+That distinction is pinned by a test, and the test was checked by
+mutation: pointing revocation at the availability set instead of the
+policy set makes exactly one test fail. A test that cannot fail is not a
+test, and this one guards the difference between a maintenance window and
+an incident.
+
+### Per-plan route selection
+
+Plans can now name the routes they are served by. **Empty means no
+restriction** — every route the plan's protocols and relay policy already
+allow. That asymmetry is the whole safety property: every plan that
+exists today has an empty selection, so reading empty as "nothing
+allowed" would reconcile the entire customer base down to zero
+credentials on the next sweep. There is a test whose only job is to catch
+that.
+
+`relayOnly` is kept alongside rather than replaced by the list, because
+they answer different questions. A flag covers routes that do not exist
+yet: when a second Iran relay is built, every Ultimate subscription
+should pick it up automatically. An explicit list cannot do that — a new
+route would reach nobody until someone remembered to edit each plan, and
+nothing would report the silence.
+
+The panel hides routes on the wrong side of the relay split rather than
+showing them and ignoring them. Ticking one would grant nothing, since
+the selection narrows what policy permits and never widens it.
+
+### What happens on deploy, and it is not nothing
+
+The reconciliation is destructive by design and the owner chose it
+knowingly: revoke immediately, clean up the Ultimate case automatically.
+So the first `provisionAll` after deploy — on renewal, on a picker
+touch, or from the backfill sweep — will **delete 16 credentials from
+live nodes**, belonging to two Ultimate subscribers, one of whom is a
+real paying customer.
+
+That is the intended outcome; those credentials are the ones that make
+the plan untrue. But it is worth doing deliberately rather than
+discovering it in a log:
+
+- Ultimate has **one** working protocol on ir1 (REALITY) and one exit.
+  After the cleanup those subscribers have exactly that and no failover,
+  where today they have direct routes to fall back on. The 08-13 entry
+  already called this the most important gap on the board; this change
+  makes it the *only* thing those customers have.
+- So the honest sequence is to finish ir1's protocol set first, or to
+  accept knowingly that two customers spend that window on a single
+  credential.
+
+Not deployed, precisely so that is a decision rather than a side effect.
