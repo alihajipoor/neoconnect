@@ -33,11 +33,22 @@ export class SubscriptionsService {
    * what stops a later plan edit rewriting what someone already
    * bought, and it means a plan change has to update it explicitly.
    *
-   * Credentials are then topped up for whatever the new plan allows.
-   * A plan that permits more protocols than the old one needs the
-   * extra ones provisioned or the customer simply cannot use what they
-   * were moved onto. provisionAll only adds what is missing, so this is
-   * safe to run on a subscription that already has most of them.
+   * Credentials are then reconciled against whatever the new plan
+   * allows. A plan that permits more protocols than the old one needs
+   * the extra ones provisioned or the customer simply cannot use what
+   * they were moved onto.
+   *
+   * It cuts the other way too, and that is not incidental: provisionAll
+   * revokes credentials the new plan does not allow, so moving somebody
+   * from a relay-only plan to an ordinary one takes their relay
+   * credentials away, and a downgrade removes the protocols they no
+   * longer pay for. Without that, changing plan would only ever widen
+   * access and a customer could accumulate every protocol by moving
+   * between tiers.
+   *
+   * This used to say provisionAll "only adds what is missing", which
+   * was true when it was written and is the reason the sentence is
+   * spelled out now rather than trimmed.
    *
    * The expiry is left alone. Changing plan is not the same as renewing
    * it, and silently moving somebody's end date -- in either direction
