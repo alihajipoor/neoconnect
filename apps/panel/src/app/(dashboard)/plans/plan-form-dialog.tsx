@@ -90,6 +90,7 @@ export function PlanFormDialog({
         maxDownloadMbps: downMbps ? Number(downMbps) : undefined,
         maxUploadMbps: upMbps ? Number(upMbps) : undefined,
         isActive: formData.get("isActive") === "on",
+        isPurchasable: formData.get("isPurchasable") === "on",
         defaultRouteId: defaultRouteId === NO_DEFAULT_ROUTE ? undefined : defaultRouteId,
         // Always sent, including as an empty array -- that is what
         // clears a restriction back to "every eligible route". Omitting
@@ -237,14 +238,12 @@ export function PlanFormDialog({
             <Label>Routes</Label>
             <p className="text-xs text-muted-foreground">
               {selectedRoutes.length === 0
-                ? "None selected -- this plan uses every route its protocols allow, including ones added later."
-                : `Restricted to ${selectedRoutes.length} route${selectedRoutes.length === 1 ? "" : "s"}. Routes added later won't be included until you tick them here.`}
+                ? "None selected -- this plan serves nothing. Tick the routes customers on it should get."
+                : `Served by ${selectedRoutes.length} route${selectedRoutes.length === 1 ? "" : "s"}. Routes added later won't be included until you tick them here.`}
             </p>
             <div className="flex flex-col gap-2">
               {eligibleRoutes.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  No {plan?.relayOnly ? "relay" : "direct"} routes exist yet.
-                </p>
+                <p className="text-xs text-muted-foreground">No routes exist yet.</p>
               ) : (
                 eligibleRoutes.map((route) => (
                   <label key={route.id} className="flex items-center gap-2 text-sm">
@@ -287,9 +286,17 @@ export function PlanFormDialog({
               clears. Required for self-service purchases to actually work.
             </p>
           </div>
+          {/* Two flags, because one was doing two jobs and broke the
+              free trial: the Trial plan was deactivated to hide it from
+              customers, and an inactive plan cannot have subscriptions
+              created on it, so every trial signup failed silently. */}
           <label className="flex items-center gap-2 text-sm">
             <Checkbox name="isActive" defaultChecked={plan?.isActive ?? true} />
-            Active (visible for new subscriptions)
+            Active (the plan works -- subscriptions and trials can use it)
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox name="isPurchasable" defaultChecked={plan?.isPurchasable ?? true} />
+            Show in the purchase list (untick to keep it usable but hidden)
           </label>
           <DialogFooter>
             <Button type="submit" disabled={pending}>

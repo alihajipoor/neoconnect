@@ -1,4 +1,4 @@
-import { ArrayMinSize, IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, Min, ValidateIf } from "class-validator";
+import { IsArray, IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, Min, ValidateIf } from "class-validator";
 import { Protocol } from "@prisma/client";
 
 export class CreatePlanDto {
@@ -67,6 +67,15 @@ export class CreatePlanDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  /** Whether customers see this plan in the purchase list.
+   *
+   * Separate from isActive, which decides whether the plan works at all.
+   * A trial is usable and unlisted; deactivating it to hide it is what
+   * made every trial signup throw. */
+  @IsOptional()
+  @IsBoolean()
+  isPurchasable?: boolean;
 
   /** Which Route a customer purchasing this plan gets provisioned on
    * once payment clears -- see BillingService.confirmPayment(). Same v1

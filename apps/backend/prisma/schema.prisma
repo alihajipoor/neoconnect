@@ -331,7 +331,21 @@ model SubscriptionPlan {
   maxDownloadMbps          Int?
   maxUploadMbps            Int?
   protocolsAllowed         Protocol[]
+  /// Whether this plan can be used at all: subscriptions cannot be
+  /// created on an inactive plan, which includes trials.
+  ///
+  /// This was doing two jobs and quietly broke the free trial. The Trial
+  /// plan was set inactive to keep it out of the purchase list, and
+  /// SubscriptionsService.create refuses an inactive plan -- so every
+  /// signup threw and no customer got a trial, with nothing saying why.
+  /// Visibility now has its own flag below.
   isActive                 Boolean    @default(true)
+  /// Whether customers see this plan in the purchase list.
+  ///
+  /// Separate from isActive on purpose: a plan can be perfectly usable
+  /// and deliberately unlisted -- a trial nobody buys, a legacy tier
+  /// existing customers keep, a plan issued only by voucher.
+  isPurchasable            Boolean    @default(true)
   // Which Route a customer purchasing this plan gets provisioned on --
   // same v1 simplification as FreeTrialSettings.trialRouteId (one
   // admin-configured default, no per-purchase server picker yet). Used
