@@ -7,6 +7,7 @@
 //! job is to write the right config file and drive the right process,
 //! invisibly.
 
+mod dns;
 mod ikev2;
 mod ras;
 mod openvpn;
@@ -315,7 +316,7 @@ impl Engines {
         // is no longer reachable, which presents as "no website loads
         // at all" long after the VPN is gone. Cheap, and safe when
         // there is nothing to remove.
-        xray::clear_tunnel_dns();
+        dns::clear();
         self.wipe_generated_configs();
         result
     }

@@ -39,6 +39,11 @@ const ENTRY_NAME: &str = "Neoxify";
 /// validates the server's certificate against the name that was
 /// dialled, and the node presents a Let's Encrypt certificate for its
 /// DNS name.
+/// The resolver the nodes push to IKEv2 clients (`dns =` in the swanctl
+/// pool). Named here so the NRPT rule points at something the tunnel
+/// already carries.
+const IKEV2_DNS: &str = "1.1.1.1";
+
 pub fn connect(profile: &Ikev2Profile) -> Result<(), String> {
     // Removed first rather than updated. Add-VpnConnection refuses when
     // the entry exists, and -Force only suppresses the prompt, not the
@@ -104,7 +109,29 @@ pub fn connect(profile: &Ikev2Profile) -> Result<(), String> {
     }
 
     match dial(&profile.username, &profile.password) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // Same exposure as every other protocol, despite Windows
+            // owning this tunnel: strongSwan pushes 1.1.1.1 and Windows
+            // applies it to the VPN interface, but "applied" is not
+            // "exclusive" -- lookups still go to every interface at once
+            // and the customer's ISP answers first. In Iran that answer
+            // is poisoned for exactly the domains they connected to
+            // reach.
+            //
+            // The resolver named here is the one the nodes push (see
+            // `dns =` in the swanctl pool, installer/lib/agent.sh), so
+            // this points at something already reachable through the
+            // tunnel rather than introducing a second opinion.
+            //
+            // Not fatal on failure. The tunnel is up and carrying
+            // traffic at this point, and refusing the connection over a
+            // DNS rule would take away a working protocol from someone
+            // who may have no other one that connects.
+            if let Err(e) = super::dns::apply(IKEV2_DNS) {
+                eprintln!("ikev2: {e}");
+            }
+            Ok(())
+        }
         Err(code) => {
             // Tear the entry down again. Leaving a half-configured
             // connection in the customer's Windows VPN settings after a
