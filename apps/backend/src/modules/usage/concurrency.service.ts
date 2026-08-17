@@ -40,7 +40,34 @@ const COOLDOWN_MS = 60_000;
  * once. */
 const MIN_STRIKE_GAP_MS = 20_000;
 
-/** Enforces a plan's concurrent-connection limit.
+/** Enforces a plan's concurrent-connection limit -- for the protocols
+ * that still report sessions, which since 2026-08-16 is none of the
+ * Xray ones.
+ *
+ * READ THIS BEFORE TRUSTING A DEVICE LIMIT. Xray exposes session counts
+ * nowhere in its API; the agent derived them by reading the access log,
+ * and that log is now off on every node because each line paired a
+ * customer's IP with the destination they reached, kept for days, on
+ * boxes we do not physically control. Deliberate trade, taken with the
+ * cost known: REALITY, VLESS+TLS over TCP and WS, Trojan and
+ * Shadowsocks no longer report, so for them this class is inert. Those
+ * are the six protocols Iranian customers actually use.
+ *
+ * Nothing here misbehaves as a result -- a protocol that reports nothing
+ * is treated as unknown rather than zero, so no one is disconnected on
+ * missing evidence. But `maxConcurrentConnections` on a plan is now a
+ * number the product mostly does not enforce, and the honest place to
+ * learn that is here rather than from a customer sharing an account.
+ *
+ * Still enforced where the engine self-limits without any counting:
+ * OpenVPN replaces the existing session when the same certificate
+ * reconnects, and a WireGuard peer holds one endpoint, so devices
+ * sharing a key fight over it instead of working in parallel.
+ *
+ * Making it true again means giving Xray a session source that is not
+ * the access log -- writing source and user through a named pipe while
+ * dropping the destination before it touches disk is the sketch in
+ * docs/journal, and it is real work, not a flag.
  *
  * The limit is evaluated per subscription, not per credential -- see
  * handleSessionCounts for why that distinction is what makes it

@@ -41,6 +41,11 @@ export function PlanFormDialog({
   // address, so there is nothing to shape per customer. Saying so beats
   // showing a cap that quietly does nothing on those protocols.
   const unshapeable = protocols.filter((p) => p.startsWith("XRAY"));
+  // Device limits are counted per protocol, and the Xray family stopped
+  // being countable when the access log came off the nodes. Shadowsocks
+  // belongs here despite its name: it is served by Xray too, so its
+  // sessions came from the same log.
+  const uncountable = protocols.filter((p) => p.startsWith("XRAY") || p === "SHADOWSOCKS");
   const [pending, startTransition] = useTransition();
   const [unlimitedData, setUnlimitedData] = useState(plan ? plan.dataCapBytes === null : false);
   const isEdit = Boolean(plan);
@@ -186,6 +191,20 @@ export function PlanFormDialog({
                 min={1}
                 defaultValue={plan?.maxConcurrentConnections ?? ""}
               />
+              {/* Said here rather than discovered from a shared account.
+                  Counting sessions on the Xray protocols meant reading an
+                  access log that paired each customer's IP with the sites
+                  they reached; that log was turned off on every node on
+                  2026-08-16, and Xray reports sessions nowhere else. The
+                  limit still holds on OpenVPN and WireGuard, which
+                  self-limit without any counting. */}
+              {uncountable.length > 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  Not enforced on {uncountable.map((p) => PROTOCOL_LABELS[p]).join(", ")} — those run
+                  through Xray, which no longer reports how many devices are connected. It still
+                  applies to WireGuard and OpenVPN.
+                </p>
+              ) : null}
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
