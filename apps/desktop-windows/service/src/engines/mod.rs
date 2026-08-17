@@ -23,6 +23,7 @@ use std::process::{Child, Command};
 
 use neoconnect_ipc::{ConnectProfile, TunnelHealth};
 
+use crate::adapters;
 use crate::split_tunnel::SplitTunnel;
 
 /// Suppresses the console window a child process would otherwise flash
@@ -123,7 +124,28 @@ impl Engines {
     /// Tears down whatever is up, then brings up `profile`. Teardown
     /// happens first and unconditionally so that switching servers can
     /// never leave two engines fighting over the system routing table.
+    /// Wraps the real work so that EVERY failure path picks up the hint,
+    /// rather than the two or three someone remembered to decorate.
     pub fn connect(&mut self, profile: &ConnectProfile) -> Result<(), String> {
+        // Noted before the attempt, reported only if it fails.
+        //
+        // Another VPN that is up owns the default route, and two clients
+        // fighting over it produces a tunnel that connects and then
+        // carries nothing -- which is indistinguishable, from the
+        // customer's side, from our engine being broken. Naming the
+        // other one turns "it doesn't work" into something they can act
+        // on.
+        //
+        // Not a refusal. Plenty of these coexist fine -- a split-tunnel
+        // corporate client, an idle ZeroTier -- and blocking on a guess
+        // would stop people connecting for no reason, which is worse
+        // than the fault being diagnosed. So it only ever decorates an
+        // error that was going to happen anyway.
+        let rivals = adapters::other_vpns_up(&[xray::ADAPTER_NAME, wireguard::TUNNEL_NAME]).unwrap_or_default();
+        self.connect_inner(profile).map_err(|e| with_rival_hint(e, &rivals))
+    }
+
+    fn connect_inner(&mut self, profile: &ConnectProfile) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
         self.disconnect()?;
 
@@ -570,4 +592,20 @@ fn confirm_started(mut child: Child, engine: &str, log_path: &Path) -> Result<Ch
             Err(format!("could not check whether {engine} started: {e}"))
         }
     }
+}
+
+/// Appends the other VPNs that were up when a connection failed.
+///
+/// Only on failure, and only ever as extra sentence: the presence of
+/// another VPN is evidence, not a diagnosis, and a customer reading this
+/// is better served by "here is what else is running" than by us
+/// guessing which of the two is at fault.
+fn with_rival_hint(error: String, rivals: &[String]) -> String {
+    if rivals.is_empty() {
+        return error;
+    }
+    format!(
+        "{error} Another VPN is connected on this machine ({}), which takes over the default route --          disconnecting it and trying again is the usual fix.",
+        rivals.join(", ")
+    )
 }

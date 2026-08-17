@@ -36,6 +36,11 @@ pub struct Adapter {
     /// intercepting its own upstream traffic in a loop.
     pub ipv4: Option<Ipv4Addr>,
     pub is_up: bool,
+    /// The driver's own description, e.g. "WireGuard Tunnel" or
+    /// "TAP-Windows Adapter V9". FriendlyName is whatever the user
+    /// renamed the connection to, so it cannot identify what a thing is;
+    /// this can. Used to spot another VPN holding the routes.
+    pub description: String,
 }
 
 /// Windows' own value for IfOperStatusUp.
@@ -157,6 +162,7 @@ pub fn list() -> io::Result<Vec<Adapter>> {
             // struct the API defines.
             index: unsafe { entry.Anonymous1.Anonymous.IfIndex },
             name: wide_to_string(entry.FriendlyName),
+            description: wide_to_string(entry.Description),
             gateway,
             ipv4,
             is_up: entry.OperStatus == IF_OPER_STATUS_UP,
@@ -216,5 +222,102 @@ mod tests {
     #[test]
     fn reports_nothing_for_an_adapter_that_does_not_exist() {
         assert!(find_by_name("definitely-not-an-adapter").unwrap().is_none());
+    }
+}
+
+/// Substrings that identify another VPN's adapter, matched against the
+/// driver description.
+///
+/// Deliberately not "anything virtual". Hyper-V, VirtualBox, VMware and
+/// Docker all install permanently-present virtual adapters, and naming
+/// one of those as a conflict would tell a developer to uninstall their
+/// tooling to use a VPN -- so the list is VPN vendors and VPN driver
+/// families only, and everything else is left alone.
+const VPN_DRIVER_MARKERS: &[&str] = &[
+    "wireguard",
+    "tap-windows",
+    "tap-nordvpn",
+    "openvpn",
+    "kerio",
+    "anyconnect",
+    "fortinet",
+    "fortissl",
+    "check point",
+    "softether",
+    "hamachi",
+    "zerotier",
+    "tailscale",
+    "proton",
+    "mullvad",
+    "expressvpn",
+    "nordlynx",
+    "surfshark",
+    "psiphon",
+    "wintun",
+];
+
+/// Other VPN adapters that are currently up, by friendly name.
+///
+/// Only ones that are UP and carrying an address: a VPN that is merely
+/// installed is not a conflict, and saying it is would be crying wolf on
+/// most Windows machines. On the customer whose machine prompted this,
+/// Kerio and a TAP adapter were both present and both disconnected --
+/// neither was the problem, and neither should have been named.
+///
+/// `ours` is excluded by friendly name, since our own tunnel is up by
+/// the time anything asks this.
+pub fn other_vpns_up(ours: &[&str]) -> io::Result<Vec<String>> {
+    Ok(list()?
+        .into_iter()
+        .filter(|a| a.is_up && a.ipv4.is_some())
+        .filter(|a| !ours.iter().any(|o| a.name.eq_ignore_ascii_case(o)))
+        .filter(|a| {
+            let d = a.description.to_ascii_lowercase();
+            VPN_DRIVER_MARKERS.iter().any(|m| d.contains(m))
+        })
+        .map(|a| a.name)
+        .collect())
+}
+
+#[cfg(test)]
+mod vpn_detection_tests {
+    use super::*;
+
+    fn looks_like_vpn(description: &str) -> bool {
+        let d = description.to_ascii_lowercase();
+        VPN_DRIVER_MARKERS.iter().any(|m| d.contains(m))
+    }
+
+    #[test]
+    fn recognises_the_drivers_customers_actually_have() {
+        // Every one of these was seen on a real customer machine or is a
+        // vendor whose client is common in Iran.
+        for d in [
+            "WireGuard Tunnel",
+            "TAP-Windows Adapter V9",
+            "NW TAP-Win32 Adapter V9.21",
+            "Kerio Virtual Network Adapter",
+            "Cisco AnyConnect Virtual Miniport Adapter",
+            "TAP-NordVPN Windows Adapter V9",
+        ] {
+            assert!(looks_like_vpn(d), "{d} should be recognised as a VPN adapter");
+        }
+    }
+
+    #[test]
+    fn leaves_developer_tooling_alone() {
+        // The failure that would matter most: naming one of these tells a
+        // developer to uninstall their tooling to use a VPN, and if the
+        // hint ever became a refusal it would lock them out entirely.
+        for d in [
+            "Hyper-V Virtual Ethernet Adapter",
+            "VirtualBox Host-Only Ethernet Adapter",
+            "VMware Virtual Ethernet Adapter for VMnet8",
+            "Realtek PCIe GbE Family Controller",
+            "802.11n USB Wireless LAN Card",
+            "Npcap Loopback Adapter",
+        ] {
+            assert!(!looks_like_vpn(d), "{d} must NOT be treated as a rival VPN");
+        }
     }
 }
