@@ -1092,7 +1092,15 @@ PY
   # week's retention configured would quietly restore it the moment
   # anyone flipped the log back on. One day is enough to read a log you
   # are actively watching, and is a poor archive by design.
-  install -d -m 750 /var/log/xray
+  # Owned by the user Xray runs as, not root. 750 alone looks like a
+  # sensible tightening and is a node that will not boot: with access
+  # logging on, Xray opens this file at startup and a root-owned 750
+  # directory refuses it, so the daemon exits with "failed to initialize
+  # access logger ... permission denied" and every protocol on the node
+  # is down. Cost the live fleet a minute of downtime on 2026-08-17,
+  # because the mode was tightened while logging happened to be off and
+  # the breakage stayed invisible until it was turned back on.
+  install -d -m 750 -o "${XRAY_RUN_USER:-nobody}" -g "${XRAY_RUN_GROUP:-nogroup}" /var/log/xray
   cat > /etc/logrotate.d/xray <<'EOF'
 /var/log/xray/*.log {
   daily

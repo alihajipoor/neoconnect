@@ -2710,3 +2710,55 @@ templates are not plain JSON on their own and never were.
 restart, and on an exit node the counters only confirm traffic leaves via
 `direct`, which is expected anyway. Worth doing at their next natural
 restart rather than disturbing customers for a diagnostic.
+
+## 2026-08-17 — Access logging back on: device limits mattered more, and the 750 bit the fleet
+
+**Status:** logging restored on all three Xray nodes and in source. Owner's
+call, made once the cost of yesterday's change was visible: Starter's one
+device and Pro's two were decorative on every Xray protocol, which is the
+six Iranian customers actually use.
+
+The constraint that forced the choice: **Xray reports sessions nowhere but
+the access log.** Its stats API gives bytes, not connections, and counting
+sources from conntrack cannot work because every customer shares port 443 --
+the log is the only thing that attributes a device count to a user.
+
+### The 750 was a landmine, and it went off
+
+Re-enabling the log took **finland1 and france-1 down at the same time**:
+
+    Failed to start: app/log: failed to initialize access logger
+      > open /var/log/xray/access.log: permission denied
+
+Yesterday's tightening set `/var/log/xray` to mode 750 owned by **root**,
+while Xray runs as **nobody**. With logging off nothing opened the file, so
+the breakage was invisible for a day and surfaced the moment it was needed.
+Both nodes were back inside about a minute (chown to nobody, restart), and
+ir1 was done ownership-first so it never failed.
+
+Worth keeping: `xray run -test` passed on both nodes immediately before the
+failure. It validates the config, not the environment the daemon will run
+in -- so a green `-test` is not evidence the service will start.
+
+The installer had the same landmine (`install -d -m 750 /var/log/xray`,
+root-owned) and would have built nodes that refuse to boot now that the
+templates log again. Fixed with an explicit owner.
+
+### What is restored, and what is not proven
+
+Restored: logging on all three nodes, `rotate 1` retained (one day, not the
+eight it used to keep), templates back to logging with their notes rewritten
+-- they still said "deliberately off" beside a path.
+
+**Not proven: that counting works on all six protocols.** finland1 shows 68
+session lines and 2 distinct users attributed, so user tagging works. But
+only 10 of those lines carry a source address and only one distinct source
+appears, and no protocol has been driven deliberately since the revert. The
+owner asked specifically that it work on every protocol; that needs the
+client matrix, which is still blocked on the test VM's Windows update.
+
+### Consequence that must not be forgotten
+
+'Web browsing history' stays declared on the Play Data safety card, and
+`disclosure.dataServerLogs` keeps saying the servers keep connection logs.
+Both are true again. The pending change to remove them must NOT be made.
