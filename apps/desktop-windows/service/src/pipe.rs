@@ -6,7 +6,9 @@
 //! them is correctness, not a simplification. A second caller waits
 //! rather than racing the first.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use neoconnect_ipc::{Request, Response, PIPE_NAME};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -40,8 +42,27 @@ pub async fn serve(engines: Arc<Mutex<Engines>>) -> std::io::Result<()> {
 /// Split out from [`serve`] so tests can drive the real server on a
 /// throwaway pipe name instead of the production one -- everything
 /// below this point, including the ACL, is the shipping code path.
+/// How long the tunnel outlives the last client before being torn down.
+///
+/// Not zero, because the app drops this pipe for ordinary reasons -- it
+/// restarts, it is updated, a transient error closes the stream -- and
+/// dropping a working tunnel every time somebody's client blinked would
+/// be its own bug.
+///
+/// Not long either. This window is exactly how long a customer can be
+/// tunnelled with nothing on the machine able to tell them so.
+const CLIENT_GRACE: Duration = Duration::from_secs(10);
+
 pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Result<()> {
     let mut server = create_pipe_server(name, true)?;
+    // Live clients. The tunnel is torn down when this reaches zero and
+    // stays there, which is the fix for the worst failure this service
+    // had: closing the app left the tunnel up, holding the default route
+    // at a lower metric than the customer's real link, while the app --
+    // having forgotten it -- offered no way to disconnect. Reported by a
+    // customer 2026-08-17 whose machine routed everything through a
+    // tunnel no running program admitted to owning.
+    let clients = Arc::new(AtomicUsize::new(0));
     loop {
         server.connect().await?;
         let connected = server;
@@ -51,9 +72,36 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
         server = create_pipe_server(name, false)?;
 
         let engines = Arc::clone(&engines);
+        let clients = Arc::clone(&clients);
+        clients.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(connected, engines).await {
+            if let Err(err) = handle_connection(connected, engines.clone()).await {
                 eprintln!("connection error: {err}");
+            }
+
+            // fetch_sub returns the value *before* the subtraction, so
+            // this is "I was the last one".
+            if clients.fetch_sub(1, Ordering::SeqCst) != 1 {
+                return;
+            }
+            tokio::time::sleep(CLIENT_GRACE).await;
+            // Re-checked after the wait rather than trusted from before
+            // it: an app that restarted during the grace window is a
+            // client again, and tearing its tunnel down would disconnect
+            // somebody who never asked to be disconnected.
+            if clients.load(Ordering::SeqCst) != 0 {
+                return;
+            }
+            let mut engines = engines.lock().await;
+            // status() consults the OS, so this asks "is anything
+            // actually tunnelling" rather than "did we start something".
+            let (up, _, _) = engines.status();
+            if !up {
+                return;
+            }
+            eprintln!("no client for {CLIENT_GRACE:?} with a tunnel up -- tearing it down");
+            if let Err(err) = engines.disconnect() {
+                eprintln!("client-gone cleanup: {err}");
             }
         });
     }
