@@ -2762,3 +2762,80 @@ client matrix, which is still blocked on the test VM's Windows update.
 'Web browsing history' stays declared on the Play Data safety card, and
 `disclosure.dataServerLogs` keeps saying the servers keep connection logs.
 Both are true again. The pending change to remove them must NOT be made.
+
+## 2026-08-17 (spec) — Plans become a set of routes, and relayOnly goes
+
+**Status:** decided, not built. Written as a spec because the ordering is
+load-bearing and getting it wrong disconnects every customer at once.
+
+### The decision
+
+A plan is a set of routes, full stop. A Route already names its node and
+its protocol, so the Protocols checkboxes are redundant. Owner's calls,
+2026-08-17:
+
+- **No routes ticked means no service.** Explicit selection is required.
+- **`relayOnly` is removed entirely.** Any plan may include any route,
+  relay or direct, by ticking it.
+
+What exists today is the opposite and was built to an earlier
+instruction ("Ultimate only relay, everything else only direct"), so
+`relayOnly` is a hard rule and the picker hides the other side. Starter
+shows 16 direct routes and says 13 relay ones are not listed; Ultimate
+shows only relay. Working as designed, wrong design.
+
+### THE ORDER MATTERS. Read this before touching anything
+
+**Right now no plan has a single route ticked** -- the join table is
+empty except for a throwaway row created and removed during testing.
+Today that is harmless because empty means "everything this plan is
+eligible for". The moment empty means "nothing", **every customer on
+every plan loses all service simultaneously.**
+
+So:
+
+1. **Backfill first, as a migration.** For each plan, write its
+   *currently effective* route set explicitly: the routes it would be
+   provisioned on today, i.e. matching `protocolsAllowed` and on the
+   correct side of `relayOnly`. After this step nothing has changed
+   behaviourally and every plan is explicit.
+2. **Verify** the backfill against production before going further:
+   every active plan has a non-empty selection, and each selection
+   matches what its subscriptions already hold. A plan that comes out
+   empty here is a customer about to be cut off.
+3. **Then** flip the semantics: empty means empty, and the route query
+   stops falling back to "everything".
+4. **Then** drop `relayOnly` -- the column, the filters in
+   `provisionAll` and `create()`, the panel's eligibility filter, and
+   the tests that pin the split.
+
+Steps 3 and 4 are safe only after 1 and 2 have run and been checked.
+
+### What must not be lost with relayOnly
+
+The flag was not decoration. It existed because `provisionAll` gives
+every eligible route to every subscription, so the first relay route
+created would have put all fifteen live customers onto Iran bandwidth
+that costs double -- silently, within one sweep. Explicit selection
+replaces that guard only if selection is genuinely required; that is why
+"empty means no service" and "relayOnly is gone" have to ship together,
+and neither before the backfill.
+
+The reverse guard also disappears: nothing will stop an Ultimate plan
+being ticked onto a direct route, which is a different product under the
+same name. That becomes an operator responsibility rather than a rule,
+which is what the owner asked for.
+
+### `protocolsAllowed` cannot simply be deleted
+
+The field is still read by provisioning and by `switchRoute`, which
+rejects a route whose protocol the plan does not allow. Removing the
+checkboxes from the form means **deriving** it from the selected routes
+(the distinct set of their entry protocols) and keeping it in sync on
+every plan write -- not dropping the column.
+
+### Panel
+
+Show every route, direct and relay, with the relay ones marked so the
+operator can see what they are choosing. Drop the Protocols section. The
+"13 relay routes are not listed" hint goes away with the filter.
