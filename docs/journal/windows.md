@@ -2653,3 +2653,60 @@ not read it.
 put on screen. `dir=rtl` applies, all four data bullets render, the
 accept button reaches Login in Persian, and there is no horizontal
 overflow. Still nothing run on a device.
+
+## 2026-08-17 — ir1 can no longer egress in Iran, and fresh nodes can prove it
+
+Two follow-ups from last night, both closed.
+
+### The NAT rules came off ir1
+
+The installer fix stopped a *fresh* relay getting the trapdoor. ir1 still
+had it: MASQUERADE rules for WireGuard's 10.66.0.0/24 and OpenVPN's
+10.77.0.0/24 out eth0, which are reachable only when the policy route
+into relay-tun is missing -- and then quietly turn the relay into a
+direct exit inside Iran.
+
+Checked before touching, and the counters answered two questions at once:
+
+    pkts bytes target      source
+       0     0 MASQUERADE  10.77.0.0/24     (OpenVPN)
+       0     0 MASQUERADE  10.66.0.0/24     (WireGuard)
+       0     0 MASQUERADE  192.168.201.0/24 (phantun)
+
+**Zero packets across 4 days 14 hours of uptime.** So no traffic has ever
+taken the fallback path in that window -- no leak to find -- and the
+rules were dormant, which is what made removing them safe rather than a
+gamble.
+
+`wg-quick`'s PostUp/PostDown hooks were removed from wg0.conf too, or a
+restart would have put the WireGuard rule straight back. Deleted live,
+then `netfilter-persistent save` so a reboot does not restore them.
+
+**phantun's 192.168.201.0/24 rule was deliberately left.** It is the
+tunnel's own transport, not a customer subnet: the customer's traffic
+sits *inside* WireGuard and is still policy-routed. NATing the wrapper
+is correct even on a relay.
+
+Verified after: all five services active, both WireGuard peers still
+present, and a request forced down the customer path still showed a
+relay-outbound delta (186 bytes) with `direct` at 0. The bridge never
+needed local NAT -- relayed traffic is NATed at the exit node.
+
+ir1 now fails closed on all three non-Xray protocols.
+
+### Outbound counters are in the templates
+
+Turning off the access log took away the only evidence for "relayed
+traffic does not egress in Iran". ir1 got `statsOutboundUplink/Downlink`
+last night so it could still answer; both Xray templates now carry them,
+so a node built tomorrow can too. Per-outbound-tag byte totals only --
+no addresses, no destinations, no user tags -- so the check comes back
+without the thing the log was removed for.
+
+Validated by substituting the `__PLACEHOLDER__` tokens and parsing; the
+templates are not plain JSON on their own and never were.
+
+**Not applied to finland1 and france-1.** They would each need an Xray
+restart, and on an exit node the counters only confirm traffic leaves via
+`direct`, which is expected anyway. Worth doing at their next natural
+restart rather than disturbing customers for a diagnostic.
