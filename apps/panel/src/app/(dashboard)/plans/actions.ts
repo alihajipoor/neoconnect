@@ -15,7 +15,10 @@ export interface PlanInput {
    * which the node reads as a limit of zero and cuts the customer off. */
   maxDownloadMbps?: number;
   maxUploadMbps?: number;
-  protocolsAllowed: Protocol[];
+  /** Derived from allowedRouteIds by the backend -- a route already
+   * names the protocol it is reached on, so the panel no longer asks.
+   * Still accepted for any caller that is not the panel. */
+  protocolsAllowed?: Protocol[];
   isActive?: boolean;
   defaultRouteId?: string;
   /** Which routes this plan may be served by.

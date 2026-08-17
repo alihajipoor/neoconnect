@@ -4,7 +4,6 @@ import { useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 import { createPlan, updatePlan } from "./actions";
 import type { Protocol, Route, SubscriptionPlan } from "@/lib/types";
-import { ALL_PROTOCOLS } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { formatBytes, parseBytesInput } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -36,7 +35,9 @@ export function PlanFormDialog({
   const downRef = useRef<HTMLInputElement>(null);
   const upRef = useRef<HTMLInputElement>(null);
   const [caps, setCaps] = useState(Boolean(plan?.maxDownloadMbps || plan?.maxUploadMbps));
-  const [protocols, setProtocols] = useState<Protocol[]>(plan?.protocolsAllowed ?? []);
+  // Read from the stored plan for the two warnings below; no longer
+  // editable here, because the routes decide it.
+  const protocols: Protocol[] = plan?.protocolsAllowed ?? [];
   // Xray multiplexes every user through one process with no per-user
   // address, so there is nothing to shape per customer. Saying so beats
   // showing a cap that quietly does nothing on those protocols.
@@ -50,19 +51,13 @@ export function PlanFormDialog({
   const [unlimitedData, setUnlimitedData] = useState(plan ? plan.dataCapBytes === null : false);
   const isEdit = Boolean(plan);
 
-  // Only routes on this plan's side of the relay/direct split can ever
-  // serve it, so only those are offered. A relay-only plan is served by
-  // relayed routes and nothing else, and the inverse holds for every
-  // other plan -- selecting across that line would grant nothing, since
-  // the selection narrows what the policy permits rather than widening
-  // it. New plans default to the non-relay side, matching relayOnly's
-  // own default.
+  // Every route is offered on every plan, relay or direct. The plan is
+  // whatever an operator ticked and nothing else -- there is no longer a
+  // relay/direct rule deciding what may appear here.
   const [selectedRoutes, setSelectedRoutes] = useState<string[]>(
     plan?.allowedRoutes.map((r) => r.id) ?? [],
   );
-  const wantsRelay = plan?.relayOnly ?? false;
-  const eligibleRoutes = routes.filter((route) => (route.exitProtocolConfigId !== null) === wantsRelay);
-  const hiddenRouteCount = routes.length - eligibleRoutes.length;
+  const eligibleRoutes = routes;
 
   function handleSubmit(formData: FormData) {
     // Null, not a very large number. An unlimited plan and a plan with
@@ -76,12 +71,6 @@ export function PlanFormDialog({
         return;
       }
       dataCapBytes = parsed;
-    }
-
-    const protocolsAllowed = formData.getAll("protocolsAllowed") as Protocol[];
-    if (protocolsAllowed.length === 0) {
-      toast.error("Select at least one protocol.");
-      return;
     }
 
     const maxConn = String(formData.get("maxConcurrentConnections") ?? "").trim();
@@ -100,7 +89,6 @@ export function PlanFormDialog({
         // node would read as a limit of zero and cut the customer off.
         maxDownloadMbps: downMbps ? Number(downMbps) : undefined,
         maxUploadMbps: upMbps ? Number(upMbps) : undefined,
-        protocolsAllowed,
         isActive: formData.get("isActive") === "on",
         defaultRouteId: defaultRouteId === NO_DEFAULT_ROUTE ? undefined : defaultRouteId,
         // Always sent, including as an empty array -- that is what
@@ -242,26 +230,6 @@ export function PlanFormDialog({
               every customer on the node at once. WireGuard and OpenVPN are limited normally.
             </p>
           ) : null}
-          <div className="flex flex-col gap-2">
-            <Label>Protocols</Label>
-            <div className="flex flex-col gap-2">
-              {ALL_PROTOCOLS.map((protocol) => (
-                <label key={protocol} className="flex items-center gap-2 text-sm">
-                  <Checkbox
-                    name="protocolsAllowed"
-                    value={protocol}
-                    defaultChecked={plan?.protocolsAllowed.includes(protocol)}
-                    onCheckedChange={(checked) =>
-                      setProtocols((current) =>
-                        checked ? [...current, protocol] : current.filter((p) => p !== protocol),
-                      )
-                    }
-                  />
-                  {PROTOCOL_LABELS[protocol]}
-                </label>
-              ))}
-            </div>
-          </div>
           {/* Empty means every eligible route, not none. The count in the
               hint is there so the admin can see which of the two states
               they are in without counting checkboxes. */}
@@ -298,17 +266,6 @@ export function PlanFormDialog({
                 ))
               )}
             </div>
-            {/* Routes on the wrong side of the relay split are hidden
-                rather than shown-and-ignored: ticking one would grant
-                nothing, since the selection narrows what the policy
-                already permits and never widens it. */}
-            {hiddenRouteCount > 0 ? (
-              <p className="text-xs text-muted-foreground">
-                {hiddenRouteCount} {plan?.relayOnly ? "direct" : "relay"} route
-                {hiddenRouteCount === 1 ? " is" : "s are"} not listed -- this plan is served only by{" "}
-                {plan?.relayOnly ? "relay" : "direct"} routes.
-              </p>
-            ) : null}
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="defaultRouteId">Default route (for purchases)</Label>
