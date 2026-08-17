@@ -195,7 +195,11 @@ export class CustomerAuthService {
     // account is what matters, not which route confirmed it, and saying
     // "expired" sent people off to request codes that would never help.
     if (customer?.emailVerifiedAt) {
-      return { alreadyVerified: true, trial: null };
+      // Retried here, because this is the path a customer whose grant
+      // failed comes back through. grantFreeTrialIfEnabled refuses if
+      // they already have a subscription, so an ordinary re-verification
+      // still gets nothing.
+      return { alreadyVerified: true, trial: await this.retryTrial(customer.id) };
     }
 
     if (
@@ -210,16 +214,38 @@ export class CustomerAuthService {
     return this.completeVerification(customer.id, customer.emailVerifiedAt);
   }
 
+  /** Best-effort second chance at a trial that failed its first. */
+  private async retryTrial(customerId: string) {
+    try {
+      return await this.grantFreeTrialIfEnabled(customerId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Trial retry failed for customer ${customerId}: ${reason}`);
+      return null;
+    }
+  }
+
   private async completeVerification(customerId: string, alreadyVerifiedAt: Date | null) {
     if (alreadyVerifiedAt) {
-      return { alreadyVerified: true, trial: null };
+      return { alreadyVerified: true, trial: await this.retryTrial(customerId) };
     }
 
     await this.prisma.customer.update({
       where: { id: customerId },
       data: { emailVerifiedAt: new Date(), emailVerificationCode: null, emailVerificationCodeExpiresAt: null },
     });
-    const trial = await this.grantFreeTrialIfEnabled(customerId);
+    // Caught, not propagated. The account is already marked verified by
+    // the update above, so letting this throw returns an error to
+    // someone whose email *is* verified -- and leaves them unable to
+    // sign in while the trial they cannot see is the reason. The grant
+    // is retried on their next verify attempt or sign-in instead.
+    let trial = null;
+    try {
+      trial = await this.grantFreeTrialIfEnabled(customerId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Trial grant failed for customer ${customerId}, will retry later: ${reason}`);
+    }
 
     // Only now, not at signup. An unverified account is not a person
     // yet, and mailing on an unconfirmed address would turn a shared
@@ -231,6 +257,21 @@ export class CustomerAuthService {
   }
 
   private async grantFreeTrialIfEnabled(customerId: string) {
+    // Never twice, and safe to call again after a failure. Keyed on the
+    // customer having no subscription at all rather than on a flag,
+    // because that is the actual question -- a trial is what somebody
+    // gets when they have never had anything.
+    //
+    // This is what makes retrying possible. Before it, the grant ran
+    // exactly once, wired to a verification that had already been
+    // written down: if anything threw -- an inactive trial plan throws
+    // from subscriptionsService.create, which is how this was found --
+    // the customer was left verified with nothing, and every later
+    // attempt took the already-verified path and returned null. One
+    // failure cost them the trial permanently.
+    const existing = await this.prisma.subscription.count({ where: { customerId } });
+    if (existing > 0) return null;
+
     const settings = await this.freeTrialSettingsService.get();
     // Say which condition stopped it, rather than returning null in
     // silence. A customer who verifies and receives nothing is

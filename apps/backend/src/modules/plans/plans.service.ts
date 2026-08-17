@@ -49,7 +49,11 @@ export class PlansService {
    * (which intentionally show inactive plans too, for management). */
   listActive() {
     return this.prisma.subscriptionPlan.findMany({
-      where: { isActive: true },
+      // Both flags. isActive is "can this be used at all", isPurchasable
+      // is "should a customer be offered it" -- a trial is usable and
+      // deliberately unlisted, and conflating the two is what silently
+      // broke trials when the Trial plan was deactivated to hide it.
+      where: { isActive: true, isPurchasable: true },
       orderBy: { priceUsd: "asc" },
     });
   }
@@ -100,6 +104,7 @@ export class PlansService {
         maxUploadMbps: dto.maxUploadMbps,
         protocolsAllowed,
         isActive: dto.isActive ?? true,
+        isPurchasable: dto.isPurchasable ?? true,
         defaultRouteId: dto.defaultRouteId,
         allowedRoutes: dto.allowedRouteIds?.length
           ? { connect: dto.allowedRouteIds.map((id) => ({ id })) }
@@ -133,6 +138,7 @@ export class PlansService {
         maxUploadMbps: dto.maxUploadMbps,
         protocolsAllowed,
         isActive: dto.isActive,
+        isPurchasable: dto.isPurchasable,
         defaultRouteId: dto.defaultRouteId,
         // `set` rather than `connect`, so deselecting actually removes.
         // undefined leaves the selection alone; an explicit empty array

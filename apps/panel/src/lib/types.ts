@@ -160,18 +160,15 @@ export interface SubscriptionPlan {
   maxDownloadMbps: number | null;
   maxUploadMbps: number | null;
   protocolsAllowed: Protocol[];
+  /** Whether the plan works at all -- subscriptions, including trials,
+   * cannot be created on an inactive plan. */
   isActive: boolean;
+  /** Whether customers are offered it. Independent of isActive. */
+  isPurchasable: boolean;
   defaultRouteId: string | null;
-  /** When true, this plan is served only by relayed routes (and a plan
-   * without it is served only by direct ones). Not editable from the
-   * plan form -- shown so the route picker can say which of the routes
-   * listed can actually apply. */
-  relayOnly: boolean;
-  /** Which routes this plan may be served by.
-   *
-   * EMPTY MEANS NO RESTRICTION -- every route the plan's protocols and
-   * relay policy already allow. Anything reading this must treat an
-   * empty list as "all", never as "none". */
+  /** The routes this plan is served by -- relay and direct alike, and
+   * the only thing that decides. EMPTY MEANS NO SERVICE: a plan with
+   * nothing ticked provisions nothing. */
   allowedRoutes: { id: string }[];
   createdAt: string;
   updatedAt: string;

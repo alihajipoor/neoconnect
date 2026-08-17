@@ -32,7 +32,12 @@ function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
 
 describe("CustomerAuthService", () => {
   let service: CustomerAuthService;
-  let prisma: { customer: { findUnique: jest.Mock; update: jest.Mock } };
+  let prisma: {
+    customer: { findUnique: jest.Mock; update: jest.Mock };
+    // The trial grant now refuses anyone who already has a subscription,
+    // which is what makes it safe to retry after a failure.
+    subscription: { count: jest.Mock };
+  };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let config: { get: jest.Mock };
   let customersService: { create: jest.Mock };
@@ -49,6 +54,7 @@ describe("CustomerAuthService", () => {
   beforeEach(() => {
     prisma = {
       customer: { findUnique: jest.fn(), update: jest.fn() },
+      subscription: { count: jest.fn().mockResolvedValue(0) },
     };
     jwt = { signAsync: jest.fn(), verifyAsync: jest.fn() };
     config = { get: jest.fn((key: string) => `config:${key}`) };

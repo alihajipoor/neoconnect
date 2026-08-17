@@ -20,6 +20,7 @@ export interface PlanInput {
    * Still accepted for any caller that is not the panel. */
   protocolsAllowed?: Protocol[];
   isActive?: boolean;
+  isPurchasable?: boolean;
   defaultRouteId?: string;
   /** Which routes this plan may be served by.
    *
