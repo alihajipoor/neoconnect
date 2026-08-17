@@ -319,7 +319,37 @@ impl Engines {
     /// [`wireguard::handshake_health`].
     pub fn status(&mut self) -> (bool, Option<String>, TunnelHealth) {
         match &mut self.active {
-            None => (false, None, TunnelHealth::Down),
+            // Nothing tracked is NOT the same as nothing running, and
+            // treating them as the same stranded customers.
+            //
+            // A WireGuard tunnel service and an IKEv2 phonebook entry
+            // both outlive this process -- disconnect() has always said
+            // so, which is why its None arm calls
+            // wireguard::remove_tunnel_if_present. So after a service
+            // restart or crash with a tunnel up, `active` is None while
+            // the machine is still fully tunnelled. This arm then
+            // answered "disconnected" without asking anything, and the
+            // app believed it.
+            //
+            // What that does to a customer, reported 2026-08-17: their
+            // traffic still goes through the tunnel, the app says "not
+            // connected" when reopened, so it offers no Disconnect
+            // button -- and no other VPN can work while ours holds the
+            // routes. They cannot get out of it from the UI at all.
+            //
+            // Asking the OS costs two cheap calls and makes the honest
+            // answer available: report it up, unnamed, so the app shows
+            // connected and lets them disconnect. disconnect()'s None
+            // arm already knows how to tear exactly this down.
+            None => {
+                if wireguard::tunnel_is_running() {
+                    (true, Some("WIREGUARD".to_string()), TunnelHealth::Unknown)
+                } else if ikev2::is_connected() {
+                    (true, Some("IKEV2".to_string()), TunnelHealth::Unknown)
+                } else {
+                    (false, None, TunnelHealth::Down)
+                }
+            }
             Some(Active::Ikev2) => {
                 // Windows owns this tunnel, so its own view is the only
                 // truth available. There is no handshake to read the way
