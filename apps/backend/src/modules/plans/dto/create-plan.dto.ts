@@ -47,10 +47,22 @@ export class CreatePlanDto {
   @Max(10_000)
   maxUploadMbps?: number;
 
+  /** Derived from the selected routes, not chosen.
+   *
+   * A Route already names the node and the protocol customers reach it
+   * on, so asking for a protocol list as well was asking the same
+   * question twice and letting the two answers disagree -- a plan could
+   * allow Trojan while being pointed only at WireGuard routes, and the
+   * intersection silently decided what the customer actually got.
+   *
+   * Still a column, and still read by provisioning and switchRoute, so
+   * it is computed from allowedRouteIds on every write rather than
+   * removed. Optional here: the panel no longer sends it.
+   */
+  @IsOptional()
   @IsArray()
-  @ArrayMinSize(1)
   @IsEnum(Protocol, { each: true })
-  protocolsAllowed!: Protocol[];
+  protocolsAllowed?: Protocol[];
 
   @IsOptional()
   @IsBoolean()

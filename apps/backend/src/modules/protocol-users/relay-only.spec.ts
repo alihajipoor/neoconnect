@@ -2,165 +2,16 @@ import { BadRequestException } from "@nestjs/common";
 import { ProtocolUsersService } from "./protocol-users.service";
 
 /**
- * The relay/direct split, pinned in both directions.
- *
- * These exist because the expensive failure is silent. provisionAll()
- * hands every eligible Route to every subscription, so without the
- * filter the first Iran relay route would be provisioned to all live
- * customers within one sweep -- relayed traffic crosses two servers and
- * the Iran side costs more per gigabyte, so the bill arrives before
- * anyone notices the behaviour.
- *
- * Asserting on the WHERE clause rather than on rows is deliberate: the
- * filter is the whole mechanism, and a test that went through a real
- * database would prove it for the routes that happened to exist that
- * day rather than for the rule.
- */
-describe("provisionAll: relay-only plans", () => {
-  function serviceFor(plan: { name: string; relayOnly: boolean; protocolsAllowed: string[] }) {
-    const findMany = jest.fn().mockResolvedValue([]);
-    const prisma = {
-      subscription: {
-        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", plan: { id: "p1", allowedRoutes: [], ...plan } }),
-      },
-      route: { findMany },
-      protocolUser: { findMany: jest.fn().mockResolvedValue([]) },
-    };
-    // Two args, matching provision-all.spec.ts -- the sibling spec for
-    // this same method, whose pattern this follows rather than inventing
-    // a second one.
-    const service = new ProtocolUsersService(prisma as never, {} as never);
-    jest.spyOn(service, "create").mockImplementation(({ routeId }) => Promise.resolve({ routeId } as never));
-    return { service, findMany };
-  }
-
-  const NORMAL = { name: "Starter", relayOnly: false, protocolsAllowed: ["WIREGUARD"] };
-  const RELAY = { name: "Ultimate", relayOnly: true, protocolsAllowed: ["WIREGUARD"] };
-
-  it("a normal plan asks only for DIRECT routes", async () => {
-    // The expensive direction: without this, every Starter and Pro
-    // customer lands on the Iran relay the moment one exists.
-    const { service, findMany } = serviceFor(NORMAL);
-    await service.provisionAll("sub-1").catch(() => undefined);
-
-    expect(findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ exitProtocolConfigId: null }),
-      }),
-    );
-  });
-
-  it("a relay-only plan asks only for RELAYED routes", async () => {
-    const { service, findMany } = serviceFor(RELAY);
-    await service.provisionAll("sub-1").catch(() => undefined);
-
-    expect(findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ exitProtocolConfigId: { not: null } }),
-      }),
-    );
-  });
-
-  it("a relay-only plan with no relay route FAILS rather than provisioning nothing", async () => {
-    // Silence would look like a working subscription that never
-    // connects, for a customer who has paid. An error at least reaches
-    // the operator and the purchase flow.
-    const { service } = serviceFor(RELAY);
-    await expect(service.provisionAll("sub-1")).rejects.toBeInstanceOf(BadRequestException);
-  });
-
-  it("a normal plan with no route does NOT fail", async () => {
-    // Only the relay case is an error. A normal plan legitimately has
-    // nothing to provision when no route matches its protocols, and
-    // throwing there would break ordinary purchases.
-    const { service } = serviceFor(NORMAL);
-    await expect(service.provisionAll("sub-1")).resolves.toEqual({ created: [], revoked: [] });
-  });
-});
-
-/**
- * The same rule at the chokepoint every provisioning path goes through.
- *
- * provisionAll's filter decides what gets OFFERED. It does not decide
- * what can be created: POST /protocol-users, the picker's switchRoute,
- * the admin panel and renewal all call create() with a routeId directly.
- * Verified against the live backend on 2026-08-13 -- a direct route on a
- * relay-only plan returned 201 with only the filter in place.
- */
-describe("create: relay-only plans", () => {
-  function serviceFor(relayOnly: boolean, exitProtocolConfigId: string | null) {
-    const prisma = {
-      subscription: {
-        findUnique: jest.fn().mockResolvedValue({ id: "sub-1", plan: { name: "Ultimate", relayOnly, allowedRoutes: [] } }),
-      },
-      route: {
-        findUnique: jest.fn().mockResolvedValue({
-          id: "route-1",
-          name: exitProtocolConfigId ? "ir1 relay -> finland1" : "finland1 direct",
-          isEnabled: true,
-          exitProtocolConfigId,
-          entryProtocolConfig: { id: "cfg-1", nodeId: "n1", protocol: "XRAY_VLESS_REALITY", node: {} },
-        }),
-      },
-      protocolUser: { create: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
-    };
-    const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
-    return {
-      service: new ProtocolUsersService(prisma as never, agentGateway as never),
-      prisma,
-      agentGateway,
-    };
-  }
-
-  it("refuses a DIRECT route on a relay-only plan", async () => {
-    const { service, prisma, agentGateway } = serviceFor(true, null);
-    await expect(service.create({ subscriptionId: "sub-1", routeId: "route-1" })).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
-    // No row written and no CREATE_USER sent to a node -- a rejected
-    // request must not leave an account running on an engine.
-    expect(prisma.protocolUser.create).not.toHaveBeenCalled();
-    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
-  });
-
-  it("allows a RELAYED route on a relay-only plan", async () => {
-    const { service, prisma } = serviceFor(true, "exit-cfg-1");
-    await service.create({ subscriptionId: "sub-1", routeId: "route-1" }).catch(() => undefined);
-    expect(prisma.protocolUser.create).toHaveBeenCalled();
-  });
-
-  it("leaves normal plans on direct routes alone", async () => {
-    // The regression that would matter most: every existing customer is
-    // on a normal plan and a direct route.
-    const { service, prisma } = serviceFor(false, null);
-    await service.create({ subscriptionId: "sub-1", routeId: "route-1" }).catch(() => undefined);
-    expect(prisma.protocolUser.create).toHaveBeenCalled();
-  });
-
-  it("refuses a RELAYED route on a normal plan", async () => {
-    // The half that was missing. provisionAll has always filtered both
-    // ways, but create() only ever checked the relayOnly side, so the
-    // expensive direction stayed reachable by asking for it directly:
-    // a Starter or Pro subscription provisioned onto the Iran relay,
-    // crossing two servers at double the cost per gigabyte for someone
-    // who never bought that plan.
-    const { service, prisma, agentGateway } = serviceFor(false, "exit-cfg-1");
-    await expect(service.create({ subscriptionId: "sub-1", routeId: "route-1" })).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
-    expect(prisma.protocolUser.create).not.toHaveBeenCalled();
-    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
-  });
-});
-
-/**
  * The per-plan route selection.
  *
- * Empty means no restriction, and that asymmetry is the whole safety
- * property: every plan that existed before this feature has an empty
- * selection, so treating empty as "nothing allowed" would strip the
- * entire customer base at once. The first test below is the one that
- * would catch that.
+ * This is now the ONLY rule. There is no relay/direct split beside it
+ * and no implicit "everything" behind it: a plan is exactly the routes
+ * an operator ticked, relay or direct alike.
+ *
+ * Empty therefore means no service. That was safe to introduce only
+ * because a migration first wrote every existing plan's effective route
+ * set down explicitly -- flipping the meaning against an empty join
+ * table would have cut off every customer at once.
  */
 describe("the plan's route selection", () => {
   function serviceFor(selected: string[], routeId = "route-1") {
@@ -193,16 +44,14 @@ describe("the plan's route selection", () => {
     return { service: new ProtocolUsersService(prisma as never, agentGateway as never), prisma, findMany };
   }
 
-  it("an EMPTY selection restricts nothing", async () => {
-    // The migration-safety case. Every pre-existing plan has an empty
-    // selection; if that were read as `id: { in: [] }` the query would
-    // match no route and every customer would be reconciled down to
-    // nothing on the next sweep.
+  it("an EMPTY selection serves nothing", async () => {
+    // The owner's decision: explicit selection is required, so a plan
+    // nobody has finished configuring provisions no credentials rather
+    // than quietly handing out every route on the fleet.
     const { service, findMany } = serviceFor([]);
     await service.provisionAll("sub-1").catch(() => undefined);
 
-    const where = findMany.mock.calls[0][0].where;
-    expect(where.id).toBeUndefined();
+    expect(findMany.mock.calls[0][0].where.id).toEqual({ in: [] });
   });
 
   it("a non-empty selection narrows the query to those routes", async () => {
@@ -233,11 +82,11 @@ describe("the plan's route selection", () => {
     expect(prisma.protocolUser.create).toHaveBeenCalled();
   });
 
-  it("does not let a selection override the relay rule", async () => {
-    // Selecting routes narrows; it never widens. A relay route picked on
-    // a non-relay plan must still be refused, or the setting becomes a
-    // way around the split that exists to stop Starter customers landing
-    // on Iran bandwidth.
+  it("allows a RELAY route on any plan that selected it", async () => {
+    // The relay/direct split is gone. A relay route is now just a route
+    // somebody chose, so a plan that ticked one is served by it -- which
+    // is what the owner asked for after the split proved too rigid to
+    // express plans like "Pro, plus one Iran entry".
     const { service, prisma } = serviceFor(["route-1"], "route-1");
     prisma.route.findUnique.mockResolvedValue({
       id: "route-1",
@@ -247,10 +96,8 @@ describe("the plan's route selection", () => {
       entryProtocolConfig: { id: "cfg-1", nodeId: "n1", protocol: "XRAY_VLESS_REALITY", node: {} },
     });
 
-    await expect(service.create({ subscriptionId: "sub-1", routeId: "route-1" })).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
-    expect(prisma.protocolUser.create).not.toHaveBeenCalled();
+    await service.create({ subscriptionId: "sub-1", routeId: "route-1" }).catch(() => undefined);
+    expect(prisma.protocolUser.create).toHaveBeenCalled();
   });
 });
 
@@ -269,7 +116,7 @@ describe("the plan's route selection", () => {
  */
 describe("provisionAll: revoking what the plan no longer allows", () => {
   function serviceFor(opts: {
-    relayOnly: boolean;
+    selected: string[];
     routes: { id: string; isEnabled?: boolean; entryEnabled?: boolean }[];
     existing: { id: string; routeId: string }[];
   }) {
@@ -277,7 +124,11 @@ describe("provisionAll: revoking what the plan no longer allows", () => {
       subscription: {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
-          plan: { name: opts.relayOnly ? "Ultimate" : "Starter", relayOnly: opts.relayOnly, protocolsAllowed: ["WIREGUARD"], allowedRoutes: [] },
+          plan: {
+            name: "Pro",
+            protocolsAllowed: ["WIREGUARD"],
+            allowedRoutes: opts.selected.map((id) => ({ id })),
+          },
         }),
       },
       route: {
@@ -306,7 +157,7 @@ describe("provisionAll: revoking what the plan no longer allows", () => {
     // The Ultimate case exactly: the relay route is allowed and held,
     // the direct one is a leftover and must go.
     const { service, remove } = serviceFor({
-      relayOnly: true,
+      selected: ["relay-1"],
       routes: [{ id: "relay-1" }],
       existing: [
         { id: "pu-relay", routeId: "relay-1" },
@@ -328,22 +179,26 @@ describe("provisionAll: revoking what the plan no longer allows", () => {
     // re-enable, dropping anyone connected through it for a reason that
     // had nothing to do with their plan.
     const { service, remove } = serviceFor({
-      relayOnly: false,
+      selected: ["direct-1"],
       routes: [{ id: "direct-1", isEnabled: false }],
       existing: [{ id: "pu-direct", routeId: "direct-1" }],
     });
 
-    await service.provisionAll("sub-1");
+    // Throws, because every selected route is currently unreachable --
+    // and the point stands regardless: nothing was revoked. A route
+    // disabled for maintenance is still selected, so the credential on
+    // it survives the outage.
+    await expect(service.provisionAll("sub-1")).rejects.toBeInstanceOf(BadRequestException);
 
     expect(remove).not.toHaveBeenCalled();
   });
 
-  it("does not revoke when a relay-only plan has no relay route available", async () => {
+  it("does not revoke when every selected route is unavailable", async () => {
     // Ordered after the "none available" throw, so an outage cannot
     // strip a paying subscription of everything it holds. The customer
-    // keeps what they have until a relay route is back.
+    // keeps what they have until one of its routes is back.
     const { service, remove } = serviceFor({
-      relayOnly: true,
+      selected: ["relay-1"],
       routes: [],
       existing: [{ id: "pu-direct", routeId: "direct-1" }],
     });

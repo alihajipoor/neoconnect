@@ -94,37 +94,18 @@ export class ProtocolUsersService {
     if (!route) throw new BadRequestException("Route not found");
     if (!route.isEnabled) throw new BadRequestException("Route is not enabled");
 
-    // relayOnly is enforced here, not only in provisionAll's route filter.
+    // The relay/direct split used to be a rule of its own here, driven
+    // by plan.relayOnly. It is gone: a plan is now exactly the set of
+    // routes an operator ticked, and a relay route is only different
+    // from a direct one in that somebody chose it.
     //
-    // Measured 2026-08-13: with the filter living solely in provisionAll,
-    // POST /protocol-users happily returned 201 for a direct route on a
-    // relay-only plan. Every provisioning path -- the customer picker's
-    // switchRoute, the admin panel, renewal, a backfill -- funnels through
-    // create(), so this is the one place that actually holds. A filter
-    // that only shapes what gets *offered* is not enforcement; it just
-    // means the plan's defining promise depends on nobody asking directly.
-    //
-    // Ultimate is sold as the Iran relay path specifically, at more money
-    // for less data, so serving it from a direct route is not a lenient
-    // edge case -- it is selling one product and delivering another.
-    // Both directions, because the plans are mutually exclusive and only
-    // one half was ever enforced here. provisionAll's filter has always
-    // run both ways; create() checked relayOnly plans alone, which left
-    // the expensive direction open -- POST /protocol-users would happily
-    // put a Starter or Pro subscription on the Iran relay, where traffic
-    // crosses two servers and costs double for someone who never asked
-    // for it. That is the same shape of hole the relayOnly half already
-    // went through once: a filter that only decides what gets *offered*
-    // is not enforcement while any path can ask directly.
-    const wantsRelay = route.exitProtocolConfigId !== null;
-    if (subscription.plan.relayOnly !== wantsRelay) {
-      throw new BadRequestException(
-        subscription.plan.relayOnly
-          ? `The ${subscription.plan.name} plan is served only by relay routes, and "${route.name}" is a direct route`
-          : `The ${subscription.plan.name} plan is served only by direct routes, and "${route.name}" is a relay route`,
-      );
-    }
-
+    // What that guard bought is not lost, but it has moved. It existed
+    // because provisionAll handed every eligible route to every
+    // subscription, so the first relay route created would have put all
+    // fifteen live customers onto Iran bandwidth at double the cost
+    // within one sweep. Nothing is implicit any more -- an empty
+    // selection is empty, not "everything" -- so a route reaches a
+    // customer only if it was picked for their plan.
     // The plan's explicit route selection, enforced at the same
     // chokepoint for the same reason: provisionAll's filter decides what
     // is offered, and every other path -- the picker, the admin panel,
@@ -132,10 +113,12 @@ export class ProtocolUsersService {
     // selection that only shaped the offer would be a setting the admin
     // could see and nothing could rely on.
     //
-    // Empty means unrestricted, so the check is skipped entirely rather
-    // than treated as "nothing is allowed".
+    // Empty means empty. A plan with nothing selected serves nothing,
+    // which is the owner's decision -- explicit selection is required --
+    // and is why every existing plan was backfilled with its effective
+    // routes before this stopped meaning "everything".
     const selectedRouteIds = subscription.plan.allowedRoutes.map((r) => r.id);
-    if (selectedRouteIds.length > 0 && !selectedRouteIds.includes(route.id)) {
+    if (!selectedRouteIds.includes(route.id)) {
       throw new BadRequestException(
         `The ${subscription.plan.name} plan is not served by "${route.name}"`,
       );
@@ -220,37 +203,17 @@ export class ProtocolUsersService {
     // moment one exists -- paying twice over to serve people who never
     // asked for it. This half is why the flag had to land before the
     // first relay route did.
-    const relayFilter = subscription.plan.relayOnly
-      ? { exitProtocolConfigId: { not: null } }
-      : { exitProtocolConfigId: null };
-
-    // The plan's own route selection, if it has one.
+    // The plan's route selection IS the policy now. No relay/direct
+    // filter sits beside it, and no implicit "everything" behind it.
     //
-    // Empty means no restriction, which is why this is a conditional
-    // spread rather than an `id: { in: [] }` -- that would match nothing
-    // and silently strip every unrestricted plan of every route, which
-    // is every plan that existed before the feature.
-    //
-    // Narrows only. It sits alongside relayFilter rather than replacing
-    // it, so a direct route selected on a relay-only plan still grants
-    // nothing: what is provisioned is the intersection of the two.
+    // An empty selection therefore means no service, which is a real
+    // edge with real consequences: a plan nobody has ticked routes for
+    // provisions nothing and its customers connect to nothing. That is
+    // the owner's decision -- explicit selection is required -- and the
+    // migration that backfilled every existing plan's effective routes
+    // is what makes it safe to say.
     const selected = subscription.plan.allowedRoutes.map((r) => r.id);
-    const selectionFilter = selected.length > 0 ? { id: { in: selected } } : {};
-
-    // Two different questions, and conflating them would churn live
-    // customers.
-    //
-    // What the PLAN allows is a policy question -- relay vs direct, and
-    // the protocols sold with it. What can be provisioned RIGHT NOW is
-    // additionally a question of whether the route and its engine happen
-    // to be enabled, which is operational and temporary.
-    //
-    // Revocation below keys off the first and never the second. An
-    // operator disabling a route for ten minutes of maintenance must not
-    // cause every customer's credential on it to be deleted from the
-    // node and rebuilt on re-enable: that turns a quiet maintenance
-    // window into a fleet-wide reprovision, and drops anyone connected
-    // through it for a reason that had nothing to do with their plan.
+    const selectionFilter = { id: { in: selected } };
     // Two queries rather than one broader one, so each answers exactly
     // one of those questions and neither has to be read as also meaning
     // the other.
@@ -259,7 +222,6 @@ export class ProtocolUsersService {
       this.prisma.route.findMany({
         where: {
           isEnabled: true,
-          ...relayFilter,
           ...selectionFilter,
           entryProtocolConfig: { protocol: { in: subscription.plan.protocolsAllowed }, isEnabled: true },
         },
@@ -270,7 +232,6 @@ export class ProtocolUsersService {
       // up. Only revocation reads this.
       this.prisma.route.findMany({
         where: {
-          ...relayFilter,
           ...selectionFilter,
           entryProtocolConfig: { protocol: { in: subscription.plan.protocolsAllowed } },
         },
@@ -281,16 +242,19 @@ export class ProtocolUsersService {
 
     const allowedRouteIds = new Set(allowedByPolicy.map((r) => r.id));
 
-    // Fail loudly rather than provisioning nothing. A relayOnly plan
-    // with no relayed route means the relay is down, not yet built, or
-    // disabled -- and the customer has paid. Silence here would look
+    // Fail loudly rather than provisioning nothing. A plan that has
+    // routes selected but none of them reachable means the nodes are
+    // down or disabled -- and the customer has paid. Silence there looks
     // like a working subscription that simply never connects, which is
-    // the worst way for this to fail; an error at least surfaces to the
-    // operator and the purchase flow.
-    if (routes.length === 0 && subscription.plan.relayOnly) {
+    // the worst way for this to fail.
+    //
+    // A plan with NO routes selected is a different case and not an
+    // error: it is an operator who has not finished setting it up, and
+    // saying so on every sweep would be noise rather than news.
+    if (selected.length > 0 && routes.length === 0) {
       throw new BadRequestException(
-        `The ${subscription.plan.name} plan is served only by relay routes, and none is available right now. ` +
-          `No credentials were created -- enable a relayed route before selling this plan.`,
+        `The ${subscription.plan.name} plan's selected routes are all unavailable right now. ` +
+          `No credentials were created -- enable one of its routes before selling this plan.`,
       );
     }
 

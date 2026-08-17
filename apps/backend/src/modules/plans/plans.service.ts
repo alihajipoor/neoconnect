@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Protocol } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { rateLimitFor } from "../protocol-users/rate-limit";
@@ -64,7 +65,29 @@ export class PlansService {
     return plan;
   }
 
-  create(dto: CreatePlanDto) {
+  /** The protocols a set of routes is reachable on.
+   *
+   * protocolsAllowed used to be typed in beside the routes, which meant
+   * the same question was asked twice and the two answers could
+   * disagree: a plan could allow Trojan while pointing only at
+   * WireGuard routes, and the intersection quietly decided what the
+   * customer got. Deriving it removes the disagreement entirely.
+   *
+   * An explicit list is still honoured when one is sent, so the API
+   * keeps working for anything that is not the panel.
+   */
+  private async protocolsFor(routeIds: string[] | undefined, explicit?: Protocol[]) {
+    if (explicit?.length) return explicit;
+    if (!routeIds?.length) return undefined;
+    const routes = await this.prisma.route.findMany({
+      where: { id: { in: routeIds } },
+      select: { entryProtocolConfig: { select: { protocol: true } } },
+    });
+    return [...new Set(routes.map((r) => r.entryProtocolConfig.protocol))];
+  }
+
+  async create(dto: CreatePlanDto) {
+    const protocolsAllowed = await this.protocolsFor(dto.allowedRouteIds, dto.protocolsAllowed);
     return this.prisma.subscriptionPlan.create({
       data: {
         name: dto.name,
@@ -75,7 +98,7 @@ export class PlansService {
         maxConcurrentConnections: dto.maxConcurrentConnections,
         maxDownloadMbps: dto.maxDownloadMbps,
         maxUploadMbps: dto.maxUploadMbps,
-        protocolsAllowed: dto.protocolsAllowed,
+        protocolsAllowed,
         isActive: dto.isActive ?? true,
         defaultRouteId: dto.defaultRouteId,
         allowedRoutes: dto.allowedRouteIds?.length
@@ -88,6 +111,10 @@ export class PlansService {
 
   async update(id: string, dto: UpdatePlanDto) {
     const before = await this.get(id);
+    // Recomputed whenever the route selection changes, so the two can
+    // never drift apart. undefined when neither was sent, which leaves
+    // the stored value alone.
+    const protocolsAllowed = await this.protocolsFor(dto.allowedRouteIds, dto.protocolsAllowed);
     const plan = await this.prisma.subscriptionPlan.update({
       where: { id },
       data: {
@@ -104,7 +131,7 @@ export class PlansService {
         maxConcurrentConnections: dto.maxConcurrentConnections,
         maxDownloadMbps: dto.maxDownloadMbps,
         maxUploadMbps: dto.maxUploadMbps,
-        protocolsAllowed: dto.protocolsAllowed,
+        protocolsAllowed,
         isActive: dto.isActive,
         defaultRouteId: dto.defaultRouteId,
         // `set` rather than `connect`, so deselecting actually removes.
