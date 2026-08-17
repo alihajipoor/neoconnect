@@ -310,6 +310,12 @@ impl Engines {
             }
         };
 
+        // Unconditionally, like the config wipe: an NRPT rule left
+        // behind points the whole machine's lookups at a resolver that
+        // is no longer reachable, which presents as "no website loads
+        // at all" long after the VPN is gone. Cheap, and safe when
+        // there is nothing to remove.
+        xray::clear_tunnel_dns();
         self.wipe_generated_configs();
         result
     }
