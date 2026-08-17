@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, UnauthorizedException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import * as argon2 from "argon2";
@@ -53,6 +53,8 @@ const RESET_CODE_MAX_ATTEMPTS = 5;
 
 @Injectable()
 export class CustomerAuthService {
+  private readonly logger = new Logger(CustomerAuthService.name);
+
   /**
    * Wrong reset-code guesses, keyed by lowercased email.
    *
@@ -230,7 +232,22 @@ export class CustomerAuthService {
 
   private async grantFreeTrialIfEnabled(customerId: string) {
     const settings = await this.freeTrialSettingsService.get();
+    // Say which condition stopped it, rather than returning null in
+    // silence. A customer who verifies and receives nothing is
+    // indistinguishable, from every log this service writes, from a
+    // customer who was never offered a trial at all -- which is exactly
+    // the position info@neoxify.com left us in on 2026-08-17: verified,
+    // zero subscriptions, and not one line anywhere saying why.
+    //
+    // Reported at warn because a verified signup getting no trial is a
+    // lost customer, not routine bookkeeping.
     if (!settings.enabled || !settings.trialPlanId || !settings.trialRouteId) {
+      const missing = [
+        settings.enabled ? null : "trial mode is off",
+        settings.trialPlanId ? null : "no trial plan is set",
+        settings.trialRouteId ? null : "no trial route is set",
+      ].filter(Boolean);
+      this.logger.warn(`No trial granted to customer ${customerId}: ${missing.join("; ")}`);
       return null;
     }
 
