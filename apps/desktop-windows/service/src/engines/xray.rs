@@ -19,13 +19,13 @@
 use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::PathBuf;
-use std::process::Child;
+use std::process::{Child, Command};
 
 use neoconnect_ipc::{ShadowsocksProfile, TrojanProfile, VlessTlsProfile, XrayProfile};
 use serde_json::json;
 
 use super::routing::{self, InstalledRoutes};
-use super::{confirm_started, run_hidden, spawn_hidden, write_config, Engines};
+use super::{confirm_started, run_hidden, spawn_hidden, write_config, Engines, CREATE_NO_WINDOW};
 use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
@@ -317,6 +317,10 @@ fn configure_adapter(tun_ip: Ipv4Addr) -> Result<(), String> {
         return Err(format!("setting the tunnel's DNS failed ({status})"));
     }
 
+    // The adapter's own resolver is only a preference; this is what makes
+    // it the only answer. See apply_tunnel_dns.
+    apply_tunnel_dns()?;
+
     Ok(())
 }
 
@@ -514,4 +518,63 @@ mod tests {
         assert_eq!(settings["autoSystemRoutingTable"], true);
         assert_eq!(settings["autoOutboundsInterface"], true);
     }
+}
+
+/// Marks the NRPT rules this service owns, so cleanup removes ours and
+/// leaves anything else on the machine alone.
+const NRPT_COMMENT: &str = "Neoxify tunnel DNS";
+
+/// Forces every DNS lookup through the tunnel's resolver.
+///
+/// Setting the adapter's own DNS is not enough, and the gap is not
+/// academic -- it is what a customer in Iran reported on 2026-08-17:
+/// connected, exit IP correct, Telegram working, and youtube.com
+/// refusing to load in the browser while google.com loaded fine.
+///
+/// Windows resolves names on ALL interfaces at once and takes whichever
+/// answers first ("smart multi-homed name resolution"). The customer's
+/// ISP resolver is a few milliseconds away and ours is across a tunnel,
+/// so the local one usually wins -- and in Iran it answers filtered
+/// domains with a poisoned address. Traffic then never reaches the
+/// tunnel at all, because the browser was handed the wrong destination
+/// before any of it was routed. Telegram is unaffected because it does
+/// not ask Windows.
+///
+/// An NRPT rule is what WireGuard's own client uses for this, which is
+/// why the WireGuard protocol never showed the fault and the Xray ones
+/// all did. Namespace "." matches every name.
+pub fn apply_tunnel_dns() -> Result<(), String> {
+    clear_tunnel_dns();
+    let script = format!(
+        "Add-DnsClientNrptRule -Namespace '.' -NameServers '{TUN_DNS}' -Comment '{NRPT_COMMENT}' -ErrorAction Stop"
+    );
+    powershell(&script).map(|_| ()).map_err(|e| format!("could not force tunnel DNS: {e}"))
+}
+
+/// Removes our NRPT rules.
+///
+/// Failures are ignored and it is safe to call when none exist: this
+/// runs on every disconnect and at service start, because a rule left
+/// behind by a crash would point the whole machine's lookups at a
+/// resolver that is no longer reachable -- which presents as "no
+/// website loads at all" long after the VPN is gone.
+pub fn clear_tunnel_dns() {
+    let script = format!(
+        "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue"
+    );
+    let _ = powershell(&script);
+}
+
+fn powershell(script: &str) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
