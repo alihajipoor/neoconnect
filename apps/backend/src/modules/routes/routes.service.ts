@@ -74,20 +74,36 @@ export class RoutesService {
   }
 
   /** Customer-facing: which Routes a plan's customers may pick, i.e. the
-   * location picker's option list. Reuses SubscriptionPlan.protocolsAllowed
-   * (already in the schema, previously write-only/unenforced) rather than
-   * adding a new plan<->route relation -- a route is eligible if it's
-   * enabled and its entry protocol is one the plan allows.
+   * location picker's option list.
+   *
+   * Eligibility is the plan's explicit route selection, intersected with
+   * its protocols and with the route being enabled. It used to be
+   * protocols alone -- that predates plans having a route relation at
+   * all, and once they did, the picker kept offering servers the plan
+   * was not served by. Customers on Starter and Pro saw the Iran relay
+   * entries, tapped one, and got refused; from their side an app that
+   * lists something and then says no is simply broken.
    *
    * Deliberately an explicit `select`, not `include` -- a plain `include`
    * would return the raw Route row as-is, which contains
    * `uplinkCredentialsJson` (the relay's shared exit-node secret). That
    * must never reach a customer; only the fields a location picker
    * actually needs are selected here. */
-  async listAvailableForPlan(protocolsAllowed: Protocol[]) {
+  async listAvailableForPlan(protocolsAllowed: Protocol[], allowedRouteIds: string[]) {
     const routes = await this.prisma.route.findMany({
       where: {
         isEnabled: true,
+        // The plan's own selection, not just its protocols. Listing by
+        // protocol alone showed every customer every route their
+        // protocols could reach -- so Starter and Pro saw the Iran relay
+        // entries, tapped one, and were refused by create(). To them
+        // that reads as a broken app rather than a plan boundary, and
+        // the honest fix is not to offer what cannot be chosen.
+        //
+        // Empty selection means the plan serves nothing, so the picker
+        // shows nothing: `id: { in: [] }` matches no rows, which is the
+        // correct answer rather than an edge case to special-case.
+        id: { in: allowedRouteIds },
         entryProtocolConfig: { protocol: { in: protocolsAllowed } },
       },
       select: {

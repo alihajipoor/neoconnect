@@ -207,14 +207,19 @@ export class CustomerController {
     return this.subscriptionsService.createOrReusePending(customer.sub, dto.planId);
   }
 
-  // Location picker: which servers this subscription's plan allows
-  // switching to -- see RoutesService.listAvailableForPlan for how
-  // eligibility is derived from the plan's protocolsAllowed[].
+  // Location picker: which servers this subscription's plan is actually
+  // served by. Deliberately the same set provisioning would grant -- a
+  // picker that offers more than that produces a customer tapping a
+  // server and being told no, which looks like a bug rather than a plan
+  // boundary.
   @Get("subscriptions/:id/routes")
   async availableRoutes(@CurrentCustomer() customer: AuthenticatedCustomer, @Param("id") id: string) {
     const subscription = await this.subscriptionsService.getOwned(id, customer.sub);
     const plan = await this.plansService.get(subscription.planId);
-    return this.routesService.listAvailableForPlan(plan.protocolsAllowed);
+    return this.routesService.listAvailableForPlan(
+      plan.protocolsAllowed,
+      plan.allowedRoutes.map((r) => r.id),
+    );
   }
 
   // Location picker: switch this subscription's VPN account to a
