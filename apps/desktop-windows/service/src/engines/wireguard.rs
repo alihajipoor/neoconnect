@@ -48,8 +48,23 @@ fn build_conf(p: &WireguardProfile, passive: bool) -> String {
     };
     let table = if passive { "Table = off\n" } else { "" };
 
+    // MTU, explicitly, because leaving it out is not neutral. Measured on
+    // a customer's machine 2026-08-17: the adapter came up at 1500, the
+    // same as the Wi-Fi link underneath it, so every full-size packet was
+    // over the path MTU once WireGuard's ~80 bytes of header went on.
+    //
+    // That failure is horrible to diagnose from the outside because it is
+    // size-dependent, not on/off: the handshake completes, small requests
+    // work, DNS works, and then large responses silently vanish. To the
+    // customer some sites load and others hang forever, on a tunnel the
+    // app is correctly reporting as connected.
+    //
+    // 1420 is WireGuard's own default for IPv4 over a 1500-byte link
+    // (1500 - 20 IP - 8 UDP - 32 WireGuard) and matches what the nodes
+    // already run on wg0, so both ends agree rather than negotiating
+    // through loss.
     format!(
-        "[Interface]\nPrivateKey = {}\nAddress = {}\n{dns}{table}\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = 25\n",
+        "[Interface]\nPrivateKey = {}\nAddress = {}\nMTU = 1420\n{dns}{table}\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = 25\n",
         p.private_key,
         p.address,
         p.server_public_key,
@@ -205,6 +220,25 @@ mod tests {
         let conf = build_conf(&profile(), false);
         assert!(!conf.contains("Table = off"), "the default must still capture routing");
         assert!(conf.contains("DNS = 1.1.1.1"));
+    }
+
+    #[test]
+    fn every_config_pins_the_mtu_below_the_link() {
+        // Omitting MTU is not neutral. Measured on a customer's machine
+        // 2026-08-17: the adapter came up at 1500, matching the Wi-Fi
+        // link under it, so full-size packets exceeded the path MTU once
+        // WireGuard's header was added. Size-dependent breakage is the
+        // worst kind to report -- the handshake succeeds, DNS resolves,
+        // small requests work, and large responses vanish, so the
+        // customer sees "some sites don't load" on a tunnel that is
+        // genuinely connected.
+        //
+        // Both modes, because Custom mode gives up the routing table but
+        // still carries packets through the same interface.
+        for passive in [false, true] {
+            let conf = build_conf(&profile(), passive);
+            assert!(conf.contains("MTU = 1420"), "passive={passive}: MTU must be pinned");
+        }
     }
 
     #[test]
