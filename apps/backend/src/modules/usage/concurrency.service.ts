@@ -40,48 +40,34 @@ const COOLDOWN_MS = 60_000;
  * once. */
 const MIN_STRIKE_GAP_MS = 20_000;
 
-/** Enforces a plan's concurrent-connection limit -- for the protocols
- * that still report sessions, which since 2026-08-16 is none of the
- * Xray ones.
+/** Enforces a plan's concurrent-connection limit.
  *
- * READ THIS BEFORE TRUSTING A DEVICE LIMIT. Xray exposes session counts
- * nowhere in its API; the agent derived them by reading the access log,
- * and that log is now off on every node because each line paired a
- * customer's IP with the destination they reached, kept for days, on
- * boxes we do not physically control. Deliberate trade, taken with the
- * cost known: REALITY, VLESS+TLS over TCP and WS, Trojan and
- * Shadowsocks no longer report, so for them this class is inert. Those
- * are the six protocols Iranian customers actually use.
+ * Xray exposes session counts nowhere in its API -- its stats report
+ * bytes, not connections -- so the agent derives them by reading the
+ * access log. That makes this class only as alive as the log is.
  *
- * Nothing here misbehaves as a result -- a protocol that reports nothing
- * is treated as unknown rather than zero, so no one is disconnected on
- * missing evidence. But `maxConcurrentConnections` on a plan is now a
- * number the product mostly does not enforce, and the honest place to
- * learn that is here rather than from a customer sharing an account.
+ * It was turned off fleet-wide on 2026-08-16 for privacy and turned
+ * back on on 2026-08-17 when the cost became clear: with it off,
+ * Starter's one device and Pro's two were decorative on REALITY,
+ * VLESS+TLS over TCP and WS, Trojan and Shadowsocks -- the six
+ * protocols Iranian customers actually use. The log is on now, carrying
+ * source addresses and user tags, one day's retention.
  *
- * Still enforced where the engine self-limits without any counting:
+ * So the mechanism is live. What has NOT been done is watching it act:
+ * nobody has put two devices on one credential and seen a disconnect.
+ * Treat enforcement as restored-but-unproven until someone has.
+ *
+ * Also enforced without any counting, and unaffected by the above:
  * OpenVPN replaces the existing session when the same certificate
  * reconnects, and a WireGuard peer holds one endpoint, so devices
- * sharing a key fight over it instead of working in parallel.
- *
- * Making it true again means giving Xray a session source that is not
- * the access log -- writing source and user through a named pipe while
- * dropping the destination before it touches disk is the sketch in
- * docs/journal, and it is real work, not a flag.
+ * sharing a key fight over it rather than working in parallel.
  *
  * The limit is evaluated per subscription, not per credential -- see
  * handleSessionCounts for why that distinction is what makes it
  * enforceable at all.
  *
- * Only Xray is enforced here, because only Xray needs it. VLESS accepts
- * unlimited simultaneous connections for one UUID, so a shared credential
- * genuinely multiplies into many users. The other engines are already
- * self-limiting: OpenVPN replaces the existing session when the same
- * certificate reconnects (no duplicate-cn), and a WireGuard peer holds a
- * single endpoint, so devices sharing a key fight over it instead of
- * working in parallel. Nodes report counts only for protocols they can
- * actually measure, and a protocol that reports nothing is treated as
- * unknown rather than as zero.
+ * A protocol that reports nothing is treated as unknown rather than as
+ * zero, so a node that cannot measure never causes a disconnect.
  */
 @Injectable()
 export class ConcurrencyService implements OnModuleDestroy {

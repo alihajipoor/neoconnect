@@ -72,9 +72,27 @@ const (
 )
 
 // How far back a client address still counts as "currently connected".
-// Long enough to span a quiet period on an idle connection, short enough
-// that a user who genuinely moved networks stops looking like two.
-const sessionWindow = 5 * time.Minute
+//
+// Sixty seconds, down from five minutes, and the reason is the customer
+// base rather than the protocol. Iranian mobile carriers rotate a
+// subscriber's address constantly. When that happens the old address is
+// still inside the window while the new one is already active, so ONE
+// phone reads as two sources -- and on Starter, whose limit is one, that
+// is over the limit on every poll until the window expires.
+//
+// At five minutes that lasted ten consecutive polls, which is far past
+// the three strikes the server needs to act: a single paying customer
+// on mobile data would be disconnected for changing cell. No strike
+// threshold fixes that, because the window outlasts any of them; the
+// window is the only lever.
+//
+// Sixty seconds keeps a rotated address around for about two polls,
+// which cannot reach three strikes. The cost is that a genuinely idle
+// second device stops being counted after a minute of silence -- so a
+// sharer with two devices, one of them idle, is missed. That is the
+// right way round to be wrong: a missed sharer costs bandwidth, a false
+// disconnect costs a paying customer who did nothing.
+const sessionWindow = 60 * time.Second
 
 func New(apiAddr, inboundTag, accessLogPath string) (*Provisioner, error) {
 	conn, err := grpc.NewClient(apiAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
