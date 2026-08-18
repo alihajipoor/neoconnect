@@ -17,6 +17,14 @@ use tauri_plugin_deep_link::DeepLinkExt;
 // reliable fallback than depending on the plugin's own capture path.
 struct LaunchDeepLink(Option<String>);
 
+/// How often to tell the service this app is still running.
+///
+/// Comfortably inside the service's sixty-second idle grace, and
+/// deliberately not derived from it: the two live in different crates,
+/// and a heartbeat that is merely equal to the timeout it is meant to
+/// beat is the bug this exists to remove.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[tauri::command]
 fn get_launch_deep_link(state: tauri::State<LaunchDeepLink>) -> Option<String> {
     state.0.clone()
@@ -83,6 +91,31 @@ pub fn run() {
             // this app is Windows-only for now.
             #[cfg(desktop)]
             app.deep_link().register("neoconnect")?;
+
+            // Tells the service this app is still here.
+            //
+            // The service tears a tunnel down when it has heard nothing
+            // from us for a while -- that is what stops a tunnel
+            // outliving the app that started it. But the only thing that
+            // was speaking to it was the dashboard's status poll, and
+            // that runs in the webview, where Windows throttles timers
+            // in a minimized window to roughly one a minute. The grace
+            // period is sixty seconds, so a customer who minimized the
+            // app was relying on two numbers that are the same size.
+            //
+            // A beat from here does not depend on the webview being
+            // awake, or even on a window existing. When this process
+            // ends it stops on its own, which is exactly the condition
+            // the service is trying to detect.
+            tauri::async_runtime::spawn(async {
+                loop {
+                    tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+                    // The reply is not interesting; being asked is. A
+                    // failure means the service is not there, which is
+                    // its own problem and not one to solve by stopping.
+                    let _ = vpn::vpn_status().await;
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

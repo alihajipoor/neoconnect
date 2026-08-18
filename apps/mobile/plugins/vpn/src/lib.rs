@@ -17,6 +17,14 @@ mod commands;
 
 pub use commands::*;
 
+/// Answer to `vpn_tunnel_gone`: false while the device is still routed
+/// through any VPN, ours or otherwise.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelGone {
+    pub gone: bool,
+}
+
 use serde::{Deserialize, Serialize};
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 use tauri::Runtime;

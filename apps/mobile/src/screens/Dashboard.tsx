@@ -23,6 +23,7 @@ import {
   connectWireGuard,
   connectXray,
   disconnect,
+  tunnelGone,
   hasVpnPermission,
   requestVpnPermission,
   vpnStatus,
@@ -94,6 +95,39 @@ async function confirmEgress(
  * connection of those protocols degraded, which is crying wolf, and the
  * egress check is the honest signal for them anyway.
  */
+
+/** How long to wait for the device to stop being routed through a VPN
+ * before telling the customer the disconnect did not finish.
+ *
+ * A ceiling, not a delay: this is polled twice a second and the orb
+ * flips the moment the tunnel is gone, which on the emulator is inside
+ * a second now that the engine process is not allowed to sit on the
+ * descriptor. Eight seconds is headroom for a slower phone, and long
+ * enough that the warning means something when it does appear. */
+const TEARDOWN_WAIT_MS = 8_000;
+const TEARDOWN_POLL_MS = 500;
+
+/** Waits for the tunnel to actually be gone.
+ *
+ * The disconnect call returns as soon as every engine has been told to
+ * stop, which is not the same as the device being out of the tunnel --
+ * and announcing "disconnected" at that moment is what left customers
+ * looking at an app that claimed to be off while their traffic still
+ * went into it. */
+async function waitForTeardown(): Promise<boolean> {
+  const deadline = Date.now() + TEARDOWN_WAIT_MS;
+  while (Date.now() < deadline) {
+    try {
+      if (await tunnelGone()) return true;
+    } catch {
+      // Not knowing is not the same as knowing it is down; keep asking
+      // until the deadline rather than assuming either way.
+    }
+    await new Promise((r) => setTimeout(r, TEARDOWN_POLL_MS));
+  }
+  return false;
+}
+
 function stateFromStatus(status: VpnStatus): ConnectionState {
   if (!status.connected) return "disconnected";
   if (status.lastHandshakeAgeSecs === null) return "connected";
@@ -366,10 +400,24 @@ export function Dashboard({
       setConnectionState("disconnecting");
       try {
         await disconnect();
-      } catch {
-        // The tunnel may not exist yet; the customer asked to stop
-        // either way, and reporting a teardown failure for something
-        // that was never up would be noise.
+      } catch (err) {
+        // Reported, not swallowed: a teardown that could not even be
+        // requested is not a disconnect.
+        setConnectionError(classifyConnectionError(err));
+        setConnectionState("degraded");
+        return;
+      }
+      if (!(await waitForTeardown())) {
+        // Still in a tunnel. Saying "disconnected" here is the lie that
+        // sent customers to Android's settings to force-stop the app
+        // before their internet came back.
+        setConnectionError({
+          kind: "unknown",
+          messageKey: "err.teardownStuck",
+          detail: "still routed through a VPN after disconnecting",
+        });
+        setConnectionState("degraded");
+        return;
       }
       setConnectionState("disconnected");
       setConnectedAt(null);
@@ -381,12 +429,25 @@ export function Dashboard({
       setConnectionState("disconnecting");
       try {
         await disconnect();
+        if (!(await waitForTeardown())) {
+          setConnectionError({
+            kind: "unknown",
+            messageKey: "err.teardownStuck",
+            detail: "still routed through a VPN after disconnecting",
+          });
+          setConnectionState("degraded");
+          return;
+        }
         setConnectionState("disconnected");
         setConnectedAt(null);
         setExitIp(null);
       } catch (err) {
+        // The tunnel is still up -- that is what the failure means --
+        // but a disconnect that could not finish is not a healthy
+        // connection either, and the customer needs to see that rather
+        // than a green orb.
         setConnectionError(classifyConnectionError(err));
-        setConnectionState("connected");
+        setConnectionState("degraded");
       }
       return;
     }

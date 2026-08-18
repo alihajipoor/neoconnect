@@ -5,7 +5,7 @@
 //! root of a library crate those two collide with each other. Official
 //! Tauri plugins put their commands in a submodule for the same reason.
 
-use crate::{Apps, Empty, Granted, Ikev2Profile, VpnStatus, WireGuardProfile, XrayProfile};
+use crate::{Apps, Empty, Granted, Ikev2Profile, TunnelGone, VpnStatus, WireGuardProfile, XrayProfile};
 #[cfg(target_os = "android")]
 use crate::Vpn;
 use tauri::{AppHandle, Runtime};
@@ -129,6 +129,28 @@ pub async fn vpn_disconnect<R: Runtime>(app: AppHandle<R>) -> Result<Empty, Stri
         handle(&app)?
             .0
             .run_mobile_plugin::<Empty>("disconnect", ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err(unavailable())
+    }
+}
+
+/// Whether the device has stopped being routed through a VPN.
+///
+/// Split out from `vpn_disconnect` so the teardown itself never blocks:
+/// the connect ladder disconnects between rungs, and a wait inside the
+/// disconnect ran once per protocol it tried. The dashboard polls this
+/// after a customer asks to disconnect, and only then says it happened.
+#[tauri::command]
+pub async fn vpn_tunnel_gone<R: Runtime>(app: AppHandle<R>) -> Result<TunnelGone, String> {
+    #[cfg(target_os = "android")]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<TunnelGone>("tunnelGone", ())
             .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "android"))]

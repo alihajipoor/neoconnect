@@ -60,6 +60,83 @@ class NeoxifyTunService : VpnService(), Protector {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Stopping is a message to this service, not a stopService() call
+        // on it, and that is not a style choice.
+        //
+        // While a tunnel is established the system binds to this service
+        // (BIND_VPN_SERVICE, act=android.net.VpnService) and holds that
+        // binding for as long as it considers this app the active VPN.
+        // A bound service is not destroyed by stopService(): the started
+        // flag clears, onDestroy() never runs, and onDestroy() was the
+        // only caller of teardown(). So the tun descriptor stayed open,
+        // which is precisely what kept the system's binding alive --
+        // the teardown was gated on a destroy that the tun itself
+        // prevented.
+        //
+        // What that cost the customer: the app said "disconnected", the
+        // VPN key stayed in the status bar, and every packet on the
+        // device kept being routed into an engine that was no longer
+        // carrying it. The whole phone was offline until they found
+        // force-stop in Android's settings. Reproduced on the emulator
+        // on 2026-08-17 -- dumpsys showed startRequested=false with the
+        // system still listed under Bindings.
+        //
+        // Closing the descriptor here is what releases the system's
+        // binding, and only then can the service actually die.
+        if (intent?.action == ACTION_STOP) {
+            // Required if this arrived via startForegroundService, and a
+            // no-op notification update when the service was already in
+            // the foreground -- which is the usual case.
+            runCatching { startForeground(NOTIFICATION_ID, buildNotification()) }
+            instance = null
+            // Off the main thread. Stopping the engine can block for as
+            // long as starting it can, and this is the system's
+            // main-thread callback: doing it here would trade a stuck
+            // tunnel for an ANR and leave the tun open either way.
+            Thread({
+                // Order matters, and it is the same lesson twice: the
+                // step that frees the device must not sit behind a step
+                // that can block. Stopping the engine is a call into Go
+                // that can wait on the same dead network the tunnel was
+                // dialling, so it happens after this service has closed
+                // the tun and stopped claiming to be running -- which is
+                // what the disconnect is waiting to see. If the process
+                // is killed before that last call returns, the engine
+                // goes with it, which is the same outcome.
+                closeTun()
+                clearState(this)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(true)
+                }
+                stopSelf()
+
+                // Closing our descriptor is not enough on its own: the
+                // engine was handed the raw fd and keeps its own copy,
+                // so the interface -- and the routes pointing into it --
+                // survive until xray has finished shutting down.
+                //
+                // Measured on the emulator: our close landed at 0.3s and
+                // the interface did not go until 4.0s, all of it waiting
+                // for the engine. Killing this process dropped it in
+                // under 0.26s. A disconnect a customer waits four
+                // seconds for is a disconnect they press twice.
+                //
+                // So the engine is asked politely, briefly, and then the
+                // process goes. Nothing else lives here -- it exists to
+                // hold the tunnel and is being torn down -- and the
+                // kernel closes every descriptor with it.
+                val stopping = Thread({ stopEngine() }, "neoxify-engine-stop")
+                stopping.isDaemon = true
+                stopping.start()
+                stopping.join(ENGINE_STOP_GRACE_MS)
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }, "neoxify-teardown").start()
+            return START_NOT_STICKY
+        }
+
         // Android requires a visible notification for a service holding a
         // VPN, and rightly: a tunnel nobody can see is a tunnel nobody
         // can turn off.
@@ -135,7 +212,13 @@ class NeoxifyTunService : VpnService(), Protector {
                 }
             }, "neoxify-xray-start").start()
         }
-        return START_STICKY
+        // Not sticky, and deliberately so now that the teardown kills
+        // this process: a restart arrives with a null Intent, which
+        // carries no config, so the service would come back holding a
+        // VPN notification and no tunnel -- telling the customer they
+        // are protected when nothing is running. Staying down is both
+        // honest and what the status file already reports.
+        return START_NOT_STICKY
     }
 
     /** Reports state to the main process.
@@ -175,11 +258,44 @@ class NeoxifyTunService : VpnService(), Protector {
         super.onRevoke()
     }
 
+    /** Both halves, for the paths that are not racing anything. */
     private fun teardown() {
-        // Only if it was started. Calling into the Go library to stop
+        closeTun()
+        stopEngine()
+    }
+
+    /** Releases the device.
+     *
+     * This is the half the customer feels: the tun is what holds the
+     * system's VPN binding and what swallows every packet on the phone.
+     * Once it is closed the device routes normally again, whatever the
+     * engine is still doing.
+     */
+    private fun closeTun() {
+        // The descriptor goes first, and the order is the fix.
+        //
+        // Closing the tun makes the engine's reads fail, which is what
+        // unwedges a start still blocked dialling a server that will
+        // never answer -- the case this path exists for. Stopping the
+        // engine first waits on that same dial, so the close never
+        // happens and the device stays offline behind a tunnel nothing
+        // is carrying.
+        try {
+            tun?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "closing the tun descriptor failed", e)
+        }
+        tun = null
+    }
+
+    /** Stops the engine. Best effort, and deliberately not on the path
+     * that frees the device -- see closeTun. */
+    private fun stopEngine() {
+        // Only if it was attempted. Calling into the Go library to stop
         // something that never ran would load libgojni.so purely to be
         // told "nothing is running" -- and loading it is exactly what we
         // are avoiding until traffic needs it.
+        //
         // Attempted, not completed. An engine wedged inside start() is
         // exactly the case that must be stopped, and it is the only case
         // the old `started` guard excluded.
@@ -188,19 +304,13 @@ class NeoxifyTunService : VpnService(), Protector {
                 Neoxifyxray.stop()
             } catch (e: Throwable) {
                 // Throwable: this runs on the teardown path, and a
-                // native Error escaping here would leave the tun open --
-                // the fault it exists to prevent.
+                // native Error escaping here would leave the engine
+                // running -- the fault it exists to prevent.
                 Log.w(TAG, "xray stop failed", e)
             }
             started = false
             startAttempted = false
         }
-        try {
-            tun?.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "closing the tun descriptor failed", e)
-        }
-        tun = null
     }
 
     private fun buildNotification(): Notification {
@@ -311,6 +421,14 @@ class NeoxifyTunService : VpnService(), Protector {
          * internet and no way for the customer to fix it from the app.
          */
         private const val START_TIMEOUT_MS = 20_000L
+
+        /** How long the engine gets to stop on its own before this
+         * process is killed out from under it.
+         *
+         * Long enough for the system to have registered the stopSelf
+         * above, short enough that the tunnel is gone before a customer
+         * would reach for the button a second time. */
+        private const val ENGINE_STOP_GRACE_MS = 500L
         private const val TAG = "NeoxifyTun"
         private const val CHANNEL_ID = "neoxify-vpn"
         private const val NOTIFICATION_ID = 1
@@ -321,6 +439,13 @@ class NeoxifyTunService : VpnService(), Protector {
         const val EXTRA_MTU = "com.neoxify.vpn.MTU"
         const val EXTRA_DNS = "com.neoxify.vpn.DNS"
         const val EXTRA_APPS = "com.neoxify.vpn.APPS"
+
+        /** Asks the service to tear the tunnel down and stop.
+         *
+         * Sent as a start intent rather than stopService() -- see the
+         * top of onStartCommand for why that distinction is the whole
+         * fix. */
+        const val ACTION_STOP = "com.neoxify.vpn.STOP"
 
         const val STATE_UP = "up"
         const val STATE_ERROR = "error"

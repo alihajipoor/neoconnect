@@ -100,4 +100,12 @@ export const connectIkev2 = (profile: Ikev2Profile) =>
 
 export const disconnect = () => invoke<void>("vpn_disconnect");
 
+/** Whether the device has stopped being routed through a VPN.
+ *
+ * Polled after a disconnect so the UI confirms the teardown instead of
+ * announcing it. Kept out of `disconnect` itself because the connect
+ * ladder disconnects between rungs and must not wait. */
+export const tunnelGone = () =>
+  invoke<{ gone: boolean }>("vpn_tunnel_gone").then((r) => r.gone);
+
 export const vpnStatus = () => invoke<VpnStatus>("vpn_status");
