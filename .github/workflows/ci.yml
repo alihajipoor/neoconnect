@@ -155,10 +155,7 @@ jobs:
         working-directory: apps/desktop-windows
         run: |
           cargo build -p neoconnect-service
-          copy target\debug
-eoconnect-service.exe src-tauri
-esources
-eoconnect-service.exe
+          Copy-Item target/debug/neoconnect-service.exe src-tauri/resources/neoconnect-service.exe
 
       # Compiles everything, including the code paths tests do not reach.
       # Kept separate from the test step so a build failure and a failing
