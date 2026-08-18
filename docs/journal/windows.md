@@ -2965,3 +2965,93 @@ Also still open: IKEv2 has never been dialled at all; exit IPs have not
 been re-checked since the node restarts of 2026-08-16; Xray on a real
 Android handset, which matters more now the app is live on Play; and
 ir1's single vCPU, which is the measured cause of relay slowness.
+
+## 2026-08-18 — Device limits: the window was the bug, and MAC cannot be the answer
+
+**Status:** agent v0.2.5 built and rolled out to all four nodes.
+Enforcement is **restored but still unwatched** -- nobody has put two
+devices on one credential and seen a disconnect, in either direction.
+
+### I told the owner limits were unenforced, and I was wrong
+
+They were, on 2026-08-16, when the access log was off. The log came back
+on 2026-08-17 on the owner's instruction, which restored the mechanism.
+Listing "device limits unenforced" in a launch-readiness summary after
+that was me repeating an old finding instead of rechecking it, and the
+owner was right to push back.
+
+Two comments I had written that day said the same thing in code --
+`ConcurrencyService`'s docstring and the plan form's note under Max
+connections -- and by then both stated the opposite of the truth.
+Corrected. Exactly the staleness this journal keeps catching elsewhere,
+except this time I introduced it.
+
+Measured before correcting: finland1's access log holds 417 lines, 388
+carrying a user tag, 4 distinct users, 2 distinct sources. The data
+counting needs is there.
+
+### The false-positive the owner asked about was real, and specific
+
+They asked whether the limit could wrongly disconnect a normal
+single-device user. It could, and Iran is what made it likely.
+
+`sessionWindow` was **five minutes**: how long a source address keeps
+counting as present after its last packet. Iranian mobile carriers
+rotate a subscriber's address constantly, and when that happens the old
+address is still inside the window while the new one is already active
+-- so one phone reads as **two sources**. On Starter, limit one, that is
+over the limit on every poll for five minutes: about ten consecutive
+readings against the three strikes the server needs to act.
+
+**No strike threshold could fix that**, which is worth stating plainly
+because raising it is the obvious move and it does nothing -- the window
+outlasts any number of strikes. The window was the only lever.
+
+Now sixty seconds: a rotated address survives roughly two polls and
+cannot reach three strikes.
+
+The cost is deliberate and one-directional. A genuinely idle second
+device drops out of the count after a minute of silence, so a sharer
+with one idle device is missed. A missed sharer costs bandwidth; a false
+disconnect costs a paying customer who did nothing wrong.
+
+The safeguards that were already right, for the record: distinct
+addresses rather than connection count (a browser opens many parallel
+connections), three consecutive strikes, a 20s minimum gap so several
+nodes reporting at once counts once, per-subscription aggregation across
+the fleet, and absent counts treated as unknown rather than zero.
+
+### MAC addresses cannot identify a device here
+
+Asked whether to count by MAC instead of IP. No, and not for a reason we
+could engineer around: MAC is link-layer and is rewritten at every
+router hop, so the only MAC an exit node ever sees is its own gateway's.
+The customer's never leaves their home network. True of every VPN.
+
+The right answer is a **device ID issued by our own client** -- stable,
+stored once, sent at provisioning -- so the count is of registered
+devices rather than inferred from addresses. It removes the rotation
+problem entirely, allows an honest "2 of 2 devices" UI with a remove
+button instead of a silent disconnect, and exposes less than logging
+addresses does. Not built: it needs client work on both platforms, a
+device table, and a management surface.
+
+It also would not stop extraction, and nothing can. The client must hold
+the credential to build the tunnel, so a determined device owner can
+always retrieve it. What device IDs do is make an extracted credential
+worth little, because it still counts against the subscription and can
+be revoked. The server-side count remains the only layer a client cannot
+bypass, which is why it matters that it works.
+
+### Rollout
+
+v0.2.5 to finland1, france-1, singapore-1, ir1. Checksum verified
+against the release on each node before installing, previous binary kept
+as a timestamped backup, service stopped and started rather than the
+binary swapped underneath it. All four active, identical size, zero
+errors on three.
+
+singapore-1 reports two `XRAY_VLESS_REALITY StatsSince: connection
+refused` errors per minute. That is the deliberate noise recorded on
+2026-08-15 -- it has an Xray protocol config and no Xray -- not
+something this rollout caused.
