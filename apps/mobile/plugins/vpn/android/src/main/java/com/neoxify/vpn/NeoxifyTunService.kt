@@ -39,6 +39,20 @@ class NeoxifyTunService : VpnService(), Protector {
     /** Whether the Go engine has actually been started in this service.
      * See the note in teardown. */
     private var started = false
+    /** Whether Neoxifyxray.start() has been ENTERED, not whether it returned.
+     *
+     * The distinction is the whole bug. `started` only becomes true once
+     * start() returns, so when it blocks -- which is what happens when
+     * the server cannot be reached -- teardown skipped stopping the
+     * engine, and the engine holds its own reference to the tun file
+     * descriptor. Closing the Kotlin ParcelFileDescriptor does not take
+     * the interface down while Go still has it, so the device stayed
+     * captured by a tunnel carrying nothing until the process was
+     * killed. Reproduced on a tablet 2026-08-18: whole-device internet
+     * loss, VPN icon stuck in the status bar, and force-stop the only
+     * recovery.
+     */
+    private var startAttempted = false
 
     override fun onCreate() {
         super.onCreate()
@@ -84,11 +98,33 @@ class NeoxifyTunService : VpnService(), Protector {
             val apps = intent.getStringArrayListExtra(EXTRA_APPS) ?: arrayListOf()
             // Off the main thread: establish() and xray's startup both
             // block, and this is the system's main-thread callback.
+            // A connect that hangs is not hypothetical -- picking a
+            // server that cannot be reached does it every time -- and
+            // until it returns, the tun established below is swallowing
+            // every packet on the device. Nothing else in this service
+            // is watching, so this is what ends it.
+            val watchdog = Thread({
+                try {
+                    Thread.sleep(START_TIMEOUT_MS)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                if (!started) {
+                    Log.e(TAG, "engine did not come up within ${START_TIMEOUT_MS}ms; tearing down")
+                    publish(STATE_ERROR, "The server did not respond. Try another server or protocol.")
+                    teardown()
+                    stopSelf()
+                }
+            }, "neoxify-start-watchdog")
+            watchdog.start()
+
             Thread({
                 try {
                     start(config, mtu, dns, apps)
+                    watchdog.interrupt()
                     publish(STATE_UP, null)
                 } catch (t: Throwable) {
+                    watchdog.interrupt()
                     // Throwable: a native engine failing to load arrives
                     // as an Error, and an uncaught one here would take
                     // the process with it instead of failing the connect.
@@ -144,13 +180,20 @@ class NeoxifyTunService : VpnService(), Protector {
         // something that never ran would load libgojni.so purely to be
         // told "nothing is running" -- and loading it is exactly what we
         // are avoiding until traffic needs it.
-        if (started) {
+        // Attempted, not completed. An engine wedged inside start() is
+        // exactly the case that must be stopped, and it is the only case
+        // the old `started` guard excluded.
+        if (startAttempted) {
             try {
                 Neoxifyxray.stop()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // Throwable: this runs on the teardown path, and a
+                // native Error escaping here would leave the tun open --
+                // the fault it exists to prevent.
                 Log.w(TAG, "xray stop failed", e)
             }
             started = false
+            startAttempted = false
         }
         try {
             tun?.close()
@@ -250,6 +293,7 @@ class NeoxifyTunService : VpnService(), Protector {
         tun = descriptor
 
         try {
+            startAttempted = true
             Neoxifyxray.start(configJson, descriptor.fd.toLong(), this)
             started = true
         } catch (e: Exception) {
@@ -259,6 +303,14 @@ class NeoxifyTunService : VpnService(), Protector {
     }
 
     companion object {
+        /** How long the engine gets before the tunnel is torn down.
+         *
+         * Generous, because a slow network on a bad link is not a
+         * failure and xray-core loads a 46MB engine first. But bounded,
+         * because every second past this is a device with no working
+         * internet and no way for the customer to fix it from the app.
+         */
+        private const val START_TIMEOUT_MS = 20_000L
         private const val TAG = "NeoxifyTun"
         private const val CHANNEL_ID = "neoxify-vpn"
         private const val NOTIFICATION_ID = 1
