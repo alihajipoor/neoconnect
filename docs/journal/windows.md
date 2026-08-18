@@ -3261,3 +3261,28 @@ So: three Windows changes, all reasoned from the code and covered by
 tests, none of them exercised against a running tunnel. No desktop
 release cut. 0.9.6 is the precedent for why that matters -- it shipped
 from exactly this position and a customer found it.
+
+### Addendum: the slow connect could not be reproduced
+
+Chased the "three minutes on Checking connection" from the entry above,
+because a customer seeing that assumes a hang -- and the tester's report
+says exactly that. Five timed connects on the emulator, measured by
+sampling the tun on the device once a second:
+
+| run | state | route | tun up at |
+|---|---|---|---|
+| 1 | fresh install, just logged in | fr-france Shadowsocks | ~3 min |
+| 2 | fresh install, just logged in | fr-france Shadowsocks | ~3 min |
+| 3 | warm | fr-france Shadowsocks | +4s |
+| 4 | data cleared, just logged in | default sg-singapore (fell back to WireGuard) | +2s |
+| 5 | warm, route chosen in the picker | fr-france Shadowsocks | +3s |
+
+Runs 4 and 5 were built to reproduce it -- 4 to test "first run is
+slow", 5 to test "choosing a route in the picker is slow" -- and neither
+did. So the two slow runs share only that a newly installed build was
+connecting for the first time, and that is not enough to name a cause.
+
+Recorded rather than explained. The endpoint that would have been the
+obvious suspect is fine: `/api/health/ip` answers in 0.73s, and
+`apiEndpoints()` puts the remembered address first, so the per-rung
+baseline capture is not it.
