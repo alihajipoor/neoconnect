@@ -12,6 +12,7 @@ import { orderCandidates } from "@shared/lib/failover";
 import { Button, Card, Stat } from "@shared/components/ui";
 import { ConnectOrb, type ConnectionState } from "@shared/components/ConnectOrb";
 import { Logo } from "@shared/components/Logo";
+import { Flag } from "@shared/components/Flag";
 import { LocationPicker } from "@shared/components/LocationPicker";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
@@ -886,7 +887,13 @@ export function Dashboard({
                     was a separate button further down showing the same
                     text. The tile is the control now. */}
                 <Stat
-                  icon={<Globe className="size-3" />}
+                  icon={
+                    currentRoute ? (
+                      <Flag region={currentRoute.location.region} className="h-3 w-[1rem]" />
+                    ) : (
+                      <Globe className="size-3" />
+                    )
+                  }
                   label={t("dash.server")}
                   value={currentRoute ? currentRoute.location.region : "—"}
                   onClick={() => setShowLocationPicker(true)}
