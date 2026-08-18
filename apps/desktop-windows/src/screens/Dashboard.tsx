@@ -12,6 +12,8 @@ import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from
 import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
 import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
+import { IS_STORE_BUILD } from "../lib/distribution";
+import { endedNotice } from "../lib/subscription-state";
 import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
@@ -1031,6 +1033,14 @@ export function Dashboard({
     return { used, cap, percent: Math.min(100, (used / cap) * 100) };
   }, [subscription]);
 
+  /** Set only when the subscription exists but no longer entitles the
+   * customer to connect. See subscription-state for why the decision
+   * lives outside the component. */
+  const endedState = useMemo(
+    () => (subscription ? endedNotice(subscription.status, IS_STORE_BUILD) : null),
+    [subscription],
+  );
+
   const daysLeft = useMemo(() => {
     if (!subscription) return null;
     const ms = new Date(subscription.expireAt).getTime() - now;
@@ -1251,6 +1261,23 @@ export function Dashboard({
 
               {/* What the connection actually is. These three answer the
                   questions a customer asks while looking at the orb. */}
+
+              {/* The plan has stopped working. Until now this said so
+                  only in the error a connect attempt produced -- text
+                  that told the customer to "upgrade or wait for it to
+                  renew" on a screen with nothing to press. */}
+              {endedState ? (
+                <Card className="ring-brand animate-rise flex flex-col gap-2 text-center">
+                  <p className="text-sm font-semibold">{t(endedState.titleKey)}</p>
+                  <p className="text-xs text-muted-foreground">{t(endedState.bodyKey)}</p>
+                  {endedState.showPlansButton ? (
+                    <Button onClick={onBrowsePlans} className="mt-2 w-full justify-center gap-2">
+                      <Tag className="size-4" />
+                      {t("dash.renewCta")}
+                    </Button>
+                  ) : null}
+                </Card>
+              ) : null}
               <div className="animate-rise grid grid-cols-3 gap-2">
                 {/* Both open the same picker, because a customer asking
                     to "change the protocol" and one asking to "change the
