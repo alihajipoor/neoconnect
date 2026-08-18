@@ -3323,3 +3323,47 @@ disconnect, since our service is not involved in one at all.
 
 Still not dialled: IKEv2 on the Windows client, and IKEv2 through the
 Iran relay (this test was a direct route).
+
+## 2026-08-18 -- Flags on the server list
+
+**Status:** done (Android verified), pending (desktop unverified)
+**Touches:** `components/Flag.tsx` (new), `components/LocationPicker.tsx`,
+both `screens/Dashboard.tsx`
+
+Every row of the server list carried the same map pin, which told the
+customer nothing, while the one thing people scan a server list for --
+the country -- was left encoded in a slug like `fr-france`. The
+dashboard's SERVER tile had the same problem behind a globe.
+
+Both now lead with the country's flag. One component, shared: mobile
+imports desktop's `src/` through the `@shared` alias, so Android,
+Windows and iOS all draw from the same file.
+
+### Why the flags are drawn by hand
+
+- **Emoji is the obvious answer and is wrong.** Windows ships no glyphs
+  for regional-indicator pairs, so 🇫🇷 renders as the letters "FR" in two
+  boxes on the desktop client while Android shows a flag. The clients
+  are meant to look like one product.
+- **A remote sprite** would put a network fetch in front of the server
+  list, for customers whose networks are the reason they installed a
+  VPN, and often before any tunnel is up.
+- **A flag package** costs a dependency and a bundle for the handful of
+  countries we run nodes in.
+
+Ten are drawn: fi, fr, sg, ir, de, nl, us, gb, tr, ae. They are
+deliberately simplified -- at 20px a coat of arms is a smudge -- so each
+keeps only what identifies it: bands, a cross, a crescent. Iran's is the
+plain tricolour without the emblem, which is both the legible choice and
+the less loaded one for this audience.
+
+The code comes from the region slug's prefix, because `region` is free
+text in the database and there is no country column to trust. Anything
+that is not two letters falls back to a globe, so a node added in a new
+country from the installer degrades to a neutral icon rather than to an
+empty box or another country's colours.
+
+Verified on the emulator against the real app, not just a preview: the
+picker rows show Finland's cross and France's tricolour, and the SERVER
+tile shows Singapore's. The desktop client shares the component but has
+not been looked at -- the VM still cannot be driven.
