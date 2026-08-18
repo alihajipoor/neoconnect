@@ -366,10 +366,16 @@ export function Dashboard({
       setConnectionState("disconnecting");
       try {
         await disconnect();
-      } catch {
-        // The tunnel may not exist yet; the customer asked to stop
-        // either way, and reporting a teardown failure for something
-        // that was never up would be noise.
+      } catch (err) {
+        // Reported, not swallowed. A teardown that did not complete
+        // leaves the tun in place and every packet on the device going
+        // into an engine that is not carrying it -- so "disconnected"
+        // here was the lie that sent customers to Android's settings to
+        // force-stop the app before their internet came back. It is
+        // still not "connected" either: nothing was ever verified.
+        setConnectionError(classifyConnectionError(err));
+        setConnectionState("degraded");
+        return;
       }
       setConnectionState("disconnected");
       setConnectedAt(null);
@@ -385,8 +391,12 @@ export function Dashboard({
         setConnectedAt(null);
         setExitIp(null);
       } catch (err) {
+        // The tunnel is still up -- that is what the failure means --
+        // but a disconnect that could not finish is not a healthy
+        // connection either, and the customer needs to see that rather
+        // than a green orb.
         setConnectionError(classifyConnectionError(err));
-        setConnectionState("connected");
+        setConnectionState("degraded");
       }
       return;
     }

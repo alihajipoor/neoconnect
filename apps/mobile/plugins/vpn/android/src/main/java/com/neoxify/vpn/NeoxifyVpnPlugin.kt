@@ -1,6 +1,8 @@
 package com.neoxify.vpn
 
 import android.app.Activity
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -313,7 +315,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // has nothing to do with IKEv2.
         engine.execute {
             runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
-            activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+            stopTunService()
 
             val consent = try {
                 Ikev2Engine.provision(activity, profile.server, profile.username, profile.password)
@@ -356,6 +358,77 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+
+    /** Brings the Xray tunnel down and waits for the tun to actually go.
+     *
+     * A stop *message* rather than stopService(): while a tunnel is
+     * established the system is bound to that service, and a bound
+     * service ignores stopService() entirely -- the descriptor stays
+     * open and the device stays offline behind a tunnel nothing is
+     * carrying. NeoxifyTunService.onStartCommand documents the deadlock.
+     *
+     * stopService() still follows it, for the case the message cannot
+     * cover: a service running but never bound, because its start failed
+     * before establish() ever created a tun.
+     */
+    private fun stopTunService() {
+        val stop = Intent(activity, NeoxifyTunService::class.java)
+            .setAction(NeoxifyTunService.ACTION_STOP)
+        // A disconnect is user-initiated from a visible app, so plain
+        // startService is allowed and carries no notification
+        // obligation. The foreground variant is the fallback for the
+        // background case -- a revoke, or a stop issued from a
+        // notification action.
+        runCatching { activity.startService(stop) }.recoverCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activity.startForegroundService(stop)
+            } else {
+                throw it
+            }
+        }
+        activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+
+        // Answering before the tun is gone is what let the dashboard say
+        // "disconnected" while every packet on the device still went
+        // into an engine that was no longer carrying them.
+        //
+        // The signal is the service being gone, not the state file being
+        // absent. During a connect the file has not been written yet, so
+        // absence would read as "torn down" in exactly the case the
+        // customer hits -- cancelling a connect to a server that is not
+        // answering. A service that is still listed is still holding the
+        // tun, whichever stage it reached.
+        val deadline = System.currentTimeMillis() + TEARDOWN_WAIT_MS
+        while (System.currentTimeMillis() < deadline) {
+            if (!tunServiceRunning()) return
+            Thread.sleep(TEARDOWN_POLL_MS)
+        }
+        // Said plainly rather than swallowed: the caller reports this to
+        // the customer, who would otherwise be told the tunnel is down
+        // while their device has no working internet.
+        Log.w(TAG, "the tunnel service did not confirm teardown in ${TEARDOWN_WAIT_MS}ms")
+        throw IllegalStateException("The tunnel did not shut down. Restart the app if your internet stays down.")
+    }
+
+    /** Whether our own tunnel service is still alive.
+     *
+     * getRunningServices is deprecated and, since Android 8, returns
+     * only the caller's own services -- which is all this needs. It is
+     * the one question with an answer the system owns rather than a
+     * field of ours that a process restart can outlive.
+     */
+    private fun tunServiceRunning(): Boolean = try {
+        val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        @Suppress("DEPRECATION")
+        am.getRunningServices(Int.MAX_VALUE)
+            .any { it.service.className == NeoxifyTunService::class.java.name }
+    } catch (e: Exception) {
+        Log.w(TAG, "could not read running services", e)
+        // Unknown, not "gone": claiming teardown we cannot see is the
+        // failure this whole path is here to prevent.
+        true
+    }
+
     @Command
     fun disconnect(invoke: Invoke) {
         offMainThread(invoke, "disconnect") {
@@ -364,7 +437,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             // outlive; tearing down an engine that is already down costs
             // nothing.
             runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
-            activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+            stopTunService()
             Ikev2Engine.stop(activity)
             activeProtocol = null
             JSObject()
@@ -550,6 +623,13 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     companion object {
+        /** How long a disconnect waits for the service to confirm the
+         * tun is closed before giving up and saying so. Teardown is a
+         * file close and a Go stop, not a network round trip, so this is
+         * generous rather than tight. */
+        private const val TEARDOWN_WAIT_MS = 4_000L
+        private const val TEARDOWN_POLL_MS = 100L
+
         private const val TAG = "NeoxifyVpn"
         /** Covers the Xray process starting, the tunnel being
          * established and xray-core loading a 46MB engine, so it is
