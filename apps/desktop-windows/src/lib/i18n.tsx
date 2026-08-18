@@ -268,6 +268,8 @@ const en = {
   "err.concurrentLimit": "Your plan's device limit is already in use. Disconnect another device and try again.",
   "err.quotaExhausted": "You've used all the data on your plan. Upgrade or wait for it to renew.",
   "err.subscriptionInactive": "Your subscription isn't active right now. Check its status on the dashboard.",
+  "err.teardownStuck":
+    "The tunnel is still shutting down. If your internet stays down, close and reopen the app.",
   "err.unknown": "Couldn't connect.",
   "err.showDetail": "Technical details",
 
@@ -532,6 +534,8 @@ const fa: Record<TranslationKey, string> = {
   "dash.yourIp": "آی‌پی شما:",
   "err.serviceUnavailable": "سرویس پس‌زمینه نئوکسیفای اجرا نمی‌شود. معمولاً راه‌اندازی دوباره برنامه مشکل را حل می‌کند.",
   "err.engineMissing": "بخشی از نصب ناقص است. لطفاً دوباره نصب کنید.",
+  "err.teardownStuck":
+    "تونل هنوز در حال بسته شدن است. اگر اینترنت شما وصل نشد، برنامه را ببندید و دوباره باز کنید.",
   "err.serverUnreachable": "این سرور در دسترس نیست. موقعیت دیگری را امتحان کنید.",
   "err.notCarryingTraffic": "اتصال برقرار شد اما ترافیکی عبور نکرد.",
   "err.allProtocolsFailed": "همه پروتکل‌های موجود امتحان شدند — هیچ‌کدام ترافیک را عبور ندادند.",
