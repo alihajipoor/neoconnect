@@ -94,7 +94,16 @@ class NeoxifyTunService : VpnService(), Protector {
             // main-thread callback: doing it here would trade a stuck
             // tunnel for an ANR and leave the tun open either way.
             Thread({
-                teardown()
+                // Order matters, and it is the same lesson twice: the
+                // step that frees the device must not sit behind a step
+                // that can block. Stopping the engine is a call into Go
+                // that can wait on the same dead network the tunnel was
+                // dialling, so it happens after this service has closed
+                // the tun and stopped claiming to be running -- which is
+                // what the disconnect is waiting to see. If the process
+                // is killed before that last call returns, the engine
+                // goes with it, which is the same outcome.
+                closeTun()
                 clearState(this)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -103,6 +112,7 @@ class NeoxifyTunService : VpnService(), Protector {
                     stopForeground(true)
                 }
                 stopSelf()
+                stopEngine()
             }, "neoxify-teardown").start()
             return START_NOT_STICKY
         }
@@ -222,7 +232,20 @@ class NeoxifyTunService : VpnService(), Protector {
         super.onRevoke()
     }
 
+    /** Both halves, for the paths that are not racing anything. */
     private fun teardown() {
+        closeTun()
+        stopEngine()
+    }
+
+    /** Releases the device.
+     *
+     * This is the half the customer feels: the tun is what holds the
+     * system's VPN binding and what swallows every packet on the phone.
+     * Once it is closed the device routes normally again, whatever the
+     * engine is still doing.
+     */
+    private fun closeTun() {
         // The descriptor goes first, and the order is the fix.
         //
         // Closing the tun makes the engine's reads fail, which is what
@@ -231,18 +254,17 @@ class NeoxifyTunService : VpnService(), Protector {
         // engine first waits on that same dial, so the close never
         // happens and the device stays offline behind a tunnel nothing
         // is carrying.
-        //
-        // It is also the half that matters most: the tun is what holds
-        // the system's VPN binding and swallows every packet on the
-        // device. A leaked engine costs memory in a process that is
-        // about to exit.
         try {
             tun?.close()
         } catch (e: Exception) {
             Log.w(TAG, "closing the tun descriptor failed", e)
         }
         tun = null
+    }
 
+    /** Stops the engine. Best effort, and deliberately not on the path
+     * that frees the device -- see closeTun. */
+    private fun stopEngine() {
         // Only if it was attempted. Calling into the Go library to stop
         // something that never ran would load libgojni.so purely to be
         // told "nothing is running" -- and loading it is exactly what we
