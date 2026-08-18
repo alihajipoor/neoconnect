@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -372,7 +374,7 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
 
-    /** Brings the Xray tunnel down and waits for the tun to actually go.
+    /** Brings the Xray tunnel down.
      *
      * A stop *message* rather than stopService(): while a tunnel is
      * established the system is bound to that service, and a bound
@@ -400,45 +402,44 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             }
         }
         activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+    }
 
-        // Answering before the tun is gone is what let the dashboard say
-        // "disconnected" while every packet on the device still went
-        // into an engine that was no longer carrying them.
-        //
-        // The signal is the service being gone, not the state file being
-        // absent. During a connect the file has not been written yet, so
-        // absence would read as "torn down" in exactly the case the
-        // customer hits -- cancelling a connect to a server that is not
-        // answering. A service that is still listed is still holding the
-        // tun, whichever stage it reached.
+    /** Blocks until the device is no longer routed through a VPN.
+     *
+     * Asked of ConnectivityManager rather than of our own service,
+     * because the service is a lagging signal: the system holds its
+     * binding for seconds after the tun is closed, so waiting on the
+     * service being gone reported a failure for a teardown that had
+     * already succeeded. What the customer feels is whether their
+     * packets are still going into a tunnel, and that is this.
+     *
+     * Called once, after every engine has been told to stop -- not
+     * inside the individual stops, where it would wait on tunnels that
+     * are only brought down a line later.
+     */
+    private fun awaitNoVpn() {
         val deadline = System.currentTimeMillis() + TEARDOWN_WAIT_MS
         while (System.currentTimeMillis() < deadline) {
-            if (!tunServiceRunning()) return
+            if (!vpnTransportUp()) return
             Thread.sleep(TEARDOWN_POLL_MS)
         }
-        // Said plainly rather than swallowed: the caller reports this to
-        // the customer, who would otherwise be told the tunnel is down
-        // while their device has no working internet.
-        Log.w(TAG, "the tunnel service did not confirm teardown in ${TEARDOWN_WAIT_MS}ms")
+        // Said plainly rather than swallowed: the caller reports it, and
+        // a customer told "disconnected" while their traffic still goes
+        // into a dead tunnel has no way to work out what is wrong.
+        Log.w(TAG, "still routed through a VPN ${TEARDOWN_WAIT_MS}ms after disconnecting")
         throw IllegalStateException("The tunnel did not shut down. Restart the app if your internet stays down.")
     }
 
-    /** Whether our own tunnel service is still alive.
-     *
-     * getRunningServices is deprecated and, since Android 8, returns
-     * only the caller's own services -- which is all this needs. It is
-     * the one question with an answer the system owns rather than a
-     * field of ours that a process restart can outlive.
-     */
-    private fun tunServiceRunning(): Boolean = try {
-        val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    private fun vpnTransportUp(): Boolean = try {
+        val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         @Suppress("DEPRECATION")
-        am.getRunningServices(Int.MAX_VALUE)
-            .any { it.service.className == NeoxifyTunService::class.java.name }
+        cm.allNetworks.any {
+            cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        }
     } catch (e: Exception) {
-        Log.w(TAG, "could not read running services", e)
-        // Unknown, not "gone": claiming teardown we cannot see is the
-        // failure this whole path is here to prevent.
+        Log.w(TAG, "could not read network state", e)
+        // Unknown, not "gone": claiming a teardown we cannot see is the
+        // failure this exists to prevent.
         true
     }
 
@@ -453,6 +454,9 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             stopTunService()
             Ikev2Engine.stop(activity)
             activeProtocol = null
+            // Only now, with all three told to stop, is it fair to ask
+            // whether the device is still in a tunnel.
+            awaitNoVpn()
             JSObject()
         }
     }
@@ -636,11 +640,15 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     companion object {
-        /** How long a disconnect waits for the service to confirm the
-         * tun is closed before giving up and saying so. Teardown is a
-         * file close and a Go stop, not a network round trip, so this is
-         * generous rather than tight. */
-        private const val TEARDOWN_WAIT_MS = 4_000L
+        /** How long a disconnect waits for the device to stop being
+         * routed through a VPN before giving up and saying so.
+         *
+         * Measured, not guessed: on the emulator the tun goes within a
+         * couple of seconds, but the system's own teardown trails it.
+         * Ten seconds is well past what a healthy stop takes and still
+         * short enough that a customer whose tunnel is genuinely stuck
+         * is told so rather than left watching a spinner. */
+        private const val TEARDOWN_WAIT_MS = 10_000L
         private const val TEARDOWN_POLL_MS = 100L
 
         private const val TAG = "NeoxifyVpn"
