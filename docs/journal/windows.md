@@ -3286,3 +3286,40 @@ Recorded rather than explained. The endpoint that would have been the
 obvious suspect is fine: `/api/health/ip` answers in 0.73s, and
 `apiEndpoints()` puts the remembered address first, so the per-rung
 baseline capture is not it.
+
+## 2026-08-18 -- IKEv2 dialled, for the first time anywhere
+
+**Status:** done
+**Touches:** nothing in the repo -- verification only
+
+IKEv2 was installed on ir1 on 2026-08-17 and wired into the relay, and
+the entry for it said plainly that nobody had ever dialled it. That is
+now done, on the Android emulator against `sg-singapore · Built-in`
+("Built-in" is the customer-facing name for the platform profile).
+
+It works, and both halves are measured rather than assumed:
+
+| | |
+|---|---|
+| interface | `ipsec1`, `10.68.0.6/32` -- Android's own IPsec profile, not our tun |
+| our tun service | not running, as it should not be for this protocol |
+| exit IP | **172.236.143.200** -- Singapore, Akamai Connected Cloud |
+| host IP for contrast | 50.34.35.228 -- United States |
+| disconnect | `ipsec1` gone at **+0.29s**, VPN transport cleared at **+0.65s** |
+| device TCP afterwards | fine |
+
+The exit address is the point: it is not merely different from the
+home address, it geolocates to the city of the server that was picked.
+That is the egress check the repo asks for -- an exit IP that matches
+the node -- rather than "the interface came up".
+
+It also exercises the new teardown confirmation against a second
+engine. `vpn_tunnel_gone` asks ConnectivityManager whether the device is
+still routed through *any* VPN, so it covers the platform profile as
+well as our own service, and it cleared inside a second here. Had it
+been written against our service's liveness -- which was my first
+attempt -- it would have reported a stuck tunnel for every IKEv2
+disconnect, since our service is not involved in one at all.
+
+Still not dialled: IKEv2 on the Windows client, and IKEv2 through the
+Iran relay (this test was a direct route).
