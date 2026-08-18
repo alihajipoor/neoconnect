@@ -16,6 +16,7 @@ import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
+import { Flag } from "../components/Flag";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { useI18n } from "../lib/i18n";
@@ -1258,7 +1259,13 @@ export function Dashboard({
                     entry points because people look for the word they
                     have in mind. */}
                 <Stat
-                  icon={<Globe className="size-3" />}
+                  icon={
+                    currentRoute ? (
+                      <Flag region={currentRoute.location.region} className="h-3 w-[1rem]" />
+                    ) : (
+                      <Globe className="size-3" />
+                    )
+                  }
                   label={t("dash.server")}
                   value={currentRoute ? currentRoute.location.region : "—"}
                   onClick={() => setShowLocationPicker(true)}
