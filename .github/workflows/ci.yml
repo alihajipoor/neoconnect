@@ -95,3 +95,43 @@ jobs:
       # indistinguishable from a deliberate choice not to offer it.
       - name: Panel offers every protocol the schema has
         run: bash scripts/check-protocol-drift.sh
+
+  desktop:
+    name: Desktop client tests
+    # The only Windows runner here, and the only reason this job exists:
+    # the client is Windows-only Rust, and until now CI never compiled a
+    # line of it. Its tests had therefore never run anywhere -- not in CI,
+    # and not locally either, because linking needs WinDivert and a
+    # developer machine without it silently cannot build the test binary.
+    #
+    # That gap is not theoretical. desktop-v0.9.6 shipped a teardown that
+    # killed the tunnel seconds after connecting, because it keyed on a
+    # pipe connection closing while the app opens a fresh connection per
+    # request. A customer found it. Nothing between the edit and their
+    # machine could have.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Keyed on the lockfile so a dependency change refreshes it, and
+      # scoped to this workspace -- the desktop crates are their own
+      # cargo workspace, rooted at apps/desktop-windows.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-windows/target
+          key: desktop-cargo-${{ hashFiles('apps/desktop-windows/Cargo.lock') }}
+
+      # Compiles everything, including the code paths tests do not reach.
+      # Kept separate from the test step so a build failure and a failing
+      # assertion are distinguishable at a glance.
+      - name: Check
+        working-directory: apps/desktop-windows
+        run: cargo check --workspace --all-targets
+
+      - name: Test
+        working-directory: apps/desktop-windows
+        run: cargo test --workspace
