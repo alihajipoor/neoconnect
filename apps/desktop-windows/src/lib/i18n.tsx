@@ -91,6 +91,16 @@ const en = {
   // leave the customer knowing where they stand and that nothing is
   // broken -- which is the whole difference between an empty state and
   // a dead end.
+  "dash.outOfData": "You've used all your data",
+  "dash.planExpired": "Your plan has expired",
+  "dash.renewHint": "Renew or change your plan to keep connecting.",
+  // Deliberately names no website and offers no link. Both stores treat
+  // steering a customer to an outside payment as their business, and the
+  // customer already knows where they bought it -- what they need is to
+  // be told that is where to go, and that it will show up here after.
+  "dash.renewStore":
+    "This plan is managed wherever you bought it. Sign in to your account there to renew -- once you have, it appears here again.",
+  "dash.renewCta": "Renew plan",
   "dash.noPlanStore": "Your account is ready. As soon as a plan is added to it, it appears here and you can connect.",
 
   "plans.title": "Choose a plan",
@@ -387,6 +397,12 @@ const fa: Record<TranslationKey, string> = {
   "dash.viewPlans": "مشاهده پلن‌ها",
   "dash.noSubscription": "اشتراک فعالی ندارید",
   "dash.noPlanHint": "برای شروع استفاده از نئوکسیفای یک پلن انتخاب کنید.",
+  "dash.outOfData": "حجم پلن شما تمام شده است",
+  "dash.planExpired": "اعتبار پلن شما به پایان رسیده است",
+  "dash.renewHint": "برای ادامه اتصال، پلن خود را تمدید یا تغییر دهید.",
+  "dash.renewStore":
+    "این پلن از همان جایی که آن را خریده‌اید مدیریت می‌شود. برای تمدید، وارد حساب خود در همان‌جا شوید؛ پس از تمدید، دوباره همین‌جا نمایش داده می‌شود.",
+  "dash.renewCta": "تمدید پلن",
   "dash.noPlanStore": "حساب شما آماده است. به‌محض افزوده‌شدن یک پلن، همین‌جا نمایش داده می‌شود و می‌توانید متصل شوید.",
 
   "plans.title": "انتخاب پلن",

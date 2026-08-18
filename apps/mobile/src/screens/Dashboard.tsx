@@ -5,6 +5,7 @@ import { logout } from "@shared/lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "@shared/lib/types";
 import { formatBytes } from "@shared/lib/utils";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
+import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
 import { captureBaselineIp, verifyEgress } from "@shared/lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "@shared/lib/connection-errors";
@@ -703,6 +704,14 @@ export function Dashboard({
     return { used, cap, percent: Math.min(100, (used / cap) * 100) };
   }, [subscription]);
 
+  /** Set only when the subscription exists but no longer entitles the
+   * customer to connect. See subscription-state for why the decision
+   * lives outside the component. */
+  const endedState = useMemo(
+    () => (subscription ? endedNotice(subscription.status, IS_STORE_BUILD) : null),
+    [subscription],
+  );
+
   const daysLeft = useMemo(() => {
     if (!subscription) return null;
     const ms = new Date(subscription.expireAt).getTime() - now;
@@ -879,6 +888,23 @@ export function Dashboard({
                 )}
               </div>
 
+
+              {/* The plan has stopped working. Until now this said so
+                  only in the error a connect attempt produced -- text
+                  that told the customer to "upgrade or wait for it to
+                  renew" on a screen with nothing to press. */}
+              {endedState ? (
+                <Card className="ring-brand animate-rise flex flex-col gap-2 text-center">
+                  <p className="text-sm font-semibold">{t(endedState.titleKey)}</p>
+                  <p className="text-xs text-muted-foreground">{t(endedState.bodyKey)}</p>
+                  {endedState.showPlansButton ? (
+                    <Button onClick={onBrowsePlans} className="mt-2 w-full justify-center gap-2">
+                      <Tag className="size-4" />
+                      {t("dash.renewCta")}
+                    </Button>
+                  ) : null}
+                </Card>
+              ) : null}
               <div className="animate-rise grid grid-cols-3 gap-2">
                 {/* Both open the picker. Customers tapped these tiles
                     -- which highlight on touch and show the very value
