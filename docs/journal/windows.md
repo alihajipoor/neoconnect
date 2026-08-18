@@ -3116,3 +3116,73 @@ Fix committed and pushed; **verification on the emulator is still
 pending** at the time of writing -- normal disconnect, cancel
 mid-connect against a blackholed node, and the 20s watchdog firing on
 its own. Nothing here should be quoted as proven until that runs.
+
+## 2026-08-18 -- The disconnect, measured
+
+Verified the previous entry's fix on the emulator, and the measuring is
+the point: two of the three things I "fixed" first were wrong, and only
+timing them showed it.
+
+**What the customer gets now**, fr-france Shadowsocks, x86_64 debug
+build, sampled every 100ms on the device:
+
+| case | result |
+|---|---|
+| disconnect while connected | tun0, state file and engine process all gone at **+0.30s** |
+| cancel mid-connect, node blackholed | tun0 gone at **+0.19s** |
+| device TCP afterwards | fine in both cases |
+| UI | "You're not protected", no VPN key, no false error |
+
+Before this session it never tore down at all.
+
+### Two wrong turns worth remembering
+
+**A wait in the wrong place.** The first fix confirmed the teardown
+inside `disconnect()`. But the connect ladder disconnects between rungs,
+so the wait ran once per protocol it tried -- most of why a failing
+connect sat on the spinner for minutes. Confirmation belongs to the
+caller that asked to stop, which is the dashboard, and only then.
+
+**A budget tighter than the truth.** It also threw when the teardown
+took longer than ten seconds -- on teardowns that then succeeded. The UI
+was reporting a failure that had not happened.
+
+### Closing the descriptor is not releasing the tunnel
+
+The real number: our close landed at 0.3s and tun0 did not go until
+**4.0s**. The engine is handed the raw fd and keeps its own copy, so the
+interface -- and every route into it -- survives until xray has finished
+shutting down. Killing the process on a live tunnel dropped tun0 in
+under 0.26s, which is what proved where the four seconds went.
+
+So the stop path now asks the engine to stop, gives it 500ms, and kills
+the process. Nothing else lives in it. Four seconds is long enough that
+a customer presses the button again and concludes the app is broken --
+which is roughly what they told us.
+
+The connect path stopped returning `START_STICKY` as part of that: a
+sticky restart arrives with a null Intent and no config, so the service
+would return holding a VPN notification with no tunnel behind it.
+
+### What is NOT proven
+
+- **The 20s start watchdog has never fired.** With the node blackholed,
+  xray-core's `start()` still returns promptly and publishes UP, so the
+  condition it watches for -- a start that blocks -- does not happen for
+  an unreachable server. What catches that case is the app's own egress
+  check failing the rung. Treat the watchdog as an untriggered backstop.
+- **My earlier "100% packet loss" evidence was not sound.** ICMP does
+  not traverse a Shadowsocks tun2socks tunnel even when it is healthy;
+  confirmed against a working one. The deadlock itself stands on the
+  dumpsys evidence, but I cannot claim from ping alone that the orphaned
+  tun left the device offline.
+
+### Unrelated, and still open
+
+Connecting is slow: the first connect after a fresh install took about
+three minutes on the emulator with nothing blocked, sitting on
+"Checking connection..." before any engine was started. Failover itself
+works -- with fr-france blackholed the ladder skipped it and brought up
+fi-finland Stealth HTTPS -- but the time to get there is a customer
+seeing a spinner and assuming a hang. Not diagnosed yet; `publicIp()`
+walking every API endpoint per rung is the first place to look.
