@@ -2839,3 +2839,129 @@ every plan write -- not dropping the column.
 Show every route, direct and relay, with the relay ones marked so the
 operator can see what they are choosing. Drop the Protocols section. The
 "13 relay routes are not listed" hint goes away with the filter.
+
+## 2026-08-17 (evening) — Four desktop releases, one of them mine to apologise for
+
+**Status:** 0.9.6 through 0.9.11 shipped. Backend and panel changes are
+deployed and verified against the database. **No client fix has been run
+against a real tunnel** -- the test VM spent the whole day in a Windows
+update and the service tests do not link on this machine, so every one
+of these is backed by compiler and reasoning alone. A customer in Iran
+was, in effect, the test rig.
+
+### The DNS leak, which is the one that mattered
+
+A customer sent a screenshot: connected on Stealth Lite, exit IP
+104.105.205.233 (france-1, correct), Telegram working, **google.com
+loading and youtube.com refusing** in the browser.
+
+Every part of that says the tunnel was carrying traffic, and it was. The
+lookups were not going through it. Windows resolves names on every
+interface at once and takes whichever answers first, so an ISP resolver
+milliseconds away beats one across a tunnel -- and in Iran it answers
+filtered domains with a poisoned address. The browser is handed a wrong
+destination *before* any routing happens, so the tunnel never sees the
+request. Telegram is unaffected because it does not ask Windows.
+
+That asymmetry is the whole diagnosis, and it is why the fault looked
+like a broken app rather than a DNS problem.
+
+**Setting the adapter's DNS is a preference, not an answer.** The fix is
+an NRPT rule, which is what WireGuard's own client has always used --
+and precisely why the WireGuard protocol never showed this while every
+other one did. Now:
+
+    WireGuard   wg-quick NRPT        (was always safe)
+    Xray        NRPT rule            0.9.9
+    OpenVPN     block-outside-dns    0.9.10
+    IKEv2       NRPT rule            0.9.11
+
+`block-outside-dns` was checked before use rather than pasted in: it
+blocks DNS on every other interface, so without a resolver pushed from
+the server it would leave the machine unable to resolve anything. The
+nodes push `dhcp-option DNS 1.1.1.1`, so there is one. Full tunnel only
+-- in Custom mode most applications are deliberately off the tunnel and
+seizing the machine's DNS would send their lookups through one they are
+not using.
+
+IKEv2 looked safe and was not. Windows owns that tunnel and applies the
+resolver strongSwan pushes, but applied is not exclusive.
+
+The helpers live in `engines/dns.rs` now. None of it was ever
+Xray-specific; it landed there only because that is where the fault was
+found.
+
+### 0.9.6 was my regression, and the mistake is worth naming
+
+0.9.6 fixed a real thing -- a tunnel outliving the app with the UI
+saying "not connected", so the customer could not disconnect and no
+other VPN could work. `status()` reported a remembered flag rather than
+asking the OS, which its own docstring claimed it did not do.
+
+The teardown I added with it keyed on **a pipe connection closing**. The
+app opens a fresh connection per request and closes it immediately
+(`vpn.rs` `call`), so "a client is connected" is true for milliseconds
+at a time and says nothing about whether the app is running. The count
+hit zero after every request and the tunnel was torn down seconds after
+coming up. Customers reported connecting and immediately losing it.
+
+Reading `call()` before writing a teardown that depended on it would
+have cost a minute. 0.9.7 replaced it with a watchdog on **silence** --
+sixty seconds without a request, polled every ten -- which is the signal
+that actually exists.
+
+### Also shipped
+
+- **MTU 1420.** The adapter was coming up at 1500 over a 1500-byte link,
+  so full-size packets died once encapsulated: handshake fine, DNS fine,
+  small requests fine, large responses gone. Size-dependent breakage
+  reads as "your app is broken", not as a bug report.
+- **Rival VPN named on failure.** Detection is by driver description,
+  not "looks virtual" -- Hyper-V, VirtualBox and Docker leave permanent
+  adapters and naming one would tell a developer to uninstall their
+  tooling. Only adapters that are UP and addressed count. Never a
+  refusal: blocking on a guess is worse than the fault it diagnoses.
+
+### Plans are a set of routes now
+
+`relayOnly` is gone, the Protocols checkboxes are gone, every route is
+selectable on every plan, and **no routes selected means no service**.
+`protocolsAllowed` is derived from the ticked routes rather than typed
+in beside them, where the two could disagree.
+
+The order was the whole risk. The join table was empty and empty meant
+"everything", so a migration wrote each plan's effective routes down
+first -- Pro/Starter/Trial/Ultimate Max 16 each, Ultimate 13. Zero
+revocations on the boot sweep afterwards, 314 credentials intact.
+
+The customer picker was still listing by protocol alone, so Starter and
+Pro saw the Iran relay entries, tapped one and were refused. It now
+shows exactly what provisioning would grant.
+
+### The trial was broken two ways
+
+`SubscriptionsService.create` refuses an inactive plan, and the Trial
+plan was inactive **because that was the only way to hide it from the
+purchase list**. Every signup threw, and nothing said so.
+
+Worse, the grant ran once, after verification had already been written
+down. One throw left the customer verified with nothing, and every retry
+took the already-verified path. A single failure was permanent.
+
+Now: `isPurchasable` separates "works" from "listed", and the grant
+refuses anyone who already has a subscription, which makes it safe to
+retry -- so the already-verified paths do. Trial is now Active + hidden
+and signups get their trial again.
+
+### What is owed
+
+Everything client-side is unverified. When the VM is usable the first
+thing to run is connect -> disconnect -> connect a *different* protocol,
+across the direct routes and all 13 relay ones, checking exit IPs and
+that a filtered domain resolves through the tunnel. Three of today's
+four real bugs would have died in that one test.
+
+Also still open: IKEv2 has never been dialled at all; exit IPs have not
+been re-checked since the node restarts of 2026-08-16; Xray on a real
+Android handset, which matters more now the app is live on Play; and
+ir1's single vCPU, which is the measured cause of relay slowness.
