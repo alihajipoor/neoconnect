@@ -3055,3 +3055,64 @@ singapore-1 reports two `XRAY_VLESS_REALITY StatsSince: connection
 refused` errors per minute. That is the deliberate noise recorded on
 2026-08-15 -- it has an Xray protocol config and no Xray -- not
 something this rollout caused.
+
+## 2026-08-17 -- Android: a disconnect that could never have worked
+
+Reproduced the tester's report on the emulator, and the cause is not
+what the earlier start-watchdog fix addressed. Both are real; only one
+of them was the thing customers were hitting.
+
+The symptom, on fr-france Shadowsocks: the dashboard says "You're not
+protected", the VPN key stays in the status bar, and the device has no
+internet at all. `am force-stop` fixes it, which is exactly what the
+tester found on his own.
+
+`dumpsys activity services` gives the whole answer:
+
+    startRequested=false            <- stopService() WAS delivered
+    Bindings:
+      intent={act=android.net.VpnService}
+      * Client AppBindRecord{ ProcessRecord{546:system/1000} }
+
+While a tunnel is established the system binds to the VpnService, and a
+bound service is not destroyed by `stopService()`. So `onDestroy()`
+never ran -- and `onDestroy()` was the only caller of `teardown()`. The
+tun descriptor stayed open, and the open descriptor is precisely what
+keeps the system's binding alive. The teardown was gated on a destroy
+that the tun itself prevented. There is no timing under which that path
+succeeds; it has never worked on any build.
+
+Two things made it land harder than it had to:
+
+- `teardown()` stopped the engine before closing the descriptor, so a
+  start still dialling an unreachable server blocked the one call that
+  would have freed the device.
+- `Dashboard.tsx` set `"disconnected"` unconditionally and swallowed the
+  error from `disconnect()`. That is the part the customer experienced:
+  not a tunnel that failed, but an app that said it had stopped while
+  the phone was dark.
+
+Stopping is now a message the service handles itself, off the main
+thread, closing the descriptor and dropping the foreground notification
+before it stops the engine. The plugin waits for the service to actually
+be gone -- service liveness, not the state file, which is absent
+mid-connect and so would have read as "torn down" in exactly the case
+the customer hits. A teardown that cannot be confirmed is reported
+rather than swallowed.
+
+Two things worth knowing that fell out of this:
+
+- **Xray had never actually run on the emulator.** Earlier emulator
+  passes were inconclusive because the Play build is arm-only; it threw
+  `UnsatisfiedLinkError` and nothing exercised the engine. The x86_64
+  debug build from `debug-android.yml` is what makes this testable, and
+  Shadowsocks connects cleanly on it -- tun0 up, real traffic through it.
+- **`Compatible` is not implemented on Android** and silently falls back
+  to `Fast`. The app does say so, but the warning is keyed to the wrong
+  thing: it still read "Compatible isn't in the Android app yet" after
+  the protocol had been switched to Shadowsocks.
+
+Fix committed and pushed; **verification on the emulator is still
+pending** at the time of writing -- normal disconnect, cancel
+mid-connect against a blackholed node, and the 20s watchdog firing on
+its own. Nothing here should be quoted as proven until that runs.
