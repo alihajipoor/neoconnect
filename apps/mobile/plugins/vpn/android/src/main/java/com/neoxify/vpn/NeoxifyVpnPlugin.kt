@@ -315,7 +315,20 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // has nothing to do with IKEv2.
         engine.execute {
             runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
-            stopTunService()
+            // Caught here, unlike in disconnect(): this runs directly on
+            // the executor rather than inside offMainThread's handler,
+            // so an escaping throw would take the process down and leave
+            // the call unanswered. And a previous tunnel that refused to
+            // come down is a reason not to start this one -- Android
+            // allows a single VPN, so the establish below would fail
+            // anyway, for a reason that reads as an IKEv2 fault.
+            try {
+                stopTunService()
+            } catch (e: Throwable) {
+                Log.e(TAG, "the previous tunnel would not come down", e)
+                invoke.reject(e.message ?: e.toString())
+                return@execute
+            }
 
             val consent = try {
                 Ikev2Engine.provision(activity, profile.server, profile.username, profile.password)
