@@ -1,7 +1,11 @@
 package com.neoxify.vpn
 
 import android.app.Activity
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -313,7 +317,20 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         // has nothing to do with IKEv2.
         engine.execute {
             runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
-            activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+            // Caught here, unlike in disconnect(): this runs directly on
+            // the executor rather than inside offMainThread's handler,
+            // so an escaping throw would take the process down and leave
+            // the call unanswered. And a previous tunnel that refused to
+            // come down is a reason not to start this one -- Android
+            // allows a single VPN, so the establish below would fail
+            // anyway, for a reason that reads as an IKEv2 fault.
+            try {
+                stopTunService()
+            } catch (e: Throwable) {
+                Log.e(TAG, "the previous tunnel would not come down", e)
+                invoke.reject(e.message ?: e.toString())
+                return@execute
+            }
 
             val consent = try {
                 Ikev2Engine.provision(activity, profile.server, profile.username, profile.password)
@@ -356,6 +373,65 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+
+    /** Brings the Xray tunnel down.
+     *
+     * A stop *message* rather than stopService(): while a tunnel is
+     * established the system is bound to that service, and a bound
+     * service ignores stopService() entirely -- the descriptor stays
+     * open and the device stays offline behind a tunnel nothing is
+     * carrying. NeoxifyTunService.onStartCommand documents the deadlock.
+     *
+     * stopService() still follows it, for the case the message cannot
+     * cover: a service running but never bound, because its start failed
+     * before establish() ever created a tun.
+     */
+    private fun stopTunService() {
+        val stop = Intent(activity, NeoxifyTunService::class.java)
+            .setAction(NeoxifyTunService.ACTION_STOP)
+        // A disconnect is user-initiated from a visible app, so plain
+        // startService is allowed and carries no notification
+        // obligation. The foreground variant is the fallback for the
+        // background case -- a revoke, or a stop issued from a
+        // notification action.
+        runCatching { activity.startService(stop) }.recoverCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activity.startForegroundService(stop)
+            } else {
+                throw it
+            }
+        }
+        activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+    }
+
+    /** Whether the device is still routed through a VPN.
+     *
+     * Exposed so the dashboard can confirm a disconnect before saying
+     * it happened, without any engine call blocking while it waits.
+     * Asked of ConnectivityManager rather than of our own service: the
+     * system holds its binding for seconds after the tun is closed, so
+     * service liveness reported a failure for teardowns that had
+     * already worked. What the customer feels is whether their packets
+     * still go into a tunnel, and that is this.
+     */
+    @Command
+    fun tunnelGone(invoke: Invoke) = offMainThread(invoke, "tunnelGone") {
+        JSObject().put("gone", !vpnTransportUp())
+    }
+
+    private fun vpnTransportUp(): Boolean = try {
+        val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        @Suppress("DEPRECATION")
+        cm.allNetworks.any {
+            cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "could not read network state", e)
+        // Unknown, not "gone": claiming a teardown we cannot see is the
+        // failure this exists to prevent.
+        true
+    }
+
     @Command
     fun disconnect(invoke: Invoke) {
         offMainThread(invoke, "disconnect") {
@@ -364,9 +440,16 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
             // outlive; tearing down an engine that is already down costs
             // nothing.
             runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
-            activity.stopService(Intent(activity, NeoxifyTunService::class.java))
+            stopTunService()
             Ikev2Engine.stop(activity)
             activeProtocol = null
+            // Deliberately does not wait for the tunnel to be gone.
+            // The connect ladder calls this between rungs, and a wait
+            // here ran once per protocol it tried -- turning a failed
+            // connect into minutes of spinner. Confirming the teardown
+            // is the caller's job, and only when a customer asked to
+            // disconnect: see tunnelGone below, which the dashboard
+            // polls before it claims anything.
             JSObject()
         }
     }
@@ -550,6 +633,17 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     companion object {
+        /** How long a disconnect waits for the device to stop being
+         * routed through a VPN before giving up and saying so.
+         *
+         * Measured, not guessed: on the emulator the tun goes within a
+         * couple of seconds, but the system's own teardown trails it.
+         * Ten seconds is well past what a healthy stop takes and still
+         * short enough that a customer whose tunnel is genuinely stuck
+         * is told so rather than left watching a spinner. */
+        private const val TEARDOWN_WAIT_MS = 10_000L
+        private const val TEARDOWN_POLL_MS = 100L
+
         private const val TAG = "NeoxifyVpn"
         /** Covers the Xray process starting, the tunnel being
          * established and xray-core loading a 46MB engine, so it is

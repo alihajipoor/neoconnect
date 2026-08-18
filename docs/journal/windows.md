@@ -3055,3 +3055,234 @@ singapore-1 reports two `XRAY_VLESS_REALITY StatsSince: connection
 refused` errors per minute. That is the deliberate noise recorded on
 2026-08-15 -- it has an Xray protocol config and no Xray -- not
 something this rollout caused.
+
+## 2026-08-17 -- Android: a disconnect that could never have worked
+
+Reproduced the tester's report on the emulator, and the cause is not
+what the earlier start-watchdog fix addressed. Both are real; only one
+of them was the thing customers were hitting.
+
+The symptom, on fr-france Shadowsocks: the dashboard says "You're not
+protected", the VPN key stays in the status bar, and the device has no
+internet at all. `am force-stop` fixes it, which is exactly what the
+tester found on his own.
+
+`dumpsys activity services` gives the whole answer:
+
+    startRequested=false            <- stopService() WAS delivered
+    Bindings:
+      intent={act=android.net.VpnService}
+      * Client AppBindRecord{ ProcessRecord{546:system/1000} }
+
+While a tunnel is established the system binds to the VpnService, and a
+bound service is not destroyed by `stopService()`. So `onDestroy()`
+never ran -- and `onDestroy()` was the only caller of `teardown()`. The
+tun descriptor stayed open, and the open descriptor is precisely what
+keeps the system's binding alive. The teardown was gated on a destroy
+that the tun itself prevented. There is no timing under which that path
+succeeds; it has never worked on any build.
+
+Two things made it land harder than it had to:
+
+- `teardown()` stopped the engine before closing the descriptor, so a
+  start still dialling an unreachable server blocked the one call that
+  would have freed the device.
+- `Dashboard.tsx` set `"disconnected"` unconditionally and swallowed the
+  error from `disconnect()`. That is the part the customer experienced:
+  not a tunnel that failed, but an app that said it had stopped while
+  the phone was dark.
+
+Stopping is now a message the service handles itself, off the main
+thread, closing the descriptor and dropping the foreground notification
+before it stops the engine. The plugin waits for the service to actually
+be gone -- service liveness, not the state file, which is absent
+mid-connect and so would have read as "torn down" in exactly the case
+the customer hits. A teardown that cannot be confirmed is reported
+rather than swallowed.
+
+Two things worth knowing that fell out of this:
+
+- **Xray had never actually run on the emulator.** Earlier emulator
+  passes were inconclusive because the Play build is arm-only; it threw
+  `UnsatisfiedLinkError` and nothing exercised the engine. The x86_64
+  debug build from `debug-android.yml` is what makes this testable, and
+  Shadowsocks connects cleanly on it -- tun0 up, real traffic through it.
+- **`Compatible` is not implemented on Android** and silently falls back
+  to `Fast`. The app does say so, but the warning is keyed to the wrong
+  thing: it still read "Compatible isn't in the Android app yet" after
+  the protocol had been switched to Shadowsocks.
+
+Fix committed and pushed; **verification on the emulator is still
+pending** at the time of writing -- normal disconnect, cancel
+mid-connect against a blackholed node, and the 20s watchdog firing on
+its own. Nothing here should be quoted as proven until that runs.
+
+## 2026-08-18 -- The disconnect, measured
+
+Verified the previous entry's fix on the emulator, and the measuring is
+the point: two of the three things I "fixed" first were wrong, and only
+timing them showed it.
+
+**What the customer gets now**, fr-france Shadowsocks, x86_64 debug
+build, sampled every 100ms on the device:
+
+| case | result |
+|---|---|
+| disconnect while connected | tun0, state file and engine process all gone at **+0.30s** |
+| cancel mid-connect, node blackholed | tun0 gone at **+0.19s** |
+| device TCP afterwards | fine in both cases |
+| UI | "You're not protected", no VPN key, no false error |
+
+Before this session it never tore down at all.
+
+### Two wrong turns worth remembering
+
+**A wait in the wrong place.** The first fix confirmed the teardown
+inside `disconnect()`. But the connect ladder disconnects between rungs,
+so the wait ran once per protocol it tried -- most of why a failing
+connect sat on the spinner for minutes. Confirmation belongs to the
+caller that asked to stop, which is the dashboard, and only then.
+
+**A budget tighter than the truth.** It also threw when the teardown
+took longer than ten seconds -- on teardowns that then succeeded. The UI
+was reporting a failure that had not happened.
+
+### Closing the descriptor is not releasing the tunnel
+
+The real number: our close landed at 0.3s and tun0 did not go until
+**4.0s**. The engine is handed the raw fd and keeps its own copy, so the
+interface -- and every route into it -- survives until xray has finished
+shutting down. Killing the process on a live tunnel dropped tun0 in
+under 0.26s, which is what proved where the four seconds went.
+
+So the stop path now asks the engine to stop, gives it 500ms, and kills
+the process. Nothing else lives in it. Four seconds is long enough that
+a customer presses the button again and concludes the app is broken --
+which is roughly what they told us.
+
+The connect path stopped returning `START_STICKY` as part of that: a
+sticky restart arrives with a null Intent and no config, so the service
+would return holding a VPN notification with no tunnel behind it.
+
+### What is NOT proven
+
+- **The 20s start watchdog has never fired.** With the node blackholed,
+  xray-core's `start()` still returns promptly and publishes UP, so the
+  condition it watches for -- a start that blocks -- does not happen for
+  an unreachable server. What catches that case is the app's own egress
+  check failing the rung. Treat the watchdog as an untriggered backstop.
+- **My earlier "100% packet loss" evidence was not sound.** ICMP does
+  not traverse a Shadowsocks tun2socks tunnel even when it is healthy;
+  confirmed against a working one. The deadlock itself stands on the
+  dumpsys evidence, but I cannot claim from ping alone that the orphaned
+  tun left the device offline.
+
+### Unrelated, and still open
+
+Connecting is slow: the first connect after a fresh install took about
+three minutes on the emulator with nothing blocked, sitting on
+"Checking connection..." before any engine was started. Failover itself
+works -- with fr-france blackholed the ladder skipped it and brought up
+fi-finland Stealth HTTPS -- but the time to get there is a customer
+seeing a spinner and assuming a hang. Not diagnosed yet; `publicIp()`
+walking every API endpoint per rung is the first place to look.
+
+## 2026-08-18 -- The desktop CI job had never run a test
+
+**Status:** done (CI), open (runtime verification)
+**Touches:** `.github/workflows/ci.yml`, `service/src/engines/openvpn.rs`,
+`service/src/adapters.rs`, `src-tauri/src/lib.rs`
+
+Went looking for the Android disconnect bug's counterpart on Windows.
+There isn't one -- the deadlock is specific to Android binding a
+VpnService, and nothing on Windows holds a teardown that way. What the
+search found instead was worse.
+
+**The "Desktop client tests" job has never once run a test.** Every run
+died on `resource path resources\WinDivert.dll doesn't exist`:
+`cargo check --workspace` pulls in the Tauri crate, whose build script
+requires every bundled resource on disk, and CI fetched none of them.
+`main` has been red on it. The job was added *specifically* to catch
+faults like the 0.9.6 teardown regression a customer found, and it never
+got far enough to catch anything.
+
+It now runs the same fetch script the release does -- so a broken fetch
+shows up on a push rather than on a tag, which has bitten before -- and
+builds the helper service into resources first. CI also gained
+`workflow_dispatch`, because a change to CI could otherwise only be
+tested by merging it to main and hoping. That is not hypothetical: the
+first repair had an escaping slip that made the YAML unparseable, and
+GitHub reports that as "a workflow file issue" with no job output.
+
+### What it found the moment it could run
+
+71 passed, 2 failed. Both failures were in code written with tests that
+had never executed.
+
+- **`block-outside-dns` was never implemented.** Two tests asserted a
+  full tunnel emits it and Custom mode does not. The directive appeared
+  nowhere in the generated config. Windows resolves on every interface
+  at once and takes the first answer, so an ISP resolver beats the
+  tunnel's -- in Iran, answering filtered domains with an address that
+  goes nowhere. OpenVPN was the one engine still missing the DNS
+  protection the others were given.
+- **Rival-VPN detection matched nothing customers have.** It looked for
+  `tap-windows`; the adapter on a real machine reads
+  `NW TAP-Win32 Adapter V9.21`, which shares no substring with it. Now
+  `tap-win`.
+
+### A tunnel that a minimized app could lose
+
+The service tears a tunnel down after 60s of silence from the app. The
+only thing speaking to it was the dashboard's status poll, which runs in
+the webview -- and Windows throttles timers in a minimized window to
+roughly one a minute. A 15s poll and a 60s grace look safe together
+until the window is minimized, at which point they are the same number.
+
+The app now beats from Rust every 20s, which does not depend on the
+webview being awake or on a window existing, and stops when the process
+does -- which is the condition the grace period is actually for.
+
+### Not verified, and why
+
+The blackhole test on Windows -- block a node, then work the connect and
+disconnect buttons -- **did not run**. The VM finished a Windows update
+and stopped accepting synthesized keyboard input: `keyboardputscancodes`,
+SendKeys and `SendInput` all produce nothing in the guest, and
+`guestcontrol` is refused because the rig auto-logs in with a blank
+password. No snapshots, and 35GB free is not enough to clone the disk
+and edit it offline.
+
+A physical keypress may well still work -- VirtualBox takes raw input,
+which is the one path that cannot be synthesized from outside. Worth
+trying by hand before assuming the VM is broken.
+
+So: three Windows changes, all reasoned from the code and covered by
+tests, none of them exercised against a running tunnel. No desktop
+release cut. 0.9.6 is the precedent for why that matters -- it shipped
+from exactly this position and a customer found it.
+
+### Addendum: the slow connect could not be reproduced
+
+Chased the "three minutes on Checking connection" from the entry above,
+because a customer seeing that assumes a hang -- and the tester's report
+says exactly that. Five timed connects on the emulator, measured by
+sampling the tun on the device once a second:
+
+| run | state | route | tun up at |
+|---|---|---|---|
+| 1 | fresh install, just logged in | fr-france Shadowsocks | ~3 min |
+| 2 | fresh install, just logged in | fr-france Shadowsocks | ~3 min |
+| 3 | warm | fr-france Shadowsocks | +4s |
+| 4 | data cleared, just logged in | default sg-singapore (fell back to WireGuard) | +2s |
+| 5 | warm, route chosen in the picker | fr-france Shadowsocks | +3s |
+
+Runs 4 and 5 were built to reproduce it -- 4 to test "first run is
+slow", 5 to test "choosing a route in the picker is slow" -- and neither
+did. So the two slow runs share only that a newly installed build was
+connecting for the first time, and that is not enough to name a cause.
+
+Recorded rather than explained. The endpoint that would have been the
+obvious suspect is fine: `/api/health/ip` answers in 0.73s, and
+`apiEndpoints()` puts the remembered address first, so the per-rung
+baseline capture is not it.
