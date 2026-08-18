@@ -97,14 +97,14 @@ async function confirmEgress(
  */
 
 /** How long to wait for the device to stop being routed through a VPN
- * after a disconnect.
+ * before telling the customer the disconnect did not finish.
  *
- * Measured on the emulator rather than guessed: the tun closes within a
- * couple of seconds, but Android keeps the VPN network alive until the
- * service is fully destroyed, which took up to fourteen. Twenty leaves
- * headroom on a slower phone; the orb reads "Disconnecting" throughout,
- * which is true. */
-const TEARDOWN_WAIT_MS = 20_000;
+ * A ceiling, not a delay: this is polled twice a second and the orb
+ * flips the moment the tunnel is gone, which on the emulator is inside
+ * a second now that the engine process is not allowed to sit on the
+ * descriptor. Eight seconds is headroom for a slower phone, and long
+ * enough that the warning means something when it does appear. */
+const TEARDOWN_WAIT_MS = 8_000;
 const TEARDOWN_POLL_MS = 500;
 
 /** Waits for the tunnel to actually be gone.

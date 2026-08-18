@@ -112,7 +112,27 @@ class NeoxifyTunService : VpnService(), Protector {
                     stopForeground(true)
                 }
                 stopSelf()
-                stopEngine()
+
+                // Closing our descriptor is not enough on its own: the
+                // engine was handed the raw fd and keeps its own copy,
+                // so the interface -- and the routes pointing into it --
+                // survive until xray has finished shutting down.
+                //
+                // Measured on the emulator: our close landed at 0.3s and
+                // the interface did not go until 4.0s, all of it waiting
+                // for the engine. Killing this process dropped it in
+                // under 0.26s. A disconnect a customer waits four
+                // seconds for is a disconnect they press twice.
+                //
+                // So the engine is asked politely, briefly, and then the
+                // process goes. Nothing else lives here -- it exists to
+                // hold the tunnel and is being torn down -- and the
+                // kernel closes every descriptor with it.
+                val stopping = Thread({ stopEngine() }, "neoxify-engine-stop")
+                stopping.isDaemon = true
+                stopping.start()
+                stopping.join(ENGINE_STOP_GRACE_MS)
+                android.os.Process.killProcess(android.os.Process.myPid())
             }, "neoxify-teardown").start()
             return START_NOT_STICKY
         }
@@ -192,7 +212,13 @@ class NeoxifyTunService : VpnService(), Protector {
                 }
             }, "neoxify-xray-start").start()
         }
-        return START_STICKY
+        // Not sticky, and deliberately so now that the teardown kills
+        // this process: a restart arrives with a null Intent, which
+        // carries no config, so the service would come back holding a
+        // VPN notification and no tunnel -- telling the customer they
+        // are protected when nothing is running. Staying down is both
+        // honest and what the status file already reports.
+        return START_NOT_STICKY
     }
 
     /** Reports state to the main process.
@@ -395,6 +421,14 @@ class NeoxifyTunService : VpnService(), Protector {
          * internet and no way for the customer to fix it from the app.
          */
         private const val START_TIMEOUT_MS = 20_000L
+
+        /** How long the engine gets to stop on its own before this
+         * process is killed out from under it.
+         *
+         * Long enough for the system to have registered the stopSelf
+         * above, short enough that the tunnel is gone before a customer
+         * would reach for the button a second time. */
+        private const val ENGINE_STOP_GRACE_MS = 500L
         private const val TAG = "NeoxifyTun"
         private const val CHANNEL_ID = "neoxify-vpn"
         private const val NOTIFICATION_ID = 1
