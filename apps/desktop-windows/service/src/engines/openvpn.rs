@@ -112,9 +112,27 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     // tunnel adds the one route it needs itself.
     let routing = if passive { "route-nopull\n" } else { "" };
 
+    // Windows resolves names on every interface at once and takes the
+    // first answer, so an ISP resolver can beat the tunnel's -- and in
+    // Iran it answers filtered domains with an address that goes
+    // nowhere. The customer sees "connected" while the sites they
+    // installed a VPN for refuse to load.
+    //
+    // block-outside-dns is OpenVPN's own fix: it drops DNS leaving any
+    // other adapter while the tunnel is up. Full tunnel only -- in
+    // Custom mode most applications are deliberately off the tunnel,
+    // and seizing the machine's resolver would push their lookups
+    // through a tunnel they are not using.
+    //
+    // Two tests asserted this before it was ever written, and could not
+    // fail: the job that would have run them had never once got as far
+    // as running a test.
+    let dns = if passive { "" } else { "block-outside-dns\n" };
+
     Ok(format!(
         "client\n\
          {routing}\
+         {dns}\
          dev tun\n\
          windows-driver wintun\n\
          dev-node {adapter}\n\
@@ -134,6 +152,7 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
          <key>\n{key}\n</key>\n\
          {tls_crypt}",
         adapter = ADAPTER_NAME,
+        dns = dns,
         proto = p.proto,
         host = host,
         port = port,

@@ -235,7 +235,10 @@ mod tests {
 /// families only, and everything else is left alone.
 const VPN_DRIVER_MARKERS: &[&str] = &[
     "wireguard",
-    "tap-windows",
+    // "tap-win" rather than "tap-windows": the driver a customer
+    // actually has is as likely to read "NW TAP-Win32 Adapter V9.21",
+    // which the longer marker matched no part of.
+    "tap-win",
     "tap-nordvpn",
     "openvpn",
     "kerio",
