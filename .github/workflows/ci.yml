@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Runnable by hand on any branch. Without this, a change to CI itself
+  # could only be tested by merging it to main and hoping -- which is
+  # how the desktop job came to sit broken from the day it was added.
+  workflow_dispatch:
 
 jobs:
   ts:
@@ -124,6 +128,37 @@ jobs:
             ~/.cargo/git
             apps/desktop-windows/target
           key: desktop-cargo-${{ hashFiles('apps/desktop-windows/Cargo.lock') }}
+
+      # This job could not compile a line of the client without these,
+      # and for two separate reasons: windivert-sys links against
+      # WinDivert.lib at build time, so even the service's *test* binary
+      # fails to link without it, and the Tauri crate's build script
+      # refuses to run unless every bundled resource is already on disk.
+      #
+      # The job spent its whole existence failing here -- on
+      # `resource path resources\WinDivert.dll doesn't exist`, before a
+      # single test ran. It was added to catch the kind of fault that
+      # shipped in 0.9.6 and never once got far enough to catch anything.
+      #
+      # Running the same script the release does has a second benefit:
+      # when it breaks, this finds out on a push rather than on a tag.
+      # It has broken before -- a literal tab in a path meant no released
+      # installer contained wstunnel for four versions.
+      - name: Fetch bundled binaries
+        working-directory: apps/desktop-windows
+        run: powershell -ExecutionPolicy Bypass -File src-tauri/scripts/fetch-binaries.ps1
+
+      # The one resource that is built rather than downloaded. The
+      # installer bundles the helper service beside the app, so the app
+      # crate does not compile until it exists.
+      - name: Build the helper service into resources
+        working-directory: apps/desktop-windows
+        run: |
+          cargo build -p neoconnect-service
+          copy target\debug
+eoconnect-service.exe src-tauri
+esources
+eoconnect-service.exe
 
       # Compiles everything, including the code paths tests do not reach.
       # Kept separate from the test step so a build failure and a failing

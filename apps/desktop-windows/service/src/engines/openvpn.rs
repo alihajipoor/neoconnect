@@ -261,7 +261,7 @@ mod tests {
         // and takes the first answer, so an ISP resolver beats ours and
         // in Iran answers filtered domains with a poisoned address. The
         // customer sees "connected" while blocked sites refuse to load.
-        let conf = build_config(&profile(), false);
+        let conf = build_config(&profile(), false).unwrap();
         assert!(conf.contains("block-outside-dns"), "full tunnel must claim DNS");
     }
 
@@ -270,7 +270,7 @@ mod tests {
         // Most applications are deliberately NOT on the tunnel in Custom
         // mode, and seizing the machine's DNS would push their lookups
         // through a tunnel they are not using.
-        let conf = build_config(&profile(), true);
+        let conf = build_config(&profile(), true).unwrap();
         assert!(!conf.contains("block-outside-dns"), "custom mode must not claim DNS");
     }
 }
