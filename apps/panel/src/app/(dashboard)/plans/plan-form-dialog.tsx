@@ -180,20 +180,11 @@ export function PlanFormDialog({
                 min={1}
                 defaultValue={plan?.maxConcurrentConnections ?? ""}
               />
-              {/* Said here rather than discovered from a shared account.
-                  Counting sessions on the Xray protocols meant reading an
-                  access log that paired each customer's IP with the sites
-                  they reached; that log was turned off on every node on
-                  2026-08-16, and Xray reports sessions nowhere else. The
-                  limit still holds on OpenVPN and WireGuard, which
-                  self-limit without any counting. */}
-              {uncountable.length > 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  Not enforced on {uncountable.map((p) => PROTOCOL_LABELS[p]).join(", ")} — those run
-                  through Xray, which no longer reports how many devices are connected. It still
-                  applies to WireGuard and OpenVPN.
-                </p>
-              ) : null}
+              {/* Counted from the nodes' Xray access log, which is the only
+                  place Xray reports sessions at all. Worth knowing that
+                  the limit lives or dies with that log: it was off for a
+                  day in August and these numbers meant nothing while it
+                  was. */}
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
