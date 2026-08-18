@@ -3186,3 +3186,78 @@ works -- with fr-france blackholed the ladder skipped it and brought up
 fi-finland Stealth HTTPS -- but the time to get there is a customer
 seeing a spinner and assuming a hang. Not diagnosed yet; `publicIp()`
 walking every API endpoint per rung is the first place to look.
+
+## 2026-08-18 -- The desktop CI job had never run a test
+
+**Status:** done (CI), open (runtime verification)
+**Touches:** `.github/workflows/ci.yml`, `service/src/engines/openvpn.rs`,
+`service/src/adapters.rs`, `src-tauri/src/lib.rs`
+
+Went looking for the Android disconnect bug's counterpart on Windows.
+There isn't one -- the deadlock is specific to Android binding a
+VpnService, and nothing on Windows holds a teardown that way. What the
+search found instead was worse.
+
+**The "Desktop client tests" job has never once run a test.** Every run
+died on `resource path resources\WinDivert.dll doesn't exist`:
+`cargo check --workspace` pulls in the Tauri crate, whose build script
+requires every bundled resource on disk, and CI fetched none of them.
+`main` has been red on it. The job was added *specifically* to catch
+faults like the 0.9.6 teardown regression a customer found, and it never
+got far enough to catch anything.
+
+It now runs the same fetch script the release does -- so a broken fetch
+shows up on a push rather than on a tag, which has bitten before -- and
+builds the helper service into resources first. CI also gained
+`workflow_dispatch`, because a change to CI could otherwise only be
+tested by merging it to main and hoping. That is not hypothetical: the
+first repair had an escaping slip that made the YAML unparseable, and
+GitHub reports that as "a workflow file issue" with no job output.
+
+### What it found the moment it could run
+
+71 passed, 2 failed. Both failures were in code written with tests that
+had never executed.
+
+- **`block-outside-dns` was never implemented.** Two tests asserted a
+  full tunnel emits it and Custom mode does not. The directive appeared
+  nowhere in the generated config. Windows resolves on every interface
+  at once and takes the first answer, so an ISP resolver beats the
+  tunnel's -- in Iran, answering filtered domains with an address that
+  goes nowhere. OpenVPN was the one engine still missing the DNS
+  protection the others were given.
+- **Rival-VPN detection matched nothing customers have.** It looked for
+  `tap-windows`; the adapter on a real machine reads
+  `NW TAP-Win32 Adapter V9.21`, which shares no substring with it. Now
+  `tap-win`.
+
+### A tunnel that a minimized app could lose
+
+The service tears a tunnel down after 60s of silence from the app. The
+only thing speaking to it was the dashboard's status poll, which runs in
+the webview -- and Windows throttles timers in a minimized window to
+roughly one a minute. A 15s poll and a 60s grace look safe together
+until the window is minimized, at which point they are the same number.
+
+The app now beats from Rust every 20s, which does not depend on the
+webview being awake or on a window existing, and stops when the process
+does -- which is the condition the grace period is actually for.
+
+### Not verified, and why
+
+The blackhole test on Windows -- block a node, then work the connect and
+disconnect buttons -- **did not run**. The VM finished a Windows update
+and stopped accepting synthesized keyboard input: `keyboardputscancodes`,
+SendKeys and `SendInput` all produce nothing in the guest, and
+`guestcontrol` is refused because the rig auto-logs in with a blank
+password. No snapshots, and 35GB free is not enough to clone the disk
+and edit it offline.
+
+A physical keypress may well still work -- VirtualBox takes raw input,
+which is the one path that cannot be synthesized from outside. Worth
+trying by hand before assuming the VM is broken.
+
+So: three Windows changes, all reasoned from the code and covered by
+tests, none of them exercised against a running tunnel. No desktop
+release cut. 0.9.6 is the precedent for why that matters -- it shipped
+from exactly this position and a customer found it.
