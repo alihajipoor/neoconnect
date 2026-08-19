@@ -66,6 +66,13 @@ pub struct Engines {
     /// it -- an implementation bound to one adapter would stop working
     /// the moment failover moved the customer, and would do it silently.
     split_tunnel: SplitTunnel,
+    /// The profile the live tunnel was built from.
+    ///
+    /// Kept so Custom mode can be switched without the customer
+    /// reconnecting by hand: whether a tunnel is passive or full is
+    /// decided when the engine starts, so changing the mode means
+    /// building it again, and that needs the profile back.
+    last_profile: Option<ConnectProfile>,
 }
 
 impl Engines {
@@ -75,21 +82,57 @@ impl Engines {
             config_dir,
             active: None,
             split_tunnel: SplitTunnel::new(),
+            last_profile: None,
         }
     }
 
-    /// Replaces the customer's Custom-mode selection.
+    /// Replaces the customer's Custom-mode selection, and makes it true
+    /// of the tunnel that is up right now.
     ///
-    /// Takes effect immediately for connections made from now on. It
-    /// deliberately does not restart anything: a customer adding a
-    /// second game should not drop the first one's session.
+    /// Editing the list is cheap: the redirect reads the selection per
+    /// decision, so adding a second game never drops the first one's
+    /// session and nothing is rebuilt.
     ///
-    /// Changing it does change how the *next* tunnel is brought up,
-    /// though -- passive rather than full -- so turning Custom mode on
-    /// or off while connected only takes full effect on reconnect. The
-    /// UI says so rather than pretending otherwise.
-    pub fn set_split_tunnel(&mut self, enabled: bool, apps: Vec<String>) {
+    /// Turning the mode on or off is not cheap, because it changes the
+    /// *shape* of the tunnel. A full tunnel owns the default route; a
+    /// Custom-mode tunnel deliberately owns no routes at all and reaches
+    /// selected applications through the redirect instead. That is
+    /// decided when the engine starts, so switching means building the
+    /// tunnel again.
+    ///
+    /// It used to just record the choice and wait for the next connect.
+    /// A tester turned Custom mode on while connected, watched nothing
+    /// happen, and reasonably concluded the feature was broken -- then
+    /// restarted the app to make it take, which is how they ended up in
+    /// a state where the app said connected and their applications had
+    /// no route to anywhere.
+    ///
+    /// So the rebuild happens here, from the profile the live tunnel was
+    /// built with. Failure is returned rather than swallowed: a switch
+    /// that leaves no tunnel up must not look like success.
+    pub fn set_split_tunnel(&mut self, enabled: bool, apps: Vec<String>) -> Result<(), String> {
+        let was_passive = self.split_tunnel.wants_passive_tunnel();
         self.split_tunnel.set_selection(enabled, apps);
+        let now_passive = self.split_tunnel.wants_passive_tunnel();
+
+        // Only the shape matters. Editing the list within a mode, or
+        // toggling a mode with nothing selected, changes nothing about
+        // how the tunnel must be built.
+        if was_passive == now_passive {
+            return Ok(());
+        }
+        if self.active.is_none() {
+            return Ok(());
+        }
+        let Some(profile) = self.last_profile.clone() else {
+            // Nothing to rebuild from. Saying so is better than leaving
+            // the customer with a tunnel that contradicts the toggle.
+            return Err(
+                "Custom mode changed, but this tunnel cannot be rebuilt without reconnecting."
+                    .to_string(),
+            );
+        };
+        self.connect(&profile)
     }
 
     pub fn split_tunnel_running(&self) -> bool {
@@ -143,7 +186,13 @@ impl Engines {
         // than the fault being diagnosed. So it only ever decorates an
         // error that was going to happen anyway.
         let rivals = adapters::other_vpns_up(&[xray::ADAPTER_NAME, wireguard::TUNNEL_NAME]).unwrap_or_default();
-        self.connect_inner(profile).map_err(|e| with_rival_hint(e, &rivals))
+        let result = self.connect_inner(profile).map_err(|e| with_rival_hint(e, &rivals));
+        // Remembered only on success, so a failed attempt cannot leave a
+        // profile behind for Custom mode to rebuild from.
+        if result.is_ok() {
+            self.last_profile = Some(profile.clone());
+        }
+        result
     }
 
     fn connect_inner(&mut self, profile: &ConnectProfile) -> Result<(), String> {
@@ -280,6 +329,9 @@ impl Engines {
         // redirect also restores ordinary routing for the selected apps,
         // which is the state they should be left in.
         self.split_tunnel.stop();
+        // Dropped with the tunnel: a Custom-mode toggle after a disconnect
+        // must not resurrect a connection the customer ended.
+        self.last_profile = None;
 
         let result = match self.active.take() {
             None => {
