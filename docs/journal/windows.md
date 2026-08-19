@@ -3514,3 +3514,55 @@ so its UDP left while `Test-NetConnection` from PowerShell was blocked.
 node** -- 167.233.65.166, finland1, france-1. I twice told the owner I
 lacked access I had, and both times one command would have shown it. The
 `azs_vps` key is for the TeamSpeak/bot host and works on none of these.
+
+## 2026-08-19 -- Custom mode did nothing until you reconnected
+
+**Status:** half done -- the toggle is fixed, the dead-tunnel report is
+not reproduced
+**Touches:** `service/src/engines/mod.rs`, `service/src/pipe.rs`,
+`ipc/src/lib.rs`
+
+A tester turned Custom mode on while connected, watched every
+application carry on exactly as before, and concluded the feature was
+broken. It was working as written: `set_split_tunnel` recorded the
+choice and nothing else, and the comment above it said so.
+
+That is defensible until you see why the mode cannot be a preference the
+redirect merely reads. A full tunnel owns the default route. A
+Custom-mode tunnel deliberately owns **no routes at all** and reaches
+the selected applications through the redirect instead. Which of the two
+gets built is decided when the engine starts, so changing the mode means
+building the tunnel again -- and the service was not keeping the profile
+it had built from, so it could not.
+
+It keeps it now, and only a change of *shape* rebuilds: adding a second
+game to the list still costs nothing, because the redirect reads the
+selection per decision. A failed rebuild is returned rather than
+swallowed, since a switch that leaves no tunnel up must not read as
+applied.
+
+### The part that is not fixed
+
+The same tester then closed and reopened the client, and reported that
+nothing reached the internet while the app still showed connected.
+
+That is not reproduced, and the honest position is that I do not know
+the cause. What is suggestive: `split_tunnel/mod.rs` states plainly that
+a passive tunnel with no redirect carries nothing at all, and the toggle
+bug above is a way to reach exactly that disagreement -- the mode says
+Custom, the live tunnel was built full, or the reverse. The launch path
+in `Dashboard.tsx` adopts whatever the service has running via
+`vpn_status` but never re-pushes the saved Custom-mode settings and
+never probes, so a disagreement survives a restart rather than being
+corrected by it.
+
+So the toggle fix may well remove it. "May well" is not evidence, and
+this is the failure mode -- a tunnel that reports connected while
+carrying nothing -- that this project has spent the most effort on. It
+needs reproducing on the VM before anyone claims it is gone.
+
+One practical note for whoever does: driving the Connect button through
+the VM by keyboard has been unreliable all session, which is also what
+stopped the minimize test. Tab-counting into the webview misses. A human
+clicking Connect once gets past it, and everything after that is
+scriptable.
