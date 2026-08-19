@@ -3436,3 +3436,81 @@ The app pins the chosen route locally. Switching the route through the
 API changes what the dashboard displays but not what the connect ladder
 dials -- it kept connecting to fr-france while the SERVER tile read
 de-germany. Worth deciding which one is the truth.
+
+## 2026-08-19 -- IKEv2 fleet-wide, two releases, and a key that opened everything
+
+**Status:** done
+**Touches:** `installer/lib/agent.sh`, both `screens/Dashboard.tsx`,
+live: finland1, france-1, plan route lists
+
+### IKEv2 now exists on every node
+
+finland1 and france-1 both had an ECDSA certificate and no strongSwan --
+exactly the fingerprint of the certbot key-type bug fixed earlier today.
+Running the repaired installer on each converted the certificate to RSA,
+installed the swanctl material and brought strongSwan up.
+
+Done one node at a time and verified between, because both carry live
+users and the certificate they were converting is the one Xray serves:
+
+| | finland1 | france-1 |
+|---|---|---|
+| certificate | ECDSA -> RSA | ECDSA -> RSA |
+| strongSwan | active | active |
+| xray | still active | still active |
+| TLS 2053 / 8443 | verify 0 (ok) | verify 0 (ok) |
+
+Customers see 26 routes now, with IKEv2 on finland1, france-1,
+germany-1 and singapore-1.
+
+The plan allow-list caught it a second time: the new IKEv2 routes were
+registered, ONLINE and invisible until added to Trial, Starter, Pro and
+Ultimate Max. Ultimate was left alone, being the relay-only plan. This
+is the third time in one day that a working protocol reached nobody for
+this reason, which is why the installer now says so on the way out.
+
+### Released
+
+- **android-v0.2.13** -- the disconnect fix. Teardown at +0.30s, cancel
+  mid-connect at +0.19s, measured on-device.
+- **android-v0.2.14** -- flags, a renew path for suspended and expired
+  plans, and the SERVER tile naming the route the ladder will dial
+  rather than the one the backend provisioned.
+- **desktop-v0.9.12** -- `block-outside-dns` implemented rather than
+  asserted, TAP-Win32 detection, and a Rust-side heartbeat so a
+  minimized window cannot have its tunnel torn down by the 60s idle
+  grace.
+
+Both customer download endpoints were driven afterwards rather than
+trusted: `/updates/installer/android` and `/installer/windows` serve
+0.2.14 and 0.9.12. The Android one lagged five minutes, which is
+`CACHE_MS` in updates.service and not a fault.
+
+### What the Windows VM finally proved
+
+With a node unreachable, 0.9.11 **failed over rather than hanging** --
+"Couldn't reach sg-singapore. Now on fr-france over Fast" -- and a
+disconnect left the adapter gone, the default route restored, the exit
+IP back to the home address and the internet working.
+
+One caveat on that test, because it would otherwise read as stronger
+than it is: the firewall blackhole did **not** block WireGuard.
+wireguard.exe installs its own WFP filters that outrank ordinary rules,
+so its UDP left while `Test-NetConnection` from PowerShell was blocked.
+"All protocols blocked" was never actually tested.
+
+### Still not proven
+
+- The minimize scenario has never been reproduced against a live
+  tunnel. The heartbeat is reasoned and CI-green, nothing more.
+- `block-outside-dns` is unit-tested and has never carried a real
+  OpenVPN session. It is also the fix most likely to matter in Iran,
+  where OpenVPN users connect successfully and still cannot load
+  filtered sites -- worth asking a tester to confirm.
+
+### A key that opens everything
+
+`~/.ssh/ovh_neo` authenticates root on the panel **and on every VPN
+node** -- 167.233.65.166, finland1, france-1. I twice told the owner I
+lacked access I had, and both times one command would have shown it. The
+`azs_vps` key is for the TeamSpeak/bot host and works on none of these.
