@@ -686,9 +686,22 @@ export function Dashboard({
     onLoggedOut();
   }
 
+  /** The route this screen should name, which is the one a connect will
+   * actually dial.
+   *
+   * The pinned choice leads, and the provisioned route only fills in
+   * when nothing is pinned. They can disagree: switching the route
+   * through another device changes what the backend has provisioned
+   * while this app keeps dialling what its customer picked here. When
+   * that happened the SERVER tile read de-germany and every connect went
+   * to fr-france -- the app naming one server and using another, which
+   * is the same shape of lie as a false "Connected". */
   const currentRoute = useMemo(
-    () => routes.find((r) => r.id === protocolUser?.routeId) ?? null,
-    [routes, protocolUser],
+    () =>
+      routes.find((r) => r.id === chosenRouteId) ??
+      routes.find((r) => r.id === protocolUser?.routeId) ??
+      null,
+    [routes, protocolUser, chosenRouteId],
   );
 
   /** Null cap means unlimited, which is a different thing from a cap we
