@@ -186,7 +186,7 @@ pub enum TunnelHealth {
 /// `apps/backend/src/modules/protocol-users/generate-credentials.ts`) --
 /// the app passes them through rather than reshaping, so there is one
 /// less place for the two to drift.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "protocol", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConnectProfile {
     Wireguard(WireguardProfile),
@@ -226,7 +226,7 @@ pub struct Ikev2Profile {
 /// profile here: the protocol encrypts from the first byte and presents
 /// no handshake at all, so there is nothing to verify and nothing to
 /// name.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShadowsocksProfile {
     pub host: String,
@@ -241,7 +241,7 @@ pub struct ShadowsocksProfile {
     pub password: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireguardProfile {
     pub private_key: String,
@@ -252,7 +252,7 @@ pub struct WireguardProfile {
     pub endpoint: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XrayProfile {
     pub uuid: String,
@@ -274,7 +274,7 @@ pub struct XrayProfile {
 /// verifies the name it was told to expect. Structurally this is the
 /// Trojan profile with a UUID in place of a password, which is exactly
 /// what the two protocols differ by.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VlessTlsProfile {
     pub uuid: String,
@@ -301,7 +301,7 @@ pub struct VlessTlsProfile {
 /// the server presents an ordinary certificate for a real domain, so
 /// there are no borrowed-certificate parameters to carry -- only which
 /// name to expect on it.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrojanProfile {
     /// The shared secret. On a wrong one the server answers exactly like
@@ -315,7 +315,7 @@ pub struct TrojanProfile {
     pub server_name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenvpnProfile {
     pub cert_pem: String,
