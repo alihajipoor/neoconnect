@@ -3367,3 +3367,72 @@ Verified on the emulator against the real app, not just a preview: the
 picker rows show Finland's cross and France's tricolour, and the SERVER
 tile shows Singapore's. The desktop client shares the component but has
 not been looked at -- the VM still cannot be driven.
+
+## 2026-08-19 -- germany-1, and three things that stop a node working
+
+**Status:** done
+**Touches:** `installer/lib/agent.sh`, live: germany-1 + plan route lists
+
+A LightNode box in Frankfurt (38.60.249.229, `de1.neoxify.site`, Ubuntu
+24.04, 1 vCPU / 2 GB) is live as `germany-1` / `de-germany` with all
+eight protocols: REALITY 443, VLESS+TLS 2053 TCP and WS, Trojan 8443,
+Shadowsocks 41831, WireGuard 28458, OpenVPN 38416, IKEv2 500. Ports
+match finland1 and france-1, which were read out of the database rather
+than guessed.
+
+Verified from a real client, not from the panel: the emulator picked
+germany-1 Shadowsocks and reported exit IP **38.60.249.229**, which is
+the node's own address, with five established connections to it.
+
+Three separate faults had to be cleared, and each of them produces a
+node that looks fine and serves nobody.
+
+### The agent dials Cloudflare and hangs at PENDING
+
+`grpcTarget` is empty after enrolment, so the agent falls back to
+`<panel host>:50051` -- which resolves to Cloudflare, which does not
+proxy that port. Confirmed from the box: direct 167.233.65.166:50051
+connects, connect.neoxify.site:50051 does not. The installer still does
+not set this; it is a manual step on every new node.
+
+### IKEv2 can never get a certificate on a full-protocol node
+
+install_ikev2 asks certbot for RSA deliberately, because Android refuses
+an ECDSA server certificate for IKEv2. But Xray's TLS step has already
+issued an ECDSA certificate for the same hostname by then, so the
+request is a key type change, and certbot refuses that non-interactively
+without `--cert-name`:
+
+    Are you trying to change the key type of the certificate named
+    de1.neoxify.site from ECDSA to RSA?
+
+The installer swallowed that and printed its own guidance about inbound
+port 80 -- which was serving an ACME probe file over the public address
+at the time. Fixed with `--cert-name` on both certbot calls. **finland1
+and france-1 have no IKEv2 either, and this is the likely reason.**
+
+### A node with every protocol that no customer can see
+
+Enrolling registers the node, its protocol configs and its routes, but
+plans carry an explicit allow-list, and nothing adds a new node to it.
+germany-1 was ONLINE with eight working protocols and invisible: a real
+subscription saw 16 routes, none of them German. Added to Trial,
+Starter, Pro and Ultimate Max; Ultimate was left alone because it is the
+relay-only plan and this is a direct node. Subscriptions now see 24.
+
+Two mistakes of mine on the way, both worth the reader's time:
+
+- I patched the plans with **protocol-config ids** where the relation
+  wants **route ids**. Prisma rejected them and the endpoint 500'd,
+  which is the good outcome -- the update is atomic, so nothing was
+  half-applied and no live plan lost a route.
+- I then concluded from `config.json` that no credentials had reached
+  Xray. Users added over the gRPC API are in-memory and never appear
+  there; the agent's re-assert had already pushed them.
+
+### Also observed
+
+The app pins the chosen route locally. Switching the route through the
+API changes what the dashboard displays but not what the connect ladder
+dials -- it kept connecting to fr-france while the SERVER tile read
+de-germany. Worth deciding which one is the truth.
