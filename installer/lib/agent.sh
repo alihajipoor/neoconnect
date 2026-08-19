@@ -1814,18 +1814,37 @@ install_ikev2() {
   # instead, with no restart and no window where the fallback site is
   # down. Standalone stays as the fallback for a node that genuinely has
   # nothing on 80.
+  # --cert-name, and not for tidiness: Xray's TLS step has usually
+  # already issued a certificate for this same name, and certbot's
+  # default is ECDSA. Asking for RSA here -- which this must, since
+  # Android refuses an ECDSA server certificate for IKEv2 -- is a key
+  # type change, and certbot refuses that non-interactively unless the
+  # certificate is named explicitly:
+  #
+  #   "Are you trying to change the key type of the certificate named
+  #    de1.neoxify.site from ECDSA to RSA? Please provide both
+  #    --cert-name and --key-type on the command line"
+  #
+  # Without it, IKEv2 fails on every node that also serves Xray over TLS
+  # for the same hostname -- which is every node installed with the full
+  # protocol set. Reproduced on germany-1 on 2026-08-19: it enrolled with
+  # seven working protocols and no IKEv2, and the message printed was
+  # about inbound port 80, which was fine throughout.
+  #
+  # The certificate becomes RSA for both users. Xray takes either;
+  # IKEv2 does not.
   local acme_ok="n"
   if [[ -d /var/www/html ]] && ss -tlnp 2>/dev/null | grep -qE "[^0-9]:80\b"; then
     echo "  Something already serves port 80; using the webroot challenge."
     if certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos \
-        --key-type rsa --rsa-key-size 2048 \
+        --cert-name "$hostname_input" --key-type rsa --rsa-key-size 2048 \
         --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
       acme_ok="y"
     fi
   fi
   if [[ "$acme_ok" != "y" ]]; then
     if certbot certonly --standalone --non-interactive --agree-tos \
-        --key-type rsa --rsa-key-size 2048 \
+        --cert-name "$hostname_input" --key-type rsa --rsa-key-size 2048 \
         --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
       acme_ok="y"
     fi
