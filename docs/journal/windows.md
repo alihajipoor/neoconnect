@@ -3286,3 +3286,153 @@ Recorded rather than explained. The endpoint that would have been the
 obvious suspect is fine: `/api/health/ip` answers in 0.73s, and
 `apiEndpoints()` puts the remembered address first, so the per-rung
 baseline capture is not it.
+
+## 2026-08-18 -- IKEv2 dialled, for the first time anywhere
+
+**Status:** done
+**Touches:** nothing in the repo -- verification only
+
+IKEv2 was installed on ir1 on 2026-08-17 and wired into the relay, and
+the entry for it said plainly that nobody had ever dialled it. That is
+now done, on the Android emulator against `sg-singapore · Built-in`
+("Built-in" is the customer-facing name for the platform profile).
+
+It works, and both halves are measured rather than assumed:
+
+| | |
+|---|---|
+| interface | `ipsec1`, `10.68.0.6/32` -- Android's own IPsec profile, not our tun |
+| our tun service | not running, as it should not be for this protocol |
+| exit IP | **172.236.143.200** -- Singapore, Akamai Connected Cloud |
+| host IP for contrast | 50.34.35.228 -- United States |
+| disconnect | `ipsec1` gone at **+0.29s**, VPN transport cleared at **+0.65s** |
+| device TCP afterwards | fine |
+
+The exit address is the point: it is not merely different from the
+home address, it geolocates to the city of the server that was picked.
+That is the egress check the repo asks for -- an exit IP that matches
+the node -- rather than "the interface came up".
+
+It also exercises the new teardown confirmation against a second
+engine. `vpn_tunnel_gone` asks ConnectivityManager whether the device is
+still routed through *any* VPN, so it covers the platform profile as
+well as our own service, and it cleared inside a second here. Had it
+been written against our service's liveness -- which was my first
+attempt -- it would have reported a stuck tunnel for every IKEv2
+disconnect, since our service is not involved in one at all.
+
+Still not dialled: IKEv2 on the Windows client, and IKEv2 through the
+Iran relay (this test was a direct route).
+
+## 2026-08-18 -- Flags on the server list
+
+**Status:** done (Android verified), pending (desktop unverified)
+**Touches:** `components/Flag.tsx` (new), `components/LocationPicker.tsx`,
+both `screens/Dashboard.tsx`
+
+Every row of the server list carried the same map pin, which told the
+customer nothing, while the one thing people scan a server list for --
+the country -- was left encoded in a slug like `fr-france`. The
+dashboard's SERVER tile had the same problem behind a globe.
+
+Both now lead with the country's flag. One component, shared: mobile
+imports desktop's `src/` through the `@shared` alias, so Android,
+Windows and iOS all draw from the same file.
+
+### Why the flags are drawn by hand
+
+- **Emoji is the obvious answer and is wrong.** Windows ships no glyphs
+  for regional-indicator pairs, so 🇫🇷 renders as the letters "FR" in two
+  boxes on the desktop client while Android shows a flag. The clients
+  are meant to look like one product.
+- **A remote sprite** would put a network fetch in front of the server
+  list, for customers whose networks are the reason they installed a
+  VPN, and often before any tunnel is up.
+- **A flag package** costs a dependency and a bundle for the handful of
+  countries we run nodes in.
+
+Ten are drawn: fi, fr, sg, ir, de, nl, us, gb, tr, ae. They are
+deliberately simplified -- at 20px a coat of arms is a smudge -- so each
+keeps only what identifies it: bands, a cross, a crescent. Iran's is the
+plain tricolour without the emblem, which is both the legible choice and
+the less loaded one for this audience.
+
+The code comes from the region slug's prefix, because `region` is free
+text in the database and there is no country column to trust. Anything
+that is not two letters falls back to a globe, so a node added in a new
+country from the installer degrades to a neutral icon rather than to an
+empty box or another country's colours.
+
+Verified on the emulator against the real app, not just a preview: the
+picker rows show Finland's cross and France's tricolour, and the SERVER
+tile shows Singapore's. The desktop client shares the component but has
+not been looked at -- the VM still cannot be driven.
+
+## 2026-08-19 -- germany-1, and three things that stop a node working
+
+**Status:** done
+**Touches:** `installer/lib/agent.sh`, live: germany-1 + plan route lists
+
+A LightNode box in Frankfurt (38.60.249.229, `de1.neoxify.site`, Ubuntu
+24.04, 1 vCPU / 2 GB) is live as `germany-1` / `de-germany` with all
+eight protocols: REALITY 443, VLESS+TLS 2053 TCP and WS, Trojan 8443,
+Shadowsocks 41831, WireGuard 28458, OpenVPN 38416, IKEv2 500. Ports
+match finland1 and france-1, which were read out of the database rather
+than guessed.
+
+Verified from a real client, not from the panel: the emulator picked
+germany-1 Shadowsocks and reported exit IP **38.60.249.229**, which is
+the node's own address, with five established connections to it.
+
+Three separate faults had to be cleared, and each of them produces a
+node that looks fine and serves nobody.
+
+### The agent dials Cloudflare and hangs at PENDING
+
+`grpcTarget` is empty after enrolment, so the agent falls back to
+`<panel host>:50051` -- which resolves to Cloudflare, which does not
+proxy that port. Confirmed from the box: direct 167.233.65.166:50051
+connects, connect.neoxify.site:50051 does not. The installer still does
+not set this; it is a manual step on every new node.
+
+### IKEv2 can never get a certificate on a full-protocol node
+
+install_ikev2 asks certbot for RSA deliberately, because Android refuses
+an ECDSA server certificate for IKEv2. But Xray's TLS step has already
+issued an ECDSA certificate for the same hostname by then, so the
+request is a key type change, and certbot refuses that non-interactively
+without `--cert-name`:
+
+    Are you trying to change the key type of the certificate named
+    de1.neoxify.site from ECDSA to RSA?
+
+The installer swallowed that and printed its own guidance about inbound
+port 80 -- which was serving an ACME probe file over the public address
+at the time. Fixed with `--cert-name` on both certbot calls. **finland1
+and france-1 have no IKEv2 either, and this is the likely reason.**
+
+### A node with every protocol that no customer can see
+
+Enrolling registers the node, its protocol configs and its routes, but
+plans carry an explicit allow-list, and nothing adds a new node to it.
+germany-1 was ONLINE with eight working protocols and invisible: a real
+subscription saw 16 routes, none of them German. Added to Trial,
+Starter, Pro and Ultimate Max; Ultimate was left alone because it is the
+relay-only plan and this is a direct node. Subscriptions now see 24.
+
+Two mistakes of mine on the way, both worth the reader's time:
+
+- I patched the plans with **protocol-config ids** where the relation
+  wants **route ids**. Prisma rejected them and the endpoint 500'd,
+  which is the good outcome -- the update is atomic, so nothing was
+  half-applied and no live plan lost a route.
+- I then concluded from `config.json` that no credentials had reached
+  Xray. Users added over the gRPC API are in-memory and never appear
+  there; the agent's re-assert had already pushed them.
+
+### Also observed
+
+The app pins the chosen route locally. Switching the route through the
+API changes what the dashboard displays but not what the connect ladder
+dials -- it kept connecting to fr-france while the SERVER tile read
+de-germany. Worth deciding which one is the truth.

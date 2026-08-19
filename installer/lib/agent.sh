@@ -195,8 +195,45 @@ EOF
     exit 1
   fi
 
+  # Where the agent will reach the control plane's gRPC, which is NOT
+  # necessarily the panel's hostname.
+  #
+  # The agent defaults to <panel host>:50051. That is right for a panel
+  # exposed directly and wrong for one behind Cloudflare, which proxies
+  # 80 and 443 and nothing else -- the agent then dials a Cloudflare
+  # address on 50051, gets "network is unreachable", and retries every
+  # second forever while the panel shows the node PENDING with no
+  # explanation. Two nodes have been lost to this, and both times the
+  # fix was one field in a config file nobody knew to edit.
+  #
+  # So it is measured rather than assumed: if the panel's own hostname
+  # answers on 50051, the default is correct and nothing is asked.
+  local panel_host grpc_target
+  panel_host="$(printf '%s' "$panel_url" | sed -E 's#^[a-z]+://##; s#[:/].*$##')"
+  grpc_target="${NEOXIFY_GRPC_TARGET:-}"
+  if [[ -z "$grpc_target" ]]; then
+    if timeout 6 bash -c "cat < /dev/null > /dev/tcp/$panel_host/50051" 2>/dev/null; then
+      echo "  gRPC reaches $panel_host:50051; using it."
+    else
+      cat <<EOF
+
+  $panel_host does not answer on 50051, so the agent cannot reach the
+  control plane there. That is normal when the panel sits behind a CDN:
+  only 80 and 443 are proxied. Give the panel's own address instead --
+  the one you SSH to -- and the agent will use it for gRPC only.
+
+EOF
+      read -r -p "Panel gRPC address [host:50051, blank to use $panel_host:50051]: " grpc_target
+    fi
+  fi
+
   echo "Enrolling agent..."
-  /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token"
+  if [[ -n "$grpc_target" ]]; then
+    [[ "$grpc_target" == *:* ]] || grpc_target="$grpc_target:50051"
+    /usr/local/bin/agentd --enroll-init --panel-url "$panel_url"       --token "$enroll_token" --grpc-target "$grpc_target"
+  else
+    /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token"
+  fi
 
   install -d -m 755 /etc/neoxify
   echo "agent" > /etc/neoxify/role
@@ -250,9 +287,20 @@ EOF
 Done. "$node_name" is registered with its engines and routes, and should
 already show as ONLINE in the panel.
 
-Nothing further to configure by hand -- customers can select it as soon
-as it reports in. To change ports or parameters later, edit the Protocol
-Config in the panel.
+ONE STEP REMAINS, and without it this node serves nobody:
+
+  Its routes are not in any plan yet. Plans carry an explicit list of
+  the routes they allow, and enrolling a node does not add it to them --
+  so until you do, the node is ONLINE with every protocol working and
+  invisible to every customer. Open each plan in the panel and tick this
+  node's routes.
+
+  This is not hypothetical: germany-1 was built with all eight protocols
+  and a verified exit IP, and a real subscription still could not see a
+  single one of them.
+
+To change ports or parameters later, edit the Protocol Config in the
+panel.
 
 Check the agent with: systemctl status neoxify-agentd
 EOF
@@ -1814,18 +1862,37 @@ install_ikev2() {
   # instead, with no restart and no window where the fallback site is
   # down. Standalone stays as the fallback for a node that genuinely has
   # nothing on 80.
+  # --cert-name, and not for tidiness: Xray's TLS step has usually
+  # already issued a certificate for this same name, and certbot's
+  # default is ECDSA. Asking for RSA here -- which this must, since
+  # Android refuses an ECDSA server certificate for IKEv2 -- is a key
+  # type change, and certbot refuses that non-interactively unless the
+  # certificate is named explicitly:
+  #
+  #   "Are you trying to change the key type of the certificate named
+  #    de1.neoxify.site from ECDSA to RSA? Please provide both
+  #    --cert-name and --key-type on the command line"
+  #
+  # Without it, IKEv2 fails on every node that also serves Xray over TLS
+  # for the same hostname -- which is every node installed with the full
+  # protocol set. Reproduced on germany-1 on 2026-08-19: it enrolled with
+  # seven working protocols and no IKEv2, and the message printed was
+  # about inbound port 80, which was fine throughout.
+  #
+  # The certificate becomes RSA for both users. Xray takes either;
+  # IKEv2 does not.
   local acme_ok="n"
   if [[ -d /var/www/html ]] && ss -tlnp 2>/dev/null | grep -qE "[^0-9]:80\b"; then
     echo "  Something already serves port 80; using the webroot challenge."
     if certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos \
-        --key-type rsa --rsa-key-size 2048 \
+        --cert-name "$hostname_input" --key-type rsa --rsa-key-size 2048 \
         --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
       acme_ok="y"
     fi
   fi
   if [[ "$acme_ok" != "y" ]]; then
     if certbot certonly --standalone --non-interactive --agree-tos \
-        --key-type rsa --rsa-key-size 2048 \
+        --cert-name "$hostname_input" --key-type rsa --rsa-key-size 2048 \
         --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
       acme_ok="y"
     fi

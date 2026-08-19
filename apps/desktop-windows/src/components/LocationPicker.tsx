@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Loader2, MapPin, Repeat, X } from "lucide-react";
+import { Check, Loader2, Repeat, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
 import { Button } from "./ui";
 import { Latency } from "./Latency";
+import { Flag } from "./Flag";
 import { useI18n } from "../lib/i18n";
 
 // Full-screen overlay, not a floating dialog -- this app's window is a
@@ -264,13 +265,18 @@ export function LocationPicker({
                       : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
                   )}
                 >
+                  {/* The flag, not a pin. Every row used to carry the
+                      same pin, which told the customer nothing they
+                      could not already read -- while the one thing they
+                      actually scan a server list for, the country, was
+                      buried in a slug like "fr-france". */}
                   <div
                     className={cn(
                       "flex size-9 shrink-0 items-center justify-center rounded-full",
-                      isCurrent ? "bg-primary/20 text-primary" : "bg-highlight/15 text-highlight",
+                      isCurrent ? "bg-primary/20" : "bg-highlight/10",
                     )}
                   >
-                    <MapPin className="size-4" />
+                    <Flag region={route.location.region} className="h-4 w-[1.35rem]" />
                   </div>
                   <div className="flex min-w-0 flex-1 flex-col">
                     <span className="truncate text-sm font-medium">{route.location.nodeName}</span>

@@ -12,10 +12,13 @@ import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from
 import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
 import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
+import { IS_STORE_BUILD } from "../lib/distribution";
+import { endedNotice } from "../lib/subscription-state";
 import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
+import { Flag } from "../components/Flag";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { useI18n } from "../lib/i18n";
@@ -1010,9 +1013,22 @@ export function Dashboard({
     onLoggedOut();
   }
 
+  /** The route this screen should name, which is the one a connect will
+   * actually dial.
+   *
+   * The pinned choice leads, and the provisioned route only fills in
+   * when nothing is pinned. They can disagree: switching the route
+   * through another device changes what the backend has provisioned
+   * while this app keeps dialling what its customer picked here. When
+   * that happened the SERVER tile read de-germany and every connect went
+   * to fr-france -- the app naming one server and using another, which
+   * is the same shape of lie as a false "Connected". */
   const currentRoute = useMemo(
-    () => routes.find((r) => r.id === protocolUser?.routeId) ?? null,
-    [routes, protocolUser],
+    () =>
+      routes.find((r) => r.id === chosenRouteId) ??
+      routes.find((r) => r.id === protocolUser?.routeId) ??
+      null,
+    [routes, protocolUser, chosenRouteId],
   );
 
   /** Null cap means unlimited, and that is a different thing from a
@@ -1029,6 +1045,14 @@ export function Dashboard({
     if (!Number.isFinite(cap) || cap <= 0) return null;
     return { used, cap, percent: Math.min(100, (used / cap) * 100) };
   }, [subscription]);
+
+  /** Set only when the subscription exists but no longer entitles the
+   * customer to connect. See subscription-state for why the decision
+   * lives outside the component. */
+  const endedState = useMemo(
+    () => (subscription ? endedNotice(subscription.status, IS_STORE_BUILD) : null),
+    [subscription],
+  );
 
   const daysLeft = useMemo(() => {
     if (!subscription) return null;
@@ -1250,6 +1274,23 @@ export function Dashboard({
 
               {/* What the connection actually is. These three answer the
                   questions a customer asks while looking at the orb. */}
+
+              {/* The plan has stopped working. Until now this said so
+                  only in the error a connect attempt produced -- text
+                  that told the customer to "upgrade or wait for it to
+                  renew" on a screen with nothing to press. */}
+              {endedState ? (
+                <Card className="ring-brand animate-rise flex flex-col gap-2 text-center">
+                  <p className="text-sm font-semibold">{t(endedState.titleKey)}</p>
+                  <p className="text-xs text-muted-foreground">{t(endedState.bodyKey)}</p>
+                  {endedState.showPlansButton ? (
+                    <Button onClick={onBrowsePlans} className="mt-2 w-full justify-center gap-2">
+                      <Tag className="size-4" />
+                      {t("dash.renewCta")}
+                    </Button>
+                  ) : null}
+                </Card>
+              ) : null}
               <div className="animate-rise grid grid-cols-3 gap-2">
                 {/* Both open the same picker, because a customer asking
                     to "change the protocol" and one asking to "change the
@@ -1258,7 +1299,13 @@ export function Dashboard({
                     entry points because people look for the word they
                     have in mind. */}
                 <Stat
-                  icon={<Globe className="size-3" />}
+                  icon={
+                    currentRoute ? (
+                      <Flag region={currentRoute.location.region} className="h-3 w-[1rem]" />
+                    ) : (
+                      <Globe className="size-3" />
+                    )
+                  }
                   label={t("dash.server")}
                   value={currentRoute ? currentRoute.location.region : "—"}
                   onClick={() => setShowLocationPicker(true)}
