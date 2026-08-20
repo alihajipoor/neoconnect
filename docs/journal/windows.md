@@ -3910,3 +3910,53 @@ verified working, none of them the fix:
 installer:** 26/26 routes exit at their node, and the full split-tunnel
 matrix passes on two separate nodes — germany-1 and finland1 — across
 WireGuard, VLESS REALITY, Trojan, Shadowsocks and OpenVPN.
+
+---
+
+## 2026-08-20 — Custom mode now works on every protocol, IKEv2 included
+
+**Status:** done, verified per route on the VM
+**Touches:** `apps/desktop-windows/service/src/engines/{ikev2,mod}.rs`,
+`split_tunnel/redirect.rs`
+
+Custom mode refused IKEv2 outright, so four routes — one per node —
+could not split traffic at all. The refusal rested on a belief that was
+simply wrong: that Windows owning the tunnel left nothing to pin a
+socket to.
+
+It owns it, but it is still an ordinary interface. The RAS connection
+carries the entry's name, has an index and an address, and a socket
+pins to it exactly like it pins to a Wintun adapter — the log line
+`custom mode on Neoxify (index 27, tunnel 10.68.0.2)` was the proof.
+What actually blocked Custom mode was the other half of the shape: the
+tunnel claiming the default route, leaving unselected traffic nowhere
+else to go.
+
+`Add-VpnConnection -SplitTunneling` is exactly that switch, and naming
+it turns it on. Same passive tunnel WireGuard gets from `Table = off`.
+Named only in Custom mode — the existing note in `ikev2.rs` about
+`-SplitTunneling $false` binding its argument to the wrong parameter is
+why it is a conditional string rather than a value.
+
+**Gotcha that nearly buried this.** The first run looked like a total
+failure: `seen=0`, everything exiting at the home address. It was the
+VM thrashing through four reconnects back to back, and the redirect
+worker was *swallowing the driver's error and returning silently* — so
+the only symptom was a zero counter while the selected app quietly went
+direct. The worker now says why it stopped. Re-run one route at a time
+and every row was correct first time.
+
+**Coverage is now complete.** Every engine the client can run has been
+through the full matrix — selected app at the node, unselected at home,
+selection swapped live both ways with no reconnect, Custom mode off
+back to a full tunnel, disconnect back to normal:
+
+| engine | verified on |
+|---|---|
+| WireGuard | germany-1, finland1 |
+| VLESS REALITY | germany-1, finland1 |
+| VLESS+TLS | germany-1 |
+| VLESS+TLS (WebSocket) | germany-1 |
+| Trojan | germany-1, finland1 |
+| Shadowsocks | germany-1, finland1 |
+| IKEv2 | finland1, france-1, germany-1, singapore-1 |
