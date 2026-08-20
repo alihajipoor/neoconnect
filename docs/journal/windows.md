@@ -3689,3 +3689,80 @@ on live nodes.
 **Measuring note:** `swanctl --list-sas` after a session has ended shows
 IKE SAs with no children and reads like "the child never came up". It
 has to be read while a tunnel is actually up.
+
+### What was ruled out on 2026-08-20 (so nobody repeats it)
+
+Chased much further with the owner's go-ahead. Everything below was
+measured, not reasoned about, and none of it is the cause:
+
+- **Not the kernel state.** Read while a tunnel is up, fr1 has the child
+  SA installed correctly -- 2 xfrm states, 3 tunnel policies,
+  `espinudp sport 4500 dport 4500`, selectors `0.0.0.0/0` <-> the
+  client's `/32`. Zero bytes through it.
+- **Not the config.** `/etc/swanctl/conf.d/neoxify.conf` and
+  `/etc/strongswan.conf` are **byte-identical** to de1's. Same
+  certificates (correct CN and SAN per node), same `ip_forward=1`, same
+  `rp_filter=2`, same MASQUERADE and FORWARD rules, same single charon
+  under strongswan-starter.
+- **Not the crypto.** Both nodes negotiate the same
+  `AES_CBC-256/HMAC_SHA2_256_128`.
+- **Not the leases.** fr1 had three "online" leases for one identity,
+  two of them the same address. Cleared them, restarted the daemon,
+  reloaded: still dead.
+- **Not the pool offset.** fr1 handed `10.68.0.1` and de1 `10.68.0.2`,
+  which looked like the answer. The pool was narrowed to
+  `10.68.0.2-10.68.0.254` (backup at `/root/neoxify.conf.bak-*`) and it
+  made no difference. **That change is still in place on fr1** and is
+  the one config divergence between it and the other nodes.
+- **Not the client.** Windows reports the same state for both: rasdial
+  connected before and after the request, 1 main-mode SA, 2 quick-mode
+  SAs, tunnel default route installed with the better metric.
+
+**What it actually looks like.** `pktmon` on the client shows the SYN
+entering the tunnel adapter with no drops -- and then the physical NIC
+emits *nothing but 43-byte NAT keepalives* to fr1. Not one ESP data
+packet leaves. tcpdump on fr1 agrees: IKE_AUTH (retransmitted five or
+six times, itself a hint) and keepalives, no ESP. So the client brings
+the tunnel up and then never encrypts into it, while the identical
+client on de1 pushes 110 packets. That points at the path or at
+something in fr1's negotiation Windows dislikes, not at config -- and it
+is where the next session should start.
+
+---
+
+## 2026-08-20 — Desktop 0.9.13 released and re-verified from the installer
+
+**Status:** done
+**Touches:** `installer/lib/agent.sh`
+
+`desktop-v0.9.13` published (installer, `.sig`, checksums), all four CI
+jobs green. The whole matrix was then re-run **against the shipped
+installer**, not the dev build -- `neoconnect-desktop.exe v0.9.13`
+installed over the top, service running from the released binary:
+
+| protocol | full tunnel | split, unselected | split, selected | live swap | off | after disconnect |
+|---|---|---|---|---|---|---|
+| WireGuard | node | home | node | correct | node | home |
+| VLESS REALITY | node | home | node | correct | node | home |
+| Trojan | node | home | node | correct | node | home |
+| Shadowsocks | node | home | node | correct | node | home |
+| OpenVPN | node | home | node | correct | node | home |
+
+`returned` non-zero and `rejected` zero throughout, and no firewall rule
+left behind after any run. Shadowsocks and OpenVPN were re-run after a
+hard VM reboot, so they are a cold-start result as well.
+
+**Installer fix that came out of the IKEv2 hunt.** The
+`neoxify-swanctl-load` unit had `After=`/`Requires=` but not `PartOf=`,
+so it only ran at boot. `systemctl restart strongswan-starter` during
+maintenance therefore left the daemon up with **no connections, no pool
+and no EAP secrets** -- clients authenticate against nothing, and the
+node looks healthy. `PartOf=` added in the installer and applied live to
+fr1, fi1, sg1 and de1.
+
+**Rig gotchas, both cost time tonight.** The VM froze mid-matrix with the
+display byte-identical across screenshots while `VMState` still said
+`running` -- compare screenshot sizes to tell a frozen guest from a busy
+one. And a `poweroff` drops the transient shared folder *and* leaves the
+guest ignoring `keyboardputscancode` when restarted `--type headless`;
+`--type separate` restores input.

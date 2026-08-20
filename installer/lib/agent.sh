@@ -2053,6 +2053,12 @@ CONF
 Description=Load Neoxify swanctl connections and credentials
 After=strongswan-starter.service
 Requires=strongswan-starter.service
+# PartOf, so restarting the daemon by hand reloads this too. Without it
+# the unit only runs at boot, and "systemctl restart strongswan-starter"
+# during maintenance leaves the daemon up with no connections, no pool
+# and no EAP secrets -- every client then authenticates against nothing.
+# Cost an hour on france-1 before it was noticed.
+PartOf=strongswan-starter.service
 
 [Service]
 Type=oneshot
