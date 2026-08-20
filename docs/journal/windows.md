@@ -3766,3 +3766,83 @@ display byte-identical across screenshots while `VMState` still said
 one. And a `poweroff` drops the transient shared folder *and* leaves the
 guest ignoring `keyboardputscancode` when restarted `--type headless`;
 `--type separate` restores input.
+
+---
+
+## 2026-08-20 — Every route real-tested: only germany-1 is fully working
+
+**Status:** open — infrastructure, not the client
+**Touches:** nothing in the repo; live changes listed below
+
+Ran all 26 routes the test account can reach, one connect each, verdict
+by exit IP (node = pass, home = the tunnel carries nothing).
+
+| node | pass | detail |
+|---|---|---|
+| germany-1 | **8 / 8** | every protocol, including IKEv2 |
+| finland1 | 1 / 8 | WireGuard only |
+| france-1 | 1 / 8 | WireGuard only |
+| singapore-1 | 0 / 2 | IKEv2 and OpenVPN both fail |
+
+The 13 Iran relay routes are not on this account's plan and were not
+covered.
+
+**The one thing that predicts success is when the node was built.**
+germany-1 was installed with the current installer during this session
+and everything works on it. Every older node fails on everything except
+WireGuard, whose peers live on disk rather than being pushed at runtime.
+
+Failure shapes, so they are recognisable: Xray routes return curl exit 6
+(DNS never resolves, because the tunnel carries nothing); by address
+they return exit 35, a TLS error, which is what REALITY looks like when
+it silently proxies a client to its decoy. OpenVPN and IKEv2 report
+Connected and exit at the customer's own address.
+
+**Ruled out by measurement — do not re-test these:**
+
+- Users not provisioned. They are: 24-25 per inbound after an agent
+  re-assert, and the specific test UUID is present in `xray api
+  inbounduser`.
+- Ports unreachable. 443, 2053, 8443 and the Shadowsocks port all accept
+  TCP from the client's network in ~150ms.
+- REALITY key mismatch. Node-derived public key, shortId and SNI match
+  the panel exactly.
+- Decoy unreachable from the node. Both cloudflare.com and www.shatel.ir
+  answer from finland1 and france-1.
+- Decoy choice. Switched finland1 from cloudflare.com to www.shatel.ir,
+  the decoy the working node uses, and updated the panel to match. No
+  change.
+- Stale credentials in the harness. The 26 saved credentials are
+  byte-identical to what the database holds now.
+- Agent down. `neoxify-agentd` (not `neoxify-agent`) is running on every
+  node and the panel shows all five ONLINE with fresh heartbeats.
+
+**Recommendation: rebuild the protocol stacks on finland1, france-1 and
+singapore-1 with the current installer** rather than keep bisecting.
+germany-1 is proof the installer produces a fully working node, and
+every difference found so far has been invisible in the config files.
+
+**Live changes made during this investigation, all disclosed:**
+
+- Restarted `neoxify-agentd` on finland1 and france-1. Both re-asserted
+  every user (hundreds of `CREATE_USER`). Safe: the agent is not in the
+  data path.
+- Added `PartOf=strongswan-starter.service` to the swanctl loader on
+  fr1, fi1, sg1 and de1, matching the installer fix.
+- Narrowed france-1's IKEv2 pool to `10.68.0.2-10.68.0.254` (backup
+  `/root/neoxify.conf.bak-*`). Did not help; it is the one config
+  divergence from the other nodes.
+- **Corrected france-1's OpenVPN `tlsCryptKey` in the panel.** It was
+  genuinely stale — the node's key hashed differently from the panel's.
+  The first repair attempt mangled it through the shell (655 bytes
+  instead of 636); it was then rewritten via base64 and now matches the
+  node's file exactly (md5 `f4d7c491…`, 636 bytes). OpenVPN there still
+  fails, so the stale key was not the only fault.
+- Switched finland1's REALITY decoy to `www.shatel.ir` on the node and
+  in the panel. Did not help; trivially revertible from
+  `/root/xray-config.bak-*`.
+
+**Method note.** A file hash is not a string hash. Comparing
+`sha256sum tls-crypt.key` against `sha256(publicParamsJson->>'key')`
+made finland1 look mismatched when it was fine; only comparing the
+values themselves settled it.
