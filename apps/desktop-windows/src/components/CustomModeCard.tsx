@@ -184,7 +184,28 @@ export function CustomModeCard() {
                   className="flex items-center gap-2 rounded-lg border border-white/8 bg-white/[0.025] px-2.5 py-2"
                 >
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs font-semibold">{appName(path)}</p>
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-xs font-semibold">{appName(path)}</p>
+                      {/* Says what happens to this app, per app, rather
+                          than leaving it to be inferred from a toggle
+                          above. A tester picked a browser, opened it,
+                          found the real IP and reported Custom mode
+                          broken -- the direction is the one thing that
+                          silently produces exactly that, and a label on
+                          the row is where it stops being ambiguous. */}
+                      <span
+                        className={[
+                          "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                          settings.mode === "allExcept"
+                            ? "bg-white/8 text-muted-foreground"
+                            : "bg-highlight/15 text-highlight",
+                        ].join(" ")}
+                      >
+                        {settings.mode === "allExcept"
+                          ? t("settings.customAppBypasses")
+                          : t("settings.customAppUsesVpn")}
+                      </span>
+                    </div>
                     {/* The full path is what actually gets matched, so
                         it is shown rather than hidden -- two games can
                         share an executable name. */}

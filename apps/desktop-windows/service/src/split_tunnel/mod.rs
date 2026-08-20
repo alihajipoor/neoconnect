@@ -261,8 +261,32 @@ fn install_verified_route(
         }
     }
 
-    // Nothing carried. Say so loudly, with the state that would explain
-    // it, and fall back to the shape that at least works for WireGuard.
+    // Nothing carried, on either shape, to either probe target. Say so
+    // with the state that would explain it -- and then refuse.
+    //
+    // This used to install the on-link shape anyway and carry on, and
+    // that was the wrong call in the worst possible way. A tester's log
+    // showed it happening against three different nodes in one sitting:
+    //
+    // ```text
+    // route on-link: no traffic (8.8.8.8:443 timed out)
+    // route via the tunnel address: no traffic (...)
+    // no route shape carried traffic (...)
+    // probe FAILED: the tunnel did not carry a test connection
+    // ```
+    //
+    // Custom mode started every time. His chosen browser was then
+    // redirected into a tunnel already proven dead, and when the engine
+    // dropped, the deliberate fail-open sent it out on the ordinary
+    // route -- so he watched his own address come back with Custom mode
+    // switched on, and reported the feature as broken. It was not: the
+    // tunnel was.
+    //
+    // Refusing turns that into a failed candidate, which the connect
+    // ladder handles by trying the next protocol. Same reasoning as the
+    // IKEv2 refusal above it: giving somebody an unprotected app while
+    // the switch says otherwise is the same shape of lie as a false
+    // "Connected", and it is worth a failed connection to avoid.
     append(log_path, &format!("no route shape carried traffic ({last_error})"));
     for line in default_routes() {
         append(log_path, &format!("  route  {line}"));
@@ -271,11 +295,9 @@ fn install_verified_route(
         append(log_path, &format!("  adapter  {line}"));
     }
 
-    routing::install_passive_default_shaped(
-        tunnel_address,
-        tunnel_index,
-        routing::PassiveRouteShape::OnLink,
-    )
+    Err(format!(
+        "Custom mode did not start: this tunnel is not carrying traffic ({last_error}).          Your chosen apps would have used the ordinary connection without telling you."
+    ))
 }
 
 /// What the tunnel adapter actually looks like to Windows.

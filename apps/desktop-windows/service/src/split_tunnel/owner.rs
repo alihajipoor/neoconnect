@@ -412,7 +412,34 @@ fn is_user_application(path: &str) -> bool {
         r"\windows\winsxs\",
         r"\windows\servicing\",
     ];
-    !SYSTEM.iter().any(|dir| lowered.contains(dir))
+    if SYSTEM.iter().any(|dir| lowered.contains(dir)) {
+        return false;
+    }
+
+    // Traps rather than choices, and each one was really offered.
+    //
+    // `msedgewebview2.exe` is this application's own window: Tauri runs
+    // on WebView2, so it is always in the list, and it sits one letter
+    // away from the browser somebody actually means. A tester picked
+    // from this list, opened Edge, and reported that Custom mode did
+    // nothing -- correctly, because Edge was never what got selected.
+    // Edge itself is absent unless it happens to be running, which is
+    // what makes the near-miss so easy.
+    //
+    // The other two are the app and the service. Routing the client
+    // that manages the tunnel through its own tunnel is not a setting
+    // anybody wants, and the redirect excludes the service anyway --
+    // so offering them can only mislead.
+    const NEVER_OFFER: [&str; 3] = [
+        "msedgewebview2.exe",
+        "neoconnect-desktop.exe",
+        "neoconnect-service.exe",
+    ];
+    let file_name = std::path::Path::new(&lowered)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    !NEVER_OFFER.contains(&file_name.as_str())
 }
 
 fn image_path(pid: u32) -> Option<String> {
