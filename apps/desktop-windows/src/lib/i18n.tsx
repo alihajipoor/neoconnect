@@ -199,7 +199,7 @@ const en = {
   "settings.sections": "Sections",
   "settings.custom": "Custom mode",
   "settings.customBeta": "Beta",
-  "settings.customHint": "Send only the apps you choose through the VPN. Everything else uses your normal connection. Still new — tell us if something looks wrong.",
+  "settings.customHint": "Choose which apps use the VPN and which keep your normal connection. Still new — tell us if something looks wrong.",
   "settings.customOn": "On",
   "settings.customOff": "Off",
   "settings.customAddApp": "Add an app",
