@@ -216,6 +216,20 @@ pub fn start(
     Ok(Running { handle, stop, stats, threads })
 }
 
+/// Appends a line to the split-tunnel log, beside the counters.
+///
+/// Same file the periodic stats go to, so a worker that died and the
+/// numbers that stopped moving are read together rather than in two
+/// places.
+fn note(line: &str) {
+    use std::io::Write;
+    let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+    let path = std::path::Path::new(&base).join("Neoxify").join("split-tunnel.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 fn worker(
     handle: Arc<Handle>,
     redirect: Arc<Redirect>,
@@ -235,7 +249,16 @@ fn worker(
             Ok(Some(received)) => received,
             // Shut down cleanly, or the driver gave up on us. Either way
             // there is nothing further to read.
-            Ok(None) | Err(_) => return,
+            Ok(None) => return,
+            // Said out loud rather than swallowed. A worker that exits
+            // here stops intercepting silently, and the only visible
+            // symptom is `seen=0` in the counters while the customer's
+            // selected app quietly goes direct -- which is exactly the
+            // kind of quiet failure this file exists to avoid.
+            Err(e) => {
+                note(&format!("redirect worker stopped: {e}"));
+                return;
+            }
         };
 
         stats.seen.fetch_add(1, Ordering::Relaxed);
