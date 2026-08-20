@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AppWindow, Plus, X } from "lucide-react";
+import { AppWindow, FolderOpen, ListChecks, X } from "lucide-react";
+import { RunningAppPicker } from "./RunningAppPicker";
 import { useI18n } from "../lib/i18n";
 import {
   appName,
@@ -9,6 +10,7 @@ import {
   MAX_APPS,
   pushSplitTunnel,
   saveSplitTunnel,
+  type SplitTunnelMode,
   type SplitTunnelSettings,
 } from "../lib/split-tunnel";
 import { Button, Card } from "../components/ui";
@@ -29,6 +31,7 @@ export function CustomModeCard() {
   const { t } = useI18n();
   const [settings, setSettings] = useState<SplitTunnelSettings | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,21 +56,15 @@ export function CustomModeCard() {
     }
   }
 
-  async function addApp() {
-    setNotice(null);
+  /** Shared by both pickers, so a program chosen from the running list
+   * and the same program found on disk cannot end up on the list twice
+   * under different spellings. */
+  async function addPath(picked: string) {
     if (!settings) return;
     if (settings.apps.length >= MAX_APPS) {
       setNotice(t("settings.customTooMany", { max: MAX_APPS }));
       return;
     }
-
-    const picked = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Programs", extensions: ["exe"] }],
-    });
-    if (typeof picked !== "string") return;
-
     // Compared case-insensitively because Windows paths are, and the
     // picker's casing does not always match what a running process
     // reports -- two entries for one app would look like a bug.
@@ -76,6 +73,18 @@ export function CustomModeCard() {
       return;
     }
     await apply({ ...settings, apps: [...settings.apps, picked] });
+  }
+
+  async function browseForApp() {
+    setNotice(null);
+    if (!settings) return;
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Programs", extensions: ["exe"] }],
+    });
+    if (typeof picked !== "string") return;
+    await addPath(picked);
   }
 
   if (!settings) return null;
@@ -125,9 +134,47 @@ export function CustomModeCard() {
 
       {settings.enabled ? (
         <div className="flex flex-col gap-2">
+          {/* Which way the list reads. Two opposite meanings for the
+              same list of apps, so both are spelled out as sentences
+              underneath rather than left to the labels -- a customer who
+              reads this backwards sends the traffic they wanted hidden
+              out in the clear. */}
+          <div className="flex gap-1 rounded-lg border border-white/8 bg-white/[0.025] p-1">
+            {(
+              [
+                ["onlySelected", t("settings.customModeOnly")],
+                ["allExcept", t("settings.customModeExcept")],
+              ] as [SplitTunnelMode, string][]
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={settings.mode === value}
+                onClick={() => void apply({ ...settings, mode: value })}
+                className={[
+                  "press flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
+                  settings.mode === value
+                    ? "bg-[linear-gradient(120deg,var(--primary),var(--highlight))] text-white"
+                    : "text-muted-foreground hover:bg-white/8 hover:text-foreground",
+                ].join(" ")}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            {settings.mode === "allExcept"
+              ? t("settings.customModeExceptHint")
+              : t("settings.customModeOnlyHint")}
+          </p>
+
           {settings.apps.length === 0 ? (
             <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-              {t("settings.customNoApps")}
+              {/* Says what is actually happening, which is opposite in
+                  the two directions: nothing routed, or everything. */}
+              {settings.mode === "allExcept"
+                ? t("settings.customNoAppsExcept")
+                : t("settings.customNoApps")}
             </p>
           ) : (
             <ul className="flex flex-col gap-1.5">
@@ -162,14 +209,42 @@ export function CustomModeCard() {
 
           {notice ? <p className="text-xs text-destructive">{notice}</p> : null}
 
-          <Button
-            variant="outline"
-            onClick={() => void addApp()}
-            className="w-full justify-center gap-2"
-          >
-            <Plus className="size-4" />
-            {t("settings.customAddApp")}
-          </Button>
+          {/* Two ways in, because neither covers everything. The
+              running list is how a person actually thinks about it --
+              "that one, the game I have open" -- but it cannot offer
+              something that is not running yet, and browsing can. */}
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setNotice(null);
+                setPicking(true);
+              }}
+              className="flex-1 justify-center gap-2"
+            >
+              <ListChecks className="size-4" />
+              {t("settings.customPickRunning")}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void browseForApp()}
+              className="flex-1 justify-center gap-2"
+            >
+              <FolderOpen className="size-4" />
+              {t("settings.customPickFile")}
+            </Button>
+          </div>
+
+          {picking ? (
+            <RunningAppPicker
+              chosen={settings.apps}
+              onClose={() => setPicking(false)}
+              onPick={(path) => {
+                setPicking(false);
+                void addPath(path);
+              }}
+            />
+          ) : null}
 
           {effective ? (
             <p className="text-[11px] text-muted-foreground">{t("settings.customApplies")}</p>

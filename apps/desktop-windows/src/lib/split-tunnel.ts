@@ -11,13 +11,25 @@ import { invoke } from "@tauri-apps/api/core";
  * Its own store file rather than session.json, for the same reason
  * failover.json is: signing out should not erase which game someone
  * picked. */
+/** Which way round the chosen list reads.
+ *
+ * Two opposite answers to "does this app use the VPN", so the wording in
+ * the UI has to be unambiguous -- a customer who reads it backwards
+ * sends the traffic they wanted hidden out in the clear. */
+export type SplitTunnelMode = "onlySelected" | "allExcept";
+
 export type SplitTunnelSettings = {
   enabled: boolean;
-  /** Absolute paths to executables, as the file picker returned them. */
+  /** Absolute paths to executables, as the picker returned them. */
   apps: string[];
+  mode: SplitTunnelMode;
 };
 
-export const EMPTY_SPLIT_TUNNEL: SplitTunnelSettings = { enabled: false, apps: [] };
+export const EMPTY_SPLIT_TUNNEL: SplitTunnelSettings = {
+  enabled: false,
+  apps: [],
+  mode: "onlySelected",
+};
 
 /** Matches the service's own cap, so an over-long list is refused here
  * with an explanation rather than there with a validation error. */
@@ -47,6 +59,10 @@ export async function loadSplitTunnel(): Promise<SplitTunnelSettings> {
     return {
       enabled: Boolean(stored.enabled),
       apps: Array.isArray(stored.apps) ? stored.apps.filter((a) => typeof a === "string") : [],
+      // An upgrade reads a file written before the direction existed,
+      // and the only safe reading is the behaviour that file was saved
+      // under.
+      mode: stored.mode === "allExcept" ? "allExcept" : "onlySelected",
     };
   } catch {
     return EMPTY_SPLIT_TUNNEL;
@@ -73,7 +89,23 @@ export async function saveSplitTunnel(settings: SplitTunnelSettings): Promise<vo
  * knowing nothing. Re-sending is cheap and removes the whole class of
  * "Custom mode silently stopped applying". */
 export async function pushSplitTunnel(settings: SplitTunnelSettings): Promise<void> {
-  await invoke("vpn_set_split_tunnel", { enabled: settings.enabled, apps: settings.apps });
+  await invoke("vpn_set_split_tunnel", {
+    enabled: settings.enabled,
+    apps: settings.apps,
+    mode: settings.mode,
+  });
+}
+
+/** One running application, as the service reports it. */
+export type RunningApp = { path: string; name: string };
+
+/** What is running right now, for choosing from a list.
+ *
+ * Asked of the service rather than gathered here: this app is not
+ * elevated and cannot read the image path of a process it does not own,
+ * and the path is what a selection is made of. */
+export async function listRunningApps(): Promise<RunningApp[]> {
+  return await invoke<RunningApp[]>("vpn_list_running_apps");
 }
 
 /** Whether the setting will actually change how the next tunnel behaves.

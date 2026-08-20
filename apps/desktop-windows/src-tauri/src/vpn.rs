@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use neoconnect_ipc::{
     ConnectProfile, Ikev2Profile, OpenvpnProfile, Request, Response, ShadowsocksProfile,
-    SplitTunnelConfig, TrojanProfile, TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile,
+    RunningApp, SplitTunnelConfig, SplitTunnelMode, TrojanProfile, TunnelHealth, VlessTlsProfile,
+    WireguardProfile, XrayProfile,
     PIPE_NAME,
 };
 use serde::Deserialize;
@@ -329,7 +330,9 @@ async fn call_expecting_ok(request: &Request) -> Result<(), String> {
     match call(request).await? {
         Response::Ok => Ok(()),
         Response::Error { message } => Err(message),
-        Response::State { .. } => Err("the background service returned an unexpected reply".into()),
+        Response::State { .. } | Response::RunningApps { .. } => {
+            Err("the background service returned an unexpected reply".into())
+        }
     }
 }
 
@@ -366,11 +369,31 @@ pub async fn vpn_probe_split_tunnel() -> Result<(), String> {
 /// restart -- it runs as a Windows service and can be restarted
 /// independently of the app.
 #[tauri::command]
-pub async fn vpn_set_split_tunnel(enabled: bool, apps: Vec<String>) -> Result<(), String> {
+pub async fn vpn_set_split_tunnel(
+    enabled: bool,
+    apps: Vec<String>,
+    mode: SplitTunnelMode,
+) -> Result<(), String> {
     call_expecting_ok(&Request::SetSplitTunnel {
-        config: SplitTunnelConfig { enabled, apps },
+        config: SplitTunnelConfig { enabled, apps, mode },
     })
     .await
+}
+
+/// The applications running right now, for the in-app picker.
+///
+/// Asked of the service because the app is not elevated: it can see
+/// that a process exists but not the image path of one it does not own,
+/// and the path is exactly what a selection is made of.
+#[tauri::command]
+pub async fn vpn_list_running_apps() -> Result<Vec<RunningApp>, String> {
+    match call(&Request::ListRunningApps).await? {
+        Response::RunningApps { apps } => Ok(apps),
+        Response::Error { message } => Err(message),
+        // Anything else means the service answered a different question,
+        // which is a bug rather than a condition to paper over.
+        _ => Err("the helper service gave an unexpected answer".to_string()),
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -560,7 +583,9 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_active,
         }),
         Response::Error { message } => Err(message),
-        Response::Ok => Err("the background service returned an unexpected reply".into()),
+        Response::Ok | Response::RunningApps { .. } => {
+            Err("the background service returned an unexpected reply".into())
+        }
     }
 }
 
