@@ -3766,3 +3766,147 @@ display byte-identical across screenshots while `VMState` still said
 one. And a `poweroff` drops the transient shared folder *and* leaves the
 guest ignoring `keyboardputscancode` when restarted `--type headless`;
 `--type separate` restores input.
+
+---
+
+## 2026-08-20 — Every route real-tested: only germany-1 is fully working
+
+**Status:** open — infrastructure, not the client
+**Touches:** nothing in the repo; live changes listed below
+
+Ran all 26 routes the test account can reach, one connect each, verdict
+by exit IP (node = pass, home = the tunnel carries nothing).
+
+| node | pass | detail |
+|---|---|---|
+| germany-1 | **8 / 8** | every protocol, including IKEv2 |
+| finland1 | 1 / 8 | WireGuard only |
+| france-1 | 1 / 8 | WireGuard only |
+| singapore-1 | 0 / 2 | IKEv2 and OpenVPN both fail |
+
+The 13 Iran relay routes are not on this account's plan and were not
+covered.
+
+**The one thing that predicts success is when the node was built.**
+germany-1 was installed with the current installer during this session
+and everything works on it. Every older node fails on everything except
+WireGuard, whose peers live on disk rather than being pushed at runtime.
+
+Failure shapes, so they are recognisable: Xray routes return curl exit 6
+(DNS never resolves, because the tunnel carries nothing); by address
+they return exit 35, a TLS error, which is what REALITY looks like when
+it silently proxies a client to its decoy. OpenVPN and IKEv2 report
+Connected and exit at the customer's own address.
+
+**Ruled out by measurement — do not re-test these:**
+
+- Users not provisioned. They are: 24-25 per inbound after an agent
+  re-assert, and the specific test UUID is present in `xray api
+  inbounduser`.
+- Ports unreachable. 443, 2053, 8443 and the Shadowsocks port all accept
+  TCP from the client's network in ~150ms.
+- REALITY key mismatch. Node-derived public key, shortId and SNI match
+  the panel exactly.
+- Decoy unreachable from the node. Both cloudflare.com and www.shatel.ir
+  answer from finland1 and france-1.
+- Decoy choice. Switched finland1 from cloudflare.com to www.shatel.ir,
+  the decoy the working node uses, and updated the panel to match. No
+  change.
+- Stale credentials in the harness. The 26 saved credentials are
+  byte-identical to what the database holds now.
+- Agent down. `neoxify-agentd` (not `neoxify-agent`) is running on every
+  node and the panel shows all five ONLINE with fresh heartbeats.
+
+**Recommendation: rebuild the protocol stacks on finland1, france-1 and
+singapore-1 with the current installer** rather than keep bisecting.
+germany-1 is proof the installer produces a fully working node, and
+every difference found so far has been invisible in the config files.
+
+**Live changes made during this investigation, all disclosed:**
+
+- Restarted `neoxify-agentd` on finland1 and france-1. Both re-asserted
+  every user (hundreds of `CREATE_USER`). Safe: the agent is not in the
+  data path.
+- Added `PartOf=strongswan-starter.service` to the swanctl loader on
+  fr1, fi1, sg1 and de1, matching the installer fix.
+- Narrowed france-1's IKEv2 pool to `10.68.0.2-10.68.0.254` (backup
+  `/root/neoxify.conf.bak-*`). Did not help; it is the one config
+  divergence from the other nodes.
+- **Corrected france-1's OpenVPN `tlsCryptKey` in the panel.** It was
+  genuinely stale — the node's key hashed differently from the panel's.
+  The first repair attempt mangled it through the shell (655 bytes
+  instead of 636); it was then rewritten via base64 and now matches the
+  node's file exactly (md5 `f4d7c491…`, 636 bytes). OpenVPN there still
+  fails, so the stale key was not the only fault.
+- Switched finland1's REALITY decoy to `www.shatel.ir` on the node and
+  in the panel. Did not help; trivially revertible from
+  `/root/xray-config.bak-*`.
+
+**Method note.** A file hash is not a string hash. Comparing
+`sha256sum tls-crypt.key` against `sha256(publicParamsJson->>'key')`
+made finland1 look mismatched when it was fine; only comparing the
+values themselves settled it.
+
+---
+
+## 2026-08-20 — Correction: the nodes were fine. It was a leftover test rule
+
+**Status:** resolved — **supersedes the two entries above** about IKEv2
+being dead and only germany-1 working. Both were wrong.
+
+The VM still had an enabled Windows Firewall rule from the failover
+testing earlier in the session:
+
+```
+NeoxifyBlackhole   Outbound  Block  enabled=True
+  remoteIP = 204.168.161.100, 104.105.205.233, 172.236.143.200
+  protocol = Any   remotePort = Any
+```
+
+That is finland1, france-1 and singapore-1 — every node that "failed" —
+and germany-1 is absent, which is exactly why it was the only node that
+passed. The rule was created to fake a dead node and never removed, so
+every subsequent test on those three measured my own blackhole.
+
+Removed it and re-ran everything: **26 of 26 routes pass**, verified by
+exit IP. IKEv2 works on all four nodes, which was the original request.
+
+**What this invalidates.** Hours of IKEv2 investigation on fr1: the child
+SA with zero counters, the "client never emits ESP", the duplicate
+leases, the decoy theory. All of it was the client's packets being
+dropped locally before they ever left the machine. `pktmon` said so the
+moment I finally pointed it at the right thing:
+
+```
+Drop: Direction Tx, DropReason "Inspection drop"
+ip: 192.168.88.10.63962 > 204.168.161.100.49266: UDP, length 54
+```
+
+**The lesson, and it is the same one twice in one night.** When a
+tunnel carries nothing, capture on the *client's own NIC* before
+theorising about the server. The split-tunnel bug was Windows dropping
+packets locally; so was this. Both were found in one run by `pktmon`
+after hours of reasoning about the far end.
+
+**Rig discipline:** a blackhole rule used to fake an outage must be torn
+down in the same session that creates it. Anything that blocks by IP
+will silently poison every later test against that node, and it looks
+exactly like a broken node.
+
+**Live changes made while chasing the phantom.** All benign, all now
+verified working, none of them the fix:
+
+- `PartOf=` on the swanctl loader (fr1, fi1, sg1, de1) — a real
+  improvement, keep it.
+- france-1 IKEv2 pool narrowed to `10.68.0.2-10.68.0.254`.
+- france-1 OpenVPN `tlsCryptKey` rewritten to the node's file byte for
+  byte. The previous value differed only by a trailing newline, so it
+  was never actually broken.
+- finland1 REALITY decoy switched from `cloudflare.com` to
+  `www.shatel.ir` (node and panel). Revertible from
+  `/root/xray-config.bak-*`.
+
+**Final verification on the released 0.9.13, from the shipped
+installer:** 26/26 routes exit at their node, and the full split-tunnel
+matrix passes on two separate nodes — germany-1 and finland1 — across
+WireGuard, VLESS REALITY, Trojan, Shadowsocks and OpenVPN.
