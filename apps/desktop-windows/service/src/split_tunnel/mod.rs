@@ -354,10 +354,7 @@ impl SplitTunnel {
     /// nothing chosen -- which must not mean "tunnel everything", since
     /// that is the opposite of what the customer asked for.
     pub fn wants_passive_tunnel(&self) -> bool {
-        let selection = self.selection.read().unwrap_or_else(|e| e.into_inner());
-        self.enabled
-            && !selection.is_empty()
-            && selection.mode() == SplitTunnelMode::OnlySelected
+        self.wants_interception()
     }
 
     /// Whether packets must be intercepted at all, whichever way the
@@ -429,23 +426,13 @@ impl SplitTunnel {
         // redirected connections are pinned to the physical link so they
         // leave the way they would with no VPN at all. The rewriting,
         // the NAT and the return leg are identical either way.
-        let (attach_index, attach_addr) = match mode {
-            SplitTunnelMode::OnlySelected => (tunnel_adapter.index, tunnel_address),
-            SplitTunnelMode::AllExcept => (uplink.index, local_addr),
-        };
-        let tunnel = Arc::new(proxy::TunnelInterface::new(attach_index, attach_addr));
+        let tunnel =
+            Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
 
-        // Only the passive tunnel needs a route installed. A full one
-        // already has the machine's default, and adding a second would
-        // be this service fighting the engine over the routing table.
-        let route = match mode {
-            // The route is chosen by trying it, not by predicting it.
-            // See install_verified_route.
-            SplitTunnelMode::OnlySelected => {
-                install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path)?
-            }
-            SplitTunnelMode::AllExcept => InstalledRoutes::none(),
-        };
+        // The route is chosen by trying it, not by predicting it. See
+        // install_verified_route.
+        let route =
+            install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path)?;
         let relays = match proxy::start(nat.clone(), tunnel.clone()) {
             Ok(relays) => relays,
             Err(e) => {
@@ -458,7 +445,7 @@ impl SplitTunnel {
         // Before the redirect starts, so that no packet is ever sent
         // to a port the firewall is still dropping.
         let allowance =
-            match firewall::Allowance::install(local_addr, relays.tcp_port, relays.udp_port) {
+            match firewall::Allowance::install(&[local_addr, tunnel_address], relays.tcp_port, relays.udp_port) {
                 Ok(allowance) => allowance,
                 Err(e) => {
                     relays.stop();
@@ -470,6 +457,7 @@ impl SplitTunnel {
 
         let redirect = redirect::Redirect {
             local_addr,
+            local_interface: uplink.index,
             node_addr: node,
             tcp_proxy_port: relays.tcp_port,
             udp_proxy_port: relays.udp_port,
@@ -478,7 +466,10 @@ impl SplitTunnel {
             // A full tunnel already resolves through the VPN, so there
             // is nothing to rescue and redirecting lookups would push
             // them back out of it.
-            carry_dns: matches!(mode, SplitTunnelMode::OnlySelected),
+            // Both directions, because the tunnel is passive in both:
+            // whatever is not carried resolves on the local network
+            // otherwise, which is the leak this closes.
+            carry_dns: true,
         };
 
         // Recorded before anything can go wrong with it: if Custom mode
@@ -487,15 +478,14 @@ impl SplitTunnel {
         // local address, and this is the only place that is written
         // down.
         let header = format!(
-            "custom mode ({direction}) on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}, redirected traffic leaves on if{attach_index}",
+            "custom mode ({direction}) on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}",
             tunnel_adapter.index,
             relays.tcp_port,
             relays.udp_port,
             direction = match mode {
                 SplitTunnelMode::OnlySelected => "only the selected apps are tunnelled",
                 SplitTunnelMode::AllExcept => "everything except the selected apps is tunnelled",
-            },
-            attach_index = attach_index
+            }
         );
 
         match redirect::start(redirect, nat, self.selection.clone()) {

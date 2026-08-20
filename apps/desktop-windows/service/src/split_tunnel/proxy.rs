@@ -397,6 +397,12 @@ fn accept_tcp(
             // Either the flow was retired underneath us, or something
             // connected to this port directly. Neither is ours to carry:
             // with no origin there is nowhere to send it.
+            //
+            // Said out loud rather than dropped in silence. This is the
+            // one place a redirected connection can disappear without
+            // any counter moving: the packets were rewritten and sent,
+            // so `redirected` climbs, and nothing ever answers.
+            note(&format!("accepted from port {} but no flow claims it", peer.port()));
             continue;
         };
 

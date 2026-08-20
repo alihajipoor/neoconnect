@@ -58,11 +58,11 @@ impl Allowance {
     /// Any rule left over from a previous session is deleted first: the
     /// ports are ephemeral, so a stale rule allows something arbitrary
     /// while failing to allow what this session needs.
-    pub fn install(local_addr: Ipv4Addr, tcp_port: u16, udp_port: u16) -> Result<Self, String> {
+    pub fn install(sources: &[Ipv4Addr], tcp_port: u16, udp_port: u16) -> Result<Self, String> {
         delete_rule();
 
-        add_rule("TCP", local_addr, tcp_port)?;
-        if let Err(e) = add_rule("UDP", local_addr, udp_port) {
+        add_rule("TCP", sources, tcp_port)?;
+        if let Err(e) = add_rule("UDP", sources, udp_port) {
             delete_rule();
             return Err(e);
         }
@@ -83,7 +83,27 @@ impl Drop for Allowance {
     }
 }
 
-fn add_rule(protocol: &str, local_addr: Ipv4Addr, port: u16) -> Result<(), String> {
+/// Every address a redirected packet can arrive from.
+///
+/// More than one, and the second is not optional. Which source a
+/// rewritten packet carries depends on where the application's traffic
+/// was headed before it was intercepted: with a passive tunnel it is
+/// the machine's address on the physical link, but with a full one --
+/// which is what "everything except these" builds -- the route to the
+/// internet is the tunnel, so the socket's source is the *tunnel's*
+/// address instead.
+///
+/// Allowing only the first is a silent failure of exactly the kind this
+/// module exists to prevent: the packets are rewritten and sent, the
+/// counters climb, and Windows drops every one of them before the proxy
+/// is ever offered the connection. Measured: redirected=10, returned=0,
+/// and not a single accept.
+fn add_rule(protocol: &str, sources: &[Ipv4Addr], port: u16) -> Result<(), String> {
+    let remote = sources
+        .iter()
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     // `profile=any` because the rule has to hold whichever profile
     // Windows has decided the network is; a customer on a Public
     // network would otherwise get a tunnel that silently carries
@@ -99,7 +119,7 @@ fn add_rule(protocol: &str, local_addr: Ipv4Addr, port: u16) -> Result<(), Strin
             "action=allow",
             &format!("protocol={protocol}"),
             &format!("localport={port}"),
-            &format!("remoteip={local_addr}"),
+            &format!("remoteip={remote}"),
             "profile=any",
             "enable=yes",
         ])
