@@ -128,7 +128,67 @@ pub struct Redirect {
     /// exactly like an ordinary app's, so without this the proxy would
     /// intercept itself.
     pub own_image: String,
+    /// The interface `local_addr` lives on.
+    ///
+    /// A rewritten packet is aimed at that address, so it has to be
+    /// injected on the link that owns it. Left as captured, a packet
+    /// taken off the tunnel adapter is re-injected *on the tunnel* and
+    /// Windows sends it to the VPN instead of to the proxy sitting on
+    /// this machine -- which is what "everything except these" did:
+    ///
+    /// ```text
+    /// ip: 10.77.0.3.40001 > 192.168.88.10.64129: Flags [S]   (x4, no reply)
+    /// ```
+    ///
+    /// Nothing was dropped and nothing answered, because the SYN went
+    /// down the tunnel. It never mattered before: with a passive tunnel
+    /// the captured packet was already on the physical link.
+    pub local_interface: u32,
+    /// Whether lookups are carried at all. False for a full tunnel,
+    /// which already resolves through the VPN.
+    pub carry_dns: bool,
+    /// Where name lookups are sent while Custom mode is on.
+    ///
+    /// Every lookup goes here, through the tunnel, whoever asked. See
+    /// `is_dns` for why that is not the overreach it looks like.
+    pub dns_resolver: Ipv4Addr,
 }
+
+/// Whether this packet is a name lookup.
+///
+/// Custom mode used to leave DNS alone, and that was a leak with teeth.
+/// Measured on the test rig, one run, same moment:
+///
+/// ```text
+/// CUSTOM  tcp egress: 38.60.249.229   (the node)
+/// CUSTOM  dns egress: 50.34.35.228    (the customer's own address)
+/// ```
+///
+/// So a selected application's traffic went through the tunnel while
+/// the name it looked up was resolved by the network the customer was
+/// trying to escape. On an ordinary connection that is merely a privacy
+/// leak. On a censored one it is the whole feature failing: the
+/// resolver answers blocked domains with a lie, so the browser cannot
+/// open the site while an unblocked address check still shows the
+/// tunnel's IP. That is exactly how it was reported -- "the IP changes
+/// but the site will not open", from Iran, with Telegram working
+/// because it never asks that resolver.
+///
+/// It cannot be done per-application: Windows resolves through its own
+/// DNS Client service, so the query leaves under svchost's name rather
+/// than the selected app's. Catching only the applications that resolve
+/// for themselves would fix some browsers and leave the rest broken.
+/// So while Custom mode is on, every lookup goes through the tunnel.
+/// Nothing else about an unselected application changes -- its
+/// connections still leave directly; only the name it asked about is
+/// resolved somewhere honest.
+fn is_dns(parsed: &Parsed) -> bool {
+    parsed.destination_port == DNS_PORT
+}
+
+/// The well-known port, named because `== 53` in the middle of a
+/// verdict reads like a magic number.
+const DNS_PORT: u16 = 53;
 
 /// The filter string, built from the addresses and ports in use.
 ///
@@ -392,7 +452,15 @@ fn handle_packet(
     match verdict {
         Verdict::Direct | Verdict::Unknown => None,
         Verdict::Redirect { nat_port } => {
-            rewrite_outbound(packet, &parsed, redirect.local_addr, nat_port, proxy_port);
+            rewrite_outbound(
+                packet,
+                address,
+                &parsed,
+                redirect.local_addr,
+                redirect.local_interface,
+                nat_port,
+                proxy_port,
+            );
             Some(Leg::Outbound)
         }
     }
@@ -446,13 +514,44 @@ fn decide(
 
     let owner_image = owner.image_for_port(parsed.transport, parsed.source_port);
     let known_owner = owner_image.is_some();
+    // This service, resolving for itself. Checked separately because it
+    // has to be excluded from the DNS rule below as well as from the
+    // selection: the proxy's upstream lookups must not be routed into
+    // the proxy. Getting this wrong took DNS out for the whole machine
+    // the moment Custom mode came on -- the first version of this rule
+    // did exactly that.
+    let is_own = owner_image
+        .map(|image| image.eq_ignore_ascii_case(&redirect.own_image))
+        .unwrap_or(false);
     let selected = match owner_image {
-        Some(image) => !image.eq_ignore_ascii_case(&redirect.own_image) && selection.matches(image),
-        // A port with no owner this can see. Leaving it alone is the
-        // only safe answer -- redirecting traffic whose origin is
-        // unknown is how a split tunnel becomes a full one.
-        None => false,
+        Some(image) => !is_own && selection.should_tunnel(image),
+        // A port with no owner this can see. Which way to fail depends
+        // on the direction -- see `tunnel_when_owner_unknown`.
+        None => selection.tunnel_when_owner_unknown(),
     };
+
+    // A lookup is carried whoever made it -- see `is_dns` -- except this
+    // service's own.
+    if redirect.carry_dns && is_dns(parsed) && !is_own {
+        let origin = Origin {
+            addr: parsed.destination,
+            port: parsed.destination_port,
+            client: parsed.source,
+            client_port: parsed.source_port,
+            interface_id,
+            // Answered by a resolver reached through the tunnel, not by
+            // the one the network handed out.
+            upstream: Some(std::net::SocketAddrV4::new(redirect.dns_resolver, DNS_PORT)),
+        };
+        return match nat.redirect(parsed.transport, origin) {
+            Some(nat_port) => {
+                stats.matched.fetch_add(1, Ordering::Relaxed);
+                Verdict::Redirect { nat_port }
+            }
+            None => Verdict::Direct,
+        };
+    }
+
     if !selected {
         // Only remember the decision when the owner was actually known.
         //
@@ -487,6 +586,7 @@ fn decide(
         client: parsed.source,
         client_port: parsed.source_port,
         interface_id,
+        upstream: None,
     };
     match nat.redirect(parsed.transport, origin) {
         Some(nat_port) => {
@@ -504,8 +604,10 @@ fn decide(
 
 fn rewrite_outbound(
     packet: &mut [u8],
+    address: &mut WINDIVERT_ADDRESS,
     parsed: &Parsed,
     local_addr: Ipv4Addr,
+    local_interface: u32,
     nat_port: u16,
     proxy_port: u16,
 ) {
@@ -520,6 +622,13 @@ fn rewrite_outbound(
     // the proxy tells one peer from another on a single UDP socket.
     packet[ports..ports + 2].copy_from_slice(&nat_port.to_be_bytes());
     packet[ports + 2..ports + 4].copy_from_slice(&proxy_port.to_be_bytes());
+
+    // Injected on the link that owns the address it is now aimed at.
+    // See `Redirect::local_interface`.
+    //
+    // SAFETY: this came from the network layer, so the Network arm of
+    // the union is the live one.
+    unsafe { address.union_field.Network.interface_id = local_interface };
 
     // Still outbound, and that is the whole fix.
     //
@@ -592,6 +701,22 @@ mod tests {
         packet[20..22].copy_from_slice(&source_port.to_be_bytes());
         packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
         packet[33] = flags;
+        packet
+    }
+
+    fn udp_packet(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        source_port: u16,
+        destination_port: u16,
+    ) -> Vec<u8> {
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x45; // IPv4, 20-byte header
+        packet[9] = IPPROTO_UDP;
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
         packet
     }
 
@@ -668,10 +793,14 @@ mod tests {
         // so the packet stays outbound and the stack loops it back to
         // the proxy's socket. Flipping it to inbound made the stack
         // drop it as spoofed, since by then both ends are local.
+        let mut address = WINDIVERT_ADDRESS::default();
+        address.set_outbound(true);
         rewrite_outbound(
             &mut packet,
+            &mut address,
             &parsed,
             Ipv4Addr::new(192, 168, 1, 20),
+            5,
             41000,
             19999,
         );
@@ -695,6 +824,7 @@ mod tests {
             client: Ipv4Addr::new(192, 168, 1, 20),
             client_port: 51234,
             interface_id: 12,
+            upstream: None,
         };
         let nat_port = nat.redirect(Transport::Tcp, origin).unwrap();
 
@@ -736,6 +866,40 @@ mod tests {
     }
 
     #[test]
+    fn a_lookup_is_carried_even_when_its_app_is_not_selected() {
+        // The leak this closes, measured on the test rig in one run:
+        //
+        //   CUSTOM  tcp egress: 38.60.249.229   (the node)
+        //   CUSTOM  dns egress: 50.34.35.228    (the customer's own line)
+        //
+        // A selected app's traffic went through the tunnel while the
+        // name it asked about was resolved by the network being escaped.
+        // On a censored connection that answer is a lie, so the site
+        // will not open while an address check still shows the tunnel --
+        // reported exactly that way from Iran.
+        //
+        // It cannot be done per-application, because Windows resolves
+        // through its own DNS Client service rather than the asking
+        // program, so the query never carries the app's name.
+        assert!(is_dns(&parse(&udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(192, 168, 1, 1),
+            51000,
+            53,
+        ))
+        .unwrap()));
+
+        // Anything else still obeys the selection.
+        assert!(!is_dns(&parse(&udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            51000,
+            443,
+        ))
+        .unwrap()));
+    }
+
+    #[test]
     fn the_filter_excludes_the_node_and_every_local_destination() {
         // Each exclusion is load-bearing. The node's address carries the
         // tunnel itself; the private ranges are the LAN a split tunnel
@@ -748,6 +912,9 @@ mod tests {
             tcp_proxy_port: 19999,
             udp_proxy_port: 19998,
             own_image: String::new(),
+            dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
+            carry_dns: true,
+            local_interface: 5,
         });
 
         assert!(filter.contains("ip.DstAddr != 203.0.113.7"));
@@ -773,6 +940,9 @@ mod tests {
             tcp_proxy_port: 19999,
             udp_proxy_port: 19998,
             own_image: String::new(),
+            dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
+            carry_dns: true,
+            local_interface: 5,
         });
         super::super::divert::compile_filter(&filter).expect("the filter must compile");
     }

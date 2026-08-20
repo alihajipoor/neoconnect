@@ -35,6 +35,10 @@ features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
+    # Process enumeration for the Custom-mode app picker, so a customer
+    # can choose from what is running instead of hunting through
+    # Program Files for an executable.
+    "Win32_System_Diagnostics_ToolHelp",
     # Adapter enumeration for routing -- see src/adapters.rs for why this
     # is done through the API rather than by parsing localised command output.
     "Win32_NetworkManagement_IpHelper",

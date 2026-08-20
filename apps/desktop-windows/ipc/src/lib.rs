@@ -57,6 +57,23 @@ pub enum Request {
     /// correctly leaves by the ordinary route and correctly reports the
     /// tunnel as bypassed.
     ProbeSplitTunnel,
+    /// The applications running right now, for choosing from a list
+    /// instead of hunting through Program Files.
+    ///
+    /// Answered by the service rather than the app because the app is
+    /// not elevated and cannot read the image path of a process it does
+    /// not own -- which is exactly the path Custom mode matches on.
+    ListRunningApps,
+}
+
+/// One running application, as the picker shows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningApp {
+    /// The full path, which is what a selection is made of.
+    pub path: String,
+    /// The file name, for showing to a human.
+    pub name: String,
 }
 
 /// Custom mode, as the app expresses it.
@@ -65,10 +82,33 @@ pub enum Request {
 /// customer turned the toggle on and has not chosen anything yet. It
 /// must not be read as "tunnel everything": that is the opposite of what
 /// the toggle promises, and it would arrive as a surprise full tunnel.
+/// Which way round Custom mode reads the customer's list.
+///
+/// Two genuinely different tunnels, not a filter applied twice. With
+/// `OnlySelected` the tunnel carries nothing by default and the chosen
+/// applications are lifted into it. With `AllExcept` the tunnel carries
+/// everything, as it would with Custom mode off, and the chosen
+/// applications are pushed out of it -- so it is the *tunnel's* shape
+/// that changes, not just which names match.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitTunnelMode {
+    /// Only the chosen applications use the VPN. Everything else keeps
+    /// the ordinary connection. The original behaviour, and the default
+    /// so an older app that sends no mode keeps what it had.
+    #[default]
+    OnlySelected,
+    /// Everything uses the VPN except the chosen applications.
+    AllExcept,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SplitTunnelConfig {
     pub enabled: bool,
+    /// Absent from an older app, which only ever meant `OnlySelected`.
+    #[serde(default)]
+    pub mode: SplitTunnelMode,
     /// Absolute paths to executables. Paths rather than process names,
     /// because a name matches whatever happens to be called that, and
     /// paths rather than process ids, because a modern application is
@@ -126,6 +166,11 @@ impl SplitTunnelConfig {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum Response {
     Ok,
+    /// The running applications, deduplicated by path and sorted by
+    /// name.
+    RunningApps {
+        apps: Vec<RunningApp>,
+    },
     /// Reports what is actually running, re-derived from live process /
     /// service state rather than from a remembered flag, so a
     /// crashed-engine case surfaces as disconnected instead of lying.
@@ -949,5 +994,29 @@ mod tests {
             server_name: "example.com".into(),
         });
         assert!(profile.validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod split_tunnel_mode_tests {
+    use super::*;
+
+    #[test]
+    fn the_app_can_ask_for_either_direction() {
+        // The wire spelling matters more than it looks: an unrecognised
+        // mode must not quietly read as the other one, because the two
+        // are opposite answers to "does this app use the VPN".
+        let only: SplitTunnelConfig =
+            serde_json::from_str(r#"{"enabled":true,"apps":[],"mode":"onlySelected"}"#).unwrap();
+        assert_eq!(only.mode, SplitTunnelMode::OnlySelected);
+
+        let except: SplitTunnelConfig =
+            serde_json::from_str(r#"{"enabled":true,"apps":[],"mode":"allExcept"}"#).unwrap();
+        assert_eq!(except.mode, SplitTunnelMode::AllExcept);
+
+        // An older app sends no mode at all, and must keep what it had.
+        let legacy: SplitTunnelConfig =
+            serde_json::from_str(r#"{"enabled":true,"apps":[]}"#).unwrap();
+        assert_eq!(legacy.mode, SplitTunnelMode::OnlySelected);
     }
 }
