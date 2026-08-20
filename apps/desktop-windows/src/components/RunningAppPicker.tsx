@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Loader2, RefreshCw, X } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import { listRunningApps, type RunningApp } from "../lib/split-tunnel";
@@ -50,9 +51,15 @@ export function RunningAppPicker({
 
   const already = new Set(chosen.map((c) => c.toLowerCase()));
 
-  return (
+  // Rendered into the body rather than where it sits in the tree.
+  // `position: fixed` is measured against the nearest ancestor with a
+  // transform or filter rather than the viewport, and the card this
+  // lives inside has both -- which clipped the dialog's own header and
+  // its Cancel button off the top of the screen while the list in the
+  // middle still looked fine.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="flex max-h-[80vh] w-full max-w-md flex-col gap-3 rounded-xl border border-white/10 bg-surface p-4 shadow-xl">
+      <div className="flex max-h-[80vh] w-full max-w-md flex-col gap-3 rounded-xl border border-white/10 bg-popover p-4 shadow-xl">
         <div className="flex items-center gap-2">
           <p className="flex-1 text-sm font-semibold">{t("settings.customRunningTitle")}</p>
           <button
@@ -121,6 +128,7 @@ export function RunningAppPicker({
           {t("settings.customCancel")}
         </Button>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

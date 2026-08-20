@@ -3960,3 +3960,74 @@ back to a full tunnel, disconnect back to normal:
 | Trojan | germany-1, finland1 |
 | Shadowsocks | germany-1, finland1 |
 | IKEv2 | finland1, france-1, germany-1, singapore-1 |
+
+---
+
+## 2026-08-20 — The Custom mode DNS leak, and a direction for the list
+
+**Status:** done, verified on the VM through the app itself
+**Touches:** `apps/desktop-windows/**`
+
+**The tester's bug was DNS.** Custom mode on: Telegram fine, Chrome's IP
+changed but no site would open, and a full tunnel fixed it. One
+measurement explains all of it:
+
+```text
+CUSTOM  tcp egress: 38.60.249.229   (the node)
+CUSTOM  dns egress: 50.34.35.228    (his own line)
+```
+
+The selected app's traffic went through the tunnel while the *name* it
+looked up was resolved by the network he was escaping. No engine sets a
+resolver in Custom mode -- WireGuard drops it deliberately, OpenVPN
+pulls no routes, IKEv2 the same -- and the redirect had no notion of
+port 53. Invisible on a normal connection; on a censored one the
+resolver lies about blocked domains, so the browser cannot open the site
+while an unblocked address check still shows the tunnel. Telegram never
+asks that resolver, which is why it worked.
+
+It cannot be fixed per-application: Windows resolves through its own DNS
+Client service, so the query leaves under svchost's name. Every lookup
+now goes through the tunnel while Custom mode is on.
+
+**Gotcha:** the first attempt took DNS out for the whole machine, because
+the service's own lookups were being routed into the service's own
+proxy. Excluded, re-measured.
+
+**A direction for the list.** "All except these" is the other half of
+the feature. The obvious implementation is wrong: building a *full*
+tunnel and pushing the chosen applications out of it reads correctly and
+does not work, because a packet captured on the tunnel adapter and
+re-injected towards this machine goes down the tunnel and arrives
+nowhere -- four retransmits, no reply, no drop:
+
+```text
+ip: 10.77.0.3.40001 > 192.168.88.10.64129: Flags [S]
+```
+
+Three fixes died against that (widening the firewall allowance to the
+tunnel address, naming the physical interface on injection) before the
+shape of the mistake was clear. **Keep the tunnel passive in both
+directions and invert the match instead.** Everything carried then takes
+the one path already proven to work.
+
+Which way to fail on an unknown owner is opposite in the two
+directions, and both answers are the cautious one: tunnel only named
+apps and an unknown owner is left alone; tunnel everything except named
+apps and an unknown owner is carried.
+
+**A list to pick from.** Running applications come from the service --
+the app is not elevated and cannot read the image path of a process it
+does not own, and the path is what a selection is made of.
+
+**UI gotcha worth keeping:** the picker is rendered through a portal.
+`position: fixed` is measured against the nearest ancestor with a
+transform or filter, not the viewport, and the card it lives in has
+both -- which clipped the dialog's header and its Cancel button off the
+screen while the list in the middle looked fine.
+
+Verified through the app on the VM: the toggle, both directions with
+their wording, the running-apps list with real paths, and the settings
+surviving a restart. Behaviour verified per mode: only-these puts the
+chosen app at the node and others at home; all-except the reverse;
+Custom mode off carries the whole machine. All switched live.
