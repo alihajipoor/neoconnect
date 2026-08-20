@@ -3846,3 +3846,67 @@ every difference found so far has been invisible in the config files.
 `sha256sum tls-crypt.key` against `sha256(publicParamsJson->>'key')`
 made finland1 look mismatched when it was fine; only comparing the
 values themselves settled it.
+
+---
+
+## 2026-08-20 — Correction: the nodes were fine. It was a leftover test rule
+
+**Status:** resolved — **supersedes the two entries above** about IKEv2
+being dead and only germany-1 working. Both were wrong.
+
+The VM still had an enabled Windows Firewall rule from the failover
+testing earlier in the session:
+
+```
+NeoxifyBlackhole   Outbound  Block  enabled=True
+  remoteIP = 204.168.161.100, 104.105.205.233, 172.236.143.200
+  protocol = Any   remotePort = Any
+```
+
+That is finland1, france-1 and singapore-1 — every node that "failed" —
+and germany-1 is absent, which is exactly why it was the only node that
+passed. The rule was created to fake a dead node and never removed, so
+every subsequent test on those three measured my own blackhole.
+
+Removed it and re-ran everything: **26 of 26 routes pass**, verified by
+exit IP. IKEv2 works on all four nodes, which was the original request.
+
+**What this invalidates.** Hours of IKEv2 investigation on fr1: the child
+SA with zero counters, the "client never emits ESP", the duplicate
+leases, the decoy theory. All of it was the client's packets being
+dropped locally before they ever left the machine. `pktmon` said so the
+moment I finally pointed it at the right thing:
+
+```
+Drop: Direction Tx, DropReason "Inspection drop"
+ip: 192.168.88.10.63962 > 204.168.161.100.49266: UDP, length 54
+```
+
+**The lesson, and it is the same one twice in one night.** When a
+tunnel carries nothing, capture on the *client's own NIC* before
+theorising about the server. The split-tunnel bug was Windows dropping
+packets locally; so was this. Both were found in one run by `pktmon`
+after hours of reasoning about the far end.
+
+**Rig discipline:** a blackhole rule used to fake an outage must be torn
+down in the same session that creates it. Anything that blocks by IP
+will silently poison every later test against that node, and it looks
+exactly like a broken node.
+
+**Live changes made while chasing the phantom.** All benign, all now
+verified working, none of them the fix:
+
+- `PartOf=` on the swanctl loader (fr1, fi1, sg1, de1) — a real
+  improvement, keep it.
+- france-1 IKEv2 pool narrowed to `10.68.0.2-10.68.0.254`.
+- france-1 OpenVPN `tlsCryptKey` rewritten to the node's file byte for
+  byte. The previous value differed only by a trailing newline, so it
+  was never actually broken.
+- finland1 REALITY decoy switched from `cloudflare.com` to
+  `www.shatel.ir` (node and panel). Revertible from
+  `/root/xray-config.bak-*`.
+
+**Final verification on the released 0.9.13, from the shipped
+installer:** 26/26 routes exit at their node, and the full split-tunnel
+matrix passes on two separate nodes — germany-1 and finland1 — across
+WireGuard, VLESS REALITY, Trojan, Shadowsocks and OpenVPN.
