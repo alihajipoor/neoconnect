@@ -7,17 +7,17 @@ describe("isEffective", () => {
     // distracted. It must read as "doing nothing", because the
     // alternative reading -- tunnel everything -- is the opposite of
     // what the toggle promises, and it decides whether the UI warns.
-    expect(isEffective({ enabled: true, apps: [] })).toBe(false);
+    expect(isEffective({ enabled: true, apps: [], mode: "onlySelected" })).toBe(false);
   });
 
   it("is false when apps are chosen but the toggle is off", () => {
     // The list survives the toggle so a customer can turn Custom mode
     // off and back on without re-picking their games.
-    expect(isEffective({ enabled: false, apps: [String.raw`C:\Games\game.exe`] })).toBe(false);
+    expect(isEffective({ enabled: false, apps: [String.raw`C:\Games\game.exe`], mode: "onlySelected" })).toBe(false);
   });
 
   it("is true only when both are set", () => {
-    expect(isEffective({ enabled: true, apps: [String.raw`C:\Games\game.exe`] })).toBe(true);
+    expect(isEffective({ enabled: true, apps: [String.raw`C:\Games\game.exe`], mode: "onlySelected" })).toBe(true);
   });
 });
 

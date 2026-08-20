@@ -106,6 +106,46 @@ impl Selection {
         let lowered = image_path.to_lowercase();
         self.paths.iter().any(|p| *p == lowered)
     }
+
+    /// Whether this application's traffic belongs in the tunnel.
+    ///
+    /// The direction is applied here rather than to the tunnel's shape,
+    /// and that is deliberate. Building a *full* tunnel and pushing the
+    /// chosen applications out of it is the obvious reading of
+    /// "everything except these", and it does not work: a packet
+    /// captured on the tunnel adapter and re-injected towards this
+    /// machine is sent down the tunnel instead of to the proxy, and
+    /// arrives nowhere. Measured, four retransmits, no reply and no
+    /// drop:
+    ///
+    /// ```text
+    /// ip: 10.77.0.3.40001 > 192.168.88.10.64129: Flags [S]
+    /// ```
+    ///
+    /// Keeping the tunnel passive in both directions and inverting the
+    /// *match* instead means every packet that is carried takes the one
+    /// path already known to work. What the customer asked for is the
+    /// same either way: with `AllExcept` everything is lifted into the
+    /// tunnel except the applications they named, which are simply
+    /// never redirected and so keep the ordinary connection.
+    pub fn should_tunnel(&self, image_path: &str) -> bool {
+        match self.mode {
+            SplitTunnelMode::OnlySelected => self.matches(image_path),
+            SplitTunnelMode::AllExcept => !self.matches(image_path),
+        }
+    }
+
+    /// What to do with traffic whose owning program cannot be seen.
+    ///
+    /// Opposite answers for opposite directions, and both are the safe
+    /// one. Tunnelling only named applications means an unknown owner is
+    /// left alone, because redirecting traffic whose origin is unknown
+    /// is how a split tunnel becomes a full one. Tunnelling everything
+    /// *except* named applications means an unknown owner is carried,
+    /// because leaving it out is how it becomes a leak.
+    pub fn tunnel_when_owner_unknown(&self) -> bool {
+        matches!(self.mode, SplitTunnelMode::AllExcept)
+    }
 }
 
 /// Caches the two connection tables and the image path of each process

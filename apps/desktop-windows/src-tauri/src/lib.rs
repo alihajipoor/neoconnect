@@ -123,6 +123,7 @@ pub fn run() {
             vpn::vpn_disconnect,
             vpn::vpn_set_split_tunnel,
             vpn::vpn_probe_split_tunnel,
+            vpn::vpn_list_running_apps,
             vpn::vpn_status,
             vpn::measure_latency,
             vpn::network_fingerprint,
