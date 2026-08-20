@@ -24,6 +24,7 @@
 //! cached and the refresh rate-limited below.
 
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, NO_ERROR};
@@ -64,6 +65,14 @@ pub enum Transport {
 /// two different pids inside twenty seconds, and a customer who picks an
 /// app means every process from that image, including ones that do not
 /// exist yet.
+/// A selection the redirect loop can be handed once and still see
+/// later edits through.
+///
+/// The lock is read on every packet and written only when the customer
+/// changes their choice, which is why it is an `RwLock`: the readers are
+/// the hot path and they do not contend with each other.
+pub type SharedSelection = Arc<RwLock<Selection>>;
+
 #[derive(Debug, Default, Clone)]
 pub struct Selection {
     paths: Vec<String>,
