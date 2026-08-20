@@ -60,10 +60,12 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use neoconnect_ipc::SplitTunnelMode;
+
 use crate::adapters;
 use crate::engines::routing::{self, InstalledRoutes};
 
-pub use owner::{Selection, SharedSelection};
+pub use owner::{running_apps, Selection, SharedSelection};
 
 /// How long to wait for a tunnel adapter to appear and be given an
 /// address after its engine starts.
@@ -342,9 +344,9 @@ impl SplitTunnel {
     /// It shipped that way, and because editing the list within Custom
     /// mode deliberately rebuilds nothing, the customer's first choice
     /// was the only one that ever took effect.
-    pub fn set_selection(&mut self, enabled: bool, apps: Vec<String>) {
+    pub fn set_selection(&mut self, enabled: bool, apps: Vec<String>, mode: SplitTunnelMode) {
         self.enabled = enabled;
-        *self.selection.write().unwrap_or_else(|e| e.into_inner()) = Selection::new(apps);
+        *self.selection.write().unwrap_or_else(|e| e.into_inner()) = Selection::new(apps, mode);
     }
 
     /// Whether Custom mode should shape how the next tunnel is brought
@@ -352,8 +354,28 @@ impl SplitTunnel {
     /// nothing chosen -- which must not mean "tunnel everything", since
     /// that is the opposite of what the customer asked for.
     pub fn wants_passive_tunnel(&self) -> bool {
+        let selection = self.selection.read().unwrap_or_else(|e| e.into_inner());
         self.enabled
-            && !self.selection.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+            && !selection.is_empty()
+            && selection.mode() == SplitTunnelMode::OnlySelected
+    }
+
+    /// Whether packets must be intercepted at all, whichever way the
+    /// list reads.
+    ///
+    /// Distinct from `wants_passive_tunnel` because "everything except
+    /// these" needs a *full* tunnel with interception on top: the tunnel
+    /// carries the machine as usual and the chosen applications are
+    /// pushed out of it. Asking the passive question there would answer
+    /// no and leave the excluded applications tunnelled, which is the
+    /// setting doing nothing.
+    pub fn wants_interception(&self) -> bool {
+        self.enabled && !self.selection.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
+    /// Which way the list reads right now.
+    pub fn mode(&self) -> SplitTunnelMode {
+        self.selection.read().unwrap_or_else(|e| e.into_inner()).mode()
     }
 
     pub fn is_running(&self) -> bool {
@@ -373,9 +395,10 @@ impl SplitTunnel {
         log_dir: &Path,
     ) -> Result<(), String> {
         self.stop();
-        if !self.wants_passive_tunnel() {
+        if !self.wants_interception() {
             return Ok(());
         }
+        let mode = self.mode();
 
         // Needed before the session is assembled, because choosing the
         // route writes to it.
@@ -394,17 +417,35 @@ impl SplitTunnel {
             .ok_or_else(|| "the physical network connection has no address".to_string())?;
 
         let nat = Arc::new(flows::Nat::new());
-        let tunnel =
-            Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
 
-        // The route is chosen by trying it, not by predicting it. See
-        // install_verified_route.
-        let route = install_verified_route(
-            tunnel_address,
-            tunnel_adapter.index,
-            &tunnel,
-            &log_path,
-        )?;
+        // Which interface the proxy sends a redirected connection out
+        // of, and it is the only thing that differs between the two
+        // directions.
+        //
+        // Tunnelling the chosen applications means pinning to the VPN
+        // adapter, with the tunnel itself passive so nothing else uses
+        // it. Excluding them means the opposite in both halves: the
+        // tunnel stays full and carries the machine as usual, and the
+        // redirected connections are pinned to the physical link so they
+        // leave the way they would with no VPN at all. The rewriting,
+        // the NAT and the return leg are identical either way.
+        let (attach_index, attach_addr) = match mode {
+            SplitTunnelMode::OnlySelected => (tunnel_adapter.index, tunnel_address),
+            SplitTunnelMode::AllExcept => (uplink.index, local_addr),
+        };
+        let tunnel = Arc::new(proxy::TunnelInterface::new(attach_index, attach_addr));
+
+        // Only the passive tunnel needs a route installed. A full one
+        // already has the machine's default, and adding a second would
+        // be this service fighting the engine over the routing table.
+        let route = match mode {
+            // The route is chosen by trying it, not by predicting it.
+            // See install_verified_route.
+            SplitTunnelMode::OnlySelected => {
+                install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path)?
+            }
+            SplitTunnelMode::AllExcept => InstalledRoutes::none(),
+        };
         let relays = match proxy::start(nat.clone(), tunnel.clone()) {
             Ok(relays) => relays,
             Err(e) => {
@@ -434,6 +475,10 @@ impl SplitTunnel {
             udp_proxy_port: relays.udp_port,
             own_image: own_image_path(),
             dns_resolver: CUSTOM_MODE_RESOLVER,
+            // A full tunnel already resolves through the VPN, so there
+            // is nothing to rescue and redirecting lookups would push
+            // them back out of it.
+            carry_dns: matches!(mode, SplitTunnelMode::OnlySelected),
         };
 
         // Recorded before anything can go wrong with it: if Custom mode
@@ -442,8 +487,15 @@ impl SplitTunnel {
         // local address, and this is the only place that is written
         // down.
         let header = format!(
-            "custom mode on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}",
-            tunnel_adapter.index, relays.tcp_port, relays.udp_port
+            "custom mode ({direction}) on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}, redirected traffic leaves on if{attach_index}",
+            tunnel_adapter.index,
+            relays.tcp_port,
+            relays.udp_port,
+            direction = match mode {
+                SplitTunnelMode::OnlySelected => "only the selected apps are tunnelled",
+                SplitTunnelMode::AllExcept => "everything except the selected apps is tunnelled",
+            },
+            attach_index = attach_index
         );
 
         match redirect::start(redirect, nat, self.selection.clone()) {
@@ -577,13 +629,13 @@ mod tests {
         // "tunnel everything" -- that is the opposite of Custom mode,
         // and it would arrive as a surprise full tunnel.
         let mut split = SplitTunnel::new();
-        split.set_selection(true, Vec::new());
+        split.set_selection(true, Vec::new(), SplitTunnelMode::OnlySelected);
         assert!(!split.wants_passive_tunnel());
 
-        split.set_selection(true, vec![r"C:\Games\game.exe".into()]);
+        split.set_selection(true, vec![r"C:\Games\game.exe".into()], SplitTunnelMode::OnlySelected);
         assert!(split.wants_passive_tunnel());
 
-        split.set_selection(false, vec![r"C:\Games\game.exe".into()]);
+        split.set_selection(false, vec![r"C:\Games\game.exe".into()], SplitTunnelMode::OnlySelected);
         assert!(!split.wants_passive_tunnel());
     }
 

@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use neoconnect_ipc::{ConnectProfile, TunnelHealth};
+use neoconnect_ipc::{ConnectProfile, SplitTunnelMode, TunnelHealth};
 
 use crate::adapters;
 use crate::split_tunnel::SplitTunnel;
@@ -110,18 +110,44 @@ impl Engines {
     /// So the rebuild happens here, from the profile the live tunnel was
     /// built with. Failure is returned rather than swallowed: a switch
     /// that leaves no tunnel up must not look like success.
-    pub fn set_split_tunnel(&mut self, enabled: bool, apps: Vec<String>) -> Result<(), String> {
+    pub fn set_split_tunnel(
+        &mut self,
+        enabled: bool,
+        apps: Vec<String>,
+        mode: SplitTunnelMode,
+    ) -> Result<(), String> {
         let was_passive = self.split_tunnel.wants_passive_tunnel();
-        self.split_tunnel.set_selection(enabled, apps);
+        let was_intercepting = self.split_tunnel.wants_interception();
+        let was_mode = self.split_tunnel.mode();
+        self.split_tunnel.set_selection(enabled, apps, mode);
         let now_passive = self.split_tunnel.wants_passive_tunnel();
+        let now_intercepting = self.split_tunnel.wants_interception();
+        let now_mode = self.split_tunnel.mode();
 
-        // Only the shape matters. Editing the list within a mode, or
-        // toggling a mode with nothing selected, changes nothing about
-        // how the tunnel must be built.
-        if was_passive == now_passive {
+        if self.active.is_none() {
             return Ok(());
         }
-        if self.active.is_none() {
+
+        // Interception changed but the tunnel's shape did not: turning
+        // "everything except these" on or off, where the tunnel carries
+        // the machine either way. Restarting the redirect in place is
+        // enough, and is what keeps the switch immediate -- rebuilding
+        // the tunnel would drop every live connection to change
+        // something the tunnel does not care about.
+        if was_passive == now_passive {
+            if was_intercepting != now_intercepting || was_mode != now_mode {
+                let Some(profile) = self.last_profile.clone() else {
+                    return Err(
+                        "Custom mode changed, but this tunnel cannot be rebuilt without reconnecting."
+                            .to_string(),
+                    );
+                };
+                self.split_tunnel.stop();
+                return self.start_split_tunnel(&profile);
+            }
+            // Editing the list within a mode changes nothing about how
+            // the tunnel is built, and the redirect reads the selection
+            // per packet.
             return Ok(());
         }
         let Some(profile) = self.last_profile.clone() else {
@@ -288,7 +314,13 @@ impl Engines {
             }
         }
 
-        if passive {
+        // Interception, not passivity. "Everything except these"
+        // deliberately builds a *full* tunnel and then pushes the chosen
+        // applications out of it, so asking whether the tunnel is
+        // passive answers no and skips the redirect entirely -- which
+        // presents as the excluded applications still being tunnelled,
+        // the setting doing nothing at all.
+        if self.split_tunnel.wants_interception() {
             self.start_split_tunnel(profile)?;
         }
         Ok(())

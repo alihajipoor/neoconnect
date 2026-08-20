@@ -25,6 +25,8 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+
+use neoconnect_ipc::SplitTunnelMode;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, NO_ERROR};
@@ -32,6 +34,10 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
 use windows_sys::Win32::Networking::WinSock::AF_INET;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+    TH32CS_SNAPPROCESS,
+};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -76,11 +82,19 @@ pub type SharedSelection = Arc<RwLock<Selection>>;
 #[derive(Debug, Default, Clone)]
 pub struct Selection {
     paths: Vec<String>,
+    /// Which way the list reads. Held here because `matches` is the hot
+    /// path and the answer must not depend on a second lookup somewhere
+    /// else that could disagree with it.
+    mode: SplitTunnelMode,
 }
 
 impl Selection {
-    pub fn new<I: IntoIterator<Item = String>>(paths: I) -> Self {
-        Self { paths: paths.into_iter().map(|p| p.to_lowercase()).collect() }
+    pub fn new<I: IntoIterator<Item = String>>(paths: I, mode: SplitTunnelMode) -> Self {
+        Self { paths: paths.into_iter().map(|p| p.to_lowercase()).collect(), mode }
+    }
+
+    pub fn mode(&self) -> SplitTunnelMode {
+        self.mode
     }
 
     pub fn is_empty(&self) -> bool {
@@ -289,6 +303,78 @@ fn parse_table(
 /// right on purpose: it is the least this needs, and it is the one that
 /// works against protected processes, which some anti-cheat-guarded
 /// games are.
+/// The applications running right now, for the picker to offer.
+///
+/// Deduplicated by path, because a modern application is many processes
+/// and a list with chrome.exe in it eleven times is not a list. Sorted
+/// by name so the order does not shuffle between refreshes.
+///
+/// Filtered to what a person would recognise as a program: anything
+/// under the Windows system directories is the operating system going
+/// about its business, and offering it invites a customer to route
+/// their own machinery through a VPN. The path is what a selection is
+/// actually made of -- see `Selection` -- so the path is returned, with
+/// the file name alongside only for display.
+pub fn running_apps() -> Vec<(String, String)> {
+    let mut found: HashMap<String, (String, String)> = HashMap::new();
+
+    // SAFETY: a plain call; an invalid handle is checked below.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot.is_null() {
+        return Vec::new();
+    }
+
+    // SAFETY: zeroed is a valid PROCESSENTRY32W once dwSize is set, and
+    // setting it is what the API uses to version the struct.
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    // SAFETY: the handle is valid until CloseHandle below, and `entry`
+    // is owned here.
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
+    while ok != 0 {
+        if let Some(path) = image_path(entry.th32ProcessID) {
+            if is_user_application(&path) {
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                // Lowered only as the key, so matching is
+                // case-insensitive while what the customer sees keeps
+                // the spelling Windows reported.
+                found.entry(path.to_lowercase()).or_insert((path, name));
+            }
+        }
+        // SAFETY: same handle and entry as above.
+        ok = unsafe { Process32NextW(snapshot, &mut entry) };
+    }
+    // SAFETY: the snapshot handle is valid and not used again.
+    unsafe { CloseHandle(snapshot) };
+
+    let mut apps: Vec<(String, String)> = found.into_values().collect();
+    apps.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    apps
+}
+
+/// Whether this is a program a customer would recognise, rather than a
+/// part of Windows.
+fn is_user_application(path: &str) -> bool {
+    let lowered = path.to_lowercase();
+    if !lowered.ends_with(".exe") {
+        return false;
+    }
+    // Excluded rather than merely sorted last: a customer who routes
+    // svchost through a VPN has not made a choice, they have made a
+    // mistake, and an offered list is where that starts.
+    const SYSTEM: [&str; 4] = [
+        r"\windows\system32\",
+        r"\windows\syswow64\",
+        r"\windows\winsxs\",
+        r"\windows\servicing\",
+    ];
+    !SYSTEM.iter().any(|dir| lowered.contains(dir))
+}
+
 fn image_path(pid: u32) -> Option<String> {
     // SAFETY: a plain call; a failure returns a null handle.
     let process: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -319,7 +405,7 @@ mod tests {
         // Windows paths are case-insensitive, and the path the customer
         // picked through a file dialog will not always be cased the same
         // way as the one the process reports.
-        let selection = Selection::new([r"C:\Games\Valorant\VALORANT.exe".to_string()]);
+        let selection = Selection::new([r"C:\Games\Valorant\VALORANT.exe".to_string()], SplitTunnelMode::OnlySelected);
         assert!(selection.matches(r"c:\games\valorant\valorant.exe"));
         assert!(selection.matches(r"C:\GAMES\VALORANT\VALORANT.EXE"));
         assert!(!selection.matches(r"C:\Games\Other\VALORANT.exe"));

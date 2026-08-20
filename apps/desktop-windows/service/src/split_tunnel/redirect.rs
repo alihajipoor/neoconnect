@@ -128,6 +128,9 @@ pub struct Redirect {
     /// exactly like an ordinary app's, so without this the proxy would
     /// intercept itself.
     pub own_image: String,
+    /// Whether lookups are carried at all. False for a full tunnel,
+    /// which already resolves through the VPN.
+    pub carry_dns: bool,
     /// Where name lookups are sent while Custom mode is on.
     ///
     /// Every lookup goes here, through the tunnel, whoever asked. See
@@ -506,7 +509,7 @@ fn decide(
 
     // A lookup is carried whoever made it -- see `is_dns` -- except this
     // service's own.
-    if is_dns(parsed) && !is_own {
+    if redirect.carry_dns && is_dns(parsed) && !is_own {
         let origin = Origin {
             addr: parsed.destination,
             port: parsed.destination_port,
@@ -874,6 +877,7 @@ mod tests {
             udp_proxy_port: 19998,
             own_image: String::new(),
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
+            carry_dns: true,
         });
 
         assert!(filter.contains("ip.DstAddr != 203.0.113.7"));
@@ -900,6 +904,7 @@ mod tests {
             udp_proxy_port: 19998,
             own_image: String::new(),
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
+            carry_dns: true,
         });
         super::super::divert::compile_filter(&filter).expect("the filter must compile");
     }
