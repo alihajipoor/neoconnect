@@ -48,6 +48,16 @@ pub struct Origin {
     /// leg, because the stack routes an injected packet by its own table
     /// and this is the only record of where the app expects it from.
     pub interface_id: u32,
+    /// Where the proxy should dial instead of `addr:port`, when those
+    /// differ.
+    ///
+    /// Only DNS uses this today, and it is the whole point of carrying
+    /// it: a lookup has to be answered by a resolver reached *through*
+    /// the tunnel, while the reply must still appear to come from the
+    /// resolver the application asked, or its socket discards it. So
+    /// the query goes to `upstream` and the return leg is rewritten
+    /// from `addr:port` as usual.
+    pub upstream: Option<std::net::SocketAddrV4>,
 }
 
 /// Synthetic source ports are drawn from here. Above the range Windows
@@ -290,6 +300,7 @@ mod tests {
             client: Ipv4Addr::new(192, 168, 1, 20),
             client_port,
             interface_id: 12,
+            upstream: None,
         }
     }
 
