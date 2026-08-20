@@ -34,6 +34,16 @@ use crate::split_tunnel::SplitTunnel;
 /// disqualifying as a persistent window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Why Custom mode and the built-in protocol cannot be combined.
+///
+/// Stated plainly rather than worked around: Custom mode pins a selected
+/// app's sockets to an adapter this service created, and Windows owns
+/// the IKEv2 interface, so there is nothing to pin to. Both the connect
+/// path and a live toggle have to say the same thing, which is why it is
+/// written once.
+const IKEV2_REFUSES_CUSTOM_MODE: &str =
+    "Built-in (IKEv2) cannot be used with Custom mode, because Windows owns                  that tunnel and it always carries everything. Pick another protocol,                  or turn Custom mode off.";
+
 /// What is currently up. Holding the `Child` here is what keeps the
 /// engine process owned by the service rather than orphaned.
 enum Active {
@@ -66,6 +76,13 @@ pub struct Engines {
     /// it -- an implementation bound to one adapter would stop working
     /// the moment failover moved the customer, and would do it silently.
     split_tunnel: SplitTunnel,
+    /// The profile the live tunnel was built from.
+    ///
+    /// Kept so Custom mode can be switched without the customer
+    /// reconnecting by hand: whether a tunnel is passive or full is
+    /// decided when the engine starts, so changing the mode means
+    /// building it again, and that needs the profile back.
+    last_profile: Option<ConnectProfile>,
 }
 
 impl Engines {
@@ -75,21 +92,67 @@ impl Engines {
             config_dir,
             active: None,
             split_tunnel: SplitTunnel::new(),
+            last_profile: None,
         }
     }
 
-    /// Replaces the customer's Custom-mode selection.
+    /// Replaces the customer's Custom-mode selection, and makes it true
+    /// of the tunnel that is up right now.
     ///
-    /// Takes effect immediately for connections made from now on. It
-    /// deliberately does not restart anything: a customer adding a
-    /// second game should not drop the first one's session.
+    /// Editing the list is cheap: the redirect reads the selection per
+    /// decision, so adding a second game never drops the first one's
+    /// session and nothing is rebuilt.
     ///
-    /// Changing it does change how the *next* tunnel is brought up,
-    /// though -- passive rather than full -- so turning Custom mode on
-    /// or off while connected only takes full effect on reconnect. The
-    /// UI says so rather than pretending otherwise.
-    pub fn set_split_tunnel(&mut self, enabled: bool, apps: Vec<String>) {
+    /// Turning the mode on or off is not cheap, because it changes the
+    /// *shape* of the tunnel. A full tunnel owns the default route; a
+    /// Custom-mode tunnel deliberately owns no routes at all and reaches
+    /// selected applications through the redirect instead. That is
+    /// decided when the engine starts, so switching means building the
+    /// tunnel again.
+    ///
+    /// It used to just record the choice and wait for the next connect.
+    /// A tester turned Custom mode on while connected, watched nothing
+    /// happen, and reasonably concluded the feature was broken -- then
+    /// restarted the app to make it take, which is how they ended up in
+    /// a state where the app said connected and their applications had
+    /// no route to anywhere.
+    ///
+    /// So the rebuild happens here, from the profile the live tunnel was
+    /// built with. Failure is returned rather than swallowed: a switch
+    /// that leaves no tunnel up must not look like success.
+    pub fn set_split_tunnel(&mut self, enabled: bool, apps: Vec<String>) -> Result<(), String> {
+        let was_passive = self.split_tunnel.wants_passive_tunnel();
         self.split_tunnel.set_selection(enabled, apps);
+        let now_passive = self.split_tunnel.wants_passive_tunnel();
+
+        // Before the early return below, because a customer on IKEv2 who
+        // edits their chosen applications changes nothing about the
+        // tunnel's shape and would otherwise be told "ok" -- leaving the
+        // app showing Custom mode as accepted on the one protocol that
+        // cannot honour it. Connecting has always refused this; only
+        // this path did not.
+        if now_passive && matches!(self.active, Some(Active::Ikev2)) {
+            return Err(IKEV2_REFUSES_CUSTOM_MODE.to_string());
+        }
+
+        // Only the shape matters. Editing the list within a mode, or
+        // toggling a mode with nothing selected, changes nothing about
+        // how the tunnel must be built.
+        if was_passive == now_passive {
+            return Ok(());
+        }
+        if self.active.is_none() {
+            return Ok(());
+        }
+        let Some(profile) = self.last_profile.clone() else {
+            // Nothing to rebuild from. Saying so is better than leaving
+            // the customer with a tunnel that contradicts the toggle.
+            return Err(
+                "Custom mode changed, but this tunnel cannot be rebuilt without reconnecting."
+                    .to_string(),
+            );
+        };
+        self.connect(&profile)
     }
 
     pub fn split_tunnel_running(&self) -> bool {
@@ -142,8 +205,25 @@ impl Engines {
         // would stop people connecting for no reason, which is worse
         // than the fault being diagnosed. So it only ever decorates an
         // error that was going to happen anyway.
-        let rivals = adapters::other_vpns_up(&[xray::ADAPTER_NAME, wireguard::TUNNEL_NAME]).unwrap_or_default();
-        self.connect_inner(profile).map_err(|e| with_rival_hint(e, &rivals))
+        // Every adapter this service brings up, or the hint accuses the
+        // customer's own Neoxify tunnel of being a rival VPN. That is not
+        // hypothetical: enabling Custom mode on a live OpenVPN connection
+        // reported "Another VPN is connected on this machine
+        // (Neoxify-OpenVPN)", pointing at the very tunnel being rebuilt.
+        let rivals = adapters::other_vpns_up(&[
+            xray::ADAPTER_NAME,
+            wireguard::TUNNEL_NAME,
+            openvpn::ADAPTER_NAME,
+            ikev2::ENTRY_NAME,
+        ])
+        .unwrap_or_default();
+        let result = self.connect_inner(profile).map_err(|e| with_rival_hint(e, &rivals));
+        // Remembered only on success, so a failed attempt cannot leave a
+        // profile behind for Custom mode to rebuild from.
+        if result.is_ok() {
+            self.last_profile = Some(profile.clone());
+        }
+        result
     }
 
     fn connect_inner(&mut self, profile: &ConnectProfile) -> Result<(), String> {
@@ -165,10 +245,7 @@ impl Engines {
         // failover ladder treats this as a failed candidate and moves
         // on, which is the right outcome.
         if passive && matches!(profile, ConnectProfile::Ikev2(_)) {
-            return Err(
-                "Built-in (IKEv2) cannot be used with Custom mode, because Windows owns                  that tunnel and it always carries everything. Pick another protocol,                  or turn Custom mode off."
-                    .to_string(),
-            );
+            return Err(IKEV2_REFUSES_CUSTOM_MODE.to_string());
         }
 
         match profile {
@@ -280,6 +357,9 @@ impl Engines {
         // redirect also restores ordinary routing for the selected apps,
         // which is the state they should be left in.
         self.split_tunnel.stop();
+        // Dropped with the tunnel: a Custom-mode toggle after a disconnect
+        // must not resurrect a connection the customer ended.
+        self.last_profile = None;
 
         let result = match self.active.take() {
             None => {
@@ -299,7 +379,7 @@ impl Engines {
             Some(Active::Child {
                 mut child,
                 mut routes,
-                ..
+                protocol,
             }) => {
                 // Routes first: leaving them pointed at an adapter that is
                 // about to disappear would black-hole all traffic until
@@ -307,6 +387,16 @@ impl Engines {
                 routes.remove();
                 let _ = child.kill();
                 let _ = child.wait();
+
+                // OpenVPN installs the server's pushed routes itself, so
+                // they are not in `routes` above and a killed process
+                // never gets to withdraw them. Done after the kill, so
+                // there is nothing left running to put them back.
+                if protocol == "OPENVPN" {
+                    if let Ok(Some(adapter)) = adapters::find_by_name(openvpn::ADAPTER_NAME) {
+                        routing::purge_interface(adapter.index);
+                    }
+                }
                 Ok(())
             }
         };
@@ -491,15 +581,46 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
     // Nodes are registered by address today, but a hostname is resolved
     // rather than rejected -- otherwise a DNS-named node would silently
     // lose the exclusion above.
-    (host.as_str(), port)
-        .to_socket_addrs()
-        .map_err(|e| format!("could not resolve {host}: {e}"))?
-        .find_map(|a| match a.ip() {
-            IpAddr::V4(v4) => Some(v4),
-            IpAddr::V6(_) => None,
-        })
-        .ok_or_else(|| format!("{host} has no IPv4 address"))
+    //
+    // Retried, because of when this runs. Turning Custom mode on while
+    // connected rebuilds the tunnel, and the rebuild tears the old one
+    // down first -- so this lookup lands in the seconds where the
+    // engine's DNS servers are gone and the adapter's own are not back.
+    // Measured on the test rig: toggling Custom mode on a live OpenVPN
+    // connection failed with "could not resolve de1.neoxify.site: No
+    // such host is known", on a machine whose DNS was working before and
+    // after. One retry loop is the difference between Custom mode
+    // working on OpenVPN and not.
+    let deadline = std::time::Instant::now() + RESOLVE_RETRY_FOR;
+    let mut last = String::new();
+    loop {
+        match (host.as_str(), port).to_socket_addrs() {
+            Ok(mut addrs) => {
+                if let Some(v4) = addrs.find_map(|a| match a.ip() {
+                    IpAddr::V4(v4) => Some(v4),
+                    IpAddr::V6(_) => None,
+                }) {
+                    return Ok(v4);
+                }
+                // Answered, but with nothing usable. Retrying cannot
+                // change that.
+                return Err(format!("{host} has no IPv4 address"));
+            }
+            Err(e) => last = e.to_string(),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("could not resolve {host}: {last}"));
+        }
+        std::thread::sleep(RESOLVE_RETRY_EVERY);
+    }
 }
+
+/// How long a node's hostname is given to resolve, and how often it is
+/// retried. Generous enough to cover the gap after a teardown, short
+/// enough that a genuinely wrong hostname still fails while the customer
+/// is watching.
+const RESOLVE_RETRY_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+const RESOLVE_RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn split_host_port(endpoint: &str) -> Result<(String, u16), String> {
     let (host, port) = endpoint

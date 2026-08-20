@@ -171,11 +171,47 @@ fn pin_to_interface(socket: &Socket, index: u32) -> io::Result<()> {
 /// up.
 fn connect_upstream(target: SocketAddrV4, tunnel: &TunnelInterface) -> io::Result<TcpStream> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    if let Some((index, address)) = tunnel.get() {
-        attach_to_tunnel(&socket, index, address)?;
+    let pinned = tunnel.get();
+    if let Some((index, address)) = pinned {
+        if let Err(e) = attach_to_tunnel(&socket, index, address) {
+            // Logged, not just returned. A failure here is invisible in
+            // the redirect's counters -- packets still arrive and are
+            // counted as redirected, and the only symptom is that
+            // nothing ever comes back, which is exactly how this
+            // presented: redirected=10 returned=0 rejected=0 with the
+            // selected app timing out and the probe reporting healthy.
+            note(&format!(
+                "upstream attach FAILED for {target}: {e} (interface {index}, source {address})"
+            ));
+            return Err(e);
+        }
     }
-    socket.connect_timeout(&SocketAddr::V4(target).into(), UPSTREAM_CONNECT_TIMEOUT)?;
+    if let Err(e) = socket.connect_timeout(&SocketAddr::V4(target).into(), UPSTREAM_CONNECT_TIMEOUT)
+    {
+        note(&format!(
+            "upstream connect FAILED to {target}: {e} (pinned {:?})",
+            pinned.map(|(i, _)| i)
+        ));
+        return Err(e);
+    }
     Ok(socket.into())
+}
+
+/// Appends one line to the split-tunnel log.
+///
+/// The proxy is handed no log path -- it is started with the NAT table
+/// and the interface and nothing else -- so the location is derived the
+/// same way the service derives its config directory. Threading a path
+/// through every call site would be tidier and was not worth delaying
+/// the diagnosis of a bug whose whole difficulty is that it leaves no
+/// trace anywhere.
+fn note(line: &str) {
+    use std::io::Write;
+    let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+    let path = std::path::Path::new(&base).join("Neoxify").join("split-tunnel.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 /// A UDP socket placed the same way.

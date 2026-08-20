@@ -51,7 +51,7 @@ use windivert_sys::{WinDivertFlags, WinDivertLayer};
 
 use super::divert::{recalculate_checksums, Handle};
 use super::flows::{Nat, Origin, Verdict};
-use super::owner::{OwnerLookup, Selection, Transport};
+use super::owner::{OwnerLookup, Selection, SharedSelection, Transport};
 
 /// The largest packet WinDivert will hand over.
 const MAX_PACKET: usize = 65_575;
@@ -182,7 +182,7 @@ impl Running {
 pub fn start(
     redirect: Redirect,
     nat: Arc<Nat>,
-    selection: Arc<Selection>,
+    selection: SharedSelection,
 ) -> Result<Running, String> {
     let filter = filter_for(&redirect);
     // Checked before opening so a filter problem is reported as one.
@@ -220,7 +220,7 @@ fn worker(
     handle: Arc<Handle>,
     redirect: Arc<Redirect>,
     nat: Arc<Nat>,
-    selection: Arc<Selection>,
+    selection: SharedSelection,
     stop: Arc<AtomicBool>,
     stats: Arc<Stats>,
 ) {
@@ -239,15 +239,27 @@ fn worker(
         };
 
         stats.seen.fetch_add(1, Ordering::Relaxed);
+        // Read per packet, not captured once at startup. Editing the
+        // chosen applications while Custom mode stays on does not
+        // rebuild anything, so a copy taken here would be the customer's
+        // first choice forever -- which is what shipped, and what made a
+        // tester report that changing the list did nothing until they
+        // restarted the app.
+        let chosen = selection.read().unwrap_or_else(|e| e.into_inner());
         let rewrote = handle_packet(
             &mut packet[..len as usize],
             &mut address,
             &redirect,
             &nat,
-            &selection,
+            &chosen,
             &mut owner,
             &stats,
         );
+
+        // Released before the send: nothing below consults it, and a
+        // lock held across a syscall would make every other worker wait
+        // on this one.
+        drop(chosen);
 
         if rewrote.is_some() {
             recalculate_checksums(&mut packet[..len as usize], len, &mut address);
@@ -357,7 +369,7 @@ fn handle_packet(
     match verdict {
         Verdict::Direct | Verdict::Unknown => None,
         Verdict::Redirect { nat_port } => {
-            rewrite_outbound(packet, address, &parsed, redirect.local_addr, nat_port, proxy_port);
+            rewrite_outbound(packet, &parsed, redirect.local_addr, nat_port, proxy_port);
             Some(Leg::Outbound)
         }
     }
@@ -469,7 +481,6 @@ fn decide(
 
 fn rewrite_outbound(
     packet: &mut [u8],
-    address: &mut WINDIVERT_ADDRESS,
     parsed: &Parsed,
     local_addr: Ipv4Addr,
     nat_port: u16,
@@ -487,9 +498,27 @@ fn rewrite_outbound(
     packet[ports..ports + 2].copy_from_slice(&nat_port.to_be_bytes());
     packet[ports + 2..ports + 4].copy_from_slice(&proxy_port.to_be_bytes());
 
-    // Inbound, because this is now a delivery to a local socket rather
-    // than something being sent anywhere.
-    address.set_outbound(false);
+    // Still outbound, and that is the whole fix.
+    //
+    // After the rewrite both ends of the packet are this machine's own
+    // address. Re-injected outbound, IP output sees a local destination
+    // and loops the packet back up to the listening socket, which is
+    // what an ordinary connect() to your own address does. Re-injected
+    // inbound it instead enters the receive path as something arriving
+    // off the wire claiming one of our own addresses as its source, and
+    // the stack drops it as spoofed before any socket is consulted.
+    //
+    // Nothing reports that loss. WinDivert's send succeeds either way,
+    // so the redirect counts the packet and nothing is rejected; the
+    // only symptom is the selected application hanging forever. On the
+    // test rig, with the flip in place and the proxy confirmed
+    // listening and idle:
+    //
+    //   seen=115 matched=2 redirected=10 returned=0 rejected=0
+    //   TCP 0.0.0.0:49559 LISTENING     (and never a connection to it)
+    //
+    // The return leg is the opposite case and does flip: its source is
+    // the real remote server, so arriving inbound is legitimate there.
 }
 
 fn rewrite_return_leg(
@@ -611,12 +640,13 @@ mod tests {
             TCP_FLAG_SYN,
         );
         let parsed = parse(&packet).unwrap();
-        let mut address = WINDIVERT_ADDRESS::default();
-        address.set_outbound(true);
 
+        // No address argument: the rewrite cannot touch the direction,
+        // so the packet stays outbound and the stack loops it back to
+        // the proxy's socket. Flipping it to inbound made the stack
+        // drop it as spoofed, since by then both ends are local.
         rewrite_outbound(
             &mut packet,
-            &mut address,
             &parsed,
             Ipv4Addr::new(192, 168, 1, 20),
             41000,
@@ -628,7 +658,6 @@ mod tests {
         assert_eq!(after.destination, Ipv4Addr::new(192, 168, 1, 20));
         assert_eq!(after.source_port, 41000);
         assert_eq!(after.destination_port, 19999);
-        assert!(!address.outbound(), "a delivery to a local socket is inbound");
     }
 
     #[test]

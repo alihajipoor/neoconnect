@@ -27,7 +27,11 @@ use neoconnect_ipc::Ikev2Profile;
 /// rather than as a hostname. One entry is reconfigured in place on each
 /// connect, which also stops a customer accumulating an entry per server
 /// they have ever tried.
-const ENTRY_NAME: &str = "Neoxify";
+/// The RAS phonebook entry Windows knows this tunnel by. Public so the
+/// rival-VPN check can exclude it: it is a VPN interface like any
+/// other, and without this our own tunnel is reported as somebody
+/// else's.
+pub const ENTRY_NAME: &str = "Neoxify";
 
 /// Brings up the tunnel.
 ///

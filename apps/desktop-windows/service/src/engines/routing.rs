@@ -47,6 +47,44 @@ pub struct InstalledRoutes {
     destinations: Vec<(String, String, u32)>,
 }
 
+/// Removes every IPv4 route sitting on one interface.
+///
+/// For engines that install their own routes rather than letting this
+/// service do it. OpenVPN is the case: the server pushes
+/// `redirect-gateway`, openvpn.exe adds `0.0.0.0/1` and `128.0.0.0/1`
+/// itself, and those are not in `InstalledRoutes` because this service
+/// never added them. Killing the process leaves them behind, and
+/// because a `/1` is more specific than the `0.0.0.0/0` Custom mode
+/// demotes to metric 9999, they keep swallowing every packet into a
+/// tunnel the customer asked to use for one application. Measured on
+/// the test rig, before a connection was even made:
+///
+/// ```text
+/// routes before: 128.0.0.0/1 if6 via 10.77.0.1 m0/3 ; 0.0.0.0/1 if6 via 10.77.0.1 m0/3
+/// ```
+///
+/// Scoped to the interface, never to a destination -- see the note on
+/// `destinations` for what deleting `0.0.0.0/0` machine-wide does.
+pub fn purge_interface(interface_index: u32) {
+    // PowerShell rather than route.exe because this has to enumerate
+    // first, and `route print` is localised -- parsing it in Turkish or
+    // Persian is how this would quietly stop working for exactly the
+    // customers who matter. Get-NetRoute returns objects, so it does not
+    // care what language the machine speaks.
+    let script = format!(
+        "Get-NetRoute -InterfaceIndex {interface_index} -AddressFamily IPv4          -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false          -ErrorAction SilentlyContinue"
+    );
+    let _ = run_hidden(
+        &PathBuf::from("powershell"),
+        &[
+            OsStr::new("-NoProfile"),
+            OsStr::new("-NonInteractive"),
+            OsStr::new("-Command"),
+            OsStr::new(&script),
+        ],
+    );
+}
+
 fn route_exe() -> PathBuf {
     // In System32 on every supported Windows; not something the app ships.
     PathBuf::from(r"C:\Windows\System32\route.exe")
