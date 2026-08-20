@@ -4031,3 +4031,58 @@ their wording, the running-apps list with real paths, and the settings
 surviving a restart. Behaviour verified per mode: only-these puts the
 chosen app at the node and others at home; all-except the reverse;
 Custom mode off carries the whole machine. All switched live.
+
+---
+
+## 2026-08-20 — "Split tunnel doesn't work" was the tunnel not working
+
+**Status:** done, verified on the VM
+**Touches:** `apps/desktop-windows/**`
+
+A tester on 0.9.15 selected Edge, opened it, and saw his own IP. I could
+not reproduce it in either order — Edge selected then launched, and Edge
+already running then Custom mode enabled — both showed the node. His log
+settled it, and both of my guesses were wrong.
+
+He was in the right mode (`only the selected apps are tunnelled`, every
+session) and his selection *was* matching (`matched=27, 43, 90, 17`). The
+real line was this, against **three different nodes**:
+
+```text
+route on-link: no traffic (the tunnel did not carry a test connection (8.8.8.8:443 timed out))
+route via the tunnel address: no traffic (...)
+no route shape carried traffic (...)
+probe FAILED: the tunnel did not carry a test connection
+```
+
+**And Custom mode started anyway.** `install_verified_route` logged the
+failure, then installed the on-link shape and returned Ok. His browser
+was redirected into a tunnel already proven dead; when the engine
+dropped, the deliberate fail-open sent it out the ordinary route, and he
+watched his own address come back with the switch on. The feature was
+behaving exactly as designed on top of a tunnel that was not.
+
+It now refuses. A tunnel that carries nothing is a failed candidate, and
+the ladder tries the next protocol — the same reasoning as the old IKEv2
+refusal: an unprotected app while the switch says otherwise is a false
+"Connected" wearing different clothes.
+
+Verified both directions, because a refusal that fires on a healthy
+tunnel would be worse than the bug: with the probe targets blocked it
+returns `Custom mode did not start: this tunnel is not carrying
+traffic`, and with them reachable it returns ok and carries.
+
+**Also in his log, still open:** `returned=0` on a session whose route
+and probe both passed, plus repeated `upstream connect FAILED ... (os
+error 10053)` — Windows for "local software aborted this". My firewall
+allowance is present and works here, so the suspect is third-party
+security software on his machine. Not yet proven; needs to know what he
+runs.
+
+**Two traps I had shipped in the picker**, both fixed: it offered
+`msedgewebview2.exe` — this app's own WebView2 window, one letter from
+the browser somebody means — plus `neoconnect-desktop.exe` and
+`neoconnect-service.exe`. Meanwhile `msedge.exe` is absent unless Edge
+happens to be running. Those three are now excluded, and every chosen
+app carries a **Uses VPN** / **Bypasses VPN** label so the direction
+cannot be read backwards off a toggle further up the card.

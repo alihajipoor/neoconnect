@@ -220,6 +220,8 @@ const en = {
   "settings.customRunningEmpty": "Nothing to show. Try browsing for the program instead.",
   "settings.customRunningRefresh": "Refresh",
   "settings.customCancel": "Cancel",
+  "settings.customAppUsesVpn": "Uses VPN",
+  "settings.customAppBypasses": "Bypasses VPN",
   // Android picks from the installed-app list rather than a file
   // dialog, so these have no Windows counterpart.
   //
@@ -533,6 +535,8 @@ const fa: Record<TranslationKey, string> = {
   "settings.customRunningEmpty": "چیزی برای نمایش نیست. به‌جایش برنامه را جست‌وجو کنید.",
   "settings.customRunningRefresh": "تازه‌سازی",
   "settings.customCancel": "انصراف",
+  "settings.customAppUsesVpn": "از VPN استفاده می‌کند",
+  "settings.customAppBypasses": "بدون VPN",
   "dash.offlineTitle": "در حال حاضر به Neoxify دسترسی نیست — همچنان می‌توانید متصل شوید.",
   "dash.offlineHint":
     "از سرورهای ذخیره‌شده استفاده می‌شود. مصرف داده و تاریخ انقضا آخرین بار در {when} به‌روز شده و ممکن است دقیق نباشد.",
