@@ -48,7 +48,7 @@ pub const ENTRY_NAME: &str = "Neoxify";
 /// already carries.
 const IKEV2_DNS: &str = "1.1.1.1";
 
-pub fn connect(profile: &Ikev2Profile) -> Result<(), String> {
+pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
     // Removed first rather than updated. Add-VpnConnection refuses when
     // the entry exists, and -Force only suppresses the prompt, not the
     // conflict; a stale entry pointing at a previous server would
@@ -83,11 +83,26 @@ pub fn connect(profile: &Ikev2Profile) -> Result<(), String> {
     // `-SplitTunneling:$false` would work too -- the colon is what binds
     // a value to a switch -- but not passing it at all is harder to get
     // wrong the next time.
+    // Named only for Custom mode, and naming it is what makes
+    // Custom mode possible here at all: as a [switch], passing
+    // -SplitTunneling turns it on, and on means Windows does not
+    // claim the default route. That is the same passive shape
+    // WireGuard gets from `Table = off` and Xray from installing no
+    // routes -- unselected applications keep the normal route, and
+    // the split tunnel installs the one route it needs itself.
+    //
+    // Read the note above before touching this. `-SplitTunneling
+    // $false` does not mean off; it turns the switch on and leaves
+    // $false to bind to whatever parameter comes next, which Windows
+    // reports as a nonsensical complaint about L2TP. Off is not
+    // naming it at all.
+    let split = if passive { " -SplitTunneling" } else { "" };
     let script = format!(
         "Add-VpnConnection -Name '{name}' -ServerAddress '{server}' \
          -TunnelType Ikev2 -AuthenticationMethod Eap \
-         -EncryptionLevel Required -AllUserConnection -Force -PassThru | Out-Null",
+         -EncryptionLevel Required -AllUserConnection -Force{split} -PassThru | Out-Null",
         name = ENTRY_NAME,
+        split = split,
         server = escape_single_quotes(&profile.server),
     );
     powershell(&script).map_err(|e| format!("could not create the VPN entry: {e}"))?;
@@ -131,8 +146,17 @@ pub fn connect(profile: &Ikev2Profile) -> Result<(), String> {
             // traffic at this point, and refusing the connection over a
             // DNS rule would take away a working protocol from someone
             // who may have no other one that connects.
-            if let Err(e) = super::dns::apply(IKEV2_DNS) {
-                eprintln!("ikev2: {e}");
+            // Full tunnel only. In Custom mode this tunnel is not where
+            // most traffic goes, so pointing the whole machine's lookups
+            // down it would be wrong for every application the customer
+            // did not select. The selected ones still resolve through the
+            // tunnel, because their DNS is redirected with the rest of
+            // their traffic -- the same reasoning as WireGuard dropping
+            // its DNS in passive mode.
+            if !passive {
+                if let Err(e) = super::dns::apply(IKEV2_DNS) {
+                    eprintln!("ikev2: {e}");
+                }
             }
             Ok(())
         }
