@@ -402,7 +402,7 @@ fn accept_tcp(
 
         let tunnel = tunnel.clone();
         std::thread::spawn(move || {
-            let target = SocketAddrV4::new(origin.addr, origin.port);
+            let target = origin.upstream.unwrap_or_else(|| SocketAddrV4::new(origin.addr, origin.port));
             if let Ok(upstream) = connect_upstream(target, &tunnel) {
                 pump(client, upstream);
             }
@@ -470,7 +470,7 @@ fn serve_udp(
             }
         };
 
-        let target = SocketAddrV4::new(origin.addr, origin.port);
+        let target = origin.upstream.unwrap_or_else(|| SocketAddrV4::new(origin.addr, origin.port));
         let _ = upstream.send_to(&buffer[..len], target);
     }
 }
@@ -658,6 +658,7 @@ mod tests {
                     client: Ipv4Addr::LOCALHOST,
                     client_port,
                     interface_id: 1,
+                    upstream: None,
                 },
             )
             .unwrap();

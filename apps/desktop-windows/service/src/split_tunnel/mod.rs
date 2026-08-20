@@ -96,6 +96,14 @@ struct Active {
     log_path: PathBuf,
 }
 
+/// The resolver every lookup is sent to while Custom mode is on.
+///
+/// The same one the tunnels push for a full tunnel, so this is not a
+/// second opinion arriving through a different door -- it is already
+/// reachable through every node. See `redirect::is_dns` for why Custom
+/// mode carries lookups at all.
+const CUSTOM_MODE_RESOLVER: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+
 /// How often the counters are written out.
 ///
 /// Frequent enough to be useful within one test, rare enough that the
@@ -425,6 +433,7 @@ impl SplitTunnel {
             tcp_proxy_port: relays.tcp_port,
             udp_proxy_port: relays.udp_port,
             own_image: own_image_path(),
+            dns_resolver: CUSTOM_MODE_RESOLVER,
         };
 
         // Recorded before anything can go wrong with it: if Custom mode
