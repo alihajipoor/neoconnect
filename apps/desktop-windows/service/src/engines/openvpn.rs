@@ -36,7 +36,8 @@ use std::process::Child;
 
 use neoconnect_ipc::OpenvpnProfile;
 
-use super::{confirm_started, run_hidden_capture, spawn_hidden, write_config, Engines};
+use super::{confirm_started, routing, run_hidden_capture, spawn_hidden, write_config, Engines};
+use crate::adapters;
 
 const CONFIG_FILE: &str = "neoconnect.ovpn";
 const LOG_FILE: &str = "openvpn.log";
@@ -171,6 +172,16 @@ pub fn connect(
     let exe = engines.engine_path("openvpn.exe")?;
     engines.engine_path("wintun.dll")?;
     ensure_adapter(engines)?;
+
+    // Anything left on this adapter from a previous run goes now.
+    // Teardown purges these too, but a service that was killed rather
+    // than stopped never got to, and the pushed `0.0.0.0/1` and
+    // `128.0.0.0/1` routes then outlive every later session -- silently
+    // overriding Custom mode, because a /1 beats the demoted default.
+    // Cheap, and a no-op on a clean machine.
+    if let Ok(Some(adapter)) = adapters::find_by_name(ADAPTER_NAME) {
+        routing::purge_interface(adapter.index);
+    }
 
     let config_path = engines.config_path(CONFIG_FILE);
     write_config(&config_path, &build_config(profile, passive)?)?;
