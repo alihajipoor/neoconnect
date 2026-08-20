@@ -4086,3 +4086,61 @@ the browser somebody means — plus `neoconnect-desktop.exe` and
 happens to be running. Those three are now excluded, and every chosen
 app carries a **Uses VPN** / **Bypasses VPN** label so the direction
 cannot be read backwards off a toggle further up the card.
+
+---
+
+## 2026-08-20 — The VM rig stopped accepting synthesized keys again
+
+**Status:** blocked, rig needs one physical keypress
+**Touches:** nothing in the repo
+
+0.9.16 is built, released and serving. It is **not** verified from the
+shipped installer, and the reason is the rig rather than the build.
+
+Part-way through today the `Neoxify-Test` VM stopped accepting
+synthesized keyboard input — the same failure as 2026-08-14. It is not a
+frozen guest: the clock advances, Guest Additions reports runlevel 3 and
+`LoggedInUsersList = neoxify`, and screenshots update. Only input is
+gone. `keyboardputscancodes` returns success and changes nothing;
+compared two screenshots with `ImageChops.difference` and the bounding
+box is `None`, so this is measured rather than eyeballed.
+
+Everything tried, so the next session does not repeat it:
+
+| attempt | result |
+|---|---|
+| Win, then Win+R | nothing; only the clock ticks between shots |
+| release every modifier first, in case one was latched | nothing |
+| ACPI shutdown, full power cycle, `--type separate` | nothing |
+| `guestcontrol` as `neoxify` with a blank password | "user was not able to logon" |
+| SSH / WinRM / SMB to the guest | all closed; only 3389 is open, and RDP refuses blank passwords for the same reason |
+| switch to a USB keyboard (`--keyboard usb --usb-ohci on`) | **hung the VM at the VirtualBox boot logo** — reverted to `ps2`, boots fine again |
+
+That last one is worth remembering: this rig's EFI is fragile, which is
+already why it needs 4 vCPUs, and changing the HID type is enough to
+stop it booting. Reverting `--keyboard ps2 --usb-ohci off` brought it
+straight back.
+
+The blank-password auto-logon is what closes every remote door at once —
+it blocks `guestcontrol` and RDP by the same Windows policy. Giving the
+`neoxify` account a real password would make `guestcontrol` work and
+make this whole class of problem go away. Worth doing next time the rig
+is reachable.
+
+**One improvement did land:** the host folder is now a *permanent*
+shared folder (`sharedfolder add` with no `--transient`) instead of
+being re-added on every boot, so it survives a power cycle. That was a
+recurring five-minute tax.
+
+**So what is actually proven about 0.9.16:** it compiles, 74 service
+tests pass, all four CI jobs are green, and the public installer link
+serves the right binary — `sha256` of what
+`/api/updates/installer/windows` returns matches the release's
+`sha256sums.txt` exactly, and the updater manifest offers 0.9.16 to a
+0.9.15 client. The refusal itself was verified on this rig earlier
+today, both directions, against the same code built locally.
+
+**What is not proven:** the shipped installer has not been run, and the
+protocol x split-tunnel matrix has not been re-run against 0.9.16. Given
+0.9.6 shipped from exactly this position and a customer found the bug,
+that gap is worth closing before this build is pushed at anybody.
