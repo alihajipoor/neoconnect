@@ -34,16 +34,6 @@ use crate::split_tunnel::SplitTunnel;
 /// disqualifying as a persistent window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Why Custom mode and the built-in protocol cannot be combined.
-///
-/// Stated plainly rather than worked around: Custom mode pins a selected
-/// app's sockets to an adapter this service created, and Windows owns
-/// the IKEv2 interface, so there is nothing to pin to. Both the connect
-/// path and a live toggle have to say the same thing, which is why it is
-/// written once.
-const IKEV2_REFUSES_CUSTOM_MODE: &str =
-    "Built-in (IKEv2) cannot be used with Custom mode, because Windows owns                  that tunnel and it always carries everything. Pick another protocol,                  or turn Custom mode off.";
-
 /// What is currently up. Holding the `Child` here is what keeps the
 /// engine process owned by the service rather than orphaned.
 enum Active {
@@ -124,16 +114,6 @@ impl Engines {
         let was_passive = self.split_tunnel.wants_passive_tunnel();
         self.split_tunnel.set_selection(enabled, apps);
         let now_passive = self.split_tunnel.wants_passive_tunnel();
-
-        // Before the early return below, because a customer on IKEv2 who
-        // edits their chosen applications changes nothing about the
-        // tunnel's shape and would otherwise be told "ok" -- leaving the
-        // app showing Custom mode as accepted on the one protocol that
-        // cannot honour it. Connecting has always refused this; only
-        // this path did not.
-        if now_passive && matches!(self.active, Some(Active::Ikev2)) {
-            return Err(IKEV2_REFUSES_CUSTOM_MODE.to_string());
-        }
 
         // Only the shape matters. Editing the list within a mode, or
         // toggling a mode with nothing selected, changes nothing about
@@ -236,30 +216,18 @@ impl Engines {
         // tunnel for a customer who asked for one app.
         let passive = self.split_tunnel.wants_passive_tunnel();
 
-        // Refused rather than quietly downgraded. Custom mode works by
-        // pinning the selected apps' sockets to an adapter this service
-        // created, and Windows owns the IKEv2 interface -- there is
-        // nothing here to pin to. Connecting anyway would give the
-        // customer a full tunnel when they asked for one application,
-        // which is the same shape of lie as a false "Connected". The
-        // failover ladder treats this as a failed candidate and moves
-        // on, which is the right outcome.
-        if passive && matches!(profile, ConnectProfile::Ikev2(_)) {
-            return Err(IKEV2_REFUSES_CUSTOM_MODE.to_string());
-        }
-
         match profile {
             ConnectProfile::Wireguard(p) => {
                 wireguard::connect(self, p, passive)?;
                 self.active = Some(Active::WireguardTunnel);
             }
-            // Nothing is spawned and no routes are installed: Windows
-            // brings up the interface and routes it. Custom mode cannot
-            // apply here either, because the split tunnel works by
-            // pinning sockets to an adapter this service created, and
-            // this one belongs to the operating system.
+            // Nothing is spawned: Windows brings the interface up and
+            // routes it. Custom mode works here too now -- the entry is
+            // created with -SplitTunneling so Windows leaves the default
+            // route alone, and the split tunnel pins to the RAS
+            // interface like it pins to any other adapter.
             ConnectProfile::Ikev2(p) => {
-                ikev2::connect(p)?;
+                ikev2::connect(p, passive)?;
                 self.active = Some(Active::Ikev2);
             }
             // Both Xray protocols take the same path: one engine, one
@@ -549,11 +517,13 @@ fn adapter_name_for(profile: &ConnectProfile) -> &'static str {
         | ConnectProfile::XrayTrojan(_)
         | ConnectProfile::Shadowsocks(_) => xray::ADAPTER_NAME,
         ConnectProfile::Openvpn(_) => openvpn::ADAPTER_NAME,
-        // Unreachable: connect() refuses IKEv2 outright while Custom
-        // mode is on, because Windows owns that adapter and nothing can
-        // be pinned to it. Named here anyway rather than left to a
-        // catch-all, so adding a protocol still has to answer this.
-        ConnectProfile::Ikev2(_) => "",
+        // The RAS interface Windows brings up for the phonebook
+        // entry. It carries the entry's name and has an index and an
+        // address like any other adapter, so a socket can be pinned
+        // to it -- which is all Custom mode needs. What used to be
+        // missing was stopping Windows claiming the default route,
+        // and -SplitTunneling does that (see ikev2::connect).
+        ConnectProfile::Ikev2(_) => ikev2::ENTRY_NAME,
     }
 }
 
