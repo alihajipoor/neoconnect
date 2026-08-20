@@ -240,6 +240,12 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             let split_tunnel_active = engines.split_tunnel_running();
             Response::State { connected, protocol, health, split_tunnel_active }
         }
+        Request::ListRunningApps => Response::RunningApps {
+            apps: crate::split_tunnel::running_apps()
+                .into_iter()
+                .map(|(path, name)| neoconnect_ipc::RunningApp { path, name })
+                .collect(),
+        },
         Request::ProbeSplitTunnel => match engines.probe_split_tunnel() {
             Ok(()) => Response::Ok,
             Err(message) => Response::Error { message },
@@ -248,7 +254,7 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             // The result matters now: turning Custom mode on or off
             // rebuilds the live tunnel, and a rebuild that fails must
             // reach the customer rather than reading as applied.
-            Ok(()) => match engines.set_split_tunnel(config.enabled, config.apps) {
+            Ok(()) => match engines.set_split_tunnel(config.enabled, config.apps, config.mode) {
                 Ok(()) => Response::Ok,
                 Err(message) => Response::Error { message },
             },
