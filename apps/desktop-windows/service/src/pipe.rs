@@ -245,10 +245,13 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             Err(message) => Response::Error { message },
         },
         Request::SetSplitTunnel { config } => match config.validate() {
-            Ok(()) => {
-                engines.set_split_tunnel(config.enabled, config.apps);
-                Response::Ok
-            }
+            // The result matters now: turning Custom mode on or off
+            // rebuilds the live tunnel, and a rebuild that fails must
+            // reach the customer rather than reading as applied.
+            Ok(()) => match engines.set_split_tunnel(config.enabled, config.apps) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            },
             Err(e) => Response::Error { message: e.to_string() },
         },
     }

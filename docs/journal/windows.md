@@ -3436,3 +3436,256 @@ The app pins the chosen route locally. Switching the route through the
 API changes what the dashboard displays but not what the connect ladder
 dials -- it kept connecting to fr-france while the SERVER tile read
 de-germany. Worth deciding which one is the truth.
+
+## 2026-08-19 -- IKEv2 fleet-wide, two releases, and a key that opened everything
+
+**Status:** done
+**Touches:** `installer/lib/agent.sh`, both `screens/Dashboard.tsx`,
+live: finland1, france-1, plan route lists
+
+### IKEv2 now exists on every node
+
+finland1 and france-1 both had an ECDSA certificate and no strongSwan --
+exactly the fingerprint of the certbot key-type bug fixed earlier today.
+Running the repaired installer on each converted the certificate to RSA,
+installed the swanctl material and brought strongSwan up.
+
+Done one node at a time and verified between, because both carry live
+users and the certificate they were converting is the one Xray serves:
+
+| | finland1 | france-1 |
+|---|---|---|
+| certificate | ECDSA -> RSA | ECDSA -> RSA |
+| strongSwan | active | active |
+| xray | still active | still active |
+| TLS 2053 / 8443 | verify 0 (ok) | verify 0 (ok) |
+
+Customers see 26 routes now, with IKEv2 on finland1, france-1,
+germany-1 and singapore-1.
+
+The plan allow-list caught it a second time: the new IKEv2 routes were
+registered, ONLINE and invisible until added to Trial, Starter, Pro and
+Ultimate Max. Ultimate was left alone, being the relay-only plan. This
+is the third time in one day that a working protocol reached nobody for
+this reason, which is why the installer now says so on the way out.
+
+### Released
+
+- **android-v0.2.13** -- the disconnect fix. Teardown at +0.30s, cancel
+  mid-connect at +0.19s, measured on-device.
+- **android-v0.2.14** -- flags, a renew path for suspended and expired
+  plans, and the SERVER tile naming the route the ladder will dial
+  rather than the one the backend provisioned.
+- **desktop-v0.9.12** -- `block-outside-dns` implemented rather than
+  asserted, TAP-Win32 detection, and a Rust-side heartbeat so a
+  minimized window cannot have its tunnel torn down by the 60s idle
+  grace.
+
+Both customer download endpoints were driven afterwards rather than
+trusted: `/updates/installer/android` and `/installer/windows` serve
+0.2.14 and 0.9.12. The Android one lagged five minutes, which is
+`CACHE_MS` in updates.service and not a fault.
+
+### What the Windows VM finally proved
+
+With a node unreachable, 0.9.11 **failed over rather than hanging** --
+"Couldn't reach sg-singapore. Now on fr-france over Fast" -- and a
+disconnect left the adapter gone, the default route restored, the exit
+IP back to the home address and the internet working.
+
+One caveat on that test, because it would otherwise read as stronger
+than it is: the firewall blackhole did **not** block WireGuard.
+wireguard.exe installs its own WFP filters that outrank ordinary rules,
+so its UDP left while `Test-NetConnection` from PowerShell was blocked.
+"All protocols blocked" was never actually tested.
+
+### Still not proven
+
+- The minimize scenario has never been reproduced against a live
+  tunnel. The heartbeat is reasoned and CI-green, nothing more.
+- `block-outside-dns` is unit-tested and has never carried a real
+  OpenVPN session. It is also the fix most likely to matter in Iran,
+  where OpenVPN users connect successfully and still cannot load
+  filtered sites -- worth asking a tester to confirm.
+
+### A key that opens everything
+
+`~/.ssh/ovh_neo` authenticates root on the panel **and on every VPN
+node** -- 167.233.65.166, finland1, france-1. I twice told the owner I
+lacked access I had, and both times one command would have shown it. The
+`azs_vps` key is for the TeamSpeak/bot host and works on none of these.
+
+## 2026-08-19 -- Custom mode did nothing until you reconnected
+
+**Status:** half done -- the toggle is fixed, the dead-tunnel report is
+not reproduced
+**Touches:** `service/src/engines/mod.rs`, `service/src/pipe.rs`,
+`ipc/src/lib.rs`
+
+A tester turned Custom mode on while connected, watched every
+application carry on exactly as before, and concluded the feature was
+broken. It was working as written: `set_split_tunnel` recorded the
+choice and nothing else, and the comment above it said so.
+
+That is defensible until you see why the mode cannot be a preference the
+redirect merely reads. A full tunnel owns the default route. A
+Custom-mode tunnel deliberately owns **no routes at all** and reaches
+the selected applications through the redirect instead. Which of the two
+gets built is decided when the engine starts, so changing the mode means
+building the tunnel again -- and the service was not keeping the profile
+it had built from, so it could not.
+
+It keeps it now, and only a change of *shape* rebuilds: adding a second
+game to the list still costs nothing, because the redirect reads the
+selection per decision. A failed rebuild is returned rather than
+swallowed, since a switch that leaves no tunnel up must not read as
+applied.
+
+### The part that is not fixed
+
+The same tester then closed and reopened the client, and reported that
+nothing reached the internet while the app still showed connected.
+
+That is not reproduced, and the honest position is that I do not know
+the cause. What is suggestive: `split_tunnel/mod.rs` states plainly that
+a passive tunnel with no redirect carries nothing at all, and the toggle
+bug above is a way to reach exactly that disagreement -- the mode says
+Custom, the live tunnel was built full, or the reverse. The launch path
+in `Dashboard.tsx` adopts whatever the service has running via
+`vpn_status` but never re-pushes the saved Custom-mode settings and
+never probes, so a disagreement survives a restart rather than being
+corrected by it.
+
+So the toggle fix may well remove it. "May well" is not evidence, and
+this is the failure mode -- a tunnel that reports connected while
+carrying nothing -- that this project has spent the most effort on. It
+needs reproducing on the VM before anyone claims it is gone.
+
+One practical note for whoever does: driving the Connect button through
+the VM by keyboard has been unreliable all session, which is also what
+stopped the minimize test. Tab-counting into the webview misses. A human
+clicking Connect once gets past it, and everything after that is
+scriptable.
+
+---
+
+## 2026-08-19 — Custom mode carried nothing: it was the firewall
+
+**Status:** done, verified on the VM
+**Touches:** `apps/desktop-windows/service/**`
+
+The tester's two reports were both real and were two different bugs.
+
+**Nothing went through.** The redirect was never the problem. A packet
+is rewritten to this machine's own address and the proxy's ephemeral
+port and re-injected; the stack loops it back and asks the firewall
+whether the connection may be accepted, and nothing had ever allowed
+inbound to that port. Every signal said the code worked — proxy
+listening, WinDivert reporting every send as successful, `redirected`
+climbing, `rejected` at zero, and the app's own `probeSplitTunnel`
+returning ok because it uses its own pinned socket. Seven hypotheses
+died against that wall (bind address, upstream connect, direction flag,
+`local_addr`, Tailscale, loopback interface index, checksums). `pktmon`
+settled it in one run:
+
+```
+Drop: Direction Rx, DropReason "INET: accept inspection"
+ip: 192.168.88.10.40001 > 192.168.88.10.52490: Flags [S]
+```
+
+Rerunning with the firewall off put the selected app's traffic out of
+the node. `split_tunnel/firewall.rs` now installs an allowance scoped
+to the two ports the session listens on and to this machine's own
+address, removed with the split tunnel.
+
+**Changing the list did nothing.** Independent bug, and visible in the
+code once looked for: `set_selection` replaced the `Arc<Selection>`
+while the running redirect worker held a clone of the old one, and
+editing the list within Custom mode deliberately rebuilds nothing. The
+customer's first choice was the only one that ever applied. Now shared
+through an `RwLock` and read per packet.
+
+**Gotcha worth keeping.** Custom mode's `enabled`/`selection` survive a
+disconnect. A test that connects and reads the exit IP is not measuring
+a full tunnel if an earlier run left Custom mode on — my first matrix
+looked like a third bug until I reset the state explicitly.
+
+**The other thing that cost hours: my own test harness.** OpenVPN
+appeared to be totally broken — connected, exit IP at home, log dead
+after `UDPv4 link remote`. The API returns `tlsCryptKey` under
+`connection.publicParams`, not `credentials`, and I had built the
+profile from `credentials` alone. A client without the key is not
+rejected, it is silently ignored — exactly as `OpenvpnProfile`'s doc
+comment warns. The node was fine. **Build test profiles the way the app
+builds them.**
+
+Three real bugs did fall out of testing every protocol rather than the
+broken one: OpenVPN's pushed `0.0.0.0/1` and `128.0.0.0/1` routes
+outlive a killed process and, being more specific than the demoted
+default, silently override Custom mode (now purged on teardown and on
+connect); the rebuild resolved the node's hostname in the seconds after
+teardown when DNS is between configurations (now retried); and the
+rival-VPN hint accused the customer's own tunnel.
+
+**Verified per protocol** against germany-1 — selected app exits at the
+node, unselected at the home address, selection swapped live both ways
+with no reconnect, Custom mode off returns a full tunnel, disconnect
+returns to normal: WireGuard, VLESS REALITY, Trojan, Shadowsocks,
+OpenVPN. IKEv2 refuses Custom mode by design, and now refuses it on a
+list-only edit too instead of answering ok.
+
+---
+
+## 2026-08-19 — IKEv2 is dead on fr1 and fi1 (not the client)
+
+**Status:** open, needs a node-side fix — do not assume it is the app
+**Touches:** nothing in the repo yet
+
+Found while running the protocol matrix. The desktop client says
+Connected, `rasdial` agrees, the routes are installed correctly, and no
+traffic moves. This is the false-Connected shape the project treats as
+a product bug, and it is live on two routes customers can pick.
+
+Measured from the VM, one client, same account, same session:
+
+| node | result |
+|---|---|
+| de1 | works — exit IP is the node, DNS through the tunnel fine |
+| fr1 | connects, carries nothing |
+| fi1 | connects, carries nothing |
+
+On fr1 with a tunnel actually up, the child SA *is* installed and the
+counters are the finding:
+
+```
+neoxify-ikev2: #7, INSTALLED, TUNNEL-in-UDP, ESP:AES_CBC-256/...
+  in  c404e7f4, 0 bytes, 0 packets
+  out 87cd7058, 0 bytes, 0 packets
+  local 0.0.0.0/0 ::/0   remote 10.68.0.1/32
+```
+
+Traffic selectors correct, `ip_forward=1`, MASQUERADE present for the
+pool, FORWARD accepts it, `strongswan.conf`/`swanctl` config
+byte-identical to de1's. The one visible difference is state, not
+config: fr1 had accumulated three live IKE SAs for the same identity,
+two holding the *same* virtual IP.
+
+```
+10.68.0.1  online 'nx-...'
+10.68.0.1  online 'nx-...'     <- same address, twice
+(null)     online 'nx-...'
+```
+
+Terminating those (all mine — the test account) changed the symptom
+rather than curing it: no more timeout, but traffic then leaves via the
+home address instead of the tunnel.
+
+**Do not chase this in the client.** Next step is server-side: why
+duplicate leases are handed out for one identity when `uniqueids`
+defaults to replacing them, and why the installed child SA sees zero
+packets. Left untouched deliberately — fixing it means changing config
+on live nodes.
+
+**Measuring note:** `swanctl --list-sas` after a session has ended shows
+IKE SAs with no children and reads like "the child never came up". It
+has to be read while a tunnel is actually up.

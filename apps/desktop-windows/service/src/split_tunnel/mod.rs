@@ -50,6 +50,7 @@
 //! is the failure this project has spent the most effort removing.
 
 mod divert;
+mod firewall;
 mod flows;
 mod owner;
 mod proxy;
@@ -62,7 +63,7 @@ use std::sync::Arc;
 use crate::adapters;
 use crate::engines::routing::{self, InstalledRoutes};
 
-pub use owner::Selection;
+pub use owner::{Selection, SharedSelection};
 
 /// How long to wait for a tunnel adapter to appear and be given an
 /// address after its engine starts.
@@ -79,13 +80,16 @@ const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// protocol switches.
 pub struct SplitTunnel {
     enabled: bool,
-    selection: Arc<Selection>,
+    selection: SharedSelection,
     active: Option<Active>,
 }
 
 struct Active {
     redirect: redirect::Running,
     relays: proxy::Relays,
+    /// Held for its Drop: without it the stack accepts none of the
+    /// redirected connections. See the firewall module.
+    allowance: firewall::Allowance,
     tunnel: Arc<proxy::TunnelInterface>,
     route: InstalledRoutes,
     logger: Logger,
@@ -317,15 +321,22 @@ impl Default for SplitTunnel {
 
 impl SplitTunnel {
     pub fn new() -> Self {
-        Self { enabled: false, selection: Arc::new(Selection::default()), active: None }
+        Self { enabled: false, selection: SharedSelection::default(), active: None }
     }
 
     /// Replaces the customer's choice. Takes effect on the next
     /// connection a selected app makes, without restarting anything --
     /// the redirect loop reads the selection per decision.
+    ///
+    /// The contents are replaced rather than the cell: the running
+    /// redirect holds a clone of this handle, and handing it a new one
+    /// would leave it reading the old choice. That is not hypothetical.
+    /// It shipped that way, and because editing the list within Custom
+    /// mode deliberately rebuilds nothing, the customer's first choice
+    /// was the only one that ever took effect.
     pub fn set_selection(&mut self, enabled: bool, apps: Vec<String>) {
         self.enabled = enabled;
-        self.selection = Arc::new(Selection::new(apps));
+        *self.selection.write().unwrap_or_else(|e| e.into_inner()) = Selection::new(apps);
     }
 
     /// Whether Custom mode should shape how the next tunnel is brought
@@ -333,7 +344,8 @@ impl SplitTunnel {
     /// nothing chosen -- which must not mean "tunnel everything", since
     /// that is the opposite of what the customer asked for.
     pub fn wants_passive_tunnel(&self) -> bool {
-        self.enabled && !self.selection.is_empty()
+        self.enabled
+            && !self.selection.read().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
     pub fn is_running(&self) -> bool {
@@ -394,6 +406,19 @@ impl SplitTunnel {
             }
         };
 
+        // Before the redirect starts, so that no packet is ever sent
+        // to a port the firewall is still dropping.
+        let allowance =
+            match firewall::Allowance::install(local_addr, relays.tcp_port, relays.udp_port) {
+                Ok(allowance) => allowance,
+                Err(e) => {
+                    relays.stop();
+                    let mut route = route;
+                    route.remove();
+                    return Err(e);
+                }
+            };
+
         let redirect = redirect::Redirect {
             local_addr,
             node_addr: node,
@@ -415,8 +440,15 @@ impl SplitTunnel {
         match redirect::start(redirect, nat, self.selection.clone()) {
             Ok(running) => {
                 let logger = Logger::start(log_path.clone(), running.stats.clone(), header);
-                self.active =
-                    Some(Active { redirect: running, relays, tunnel, route, logger, log_path });
+                self.active = Some(Active {
+                    redirect: running,
+                    relays,
+                    allowance,
+                    tunnel,
+                    route,
+                    logger,
+                    log_path,
+                });
                 Ok(())
             }
             Err(e) => {
@@ -480,6 +512,8 @@ impl SplitTunnel {
         // than the fail-open this promises.
         active.redirect.stop();
         active.relays.stop();
+        let mut allowance = active.allowance;
+        allowance.remove();
         active.logger.stop();
         let mut route = active.route;
         route.remove();
