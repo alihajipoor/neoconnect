@@ -125,6 +125,19 @@ export function RunningAppPicker({
                         : "press border-white/8 bg-white/[0.025] hover:bg-white/[0.05]",
                     ].join(" ")}
                   >
+                    {/* The icon Windows draws for it, so the list is
+                        something to recognise rather than to read. */}
+                    {app.icon ? (
+                      <img
+                        src={`data:image/png;base64,${app.icon}`}
+                        alt=""
+                        className="size-6 shrink-0 rounded"
+                      />
+                    ) : (
+                      <div className="flex size-6 shrink-0 items-center justify-center rounded bg-white/8 text-[10px] font-semibold text-muted-foreground">
+                        {app.name.slice(0, 1).toUpperCase()}
+                      </div>
+                    )}
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs font-semibold">{app.name}</p>
                       {/* The full path is what gets matched, so it is
