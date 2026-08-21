@@ -165,6 +165,12 @@ impl Engines {
         self.split_tunnel.is_running()
     }
 
+    /// What Custom mode's packet counters say is wrong, for the status
+    /// poll. `None` while it is healthy or not running.
+    pub fn split_tunnel_complaint(&self) -> Option<String> {
+        self.split_tunnel.complaint()
+    }
+
     /// Proves the tunnel carries traffic, over the path selected apps
     /// use. See `SplitTunnel::probe` for why the app cannot check this
     /// for itself once Custom mode is on.

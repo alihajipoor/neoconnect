@@ -37,6 +37,10 @@ type VpnStatus = {
    * mid-session cannot retrofit itself onto a tunnel already carrying
    * everything -- and the customer is told which they have. */
   splitTunnelActive?: boolean;
+  /** What Custom mode's own packet counters say is wrong, already
+   * phrased for the customer by the service. The only signal here
+   * measured on the path a chosen app's traffic actually takes. */
+  splitTunnelProblem?: string;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }
@@ -408,6 +412,7 @@ export function Dashboard({
    * toggle here would tell them only their game is routed when the whole
    * machine is. */
   const [splitTunnelActive, setSplitTunnelActive] = useState(false);
+  const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
   /** When the shown data was last fetched, if the server could not be
    * reached this time. Null means everything on screen is current.
    *
@@ -554,6 +559,7 @@ export function Dashboard({
       adopted = stateFromStatus(status);
       setConnectionState(adopted);
       setSplitTunnelActive(Boolean(status.splitTunnelActive));
+      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
     } catch {
       setConnectionState("disconnected");
     }
@@ -590,6 +596,7 @@ export function Dashboard({
       try {
         const status = await invoke<VpnStatus>("vpn_status");
         setSplitTunnelActive(Boolean(status.splitTunnelActive));
+      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
         fromStatus = stateFromStatus(status);
       } catch {
         // Failing to ask is not the same as learning the tunnel is
@@ -1244,7 +1251,19 @@ export function Dashboard({
                           actually brought up to carry one app or all of
                           them. */}
                       {connectionState === "connected" && splitTunnelActive ? (
-                        <p className="mt-1 text-xs text-highlight">{t("dash.customActive")}</p>
+                        splitTunnelProblem ? (
+                          /* The service's own words, from counters taken
+                             on the path the chosen apps' packets travel.
+                             It outranks "Custom mode is on", because on
+                             and working are not the same thing and a
+                             tester spent three sessions believing they
+                             were -- his traffic was being redirected into
+                             a tunnel that answered none of it while this
+                             line said everything was fine. */
+                          <p className="mt-1 text-xs text-destructive">{splitTunnelProblem}</p>
+                        ) : (
+                          <p className="mt-1 text-xs text-highlight">{t("dash.customActive")}</p>
+                        )
                       ) : null}
                     </div>
 
