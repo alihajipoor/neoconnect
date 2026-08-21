@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Loader2, RefreshCw, X } from "lucide-react";
+import { Loader2, RefreshCw, Search, X } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import { listRunningApps, type RunningApp } from "../lib/split-tunnel";
 import { Button } from "./ui";
@@ -24,12 +24,14 @@ export function RunningAppPicker({
   onClose,
 }: {
   chosen: string[];
-  onPick: (path: string) => void;
+  /** Every executable of the chosen product, not just the one shown. */
+  onPick: (paths: string[]) => void;
   onClose: () => void;
 }) {
   const { t } = useI18n();
   const [apps, setApps] = useState<RunningApp[] | null>(null);
   const [failed, setFailed] = useState(false);
+  const [query, setQuery] = useState("");
 
   async function refresh() {
     setApps(null);
@@ -50,6 +52,14 @@ export function RunningAppPicker({
   }, []);
 
   const already = new Set(chosen.map((c) => c.toLowerCase()));
+
+  // Matched on the name people actually read. Searching paths as well
+  // would make "app" match half of Program Files.
+  const shown = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle || !apps) return apps;
+    return apps.filter((a) => a.name.toLowerCase().includes(needle));
+  }, [apps, query]);
 
   // Rendered into the body rather than where it sits in the tree.
   // `position: fixed` is measured against the nearest ancestor with a
@@ -80,24 +90,34 @@ export function RunningAppPicker({
           </button>
         </div>
 
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("settings.customSearch")}
+            className="w-full rounded-lg border border-white/8 bg-white/[0.03] py-1.5 pl-8 pr-2 text-xs outline-none placeholder:text-muted-foreground focus:border-white/20"
+          />
+        </div>
+
         {apps === null ? (
           <div className="flex items-center justify-center py-8 text-muted-foreground">
             <Loader2 className="size-5 animate-spin" />
           </div>
-        ) : apps.length === 0 ? (
+        ) : shown && shown.length === 0 ? (
           <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {t("settings.customRunningEmpty")}
+            {query.trim() ? t("settings.customSearchEmpty") : t("settings.customRunningEmpty")}
           </p>
         ) : (
           <ul className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
-            {apps.map((app) => {
+            {(shown ?? []).map((app) => {
               const picked = already.has(app.path.toLowerCase());
               return (
                 <li key={app.path}>
                   <button
                     type="button"
                     disabled={picked}
-                    onClick={() => onPick(app.path)}
+                    onClick={() => onPick(app.paths?.length ? app.paths : [app.path])}
                     className={[
                       "flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left",
                       picked
@@ -109,8 +129,14 @@ export function RunningAppPicker({
                       <p className="truncate text-xs font-semibold">{app.name}</p>
                       {/* The full path is what gets matched, so it is
                           shown -- two programs can share a file name. */}
+                      {/* One product is often several executables, and
+                          the count is the honest way to say so -- it is
+                          what stops "I picked Discord and half of it
+                          still went round the VPN". */}
                       <p className="truncate text-[10px] text-muted-foreground" dir="ltr">
-                        {app.path}
+                        {app.paths && app.paths.length > 1
+                          ? t("settings.customAppParts", { count: String(app.paths.length) })
+                          : app.path}
                       </p>
                     </div>
                   </button>
