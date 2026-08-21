@@ -32,9 +32,10 @@ use std::io;
 use std::mem::size_of;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::os::windows::io::AsRawSocket;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use windows_sys::Win32::Networking::WinSock::setsockopt;
@@ -215,6 +216,43 @@ fn note(line: &str) {
 }
 
 /// A UDP socket placed the same way.
+/// How long to keep trying to bind a socket to the tunnel.
+///
+/// Covers duplicate address detection on a freshly created adapter,
+/// which is the only reason this legitimately fails for more than an
+/// instant. Well short of a resolver's own patience, so a retry here is
+/// invisible where a dropped datagram was not.
+const BIND_RETRY_FOR: Duration = Duration::from_secs(6);
+const BIND_RETRY_EVERY: Duration = Duration::from_millis(100);
+
+/// Where the relay reports a problem it would otherwise swallow.
+///
+/// Set once when Custom mode starts. A silent `continue` in this loop is
+/// invisible from every angle -- the counters call it "seen", the app
+/// calls it connected, and the customer calls it broken.
+static RELAY_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_relay_log(path: PathBuf) {
+    let _ = RELAY_LOG.set(path);
+}
+
+fn stats_note(message: &str) {
+    if let Some(path) = RELAY_LOG.get() {
+        super::append(path, message);
+    }
+}
+
+fn bind_upstream_retrying(tunnel: &TunnelInterface) -> io::Result<UdpSocket> {
+    let deadline = Instant::now() + BIND_RETRY_FOR;
+    loop {
+        match bind_upstream(tunnel) {
+            Ok(socket) => return Ok(socket),
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => std::thread::sleep(BIND_RETRY_EVERY),
+        }
+    }
+}
+
 fn bind_upstream(tunnel: &TunnelInterface) -> io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     match tunnel.get() {
@@ -463,7 +501,29 @@ fn serve_udp(
         let upstream = match upstreams.get(nat_port) {
             Some(socket) => socket,
             None => {
-                let Ok(socket) = bind_upstream(&tunnel) else { continue };
+                // Retried rather than dropped, and this is the whole
+                // "the browser takes ten to twenty seconds" bug.
+                //
+                // A tunnel address is tentative for a moment after the
+                // adapter comes up, while Windows finishes duplicate
+                // address detection, and a socket cannot be bound to it
+                // until that completes. This used to `continue`, so
+                // every datagram in that window vanished with no log and
+                // no retry. DNS is the first thing anything does, so the
+                // resolver exhausted its retry budget and the lookup
+                // failed outright -- while TCP, which retransmits its
+                // own SYN for far longer, sailed through and made the
+                // whole thing look like a DNS-specific fault.
+                //
+                // Measured: nothing on the wire for the first fourteen
+                // seconds, then every lookup fine.
+                let socket = match bind_upstream_retrying(&tunnel) {
+                    Ok(socket) => socket,
+                    Err(e) => {
+                        stats_note(&format!("upstream bind failed for udp flow: {e}"));
+                        continue;
+                    }
+                };
                 let socket = Arc::new(socket);
                 upstreams.insert(nat_port, socket.clone());
 

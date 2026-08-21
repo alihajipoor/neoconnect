@@ -132,6 +132,10 @@ pub enum Verdict {
     /// Nothing is known about this flow yet; the caller must work out
     /// who owns the port and then record the answer.
     Unknown,
+    /// Swallow it. Used only where letting the packet through would send
+    /// it somewhere the customer asked it not to go -- see the DNS
+    /// branch in `redirect::decide`.
+    Drop,
 }
 
 impl Default for Nat {

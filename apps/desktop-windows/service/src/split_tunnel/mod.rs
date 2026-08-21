@@ -498,6 +498,11 @@ impl SplitTunnel {
         // So wait for proof instead of assuming. A completed TCP
         // handshake to the relay means the rule is live and the listener
         // is up; nothing is redirected until that succeeds.
+        // So the relay can report a datagram it had to drop. Set before
+        // the redirect starts, because the first seconds are exactly
+        // when it matters.
+        proxy::set_relay_log(log_path.clone());
+
         if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port) {
             relays.stop();
             let mut route = route;
