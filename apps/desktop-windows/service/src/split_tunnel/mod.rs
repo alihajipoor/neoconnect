@@ -540,10 +540,33 @@ impl SplitTunnel {
     /// requests deliberately do not go through the tunnel, so its usual
     /// "did my address change" check correctly reports being bypassed
     /// and would fail every protocol in turn. See [`proxy::probe`].
+    /// What the live counters say is wrong, or `None` when nothing is.
+    ///
+    /// Read from the real path under the customer's own traffic, which
+    /// is the one thing [`Self::probe`] cannot do -- see
+    /// [`redirect::Stats::complaint`]. Reported on every status poll
+    /// rather than only at connect, because the numbers that matter are
+    /// zero at connect and only become meaningful once the chosen apps
+    /// have actually tried to send something.
+    pub fn complaint(&self) -> Option<String> {
+        self.active.as_ref()?.redirect.stats.complaint()
+    }
+
     pub fn probe(&self) -> Result<(), String> {
         let Some(active) = &self.active else {
             return Err("custom mode is not running".into());
         };
+
+        // Real traffic beats a synthetic connection. If the customer's
+        // own packets are already proving the path is broken, say so in
+        // their terms instead of opening a socket that tests a different
+        // path and may well succeed.
+        if let Some(problem) = active.redirect.stats.complaint() {
+            append(&active.log_path, &format!("probe FAILED (counters): {problem}"));
+            append(&active.log_path, &format!("  {}", active.redirect.stats.summary()));
+            return Err(problem);
+        }
+
         let outcome = proxy::probe(&active.tunnel);
 
         // Written down because this verdict is what decides whether the

@@ -100,6 +100,15 @@ pub struct Stats {
     pub rejected: AtomicU64,
 }
 
+/// How many packets must have gone out before silence means anything.
+///
+/// One unanswered packet is normal -- a retransmit, a probe to a host
+/// that is down, a UDP send nobody was ever going to reply to. Twenty
+/// with nothing at all coming back is not something a working path does.
+/// The threshold is deliberately well above a single stalled connection
+/// so that one dead host cannot condemn a healthy tunnel.
+const SILENT_AFTER: u64 = 20;
+
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
@@ -110,6 +119,65 @@ impl Stats {
             self.returned.load(Ordering::Relaxed),
             self.rejected.load(Ordering::Relaxed),
         )
+    }
+
+    /// What these numbers say about whether Custom mode is working, in
+    /// words a customer can act on -- or `None` when nothing is wrong.
+    ///
+    /// This exists because the app had no way to notice the failure its
+    /// own service was already recording. A tester's log read
+    /// `redirected=90 returned=0` -- ninety packets pushed into the
+    /// tunnel for his browser, not one answer -- while the app showed
+    /// Connected and Custom mode on. He reported the feature as broken,
+    /// which was the only conclusion available to him.
+    ///
+    /// The existing probe cannot catch this. It opens its own socket,
+    /// pinned to the tunnel, and connects out: that proves the tunnel is
+    /// alive and touches none of the interception, matching, rewriting
+    /// or relaying that a selected application's packets go through. It
+    /// is also read at connect time, when these counters are still zero.
+    /// These are the only numbers taken from the real path under real
+    /// traffic.
+    pub fn complaint(&self) -> Option<String> {
+        let seen = self.seen.load(Ordering::Relaxed);
+        let matched = self.matched.load(Ordering::Relaxed);
+        let redirected = self.redirected.load(Ordering::Relaxed);
+        let returned = self.returned.load(Ordering::Relaxed);
+        let rejected = self.rejected.load(Ordering::Relaxed);
+
+        // Injections the driver refused. The packets are not going where
+        // every other counter implies, so say that before anything else.
+        if rejected > 0 && rejected >= redirected {
+            return Some(
+                "Windows is refusing the redirected packets, so your chosen apps are not \
+                 reaching the VPN. Restarting the app usually clears this."
+                    .into(),
+            );
+        }
+
+        // The tester's exact signature: traffic going out, nothing back.
+        if redirected >= SILENT_AFTER && returned == 0 {
+            return Some(
+                "Your chosen apps are being sent through the VPN but nothing is coming back, \
+                 so their connections will hang. The tunnel is not carrying their traffic."
+                    .into(),
+            );
+        }
+
+        // Intercepting the machine's traffic and recognising none of it.
+        // Usually the wrong executable was picked -- a launcher rather
+        // than the program, or a browser that was not running when the
+        // list was taken.
+        if seen >= 500 && matched == 0 {
+            return Some(
+                "None of the apps you chose have sent any traffic. If one of them is running, \
+                 the wrong program may have been picked -- some apps launch under a different \
+                 executable."
+                    .into(),
+            );
+        }
+
+        None
     }
 }
 
@@ -683,6 +751,73 @@ fn rewrite_return_leg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stats(seen: u64, matched: u64, redirected: u64, returned: u64, rejected: u64) -> Stats {
+        Stats {
+            seen: AtomicU64::new(seen),
+            matched: AtomicU64::new(matched),
+            redirected: AtomicU64::new(redirected),
+            returned: AtomicU64::new(returned),
+            rejected: AtomicU64::new(rejected),
+        }
+    }
+
+    #[test]
+    fn a_fresh_session_complains_about_nothing() {
+        // Every counter is zero for a moment after every connect. If
+        // that read as a fault, Custom mode would report itself broken
+        // every single time it started.
+        assert_eq!(stats(0, 0, 0, 0, 0).complaint(), None);
+    }
+
+    #[test]
+    fn traffic_flowing_both_ways_is_healthy() {
+        assert_eq!(stats(4000, 900, 850, 800, 0).complaint(), None);
+    }
+
+    #[test]
+    fn a_few_unanswered_packets_are_not_a_fault() {
+        // A retransmit, or a host that is simply down. Condemning the
+        // tunnel for this would make the warning worthless.
+        assert_eq!(stats(300, 30, SILENT_AFTER - 1, 0, 0).complaint(), None);
+    }
+
+    #[test]
+    fn sending_with_nothing_coming_back_is_reported() {
+        // The tester's log, exactly: redirected=90, returned=0, while
+        // the app showed Connected and Custom mode on.
+        let c = stats(441, 90, 90, 0, 0).complaint().expect("must complain");
+        assert!(c.contains("nothing is coming back"), "{c}");
+    }
+
+    #[test]
+    fn one_reply_is_enough_to_stay_quiet() {
+        // The claim is "nothing comes back". A single reply disproves
+        // it, and something quieter than a hard failure is happening.
+        assert_eq!(stats(441, 90, 90, 1, 0).complaint(), None);
+    }
+
+    #[test]
+    fn refused_injections_are_named_before_the_silence() {
+        // Both conditions hold here. The refusal is the cause and the
+        // silence is its consequence, so the refusal is what to say.
+        let c = stats(500, 90, 90, 0, 90).complaint().expect("must complain");
+        assert!(c.contains("refusing"), "{c}");
+    }
+
+    #[test]
+    fn intercepting_everything_and_matching_nothing_is_reported() {
+        let c = stats(5000, 0, 0, 0, 0).complaint().expect("must complain");
+        assert!(c.contains("None of the apps you chose"), "{c}");
+    }
+
+    #[test]
+    fn a_quiet_machine_that_matches_nothing_is_not_yet_a_fault() {
+        // Below the threshold this is just an idle machine, and saying
+        // "none of your apps have sent traffic" would be true but
+        // useless noise a second after switching it on.
+        assert_eq!(stats(10, 0, 0, 0, 0).complaint(), None);
+    }
 
     /// A minimal IPv4 TCP packet, so the parser is exercised against
     /// bytes rather than against a struct built to suit it.
