@@ -4591,3 +4591,59 @@ page, while one answered by the ISP is a record of where they went.
 Not changed yet, because it wants its own test and possibly a complaint
 so the customer is told, rather than a quiet swap of one failure mode
 for another.
+
+---
+
+## 2026-08-22 — The browser delay: one silent `continue`
+
+**Status:** fixed, measured
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/**`
+
+Three days of this, and it was one line in the UDP relay:
+
+```rust
+let Ok(socket) = bind_upstream(&tunnel) else { continue };
+```
+
+A tunnel address is **tentative** for a moment after the adapter appears
+while Windows finishes duplicate address detection, and a socket cannot
+be bound to it until that completes. Every datagram arriving in that
+window was dropped — no log, no retry, no counter. DNS is the first
+thing any application does, so the resolver burned its whole retry
+budget and the lookup failed outright.
+
+TCP was unaffected because it retransmits its own SYN for far longer
+than the window lasts. That asymmetry is what made this look like a
+DNS-specific fault and sent four hypotheses in the wrong direction
+(QUIC/UDP dropped, multiple apps, Tailscale, the firewall race).
+
+Measured, same eight names, same moment:
+
+| | before | after |
+|---|---|---|
+| failures | 2 of 6, at 12s each | **0 of 8** |
+| slowest | 12.07s | **1.42s** |
+| steady state | — | 0.16s |
+
+The bind now retries for up to six seconds and **says so in the log if it
+still gives up**. A packet this feature drops must never again be
+invisible from every angle at once — the counters called it "seen", the
+app called it connected, and the customer called it broken.
+
+**What actually found it:** a `pktmon` capture showing the failing
+lookups nowhere on the wire — not to the ISP resolver, not to `1.1.1.1`.
+That excluded misrouting, lost replies and source mismatch in one run,
+and pointed at the only remaining possibility: the query was never
+forwarded. Four guesses preceded it. The capture should have been first.
+
+### The DNS leak beside it, now closed
+
+The same branch fell back to `Verdict::Direct` when a NAT port could not
+be allocated — sending the lookup **in the clear to whichever resolver
+the network handed out**, which for a customer in Iran is their ISP. It
+now drops instead, via a new `Verdict::Drop` / `Leg::Swallowed` that is
+the single deliberate non-injection in the worker loop.
+
+A lookup that does not answer is a page that does not load, which the
+customer sees and can retry. A lookup answered by their ISP is a record
+of where they went, which they never learn about.
