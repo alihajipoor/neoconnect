@@ -4287,3 +4287,75 @@ before a browser starts using the tunnel while Telegram is instant, and
 one observation of the full tunnel carrying nothing with Custom mode
 *off*. The rig routes through Tailscale (`100.89.197.53`, US exit),
 which has to come out of the path before either is measured.
+
+---
+
+## 2026-08-21 — Clean baseline: 25/26, and Custom mode can now report itself broken
+
+**Status:** done
+**Touches:** `apps/desktop-windows/**`
+
+### The baseline
+
+Custom mode **off**, every route, from the app's own service:
+
+```text
+HOME (no vpn): 50.34.35.228
+PASS 25   FAIL 1   of 26
+connectivity restored after run: 50.34.35.228
+```
+
+The one failure is `finland1 / Xray VLESS+REALITY`, which returns no
+exit address at all while france-1 and germany-1 REALITY both pass. That
+is the finland1 decoy divergence (`www.shatel.ir`) still sitting on the
+live node, not a regression from any recent change. Nothing else moved.
+
+**Tailscale is ruled out**, with evidence rather than assumption: the
+default route was via Ethernet before and after stopping it, and the
+exit address was identical either way. It was never in the data path.
+
+### Four harness bugs, one of which nearly became a false alarm
+
+The first run of this matrix reported **all 26 routes broken**. Every one
+of them worked. Causes, in the order they bit:
+
+1. `keyboardputscancodes` — the command is singular, and the error was
+   muted by `>/dev/null 2>&1`.
+2. `printf` in bash turning `\a` of `Z:\apps2.ps1` into a BEL byte.
+3. `$L += ...` inside a PowerShell function appends to a *local* copy,
+   so half the diagnostic output was silently discarded.
+4. `& curl ... 2>&1` — PowerShell 5.1 wraps a native command's stderr in
+   ErrorRecords, which corrupted the body and the exit code. This is the
+   one that produced 26 false FAILs, and it is already written down in
+   this repo's environment notes.
+
+Rewriting the matrix as linear code with no functions and no stderr
+merging turned 26 failures into 25 passes without touching the product.
+**Any test harness that reports total failure is far more likely to be
+broken than the thing it measures.**
+
+### Custom mode now reports itself broken
+
+`Stats::complaint()` reads the live counters and, when they say
+something is wrong, returns words a customer can act on. Surfaced on
+every status poll through to the dashboard, where it replaces "Custom
+mode is on" rather than sitting beside it -- on and working are not the
+same thing.
+
+Why this was needed: the probe beside it opens a *fresh socket pinned to
+the tunnel* and connects out. That proves the tunnel is alive and
+exercises none of the interception, matching, rewriting or relaying a
+selected app's packets go through -- and it runs at connect time, when
+these counters are still zero. A tester's log read `redirected=90
+returned=0` for three sessions while the app showed Connected. The
+service had the evidence and nothing read it.
+
+Three verdicts, in priority order: injections refused by the driver;
+traffic redirected with nothing coming back (>= 20 packets, which is
+well above one stalled connection); and interception seeing the machine
+busy while matching none of it, which usually means the wrong executable
+was picked.
+
+Eight tests cover the thresholds, including the two that matter most --
+a fresh session with all-zero counters must stay quiet, and a single
+reply is enough to withdraw the "nothing comes back" claim.

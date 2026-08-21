@@ -238,7 +238,8 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
         Request::Status => {
             let (connected, protocol, health) = engines.status();
             let split_tunnel_active = engines.split_tunnel_running();
-            Response::State { connected, protocol, health, split_tunnel_active }
+            let split_tunnel_problem = engines.split_tunnel_complaint();
+            Response::State { connected, protocol, health, split_tunnel_active, split_tunnel_problem }
         }
         Request::ListRunningApps => Response::RunningApps {
             apps: crate::split_tunnel::running_apps()
