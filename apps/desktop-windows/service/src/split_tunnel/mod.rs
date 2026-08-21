@@ -52,6 +52,7 @@
 mod divert;
 mod firewall;
 mod flows;
+mod icon;
 mod owner;
 mod proxy;
 mod redirect;

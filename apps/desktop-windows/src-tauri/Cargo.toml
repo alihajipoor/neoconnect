@@ -1,6 +1,6 @@
 [package]
 name = "neoconnect-desktop"
-version = "0.9.20"
+version = "0.9.21"
 description = "NeoConnect VPN client"
 authors = ["NeoConnect"]
 edition = "2021"
@@ -48,5 +48,9 @@ features = [
   # MIB_IPFORWARDROW, which GetBestRoute fills in -- see
   # vpn.rs::network_fingerprint.
   "Win32_Networking_WinSock",
+  # EnumWindows: which processes own a window the customer can
+  # see. Only answerable here -- the helper service is in
+  # session 0 and cannot see the interactive desktop at all.
+  "Win32_UI_WindowsAndMessaging",
 ]
 

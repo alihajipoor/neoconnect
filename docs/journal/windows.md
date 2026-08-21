@@ -4647,3 +4647,63 @@ the single deliberate non-injection in the worker loop.
 A lookup that does not answer is a page that does not load, which the
 customer sees and can retry. A lookup answered by their ISP is a record
 of where they went, which they never learn about.
+
+---
+
+## 2026-08-22 — The app picker, rebuilt and verified
+
+**Status:** done, measured on the rig
+**Touches:** `apps/desktop-windows/**`
+
+"It shows all of Windows" was fair. The list was every process whose
+image was not under System32 -- a definition of *not a Windows binary*
+rather than of *an app* -- with one row per executable.
+
+With the window filter applied as the app applies it, fifteen entries
+become four:
+
+```text
+shown   : Microsoft Edge (2 exes), Notepad, mspaint, Windows Explorer
+removed : Antimalware Service Executable, Antimalware Core Service,
+          SearchHost, Widgets, WidgetService.exe, Shell Experience Host,
+          Start Experience Host, OneDrive, Edge Update, CrossDeviceResume,
+          Network Realtime Inspection
+```
+
+Every entry carries the icon the shell draws.
+
+### Three things worth remembering
+
+**The filter cannot live in the service.** The first attempt put
+`EnumWindows` there and returned **zero apps**: the service is
+LocalSystem in session 0, isolated from the interactive desktop.
+Process enumeration crosses sessions, window enumeration does not. The
+service reports what only it can read -- paths, version info, icons,
+pids -- and the app decides what is on screen.
+
+**ProductName alone over-groups.** Windows stamps
+"Microsoft(R) Windows(R) Operating System" on Notepad, Paint and
+Explorer alike, which collapsed nine unrelated programs into one entry.
+Selecting it would have tunnelled all nine. Products that name the
+platform are kept apart and named from FileDescription.
+
+**A group's representative must be chosen, not sorted.** Edge ships
+`elevation_service.exe`, which sorts before `msedge.exe`, so "Microsoft
+Edge" showed a service's icon and path. Closest match to the product
+name wins.
+
+### Icons without a dependency
+
+`SHGetFileInfoW` for the handle, `GetDIBits` for pixels, and a PNG
+written here -- stored deflate blocks are valid PNG in about sixty
+lines, which beats carrying an image encoder inside a LocalSystem
+service for a settings screen. The mask is applied when the colour
+bitmap's alpha is all zeroes, which is the case for older icons and
+otherwise yields a fully transparent image. CRC32, Adler-32, base64 and
+the PNG structure are covered by known-answer tests.
+
+**Not verified:** the picker dialog itself was never opened. The data it
+receives was checked by applying the identical filter on the rig, so
+search and icon rendering are unproven visually. Also `mspaint` shows as
+"mspaint" rather than "Paint" -- its FileDescription did not come
+through.

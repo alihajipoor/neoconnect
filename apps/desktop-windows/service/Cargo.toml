@@ -39,6 +39,14 @@ features = [
     # can choose from what is running instead of hunting through
     # Program Files for an executable.
     "Win32_System_Diagnostics_ToolHelp",
+    # EnumWindows and friends: the picker asks "does this process
+    # own a window a person can see", which is the only reliable
+    # difference between an application and a background helper.
+    "Win32_UI_WindowsAndMessaging",
+    # SHGetFileInfoW: the icon Windows already draws for an exe,
+    # so the picker shows what the taskbar shows.
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
     # Adapter enumeration for routing -- see src/adapters.rs for why this
     # is done through the API rather than by parsing localised command output.
     "Win32_NetworkManagement_IpHelper",

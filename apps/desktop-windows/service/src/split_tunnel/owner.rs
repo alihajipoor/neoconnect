@@ -24,12 +24,22 @@
 //! cached and the refresh rate-limited below.
 
 use std::collections::HashMap;
+use std::os::windows::ffi::OsStrExt;
 use std::sync::{Arc, RwLock};
 
 use neoconnect_ipc::SplitTunnelMode;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, NO_ERROR};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, HWND, NO_ERROR,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
+    GW_OWNER,
+};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, SetTcpEntry, TCP_TABLE_OWNER_PID_ALL,
     UDP_TABLE_OWNER_PID,
@@ -356,34 +366,51 @@ fn parse_table(
 /// their own machinery through a VPN. The path is what a selection is
 /// actually made of -- see `Selection` -- so the path is returned, with
 /// the file name alongside only for display.
-pub fn running_apps() -> Vec<(String, String)> {
-    let mut found: HashMap<String, (String, String)> = HashMap::new();
+/// The applications a customer would actually recognise, grouped one
+/// entry per product.
+///
+/// Two things decide what appears here, and the previous version had
+/// neither. It listed every process whose image was not under System32,
+/// which is a definition of "not a Windows binary" rather than of "an
+/// app" -- so background helpers, update services and telemetry hosts
+/// filled the list -- and it listed each executable separately, so one
+/// product appeared two or three times under names nobody recognises.
+///
+/// A **visible window with a title** is what a person means by "an app
+/// that is open". Everything without one is exactly the noise being
+/// complained about.
+///
+/// Grouping is by the product name recorded in the executable itself,
+/// falling back to the install directory when there is none. That is
+/// what puts `Discord.exe` and `Update.exe` under a single "Discord".
+pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
+    let mut by_product: HashMap<String, (String, Vec<String>, Vec<u32>)> = HashMap::new();
 
     // SAFETY: a plain call; an invalid handle is checked below.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot.is_null() {
         return Vec::new();
     }
-
     // SAFETY: zeroed is a valid PROCESSENTRY32W once dwSize is set, and
     // setting it is what the API uses to version the struct.
     let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-    // SAFETY: the handle is valid until CloseHandle below, and `entry`
-    // is owned here.
+    // SAFETY: the handle is valid until CloseHandle below.
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
     while ok != 0 {
-        if let Some(path) = image_path(entry.th32ProcessID) {
+        let pid = entry.th32ProcessID;
+        if let Some(path) = image_path(pid) {
             if is_user_application(&path) {
-                let name = std::path::Path::new(&path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.clone());
-                // Lowered only as the key, so matching is
-                // case-insensitive while what the customer sees keeps
-                // the spelling Windows reported.
-                found.entry(path.to_lowercase()).or_insert((path, name));
+                let (key, label) = product_of(&path);
+                let slot = by_product
+                    .entry(key)
+                    .or_insert_with(|| (label, Vec::new(), Vec::new()));
+                let lowered = path.to_lowercase();
+                if !slot.1.iter().any(|p| p.to_lowercase() == lowered) {
+                    slot.1.push(path);
+                }
+                slot.2.push(pid);
             }
         }
         // SAFETY: same handle and entry as above.
@@ -392,9 +419,253 @@ pub fn running_apps() -> Vec<(String, String)> {
     // SAFETY: the snapshot handle is valid and not used again.
     unsafe { CloseHandle(snapshot) };
 
-    let mut apps: Vec<(String, String)> = found.into_values().collect();
-    apps.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    // Every sibling goes with the group, so choosing one product routes
+    // all of it -- but siblings that are not running are unknown here,
+    // which is why the group is built from what the product is rather
+    // than from what happens to be on screen.
+    let mut apps: Vec<neoconnect_ipc::RunningApp> = by_product
+        .into_values()
+        .filter_map(|(name, mut paths, pids)| {
+            paths.sort();
+            // The executable a person associates with the product, not
+            // whichever sorts first. Microsoft Edge ships an
+            // `elevation_service.exe` that sorts before `msedge.exe`,
+            // and taking the first put a service's icon and path under
+            // the name "Microsoft Edge".
+            //
+            // The closest match to the product's own name wins: it is
+            // what publishers name their main binary after, and the one
+            // whose icon is the product's.
+            let path = pick_primary(&name, &paths)?;
+            // Taken from the executable shown, which is the one whose
+            // icon a person associates with the product.
+            let icon = super::icon::icon_png_base64(&path);
+            Some(neoconnect_ipc::RunningApp { path, name, paths, icon, pids })
+        })
+        .collect();
+    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     apps
+}
+
+/// The executable that best represents a product.
+///
+/// Scored rather than guessed: an exact stem match first, then one that
+/// contains the product's letters, then the shortest name -- helpers are
+/// almost always the longer, more qualified ones
+/// (`elevation_service`, `crashpad_handler`, `Update`).
+fn pick_primary(product: &str, paths: &[String]) -> Option<String> {
+    let wanted: String = product
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+
+    paths
+        .iter()
+        .min_by_key(|path| {
+            let stem: String = std::path::Path::new(path.as_str())
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect();
+            let rank = if stem == wanted {
+                0
+            } else if !wanted.is_empty() && (wanted.contains(&stem) || stem.contains(&wanted)) {
+                1
+            } else {
+                2
+            };
+            (rank, stem.len())
+        })
+        .cloned()
+}
+
+/// Process ids that own a visible, titled, top-level window.
+///
+/// The closest thing Windows offers to "this is an application the
+/// person can see". Owned windows and tool windows are skipped: a
+/// splash screen or a tray tooltip is not an app someone chose to open.
+fn pids_with_windows() -> std::collections::HashSet<u32> {
+    let mut set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // SAFETY: `set` outlives the enumeration, which is synchronous, and
+    // the callback only ever touches it through this pointer.
+    unsafe {
+        EnumWindows(Some(collect_window_pid), &mut set as *mut _ as isize);
+    }
+    set
+}
+
+unsafe extern "system" fn collect_window_pid(window: HWND, param: isize) -> i32 {
+    // SAFETY: the pointer is the &mut HashSet handed to EnumWindows.
+    let set = unsafe { &mut *(param as *mut std::collections::HashSet<u32>) };
+
+    // SAFETY: `window` is supplied by the enumeration and valid here.
+    unsafe {
+        if IsWindowVisible(window) == 0 || GetWindowTextLengthW(window) == 0 {
+            return 1;
+        }
+        // A window owned by another one is a dialog or a splash, not the
+        // application itself.
+        if !GetWindow(window, GW_OWNER).is_null() {
+            return 1;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(window, &mut pid);
+        if pid != 0 {
+            set.insert(pid);
+        }
+    }
+    1
+}
+
+/// A grouping key and a display name for whatever product owns this
+/// executable.
+///
+/// The product name inside the binary is the only thing that reliably
+/// ties several executables together -- file names do not (`Update.exe`
+/// is a dozen different products) and neither do directories, since a
+/// launcher and the program it launches often sit in different folders
+/// under one install root.
+fn product_of(path: &str) -> (String, String) {
+    // The friendly name first: "Notepad" rather than "Microsoft(R)
+    // Windows(R) Operating System", which is what ProductName says for
+    // every accessory Windows ships.
+    let description = version_string(path, "FileDescription");
+
+    if let Some(product) = product_name(path) {
+        let trimmed = product.trim();
+        // Some publishers put the platform in ProductName rather than
+        // the program, and Microsoft puts it on everything from Notepad
+        // to Explorer. Grouping on that collapses a dozen unrelated
+        // accessories into one entry -- measured here as a single
+        // "Windows Operating System" holding nine executables, which a
+        // customer selecting it would have tunnelled all of.
+        //
+        // Those are not one product to anybody using them, so they are
+        // kept apart and named individually.
+        if !trimmed.is_empty() && !is_platform_product(trimmed) {
+            let label = description.unwrap_or_else(|| trimmed.to_string());
+            return (trimmed.to_lowercase(), label);
+        }
+        if !trimmed.is_empty() {
+            let label = description.unwrap_or_else(|| file_label(path));
+            // Keyed by the executable, so each accessory stands alone.
+            return (path.to_lowercase(), label);
+        }
+    }
+    if let Some(label) = description {
+        return (path.to_lowercase(), label);
+    }
+    // No version block: fall back to the folder, which at least keeps
+    // one program's pieces together, and show the file name.
+    let file = std::path::Path::new(path);
+    let label = file
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    let key = file
+        .parent()
+        .map(|d| d.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| label.to_lowercase());
+    (key, label)
+}
+
+/// Whether this names the platform rather than the program.
+///
+/// Windows stamps one ProductName across everything it ships, so it is
+/// a grouping key that means "made by the OS" rather than "the same
+/// application".
+fn is_platform_product(product: &str) -> bool {
+    let lowered = product.to_lowercase();
+    lowered.contains("operating system") || lowered == "microsoft windows"
+}
+
+/// The last path segment without its extension, for a display name of
+/// last resort.
+fn file_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// `ProductName` from the executable's version resource.
+fn product_name(path: &str) -> Option<String> {
+    version_string(path, "ProductName")
+}
+
+/// One named string from an executable's version resource.
+fn version_string(path: &str, field: &str) -> Option<String> {
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `wide` is a valid null-terminated wide string.
+    let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), std::ptr::null_mut()) };
+    if size == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; size as usize];
+    // SAFETY: the buffer is `size` bytes, which is what the call asked
+    // for above.
+    if unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, buffer.as_mut_ptr() as *mut _) } == 0 {
+        return None;
+    }
+
+    // The translation table says which language block the strings are
+    // in. Assuming one is how this returns nothing for half the
+    // machines it runs on.
+    let mut lang_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut lang_len: u32 = 0;
+    let translation: Vec<u16> = std::ffi::OsStr::new("\\VarFileInfo\\Translation")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: buffer came from GetFileVersionInfoW; the out params are
+    // owned here.
+    let ok = unsafe {
+        VerQueryValueW(
+            buffer.as_ptr() as *const _,
+            translation.as_ptr(),
+            &mut lang_ptr,
+            &mut lang_len,
+        )
+    };
+    if ok == 0 || lang_ptr.is_null() || lang_len < 4 {
+        return None;
+    }
+    // SAFETY: the block is at least one 4-byte language/codepage pair.
+    let (language, codepage) = unsafe {
+        let pair = lang_ptr as *const u16;
+        (*pair, *pair.add(1))
+    };
+
+    let query = format!("\\StringFileInfo\\{language:04x}{codepage:04x}\\{field}");
+    let query: Vec<u16> = std::ffi::OsStr::new(&query)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut value: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut chars: u32 = 0;
+    // SAFETY: as above.
+    let ok = unsafe {
+        VerQueryValueW(
+            buffer.as_ptr() as *const _,
+            query.as_ptr(),
+            &mut value,
+            &mut chars,
+        )
+    };
+    if ok == 0 || value.is_null() || chars == 0 {
+        return None;
+    }
+    // SAFETY: `chars` UTF-16 units, trailing null included.
+    let text = unsafe { std::slice::from_raw_parts(value as *const u16, chars as usize) };
+    let text = String::from_utf16_lossy(text);
+    Some(text.trim_end_matches('\0').to_string())
 }
 
 /// Whether this is a program a customer would recognise, rather than a

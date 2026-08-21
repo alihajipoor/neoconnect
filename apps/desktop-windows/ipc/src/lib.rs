@@ -70,10 +70,44 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunningApp {
-    /// The full path, which is what a selection is made of.
+    /// The executable shown for this entry.
     pub path: String,
-    /// The file name, for showing to a human.
+    /// What the customer sees: the product, not the file name.
     pub name: String,
+    /// Every executable belonging to the same product, this one
+    /// included.
+    ///
+    /// One product is routinely several binaries -- Discord runs
+    /// `Discord.exe` and `Update.exe`, and a customer who chooses
+    /// "Discord" means both. Listing them separately asked people to
+    /// know which of two names was the real one, and choosing wrong
+    /// looked exactly like the feature not working.
+    ///
+    /// Sent as a plain list of paths so the wire format is unchanged:
+    /// the app expands the group when it saves a selection, and the
+    /// service still receives the flat `apps` array it always did.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// The executable's icon as a base64 PNG, or `None` when the shell
+    /// has none to give.
+    ///
+    /// Read in the service because it is the side that can open the
+    /// image at all -- the app is not elevated. Sent inline rather than
+    /// as a path, since the app could not read the file either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Process ids currently running this product.
+    ///
+    /// Here because "is this an app a person can see" is answered by
+    /// whether it owns a visible window, and **the service cannot ask
+    /// that**. It runs as LocalSystem in session 0, which is isolated
+    /// from the interactive desktop: process enumeration crosses
+    /// sessions, window enumeration does not. So the service reports
+    /// what it alone can read -- image paths, version info, icons --
+    /// and the app, which is in the customer's session, decides which
+    /// of these are on screen.
+    #[serde(default)]
+    pub pids: Vec<u32>,
 }
 
 /// Custom mode, as the app expresses it.
