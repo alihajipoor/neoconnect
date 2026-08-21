@@ -4493,3 +4493,43 @@ down.
 The rig also still had a disconnected `Neoxify-OpenVPN` adapter carrying
 its own DNS server, sitting in front of exactly the lookups being
 measured. Disabled during this run.
+
+---
+
+## 2026-08-21 — 0.9.19 verified from the shipped installer
+
+**Status:** done
+**Touches:** nothing further
+
+Installed from the release asset (hash matched `sha256sums.txt`), not
+from a local build:
+
+```text
+app version now : 0.9.19        service: Running
+stale connection: RESET -- PASS
+selected app exit: 38.60.249.229  (expected 38.60.249.229)
+warm-up polls +5/+10/+15/+20s: no problem reported
+log: closed 1 existing connection(s) so they rebuild through the tunnel
+     redirected=11 returned=11
+```
+
+Both shipped fixes behave as intended from the artifact a customer gets.
+Switch-on took 4.45s here against 13s in the earlier run -- the readiness
+gate returns as soon as the relay answers, so the cost varies with how
+long the firewall rule takes to bite.
+
+**Still open, and not fixed by this release:** DNS fails roughly half the
+time with twelve-second timeouts when Custom mode starts. That is the
+browser stall, it is unchanged, and it is the next thing to chase --
+with a capture, since four hypotheses about it have now been wrong.
+
+**Small loose end:** the check immediately after disconnect still
+reported the node address rather than home. Six seconds was probably too
+short a wait -- the 26-route matrix, which allows longer, showed
+connectivity restored correctly every time. Noted rather than explained.
+
+**Log noise introduced:** the readiness gate's probe connection shows up
+as `accepted from port NNNNN but no flow claims it`. Harmless -- the
+relay is correctly refusing a connection with no recorded flow -- but it
+appears once per session and should be labelled or suppressed so it is
+not mistaken for a fault later.
