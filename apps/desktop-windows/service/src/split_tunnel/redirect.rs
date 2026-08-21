@@ -429,6 +429,13 @@ fn worker(
         // on this one.
         drop(chosen);
 
+        // Deliberately not re-injected: the only way a packet is meant
+        // to disappear here. Everything else must reach the network,
+        // which is why this is the single early exit in the loop.
+        if rewrote == Some(Leg::Swallowed) {
+            continue;
+        }
+
         if rewrote.is_some() {
             recalculate_checksums(&mut packet[..len as usize], len, &mut address);
         }
@@ -442,6 +449,11 @@ fn worker(
             (Some(Leg::Outbound), true) => stats.redirected.fetch_add(1, Ordering::Relaxed),
             (Some(Leg::Return), true) => stats.returned.fetch_add(1, Ordering::Relaxed),
             (Some(_), false) => stats.rejected.fetch_add(1, Ordering::Relaxed),
+            // Unreachable: a swallowed packet leaves the loop above
+            // before anything is sent. Spelled out rather than folded
+            // into a wildcard so that adding a Leg later has to come
+            // back here and decide what it means.
+            (Some(Leg::Swallowed), _) => 0,
             (None, _) => 0,
         };
     }
@@ -455,6 +467,11 @@ enum Leg {
     Outbound,
     /// Proxy's reply back to the app.
     Return,
+    /// Swallowed on purpose: not re-injected, and not a hole in the
+    /// machine's networking but a deliberate refusal. Only the DNS
+    /// branch produces this, and only when the alternative would be to
+    /// send the lookup to the customer's own ISP.
+    Swallowed,
 }
 
 /// The fields the decision needs, or `None` if this is not an IPv4
@@ -536,6 +553,7 @@ fn handle_packet(
     let verdict = decide(&parsed, nat, selection, owner, redirect, interface_id, stats);
     match verdict {
         Verdict::Direct | Verdict::Unknown => None,
+        Verdict::Drop => Some(Leg::Swallowed),
         Verdict::Redirect { nat_port } => {
             rewrite_outbound(
                 packet,
@@ -633,7 +651,20 @@ fn decide(
                 stats.matched.fetch_add(1, Ordering::Relaxed);
                 Verdict::Redirect { nat_port }
             }
-            None => Verdict::Direct,
+            // Dropped, not sent out in the clear.
+            //
+            // This used to fall back to Direct, which handed the lookup
+            // to whichever resolver the network supplied -- for somebody
+            // in Iran, their ISP. That is precisely what carrying DNS
+            // through the tunnel exists to prevent, and it happened
+            // silently at the one moment the table was under pressure.
+            //
+            // A lookup that does not answer is a page that does not
+            // load, which the customer sees and can act on. A lookup
+            // answered by their ISP is a record of where they went,
+            // which they never learn about. The retry costs a moment;
+            // the leak cannot be taken back.
+            None => Verdict::Drop,
         };
     }
 
