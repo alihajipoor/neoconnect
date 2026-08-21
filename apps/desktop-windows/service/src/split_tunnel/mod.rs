@@ -59,6 +59,7 @@ mod redirect;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use neoconnect_ipc::SplitTunnelMode;
 
@@ -96,6 +97,9 @@ struct Active {
     route: InstalledRoutes,
     logger: Logger,
     log_path: PathBuf,
+    /// When interception began, so a warm-up is not mistaken
+    /// for a fault. See redirect::WARMUP.
+    started: Instant,
 }
 
 /// The resolver every lookup is sent to while Custom mode is on.
@@ -477,6 +481,30 @@ impl SplitTunnel {
                 }
             };
 
+        // The allowance is installed by netsh, and netsh returning is
+        // not the same as the rule being effective for new flows. There
+        // is a window of a second or two where the redirect is running
+        // and every packet it sends to the proxy is still dropped.
+        //
+        // That window is the whole customer-visible bug. DNS is the
+        // first thing anything does, so a browser opening a site during
+        // it gets "No such host is known" or a stall of ten to twenty
+        // seconds -- measured -- while Telegram, which connects to
+        // addresses it already holds and never resolves, is instant.
+        // Same machine, same tunnel, opposite experience, and it made
+        // the feature look broken to everyone who tested it with a
+        // browser.
+        //
+        // So wait for proof instead of assuming. A completed TCP
+        // handshake to the relay means the rule is live and the listener
+        // is up; nothing is redirected until that succeeds.
+        if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port) {
+            relays.stop();
+            let mut route = route;
+            route.remove();
+            return Err(e);
+        }
+
         let redirect = redirect::Redirect {
             local_addr,
             local_interface: uplink.index,
@@ -513,6 +541,20 @@ impl SplitTunnel {
         match redirect::start(redirect, nat, self.selection.clone()) {
             Ok(running) => {
                 let logger = Logger::start(log_path.clone(), running.stats.clone(), header);
+
+                // Only now, with the redirect actually running, so
+                // that what an application reconnects into is the
+                // tunnel rather than the ordinary route it just
+                // left. Doing it earlier would simply hand it the
+                // same connection back.
+                let closed = {
+                    let selection = self.selection.read().expect("selection lock");
+                    owner::reset_selected_connections(&selection)
+                };
+                append(
+                    &log_path,
+                    &format!("closed {closed} existing connection(s) so they rebuild through the tunnel"),
+                );
                 self.active = Some(Active {
                     redirect: running,
                     relays,
@@ -521,6 +563,7 @@ impl SplitTunnel {
                     route,
                     logger,
                     log_path,
+                    started: Instant::now(),
                 });
                 Ok(())
             }
@@ -549,7 +592,8 @@ impl SplitTunnel {
     /// zero at connect and only become meaningful once the chosen apps
     /// have actually tried to send something.
     pub fn complaint(&self) -> Option<String> {
-        self.active.as_ref()?.redirect.stats.complaint()
+        let active = self.active.as_ref()?;
+        active.redirect.stats.complaint(active.started.elapsed())
     }
 
     pub fn probe(&self) -> Result<(), String> {
@@ -561,7 +605,7 @@ impl SplitTunnel {
         // own packets are already proving the path is broken, say so in
         // their terms instead of opening a socket that tests a different
         // path and may well succeed.
-        if let Some(problem) = active.redirect.stats.complaint() {
+        if let Some(problem) = active.redirect.stats.complaint(active.started.elapsed()) {
             append(&active.log_path, &format!("probe FAILED (counters): {problem}"));
             append(&active.log_path, &format!("  {}", active.redirect.stats.summary()));
             return Err(problem);

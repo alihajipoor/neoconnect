@@ -45,6 +45,7 @@
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use windivert_sys::address::WINDIVERT_ADDRESS;
 use windivert_sys::{WinDivertFlags, WinDivertLayer};
@@ -109,6 +110,17 @@ pub struct Stats {
 /// so that one dead host cannot condemn a healthy tunnel.
 const SILENT_AFTER: u64 = 20;
 
+/// How long a session must have been running before silence is allowed
+/// to mean anything.
+///
+/// Measured, not chosen: a healthy start reaches `redirected=48,
+/// returned=0` before the first reply arrives, because the firewall
+/// allowance takes a moment to become effective for new flows. Judged on
+/// the count alone, this check called a perfectly good connection broken
+/// during its first seconds -- which is worse than saying nothing, since
+/// a false alarm here teaches customers to ignore the true ones.
+const WARMUP: Duration = Duration::from_secs(12);
+
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
@@ -138,7 +150,12 @@ impl Stats {
     /// is also read at connect time, when these counters are still zero.
     /// These are the only numbers taken from the real path under real
     /// traffic.
-    pub fn complaint(&self) -> Option<String> {
+    pub fn complaint(&self, session_age: Duration) -> Option<String> {
+        // Nothing is wrong yet, by definition: the redirect has not
+        // had time to be wrong. See WARMUP.
+        if session_age < WARMUP {
+            return None;
+        }
         let seen = self.seen.load(Ordering::Relaxed);
         let matched = self.matched.load(Ordering::Relaxed);
         let redirected = self.redirected.load(Ordering::Relaxed);
@@ -763,30 +780,50 @@ mod tests {
     }
 
     #[test]
+    fn a_warming_up_session_is_given_time_before_it_is_judged() {
+        // Measured from a healthy start: 48 packets out and none back
+        // before the firewall allowance became effective. Judged on the
+        // count alone this said "nothing is coming back" about a
+        // connection that went on to work perfectly.
+        assert_eq!(stats(81, 16, 48, 0, 0).complaint(Duration::from_secs(3)), None);
+    }
+
+    #[test]
+    fn the_same_counters_do_complain_once_it_has_had_time() {
+        // Same numbers, later. Silence that persists is the real thing,
+        // and the only difference between the two is how long it has
+        // been allowed to continue.
+        let c = stats(81, 16, 48, 0, 0)
+            .complaint(WARMUP + Duration::from_secs(1))
+            .expect("must complain once warmed up");
+        assert!(c.contains("nothing is coming back"), "{c}");
+    }
+
+    #[test]
     fn a_fresh_session_complains_about_nothing() {
         // Every counter is zero for a moment after every connect. If
         // that read as a fault, Custom mode would report itself broken
         // every single time it started.
-        assert_eq!(stats(0, 0, 0, 0, 0).complaint(), None);
+        assert_eq!(stats(0, 0, 0, 0, 0).complaint(WARMUP * 2), None);
     }
 
     #[test]
     fn traffic_flowing_both_ways_is_healthy() {
-        assert_eq!(stats(4000, 900, 850, 800, 0).complaint(), None);
+        assert_eq!(stats(4000, 900, 850, 800, 0).complaint(WARMUP * 2), None);
     }
 
     #[test]
     fn a_few_unanswered_packets_are_not_a_fault() {
         // A retransmit, or a host that is simply down. Condemning the
         // tunnel for this would make the warning worthless.
-        assert_eq!(stats(300, 30, SILENT_AFTER - 1, 0, 0).complaint(), None);
+        assert_eq!(stats(300, 30, SILENT_AFTER - 1, 0, 0).complaint(WARMUP * 2), None);
     }
 
     #[test]
     fn sending_with_nothing_coming_back_is_reported() {
         // The tester's log, exactly: redirected=90, returned=0, while
         // the app showed Connected and Custom mode on.
-        let c = stats(441, 90, 90, 0, 0).complaint().expect("must complain");
+        let c = stats(441, 90, 90, 0, 0).complaint(WARMUP * 2).expect("must complain");
         assert!(c.contains("nothing is coming back"), "{c}");
     }
 
@@ -794,20 +831,20 @@ mod tests {
     fn one_reply_is_enough_to_stay_quiet() {
         // The claim is "nothing comes back". A single reply disproves
         // it, and something quieter than a hard failure is happening.
-        assert_eq!(stats(441, 90, 90, 1, 0).complaint(), None);
+        assert_eq!(stats(441, 90, 90, 1, 0).complaint(WARMUP * 2), None);
     }
 
     #[test]
     fn refused_injections_are_named_before_the_silence() {
         // Both conditions hold here. The refusal is the cause and the
         // silence is its consequence, so the refusal is what to say.
-        let c = stats(500, 90, 90, 0, 90).complaint().expect("must complain");
+        let c = stats(500, 90, 90, 0, 90).complaint(WARMUP * 2).expect("must complain");
         assert!(c.contains("refusing"), "{c}");
     }
 
     #[test]
     fn intercepting_everything_and_matching_nothing_is_reported() {
-        let c = stats(5000, 0, 0, 0, 0).complaint().expect("must complain");
+        let c = stats(5000, 0, 0, 0, 0).complaint(WARMUP * 2).expect("must complain");
         assert!(c.contains("None of the apps you chose"), "{c}");
     }
 
@@ -816,7 +853,7 @@ mod tests {
         // Below the threshold this is just an idle machine, and saying
         // "none of your apps have sent traffic" would be true but
         // useless noise a second after switching it on.
-        assert_eq!(stats(10, 0, 0, 0, 0).complaint(), None);
+        assert_eq!(stats(10, 0, 0, 0, 0).complaint(WARMUP * 2), None);
     }
 
     /// A minimal IPv4 TCP packet, so the parser is exercised against
