@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "neoconnect-desktop"
-version = "0.9.16"
+version = "0.9.17"
 dependencies = [
  "neoconnect-ipc",
  "serde",
