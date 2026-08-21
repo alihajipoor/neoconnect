@@ -4359,3 +4359,69 @@ was picked.
 Eight tests cover the thresholds, including the two that matter most --
 a fresh session with all-zero counters must stay quiet, and a single
 reply is enough to withdraw the "nothing comes back" claim.
+
+---
+
+## 2026-08-21 — The browser delay is DNS, and 0.9.18's new check can cry wolf
+
+**Status:** cause found, fix not written
+**Touches:** nothing yet
+
+### What it is
+
+Every "the browser is slow / sites will not open, but Telegram is fine"
+report is one thing: **DNS breaks when Custom mode starts, and recovers
+a few seconds later.** Stages separated, from a selected app:
+
+```text
+NO VPN                          dns 0.13s   tcp ok   tls ok   http ok
+FULL TUNNEL, custom off         dns 0.16s   tcp ok   tls ok   http ok
+CUSTOM MODE ON, try 1           dns FAILED "No such host is known"
+CUSTOM MODE ON, try 2           dns 1.19s   tcp ok   tls ok   http ok
+```
+
+The counters show the same warm-up from the other side:
+
+```text
+seen=59  matched=8  redirected=28  returned=0
+seen=81  matched=16 redirected=48  returned=0
+seen=131 matched=27 redirected=81  returned=5
+seen=164 matched=35 redirected=110 returned=6
+```
+
+Forty-eight packets out and nothing back, then it starts answering.
+
+**Why a browser and not Telegram.** A browser resolves a name for every
+site it touches, so it sits in that window and shows either a long stall
+or "site cannot be reached". Telegram connects to addresses it already
+has and never asks, so it is instant. One machine, one tunnel, opposite
+experiences -- which is exactly how it was reported, and why testing
+with `curl` to a warm address never reproduced it.
+
+Second, smaller effect, separately confirmed: **a connection opened
+before Custom mode starts never migrates.** Asked repeatedly over 30
+seconds, a socket opened beforehand kept reporting the home address. An
+already-open browser therefore keeps showing the wrong IP on top of the
+DNS stall.
+
+### What was ruled out on the way, with evidence
+
+- **QUIC/UDP being dropped** -- my main hypothesis, and wrong. UDP round
+  trips through Custom mode in 0.14-0.15s, repeatedly, `redirected=14
+  returned=14`.
+- **Multiple selected apps** -- one, two and three all accepted.
+- **Tailscale** -- never in the data path.
+
+### And a fault in what shipped an hour ago
+
+`Stats::complaint()` in 0.9.18 fires at twenty redirected packets with
+no replies. The data above reaches forty-eight during an ordinary,
+healthy start. **It will tell customers "nothing is coming back" about a
+connection that is merely warming up.**
+
+The tests cover thresholds and not time, which is the actual dimension
+here. It needs the silence to *persist* -- remember when the first
+packet was redirected, and only complain when nothing has come back for
+several seconds -- rather than firing on a count alone. My own fault:
+the counters I designed against were an end-of-session summary, so I
+never saw the shape of the beginning.
