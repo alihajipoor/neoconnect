@@ -4144,3 +4144,58 @@ today, both directions, against the same code built locally.
 protocol x split-tunnel matrix has not been re-run against 0.9.16. Given
 0.9.6 shipped from exactly this position and a customer found the bug,
 that gap is worth closing before this build is pushed at anybody.
+
+---
+
+## 2026-08-21 — The installer most customers download cannot start
+
+**Status:** fixed, proven on a clean VM
+**Touches:** `.github/workflows/release-desktop-windows.yml`
+
+`Neoxify-Setup.exe` — the branded bootstrapper the website hands out,
+and by the release workflow's own comment "the one most customers
+actually download" — **dies on launch on a clean Windows install**:
+
+```text
+Neoxify-Setup-0916.exe - System Error
+The code execution cannot proceed because VCRUNTIME140.dll was not found.
+```
+
+It is a Rust binary, and a Rust MSVC build links the C runtime
+dynamically by default. `VCRUNTIME140.dll` is not part of Windows; it
+arrives with the Visual C++ redistributable. Every other binary we ship
+is installed *by* this one and can rely on what the installer puts
+down. This one runs before any of that exists.
+
+Read straight out of the shipped artifact's import table rather than
+inferred:
+
+| build | CRT imports |
+|---|---|
+| `Neoxify-Setup-0916.exe` (public link, live) | `VCRUNTIME140.dll` + 5 `api-ms-win-crt-*` |
+| same source, `-C target-feature=+crt-static` | none |
+
+Fixed by building that one crate with a static CRT. Scoped to the
+bootstrapper rather than `.cargo/config.toml`, which would change how
+the Tauri app and the service link too.
+
+Verified on a Windows 11 VM with no redistributable (`VCRUNTIME140.dll`
+absent from both System32 and SysWOW64) — copied to a local disk first,
+so a UNC path is not the explanation:
+
+- shipped build: error dialog, and under `/S` it **hung for 180 s** and
+  installed nothing. A silent install does not suppress a loader error,
+  so the customer gets a window that never finishes.
+- static build, embedding the byte-identical 0.9.16 NSIS payload: window
+  opens, branded install screen, ready to go.
+
+**How this survived.** Yesterday I checked the public link by hashing
+what it served against `sha256sums.txt`. They matched, and I called the
+download verified. Hashing proves you fetched the right bytes; it says
+nothing about whether those bytes run. The one thing never done to this
+artifact was running it.
+
+**Also noticed:** the bootstrapper window responds only to mouse clicks
+— Enter and Space do nothing on the Install button. Anyone installing by
+keyboard or with an accessibility tool cannot get past that screen.
+Not fixed here.
