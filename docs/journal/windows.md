@@ -4533,3 +4533,61 @@ as `accepted from port NNNNN but no flow claims it`. Harmless -- the
 relay is correctly refusing a connection with no recorded flow -- but it
 appears once per session and should be labelled or suppressed so it is
 not mistaken for a fault later.
+
+---
+
+## 2026-08-22 — DNS: the capture, and a leak found beside it
+
+**Status:** cause localised, NOT fixed
+**Touches:** nothing yet
+
+`pktmon`, filtered to UDP 53, across a Custom-mode start. Two lookups
+failed at twelve seconds each, four then succeeded.
+
+```text
+14:42:13.786 Rx 1.1.1.1:53      -> 10.66.0.2:55361   (first redirected reply)
+14:42:26.040 Rx 1.1.1.1:53      -> 10.66.0.2:58290   www.bbc.co.uk
+14:42:26.084 Tx 10.66.0.2:58290 -> 1.1.1.1:53        www.debian.org
+14:42:26.253 Tx 10.66.0.2:55361 -> 1.1.1.1:53        www.kernel.org
+```
+
+**The two failing lookups appear nowhere in the capture.** Not to the
+ISP resolver, not to `1.1.1.1`. No packet for them ever leaves the
+machine.
+
+That rules out everything that was still on the table. It is not
+misrouting, not a lost reply, not a source-address mismatch, and not the
+resolver: the successful ones prove the whole path works, with the
+tunnel address as source going straight to `1.1.1.1:53`. For roughly the
+first fourteen seconds the query is simply **not forwarded**.
+
+Since a `Verdict::Direct` packet passes through untouched and would
+appear on the wire, and these do not, they are being redirected -- and
+the UDP relay is not forwarding them. **That is where the next session
+starts: the UDP relay's first seconds, not the redirect and not DNS.**
+
+Four earlier hypotheses were wrong (QUIC/UDP dropped, multiple selected
+apps, Tailscale, the firewall race). The capture cost one run and
+excluded all of them; it should have been the first move, not the fifth.
+
+### A DNS leak found while reading that path
+
+In the `carry_dns` branch:
+
+```rust
+return match nat.redirect(parsed.transport, origin) {
+    Some(nat_port) => Verdict::Redirect { nat_port },
+    None => Verdict::Direct,
+};
+```
+
+When a NAT port cannot be allocated, the lookup is sent **out in the
+clear to the resolver the network handed out** -- which for a customer in
+Iran is their ISP. That is the exact leak this branch exists to prevent,
+and it happens silently at the moment of pressure. Dropping the packet
+would be the honest failure: a lookup that does not answer is a stalled
+page, while one answered by the ISP is a record of where they went.
+
+Not changed yet, because it wants its own test and possibly a complaint
+so the customer is told, rather than a quiet swap of one failure mode
+for another.
