@@ -427,7 +427,16 @@ pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
         .into_values()
         .filter_map(|(name, mut paths, pids)| {
             paths.sort();
-            let path = paths.first()?.clone();
+            // The executable a person associates with the product, not
+            // whichever sorts first. Microsoft Edge ships an
+            // `elevation_service.exe` that sorts before `msedge.exe`,
+            // and taking the first put a service's icon and path under
+            // the name "Microsoft Edge".
+            //
+            // The closest match to the product's own name wins: it is
+            // what publishers name their main binary after, and the one
+            // whose icon is the product's.
+            let path = pick_primary(&name, &paths)?;
             // Taken from the executable shown, which is the one whose
             // icon a person associates with the product.
             let icon = super::icon::icon_png_base64(&path);
@@ -436,6 +445,41 @@ pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
         .collect();
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     apps
+}
+
+/// The executable that best represents a product.
+///
+/// Scored rather than guessed: an exact stem match first, then one that
+/// contains the product's letters, then the shortest name -- helpers are
+/// almost always the longer, more qualified ones
+/// (`elevation_service`, `crashpad_handler`, `Update`).
+fn pick_primary(product: &str, paths: &[String]) -> Option<String> {
+    let wanted: String = product
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+
+    paths
+        .iter()
+        .min_by_key(|path| {
+            let stem: String = std::path::Path::new(path.as_str())
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect();
+            let rank = if stem == wanted {
+                0
+            } else if !wanted.is_empty() && (wanted.contains(&stem) || stem.contains(&wanted)) {
+                1
+            } else {
+                2
+            };
+            (rank, stem.len())
+        })
+        .cloned()
 }
 
 /// Process ids that own a visible, titled, top-level window.
@@ -485,11 +529,34 @@ unsafe extern "system" fn collect_window_pid(window: HWND, param: isize) -> i32 
 /// launcher and the program it launches often sit in different folders
 /// under one install root.
 fn product_of(path: &str) -> (String, String) {
+    // The friendly name first: "Notepad" rather than "Microsoft(R)
+    // Windows(R) Operating System", which is what ProductName says for
+    // every accessory Windows ships.
+    let description = version_string(path, "FileDescription");
+
     if let Some(product) = product_name(path) {
         let trimmed = product.trim();
-        if !trimmed.is_empty() {
-            return (trimmed.to_lowercase(), trimmed.to_string());
+        // Some publishers put the platform in ProductName rather than
+        // the program, and Microsoft puts it on everything from Notepad
+        // to Explorer. Grouping on that collapses a dozen unrelated
+        // accessories into one entry -- measured here as a single
+        // "Windows Operating System" holding nine executables, which a
+        // customer selecting it would have tunnelled all of.
+        //
+        // Those are not one product to anybody using them, so they are
+        // kept apart and named individually.
+        if !trimmed.is_empty() && !is_platform_product(trimmed) {
+            let label = description.unwrap_or_else(|| trimmed.to_string());
+            return (trimmed.to_lowercase(), label);
         }
+        if !trimmed.is_empty() {
+            let label = description.unwrap_or_else(|| file_label(path));
+            // Keyed by the executable, so each accessory stands alone.
+            return (path.to_lowercase(), label);
+        }
+    }
+    if let Some(label) = description {
+        return (path.to_lowercase(), label);
     }
     // No version block: fall back to the folder, which at least keeps
     // one program's pieces together, and show the file name.
@@ -505,8 +572,32 @@ fn product_of(path: &str) -> (String, String) {
     (key, label)
 }
 
+/// Whether this names the platform rather than the program.
+///
+/// Windows stamps one ProductName across everything it ships, so it is
+/// a grouping key that means "made by the OS" rather than "the same
+/// application".
+fn is_platform_product(product: &str) -> bool {
+    let lowered = product.to_lowercase();
+    lowered.contains("operating system") || lowered == "microsoft windows"
+}
+
+/// The last path segment without its extension, for a display name of
+/// last resort.
+fn file_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
 /// `ProductName` from the executable's version resource.
 fn product_name(path: &str) -> Option<String> {
+    version_string(path, "ProductName")
+}
+
+/// One named string from an executable's version resource.
+fn version_string(path: &str, field: &str) -> Option<String> {
     let wide: Vec<u16> = std::ffi::OsStr::new(path)
         .encode_wide()
         .chain(std::iter::once(0))
@@ -552,7 +643,7 @@ fn product_name(path: &str) -> Option<String> {
         (*pair, *pair.add(1))
     };
 
-    let query = format!("\\StringFileInfo\\{language:04x}{codepage:04x}\\ProductName");
+    let query = format!("\\StringFileInfo\\{language:04x}{codepage:04x}\\{field}");
     let query: Vec<u16> = std::ffi::OsStr::new(&query)
         .encode_wide()
         .chain(std::iter::once(0))
