@@ -88,6 +88,26 @@ pub struct RunningApp {
     /// service still receives the flat `apps` array it always did.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// The executable's icon as a base64 PNG, or `None` when the shell
+    /// has none to give.
+    ///
+    /// Read in the service because it is the side that can open the
+    /// image at all -- the app is not elevated. Sent inline rather than
+    /// as a path, since the app could not read the file either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Process ids currently running this product.
+    ///
+    /// Here because "is this an app a person can see" is answered by
+    /// whether it owns a visible window, and **the service cannot ask
+    /// that**. It runs as LocalSystem in session 0, which is isolated
+    /// from the interactive desktop: process enumeration crosses
+    /// sessions, window enumeration does not. So the service reports
+    /// what it alone can read -- image paths, version info, icons --
+    /// and the app, which is in the customer's session, decides which
+    /// of these are on screen.
+    #[serde(default)]
+    pub pids: Vec<u32>,
 }
 
 /// Custom mode, as the app expresses it.

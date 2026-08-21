@@ -384,8 +384,7 @@ fn parse_table(
 /// falling back to the install directory when there is none. That is
 /// what puts `Discord.exe` and `Update.exe` under a single "Discord".
 pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
-    let windowed = pids_with_windows();
-    let mut by_product: HashMap<String, (String, Vec<String>)> = HashMap::new();
+    let mut by_product: HashMap<String, (String, Vec<String>, Vec<u32>)> = HashMap::new();
 
     // SAFETY: a plain call; an invalid handle is checked below.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
@@ -401,16 +400,17 @@ pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
     while ok != 0 {
         let pid = entry.th32ProcessID;
-        if windowed.contains(&pid) {
-            if let Some(path) = image_path(pid) {
-                if is_user_application(&path) {
-                    let (key, label) = product_of(&path);
-                    let slot = by_product.entry(key).or_insert_with(|| (label, Vec::new()));
-                    let lowered = path.to_lowercase();
-                    if !slot.1.iter().any(|p| p.to_lowercase() == lowered) {
-                        slot.1.push(path);
-                    }
+        if let Some(path) = image_path(pid) {
+            if is_user_application(&path) {
+                let (key, label) = product_of(&path);
+                let slot = by_product
+                    .entry(key)
+                    .or_insert_with(|| (label, Vec::new(), Vec::new()));
+                let lowered = path.to_lowercase();
+                if !slot.1.iter().any(|p| p.to_lowercase() == lowered) {
+                    slot.1.push(path);
                 }
+                slot.2.push(pid);
             }
         }
         // SAFETY: same handle and entry as above.
@@ -425,10 +425,13 @@ pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
     // than from what happens to be on screen.
     let mut apps: Vec<neoconnect_ipc::RunningApp> = by_product
         .into_values()
-        .filter_map(|(name, mut paths)| {
+        .filter_map(|(name, mut paths, pids)| {
             paths.sort();
             let path = paths.first()?.clone();
-            Some(neoconnect_ipc::RunningApp { path, name, paths })
+            // Taken from the executable shown, which is the one whose
+            // icon a person associates with the product.
+            let icon = super::icon::icon_png_base64(&path);
+            Some(neoconnect_ipc::RunningApp { path, name, paths, icon, pids })
         })
         .collect();
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
