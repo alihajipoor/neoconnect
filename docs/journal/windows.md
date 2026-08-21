@@ -4425,3 +4425,71 @@ packet was redirected, and only complain when nothing has come back for
 several seconds -- rather than firing on a count alone. My own fault:
 the counters I designed against were an end-of-session summary, so I
 never saw the shape of the beginning.
+
+---
+
+## 2026-08-21 — Two of three fixes verified; DNS is still broken
+
+**Status:** partly done, DNS still open
+**Touches:** `apps/desktop-windows/service/**`
+
+Verified against the correct binary, on the rig, after two invalid runs
+(see below).
+
+**Works, verified:**
+
+- **No false alarm during warm-up.** Counters reached `redirected=28
+  returned=0` and no complaint appeared in any status poll. The fault
+  shipped in 0.9.18 is gone.
+- **Stale connections are closed.** `closed 1 existing connection(s) so
+  they rebuild through the tunnel`, and the socket opened beforehand was
+  forcibly reset rather than quietly carrying on down the old route.
+  This is what stops an already-open browser showing the wrong address.
+
+**Does not work:** the readiness gate does not fix DNS.
+
+```text
+www.microsoft.com   FAILED  in 12.05s
+www.wikipedia.org   ok      in 1.21s
+example.com         FAILED  in 12.04s
+www.bbc.co.uk       ok      in 1.17s
+www.debian.org      FAILED  in 12.04s
+```
+
+About half of lookups time out at twelve seconds; the ones that succeed
+take 1.2s against a 0.04s baseline. The firewall race was real -- the
+relay is genuinely unreachable for several seconds after `netsh` returns,
+which is why the gate takes up to 8s to pass -- but it is **not** the
+cause of the DNS failure. Two separate problems that happened to share a
+window.
+
+The alternating pass/fail is the useful clue and was not chased: the
+adapter has two DNS servers configured, and something is carrying
+queries to one of them and not the other. Next session starts there,
+with a capture rather than a hypothesis -- this is the fourth guess about
+this bug and the first three were all wrong (QUIC/UDP, multi-app,
+firewall race).
+
+**Switch-on now costs up to 8s** because of the gate. Kept anyway: before
+it, those seconds were spent silently dropping the customer's packets
+instead of waiting for a path that works.
+
+### Two invalid verification runs first
+
+1. Copied the new binary to `C:\Program Files\Neoxify\neoconnect-service.exe`.
+   The service runs from **`resources\`**. That run measured the old
+   build, and its "the fixes do not work" verdict was meaningless.
+2. Fixed the path, but `$svc` (a CIM object) and `$SvcExe` (a path) are
+   **the same variable** -- PowerShell is case-insensitive -- so
+   `Copy-Item` was handed an object and failed with "a drive with the
+   name 'Win32_Service' does not exist".
+
+Worth recording for next time: the service is registered as
+**`NeoxifyService`**, not `neoconnect-service`, so `Get-Service
+neoconnect-service` returns NOT FOUND while the thing is plainly
+running. Stop and start it by that name; killing the process leaves it
+down.
+
+The rig also still had a disconnected `Neoxify-OpenVPN` adapter carrying
+its own DNS server, sitting in front of exactly the lookups being
+measured. Disabled during this run.

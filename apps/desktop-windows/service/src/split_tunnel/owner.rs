@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, GetExtendedUdpTable, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+    GetExtendedTcpTable, GetExtendedUdpTable, SetTcpEntry, TCP_TABLE_OWNER_PID_ALL,
+    UDP_TABLE_OWNER_PID,
 };
 use windows_sys::Win32::Networking::WinSock::AF_INET;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -537,4 +538,82 @@ mod tests {
         );
         println!("port {port} -> {image}");
     }
+}
+
+/// The TCP state that tells Windows to tear a connection down.
+const MIB_TCP_STATE_DELETE_TCB: u32 = 12;
+
+/// Established connections belonging to selected applications, closed so
+/// they are rebuilt through the tunnel.
+///
+/// Without this, switching Custom mode on does nothing for anything
+/// already running. A connection is routed once, when it is created, and
+/// an application that is already open keeps using the ones it has:
+/// measured here, a socket opened beforehand still reported the ordinary
+/// exit address thirty seconds later and never moved.
+///
+/// For a browser that is the whole complaint. Someone selects it, looks
+/// at a page showing their address, and sees no change -- because the
+/// page is being fetched down a connection that predates the decision.
+/// Telegram reconnects promptly and appears to work immediately, which
+/// is why the two were reported so differently.
+///
+/// Only *selected* applications are touched, and only established
+/// connections. Resetting a connection is something applications handle
+/// routinely -- it is what happens when a network changes -- and the
+/// alternative is a feature that silently does not apply until every
+/// program is restarted.
+///
+/// Returns how many were closed, for the log.
+pub fn reset_selected_connections(selection: &Selection) -> usize {
+    let Some(words) = query_table(|buf, size| {
+        // SAFETY: `buf` is null (sizing) or a buffer of `*size` bytes.
+        unsafe { GetExtendedTcpTable(buf, size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0) }
+    }) else {
+        return 0;
+    };
+
+    let Some(&count) = words.first() else {
+        return 0;
+    };
+
+    // MIB_TCPROW_OWNER_PID: state, local addr, local port, remote addr,
+    // remote port, owning pid -- six DWORDs.
+    const ROW: usize = 6;
+    let mut images: HashMap<u32, Option<String>> = HashMap::new();
+    let mut closed = 0usize;
+
+    for row in 0..count as usize {
+        let base = 1 + row * ROW;
+        let Some(fields) = words.get(base..base + ROW) else {
+            break;
+        };
+        let (state, pid) = (fields[0], fields[5]);
+
+        // Only connections that actually carry traffic. A listener has
+        // no peer to re-route and killing one would stop a program
+        // accepting connections, which is not what was asked for.
+        if state != 5 {
+            continue;
+        }
+
+        let image = images
+            .entry(pid)
+            .or_insert_with(|| image_path(pid))
+            .clone();
+        let Some(image) = image else { continue };
+        if !selection.should_tunnel(&image) {
+            continue;
+        }
+
+        // MIB_TCPROW is the same five leading fields without the pid.
+        let mut set = [MIB_TCP_STATE_DELETE_TCB, fields[1], fields[2], fields[3], fields[4]];
+        // SAFETY: `set` is a correctly shaped MIB_TCPROW; the call only
+        // reads it.
+        let ret = unsafe { SetTcpEntry(set.as_mut_ptr() as *mut _) };
+        if ret == NO_ERROR {
+            closed += 1;
+        }
+    }
+    closed
 }

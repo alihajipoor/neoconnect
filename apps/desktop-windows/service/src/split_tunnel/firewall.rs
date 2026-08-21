@@ -27,9 +27,10 @@
 //! torn down with the split tunnel, so no allowance outlives the
 //! feature being switched off.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::os::windows::process::CommandExt;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// Hides the console window netsh would otherwise flash up. The service
 /// runs invisibly and a window appearing on a customer's screen when
@@ -152,4 +153,47 @@ fn delete_rule() {
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .output();
+}
+
+/// Waits until a TCP connection to the relay actually completes.
+///
+/// `netsh` returning success means the rule is written, not that the
+/// filtering engine is applying it to new flows yet. Between those two
+/// moments the redirect is live and everything it sends to the proxy is
+/// dropped, which is invisible from here and extremely visible to a
+/// customer: DNS is the first thing any application does, so a browser
+/// opening a page inside that window gets "No such host is known", or a
+/// stall of ten to twenty seconds before it recovers. Telegram, which
+/// connects to addresses it already holds and resolves nothing, is
+/// unaffected -- which is exactly how it was reported, and why it never
+/// reproduced against a warm address with curl.
+///
+/// A completed handshake is the proof: it means the rule is effective
+/// *and* the relay is listening. The connection is dropped immediately
+/// afterwards -- the relay refuses anything with no recorded flow, which
+/// is correct and does not matter here, because the handshake completing
+/// is the whole answer.
+pub fn wait_until_reachable(local: Ipv4Addr, tcp_port: u16) -> Result<(), String> {
+    const BUDGET: Duration = Duration::from_secs(8);
+    const STEP: Duration = Duration::from_millis(100);
+    const ATTEMPT: Duration = Duration::from_millis(400);
+
+    let target = SocketAddr::from((local, tcp_port));
+    let deadline = Instant::now() + BUDGET;
+    let mut last = String::from("never attempted");
+    while Instant::now() < deadline {
+        match TcpStream::connect_timeout(&target, ATTEMPT) {
+            Ok(stream) => {
+                drop(stream);
+                return Ok(());
+            }
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(STEP);
+    }
+    Err(format!(
+        "the split-tunnel proxy could not be reached on {target} within {}s ({last}). \
+         Custom mode would have dropped your chosen apps' traffic instead of carrying it.",
+        BUDGET.as_secs()
+    ))
 }
