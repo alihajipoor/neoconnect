@@ -4493,3 +4493,157 @@ down.
 The rig also still had a disconnected `Neoxify-OpenVPN` adapter carrying
 its own DNS server, sitting in front of exactly the lookups being
 measured. Disabled during this run.
+
+---
+
+## 2026-08-21 — 0.9.19 verified from the shipped installer
+
+**Status:** done
+**Touches:** nothing further
+
+Installed from the release asset (hash matched `sha256sums.txt`), not
+from a local build:
+
+```text
+app version now : 0.9.19        service: Running
+stale connection: RESET -- PASS
+selected app exit: 38.60.249.229  (expected 38.60.249.229)
+warm-up polls +5/+10/+15/+20s: no problem reported
+log: closed 1 existing connection(s) so they rebuild through the tunnel
+     redirected=11 returned=11
+```
+
+Both shipped fixes behave as intended from the artifact a customer gets.
+Switch-on took 4.45s here against 13s in the earlier run -- the readiness
+gate returns as soon as the relay answers, so the cost varies with how
+long the firewall rule takes to bite.
+
+**Still open, and not fixed by this release:** DNS fails roughly half the
+time with twelve-second timeouts when Custom mode starts. That is the
+browser stall, it is unchanged, and it is the next thing to chase --
+with a capture, since four hypotheses about it have now been wrong.
+
+**Small loose end:** the check immediately after disconnect still
+reported the node address rather than home. Six seconds was probably too
+short a wait -- the 26-route matrix, which allows longer, showed
+connectivity restored correctly every time. Noted rather than explained.
+
+**Log noise introduced:** the readiness gate's probe connection shows up
+as `accepted from port NNNNN but no flow claims it`. Harmless -- the
+relay is correctly refusing a connection with no recorded flow -- but it
+appears once per session and should be labelled or suppressed so it is
+not mistaken for a fault later.
+
+---
+
+## 2026-08-22 — DNS: the capture, and a leak found beside it
+
+**Status:** cause localised, NOT fixed
+**Touches:** nothing yet
+
+`pktmon`, filtered to UDP 53, across a Custom-mode start. Two lookups
+failed at twelve seconds each, four then succeeded.
+
+```text
+14:42:13.786 Rx 1.1.1.1:53      -> 10.66.0.2:55361   (first redirected reply)
+14:42:26.040 Rx 1.1.1.1:53      -> 10.66.0.2:58290   www.bbc.co.uk
+14:42:26.084 Tx 10.66.0.2:58290 -> 1.1.1.1:53        www.debian.org
+14:42:26.253 Tx 10.66.0.2:55361 -> 1.1.1.1:53        www.kernel.org
+```
+
+**The two failing lookups appear nowhere in the capture.** Not to the
+ISP resolver, not to `1.1.1.1`. No packet for them ever leaves the
+machine.
+
+That rules out everything that was still on the table. It is not
+misrouting, not a lost reply, not a source-address mismatch, and not the
+resolver: the successful ones prove the whole path works, with the
+tunnel address as source going straight to `1.1.1.1:53`. For roughly the
+first fourteen seconds the query is simply **not forwarded**.
+
+Since a `Verdict::Direct` packet passes through untouched and would
+appear on the wire, and these do not, they are being redirected -- and
+the UDP relay is not forwarding them. **That is where the next session
+starts: the UDP relay's first seconds, not the redirect and not DNS.**
+
+Four earlier hypotheses were wrong (QUIC/UDP dropped, multiple selected
+apps, Tailscale, the firewall race). The capture cost one run and
+excluded all of them; it should have been the first move, not the fifth.
+
+### A DNS leak found while reading that path
+
+In the `carry_dns` branch:
+
+```rust
+return match nat.redirect(parsed.transport, origin) {
+    Some(nat_port) => Verdict::Redirect { nat_port },
+    None => Verdict::Direct,
+};
+```
+
+When a NAT port cannot be allocated, the lookup is sent **out in the
+clear to the resolver the network handed out** -- which for a customer in
+Iran is their ISP. That is the exact leak this branch exists to prevent,
+and it happens silently at the moment of pressure. Dropping the packet
+would be the honest failure: a lookup that does not answer is a stalled
+page, while one answered by the ISP is a record of where they went.
+
+Not changed yet, because it wants its own test and possibly a complaint
+so the customer is told, rather than a quiet swap of one failure mode
+for another.
+
+---
+
+## 2026-08-22 — The browser delay: one silent `continue`
+
+**Status:** fixed, measured
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/**`
+
+Three days of this, and it was one line in the UDP relay:
+
+```rust
+let Ok(socket) = bind_upstream(&tunnel) else { continue };
+```
+
+A tunnel address is **tentative** for a moment after the adapter appears
+while Windows finishes duplicate address detection, and a socket cannot
+be bound to it until that completes. Every datagram arriving in that
+window was dropped — no log, no retry, no counter. DNS is the first
+thing any application does, so the resolver burned its whole retry
+budget and the lookup failed outright.
+
+TCP was unaffected because it retransmits its own SYN for far longer
+than the window lasts. That asymmetry is what made this look like a
+DNS-specific fault and sent four hypotheses in the wrong direction
+(QUIC/UDP dropped, multiple apps, Tailscale, the firewall race).
+
+Measured, same eight names, same moment:
+
+| | before | after |
+|---|---|---|
+| failures | 2 of 6, at 12s each | **0 of 8** |
+| slowest | 12.07s | **1.42s** |
+| steady state | — | 0.16s |
+
+The bind now retries for up to six seconds and **says so in the log if it
+still gives up**. A packet this feature drops must never again be
+invisible from every angle at once — the counters called it "seen", the
+app called it connected, and the customer called it broken.
+
+**What actually found it:** a `pktmon` capture showing the failing
+lookups nowhere on the wire — not to the ISP resolver, not to `1.1.1.1`.
+That excluded misrouting, lost replies and source mismatch in one run,
+and pointed at the only remaining possibility: the query was never
+forwarded. Four guesses preceded it. The capture should have been first.
+
+### The DNS leak beside it, now closed
+
+The same branch fell back to `Verdict::Direct` when a NAT port could not
+be allocated — sending the lookup **in the clear to whichever resolver
+the network handed out**, which for a customer in Iran is their ISP. It
+now drops instead, via a new `Verdict::Drop` / `Leg::Swallowed` that is
+the single deliberate non-injection in the worker loop.
+
+A lookup that does not answer is a page that does not load, which the
+customer sees and can retry. A lookup answered by their ISP is a record
+of where they went, which they never learn about.
