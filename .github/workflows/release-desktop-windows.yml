@@ -193,7 +193,25 @@ jobs:
           # bootstrapper/target/... and is not there.
           setup=$(ls "$PWD"/target/release/bundle/nsis/*_x64-setup.exe | head -1)
           echo "Embedding $setup"
-          NEOXIFY_SETUP="$setup" cargo build --release -p neoxify-bootstrapper
+          # Static CRT, and this is not a nicety. A Rust MSVC binary links
+          # VCRUNTIME140.dll dynamically by default, and that DLL is not
+          # part of Windows -- it arrives with the Visual C++
+          # redistributable, which a clean install does not have. Every
+          # other binary here is installed *by* this one and can rely on
+          # what the installer puts down; this one runs before any of
+          # that exists. Built dynamically it dies on launch with "the
+          # code execution cannot proceed because VCRUNTIME140.dll was
+          # not found", which is what a customer sees instead of the app.
+          #
+          # Verified on a clean Windows 11 VM with no redistributable:
+          # the dynamic build showed exactly that dialog and, under /S,
+          # hung forever waiting for someone to click OK.
+          #
+          # Scoped to this one crate rather than .cargo/config.toml,
+          # which would apply to the whole workspace and change how the
+          # Tauri app and the service link too.
+          NEOXIFY_SETUP="$setup" RUSTFLAGS="-C target-feature=+crt-static" \
+            cargo build --release -p neoxify-bootstrapper
           # The crate is neoxify-bootstrapper but its [[bin]] name is
           # Neoxify-Setup, so that -- not the crate name -- is what
           # cargo writes.
