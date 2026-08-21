@@ -4240,3 +4240,50 @@ Two things worth keeping from the wreckage:
 is now the working rig, since the disk is attached to it. `Neoxify-Test`
 still exists with no disk attached. One of them should be tidied away,
 but not while there is a test running.
+
+---
+
+## 2026-08-21 — 0.9.17 released, and verified by running it
+
+**Status:** done
+**Touches:** nothing further in the repo
+
+0.9.17 carries the static-CRT fix. Verified the way the previous release
+was not — by running the thing, on the machine that reproduces the bug:
+
+```text
+downloaded from the public link: 20473856 bytes
+sha256 : e31212e4...            (0.9.17, static)
+VCRUNTIME140 on this machine: False
+RESULT: process is ALIVE after 12s
+  main window title: 'Neoxify Setup'   responding: True
+no system-error window present
+```
+
+The 0.9.16 build died instantly under identical conditions. Import
+tables agree: the 0.9.17 asset has no CRT imports, 0.9.16 had six.
+
+**Worth knowing for the next release.** For about five minutes after
+publishing, `/api/updates/installer/windows` still served the *previous*
+build's bytes, and the updater told a 0.9.16 client it was up to date.
+That is `CACHE_MS` in `updates.service.ts` doing its job — the lookup is
+cached because GitHub allows 60 unauthenticated calls an hour and every
+client asks on launch. Not a bug, but it means checking the public link
+immediately after a release tells you about the *old* release. Wait five
+minutes, or you will chase a distribution ghost.
+
+**The multi-app scare was not real.** Two runs reported
+`apps: must be a full path to an executable` when two applications were
+selected, which looked like it might be the split-tunnel bug everyone
+was reporting. It is not: a controlled test with one, two and three
+apps, sent both through `ConvertTo-Json` and as hand-built JSON, returns
+`ok` every time — including Edge's path with its spaces and
+parentheses. The two failing runs were the same ones where Edge returned
+zero bytes and DNS collapsed, so something else was wrong in them.
+Recorded because it nearly went to real testers as a question.
+
+**Still open, and deliberately not guessed at:** the 10-20 s delay
+before a browser starts using the tunnel while Telegram is instant, and
+one observation of the full tunnel carrying nothing with Custom mode
+*off*. The rig routes through Tailscale (`100.89.197.53`, US exit),
+which has to come out of the path before either is measured.
