@@ -4359,3 +4359,137 @@ was picked.
 Eight tests cover the thresholds, including the two that matter most --
 a fresh session with all-zero counters must stay quiet, and a single
 reply is enough to withdraw the "nothing comes back" claim.
+
+---
+
+## 2026-08-21 — The browser delay is DNS, and 0.9.18's new check can cry wolf
+
+**Status:** cause found, fix not written
+**Touches:** nothing yet
+
+### What it is
+
+Every "the browser is slow / sites will not open, but Telegram is fine"
+report is one thing: **DNS breaks when Custom mode starts, and recovers
+a few seconds later.** Stages separated, from a selected app:
+
+```text
+NO VPN                          dns 0.13s   tcp ok   tls ok   http ok
+FULL TUNNEL, custom off         dns 0.16s   tcp ok   tls ok   http ok
+CUSTOM MODE ON, try 1           dns FAILED "No such host is known"
+CUSTOM MODE ON, try 2           dns 1.19s   tcp ok   tls ok   http ok
+```
+
+The counters show the same warm-up from the other side:
+
+```text
+seen=59  matched=8  redirected=28  returned=0
+seen=81  matched=16 redirected=48  returned=0
+seen=131 matched=27 redirected=81  returned=5
+seen=164 matched=35 redirected=110 returned=6
+```
+
+Forty-eight packets out and nothing back, then it starts answering.
+
+**Why a browser and not Telegram.** A browser resolves a name for every
+site it touches, so it sits in that window and shows either a long stall
+or "site cannot be reached". Telegram connects to addresses it already
+has and never asks, so it is instant. One machine, one tunnel, opposite
+experiences -- which is exactly how it was reported, and why testing
+with `curl` to a warm address never reproduced it.
+
+Second, smaller effect, separately confirmed: **a connection opened
+before Custom mode starts never migrates.** Asked repeatedly over 30
+seconds, a socket opened beforehand kept reporting the home address. An
+already-open browser therefore keeps showing the wrong IP on top of the
+DNS stall.
+
+### What was ruled out on the way, with evidence
+
+- **QUIC/UDP being dropped** -- my main hypothesis, and wrong. UDP round
+  trips through Custom mode in 0.14-0.15s, repeatedly, `redirected=14
+  returned=14`.
+- **Multiple selected apps** -- one, two and three all accepted.
+- **Tailscale** -- never in the data path.
+
+### And a fault in what shipped an hour ago
+
+`Stats::complaint()` in 0.9.18 fires at twenty redirected packets with
+no replies. The data above reaches forty-eight during an ordinary,
+healthy start. **It will tell customers "nothing is coming back" about a
+connection that is merely warming up.**
+
+The tests cover thresholds and not time, which is the actual dimension
+here. It needs the silence to *persist* -- remember when the first
+packet was redirected, and only complain when nothing has come back for
+several seconds -- rather than firing on a count alone. My own fault:
+the counters I designed against were an end-of-session summary, so I
+never saw the shape of the beginning.
+
+---
+
+## 2026-08-21 — Two of three fixes verified; DNS is still broken
+
+**Status:** partly done, DNS still open
+**Touches:** `apps/desktop-windows/service/**`
+
+Verified against the correct binary, on the rig, after two invalid runs
+(see below).
+
+**Works, verified:**
+
+- **No false alarm during warm-up.** Counters reached `redirected=28
+  returned=0` and no complaint appeared in any status poll. The fault
+  shipped in 0.9.18 is gone.
+- **Stale connections are closed.** `closed 1 existing connection(s) so
+  they rebuild through the tunnel`, and the socket opened beforehand was
+  forcibly reset rather than quietly carrying on down the old route.
+  This is what stops an already-open browser showing the wrong address.
+
+**Does not work:** the readiness gate does not fix DNS.
+
+```text
+www.microsoft.com   FAILED  in 12.05s
+www.wikipedia.org   ok      in 1.21s
+example.com         FAILED  in 12.04s
+www.bbc.co.uk       ok      in 1.17s
+www.debian.org      FAILED  in 12.04s
+```
+
+About half of lookups time out at twelve seconds; the ones that succeed
+take 1.2s against a 0.04s baseline. The firewall race was real -- the
+relay is genuinely unreachable for several seconds after `netsh` returns,
+which is why the gate takes up to 8s to pass -- but it is **not** the
+cause of the DNS failure. Two separate problems that happened to share a
+window.
+
+The alternating pass/fail is the useful clue and was not chased: the
+adapter has two DNS servers configured, and something is carrying
+queries to one of them and not the other. Next session starts there,
+with a capture rather than a hypothesis -- this is the fourth guess about
+this bug and the first three were all wrong (QUIC/UDP, multi-app,
+firewall race).
+
+**Switch-on now costs up to 8s** because of the gate. Kept anyway: before
+it, those seconds were spent silently dropping the customer's packets
+instead of waiting for a path that works.
+
+### Two invalid verification runs first
+
+1. Copied the new binary to `C:\Program Files\Neoxify\neoconnect-service.exe`.
+   The service runs from **`resources\`**. That run measured the old
+   build, and its "the fixes do not work" verdict was meaningless.
+2. Fixed the path, but `$svc` (a CIM object) and `$SvcExe` (a path) are
+   **the same variable** -- PowerShell is case-insensitive -- so
+   `Copy-Item` was handed an object and failed with "a drive with the
+   name 'Win32_Service' does not exist".
+
+Worth recording for next time: the service is registered as
+**`NeoxifyService`**, not `neoconnect-service`, so `Get-Service
+neoconnect-service` returns NOT FOUND while the thing is plainly
+running. Stop and start it by that name; killing the process leaves it
+down.
+
+The rig also still had a disconnected `Neoxify-OpenVPN` adapter carrying
+its own DNS server, sitting in front of exactly the lookups being
+measured. Disabled during this run.
