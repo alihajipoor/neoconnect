@@ -4199,3 +4199,44 @@ artifact was running it.
 — Enter and Space do nothing on the Install button. Anyone installing by
 keyboard or with an accessibility tool cannot get past that screen.
 Not fixed here.
+
+---
+
+## 2026-08-21 — Correction: the rig was fine, the command was wrong
+
+**Status:** correction — supersedes "The VM rig stopped accepting
+synthesized keys again" from 2026-08-20
+**Touches:** nothing in the repo
+
+That entry is wrong in its conclusion and should not be trusted. The
+rig never stopped accepting keys. The command is
+`controlvm <vm> keyboardputscancode` — **singular**. I had been sending
+`keyboardputscancodes`, which VBoxManage rejects outright:
+
+```text
+VBoxManage.exe: error: Invalid parameter 'keyboardputscancodes'.
+```
+
+I never saw it because every call was written `>/dev/null 2>&1`. The
+tool was reporting the mistake on the first try and I had muted it.
+
+What that cost, all of it chasing a typo: two full power cycles, a USB
+keyboard switch that hung the VM at the boot logo, detaching the boot
+disk, a boot from the Windows ISO, killing VBoxSVC, and building a
+second VM around the same disk. Sending the correct command opened the
+Run dialog first time.
+
+Two things worth keeping from the wreckage:
+
+- **Never silence a command you are using as a probe.** The whole
+  exercise was "is input reaching the guest", and the answer was in the
+  stderr I was discarding. A measurement whose failure mode is silence
+  cannot tell you anything.
+- `keyboardputstring` drops a leading backslash, so `\vboxsvr\...`
+  arrives as `\vboxsvr\...`. Type the UNC prefix with scancode `2b`, or
+  use the automounted drive letter (`Z:`), which needs no doubling.
+
+`Neoxify-Test2` — a second VM built around the same VDI during this —
+is now the working rig, since the disk is attached to it. `Neoxify-Test`
+still exists with no disk attached. One of them should be tidied away,
+but not while there is a test running.
