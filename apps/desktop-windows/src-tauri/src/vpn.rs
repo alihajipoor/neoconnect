@@ -414,6 +414,17 @@ pub struct VpnStatus {
     /// whole machine is.
     #[serde(rename = "splitTunnelActive")]
     split_tunnel_active: bool,
+    /// What Custom mode's packet counters say is going wrong, if
+    /// anything -- already phrased for the customer by the service.
+    ///
+    /// Carried all the way to the UI because this is the only signal
+    /// taken from the path a chosen application's traffic actually
+    /// travels. Everything else here describes the tunnel, and a tunnel
+    /// can be perfectly healthy while the redirect in front of it drops
+    /// every packet. That combination is what a tester saw for three
+    /// sessions while the app told him it was connected.
+    #[serde(rename = "splitTunnelProblem", skip_serializing_if = "Option::is_none")]
+    split_tunnel_problem: Option<String>,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -576,11 +587,13 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             protocol,
             health,
             split_tunnel_active,
+            split_tunnel_problem,
         } => Ok(VpnStatus {
             connected,
             protocol,
             health,
             split_tunnel_active,
+            split_tunnel_problem,
         }),
         Response::Error { message } => Err(message),
         Response::Ok | Response::RunningApps { .. } => {

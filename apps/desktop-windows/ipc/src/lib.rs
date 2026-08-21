@@ -197,6 +197,18 @@ pub enum Response {
         /// being routed.
         #[serde(default)]
         split_tunnel_active: bool,
+        /// What Custom mode's own packet counters say is going wrong, in
+        /// words meant for the customer -- `None` when nothing is.
+        ///
+        /// Carried on the ordinary status poll because this is the only
+        /// evidence taken from the path a selected application's traffic
+        /// actually travels. The probe beside it opens a fresh socket
+        /// pinned to the tunnel, which proves the tunnel is alive and
+        /// exercises none of the interception or relaying in between --
+        /// so a session could report healthy while every redirected
+        /// packet vanished. One did, for a tester, for three sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split_tunnel_problem: Option<String>,
     },
     Error {
         message: String,
