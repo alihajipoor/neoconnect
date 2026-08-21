@@ -242,10 +242,7 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             Response::State { connected, protocol, health, split_tunnel_active, split_tunnel_problem }
         }
         Request::ListRunningApps => Response::RunningApps {
-            apps: crate::split_tunnel::running_apps()
-                .into_iter()
-                .map(|(path, name)| neoconnect_ipc::RunningApp { path, name })
-                .collect(),
+            apps: crate::split_tunnel::running_apps(),
         },
         Request::ProbeSplitTunnel => match engines.probe_split_tunnel() {
             Ok(()) => Response::Ok,

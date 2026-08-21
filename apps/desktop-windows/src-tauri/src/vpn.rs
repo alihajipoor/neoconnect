@@ -388,7 +388,34 @@ pub async fn vpn_set_split_tunnel(
 #[tauri::command]
 pub async fn vpn_list_running_apps() -> Result<Vec<RunningApp>, String> {
     match call(&Request::ListRunningApps).await? {
-        Response::RunningApps { apps } => Ok(apps),
+        Response::RunningApps { apps } => {
+            // The service lists every user-installed program it can see,
+            // because that is all it *can* see: as LocalSystem in
+            // session 0 it is cut off from the interactive desktop, and
+            // EnumWindows there returns nothing of the customer's.
+            //
+            // Deciding what counts as "an app" happens here instead,
+            // where the windows actually are. Without it the picker
+            // showed background helpers, update services and telemetry
+            // hosts -- reported, fairly, as "it shows all of Windows".
+            let windowed = pids_with_windows();
+            let mut visible: Vec<RunningApp> = apps
+                .iter()
+                .filter(|app| app.pids.iter().any(|pid| windowed.contains(pid)))
+                .cloned()
+                .collect();
+            // Nothing qualifying means the question could not be
+            // answered -- a locked session, or an enumeration that came
+            // back empty -- not that the customer has no programs open.
+            // Showing everything is untidy; showing nothing reads as
+            // broken, and they would have no way to select an app at
+            // all.
+            if visible.is_empty() {
+                return Ok(apps);
+            }
+            visible.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            Ok(visible)
+        }
         Response::Error { message } => Err(message),
         // Anything else means the service answered a different question,
         // which is a bug rather than a condition to paper over.
@@ -969,4 +996,42 @@ pub fn network_fingerprint() -> Option<String> {
                 .join(":"),
         )
     }
+}
+
+/// Process ids owning a visible, titled, top-level window.
+///
+/// The nearest thing Windows offers to "the customer can see this". A
+/// window owned by another is a dialog or a splash screen, so it does
+/// not make its process an application in its own right.
+fn pids_with_windows() -> std::collections::HashSet<u32> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
+        GW_OWNER,
+    };
+
+    unsafe extern "system" fn collect(window: HWND, param: isize) -> i32 {
+        // SAFETY: the pointer is the &mut HashSet passed to EnumWindows.
+        let set = unsafe { &mut *(param as *mut std::collections::HashSet<u32>) };
+        // SAFETY: `window` comes from the enumeration and is valid here.
+        unsafe {
+            if IsWindowVisible(window) == 0 || GetWindowTextLengthW(window) == 0 {
+                return 1;
+            }
+            if !GetWindow(window, GW_OWNER).is_null() {
+                return 1;
+            }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(window, &mut pid);
+            if pid != 0 {
+                set.insert(pid);
+            }
+        }
+        1
+    }
+
+    let mut set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // SAFETY: `set` outlives this synchronous enumeration.
+    unsafe { EnumWindows(Some(collect), &mut set as *mut _ as isize) };
+    set
 }
