@@ -4086,3 +4086,157 @@ the browser somebody means — plus `neoconnect-desktop.exe` and
 happens to be running. Those three are now excluded, and every chosen
 app carries a **Uses VPN** / **Bypasses VPN** label so the direction
 cannot be read backwards off a toggle further up the card.
+
+---
+
+## 2026-08-20 — The VM rig stopped accepting synthesized keys again
+
+**Status:** blocked, rig needs one physical keypress
+**Touches:** nothing in the repo
+
+0.9.16 is built, released and serving. It is **not** verified from the
+shipped installer, and the reason is the rig rather than the build.
+
+Part-way through today the `Neoxify-Test` VM stopped accepting
+synthesized keyboard input — the same failure as 2026-08-14. It is not a
+frozen guest: the clock advances, Guest Additions reports runlevel 3 and
+`LoggedInUsersList = neoxify`, and screenshots update. Only input is
+gone. `keyboardputscancodes` returns success and changes nothing;
+compared two screenshots with `ImageChops.difference` and the bounding
+box is `None`, so this is measured rather than eyeballed.
+
+Everything tried, so the next session does not repeat it:
+
+| attempt | result |
+|---|---|
+| Win, then Win+R | nothing; only the clock ticks between shots |
+| release every modifier first, in case one was latched | nothing |
+| ACPI shutdown, full power cycle, `--type separate` | nothing |
+| `guestcontrol` as `neoxify` with a blank password | "user was not able to logon" |
+| SSH / WinRM / SMB to the guest | all closed; only 3389 is open, and RDP refuses blank passwords for the same reason |
+| switch to a USB keyboard (`--keyboard usb --usb-ohci on`) | **hung the VM at the VirtualBox boot logo** — reverted to `ps2`, boots fine again |
+
+That last one is worth remembering: this rig's EFI is fragile, which is
+already why it needs 4 vCPUs, and changing the HID type is enough to
+stop it booting. Reverting `--keyboard ps2 --usb-ohci off` brought it
+straight back.
+
+The blank-password auto-logon is what closes every remote door at once —
+it blocks `guestcontrol` and RDP by the same Windows policy. Giving the
+`neoxify` account a real password would make `guestcontrol` work and
+make this whole class of problem go away. Worth doing next time the rig
+is reachable.
+
+**One improvement did land:** the host folder is now a *permanent*
+shared folder (`sharedfolder add` with no `--transient`) instead of
+being re-added on every boot, so it survives a power cycle. That was a
+recurring five-minute tax.
+
+**So what is actually proven about 0.9.16:** it compiles, 74 service
+tests pass, all four CI jobs are green, and the public installer link
+serves the right binary — `sha256` of what
+`/api/updates/installer/windows` returns matches the release's
+`sha256sums.txt` exactly, and the updater manifest offers 0.9.16 to a
+0.9.15 client. The refusal itself was verified on this rig earlier
+today, both directions, against the same code built locally.
+
+**What is not proven:** the shipped installer has not been run, and the
+protocol x split-tunnel matrix has not been re-run against 0.9.16. Given
+0.9.6 shipped from exactly this position and a customer found the bug,
+that gap is worth closing before this build is pushed at anybody.
+
+---
+
+## 2026-08-21 — The installer most customers download cannot start
+
+**Status:** fixed, proven on a clean VM
+**Touches:** `.github/workflows/release-desktop-windows.yml`
+
+`Neoxify-Setup.exe` — the branded bootstrapper the website hands out,
+and by the release workflow's own comment "the one most customers
+actually download" — **dies on launch on a clean Windows install**:
+
+```text
+Neoxify-Setup-0916.exe - System Error
+The code execution cannot proceed because VCRUNTIME140.dll was not found.
+```
+
+It is a Rust binary, and a Rust MSVC build links the C runtime
+dynamically by default. `VCRUNTIME140.dll` is not part of Windows; it
+arrives with the Visual C++ redistributable. Every other binary we ship
+is installed *by* this one and can rely on what the installer puts
+down. This one runs before any of that exists.
+
+Read straight out of the shipped artifact's import table rather than
+inferred:
+
+| build | CRT imports |
+|---|---|
+| `Neoxify-Setup-0916.exe` (public link, live) | `VCRUNTIME140.dll` + 5 `api-ms-win-crt-*` |
+| same source, `-C target-feature=+crt-static` | none |
+
+Fixed by building that one crate with a static CRT. Scoped to the
+bootstrapper rather than `.cargo/config.toml`, which would change how
+the Tauri app and the service link too.
+
+Verified on a Windows 11 VM with no redistributable (`VCRUNTIME140.dll`
+absent from both System32 and SysWOW64) — copied to a local disk first,
+so a UNC path is not the explanation:
+
+- shipped build: error dialog, and under `/S` it **hung for 180 s** and
+  installed nothing. A silent install does not suppress a loader error,
+  so the customer gets a window that never finishes.
+- static build, embedding the byte-identical 0.9.16 NSIS payload: window
+  opens, branded install screen, ready to go.
+
+**How this survived.** Yesterday I checked the public link by hashing
+what it served against `sha256sums.txt`. They matched, and I called the
+download verified. Hashing proves you fetched the right bytes; it says
+nothing about whether those bytes run. The one thing never done to this
+artifact was running it.
+
+**Also noticed:** the bootstrapper window responds only to mouse clicks
+— Enter and Space do nothing on the Install button. Anyone installing by
+keyboard or with an accessibility tool cannot get past that screen.
+Not fixed here.
+
+---
+
+## 2026-08-21 — Correction: the rig was fine, the command was wrong
+
+**Status:** correction — supersedes "The VM rig stopped accepting
+synthesized keys again" from 2026-08-20
+**Touches:** nothing in the repo
+
+That entry is wrong in its conclusion and should not be trusted. The
+rig never stopped accepting keys. The command is
+`controlvm <vm> keyboardputscancode` — **singular**. I had been sending
+`keyboardputscancodes`, which VBoxManage rejects outright:
+
+```text
+VBoxManage.exe: error: Invalid parameter 'keyboardputscancodes'.
+```
+
+I never saw it because every call was written `>/dev/null 2>&1`. The
+tool was reporting the mistake on the first try and I had muted it.
+
+What that cost, all of it chasing a typo: two full power cycles, a USB
+keyboard switch that hung the VM at the boot logo, detaching the boot
+disk, a boot from the Windows ISO, killing VBoxSVC, and building a
+second VM around the same disk. Sending the correct command opened the
+Run dialog first time.
+
+Two things worth keeping from the wreckage:
+
+- **Never silence a command you are using as a probe.** The whole
+  exercise was "is input reaching the guest", and the answer was in the
+  stderr I was discarding. A measurement whose failure mode is silence
+  cannot tell you anything.
+- `keyboardputstring` drops a leading backslash, so `\vboxsvr\...`
+  arrives as `\vboxsvr\...`. Type the UNC prefix with scancode `2b`, or
+  use the automounted drive letter (`Z:`), which needs no doubling.
+
+`Neoxify-Test2` — a second VM built around the same VDI during this —
+is now the working rig, since the disk is attached to it. `Neoxify-Test`
+still exists with no disk attached. One of them should be tidied away,
+but not while there is a test running.
