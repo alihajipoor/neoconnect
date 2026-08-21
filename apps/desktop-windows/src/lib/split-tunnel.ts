@@ -97,7 +97,19 @@ export async function pushSplitTunnel(settings: SplitTunnelSettings): Promise<vo
 }
 
 /** One running application, as the service reports it. */
-export type RunningApp = { path: string; name: string };
+export type RunningApp = {
+  /** The executable shown for this entry. */
+  path: string;
+  /** The product's name, not the file's. */
+  name: string;
+  /** Every executable belonging to the same product.
+   *
+   * Choosing an app has to mean the whole of it. Discord runs
+   * `Discord.exe` and `Update.exe`, and someone who picks "Discord"
+   * means both -- picking one and getting half the program routed is
+   * indistinguishable from the feature not working. */
+  paths?: string[];
+};
 
 /** What is running right now, for choosing from a list.
  *

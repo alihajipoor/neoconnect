@@ -59,20 +59,28 @@ export function CustomModeCard() {
   /** Shared by both pickers, so a program chosen from the running list
    * and the same program found on disk cannot end up on the list twice
    * under different spellings. */
-  async function addPath(picked: string) {
+  /** Adds every executable of one product.
+   *
+   * A product is routinely more than one binary, and adding only the
+   * one that happened to be listed routes half of it -- which looks
+   * exactly like the feature not working. The file picker passes a
+   * single path; the app picker passes the whole group. */
+  async function addPaths(picked: string[]) {
     if (!settings) return;
-    if (settings.apps.length >= MAX_APPS) {
-      setNotice(t("settings.customTooMany", { max: MAX_APPS }));
-      return;
-    }
     // Compared case-insensitively because Windows paths are, and the
     // picker's casing does not always match what a running process
     // reports -- two entries for one app would look like a bug.
-    if (settings.apps.some((a) => a.toLowerCase() === picked.toLowerCase())) {
+    const have = new Set(settings.apps.map((a) => a.toLowerCase()));
+    const fresh = picked.filter((p) => !have.has(p.toLowerCase()));
+    if (fresh.length === 0) {
       setNotice(t("settings.customAlready"));
       return;
     }
-    await apply({ ...settings, apps: [...settings.apps, picked] });
+    if (settings.apps.length + fresh.length > MAX_APPS) {
+      setNotice(t("settings.customTooMany", { max: MAX_APPS }));
+      return;
+    }
+    await apply({ ...settings, apps: [...settings.apps, ...fresh] });
   }
 
   async function browseForApp() {
@@ -84,7 +92,7 @@ export function CustomModeCard() {
       filters: [{ name: "Programs", extensions: ["exe"] }],
     });
     if (typeof picked !== "string") return;
-    await addPath(picked);
+    await addPaths([picked]);
   }
 
   if (!settings) return null;
@@ -260,9 +268,9 @@ export function CustomModeCard() {
             <RunningAppPicker
               chosen={settings.apps}
               onClose={() => setPicking(false)}
-              onPick={(path) => {
+              onPick={(paths) => {
                 setPicking(false);
-                void addPath(path);
+                void addPaths(paths);
               }}
             />
           ) : null}

@@ -70,10 +70,24 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunningApp {
-    /// The full path, which is what a selection is made of.
+    /// The executable shown for this entry.
     pub path: String,
-    /// The file name, for showing to a human.
+    /// What the customer sees: the product, not the file name.
     pub name: String,
+    /// Every executable belonging to the same product, this one
+    /// included.
+    ///
+    /// One product is routinely several binaries -- Discord runs
+    /// `Discord.exe` and `Update.exe`, and a customer who chooses
+    /// "Discord" means both. Listing them separately asked people to
+    /// know which of two names was the real one, and choosing wrong
+    /// looked exactly like the feature not working.
+    ///
+    /// Sent as a plain list of paths so the wire format is unchanged:
+    /// the app expands the group when it saves a selection, and the
+    /// service still receives the flat `apps` array it always did.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 /// Custom mode, as the app expresses it.
