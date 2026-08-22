@@ -53,6 +53,7 @@ use windivert_sys::{WinDivertFlags, WinDivertLayer};
 use super::divert::{recalculate_checksums, Handle};
 use super::flows::{Nat, Origin, Verdict};
 use super::owner::{OwnerLookup, Selection, SharedSelection, Transport};
+use super::proxy::OwnSockets;
 
 /// The largest packet WinDivert will hand over.
 const MAX_PACKET: usize = 65_575;
@@ -213,6 +214,16 @@ pub struct Redirect {
     /// exactly like an ordinary app's, so without this the proxy would
     /// intercept itself.
     pub own_images: Vec<String>,
+    /// The relay's own onward sockets, as the relay itself recorded
+    /// them.
+    ///
+    /// `own_images` answers the same question but has to go through the
+    /// connection tables to do it, and that lookup is rate-limited: it
+    /// cannot see a socket younger than `MIN_REFRESH_INTERVAL`, which
+    /// every onward socket is when it sends its first packet. See
+    /// `OwnSockets` for the measurement. This is checked first because
+    /// it is both cheaper and correct.
+    pub own_sockets: Arc<OwnSockets>,
     /// The interface `local_addr` lives on.
     ///
     /// A rewritten packet is aimed at that address, so it has to be
@@ -604,6 +615,25 @@ fn decide(
     };
     if known != Verdict::Unknown {
         return known;
+    }
+
+    // The relay's own onward socket, carrying a flow that has already
+    // been decided. Answered from what the relay recorded when it
+    // created the socket, before the owner tables are consulted at all.
+    //
+    // This has to come first, and not merely as an optimisation. The
+    // image-based check below cannot see a socket this young -- the
+    // owner lookup will not rebuild more than once every 20ms -- so a
+    // lookup made while another was in flight fell through to the DNS
+    // branch and was posted back into the relay it came from. It never
+    // reached a resolver, and the answer never came. Two lookups fired
+    // less than 20ms apart lost both; 25ms apart lost neither.
+    //
+    // A browser opening a page resolves every asset host at once, which
+    // is why this presented as text arriving while images and
+    // stylesheets did not.
+    if redirect.own_sockets.contains(parsed.transport, parsed.source, parsed.source_port) {
+        return Verdict::Direct;
     }
 
     // Anything mid-connection that nothing is known about started before
@@ -1120,6 +1150,7 @@ mod tests {
             tcp_proxy_port: 19999,
             udp_proxy_port: 19998,
             own_images: Vec::new(),
+            own_sockets: Arc::new(OwnSockets::default()),
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
@@ -1148,6 +1179,7 @@ mod tests {
             tcp_proxy_port: 19999,
             udp_proxy_port: 19998,
             own_images: Vec::new(),
+            own_sockets: Arc::new(OwnSockets::default()),
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,

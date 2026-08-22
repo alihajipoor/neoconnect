@@ -4757,3 +4757,84 @@ that was never in question.
 nothing else. The app-tunnelling exemption in particular wants checking
 in `AllExcept` mode with the app running, which is exactly the
 configuration that has never once been exercised.
+
+---
+
+## 2026-08-22 — The browser bug: the relay was eating its own lookups
+
+**Status:** fixed, A/B/A measured
+**Touches:** `apps/desktop-windows/**`
+
+A whole page -- fifteen assets across nine hosts, eight parallel, cache
+flushed -- on WireGuard germany-1:
+
+| | wall clock | failures |
+|---|---|---|
+| no vpn | 0.73s | 0 |
+| full tunnel | 2.98s | 0 |
+| **split tunnel** | **24.34s** | **14 of 15, all `dns=0.000000`** |
+
+`redirect::decide` asked "is this the relay's own onward socket?" through
+`OwnerLookup::image_for_port`, which will not rebuild its snapshot more
+often than `MIN_REFRESH_INTERVAL`. A relay's onward socket is
+**microseconds old** when it sends its first packet, so inside that
+window the answer was "no" -- and the DNS branch took the relay's own
+upstream query and posted it back into the relay. It never reached a
+resolver.
+
+The gap sweep between two lookups shows the cliff exactly:
+
+```text
+gap=  0ms  0/2 survived      gap= 25ms  2/2
+gap=  5ms  1/2               gap= 50ms  2/2
+gap= 10ms  0/2               gap=250ms  2/2
+```
+
+Twenty milliseconds. A browser resolves every asset host in one burst,
+so it lost nearly all of them: text arrived, images and stylesheets did
+not. Telegram, which resolves nothing, was unaffected.
+
+**Fix:** the relay registers each onward socket at bind time, before
+anything can be sent, and the redirect consults that registry ahead of
+any owner lookup. Keyed on address *and* port -- an app and the relay
+legitimately hold the same port number on different addresses, and
+port-only matching would have pushed an app's traffic out of the tunnel.
+
+After: **3.12s, zero failures** against a 2.98s full-tunnel control, and
+32 concurrent lookups losing none. Restoring the old binary brought the
+failure back. A/B/A, so this is causality rather than correlation.
+
+### Why every test missed it for a week
+
+Each one fetched a 40-byte JSON body over a single connection. That is
+one small packet, one lookup, no concurrency -- structurally incapable
+of producing the bug. The MTU theory that replaced it was equally wrong:
+a 5MB download runs at full tunnel speed. **Six hypotheses died before a
+test was written that could fail.**
+
+### Also fixed: the app could wedge permanently
+
+`call()` in `vpn.rs` had no read deadline. The service accepting a pipe
+connection is not a promise that it will answer, and without a deadline
+that future stayed pending for the life of the process -- with every
+piece of UI waiting on it. That is "stuck on Disconnecting, can't click
+anything". Now bounded at 45s.
+
+Alongside it, the UI stopped running its own state machine: state comes
+from `vpn_status`, a failed status means *unknown* rather than
+*disconnected*, transient states have watchdogs, and the connect control
+is never left disabled with no way out -- a `disabled` on
+`"disconnecting"` was why the third press killed it.
+
+### Still open, and it is the serious one
+
+**The service can deadlock.** Rapid connect/split-tunnel sequences
+blocked `dispatch` for ~25 minutes -- every request including plain
+`status` timed out, and the machine sat full-tunnelled until the service
+was force-restarted. Something in the connect/teardown path blocks
+forever holding the `Engines` mutex, with no timeout and no recovery.
+The 45s client deadline frees the app; it does nothing for the service.
+**This is the next piece of work.**
+
+Also noted: Xray REALITY shows 2.0-5.6s DNS latency post-fix against
+WireGuard's 0.16s, with no clean baseline to attribute it.

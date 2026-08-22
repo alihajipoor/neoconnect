@@ -27,7 +27,7 @@
 //! UDP socket hold several peers at once without their replies being
 //! delivered to each other.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::mem::size_of;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
@@ -113,6 +113,107 @@ impl Default for TunnelInterface {
     }
 }
 
+/// The local addresses of the relay's own onward sockets.
+///
+/// The redirect loop has to recognise the relay's own traffic, or it
+/// sends the relay's onward packets back into the relay. It used to
+/// answer that question from the connection tables, via
+/// `OwnerLookup::image_for_port`, and that is a race it loses: the
+/// lookup will not rebuild its snapshot more than once every
+/// `MIN_REFRESH_INTERVAL`, so a socket created microseconds ago is
+/// invisible for up to that long. The onward socket for a redirected
+/// flow is *always* microseconds old when it sends its first packet.
+///
+/// Measured on this machine, two DNS lookups fired with a gap between
+/// them, Custom mode on a WireGuard tunnel:
+///
+/// ```text
+///   gap=  0ms  answered=0/2      gap= 25ms  answered=2/2
+///   gap=  5ms  answered=1/2      gap= 50ms  answered=2/2
+///   gap= 10ms  answered=0/2      gap=250ms  answered=2/2
+/// ```
+///
+/// The cliff sits exactly on the 20ms refresh interval. Any two lookups
+/// closer together than that lost *both* answers -- which is a page
+/// whose text arrives and whose images and stylesheets do not, because
+/// the browser resolves those hosts in one burst. NTP through the same
+/// relay, eight flows at once, lost nothing: it never enters the DNS
+/// branch, so it never needed the guard that was failing.
+///
+/// So ownership is recorded by the side that creates the socket, before
+/// it can send anything, rather than inferred afterwards from a table
+/// that has not caught up.
+#[derive(Default)]
+pub struct OwnSockets {
+    tcp: Mutex<HashSet<SocketAddrV4>>,
+    udp: Mutex<HashSet<SocketAddrV4>>,
+}
+
+impl OwnSockets {
+    fn set(&self, transport: Transport) -> &Mutex<HashSet<SocketAddrV4>> {
+        match transport {
+            Transport::Tcp => &self.tcp,
+            Transport::Udp => &self.udp,
+        }
+    }
+
+    /// Whether this source is one of the relay's own onward sockets.
+    ///
+    /// Keyed on the address as well as the port, and that is not
+    /// belt-and-braces. The onward sockets are bound to the tunnel's
+    /// address while applications are bound to the machine's LAN
+    /// address, so the same port number is legitimately in use by both
+    /// at the same time. Matching on the port alone would hand an
+    /// application's packet the "this is ours, leave it alone" verdict
+    /// and quietly drop it out of the tunnel.
+    pub fn contains(&self, transport: Transport, source: Ipv4Addr, port: u16) -> bool {
+        self.set(transport).lock().unwrap_or_else(|e| e.into_inner()).contains(&SocketAddrV4::new(source, port))
+    }
+
+    fn insert(&self, transport: Transport, addr: SocketAddrV4) {
+        self.set(transport).lock().unwrap_or_else(|e| e.into_inner()).insert(addr);
+    }
+
+    fn remove(&self, transport: Transport, addr: &SocketAddrV4) {
+        self.set(transport).lock().unwrap_or_else(|e| e.into_inner()).remove(addr);
+    }
+}
+
+/// Keeps one onward socket registered for exactly as long as it exists.
+///
+/// A guard rather than paired calls because the ways a relayed flow ends
+/// are many -- the app closes it, the far end closes it, the flow is
+/// expired, the relay is torn down -- and a registration left behind
+/// would claim a port number that Windows is free to hand to an
+/// application next, which is the leak `contains` guards against.
+pub(super) struct Registration {
+    own: Arc<OwnSockets>,
+    transport: Transport,
+    addr: SocketAddrV4,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.own.remove(self.transport, &self.addr);
+    }
+}
+
+/// Registers a socket that has already been bound, if it was bound to a
+/// real address.
+///
+/// Returns `None` in the fail-open case, where the socket is left
+/// unpinned and unbound and so has no address to be known by until it
+/// connects. That case is unchanged: no tunnel is up, and the image
+/// check in `redirect::decide` is what covers it -- as it always did.
+fn register(own: &Arc<OwnSockets>, socket: &Socket, transport: Transport) -> Option<Registration> {
+    let addr = socket.local_addr().ok()?.as_socket_ipv4()?;
+    if addr.ip().is_unspecified() {
+        return None;
+    }
+    own.insert(transport, addr);
+    Some(Registration { own: own.clone(), transport, addr })
+}
+
 /// Ties a socket to the tunnel: pinned to the interface, and bound to
 /// the address that interface owns.
 ///
@@ -170,9 +271,14 @@ fn pin_to_interface(socket: &Socket, index: u32) -> io::Result<()> {
 
 /// A TCP socket placed on the tunnel, or on the normal route if none is
 /// up.
-fn connect_upstream(target: SocketAddrV4, tunnel: &TunnelInterface) -> io::Result<TcpStream> {
+fn connect_upstream(
+    target: SocketAddrV4,
+    tunnel: &TunnelInterface,
+    own: &Arc<OwnSockets>,
+) -> io::Result<(TcpStream, Option<Registration>)> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     let pinned = tunnel.get();
+    let mut registration = None;
     if let Some((index, address)) = pinned {
         if let Err(e) = attach_to_tunnel(&socket, index, address) {
             // Logged, not just returned. A failure here is invisible in
@@ -186,6 +292,10 @@ fn connect_upstream(target: SocketAddrV4, tunnel: &TunnelInterface) -> io::Resul
             ));
             return Err(e);
         }
+        // Before the connect, not after: the SYN is the first thing the
+        // redirect loop sees, and a registration that lands afterwards
+        // is exactly the race this replaces.
+        registration = register(own, &socket, Transport::Tcp);
     }
     if let Err(e) = socket.connect_timeout(&SocketAddr::V4(target).into(), UPSTREAM_CONNECT_TIMEOUT)
     {
@@ -195,7 +305,7 @@ fn connect_upstream(target: SocketAddrV4, tunnel: &TunnelInterface) -> io::Resul
         ));
         return Err(e);
     }
-    Ok(socket.into())
+    Ok((socket.into(), registration))
 }
 
 /// Appends one line to the split-tunnel log.
@@ -242,10 +352,13 @@ fn stats_note(message: &str) {
     }
 }
 
-fn bind_upstream_retrying(tunnel: &TunnelInterface) -> io::Result<UdpSocket> {
+fn bind_upstream_retrying(
+    tunnel: &TunnelInterface,
+    own: &Arc<OwnSockets>,
+) -> io::Result<(UdpSocket, Option<Registration>)> {
     let deadline = Instant::now() + BIND_RETRY_FOR;
     loop {
-        match bind_upstream(tunnel) {
+        match bind_upstream(tunnel, own) {
             Ok(socket) => return Ok(socket),
             Err(e) if Instant::now() >= deadline => return Err(e),
             Err(_) => std::thread::sleep(BIND_RETRY_EVERY),
@@ -253,7 +366,10 @@ fn bind_upstream_retrying(tunnel: &TunnelInterface) -> io::Result<UdpSocket> {
     }
 }
 
-fn bind_upstream(tunnel: &TunnelInterface) -> io::Result<UdpSocket> {
+fn bind_upstream(
+    tunnel: &TunnelInterface,
+    own: &Arc<OwnSockets>,
+) -> io::Result<(UdpSocket, Option<Registration>)> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     match tunnel.get() {
         Some((index, address)) => attach_to_tunnel(&socket, index, address)?,
@@ -263,7 +379,11 @@ fn bind_upstream(tunnel: &TunnelInterface) -> io::Result<UdpSocket> {
     // Bounded so a reader thread notices its flow has been retired
     // instead of blocking forever on a socket nobody will answer.
     socket.set_read_timeout(Some(POLL_INTERVAL))?;
-    Ok(socket.into())
+    // Registered while the caller still holds it and before a single
+    // datagram has left, so the redirect loop can never see a packet
+    // from a socket it does not yet know is ours.
+    let registration = register(own, &socket, Transport::Udp);
+    Ok((socket.into(), registration))
 }
 
 /// Addresses used only to prove the tunnel carries traffic.
@@ -332,6 +452,10 @@ fn connect_pinned(
 pub struct Relays {
     pub tcp_port: u16,
     pub udp_port: u16,
+    /// The onward sockets this relay owns, for the redirect loop to
+    /// recognise its traffic. Created here because this is the side that
+    /// creates the sockets, and read by `redirect::decide`.
+    pub own_sockets: Arc<OwnSockets>,
     stop: Arc<AtomicBool>,
     upstreams: Arc<UdpUpstreams>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -360,16 +484,24 @@ impl Relays {
 /// because nothing prompts a reply.
 #[derive(Default)]
 struct UdpUpstreams {
-    sockets: Mutex<HashMap<u16, Arc<UdpSocket>>>,
+    sockets: Mutex<HashMap<u16, Upstream>>,
+}
+
+/// One flow's onward socket, held together with the registration that
+/// says it belongs to us -- so retiring the flow retires both, and a
+/// port number cannot stay claimed after Windows has reissued it.
+struct Upstream {
+    socket: Arc<UdpSocket>,
+    _registration: Option<Registration>,
 }
 
 impl UdpUpstreams {
     fn get(&self, nat_port: u16) -> Option<Arc<UdpSocket>> {
-        self.sockets.lock().unwrap().get(&nat_port).cloned()
+        self.sockets.lock().unwrap().get(&nat_port).map(|u| u.socket.clone())
     }
 
-    fn insert(&self, nat_port: u16, socket: Arc<UdpSocket>) {
-        self.sockets.lock().unwrap().insert(nat_port, socket);
+    fn insert(&self, nat_port: u16, socket: Arc<UdpSocket>, registration: Option<Registration>) {
+        self.sockets.lock().unwrap().insert(nat_port, Upstream { socket, _registration: registration });
     }
 
     fn close(&self, nat_port: u16) {
@@ -397,22 +529,25 @@ pub fn start(nat: Arc<Nat>, tunnel: Arc<TunnelInterface>) -> io::Result<Relays> 
 
     let stop = Arc::new(AtomicBool::new(false));
     let upstreams = Arc::new(UdpUpstreams::default());
+    let own_sockets = Arc::new(OwnSockets::default());
     let mut threads = Vec::new();
 
     threads.push({
-        let (nat, tunnel, stop) = (nat.clone(), tunnel.clone(), stop.clone());
-        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop))
+        let (nat, tunnel, stop, own) =
+            (nat.clone(), tunnel.clone(), stop.clone(), own_sockets.clone());
+        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own))
     });
     threads.push({
-        let (nat, stop, upstreams) = (nat.clone(), stop.clone(), upstreams.clone());
-        std::thread::spawn(move || serve_udp(udp, nat, tunnel, stop, upstreams))
+        let (nat, stop, upstreams, own) =
+            (nat.clone(), stop.clone(), upstreams.clone(), own_sockets.clone());
+        std::thread::spawn(move || serve_udp(udp, nat, tunnel, stop, upstreams, own))
     });
     threads.push({
         let (stop, upstreams) = (stop.clone(), upstreams.clone());
         std::thread::spawn(move || expire_flows(nat, stop, upstreams))
     });
 
-    Ok(Relays { tcp_port, udp_port, stop, upstreams, threads })
+    Ok(Relays { tcp_port, udp_port, own_sockets, stop, upstreams, threads })
 }
 
 fn accept_tcp(
@@ -420,6 +555,7 @@ fn accept_tcp(
     nat: Arc<Nat>,
     tunnel: Arc<TunnelInterface>,
     stop: Arc<AtomicBool>,
+    own: Arc<OwnSockets>,
 ) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
@@ -445,9 +581,13 @@ fn accept_tcp(
         };
 
         let tunnel = tunnel.clone();
+        let own = own.clone();
         std::thread::spawn(move || {
             let target = origin.upstream.unwrap_or_else(|| SocketAddrV4::new(origin.addr, origin.port));
-            if let Ok(upstream) = connect_upstream(target, &tunnel) {
+            // The registration is held for the life of the connection,
+            // not just the connect: every packet this socket sends has
+            // to be recognised as ours, not only its SYN.
+            if let Ok((upstream, _registration)) = connect_upstream(target, &tunnel, &own) {
                 pump(client, upstream);
             }
         });
@@ -485,6 +625,7 @@ fn serve_udp(
     tunnel: Arc<TunnelInterface>,
     stop: Arc<AtomicBool>,
     upstreams: Arc<UdpUpstreams>,
+    own: Arc<OwnSockets>,
 ) {
     let local = Arc::new(local);
     let mut buffer = vec![0u8; 65_535];
@@ -517,15 +658,15 @@ fn serve_udp(
                 //
                 // Measured: nothing on the wire for the first fourteen
                 // seconds, then every lookup fine.
-                let socket = match bind_upstream_retrying(&tunnel) {
-                    Ok(socket) => socket,
+                let (socket, registration) = match bind_upstream_retrying(&tunnel, &own) {
+                    Ok(bound) => bound,
                     Err(e) => {
                         stats_note(&format!("upstream bind failed for udp flow: {e}"));
                         continue;
                     }
                 };
                 let socket = Arc::new(socket);
-                upstreams.insert(nat_port, socket.clone());
+                upstreams.insert(nat_port, socket.clone(), registration);
 
                 let (reader, back, nat, stop) =
                     (socket.clone(), local.clone(), nat.clone(), stop.clone());
@@ -635,6 +776,55 @@ mod tests {
         let error = probe(&TunnelInterface::new(u32::MAX, Ipv4Addr::new(10, 66, 0, 3)))
             .expect_err("nothing can be reached");
         assert!(error.contains("did not carry"), "got {error}");
+    }
+
+    #[test]
+    fn an_onward_socket_is_known_by_its_address_and_not_by_its_port_alone() {
+        // The onward sockets are bound to the tunnel's address and
+        // applications to the machine's LAN address, so the same port
+        // number is legitimately in use by both at once. Keyed on the
+        // port alone, an application's packet would be answered "this is
+        // ours" and left out of the tunnel -- a leak, and a silent one.
+        let own = Arc::new(OwnSockets::default());
+        let tunnel = Ipv4Addr::new(10, 66, 0, 2);
+        let lan = Ipv4Addr::new(192, 168, 1, 20);
+        own.insert(Transport::Udp, SocketAddrV4::new(tunnel, 51000));
+
+        assert!(own.contains(Transport::Udp, tunnel, 51000));
+        assert!(!own.contains(Transport::Udp, lan, 51000), "an app on the same port is not ours");
+        // Transports are separate namespaces for the same reason.
+        assert!(!own.contains(Transport::Tcp, tunnel, 51000));
+    }
+
+    #[test]
+    fn a_registration_lasts_exactly_as_long_as_its_socket() {
+        // A registration left behind claims a port number that Windows
+        // is then free to hand to an application, which is the leak the
+        // test above describes -- arriving later instead of at once.
+        let own = Arc::new(OwnSockets::default());
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into()).unwrap();
+        let bound = socket.local_addr().unwrap().as_socket_ipv4().unwrap();
+
+        let registration = register(&own, &socket, Transport::Udp).expect("a bound socket registers");
+        assert!(own.contains(Transport::Udp, *bound.ip(), bound.port()));
+
+        drop(registration);
+        assert!(!own.contains(Transport::Udp, *bound.ip(), bound.port()));
+    }
+
+    #[test]
+    fn an_unbound_socket_is_not_registered_under_a_wildcard_address() {
+        // The fail-open case: no tunnel, so the socket is left unpinned
+        // and has no address until it connects. Registering 0.0.0.0 here
+        // would match every application on that port number. That case is
+        // covered by the image check in `redirect::decide`, as it always
+        // was, and this returns nothing rather than something wrong.
+        let own = Arc::new(OwnSockets::default());
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into()).unwrap();
+
+        assert!(register(&own, &socket, Transport::Udp).is_none());
     }
 
     #[test]
