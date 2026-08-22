@@ -5523,3 +5523,140 @@ right place and the installer is where it goes.
   transport in the fleet by median (20.2 Mbps against WireGuard's 52.2).
 
 **Nothing was changed on any node.** All node access was read-only.
+---
+
+## 2026-08-22 — singapore-1 now serves all eight; germany-1's mirror is blocked on a key
+
+**Status:** singapore-1 done and verified; germany-1 **blocked on SSH access**
+**Touches:** live — singapore-1 (six new engines), plan route lists; repo — `installer/`
+
+singapore-1 served only IKEv2 and OpenVPN, the two transports Iran
+identifies first. It now serves the same eight as every other direct
+node, each measured by exit IP rather than by a green install:
+
+| protocol | port | exit |
+|---|---|---|
+| VLESS+REALITY | 443 | 172.236.143.200 |
+| VLESS+TLS | 2083 TCP | 172.236.143.200 |
+| VLESS+TLS over WebSocket | 2083 `/assets/…` | 172.236.143.200 |
+| Trojan+TLS | 2053 | 172.236.143.200 |
+| Shadowsocks 2022 | 40083 | 172.236.143.200 |
+| WireGuard | 20176/udp | 172.236.143.200 |
+| OpenVPN | 26471/udp | pre-existing, untouched |
+| IKEv2 | 500/4500 | pre-existing, untouched |
+
+Added to Trial, Starter, Pro and Ultimate Max — 8 routes each, 28
+credentials per route. **Ultimate deliberately excluded**: relay-only
+plan, direct node. `PATCH /plans/:id` takes `allowedRouteIds` with `set`
+semantics, so each plan was read, unioned and written back; sending only
+the new ids would have silently deleted the other 34 routes from every
+plan. `_PlanAllowedRoutes` was dumped first.
+
+The two live transports were never restarted — `systemctl show
+... ActiveEnterTimestamp` still reads 11 August for both openvpn-server
+and strongswan-starter. needrestart deferred them and was left to.
+
+### Verified without tunnelling anything
+
+All six ran as **client-side xray on the panel box**, SOCKS inbound on
+loopback, `curl --socks5-hostname` to `1.1.1.1/cdn-cgi/trace`. WireGuard
+too: xray's **userspace** wireguard outbound needs no kernel module, no
+netns and touches no routing table, so proving a WireGuard exit cost the
+same as proving a VLESS one. Cheaper than WSL2 and nothing to tear down.
+
+REALITY passing on exit IP is the load-bearing part: a wrong shortId
+produces a tunnel that comes up and quietly proxies to the decoy site,
+so `PASS 172.236.143.200` rather than Shopee's address is what says the
+identity is right.
+
+### The decoy had to be measured, and Singapore is the hard case
+
+The installer's built-in default for this node was `www.zoomit.ir` —
+Iranian, CDN-hosted, wrong on both counts for a Singapore address.
+
+**Every consumer-facing .sg site probed sits behind a CDN.** Cloudflare,
+Imperva, Akamai or CloudFront, including all five universities, the
+polytechnics, both ISPs' portals, sgnic.sg and the .gov.sg sites. The
+two genuinely Singapore-hosted hosts found (`www.pacific.net.sg`,
+`www.simba.sg`) offer neither TLS 1.3 nor h2 — the `www.mynet.com`
+lesson from Turkey, again.
+
+What worked was **`www.shopee.sg`**: netname `SHOPEE-SG`, the company's
+own Singapore netblock, TLS 1.3 + h2 + X25519 verified from sg1 **and**
+from ir1. `www.lazada.sg` looked equally good from Singapore and was
+rejected on the ir1 probe alone — from Iran it resolves to `10.10.34.35`,
+a poisoned answer. One probe from where the customers are settled it,
+exactly as it did for Turkey.
+
+**The installer's own "hosted abroad" list has rotted the same way
+speedtest.net did.** `www.asus.com` → 13.249.231.81 and
+`www.leboncoin.fr` → 13.35.36.62 are both AWS CloudFront. They pass
+every check `probe_reality_dest` makes, because that function tests the
+handshake and **nothing tests criterion 1** — so the default offered to
+an operator holding Enter is a CDN name on a non-CDN address, the exact
+mismatch the list exists to prevent. Commented loudly rather than
+swapped: two fresh names would rot identically. The real fix is for the
+probe to check who owns the address, which is a feature, not a comment.
+
+### Two more ways to hold Enter and lose a transport
+
+Commit 8c86d62 fixed the Trojan and Shadowsocks port prompts. It missed
+the gate above them:
+
+> `Certificate-based stealth protocols (optional) … Set them up? [y/N]`
+
+One Enter there dropped **VLESS+TLS, VLESS over WebSocket and Trojan**
+at once, silently. Now defaults to yes, and an empty domain skips those
+three with a message instead of `return 1` — which used to abort
+`install_xray` outright and leave xray-core installed and never
+configured, REALITY included.
+
+Also: **singapore-1 had no `/etc/neoxify/role`**, being enrolled before
+that marker existed. `install.sh` therefore offered the role question,
+whose only sensible answer re-enrolls a node that is already serving
+customers. It now infers the agent role from `agent.json` and writes the
+marker. Verified by removing the file on sg1 and re-running.
+
+### germany-1: the diagnosis is certain, the fix is not reachable
+
+`/api/` returns 502 on `de1.neoxify.site:2053` while the fallback site
+serves 200 — still the stale-upstream shape. Worth recording *why*, and
+it is not what the old entry assumed: `connect.neoxify.com`, the name
+germany-1 was built against, **still resolves to 167.233.65.166**, the
+current panel. So DNS is fine and the name is fine; nginx cached the
+address of a literal `proxy_pass` hostname at config load, back when the
+panel was a different VPS, and has held it ever since. A re-run of
+`ensure_fallback_site` writes the resolver-plus-variable form that
+turkey-1 has and fixes it. **Nothing in `installer/` needs changing —
+the fix is already there.**
+
+**Blocked: no key opens germany-1.** `ovh_neo`, `azs_vps` and `neo_tr1`
+all give `Permission denied (publickey)` on root and on ubuntu/debian/
+admin/neoxify; only port 22 is open; and the panel's own
+`~/.ssh/id_ed25519` is refused too. There is no remote path either — the
+agent's command set is CREATE/UPDATE/DELETE/DISABLE/ENABLE_USER,
+SET_QUOTA, SYNC, CONFIGURE_ROUTE, REMOVE_ROUTE, with no exec of any
+kind, which is the right design and also means the panel cannot repair a
+node. **This needs a key from the owner; it is two minutes of work once
+there is one.**
+
+### Left open: the mirror still loses the client's address
+
+Unchanged, and now with the missing measurement. `origin.neoxify.site`
+resolves straight to 167.233.65.166, serves the API, and **preserves the
+real client address** — a direct call returned the caller's own IP, not
+the panel's. So pointing the mirror there would fix XFF fleet-wide.
+
+The obstacle is a certificate, not a design: the panel's cert carries
+`DNS:connect.neoxify.site` and no SAN for `origin.neoxify.site`, so
+`curl` fails `SEC_E_WRONG_PRINCIPAL` against it. nginx would not notice
+(`proxy_ssl_verify` is off by default) which makes the fix *look*
+one-line and actually mean "the mirror hop stops verifying the panel".
+Doing it properly wants a cert covering the origin name first. Still a
+fleet decision, still deliberately not taken here.
+
+**Also noticed:** nodes built with the current installer answer
+`Welcome to nginx!` on port 80 — singapore-1, turkey-1 and germany-1 all
+do, finland1 does not. nginx arrives for the loopback fallback site and
+Ubuntu's default vhost comes with it. It is a fleet-wide fingerprint of
+its own and nobody put it there on purpose.

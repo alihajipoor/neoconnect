@@ -53,6 +53,18 @@ EOF
 main() {
   detect_os
 
+  # Nodes enrolled before this marker existed have no role file, and the
+  # role question is not a harmless one to ask them: the only sensible
+  # answer ("VPN Agent Node") runs action_install_agent, which re-enrolls
+  # a node that is already serving customers. An enrolled agent is
+  # identifiable without asking -- it has the config the agent writes at
+  # enrollment -- so identify it and write the marker instead. Found on
+  # singapore-1, which was enrolled in August and had no marker, so
+  # reaching its management menu at all meant getting this right first.
+  if [[ ! -f "$ROLE_FILE" && -f /etc/neoxify/agent.json ]]; then
+    echo "agent" > "$ROLE_FILE"
+  fi
+
   if [[ -f "$ROLE_FILE" ]]; then
     case "$(cat "$ROLE_FILE")" in
       panel) run_panel_menu ;;
