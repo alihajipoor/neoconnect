@@ -517,7 +517,7 @@ impl SplitTunnel {
             node_addr: node,
             tcp_proxy_port: relays.tcp_port,
             udp_proxy_port: relays.udp_port,
-            own_image: own_image_path(),
+            own_images: own_images(),
             dns_resolver: CUSTOM_MODE_RESOLVER,
             // A full tunnel already resolves through the VPN, so there
             // is nothing to rescue and redirecting lookups would push
@@ -702,6 +702,39 @@ fn own_image_path() -> String {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Everything belonging to Neoxify itself, which must never be routed
+/// through the tunnel Neoxify is managing.
+///
+/// The service was already here, because its own lookups being fed into
+/// its own proxy took DNS out for the whole machine. **The app has the
+/// same problem in "everything except these" mode** and it was missed:
+/// in that mode anything the customer did not exclude is tunnelled, and
+/// the app is not something a customer would think to exclude. Its
+/// requests to the API then depend on the tunnel it is supposed to be
+/// controlling.
+///
+/// Reported exactly that way -- the app span for twenty seconds, gave
+/// up with "can't reach Neoxify right now", and then could not say
+/// whether it was connected, while the browser beside it was plainly
+/// going out through the VPN. A control panel must not lose contact
+/// with the thing it controls because that thing is working.
+///
+/// The app sits one directory above the service, which lives in
+/// `resources\`.
+fn own_images() -> Vec<String> {
+    let service = own_image_path();
+    let mut images = vec![service.clone()];
+
+    if let Some(app) = std::path::Path::new(&service)
+        .parent()
+        .and_then(|resources| resources.parent())
+        .map(|root| root.join("neoconnect-desktop.exe"))
+    {
+        images.push(app.to_string_lossy().into_owned());
+    }
+    images
 }
 
 #[cfg(test)]
