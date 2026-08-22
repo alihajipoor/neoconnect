@@ -4707,3 +4707,53 @@ receives was checked by applying the identical filter on the rig, so
 search and icon rendering are unproven visually. Also `mspaint` shows as
 "mspaint" rather than "Paint" -- its FileDescription did not come
 through.
+
+---
+
+## 2026-08-22 — Three faults found by using the app, not the pipe
+
+**Status:** fixed, verified only by build and tests
+**Touches:** `apps/desktop-windows/**`
+
+Found in ten minutes of real use on a real machine, in "everything
+except these" mode with Chrome and Claude excluded. None of them would
+ever have shown up in my testing, because every VM run drove the service
+over its named pipe instead of running the app through its own tunnel.
+
+**1. The app tunnelled itself.** In `AllExcept` everything not excluded
+is carried, and nobody thinks to exclude the VPN client. Its API calls
+then depended on the tunnel it was managing: twenty seconds of spinner,
+then "can't reach Neoxify right now". The service was already exempt --
+its own lookups being fed into its own proxy took DNS out for the whole
+machine once -- and the app needed the same exemption for the same
+reason. It is now in `own_images` beside the service.
+
+**2. The app said "You're not protected" while it was.** The browser
+showed the node's address; the app showed a Connect button. A failed
+`vpn_status` was being treated as "disconnected", so failing to ask the
+question was reported as knowing the answer. It now keeps what it last
+knew rather than asserting the reassuring-sounding opposite -- this is
+the same class as a false "Connected", and the direction does not
+excuse it: somebody who believes "not protected" acts as though their
+traffic is their own.
+
+**3. Closing the app left the tunnel up for a minute.** `IDLE_GRACE` is
+sixty seconds, and it is right for a crash: the app opens a fresh pipe
+connection per request, so "a client is connected" is never true for
+long, and an earlier version that tore down on disconnect killed live
+tunnels seconds after they came up. But closing the window is an
+instruction, not silence, and it was being inferred instead of acted
+on. A `Destroyed` handler now disconnects before the process exits.
+
+### The pattern, stated plainly
+
+Three days of VM runs, and the faults were found by someone using the
+product for ten minutes. Every one of them lives between the app and the
+service -- the seam my harness replaced with a pipe client. **Driving
+the service directly is not testing the product**; it tests the half
+that was never in question.
+
+**Not verified:** these are covered by builds and 88 tests, and by
+nothing else. The app-tunnelling exemption in particular wants checking
+in `AllExcept` mode with the app running, which is exactly the
+configuration that has never once been exercised.
