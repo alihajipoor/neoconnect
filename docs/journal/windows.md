@@ -4905,3 +4905,69 @@ a much slower machine could see a bounded *failure* where it previously
 succeeded -- though it can no longer hang. And IKEv2 was not exercised
 end to end, so `RasDialW` -- synchronous, no timeout -- is the one
 remaining unbounded wait in the service and is unproven either way.
+
+---
+
+## 2026-08-22 — Brand marks, a visual pass, and four RTL bugs
+
+**Status:** done
+**Touches:** `apps/desktop-windows/src/**` (and mobile, via the shared alias)
+
+The community row used lucide stand-ins -- a speech bubble for Discord,
+a camera for Instagram, a paper plane for Telegram. Now the real marks,
+as inline SVG in `BrandIcons.tsx` rather than a dependency: five glyphs
+do not justify an icon pack. The website keeps the lucide globe and
+Settings keeps its gear, because neither is a brand.
+
+One edit covers every client. `apps/mobile/src` imports
+`@shared/components/CommunityLinks`, and `@shared` aliases to the
+desktop tree, so Android (APK and Play) and iOS pick it up with no file
+added to the Mac session's tree.
+
+### The RTL bugs are the part that mattered
+
+Found while checking the visual pass held up in Persian, and none of
+them is cosmetic:
+
+- **The Custom-mode toggle knob used physical `left-*`.** The card
+  mirrors in RTL; the knob did not. So "on" sat exactly where a Persian
+  reader reads "off" -- a control that lied about whether traffic was
+  being tunnelled, to the audience this product exists for. Now
+  `start-*`.
+- The picker's search icon was `left-2.5` with `pl-8`, so in RTL it sat
+  on top of the first characters typed.
+- Chevrons never mirrored.
+- `text-left` where `text-start` was meant, in five files.
+
+**Nobody had looked at this app in Persian.** Everything above is
+invisible in English and has presumably been shipping for months.
+
+### Visual pass
+
+Verified against real before/after renders of the actual components, not
+a mock. The one that was a defect rather than taste: the Stat tile's
+action shared the value's line and truncated the data -- `fi-finland`
+displayed as `fi-finl...`. An attempt to move the action to the caption
+line truncated `SERVER`/`PROTOCOL` instead and was reverted; three tiles
+across a 400px window genuinely cannot fit both at full size.
+
+Otherwise: the status headline was set at form-label size and is now
+the size of the sentence the screen exists to deliver; the exit IP is a
+success-tinted chip rather than a third grey line, since it is evidence
+a customer can check; the data bar has a recessed track; the orb's dial
+has something to measure against; the Settings rail's active row has an
+accent bar drawn as a `before:` pseudo-element pinned to `start-0`, so
+it lands on the correct edge in both directions.
+
+### Worth knowing
+
+- **There is no light theme.** `theme.css` defines `:root` and `.dark`
+  identically with no `prefers-color-scheme` block. "Check both themes"
+  reduces to one palette -- relevant before anyone promises light mode.
+- `apps/mobile/src/screens/Dashboard.tsx` keeps its own copies of the
+  status block and data-used card, so those two refinements did not
+  reach mobile. Left alone deliberately: that file is in the tree the
+  Mac session is working in, and porting it is a coordinated change.
+- `Stat` shows a raw region slug (`fi-finland`), which is why it
+  truncates at all. A display name would fix it properly, but that is a
+  data change rather than a visual one.

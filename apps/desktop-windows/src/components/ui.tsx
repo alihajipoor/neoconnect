@@ -134,18 +134,28 @@ export function Stat({
         <span className="truncate">{label}</span>
       </span>
       <span className="flex items-center justify-between gap-1">
-        <span className="truncate text-xs font-semibold text-foreground">{value}</span>
+        <span className="truncate text-xs leading-tight font-semibold text-foreground">{value}</span>
         {onClick && !disabledReason ? (
-          <span className="flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-primary">
+          // Deliberately a size below the caption above it. Three of
+          // these fit across a 400px window, and set at the same 10px
+          // the action took enough of the row that the value -- the
+          // fact the tile exists to show -- was what truncated: a
+          // customer on fi-finland read "fi-finl...". Shrinking the
+          // word that never changes buys back the room for the one
+          // that does, and the tile's violet fill and border were
+          // always the louder half of "this is pressable" anyway.
+          <span className="flex shrink-0 items-center gap-px text-[9px] font-semibold text-primary">
             {actionLabel}
-            <ChevronRight className="size-3" />
+            {/* Mirrored under Persian: a chevron means "onward", and
+                onward is leftward in an RTL layout. */}
+            <ChevronRight className="size-2.5 rtl:rotate-180" />
           </span>
         ) : null}
       </span>
     </>
   );
 
-  const shell = "flex min-w-0 flex-col gap-1 rounded-lg border px-2.5 py-2 text-left";
+  const shell = "flex min-w-0 flex-col gap-1.5 rounded-lg border px-2.5 py-2 text-start";
 
   if (!onClick) {
     return (
