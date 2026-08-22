@@ -84,6 +84,11 @@ EOF
   ensure_env_key "NOWPAYMENTS_API_KEY" ""
   ensure_env_key "NOWPAYMENTS_IPN_SECRET" ""
   ensure_env_key "ALERT_WEBHOOK_URL" ""
+  # Optional, and blank is a working configuration -- the release lookups
+  # behind /api/updates just run anonymously against GitHub's 60-per-hour
+  # per-IP budget instead of 5,000. Worth filling in on a busy panel: a
+  # failed lookup is what takes every download link down at once.
+  ensure_env_key "GITHUB_API_TOKEN" ""
   # Generated rather than left blank: it is a secret of ours, not a
   # credential from somebody else's service, and the operator has no way to
   # invent a better one. The backend and the Discord bot both read this same
