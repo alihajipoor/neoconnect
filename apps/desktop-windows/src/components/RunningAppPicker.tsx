@@ -91,12 +91,15 @@ export function RunningAppPicker({
         </div>
 
         <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          {/* Logical inset, so the glyph sits at the edge the text starts
+              from -- under Persian a physical `left` put it on top of
+              the first thing typed. */}
+          <Search className="pointer-events-none absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("settings.customSearch")}
-            className="w-full rounded-lg border border-white/8 bg-white/[0.03] py-1.5 pl-8 pr-2 text-xs outline-none placeholder:text-muted-foreground focus:border-white/20"
+            className="w-full rounded-lg border border-white/8 bg-white/[0.03] py-1.5 pe-2 ps-8 text-xs outline-none placeholder:text-muted-foreground focus:border-white/20"
           />
         </div>
 
@@ -119,7 +122,7 @@ export function RunningAppPicker({
                     disabled={picked}
                     onClick={() => onPick(app.paths?.length ? app.paths : [app.path])}
                     className={[
-                      "flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left",
+                      "flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-start",
                       picked
                         ? "cursor-default border-white/5 bg-white/[0.015] opacity-50"
                         : "press border-white/8 bg-white/[0.025] hover:bg-white/[0.05]",

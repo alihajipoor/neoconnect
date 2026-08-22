@@ -4905,3 +4905,150 @@ a much slower machine could see a bounded *failure* where it previously
 succeeded -- though it can no longer hang. And IKEv2 was not exercised
 end to end, so `RasDialW` -- synchronous, no timeout -- is the one
 remaining unbounded wait in the service and is unproven either way.
+
+---
+
+## 2026-08-22 — Brand marks, a visual pass, and four RTL bugs
+
+**Status:** done
+**Touches:** `apps/desktop-windows/src/**` (and mobile, via the shared alias)
+
+The community row used lucide stand-ins -- a speech bubble for Discord,
+a camera for Instagram, a paper plane for Telegram. Now the real marks,
+as inline SVG in `BrandIcons.tsx` rather than a dependency: five glyphs
+do not justify an icon pack. The website keeps the lucide globe and
+Settings keeps its gear, because neither is a brand.
+
+One edit covers every client. `apps/mobile/src` imports
+`@shared/components/CommunityLinks`, and `@shared` aliases to the
+desktop tree, so Android (APK and Play) and iOS pick it up with no file
+added to the Mac session's tree.
+
+### The RTL bugs are the part that mattered
+
+Found while checking the visual pass held up in Persian, and none of
+them is cosmetic:
+
+- **The Custom-mode toggle knob used physical `left-*`.** The card
+  mirrors in RTL; the knob did not. So "on" sat exactly where a Persian
+  reader reads "off" -- a control that lied about whether traffic was
+  being tunnelled, to the audience this product exists for. Now
+  `start-*`.
+- The picker's search icon was `left-2.5` with `pl-8`, so in RTL it sat
+  on top of the first characters typed.
+- Chevrons never mirrored.
+- `text-left` where `text-start` was meant, in five files.
+
+**Nobody had looked at this app in Persian.** Everything above is
+invisible in English and has presumably been shipping for months.
+
+### Visual pass
+
+Verified against real before/after renders of the actual components, not
+a mock. The one that was a defect rather than taste: the Stat tile's
+action shared the value's line and truncated the data -- `fi-finland`
+displayed as `fi-finl...`. An attempt to move the action to the caption
+line truncated `SERVER`/`PROTOCOL` instead and was reverted; three tiles
+across a 400px window genuinely cannot fit both at full size.
+
+Otherwise: the status headline was set at form-label size and is now
+the size of the sentence the screen exists to deliver; the exit IP is a
+success-tinted chip rather than a third grey line, since it is evidence
+a customer can check; the data bar has a recessed track; the orb's dial
+has something to measure against; the Settings rail's active row has an
+accent bar drawn as a `before:` pseudo-element pinned to `start-0`, so
+it lands on the correct edge in both directions.
+
+### Worth knowing
+
+- **There is no light theme.** `theme.css` defines `:root` and `.dark`
+  identically with no `prefers-color-scheme` block. "Check both themes"
+  reduces to one palette -- relevant before anyone promises light mode.
+- `apps/mobile/src/screens/Dashboard.tsx` keeps its own copies of the
+  status block and data-used card, so those two refinements did not
+  reach mobile. Left alone deliberately: that file is in the tree the
+  Mac session is working in, and porting it is a coordinated change.
+- `Stat` shows a raw region slug (`fi-finland`), which is why it
+  truncates at all. A display name would fix it properly, but that is a
+  data change rather than a visual one.
+
+---
+
+## 2026-08-22 — "Wrong IP for a minute": a SYN that escaped, and two metrics that lied
+
+**Status:** fixed, measured before and after
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/{owner,redirect}.rs`
+
+A browser in `OnlySelected` showed the customer's real address for about
+a minute after connecting, then corrected itself.
+
+### Both pieces of evidence I opened with were wrong
+
+- **"closed 0 existing connection(s)"** -- every one of those 51 lines
+  came from rapid synthetic start/stop cycles with nothing running to
+  close. Real sessions closed 274, 46, 40, 38, 31, 29, 14, 3, 1, and
+  five fresh runs closed 6-8 each with **zero survivors** every time.
+  `reset_selected_connections` was never broken.
+- **"chrome -> proxy 0, direct 60"** -- that metric *cannot* show a
+  redirected connection. `rewrite_outbound` changes the packet's
+  destination; the app's socket keeps the real remote address in the TCP
+  table. Caught in the act: Chrome held `8626 -> 64.233.184.84:443`
+  while the service simultaneously held
+  `10.67.0.2:8627 -> 64.233.184.84:443` through the tunnel. Same
+  connection, tunnelled, still showing the real address.
+
+Reading a number without establishing what it is capable of showing.
+
+### The mechanism
+
+`image_for_port` will not rebuild its snapshot more often than
+`MIN_REFRESH_INTERVAL` (20ms). A browser opens many sockets at once, so
+a SYN routinely arrives inside that window. In `OnlySelected` an unknown
+owner means *leave it alone* -- so the SYN goes out unredirected, **the
+far end answers it**, and that connection is established outside the
+tunnel for good. The browser reuses it until it retires, which is the
+minute.
+
+The comment in `decide` claimed this was survivable because the SYN
+would be retransmitted a second later. It is not: a direct SYN
+succeeds, so nothing is retransmitted. Corrected in place.
+
+Measured directly with instrumented counters: **6-22% of new TCP
+connections** hit the stale window (11/50, 5/77, 4/47, 9/60, 8/55), and
+a forced rebuild resolved **100%** of them.
+
+**Fix:** `image_for_new_connection` rebuilds rather than answering a
+miss from a stale snapshot, used for TCP SYNs only -- the one packet
+where being wrong is permanent.
+
+### Before / after, Edge selected, WireGuard france-1
+
+Ground truth is the browser's own reported exit IP on the first
+navigation after Custom mode comes up, with the TCP handshake time as an
+independent check on which path it took:
+
+| | shipped 0.9.24 | with fix |
+|---|---|---|
+| run 1 | 50.34.35.228 US, tcp 21ms | 104.105.205.233 FR, tcp 294ms |
+| run 2 | 50.34.35.228 US, tcp 9ms | 104.105.205.233 FR, tcp 291ms |
+| run 3 | -- | 104.105.205.233 FR, tcp 290ms |
+| run 4 | -- | 104.105.205.233 FR, tcp 300ms |
+
+2/2 escaped before; 4/4 tunnelled after.
+
+### Two measurement traps
+
+- The browser automation drives **Edge**, not Chrome. The first
+  "Chrome shows the real IP" readings were Edge, which was not selected.
+- A `setInterval` poller in a background tab is throttled to ~1/minute
+  and produced a convincing but entirely fake "45-second dead window".
+  The final numbers use navigations only, self-timestamped from
+  `performance.timeOrigin`.
+
+### Two gaps left open
+
+- `reset_selected_connections` closes only `ESTABLISHED` rows, so a
+  connection in `SYN_SENT` at that instant survives as a direct one.
+- The packet loop parses IPv4 only, so **IPv6 may bypass Custom mode
+  entirely**. No IPv6 was present to test against. That one deserves its
+  own investigation before anyone calls this feature finished.

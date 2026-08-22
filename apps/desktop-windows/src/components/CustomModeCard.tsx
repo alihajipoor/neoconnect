@@ -131,10 +131,14 @@ export function CustomModeCard() {
               : "border-white/12 bg-white/8",
           ].join(" ")}
         >
+          {/* Positioned from the inline start, not from the left. Under
+              Persian the whole card mirrors, and a knob pinned to a
+              physical edge slid the wrong way: "on" sat where the eye
+              reads "off". */}
           <span
             className={[
-              "absolute top-0.5 size-4 rounded-full bg-white transition-[left]",
-              settings.enabled ? "left-[1.375rem]" : "left-0.5",
+              "absolute top-0.5 size-4 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.5)] transition-[inset-inline-start] duration-200",
+              settings.enabled ? "start-[1.375rem]" : "start-0.5",
             ].join(" ")}
           />
         </button>
@@ -161,8 +165,12 @@ export function CustomModeCard() {
                 onClick={() => void apply({ ...settings, mode: value })}
                 className={[
                   "press flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
+                  // The chosen half sits on top of the groove rather
+                  // than flush in it: which way the list reads is the
+                  // one thing on this card that must never be misread,
+                  // and a lifted pill says "this one" at a glance.
                   settings.mode === value
-                    ? "bg-[linear-gradient(120deg,var(--primary),var(--highlight))] text-white"
+                    ? "bg-[linear-gradient(120deg,var(--primary),var(--highlight))] text-white shadow-[0_2px_10px_-4px_var(--primary)]"
                     : "text-muted-foreground hover:bg-white/8 hover:text-foreground",
                 ].join(" ")}
               >
@@ -189,11 +197,16 @@ export function CustomModeCard() {
               {settings.apps.map((path) => (
                 <li
                   key={path}
-                  className="flex items-center gap-2 rounded-lg border border-white/8 bg-white/[0.025] px-2.5 py-2"
+                  // Lifted off the card and lit on hover. At white/2.5
+                  // the rows were all but invisible against the surface
+                  // they sit on, so a list of chosen apps looked like
+                  // stray text and the remove button beside each one
+                  // looked like it belonged to nothing.
+                  className="group flex items-center gap-2 rounded-lg border border-white/8 bg-white/[0.04] px-2.5 py-2 transition-colors hover:border-white/14 hover:bg-white/[0.07]"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
-                      <p className="truncate text-xs font-semibold">{appName(path)}</p>
+                      <p className="truncate text-[13px] font-semibold">{appName(path)}</p>
                       {/* Says what happens to this app, per app, rather
                           than leaving it to be inferred from a toggle
                           above. A tester picked a browser, opened it,
@@ -227,7 +240,7 @@ export function CustomModeCard() {
                     onClick={() =>
                       void apply({ ...settings, apps: settings.apps.filter((a) => a !== path) })
                     }
-                    className="press flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-white/8 hover:text-foreground"
+                    className="press flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
                   >
                     <X className="size-3.5" />
                   </button>
