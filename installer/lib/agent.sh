@@ -619,11 +619,28 @@ REALITY_DEST_CANDIDATES_IR=(
   # kept as a third option that does pass the handshake checks.
   www.zoomit.ir
 )
+# WARNING: this list rots, and the probe below cannot tell you that.
+#
+# www.speedtest.net was removed from it once for resolving into
+# Cloudflare. Measured again on 2026-08-22 from a Singapore node, BOTH
+# remaining entries have gone the same way: www.asus.com -> 13.249.231.81
+# and www.leboncoin.fr -> 13.35.36.62, which are AWS CloudFront edge
+# ranges Amazon publishes. They still pass every check probe_reality_dest
+# makes -- TLS 1.3, h2, X25519, certificate verified -- because that
+# function tests the handshake and nothing tests criterion 1. So the
+# default offered to an operator who holds Enter is currently a CDN name
+# on a non-CDN address: exactly the one-table-lookup mismatch this list
+# was created to stop.
+#
+# Treat these as a last resort, not a recommendation, and prefer a name
+# measured for the node being built. Doing that for Singapore found the
+# hard part: every consumer-facing .sg site probed sat behind Cloudflare,
+# Imperva, Akamai or CloudFront, and the two genuinely SG-hosted hosts
+# found (www.pacific.net.sg, www.simba.sg) offer neither TLS 1.3 nor h2.
+# What worked was www.shopee.sg -- SHOPEE-SG, the company's own Singapore
+# netblock -- and it was reached by checking who owns the address, which
+# is the check missing from here.
 REALITY_DEST_CANDIDATES_ABROAD=(
-  # NOTE: www.speedtest.net used to head this list and has been removed.
-  # It resolves into Cloudflare (104.17.x), so it carried the very
-  # problem the list exists to avoid, and it failed the h2 check from
-  # ir1 anyway.
   www.asus.com
   www.leboncoin.fr
 )
@@ -921,15 +938,32 @@ install_xray() {
     echo
     echo "Certificate-based stealth protocols (optional) add listeners that look"
     echo "like ordinary HTTPS sites. They need a domain already pointing here."
-    read -r -p "Set them up? [y/N]: " enable_tls_protocols
+    # Defaults to yes, for the same reason the Trojan and Shadowsocks
+    # port prompts below do. This gate is worse than either of those was:
+    # it is the single question that decides VLESS+TLS, VLESS over
+    # WebSocket *and* Trojan, so an operator holding Enter lost three
+    # transports at once and nothing said so. That was fixed for the two
+    # port prompts and missed here, which is why singapore-1 could be
+    # brought up with a full-looking install and only two engines.
+    read -r -p "Set them up? [Y/n]: " enable_tls_protocols
+    enable_tls_protocols="${enable_tls_protocols:-y}"
   fi
 
   if [[ "${enable_tls_protocols,,}" == "y" ]]; then
     read -r -p "Domain for the certificate (e.g. fi1.example.com): " tls_domain
     if [[ -z "$tls_domain" ]]; then
-      echo "A domain is required: without a real certificate these protocols are more conspicuous than the one you already have, not less." >&2
-      return 1
+      # Skipped rather than fatal. Returning 1 here aborted install_xray
+      # outright, which on a fresh node left xray-core installed and
+      # never configured -- REALITY included, so the answer to "no domain
+      # yet" was a node serving nothing at all. Declining these three is
+      # a smaller loss than that, and it is now said out loud.
+      echo "  No domain given, so VLESS+TLS, VLESS over WebSocket and Trojan are being skipped." >&2
+      echo "  Point a name at this node and re-run this menu entry to add them." >&2
+      enable_tls_protocols="n"
     fi
+  fi
+
+  if [[ "${enable_tls_protocols,,}" == "y" ]]; then
     issue_tls_certificate "$tls_domain" || return 1
     # Not certbot's own paths: Xray runs as `nobody` and
     # /etc/letsencrypt/live is 0700 root, so pointing at it directly
