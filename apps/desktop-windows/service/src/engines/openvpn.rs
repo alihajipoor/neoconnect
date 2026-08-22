@@ -169,13 +169,24 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     // app is correctly reporting a tunnel that is up, and the customer
     // is looking at a browser that will not load a page.
     //
-    // Measured against a 1400-byte link, which is ordinary for PPPoE and
-    // mobile and common in Iran: see the table in the commit. `mssfix`
-    // is set explicitly and in the same units, because its own default
-    // (1492) is derived from a 1500-byte link and would keep letting
-    // oversized TCP through after tun-mtu was lowered. `pull-filter`
-    // is not optional -- without it the server's pushed 1500 replaces
-    // everything here.
+    // The three lines are one fix, and each covers a direction the
+    // others cannot:
+    //
+    //   - `tun-mtu` bounds what this machine *sends*. The local stack
+    //     will not put a packet larger than the tun's MTU into it, so
+    //     this is what keeps our own uploads inside the budget.
+    //   - `mssfix` bounds what the far end sends *back*. It rewrites the
+    //     MSS option in the SYNs leaving through the tunnel, so remote
+    //     servers never offer us segments too big to survive the return
+    //     path. Set explicitly and in `mtu` units because its own
+    //     default of 1492 is derived from a 1500-byte link -- which is
+    //     the size that was black-holing.
+    //   - `pull-filter` is what makes either of them stick. Without it
+    //     the server's pushed 1500 simply replaces them.
+    //
+    // Non-TCP inner traffic is covered by `tun-mtu` outbound and, for
+    // the return path, by the fact that nothing we carry generates
+    // inbound datagrams larger than this: QUIC sizes its own at ~1200.
     //
     // Custom mode gets it too. The packets are the same size whether
     // one application is on the tunnel or all of them.
