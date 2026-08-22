@@ -77,6 +77,21 @@ pub use owner::{running_apps, Selection, SharedSelection};
 /// source -- so both have to be there before the proxy is any use.
 const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Whether Custom mode is running, readable without the `Engines` lock.
+///
+/// A shadow of `SplitTunnel::active`, written at the two places that set
+/// and clear it and nowhere else. It exists for one caller: the status
+/// poll, which has to be answerable while an operation holds the lock --
+/// see `pipe::dispatch`. Anything that holds the lock asks
+/// [`SplitTunnel::is_running`], which reads the real thing.
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Custom mode is running, for a caller that cannot take the
+/// `Engines` lock.
+pub fn running_without_the_lock() -> bool {
+    RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Custom mode, whether or not it is currently running.
 ///
 /// The selection outlives any one connection: a customer who picked
@@ -572,6 +587,7 @@ impl SplitTunnel {
                     log_path,
                     started: Instant::now(),
                 });
+                RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
             Err(e) => {
@@ -653,6 +669,7 @@ impl SplitTunnel {
 
     pub fn stop(&mut self) {
         let Some(active) = self.active.take() else { return };
+        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
         // Interception first. Stopping the relays while packets were
         // still being rewritten to them would send a selected app's
         // traffic to a port with nothing behind it -- a blackout rather

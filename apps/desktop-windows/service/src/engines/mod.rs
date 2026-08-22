@@ -241,6 +241,13 @@ impl Engines {
     fn connect_inner(&mut self, profile: &ConnectProfile) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
         self.disconnect()?;
+        // Checked between the stages as well as inside the waits, so a
+        // customer who pressed Disconnect gets the tunnel left down
+        // rather than watching it come back up because the request that
+        // was already running finished its job.
+        if abandoned() {
+            return Err(ABANDONED.to_string());
+        }
 
         // Decided once, up front. Every engine below has to know whether
         // to install its own routes, and asking again per branch invites
@@ -300,7 +307,7 @@ impl Engines {
                     Ok(routes) => routes,
                     Err(e) => {
                         let _ = child.kill();
-                        let _ = child.wait();
+                        reap(&mut child);
                         return Err(e);
                     }
                 };
@@ -326,6 +333,10 @@ impl Engines {
         // passive answers no and skips the redirect entirely -- which
         // presents as the excluded applications still being tunnelled,
         // the setting doing nothing at all.
+        if abandoned() {
+            let _ = self.disconnect();
+            return Err(ABANDONED.to_string());
+        }
         if self.split_tunnel.wants_interception() {
             self.start_split_tunnel(profile)?;
         }
@@ -392,7 +403,7 @@ impl Engines {
                 // Windows noticed.
                 routes.remove();
                 let _ = child.kill();
-                let _ = child.wait();
+                reap(&mut child);
 
                 // OpenVPN installs the server's pushed routes itself, so
                 // they are not in `routes` above and a killed process
@@ -542,6 +553,44 @@ impl Engines {
     }
 }
 
+/// What the operating system says is tunnelling right now, asked
+/// without the `Engines` lock.
+///
+/// This exists for the one question a customer must always get an answer
+/// to: am I tunnelled, and can I get out? [`Engines::status`] is the
+/// fuller answer and needs the lock, so while a connect or a Custom-mode
+/// rebuild is in flight it cannot be given at all -- and the case where
+/// that matters most is precisely the one where something has gone
+/// wrong and the app has stopped hearing back.
+///
+/// Every check below asks Windows directly and touches nothing this
+/// service owns, so it is safe to run beside an operation that is
+/// halfway through changing things. It is also still evidence rather
+/// than a remembered flag, which is the rule state is reported under
+/// here: what it loses against the locked answer is the WireGuard
+/// handshake age and which of the Xray protocols an adapter belongs to,
+/// neither of which an adapter can be asked. Those are reported as
+/// unknown rather than guessed.
+pub fn os_visible_tunnel() -> (bool, Option<String>, TunnelHealth) {
+    // Cheapest first, and in the order that matters: the two that
+    // outlive this process -- a WireGuard tunnel service and a RAS
+    // phonebook entry -- are the ones that can strand somebody.
+    if wireguard::tunnel_is_running() {
+        return (true, Some("WIREGUARD".to_string()), TunnelHealth::Unknown);
+    }
+    for (adapter, protocol) in [(xray::ADAPTER_NAME, "XRAY"), (openvpn::ADAPTER_NAME, "OPENVPN")] {
+        if matches!(adapters::find_by_name(adapter), Ok(Some(a)) if a.is_up && a.ipv4.is_some()) {
+            return (true, Some(protocol.to_string()), TunnelHealth::Unknown);
+        }
+    }
+    // Last because it costs a PowerShell process -- half a second,
+    // measured -- where the others cost an API call.
+    if ikev2::is_connected() {
+        return (true, Some("IKEV2".to_string()), TunnelHealth::Unknown);
+    }
+    (false, None, TunnelHealth::Down)
+}
+
 /// The network adapter a given protocol's engine creates.
 ///
 /// Custom mode has to pin its sockets to it by index, so this mapping
@@ -616,7 +665,7 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
             }
             Err(e) => last = e.to_string(),
         }
-        if std::time::Instant::now() >= deadline {
+        if std::time::Instant::now() >= deadline || abandoned() {
             return Err(format!("could not resolve {host}: {last}"));
         }
         std::thread::sleep(RESOLVE_RETRY_EVERY);
@@ -647,23 +696,214 @@ fn write_config(path: &Path, contents: &str) -> Result<(), String> {
     std::fs::write(path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
-/// Runs a short-lived command to completion, hidden.
+/// How long a short-lived helper is given before it is killed and the
+/// operation reported as failed.
+///
+/// Not a performance figure. It is the difference between one helper
+/// misbehaving and the whole service going deaf, because every command
+/// below runs while the `Engines` lock is held. Measured on this
+/// machine, all of them return in well under a second: `route print -4`
+/// in 0.09s, `netsh` in 0.15s, a PowerShell one-liner in 0.25s,
+/// `Get-VpnConnection` in 0.52s, and wireguard.exe's tunnel install and
+/// uninstall in under a second each. Fifteen seconds is more than
+/// twenty times the slowest of them, and two of them back to back still
+/// fit inside the app's 45-second read deadline.
+///
+/// The number that made a limit necessary is on the other side.
+/// `wireguard.exe /installtunnelservice` can enter an unbounded retry
+/// loop (see [`wireguard::clear_tunnel_service`]); with `.status()` and
+/// no limit, it held this lock for 25 minutes in the field and for as
+/// long as it was watched here, so every request behind it -- `status`
+/// and `disconnect` included -- went unanswered and the customer sat
+/// tunnelled with no way out.
+pub(crate) const HELPER_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How often a running child is checked while waiting for it.
+const HELPER_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long a killed child is given to be collected.
+///
+/// `kill` can fail -- a process can be protected, or already gone in a
+/// way that leaves the handle live -- and `wait` on a child that did not
+/// die is the same unbounded wait this module exists to remove, arriving
+/// through the cleanup path instead of the main one.
+const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Set when a caller has asked whatever holds the `Engines` lock to give
+/// up so the lock is released.
+///
+/// The escape hatch for the failure this is all about: an operation that
+/// is waiting on something slow, and a customer who wants out of the
+/// tunnel now. `HELPER_BUDGET` bounds the wait, but bounded is not the
+/// same as immediate, and Disconnect is the one request that should
+/// never queue behind anything. See `pipe::dispatch`.
+static ABANDON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks the operation in flight to stop waiting and fail.
+///
+/// Advisory, not a kill: it is read at the points where this service
+/// waits on something outside itself, so the operation unwinds through
+/// its own error paths and leaves the machine in a state it chose.
+pub fn abandon_current_operation() {
+    ABANDON.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Clears the flag. Called by every request once it holds the lock, so
+/// an abandonment aimed at the previous operation cannot be inherited by
+/// the next one.
+pub fn begin_operation() {
+    ABANDON.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn abandoned() -> bool {
+    ABANDON.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// What an abandoned operation reports.
+///
+/// Written for the customer rather than as a status code, because it can
+/// reach them: pressing Disconnect while a connect is still running ends
+/// that connect, and the app shows whatever it said.
+const ABANDONED: &str = "this attempt was stopped so the disconnect could go ahead";
+
+/// The name to put in an error message, from the command being run.
+fn helper_name(command: &Command) -> String {
+    Path::new(command.get_program())
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "the helper".to_string())
+}
+
+/// Waits for a child, killing it if it outstays `budget` or if the
+/// operation it belongs to has been abandoned.
+fn wait_within(
+    child: &mut Child,
+    budget: std::time::Duration,
+    what: &str,
+) -> io::Result<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        let give_up = if abandoned() {
+            // The customer's sentence, not the helper's name: every
+            // caller prefixes this with the stage it was in, which is
+            // the part worth reading, and "tapctl.exe was still
+            // running" is not something to put in front of somebody who
+            // pressed Disconnect.
+            Some(ABANDONED.to_string())
+        } else if std::time::Instant::now() >= deadline {
+            Some(format!("{what} did not finish within {}s", budget.as_secs()))
+        } else {
+            None
+        };
+        if let Some(reason) = give_up {
+            let _ = child.kill();
+            reap(child);
+            return Err(io::Error::new(io::ErrorKind::TimedOut, reason));
+        }
+        std::thread::sleep(HELPER_POLL);
+    }
+}
+
+/// Collects a child that has been killed, giving up rather than waiting
+/// on one that refused to die.
+fn reap(child: &mut Child) {
+    let deadline = std::time::Instant::now() + REAP_BUDGET;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => std::thread::sleep(HELPER_POLL),
+        }
+    }
+}
+
+/// Runs a short-lived command to completion, hidden and bounded.
 fn run_hidden(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<std::process::ExitStatus> {
+    run_hidden_within(exe, args, HELPER_BUDGET)
+}
+
+fn run_hidden_within(
+    exe: &Path,
+    args: &[&std::ffi::OsStr],
+    budget: std::time::Duration,
+) -> io::Result<std::process::ExitStatus> {
     use std::os::windows::process::CommandExt;
-    Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
-        .status()
+        .stdin(std::process::Stdio::null());
+    let what = helper_name(&command);
+    let mut child = command.spawn()?;
+    wait_within(&mut child, budget, &what)
+}
+
+/// What a captured helper produced.
+pub(crate) struct Captured {
+    pub status: std::process::ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Runs a command, hidden, and returns what it printed -- within
+/// [`HELPER_BUDGET`].
+///
+/// `Command::output` cannot be used for this. It waits for the child and
+/// then reads its pipes to end-of-file, neither of which has a limit, so
+/// a helper that hangs -- or one whose own child inherited the pipe and
+/// outlived it -- takes this thread and the `Engines` lock with it. The
+/// pipe is drained on a thread of its own for the same reason: a helper
+/// blocked writing into a full pipe would never reach the exit that is
+/// being waited for.
+pub(crate) fn capture_hidden(
+    mut command: Command,
+    budget: std::time::Duration,
+) -> io::Result<Captured> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let what = helper_name(&command);
+    let mut child = command.spawn()?;
+
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Some(mut pipe) = pipe {
+            std::thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = pipe.read_to_end(&mut buffer);
+                let _ = tx.send(buffer);
+            });
+        }
+        rx
+    };
+    let out = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+    let status = wait_within(&mut child, budget, &what)?;
+
+    // The child has gone, so its ends of both pipes are closed and the
+    // readers are already at end-of-file -- unless something it spawned
+    // inherited them, which is the case this refuses to wait out.
+    let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+        rx.recv_timeout(HELPER_POLL * 20)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default()
+    };
+    Ok(Captured { status, stdout: collect(out), stderr: collect(err) })
 }
 
 /// Runs a short-lived command, hidden, and returns its stdout.
 pub(crate) fn run_hidden_capture(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<String> {
-    use std::os::windows::process::CommandExt;
-    let out = Command::new(exe)
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let mut command = Command::new(exe);
+    command.args(args);
+    Ok(capture_hidden(command, HELPER_BUDGET)?.stdout)
 }
 
 /// How long to wait after spawning before deciding the engine is up.
@@ -744,4 +984,56 @@ fn with_rival_hint(error: String, rivals: &[String]) -> String {
         "{error} Another VPN is connected on this machine ({}), which takes over the default route --          disconnecting it and trying again is the usual fix.",
         rivals.join(", ")
     )
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::time::{Duration, Instant};
+
+    /// The bug this whole budget exists for, in miniature.
+    ///
+    /// `Command::status` waits for a child with no limit at all, and
+    /// `wireguard.exe /installtunnelservice` really does refuse to
+    /// return -- 25 minutes in the field, and still going after 90
+    /// seconds when it was reproduced here. Because every helper runs
+    /// with the `Engines` lock held, that one child made the service
+    /// deaf to everything, `status` and `disconnect` included.
+    ///
+    /// `ping -n 30` stands in for it: about half a minute of a process
+    /// that is definitely still there, using a binary every Windows
+    /// install has.
+    #[test]
+    fn a_helper_past_its_budget_is_killed_rather_than_waited_on() {
+        let ping = Path::new(r"C:\Windows\System32\ping.exe");
+        let started = Instant::now();
+        let err = run_hidden_within(
+            ping,
+            &[OsStr::new("-n"), OsStr::new("30"), OsStr::new("127.0.0.1")],
+            Duration::from_millis(500),
+        )
+        .expect_err("a helper past its budget must fail, not block");
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "gave up after {:?}, which is not a bound at all",
+            started.elapsed()
+        );
+    }
+
+    /// The other half: bounding the wait must not cost the output. The
+    /// capture path had to stop using `Command::output` -- which reads
+    /// both pipes to end-of-file with no limit -- so what it replaces it
+    /// with has to still deliver what the helper printed.
+    #[test]
+    fn a_captured_helper_still_returns_what_it_printed() {
+        let out = run_hidden_capture(
+            Path::new(r"C:\Windows\System32\cmd.exe"),
+            &[OsStr::new("/c"), OsStr::new("echo neoxify")],
+        )
+        .expect("cmd should run");
+        assert!(out.contains("neoxify"), "captured nothing usable: {out:?}");
+    }
 }

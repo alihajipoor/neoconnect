@@ -1,10 +1,19 @@
 //! The control pipe.
 //!
-//! One JSON request per line, one JSON response per line. Connections
-//! are handled one at a time on purpose: every operation here mutates
-//! global machine state (routing table, tunnel adapters), so serializing
-//! them is correctness, not a simplification. A second caller waits
-//! rather than racing the first.
+//! One JSON request per line, one JSON response per line. Anything that
+//! changes the machine is handled one at a time on purpose: every such
+//! operation mutates global state (routing table, tunnel adapters), so
+//! serializing them is correctness, not a simplification. A second
+//! caller waits rather than racing the first.
+//!
+//! The two requests that change nothing -- asking what state the machine
+//! is in, and listing running applications -- deliberately do not queue
+//! behind them, and Disconnect will not wait forever for its turn. That
+//! is not an optimisation. Serializing everything meant one operation
+//! that failed to return took every later request with it, and the
+//! requests lost that way were exactly the ones a customer stranded
+//! inside a tunnel needs: "am I tunnelled" and "get me out". See
+//! [`dispatch`].
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -172,6 +181,38 @@ mod tests {
         assert_eq!(parsed["connected"], false);
     }
 
+    /// The failure this file's per-request locking exists for.
+    ///
+    /// A rapid `setSplitTunnel` + `connect` burst left
+    /// `wireguard.exe /installtunnelservice` in an unbounded retry loop
+    /// with the `Engines` lock held, and every request behind it went
+    /// unanswered for 25 minutes -- including a plain
+    /// `{"type":"status"}`, which touches nothing at all. The customer
+    /// was fully tunnelled throughout and the app could not so much as
+    /// tell them so, let alone disconnect.
+    ///
+    /// Holding the lock here stands in for that operation. The answer is
+    /// thinner than the locked one -- see `engines::os_visible_tunnel`
+    /// for what it can and cannot say -- but it arrives, which is the
+    /// whole point.
+    #[tokio::test]
+    async fn status_is_answered_while_an_operation_holds_the_lock() {
+        let name = r"\\.\pipe\neoconnect-test-status-while-busy";
+        let engines = start_server(name).await;
+        let held = engines.lock().await;
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            round_trip(name, r#"{"type":"status"}"#),
+        )
+        .await
+        .expect("status must not queue behind whatever holds the lock");
+        drop(held);
+
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "state");
+    }
+
     #[tokio::test]
     async fn rejects_a_malformed_request_without_dropping_the_connection() {
         let name = r"\\.\pipe\neoconnect-test-malformed";
@@ -224,38 +265,106 @@ mod tests {
     }
 }
 
+/// How long `status` waits for the lock before answering from what
+/// Windows says instead.
+///
+/// Long enough to ride out an ordinary status ahead of it in the queue
+/// -- one costs about half a second, most of it `Get-VpnConnection` --
+/// and far too short to be held up by a connect.
+const STATUS_LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// How long `disconnect` waits for the lock before asking whatever holds
+/// it to give up.
+///
+/// A connect takes about two and a half seconds end to end on this
+/// machine, so anything past this is either something slow or something
+/// stuck -- and in both cases a customer who has pressed Disconnect
+/// meant it. Abandoning the operation in flight is the right reading of
+/// the request, not a compromise: they want out of the tunnel, not the
+/// connection attempt finished first.
+const DISCONNECT_LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// One request, one answer.
+///
+/// The lock is taken per request rather than for the whole function, and
+/// the two requests that must never be starved by it take it on their
+/// own terms. That is the fix for the failure this file's serialization
+/// note did not anticipate: serializing is still correct, but it means
+/// one operation that does not return takes every later request with it,
+/// and the two that were lost that way -- "am I tunnelled" and "get me
+/// out" -- are exactly the two a stranded customer needs.
 async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
-    let mut engines = engines.lock().await;
     match request {
-        Request::Connect { profile } => match engines.connect(&profile) {
-            Ok(()) => Response::Ok,
-            Err(message) => Response::Error { message },
-        },
-        Request::Disconnect => match engines.disconnect() {
-            Ok(()) => Response::Ok,
-            Err(message) => Response::Error { message },
-        },
+        // Answered whether or not an operation is in flight. See
+        // `engines::os_visible_tunnel` for what the unlocked answer can
+        // and cannot say.
         Request::Status => {
+            let Ok(mut engines) = tokio::time::timeout(STATUS_LOCK_WAIT, engines.lock()).await
+            else {
+                let (connected, protocol, health) = crate::engines::os_visible_tunnel();
+                return Response::State {
+                    connected,
+                    protocol,
+                    health,
+                    split_tunnel_active: crate::split_tunnel::running_without_the_lock(),
+                    // The counters live behind the lock, so there is
+                    // nothing to report rather than nothing wrong.
+                    split_tunnel_problem: None,
+                };
+            };
             let (connected, protocol, health) = engines.status();
             let split_tunnel_active = engines.split_tunnel_running();
             let split_tunnel_problem = engines.split_tunnel_complaint();
             Response::State { connected, protocol, health, split_tunnel_active, split_tunnel_problem }
         }
+        // Nothing here touches the machine, so there is no reason for
+        // the app's picker to go blank while a connect runs.
         Request::ListRunningApps => Response::RunningApps {
             apps: crate::split_tunnel::running_apps(),
         },
-        Request::ProbeSplitTunnel => match engines.probe_split_tunnel() {
-            Ok(()) => Response::Ok,
-            Err(message) => Response::Error { message },
-        },
+        Request::Disconnect => {
+            let mut engines = match tokio::time::timeout(DISCONNECT_LOCK_WAIT, engines.lock()).await
+            {
+                Ok(engines) => engines,
+                Err(_) => {
+                    crate::engines::abandon_current_operation();
+                    engines.lock().await
+                }
+            };
+            crate::engines::begin_operation();
+            match engines.disconnect() {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            }
+        }
+        Request::Connect { profile } => {
+            let mut engines = engines.lock().await;
+            crate::engines::begin_operation();
+            match engines.connect(&profile) {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            }
+        }
+        Request::ProbeSplitTunnel => {
+            let engines = engines.lock().await;
+            crate::engines::begin_operation();
+            match engines.probe_split_tunnel() {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            }
+        }
         Request::SetSplitTunnel { config } => match config.validate() {
             // The result matters now: turning Custom mode on or off
             // rebuilds the live tunnel, and a rebuild that fails must
             // reach the customer rather than reading as applied.
-            Ok(()) => match engines.set_split_tunnel(config.enabled, config.apps, config.mode) {
-                Ok(()) => Response::Ok,
-                Err(message) => Response::Error { message },
-            },
+            Ok(()) => {
+                let mut engines = engines.lock().await;
+                crate::engines::begin_operation();
+                match engines.set_split_tunnel(config.enabled, config.apps, config.mode) {
+                    Ok(()) => Response::Ok,
+                    Err(message) => Response::Error { message },
+                }
+            }
             Err(e) => Response::Error { message: e.to_string() },
         },
     }
@@ -275,6 +384,7 @@ fn spawn_idle_watchdog(engines: Arc<Mutex<Engines>>, last_seen: Arc<Mutex<Instan
                 continue;
             }
             let mut engines = engines.lock().await;
+            crate::engines::begin_operation();
             // status() consults the OS, so this asks "is anything
             // actually tunnelling" rather than "did we start something".
             let (up, _, _) = engines.status();

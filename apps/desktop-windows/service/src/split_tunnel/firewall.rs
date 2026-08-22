@@ -28,14 +28,10 @@
 //! feature being switched off.
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Hides the console window netsh would otherwise flash up. The service
-/// runs invisibly and a window appearing on a customer's screen when
-/// they toggle Custom mode would be a bug in its own right.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use crate::engines::HELPER_BUDGET;
 
 /// Absolute, because a service's PATH is not the user's and this has to
 /// resolve the same way on every machine.
@@ -109,23 +105,26 @@ fn add_rule(protocol: &str, sources: &[Ipv4Addr], port: u16) -> Result<(), Strin
     // Windows has decided the network is; a customer on a Public
     // network would otherwise get a tunnel that silently carries
     // nothing, which is the exact failure this module exists to stop.
-    let out = Command::new(NETSH)
-        .args([
-            "advfirewall",
-            "firewall",
-            "add",
-            "rule",
-            &format!("name={RULE}"),
-            "dir=in",
-            "action=allow",
-            &format!("protocol={protocol}"),
-            &format!("localport={port}"),
-            &format!("remoteip={remote}"),
-            "profile=any",
-            "enable=yes",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
+    // Bounded, like every other helper this service shells out to:
+    // installing and removing the allowance both happen with the
+    // `Engines` lock held, so a netsh that never returned would stop the
+    // service answering anything at all. See engines::HELPER_BUDGET.
+    let mut command = Command::new(NETSH);
+    command.args([
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
+        &format!("name={RULE}"),
+        "dir=in",
+        "action=allow",
+        &format!("protocol={protocol}"),
+        &format!("localport={port}"),
+        &format!("remoteip={remote}"),
+        "profile=any",
+        "enable=yes",
+    ]);
+    let out = crate::engines::capture_hidden(command, HELPER_BUDGET)
         .map_err(|e| format!("could not run netsh: {e}"))?;
 
     if out.status.success() {
@@ -136,23 +135,22 @@ fn add_rule(protocol: &str, sources: &[Ipv4Addr], port: u16) -> Result<(), Strin
     // exit code would.
     Err(format!(
         "the firewall refused the {protocol} allowance: {}",
-        String::from_utf8_lossy(&out.stdout).trim()
+        out.stdout.trim()
     ))
 }
 
 fn delete_rule() {
     // Failure here is expected and ignored: on the first run there is
     // nothing to delete, and netsh reports that as an error.
-    let _ = Command::new(NETSH)
-        .args([
-            "advfirewall",
-            "firewall",
-            "delete",
-            "rule",
-            &format!("name={RULE}"),
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    let mut command = Command::new(NETSH);
+    command.args([
+        "advfirewall",
+        "firewall",
+        "delete",
+        "rule",
+        &format!("name={RULE}"),
+    ]);
+    let _ = crate::engines::capture_hidden(command, HELPER_BUDGET);
 }
 
 /// Waits until a TCP connection to the relay actually completes.
