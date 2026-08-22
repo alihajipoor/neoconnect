@@ -129,6 +129,25 @@ pub fn run() {
             vpn::network_fingerprint,
             get_launch_deep_link
         ])
+        // Closing the window is an instruction, and it has to be acted
+        // on rather than inferred.
+        //
+        // The service tears a tunnel down once the app has been silent
+        // for a minute, which is right for a crash and wrong for this:
+        // somebody who closes the app is still tunnelled for up to
+        // sixty seconds afterwards, with nothing on screen to say so
+        // and nothing left to press. Reported exactly that way -- "even
+        // now that I closed the vpn app the vpn connection is still
+        // going on" -- and it is the same failure as leaving a tunnel
+        // up after the app forgets it, only slower.
+        //
+        // Blocking on purpose: the process is about to exit, and a
+        // disconnect that races the exit is no disconnect at all.
+        .on_window_event(|_window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                let _ = tauri::async_runtime::block_on(vpn::vpn_disconnect());
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
