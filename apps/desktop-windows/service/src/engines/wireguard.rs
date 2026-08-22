@@ -9,9 +9,10 @@
 //! prompting the user on every single Connect).
 
 use std::ffi::OsStr;
+use std::time::{Duration, Instant};
 
 use neoconnect_ipc::WireguardProfile;
-use windows_service::service::ServiceAccess;
+use windows_service::service::{ServiceAccess, ServiceState};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use super::{run_hidden, run_hidden_capture, write_config, Engines};
@@ -82,6 +83,10 @@ pub fn connect(
     let conf_path = engines.config_path(CONF_FILE);
     write_config(&conf_path, &build_conf(profile, passive))?;
 
+    // The name has to be free before this runs, or wireguard.exe never
+    // returns. See clear_tunnel_service.
+    clear_tunnel_service()?;
+
     let status = run_hidden(&exe, &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
     if !status.success() {
@@ -97,7 +102,90 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
     if !status.success() {
         return Err(format!("wireguard.exe /uninstalltunnelservice exited with {status}"));
     }
-    Ok(())
+    // Asking is not the same as it having happened -- see
+    // clear_tunnel_service. Without this, a disconnect returns while the
+    // machine is still tunnelled, and the very next status poll
+    // correctly reports it as connected.
+    clear_tunnel_service()
+}
+
+/// How long the tunnel service is given to go away.
+///
+/// It normally goes in well under a second: `/uninstalltunnelservice`
+/// returned in 0.03s and the stop lands on the next poll. Ten seconds is
+/// room for a machine under load, and short enough that a customer
+/// pressing Connect is not left watching a spinner.
+const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(10);
+
+/// How often the service manager is asked whether it has gone yet.
+const TUNNEL_SERVICE_POLL: Duration = Duration::from_millis(250);
+
+/// Makes sure the tunnel service name is free, stopping the service
+/// ourselves if wireguard.exe's own request did not take.
+///
+/// This is the fix for the worst failure this service has had, and the
+/// mechanism is worth writing down because none of it is visible from
+/// wireguard.exe's exit code.
+///
+/// `/installtunnelservice` returns while the tunnel service it created
+/// is still START_PENDING -- it does not wait for it to reach RUNNING.
+/// `/uninstalltunnelservice` then returns in 0.03s having sent a stop
+/// control and called DeleteService. A service in START_PENDING cannot
+/// accept a stop, so the stop is refused and only the delete takes: the
+/// service finishes starting, reaches RUNNING marked-for-delete, and
+/// nothing is left that will ever stop it. The next
+/// `/installtunnelservice` finds the name still taken and spins in an
+/// unbounded OpenService loop waiting for it to free -- forever, because
+/// the process holding it is running and nobody has asked it to stop.
+///
+/// Measured in isolation on this machine, with an inert config that
+/// installs no routes: install, uninstall, install again, and the second
+/// install had not returned ninety seconds later while the first
+/// service still read RUNNING. In the field the same sequence held the
+/// `Engines` lock for 25 minutes with the customer fully tunnelled and
+/// no request, not even `status`, getting an answer.
+///
+/// So the stop is issued from here, where it can be repeated until the
+/// service is actually in a state that accepts it, and the wait is ours
+/// and bounded rather than wireguard.exe's and endless.
+fn clear_tunnel_service() -> Result<(), String> {
+    let deadline = Instant::now() + TUNNEL_SERVICE_GONE_WITHIN;
+    loop {
+        let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        else {
+            // Nothing can be asked, so nothing can be promised. Saying
+            // so by returning is better than looping until the deadline
+            // to report a failure that is really "the service manager
+            // is unreachable" -- and the install that follows is bounded
+            // by HELPER_BUDGET regardless.
+            return Ok(());
+        };
+        let Ok(service) = manager.open_service(
+            TUNNEL_SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP,
+        ) else {
+            // The name is free, which is the whole point.
+            return Ok(());
+        };
+
+        // Only when it can be accepted. A stop sent at START_PENDING is
+        // refused, and being refused is exactly how the machine got
+        // into this state in the first place.
+        if matches!(service.query_status(), Ok(status) if status.current_state == ServiceState::Running)
+        {
+            let _ = service.stop();
+        }
+        drop(service);
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the previous WireGuard tunnel was still shutting down after {}s. \
+                 Waiting a few seconds and connecting again usually clears it.",
+                TUNNEL_SERVICE_GONE_WITHIN.as_secs()
+            ));
+        }
+        std::thread::sleep(TUNNEL_SERVICE_POLL);
+    }
 }
 
 /// Best-effort teardown for the case where this service has no record of
