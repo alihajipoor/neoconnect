@@ -16,9 +16,7 @@
 //! client uses -- which is why WireGuard never showed the fault while
 //! every other protocol did.
 
-use std::process::{Command, Stdio};
-
-use super::CREATE_NO_WINDOW;
+use std::process::Command;
 
 /// Marks the rules this service owns, so cleanup removes ours and leaves
 /// anything else on the machine alone.
@@ -52,16 +50,18 @@ pub fn clear() {
     let _ = powershell(&script);
 }
 
+/// Runs a PowerShell one-liner, hidden and bounded.
+///
+/// Bounded because this runs with the `Engines` lock held, on both the
+/// connect and the disconnect path. A PowerShell that never returns
+/// would take every other request with it, `status` included -- see
+/// [`super::HELPER_BUDGET`].
 fn powershell(script: &str) -> Result<String, String> {
-    use std::os::windows::process::CommandExt;
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    let out = super::capture_hidden(command, super::HELPER_BUDGET).map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(out.stderr.trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(out.stdout)
 }

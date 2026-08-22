@@ -4838,3 +4838,70 @@ The 45s client deadline frees the app; it does nothing for the service.
 
 Also noted: Xray REALITY shows 2.0-5.6s DNS latency post-fix against
 WireGuard's 0.16s, with no clean baseline to attribute it.
+
+---
+
+## 2026-08-22 — The service deadlock: a tunnel service that nothing could stop
+
+**Status:** fixed, reproduced and measured
+**Touches:** `apps/desktop-windows/service/**`
+
+Reproduced in fifteen seconds against the shipped binary: `setSplitTunnel
+on` → `connect` → `setSplitTunnel off` → `setSplitTunnel on`, fired 50ms
+apart. The fourth request never returned, every later `status` timed
+out, and the machine sat full-tunnelled with no way to disconnect.
+
+Killing the service's one live child -- `wireguard.exe
+/installtunnelservice` -- made `status` answer in 0.01s. So the service
+was parked in `Command::status()` inside `run_hidden`, **holding the
+`Engines` mutex**. A second orphaned `/installtunnelservice` from
+earlier the same evening was still on the machine: this had happened
+before and nobody knew.
+
+### The mechanism, isolated on an inert config
+
+1. `/installtunnelservice` returns while its tunnel service is still
+   **START_PENDING**.
+2. `/uninstalltunnelservice` returns in 0.03s -- it sends a stop control
+   and calls `DeleteService`. **A START_PENDING service cannot accept a
+   stop**, so only the delete takes.
+3. The service finishes starting and sits RUNNING, marked for delete,
+   with nothing left that will ever stop it.
+4. The next `/installtunnelservice` spins in an unbounded `OpenService`
+   loop waiting for the name to free. Measured still going ninety
+   seconds later; twenty-five minutes in the field.
+
+### What changed
+
+- **`run_hidden`** is bounded (15s) and kills the child on overrun.
+  `Command::output()` is gone: it waits for the child *and* reads both
+  pipes to EOF, neither bounded.
+- **`clear_tunnel_service()`** waits, bounded, for the tunnel service
+  name to free and issues the stop itself once the service is in a state
+  that can accept one. That removes the trigger -- and fixes a second
+  honesty bug, since `disconnect` used to return while the machine was
+  still tunnelled.
+- **`pipe.rs` locks per request.** `status` waits 1s then answers from
+  the OS; `listRunningApps` never locks; `disconnect` waits 2s then
+  abandons whatever holds the lock. Serializing *everything* meant one
+  stuck operation took with it exactly the two requests a stranded
+  customer needs: "am I tunnelled" and "get me out".
+- The ad-hoc `Command::output()` calls in `dns.rs`, `ikev2.rs` and
+  `firewall.rs` now go through the bounded helper.
+
+### After
+
+Same reproduction plus eight rounds across WireGuard, REALITY,
+Shadowsocks and OpenVPN with continuous polling: **zero status
+timeouts**, worst status latency 1.8s, `disconnect` answering in
+0.7-1.4s throughout, every round ending disconnected. `status` answered
+honestly from the OS while a rebuild was in flight. The abandon path was
+exercised too -- a disconnect fired 0.5s into an OpenVPN connect
+abandoned it at the 2s mark and answered at 2.94s, machine untunnelled.
+
+**Two caveats, stated rather than buried.** The 15s and 10s budgets are
+calibrated against this machine, where every helper measured under 0.6s;
+a much slower machine could see a bounded *failure* where it previously
+succeeded -- though it can no longer hang. And IKEv2 was not exercised
+end to end, so `RasDialW` -- synchronous, no timeout -- is the one
+remaining unbounded wait in the service and is unproven either way.
