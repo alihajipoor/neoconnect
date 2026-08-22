@@ -5052,3 +5052,201 @@ independent check on which path it took:
 - The packet loop parses IPv4 only, so **IPv6 may bypass Custom mode
   entirely**. No IPv6 was present to test against. That one deserves its
   own investigation before anyone calls this feature finished.
+
+---
+
+## 2026-08-22 — turkey-1 built: eight protocols, all proven by exit IP
+
+**Status:** done and verified; one fleet-wide finding left open
+**Touches:** nothing in the repo — live: turkey-1 (new), plan route lists
+
+`tr1.neoxify.site` / 130.94.0.27, Istanbul (Light Node Limited, AS2914),
+Ubuntu 24.04, 1 vCPU / 2 GB, public address bound directly to the
+interface. STANDALONE. Node id `da93fde4`.
+
+All eight, each measured by exit IP rather than by a green connect:
+
+| protocol | port | exit |
+|---|---|---|
+| VLESS+REALITY | 443 | 130.94.0.27 |
+| VLESS+TLS | 8443 TCP | 130.94.0.27 |
+| VLESS+TLS over WebSocket | 8443 `/assets/…` | 130.94.0.27 |
+| Trojan+TLS | 2053 | 130.94.0.27 |
+| Shadowsocks 2022 | 26633 | 130.94.0.27 |
+| WireGuard | 37036/udp | 130.94.0.27 |
+| OpenVPN | 50263/udp | 130.94.0.27 |
+| IKEv2 | 500/4500 | 130.94.0.27 |
+
+Added to Trial, Starter, Pro and Ultimate Max — 8 routes each, 216
+credentials provisioned. **Ultimate deliberately excluded**: it is the
+relay-only plan and this is a direct node.
+
+### The installer ran clean, interactively, first time
+
+No desync. Driven over `tmux send-keys` against a real pty on the node,
+one prompt at a time — which is the way to satisfy "run it
+interactively" from a session that has no terminal. `NEOXIFY_ADMIN_TOKEN`
+removed the credential prompts, and that is what makes the rest of the
+sequence predictable.
+
+**The gRPC/PENDING trap is fixed and confirmed working.** The installer
+probed `connect.neoxify.site:50051`, found it dead, said why, and asked;
+answering `167.233.65.166` produced a node that came up ONLINE
+immediately. The entry above calling this "unfixed and a fleet-wide
+latent outage" is stale — the detection landed.
+
+**Two protocols default to `skip`.** Trojan and Shadowsocks both prompt
+`[skip]`, so an operator pressing Enter through the install gets a node
+missing two transports and no warning that anything was dropped. Every
+other engine defaults to yes. Worth reconsidering given "never drop a
+protocol".
+
+Also: the agent release is *not* behind main this time — v0.2.5 is the
+newest `v*` tag and nothing under `agent/` has changed since it.
+
+### The REALITY decoy was chosen by measurement, not by list
+
+The installer's built-in candidates are Iran-hosted or CDN-hosted, and
+neither fits a Turkish address. Probed alternatives from tr1 *and* from
+ir1, which is the check that mattered:
+
+- `www.sahibinden.com`, `www.trendyol.com` — resolve into Cloudflare.
+  Rejected on the installer's own range argument.
+- `www.mynet.com` — Netdirekt, an ordinary Turkish hosting AS, perfect
+  on paper. **Fails from Iran**: no h2, certificate does not verify.
+- `www.donanimhaber.com` — HizliNet (AS6205), ordinary Turkish hosting,
+  TLS 1.3 + h2 + X25519 + verified **from both tr1 and ir1**. Chosen.
+
+The lesson is the second criterion is not free: a same-country host is
+worth nothing if it is unreachable from where the customers are, and one
+probe from ir1 settled a choice that reasoning could not.
+
+### Left open: new nodes lose the client's address through the API mirror
+
+`ensure_fallback_site` points the mirror at whatever `panelUrl` says,
+which is now `connect.neoxify.site` — the **Cloudflare-proxied** name.
+Cloudflare then replaces the client address, so `X-Forwarded-For` never
+survives the hop:
+
+```
+direct   -> {"ip":"50.34.35.228","country":"US"}    (real client)
+turkey-1 -> {"ip":"130.94.0.27","country":"TR"}     (the node itself)
+finland1 -> {"ip":"50.34.35.228"}                   (real client)
+```
+
+finland1 and france-1 escape it only because they were built when the
+panel URL was `connect.neoxify.com`, which resolves straight to
+167.233.65.166. Turkey is simply the first node built since the switch.
+
+Two consequences, both of which the installer's own comments say the
+XFF header exists to prevent. Every customer arriving through a node
+mirror lands in one rate-limit bucket. And `/api/health/ip` fetched
+through a node's own mirror returns that node's address — which is
+exactly what a *working* tunnel looks like, so it would pass the
+"is traffic flowing" check while proving nothing. Not changed here:
+it is a fleet-wide decision and the same argument as `grpcTarget`.
+
+Noticed alongside it: **germany-1's mirror returns 502** on
+`de1.neoxify.site:2053/api/...` — the stale-upstream failure the
+installer comments already describe. singapore-1 has no fallback site at
+all, having only OpenVPN and IKEv2.
+
+### WSL2 is a usable isolated client rig
+
+The five Xray transports need nothing but `xray.exe` with a SOCKS
+inbound and `curl --socks5-hostname`; no tunnel, no elevation, no VM.
+WireGuard, OpenVPN and IKEv2 were run inside WSL2, which is a separate
+VM with its own routing table — a full tunnel there cannot touch the
+host, and the host's default route was confirmed unchanged throughout.
+Cheaper than booting Neoxify-Test when all that is wanted is an exit IP.
+`https://1.1.1.1/cdn-cgi/trace` is the echo endpoint: one stable address,
+so it can be scoped to a single `/32` when that is wanted.
+
+**A confound worth not re-diagnosing.** OpenVPN came up completely —
+`Initialization Sequence Completed`, tun0 addressed, ICMP crossing to
+1.1.1.1 — and carried no TCP at all. It is not the node: germany-1
+failed **identically** as a control. This machine's path MTU is 1400
+(`ping -M do -s 1372` passes, `-s 1400` drops) while the server pushes
+`tun-mtu 1500`, so the encapsulated packets black-hole. With
+`--pull-filter ignore tun-mtu --tun-mtu 1300 --mssfix 1200` the exit IP
+appeared at once. Real customers on a sub-1500 link — mobile, PPPoE,
+much of Iran — are on the same cliff, so this is worth a look as a
+product question rather than filing it as a rig quirk.
+
+## 2026-08-22 — every download 404'd for four minutes, and it was not the rate limit
+
+`/api/updates/installer/{windows,android}` returned 404 and the update
+check returned "you are up to date" while `desktop-v0.9.25` sat
+published and healthy. The obvious suspect was GitHub's 60-call
+unauthenticated limit — six releases were cut that evening, and the
+service's own comment predicts exactly that failure. **It was not.**
+
+The panel's logs settle it. `GitHub releases request failed: 504`, twice,
+at 10:07:35 and 10:08:41 UTC, which are precisely the two moments nginx
+recorded a fresh 404. Not a 403, and nothing about a limit:
+
+```
+$ curl .../rate_limit          # from the panel, same hour
+"core":{"limit":60,"remaining":46,"used":14}
+```
+
+Twelve days of nginx logs hold 340 requests to `/api/updates/*` in
+total — about 28 a day. The five-minute cache caps outbound calls at ~24
+an hour even under load. The ceiling was never in sight, and reaching for
+it as the explanation would have shipped a token and left the bug in
+place.
+
+What actually happened is an amplifier. One 504 was stored as
+`build = null` — indistinguishable from "there are no releases" — under
+the **success** TTL of five minutes, with no retry. nginx shows the whole
+shape of it: 404 at 10:07:35, 10:07:54, 10:12:02, then nothing wrong
+again. One failed HTTP request bought a four-and-a-half minute outage on
+every download link the website and the emails point at.
+
+The same signature is in the logs for 18 and 19 August, so this is the
+third occurrence, not a first.
+
+### What changed
+
+- **Retries** (3, ~250ms backoff) on 5xx/429/408 and network errors, and
+  a 10s timeout — `fetch` has none, so a hung connection hung the
+  customer's request with it. A 403 is deliberately *not* retried: a
+  spent rate-limit budget does not refill inside a retry loop.
+- **A failure is cached for 30s, not 5 minutes.** Caching a failure as
+  long as a success is what turns a blip into a guaranteed outage window.
+- **Last known good is served when a lookup fails**, for up to 24h.
+  Handing a customer last night's installer beats handing them a 404, and
+  the desktop updater pulls them forward on its next good check. Bounded
+  rather than infinite so a yanked release cannot be served for a week
+  because nobody noticed the feed had been failing since Tuesday.
+- **The update check no longer says "up to date" when it does not know.**
+  `manifestFor` returned `null` for both "you are current" and "the
+  lookup failed", and the controller turned both into 204 — the app
+  reporting a state nothing had verified, which is the one thing it must
+  not do. Now `checkFor` returns `current` / `unknown` / `update`, and
+  `unknown` is a 503. Safe for released clients: `checkAndStage` in
+  `apps/desktop-windows/src/lib/updates.ts` already swallows update-check
+  failures silently by design.
+
+### The token is worth having, but it would not have fixed this
+
+`GITHUB_API_TOKEN` is now read via ConfigService, plumbed through
+compose and `ensure_env_key`, and lifts the limit to 5,000/hour. Optional
+throughout — unset, the calls go out anonymously and everything works,
+which is what local dev and CI do.
+
+**Not installed on the panel.** `gh auth token` on the Windows box holds
+a `gho_` credential with `repo`, `workflow` and `gist` — write access to
+every repo the owner can reach, and it rotates whenever `gh` re-auths.
+Putting that on a public-facing box to read *public* release metadata is
+a bad trade, and fine-grained PATs cannot be minted through the API at
+all; GitHub only issues them from the browser. Left for the owner: a
+fine-grained token, no scopes, then `GITHUB_API_TOKEN=...` in
+`/root/neoconnect/infra/.env` and rebuild the backend.
+
+### Production is on the branch, not on main
+
+The fix was deployed from `claude/new-season-start-646af6`, so
+`/root/neoconnect` is no longer on `main`. **The documented runbook
+(`git pull --ff-only origin main`) will quietly revert this fix** until
+the PR merges. Merge first, then the runbook is correct again.

@@ -71,14 +71,27 @@ export class UpdatesController {
       return;
     }
 
-    const manifest = await this.updates.manifestFor(currentVersion);
-    if (!manifest) {
+    const check = await this.updates.checkFor(currentVersion);
+
+    if (check.status === "current") {
       // 204 is how Tauri's updater is told "you are up to date". An
       // error here would surface to the customer as a failed update
       // check, which is the wrong thing to say when nothing is wrong.
       res.status(204).send();
       return;
     }
-    res.json(manifest);
+
+    if (check.status === "unknown") {
+      // Nothing is up to date here -- we simply could not find out. 204
+      // would claim otherwise, and during the 2026-08-22 GitHub blip it
+      // did exactly that: clients on 0.9.24 were told they were current
+      // while 0.9.25 sat published. Reporting a state nothing verified
+      // is the one thing this app must never do, so say so instead and
+      // let the updater try again on its next check.
+      res.status(503).json({ message: "Could not determine the newest release" });
+      return;
+    }
+
+    res.json(check.manifest);
   }
 }
