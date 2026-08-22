@@ -12,12 +12,10 @@
 //! Everything is invoked with CREATE_NO_WINDOW. A PowerShell window
 //! flashing on Connect would be as disqualifying as a permanent one.
 
-use std::os::windows::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::ptr;
 
 use super::ras;
-use super::CREATE_NO_WINDOW;
 use neoconnect_ipc::Ikev2Profile;
 
 /// The phonebook entry's name.
@@ -222,11 +220,9 @@ pub fn disconnect() -> Result<(), String> {
     // rasdial is fine for hanging up: the 703 that rules it out for
     // dialling is an EAP credential prompt, and there is nothing to
     // prompt for when tearing one down.
-    let _ = Command::new("rasdial")
-        .args([ENTRY_NAME, "/disconnect"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .output();
+    let mut hangup = Command::new("rasdial");
+    hangup.args([ENTRY_NAME, "/disconnect"]);
+    let _ = super::capture_hidden(hangup, super::HELPER_BUDGET);
     remove_entry()
 }
 
@@ -249,17 +245,20 @@ fn remove_entry() -> Result<(), String> {
     powershell(&script).map(|_| ())
 }
 
+/// Runs a PowerShell one-liner, hidden and bounded.
+///
+/// Bounded because every caller here runs with the `Engines` lock held,
+/// and `is_connected` is on the status path -- a PowerShell that never
+/// returned would make the one question a customer must always be able
+/// to ask unanswerable. See [`super::HELPER_BUDGET`].
 fn powershell(script: &str) -> Result<String, String> {
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    let out = super::capture_hidden(command, super::HELPER_BUDGET).map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(out.stderr.trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(out.stdout)
 }
 
 /// Turns a RAS error code into something a customer can act on.
