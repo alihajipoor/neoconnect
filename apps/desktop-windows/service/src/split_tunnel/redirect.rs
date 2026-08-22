@@ -645,7 +645,15 @@ fn decide(
         return Verdict::Direct;
     }
 
-    let owner_image = owner.image_for_port(parsed.transport, parsed.source_port);
+    // A SYN asks the more insistent question -- see
+    // `image_for_new_connection`. This is the one packet whose answer
+    // decides where a whole connection lives, and the one whose miss
+    // cannot be taken back afterwards.
+    let owner_image = if is_new_connection {
+        owner.image_for_new_connection(parsed.transport, parsed.source_port)
+    } else {
+        owner.image_for_port(parsed.transport, parsed.source_port)
+    };
     let known_owner = owner_image.is_some();
     // This service, resolving for itself. Checked separately because it
     // has to be excluded from the DNS rule below as well as from the
@@ -717,14 +725,20 @@ fn decide(
         // exactly that way: "had to refresh a few times until I see the
         // VPN ip".
         //
-        // Leaving it unrecorded costs a repeat lookup on the SYN
-        // retransmit, roughly a second later, by which point the table
-        // always has the row. That is the correct trade: a table walk
-        // against a connection that silently bypasses the tunnel.
-        //
         // This is the same poisoning that OwnerLookup's image cache had
         // and it survived here, one layer up, because the cache fix
         // only stopped the *lookup* from going permanently wrong.
+        //
+        // Not recording it was only ever half the answer, and the half
+        // that was written down here was wrong: it said the cost was a
+        // repeat lookup on the SYN retransmit a second later. There is
+        // no retransmit. A SYN that reaches here unredirected is sent
+        // to the real destination, **which answers it**, so the
+        // connection is established outside the tunnel and there is
+        // never a second packet to decide about. That is why the miss
+        // itself had to stop happening -- see
+        // `OwnerLookup::image_for_new_connection`, which is what the
+        // lookup above uses for a SYN.
         if known_owner {
             nat.record_direct(parsed.transport, parsed.source_port);
         }
