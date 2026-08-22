@@ -5052,3 +5052,123 @@ independent check on which path it took:
 - The packet loop parses IPv4 only, so **IPv6 may bypass Custom mode
   entirely**. No IPv6 was present to test against. That one deserves its
   own investigation before anyone calls this feature finished.
+
+---
+
+## 2026-08-22 — turkey-1 built: eight protocols, all proven by exit IP
+
+**Status:** done and verified; one fleet-wide finding left open
+**Touches:** nothing in the repo — live: turkey-1 (new), plan route lists
+
+`tr1.neoxify.site` / 130.94.0.27, Istanbul (Light Node Limited, AS2914),
+Ubuntu 24.04, 1 vCPU / 2 GB, public address bound directly to the
+interface. STANDALONE. Node id `da93fde4`.
+
+All eight, each measured by exit IP rather than by a green connect:
+
+| protocol | port | exit |
+|---|---|---|
+| VLESS+REALITY | 443 | 130.94.0.27 |
+| VLESS+TLS | 8443 TCP | 130.94.0.27 |
+| VLESS+TLS over WebSocket | 8443 `/assets/…` | 130.94.0.27 |
+| Trojan+TLS | 2053 | 130.94.0.27 |
+| Shadowsocks 2022 | 26633 | 130.94.0.27 |
+| WireGuard | 37036/udp | 130.94.0.27 |
+| OpenVPN | 50263/udp | 130.94.0.27 |
+| IKEv2 | 500/4500 | 130.94.0.27 |
+
+Added to Trial, Starter, Pro and Ultimate Max — 8 routes each, 216
+credentials provisioned. **Ultimate deliberately excluded**: it is the
+relay-only plan and this is a direct node.
+
+### The installer ran clean, interactively, first time
+
+No desync. Driven over `tmux send-keys` against a real pty on the node,
+one prompt at a time — which is the way to satisfy "run it
+interactively" from a session that has no terminal. `NEOXIFY_ADMIN_TOKEN`
+removed the credential prompts, and that is what makes the rest of the
+sequence predictable.
+
+**The gRPC/PENDING trap is fixed and confirmed working.** The installer
+probed `connect.neoxify.site:50051`, found it dead, said why, and asked;
+answering `167.233.65.166` produced a node that came up ONLINE
+immediately. The entry above calling this "unfixed and a fleet-wide
+latent outage" is stale — the detection landed.
+
+**Two protocols default to `skip`.** Trojan and Shadowsocks both prompt
+`[skip]`, so an operator pressing Enter through the install gets a node
+missing two transports and no warning that anything was dropped. Every
+other engine defaults to yes. Worth reconsidering given "never drop a
+protocol".
+
+Also: the agent release is *not* behind main this time — v0.2.5 is the
+newest `v*` tag and nothing under `agent/` has changed since it.
+
+### The REALITY decoy was chosen by measurement, not by list
+
+The installer's built-in candidates are Iran-hosted or CDN-hosted, and
+neither fits a Turkish address. Probed alternatives from tr1 *and* from
+ir1, which is the check that mattered:
+
+- `www.sahibinden.com`, `www.trendyol.com` — resolve into Cloudflare.
+  Rejected on the installer's own range argument.
+- `www.mynet.com` — Netdirekt, an ordinary Turkish hosting AS, perfect
+  on paper. **Fails from Iran**: no h2, certificate does not verify.
+- `www.donanimhaber.com` — HizliNet (AS6205), ordinary Turkish hosting,
+  TLS 1.3 + h2 + X25519 + verified **from both tr1 and ir1**. Chosen.
+
+The lesson is the second criterion is not free: a same-country host is
+worth nothing if it is unreachable from where the customers are, and one
+probe from ir1 settled a choice that reasoning could not.
+
+### Left open: new nodes lose the client's address through the API mirror
+
+`ensure_fallback_site` points the mirror at whatever `panelUrl` says,
+which is now `connect.neoxify.site` — the **Cloudflare-proxied** name.
+Cloudflare then replaces the client address, so `X-Forwarded-For` never
+survives the hop:
+
+```
+direct   -> {"ip":"50.34.35.228","country":"US"}    (real client)
+turkey-1 -> {"ip":"130.94.0.27","country":"TR"}     (the node itself)
+finland1 -> {"ip":"50.34.35.228"}                   (real client)
+```
+
+finland1 and france-1 escape it only because they were built when the
+panel URL was `connect.neoxify.com`, which resolves straight to
+167.233.65.166. Turkey is simply the first node built since the switch.
+
+Two consequences, both of which the installer's own comments say the
+XFF header exists to prevent. Every customer arriving through a node
+mirror lands in one rate-limit bucket. And `/api/health/ip` fetched
+through a node's own mirror returns that node's address — which is
+exactly what a *working* tunnel looks like, so it would pass the
+"is traffic flowing" check while proving nothing. Not changed here:
+it is a fleet-wide decision and the same argument as `grpcTarget`.
+
+Noticed alongside it: **germany-1's mirror returns 502** on
+`de1.neoxify.site:2053/api/...` — the stale-upstream failure the
+installer comments already describe. singapore-1 has no fallback site at
+all, having only OpenVPN and IKEv2.
+
+### WSL2 is a usable isolated client rig
+
+The five Xray transports need nothing but `xray.exe` with a SOCKS
+inbound and `curl --socks5-hostname`; no tunnel, no elevation, no VM.
+WireGuard, OpenVPN and IKEv2 were run inside WSL2, which is a separate
+VM with its own routing table — a full tunnel there cannot touch the
+host, and the host's default route was confirmed unchanged throughout.
+Cheaper than booting Neoxify-Test when all that is wanted is an exit IP.
+`https://1.1.1.1/cdn-cgi/trace` is the echo endpoint: one stable address,
+so it can be scoped to a single `/32` when that is wanted.
+
+**A confound worth not re-diagnosing.** OpenVPN came up completely —
+`Initialization Sequence Completed`, tun0 addressed, ICMP crossing to
+1.1.1.1 — and carried no TCP at all. It is not the node: germany-1
+failed **identically** as a control. This machine's path MTU is 1400
+(`ping -M do -s 1372` passes, `-s 1400` drops) while the server pushes
+`tun-mtu 1500`, so the encapsulated packets black-hole. With
+`--pull-filter ignore tun-mtu --tun-mtu 1300 --mssfix 1200` the exit IP
+appeared at once. Real customers on a sub-1500 link — mobile, PPPoE,
+much of Iran — are on the same cliff, so this is worth a look as a
+product question rather than filing it as a rig quirk.
