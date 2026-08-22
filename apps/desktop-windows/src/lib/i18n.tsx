@@ -270,6 +270,15 @@ const en = {
   "dash.degradedHint": "The tunnel is up but the server isn't responding. Your traffic is NOT protected. Try reconnecting or pick another server.",
   "dash.verifying": "Checking connection...",
   "dash.verifyingHint": "Setting up your tunnel — trying each protocol until one works. Click to stop.",
+  // Said when the helper service cannot be reached, which is a different
+  // thing from the tunnel being down and must not borrow its words. The
+  // screen used to answer this case with "You're not protected", over a
+  // tunnel that was live -- someone who believes that goes and does
+  // something they would not have done otherwise.
+  "dash.unknown": "Can't tell right now",
+  "dash.unknownHint":
+    "The Neoxify service isn't answering, so the app can't say whether you're protected. It keeps asking — until it answers, don't assume either way.",
+  "dash.recheck": "Check status",
   "dash.switchedTo": "Your usual protocol didn't get through. Now using",
   // Used instead of the line above when failover crossed to a different
   // country. Naming only the protocol was accurate and still misleading:
@@ -574,6 +583,10 @@ const fa: Record<TranslationKey, string> = {
   "dash.degradedHint": "تونل برقرار است اما سرور پاسخ نمی‌دهد. ترافیک شما محافظت نمی‌شود. دوباره وصل شوید یا سرور دیگری انتخاب کنید.",
   "dash.verifying": "در حال بررسی اتصال...",
   "dash.verifyingHint": "در حال برقراری تونل — هر پروتکل امتحان می‌شود. برای توقف کلیک کنید.",
+  "dash.unknown": "در حال حاضر مشخص نیست",
+  "dash.unknownHint":
+    "سرویس نئوکسیفای پاسخ نمی‌دهد، بنابراین برنامه نمی‌تواند بگوید محافظت شده‌اید یا نه. تلاش ادامه دارد — تا پاسخ نیامده، هیچ‌کدام را فرض نکنید.",
+  "dash.recheck": "بررسی وضعیت",
   "dash.switchedTo": "پروتکل همیشگی شما عبور نکرد. اکنون از این استفاده می‌شود:",
   "dash.switchedServer": "دسترسی به {from} ممکن نشد. اکنون {to} با {protocol}",
   "dash.usedInstead": "به‌جای {from}، {to} با {protocol} استفاده شد. برای ثابت‌ماندن، یک سرور انتخاب کنید.",
