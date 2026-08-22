@@ -5172,3 +5172,81 @@ failed **identically** as a control. This machine's path MTU is 1400
 appeared at once. Real customers on a sub-1500 link — mobile, PPPoE,
 much of Iran — are on the same cliff, so this is worth a look as a
 product question rather than filing it as a rig quirk.
+
+## 2026-08-22 — every download 404'd for four minutes, and it was not the rate limit
+
+`/api/updates/installer/{windows,android}` returned 404 and the update
+check returned "you are up to date" while `desktop-v0.9.25` sat
+published and healthy. The obvious suspect was GitHub's 60-call
+unauthenticated limit — six releases were cut that evening, and the
+service's own comment predicts exactly that failure. **It was not.**
+
+The panel's logs settle it. `GitHub releases request failed: 504`, twice,
+at 10:07:35 and 10:08:41 UTC, which are precisely the two moments nginx
+recorded a fresh 404. Not a 403, and nothing about a limit:
+
+```
+$ curl .../rate_limit          # from the panel, same hour
+"core":{"limit":60,"remaining":46,"used":14}
+```
+
+Twelve days of nginx logs hold 340 requests to `/api/updates/*` in
+total — about 28 a day. The five-minute cache caps outbound calls at ~24
+an hour even under load. The ceiling was never in sight, and reaching for
+it as the explanation would have shipped a token and left the bug in
+place.
+
+What actually happened is an amplifier. One 504 was stored as
+`build = null` — indistinguishable from "there are no releases" — under
+the **success** TTL of five minutes, with no retry. nginx shows the whole
+shape of it: 404 at 10:07:35, 10:07:54, 10:12:02, then nothing wrong
+again. One failed HTTP request bought a four-and-a-half minute outage on
+every download link the website and the emails point at.
+
+The same signature is in the logs for 18 and 19 August, so this is the
+third occurrence, not a first.
+
+### What changed
+
+- **Retries** (3, ~250ms backoff) on 5xx/429/408 and network errors, and
+  a 10s timeout — `fetch` has none, so a hung connection hung the
+  customer's request with it. A 403 is deliberately *not* retried: a
+  spent rate-limit budget does not refill inside a retry loop.
+- **A failure is cached for 30s, not 5 minutes.** Caching a failure as
+  long as a success is what turns a blip into a guaranteed outage window.
+- **Last known good is served when a lookup fails**, for up to 24h.
+  Handing a customer last night's installer beats handing them a 404, and
+  the desktop updater pulls them forward on its next good check. Bounded
+  rather than infinite so a yanked release cannot be served for a week
+  because nobody noticed the feed had been failing since Tuesday.
+- **The update check no longer says "up to date" when it does not know.**
+  `manifestFor` returned `null` for both "you are current" and "the
+  lookup failed", and the controller turned both into 204 — the app
+  reporting a state nothing had verified, which is the one thing it must
+  not do. Now `checkFor` returns `current` / `unknown` / `update`, and
+  `unknown` is a 503. Safe for released clients: `checkAndStage` in
+  `apps/desktop-windows/src/lib/updates.ts` already swallows update-check
+  failures silently by design.
+
+### The token is worth having, but it would not have fixed this
+
+`GITHUB_API_TOKEN` is now read via ConfigService, plumbed through
+compose and `ensure_env_key`, and lifts the limit to 5,000/hour. Optional
+throughout — unset, the calls go out anonymously and everything works,
+which is what local dev and CI do.
+
+**Not installed on the panel.** `gh auth token` on the Windows box holds
+a `gho_` credential with `repo`, `workflow` and `gist` — write access to
+every repo the owner can reach, and it rotates whenever `gh` re-auths.
+Putting that on a public-facing box to read *public* release metadata is
+a bad trade, and fine-grained PATs cannot be minted through the API at
+all; GitHub only issues them from the browser. Left for the owner: a
+fine-grained token, no scopes, then `GITHUB_API_TOKEN=...` in
+`/root/neoconnect/infra/.env` and rebuild the backend.
+
+### Production is on the branch, not on main
+
+The fix was deployed from `claude/new-season-start-646af6`, so
+`/root/neoconnect` is no longer on `main`. **The documented runbook
+(`git pull --ff-only origin main`) will quietly revert this fix** until
+the PR merges. Merge first, then the runbook is correct again.
