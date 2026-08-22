@@ -19,6 +19,8 @@ use std::ffi::CString;
 use std::io;
 
 use windivert_sys::address::WINDIVERT_ADDRESS;
+#[cfg(test)]
+use windivert_sys::WinDivertHelperEvalFilter;
 use windivert_sys::{
     ChecksumFlags, WinDivertClose, WinDivertFlags, WinDivertHelperCalcChecksums,
     WinDivertHelperCompileFilter, WinDivertLayer, WinDivertOpen, WinDivertParam, WinDivertRecv,
@@ -174,6 +176,34 @@ pub fn compile_filter(filter: &str) -> Result<(), String> {
         unsafe { std::ffi::CStr::from_ptr(error) }.to_string_lossy().into_owned()
     };
     Err(format!("{detail} at position {position}"))
+}
+
+/// Asks WinDivert whether a filter would hand this packet over.
+///
+/// The same evaluator the driver runs, called on a packet built here
+/// rather than one taken off a wire. That matters for questions about
+/// what the filter is *blind* to: a packet the driver never delivers
+/// leaves no trace at all, so "we saw none of those" and "none were
+/// sent" are indistinguishable from the counters. Asking the evaluator
+/// directly turns that into an answer, and one a test can hold.
+///
+/// Needs no driver and no administrator, unlike opening a handle.
+#[cfg(test)]
+pub fn eval_filter(filter: &str, packet: &[u8], address: &WINDIVERT_ADDRESS) -> bool {
+    let Ok(c_filter) = CString::new(filter) else {
+        return false;
+    };
+    // SAFETY: the filter is a valid C string for the call and the packet
+    // is passed with its real length; the helper only reads both.
+    unsafe {
+        WinDivertHelperEvalFilter(
+            c_filter.as_ptr(),
+            packet.as_ptr() as *const _,
+            packet.len() as u32,
+            address,
+        )
+    }
+    .as_bool()
 }
 
 /// Recomputes the IP and transport checksums after a rewrite.

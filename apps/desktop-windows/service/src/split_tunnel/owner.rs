@@ -44,7 +44,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, SetTcpEntry, TCP_TABLE_OWNER_PID_ALL,
     UDP_TABLE_OWNER_PID,
 };
-use windows_sys::Win32::Networking::WinSock::AF_INET;
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
     TH32CS_SNAPPROCESS,
@@ -72,6 +72,22 @@ const MIN_REFRESH_INTERVAL: Duration = Duration::from_millis(20);
 pub enum Transport {
     Tcp,
     Udp,
+}
+
+/// Which address family a local port was opened in.
+///
+/// Kept apart rather than merged into one port -> pid map, even though
+/// merging would be less code. Windows draws IPv4 and IPv6 ephemeral
+/// ports from ranges that overlap, so TCP 51234 can be one process over
+/// IPv4 and a different one over IPv6 at the same moment. A merged map
+/// answers one of those two questions wrongly, and both wrong answers
+/// are bad in the direction this feature cares about: attributing an
+/// IPv6 flow to a selected app that does not own it stops traffic the
+/// customer never asked to stop, and missing one leaves the leak open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Family {
+    V4,
+    V6,
 }
 
 /// The applications the customer chose to route through the tunnel.
@@ -164,6 +180,13 @@ impl Selection {
 pub struct OwnerLookup {
     tcp: HashMap<u16, u32>,
     udp: HashMap<u16, u32>,
+    /// The same two tables for IPv6. Queried on every rebuild rather
+    /// than only when an IPv6 packet turns up: the rebuild is what the
+    /// 200ms snapshot budget is spent on, and a second pair of table
+    /// walks there is far cheaper than discovering mid-packet that the
+    /// snapshot cannot answer and having to walk again.
+    tcp6: HashMap<u16, u32>,
+    udp6: HashMap<u16, u32>,
     built_at: Instant,
     last_refresh: Instant,
     /// Only successful resolutions live here -- see image_for_port.
@@ -178,6 +201,8 @@ impl OwnerLookup {
         Self {
             tcp: HashMap::new(),
             udp: HashMap::new(),
+            tcp6: HashMap::new(),
+            udp6: HashMap::new(),
             built_at: stale,
             last_refresh: stale,
             images: HashMap::new(),
@@ -190,14 +215,19 @@ impl OwnerLookup {
     /// A miss triggers at most one rebuild, then answers from the fresh
     /// snapshot -- so a socket created microseconds ago is still found,
     /// without a hot loop for ports that will never be found.
-    pub fn image_for_port(&mut self, transport: Transport, port: u16) -> Option<&str> {
+    pub fn image_for_port(
+        &mut self,
+        family: Family,
+        transport: Transport,
+        port: u16,
+    ) -> Option<&str> {
         if self.built_at.elapsed() > SNAPSHOT_TTL {
             self.rebuild();
         }
-        let mut pid = self.pid_for(transport, port);
+        let mut pid = self.pid_for(family, transport, port);
         if pid.is_none() && self.last_refresh.elapsed() > MIN_REFRESH_INTERVAL {
             self.rebuild();
-            pid = self.pid_for(transport, port);
+            pid = self.pid_for(family, transport, port);
         }
         let pid = pid?;
 
@@ -242,17 +272,24 @@ impl OwnerLookup {
     /// the tunnel. That is what the rate limit buys, and it is not worth
     /// it: a SYN is a small share of packets and each one costs at most
     /// one extra walk.
-    pub fn image_for_new_connection(&mut self, transport: Transport, port: u16) -> Option<&str> {
-        if self.pid_for(transport, port).is_none() {
+    pub fn image_for_new_connection(
+        &mut self,
+        family: Family,
+        transport: Transport,
+        port: u16,
+    ) -> Option<&str> {
+        if self.pid_for(family, transport, port).is_none() {
             self.rebuild();
         }
-        self.image_for_port(transport, port)
+        self.image_for_port(family, transport, port)
     }
 
-    fn pid_for(&self, transport: Transport, port: u16) -> Option<u32> {
-        match transport {
-            Transport::Tcp => self.tcp.get(&port).copied(),
-            Transport::Udp => self.udp.get(&port).copied(),
+    fn pid_for(&self, family: Family, transport: Transport, port: u16) -> Option<u32> {
+        match (family, transport) {
+            (Family::V4, Transport::Tcp) => self.tcp.get(&port).copied(),
+            (Family::V4, Transport::Udp) => self.udp.get(&port).copied(),
+            (Family::V6, Transport::Tcp) => self.tcp6.get(&port).copied(),
+            (Family::V6, Transport::Udp) => self.udp6.get(&port).copied(),
         }
     }
 
@@ -263,6 +300,12 @@ impl OwnerLookup {
         if let Some(table) = udp_table() {
             self.udp = table;
         }
+        if let Some(table) = tcp6_table() {
+            self.tcp6 = table;
+        }
+        if let Some(table) = udp6_table() {
+            self.udp6 = table;
+        }
         let now = Instant::now();
         self.built_at = now;
         self.last_refresh = now;
@@ -271,8 +314,14 @@ impl OwnerLookup {
         // for the life of the connection. Windows reuses process ids, so
         // a stale entry is not merely wasted memory -- it would answer
         // for whatever took the id next.
-        let live: std::collections::HashSet<u32> =
-            self.tcp.values().chain(self.udp.values()).copied().collect();
+        let live: std::collections::HashSet<u32> = self
+            .tcp
+            .values()
+            .chain(self.udp.values())
+            .chain(self.tcp6.values())
+            .chain(self.udp6.values())
+            .copied()
+            .collect();
         self.images.retain(|pid, _| live.contains(pid));
     }
 }
@@ -319,6 +368,45 @@ fn udp_table() -> Option<HashMap<u16, u32>> {
     const ROW_WORDS: usize = 3;
     const LOCAL_PORT: usize = 1;
     const OWNING_PID: usize = 2;
+    Some(parse_table(&bytes, ROW_WORDS, LOCAL_PORT, OWNING_PID))
+}
+
+/// Local port -> owning process id, for every IPv6 TCP connection.
+///
+/// A separate call rather than a parameter on [`tcp_table`] because the
+/// row layout differs, not just the family: `MIB_TCP6ROW_OWNER_PID`
+/// carries 16-byte addresses and a scope id for each end, so the port
+/// and pid sit at different offsets. Passing `AF_INET6` to the IPv4
+/// reader would parse address bytes as a port and return a plausible
+/// number for the wrong socket -- the same class of mistake the IPv4
+/// reader avoids by not casting to the generated struct.
+fn tcp6_table() -> Option<HashMap<u16, u32>> {
+    let bytes = query_table(|buf, size| {
+        // SAFETY: `buf` is null (sizing) or valid for `*size` bytes.
+        unsafe { GetExtendedTcpTable(buf, size, 0, AF_INET6 as u32, TCP_TABLE_OWNER_PID_ALL, 0) }
+    })?;
+
+    // MIB_TCP6ROW_OWNER_PID: ucLocalAddr[16], dwLocalScopeId,
+    // dwLocalPort, ucRemoteAddr[16], dwRemoteScopeId, dwRemotePort,
+    // dwState, dwOwningPid -- fourteen 32-bit words in all.
+    const ROW_WORDS: usize = 14;
+    const LOCAL_PORT: usize = 5;
+    const OWNING_PID: usize = 13;
+    Some(parse_table(&bytes, ROW_WORDS, LOCAL_PORT, OWNING_PID))
+}
+
+/// Local port -> owning process id, for every IPv6 UDP socket.
+fn udp6_table() -> Option<HashMap<u16, u32>> {
+    let bytes = query_table(|buf, size| {
+        // SAFETY: as above.
+        unsafe { GetExtendedUdpTable(buf, size, 0, AF_INET6 as u32, UDP_TABLE_OWNER_PID, 0) }
+    })?;
+
+    // MIB_UDP6ROW_OWNER_PID rows are {ucLocalAddr[16], dwLocalScopeId,
+    // dwLocalPort, dwOwningPid}.
+    const ROW_WORDS: usize = 7;
+    const LOCAL_PORT: usize = 5;
+    const OWNING_PID: usize = 6;
     Some(parse_table(&bytes, ROW_WORDS, LOCAL_PORT, OWNING_PID))
 }
 
@@ -827,7 +915,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let mut lookup = OwnerLookup::new();
-        let image = lookup.image_for_port(Transport::Tcp, port);
+        let image = lookup.image_for_port(Family::V4, Transport::Tcp, port);
 
         let image = image.expect("the test's own listening port must have an owner");
         assert!(
@@ -855,14 +943,14 @@ mod tests {
 
         // Builds the snapshot and marks it freshly refreshed.
         let warm = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let _ = lookup.image_for_port(Transport::Tcp, warm.local_addr().unwrap().port());
+        let _ = lookup.image_for_port(Family::V4, Transport::Tcp, warm.local_addr().unwrap().port());
 
         // Opened after that snapshot was taken, so it cannot be in it.
         let fresh = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = fresh.local_addr().unwrap().port();
 
         assert!(
-            lookup.image_for_new_connection(Transport::Tcp, port).is_some(),
+            lookup.image_for_new_connection(Family::V4, Transport::Tcp, port).is_some(),
             "a new connection's owner must be resolved even when the snapshot was just rebuilt"
         );
     }
