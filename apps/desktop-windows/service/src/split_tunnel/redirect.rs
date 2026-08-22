@@ -212,7 +212,7 @@ pub struct Redirect {
     /// fail-open mode the proxy's upstream socket is unpinned and looks
     /// exactly like an ordinary app's, so without this the proxy would
     /// intercept itself.
-    pub own_image: String,
+    pub own_images: Vec<String>,
     /// The interface `local_addr` lives on.
     ///
     /// A rewritten packet is aimed at that address, so it has to be
@@ -624,7 +624,12 @@ fn decide(
     // the moment Custom mode came on -- the first version of this rule
     // did exactly that.
     let is_own = owner_image
-        .map(|image| image.eq_ignore_ascii_case(&redirect.own_image))
+        .map(|image| {
+            redirect
+                .own_images
+                .iter()
+                .any(|own| image.eq_ignore_ascii_case(own))
+        })
         .unwrap_or(false);
     let selected = match owner_image {
         Some(image) => !is_own && selection.should_tunnel(image),
@@ -1114,7 +1119,7 @@ mod tests {
             node_addr: Ipv4Addr::new(203, 0, 113, 7),
             tcp_proxy_port: 19999,
             udp_proxy_port: 19998,
-            own_image: String::new(),
+            own_images: Vec::new(),
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
@@ -1142,7 +1147,7 @@ mod tests {
             node_addr: Ipv4Addr::new(203, 0, 113, 7),
             tcp_proxy_port: 19999,
             udp_proxy_port: 19998,
-            own_image: String::new(),
+            own_images: Vec::new(),
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,

@@ -553,7 +553,7 @@ export function Dashboard({
     // actually running rather than assuming disconnected. Failure here is
     // deliberately silent -- it just means "show disconnected", and the
     // real error surfaces on the next Connect attempt with context.
-    let adopted: ConnectionState = "disconnected";
+    let adopted: ConnectionState | null = null;
     try {
       const status = await invoke<VpnStatus>("vpn_status");
       adopted = stateFromStatus(status);
@@ -561,12 +561,24 @@ export function Dashboard({
       setSplitTunnelActive(Boolean(status.splitTunnelActive));
       setSplitTunnelProblem(status.splitTunnelProblem ?? null);
     } catch {
-      setConnectionState("disconnected");
+      // Not answered is not the same as not connected, and saying
+      // "You're not protected" here is a lie in the one direction that
+      // still gets somebody hurt: they believe it, and act as though
+      // their traffic is their own.
+      //
+      // Seen exactly that way -- the app could not reach its API, so it
+      // showed a Connect button and "You're not protected", while the
+      // browser beside it was going out through the VPN. Failing to ask
+      // the question is reported as not knowing the answer.
+      setConnectionState((current) => (current === "connected" ? "connected" : current));
     }
 
     // Only meaningful while nothing is up: taken through a live tunnel
     // this would record the exit address as the "before" value and every
     // later comparison would wrongly read as a leak.
+    // Only when the service actually said so. Taken while a tunnel may
+    // still be up, this would record the exit address as the "before"
+    // value and turn every later comparison into a false leak report.
     if (adopted === "disconnected") {
       baselineIpRef.current = await captureBaselineIp();
       setExitIp(null);
