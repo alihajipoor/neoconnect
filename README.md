@@ -89,6 +89,12 @@ Re-running `sudo ./install.sh` on an already-installed box shows that
 role's management menu (status/logs, rebuild, uninstall, etc.) instead of
 asking again — the chosen role is recorded in `/etc/neoxify/role`.
 
+A node enrolled before that marker existed has no such file. It is still
+not asked: an agent is recognised by the `/etc/neoxify/agent.json` it
+wrote at enrollment, and the marker is filled in. This matters because
+the only sensible answer to the role question re-runs the full install,
+which would re-enroll a node that is already serving customers.
+
 ### Deploying an update to a running panel server
 
 ```bash
