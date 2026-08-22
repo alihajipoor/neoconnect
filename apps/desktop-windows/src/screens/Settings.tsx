@@ -99,9 +99,17 @@ export function Settings({
                 onClick={() => setSection(id)}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "press flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors",
+                  "press relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors",
+                  // A flat tint was the only thing marking the current
+                  // pane, and against a dark violet background a tint is
+                  // nearly nothing -- the rail read as five identical
+                  // rows. The bar is drawn as a pseudo-element pinned to
+                  // the inline start so it costs no width and lands on
+                  // the correct edge in Persian, where a real border
+                  // would have shifted every label by two pixels and sat
+                  // on the wrong side.
                   active
-                    ? "bg-primary/15 text-foreground"
+                    ? "bg-primary/15 text-foreground before:absolute before:inset-y-1.5 before:start-0 before:w-0.5 before:rounded-full before:bg-primary"
                     : "text-muted-foreground hover:bg-white/6 hover:text-foreground",
                 )}
               >
@@ -122,8 +130,8 @@ export function Settings({
             className="press flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors hover:bg-white/6 hover:text-foreground"
           >
             <Gift className="size-4" />
-            <span className="flex-1 text-left">{t("referrals.title")}</span>
-            <ChevronRight className="hidden size-3.5 shrink-0 sm:block" />
+            <span className="flex-1 text-start">{t("referrals.title")}</span>
+            <ChevronRight className="hidden size-3.5 shrink-0 sm:block rtl:rotate-180" />
           </button>
           <button
             type="button"
@@ -131,8 +139,8 @@ export function Settings({
             className="press flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap text-muted-foreground transition-colors hover:bg-white/6 hover:text-foreground"
           >
             <LifeBuoy className="size-4" />
-            <span className="flex-1 text-left">{t("support.title")}</span>
-            <ChevronRight className="hidden size-3.5 shrink-0 sm:block" />
+            <span className="flex-1 text-start">{t("support.title")}</span>
+            <ChevronRight className="hidden size-3.5 shrink-0 sm:block rtl:rotate-180" />
           </button>
         </nav>
 

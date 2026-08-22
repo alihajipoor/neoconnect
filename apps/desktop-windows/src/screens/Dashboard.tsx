@@ -1484,15 +1484,19 @@ export function Dashboard({
                         now?" to be inferred from a hue, which is the one
                         question this screen exists to answer. */}
                     <div className="px-4 text-center">
+                      {/* The answer to the only question this screen
+                          exists to answer, and it was set at the same
+                          size and weight as a form label. It is the
+                          headline; it now looks like one. */}
                       <p
                         className={
                           connectionState === "connected"
-                            ? "text-sm font-semibold text-success"
+                            ? "text-base font-semibold tracking-tight text-success"
                             : connectionState === "degraded"
-                              ? "text-sm font-semibold text-warning"
+                              ? "text-base font-semibold tracking-tight text-warning"
                               : connectionState === "unknown"
-                                ? "text-sm font-semibold text-muted-foreground"
-                                : "text-sm font-semibold text-foreground"
+                                ? "text-base font-semibold tracking-tight text-muted-foreground"
+                                : "text-base font-semibold tracking-tight text-foreground"
                         }
                       >
                         {/* "Not protected" is a claim, and it only gets
@@ -1511,7 +1515,12 @@ export function Dashboard({
                                 ? t("dash.unknown")
                                 : t("dash.notProtected")}
                       </p>
-                      <p className="mt-1 text-xs text-muted-foreground">
+                      {/* text-pretty rather than a raw wrap: these hints
+                          run two lines in English and three in Persian,
+                          and a one-word last line under the hero control
+                          is the thing that made the block look thrown
+                          together. */}
+                      <p className="mt-1 text-xs text-pretty text-muted-foreground">
                         {connectionState === "connected"
                           ? t("dash.protectedHint")
                           : connectionState === "degraded"
@@ -1527,9 +1536,14 @@ export function Dashboard({
                           which is what makes "protected" verifiable
                           instead of a claim. */}
                       {connectionState === "connected" && exitIp ? (
-                        <p className="mt-1.5 text-xs text-muted-foreground">
-                          {t("dash.yourIp")}{" "}
-                          <span className="tabular-nums font-medium text-foreground">{exitIp}</span>
+                        // Set as a chip rather than a third sentence.
+                        // It is evidence, not prose, and running it on
+                        // in the same grey as the hint above buried the
+                        // one line on the screen a customer can check
+                        // against a what-is-my-ip page.
+                        <p className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-success/25 bg-success/10 px-2.5 py-1 text-[11px] text-muted-foreground">
+                          {t("dash.yourIp")}
+                          <span className="tabular-nums font-semibold text-success">{exitIp}</span>
                         </p>
                       ) : null}
 
@@ -1680,12 +1694,21 @@ export function Dashboard({
 
               <Card className="animate-rise flex flex-col gap-2.5 py-3">
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-xs font-medium text-muted-foreground">{t("dash.dataUsed")}</span>
-                  <span className="tabular-nums text-xs font-semibold">
+                  {/* Same caption treatment as the tiles directly above,
+                      so the two blocks read as one column rather than as
+                      two cards that happened to land together. */}
+                  <span className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+                    {t("dash.dataUsed")}
+                  </span>
+                  {/* The figure carries the card; the cap is context for
+                      it. Setting both at one size made a customer read
+                      the whole string to find out how much was left. */}
+                  <span className="tabular-nums text-sm font-semibold">
                     {usage ? (
                       <>
-                        {formatBytes(usage.used)}{" "}
-                        <span className="font-normal text-muted-foreground">
+                        {formatBytes(usage.used)}
+                        <span className="text-xs font-normal text-muted-foreground">
+                          {" "}
                           / {usage.cap === null ? t("dash.unlimited") : formatBytes(usage.cap)}
                         </span>
                       </>
@@ -1700,7 +1723,10 @@ export function Dashboard({
                     number alone can't show at a glance. Turns amber past
                     80% so running low is noticed before it bites. */}
                 {usage && usage.cap !== null ? (
-                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/8">
+                  // The track is inset rather than painted on: a flat
+                  // white/8 strip looked like a divider somebody had
+                  // thickened, where a recessed groove reads as a gauge.
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-black/40 ring-1 ring-white/8 ring-inset">
                     <div
                       className="h-full rounded-full transition-[width] duration-700"
                       style={{
@@ -1709,6 +1735,13 @@ export function Dashboard({
                           usage.percent >= 80
                             ? "linear-gradient(90deg, #f59e0b, #ef4444)"
                             : "linear-gradient(90deg, var(--primary), var(--highlight))",
+                        // The fill carries its own light, which is what
+                        // separates the app's own accent from a generic
+                        // progress bar at this size.
+                        boxShadow:
+                          usage.percent >= 80
+                            ? "0 0 10px -1px rgba(239,68,68,0.7)"
+                            : "0 0 10px -1px color-mix(in oklab, var(--highlight) 70%, transparent)",
                       }}
                     />
                   </div>
@@ -1755,7 +1788,8 @@ export function Dashboard({
                   <MapPin className="size-4 text-primary" />
                   {t("dash.changeLocation")}
                 </span>
-                <ChevronRight className="size-4 text-muted-foreground" />
+                {/* Points the way the language reads. */}
+                <ChevronRight className="size-4 text-muted-foreground rtl:rotate-180" />
               </Button>
               {connectionState !== "disconnected" ? (
                 <p className="-mt-1 text-center text-xs text-muted-foreground">

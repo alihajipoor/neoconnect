@@ -111,14 +111,17 @@ export function ConnectOrb({
             <stop offset="1" stopColor={degraded ? "#f97316" : unsure ? "#64748b" : "#22d3ee"} />
           </linearGradient>
         </defs>
-        <circle cx="64" cy="64" r="54" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="3" />
+        {/* The track was faint enough to disappear against the wash, so
+            the dial read as a floating arc with nothing to measure it
+            against -- the gap is what makes it a dial. */}
+        <circle cx="64" cy="64" r="54" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="3.5" />
         <circle
           cx="64"
           cy="64"
           r="54"
           fill="none"
           stroke={`url(#${gradientId})`}
-          strokeWidth="3"
+          strokeWidth="3.5"
           strokeLinecap="round"
           strokeDasharray={`${dash} ${CIRCUMFERENCE}`}
           // Start the arc at 12 o'clock instead of 3 o'clock.
@@ -146,13 +149,18 @@ export function ConnectOrb({
         className={cn(
           "press relative flex size-28 flex-col items-center justify-center gap-1.5 rounded-full border backdrop-blur-md",
           "disabled:pointer-events-none disabled:opacity-70",
+          // Each face carries a lit top edge and a shaded lower half.
+          // With only the top hairline the disc read as a flat tinted
+          // circle, which is the look the layered dial around it was
+          // added to get away from; the two inset shadows together are
+          // what make it a piece of glass catching light.
           on
-            ? "border-success/40 bg-success/12 text-success shadow-[0_0_50px_-12px_var(--success),inset_0_1px_0_rgba(255,255,255,0.12)]"
+            ? "border-success/40 bg-success/12 text-success shadow-[0_0_50px_-12px_var(--success),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)]"
             : degraded
-              ? "border-warning/45 bg-warning/12 text-warning shadow-[0_0_50px_-12px_var(--warning),inset_0_1px_0_rgba(255,255,255,0.12)]"
+              ? "border-warning/45 bg-warning/12 text-warning shadow-[0_0_50px_-12px_var(--warning),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)]"
               : unsure
-                ? "border-white/15 bg-white/5 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] hover:bg-white/8"
-                : "border-primary/35 bg-primary/10 text-primary shadow-[0_0_50px_-12px_var(--primary),inset_0_1px_0_rgba(255,255,255,0.12)] hover:bg-primary/16",
+                ? "border-white/15 bg-white/5 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.08),inset_0_-14px_28px_-14px_rgba(0,0,0,0.45)] hover:bg-white/8"
+                : "border-primary/35 bg-primary/10 text-primary shadow-[0_0_50px_-12px_var(--primary),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)] hover:bg-primary/16",
         )}
       >
         {degraded ? (
@@ -162,7 +170,7 @@ export function ConnectOrb({
         ) : (
           <Power className={cn("size-7 transition-transform duration-300", on && "scale-110")} strokeWidth={2.25} />
         )}
-        <span className="px-2 text-center text-[11px] leading-tight font-semibold tracking-wide">{label}</span>
+        <span className="px-2 text-center text-xs leading-tight font-semibold tracking-wide">{label}</span>
       </button>
     </div>
   );

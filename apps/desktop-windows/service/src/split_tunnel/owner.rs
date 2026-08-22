@@ -222,6 +222,33 @@ impl OwnerLookup {
         self.images.get(&pid).map(String::as_str)
     }
 
+    /// The same answer as [`Self::image_for_port`], for a port that is
+    /// opening a connection right now, where a miss is not allowed to
+    /// stand on a snapshot taken moments ago.
+    ///
+    /// The rate limit above exists so that ports which genuinely have no
+    /// owner cannot turn every packet into a table walk. That is right
+    /// for the general case and wrong for a TCP SYN, because of what a
+    /// miss costs: with `OnlySelected` an unknown owner means "leave it
+    /// alone", the SYN goes out unredirected, **and the far end answers
+    /// it**. The connection is then established outside the tunnel for
+    /// good -- there is no retransmit to have a second go at, and a
+    /// browser keeps that socket alive and reuses it for minutes.
+    ///
+    /// Measured on this machine with Custom mode on and Edge selected: a
+    /// page opened six seconds after the redirect started reported the
+    /// customer's own address, over a socket created after the switch,
+    /// while sibling connections made in the same second went through
+    /// the tunnel. That is what the rate limit buys, and it is not worth
+    /// it: a SYN is a small share of packets and each one costs at most
+    /// one extra walk.
+    pub fn image_for_new_connection(&mut self, transport: Transport, port: u16) -> Option<&str> {
+        if self.pid_for(transport, port).is_none() {
+            self.rebuild();
+        }
+        self.image_for_port(transport, port)
+    }
+
     fn pid_for(&self, transport: Transport, port: u16) -> Option<u32> {
         match transport {
             Transport::Tcp => self.tcp.get(&port).copied(),
@@ -808,6 +835,36 @@ mod tests {
             "expected an executable path, got {image}"
         );
         println!("port {port} -> {image}");
+    }
+
+    /// The socket that opens inside the rate limiter's window, which is
+    /// the one a browser opens and the one that used to escape.
+    ///
+    /// Measured on this machine, three consecutive Custom-mode starts
+    /// with a browser selected: 4 of 47, 9 of 60 and 8 of 55 new TCP
+    /// connections were not in the snapshot the loop already held. Every
+    /// one of them was found by rebuilding, and under the old lookup
+    /// every one of them would have gone out untunnelled for good.
+    ///
+    /// The two lookups here run microseconds apart, which is what puts
+    /// the second one inside `MIN_REFRESH_INTERVAL` and makes this the
+    /// case being tested rather than an ordinary hit.
+    #[test]
+    fn a_socket_created_after_the_snapshot_is_still_attributed() {
+        let mut lookup = OwnerLookup::new();
+
+        // Builds the snapshot and marks it freshly refreshed.
+        let warm = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let _ = lookup.image_for_port(Transport::Tcp, warm.local_addr().unwrap().port());
+
+        // Opened after that snapshot was taken, so it cannot be in it.
+        let fresh = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = fresh.local_addr().unwrap().port();
+
+        assert!(
+            lookup.image_for_new_connection(Transport::Tcp, port).is_some(),
+            "a new connection's owner must be resolved even when the snapshot was just rebuilt"
+        );
     }
 }
 

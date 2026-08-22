@@ -259,7 +259,7 @@ export function LocationPicker({
                   onClick={() => void handlePick(route)}
                   disabled={isCurrent || switchingId !== null}
                   className={cn(
-                    "flex items-center gap-3 rounded-lg border px-3 py-3 text-left transition-colors disabled:cursor-default",
+                    "flex items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
                     isCurrent
                       ? "border-primary/50 bg-primary/10"
                       : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",

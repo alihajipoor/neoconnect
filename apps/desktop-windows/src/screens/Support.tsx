@@ -166,7 +166,7 @@ function TicketRow({ ticket, onOpen }: { ticket: SupportTicketSummary; onOpen: (
     <button
       type="button"
       onClick={onOpen}
-      className="press flex items-center gap-3 rounded-xl border border-white/8 bg-white/3 px-3.5 py-3 text-left transition-colors hover:border-white/15 hover:bg-white/6"
+      className="press flex items-center gap-3 rounded-xl border border-white/8 bg-white/3 px-3.5 py-3 text-start transition-colors hover:border-white/15 hover:bg-white/6"
     >
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium">{ticket.subject}</p>

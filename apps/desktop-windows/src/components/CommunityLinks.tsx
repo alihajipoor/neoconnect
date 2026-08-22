@@ -1,8 +1,18 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Camera, Globe, MessageCircle, Send } from "lucide-react";
+import { Globe } from "lucide-react";
+import { DiscordIcon, InstagramIcon, TelegramIcon } from "./BrandIcons";
 import { getAppLinks } from "../lib/customer";
 import type { AppLinks } from "../lib/types";
+
+/** Typed on the icon rather than inferred, because the row now mixes a
+ * lucide component with the local brand marks and the inferred union
+ * would not survive the filter below. */
+type CommunityLink = {
+  url: string | null;
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+};
 
 /** Website, Discord, Instagram, Telegram — whichever the operator has
  * actually set.
@@ -33,22 +43,25 @@ export function CommunityLinks() {
 
   if (!links) return null;
 
-  const entries = [
+  // The three named products get their own marks (see BrandIcons); the
+  // website is not a brand, so it keeps the lucide globe rather than
+  // being given a logo it does not have.
+  const entries: CommunityLink[] = [
     { url: links.websiteUrl, icon: Globe, label: "Website" },
-    { url: links.discordUrl, icon: MessageCircle, label: "Discord" },
-    // Camera, not a brand glyph: lucide dropped its brand icons over
-    // trademark concerns, and the label carries the meaning anyway.
-    { url: links.instagramUrl, icon: Camera, label: "Instagram" },
-    { url: links.telegramUrl, icon: Send, label: "Telegram" },
-  ].filter((entry): entry is { url: string; icon: typeof Globe; label: string } =>
+    { url: links.discordUrl, icon: DiscordIcon, label: "Discord" },
+    { url: links.instagramUrl, icon: InstagramIcon, label: "Instagram" },
+    { url: links.telegramUrl, icon: TelegramIcon, label: "Telegram" },
+  ];
+
+  const shown = entries.filter((entry): entry is CommunityLink & { url: string } =>
     Boolean(entry.url),
   );
 
-  if (entries.length === 0) return null;
+  if (shown.length === 0) return null;
 
   return (
     <div className="flex items-center gap-0.5">
-      {entries.map(({ url, icon: Icon, label }) => (
+      {shown.map(({ url, icon: Icon, label }) => (
         <button
           key={label}
           type="button"
