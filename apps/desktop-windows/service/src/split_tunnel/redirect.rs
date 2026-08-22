@@ -41,6 +41,114 @@
 //! re-inject or deliberately drop a packet is a hole in the machine's
 //! networking**, so the code below is written so that passing the packet
 //! through is what happens by default.
+//!
+//! # IPv6 is blocked, not carried, and why
+//!
+//! Everything above rewrites IPv4. Until this was measured, the IPv6
+//! case had never been run, because no machine used for the work had
+//! IPv6 -- and what it did was the worst of the available outcomes.
+//! Measured on a Windows 11 VM with a router-advertised IPv6 prefix,
+//! Custom mode on, one 22-second window carrying both families:
+//!
+//! ```text
+//! PRODUCTION FILTER delivered: ipv4=25 ipv6=0
+//! ALL-IPV6 observer saw:      ipv4=0  ipv6=8
+//!   -> [2001:db8:6ec5::1]:8686        (global unicast, off-link)
+//!   -> [fd00::950d:8fd1:26eb:d4a]:8686
+//! ```
+//!
+//! Eight IPv6 packets left the machine and the filter handed over none
+//! of them, so nothing here ever saw one. A listener on the far machine
+//! recorded what arrived:
+//!
+//! ```text
+//! FROM [fd00::20b9:6840:d2bd:49a1]:56122 BYTES 105
+//! PLAINTEXT: GET /BEFORE-ula HTTP/1.1 | Host: ... | User-Agent: curl/8.21.0
+//! ```
+//!
+//! In the clear, from the customer's own address, while the app showed
+//! Custom mode active. That is the failure this whole file exists to
+//! prevent, arriving through the one door nobody had opened.
+//!
+//! ## Carrying it was not available
+//!
+//! The complete answer is to put IPv6 through the tunnel, and it is not
+//! reachable from the client alone. A carried flow needs a v6 NAT table,
+//! a v6 rewrite, and an upstream socket pinned to the tunnel with
+//! `IPV6_UNICAST_IF` -- all of which is work, none of which is the
+//! blocker. The blocker is that **the tunnel adapter has no IPv6
+//! address**: the WireGuard engine builds its interface with
+//! `Address = 10.77.0.8/32` and `AllowedIPs = 0.0.0.0/0`, and every
+//! route this client installs (`0.0.0.0/1`, `128.0.0.0/1`,
+//! `0.0.0.0/0`) is IPv4. There is nowhere for a v6 packet to be sent,
+//! and giving it one means the node hands out v6 addressing, which is a
+//! server-side change.
+//!
+//! So the choice here was between a silent leak and a stated gap, and
+//! this project has an answer to that: a stated gap. A selected
+//! application's IPv6 is dropped. Where a destination is IPv6-only it
+//! becomes unreachable for that app, which is visible,
+//! complainable-about and recoverable. Being logged by an ISP in Iran is
+//! none of those.
+//!
+//! ## The same measurement afterwards
+//!
+//! Same rig, same targets, with the loop running -- see
+//! [`live_custom_mode_blocks_ipv6_and_keeps_carrying_ipv4`], which is
+//! what produced these:
+//!
+//! ```text
+//! seen=121 matched=6 redirected=39 returned=64 rejected=0 blocked_v6=5
+//! PRODUCTION FILTER delivered:    ipv4=66 ipv6=5
+//! SURVIVED THE LOOP (prio -1000): ipv4=0  ipv6=0
+//!   -> [2001:db8:6ec5::1]:8686   (delivered to the loop, and stopped there)
+//! ```
+//!
+//! The second sniffer is the part that matters. It is a separate
+//! WinDivert handle opened *below* this loop's priority, so it sees only
+//! what the loop let past: before, it counted the eight packets on their
+//! way out; after, none. The counter alone could not have said that --
+//! it reports intent, and this file has been wrong about intent before.
+//!
+//! And the reason blocking is tolerable rather than merely safe, from
+//! the same run: a name with a blocked `AAAA` and a working `A` was
+//! still fetched, over IPv4, in **385ms**. That is the browser's own
+//! fallback doing its job, and it is what nearly every real destination
+//! will do.
+//!
+//! ## What is deliberately *not* blocked
+//!
+//! Only traffic that would have been tunnelled. An application the
+//! customer did not select keeps its IPv6 exactly as before -- the whole
+//! premise of a split tunnel is that it is left alone -- and so do
+//! link-local, unique-local and multicast destinations, which are the
+//! LAN.
+//!
+//! That the block is actually *scoped* was measured rather than
+//! reasoned, because "it only drops the selected app" is precisely the
+//! sort of claim the code can be wrong about while every counter agrees
+//! with it. `curl.exe` was selected and a byte-for-byte copy of it at
+//! another path was not; both fetched the same IPv6 address in the same
+//! window:
+//!
+//! ```text
+//! PRODUCTION FILTER delivered:    ipv4=115 ipv6=21
+//! SURVIVED THE LOOP (prio -1000): ipv4=0   ipv6=16
+//! blocked_v6=5
+//!   -> [2001:db8:6ec5::1]:8686   (seen on both sides of the loop)
+//! ```
+//!
+//! Twenty-one in, five stopped, sixteen out, and the same destination
+//! appears above and below the loop. Identical binaries, identical
+//! destination, opposite outcomes -- which is the split doing its job
+//! and not a blanket IPv6 kill.
+//!
+//! Note that the address exclusions are weaker than the IPv4 ones, and
+//! cannot be otherwise: IPv6 home networks are usually numbered out of
+//! the global prefix the ISP delegates, so there is no `10/8` to carve
+//! out. A LAN neighbour on a `2000::/3` address is indistinguishable
+//! here from the internet, and a selected app will lose IPv6 to it. It
+//! keeps IPv4.
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -52,7 +160,7 @@ use windivert_sys::{WinDivertFlags, WinDivertLayer};
 
 use super::divert::{recalculate_checksums, Handle};
 use super::flows::{Nat, Origin, Verdict};
-use super::owner::{OwnerLookup, Selection, SharedSelection, Transport};
+use super::owner::{Family, OwnerLookup, Selection, SharedSelection, Transport};
 use super::proxy::OwnSockets;
 
 /// The largest packet WinDivert will hand over.
@@ -100,6 +208,16 @@ pub struct Stats {
     /// Injections the driver refused. Should be zero; anything else
     /// means the packets are not going where the counters imply.
     pub rejected: AtomicU64,
+    /// IPv6 packets dropped because the tunnel cannot carry them.
+    ///
+    /// Counted separately from everything above because it is the one
+    /// number here that reports a *deliberate* refusal rather than a
+    /// fault, and reading it as a fault would be wrong in both
+    /// directions: high is normal on a dual-stack network, and zero
+    /// says only that nothing tried. Before this was written it read
+    /// zero because there was nothing to count -- the packets were
+    /// leaving unexamined.
+    pub blocked_v6: AtomicU64,
 }
 
 /// How many packets must have gone out before silence means anything.
@@ -125,12 +243,13 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={}",
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
             self.returned.load(Ordering::Relaxed),
             self.rejected.load(Ordering::Relaxed),
+            self.blocked_v6.load(Ordering::Relaxed),
         )
     }
 
@@ -151,6 +270,19 @@ impl Stats {
     /// is also read at connect time, when these counters are still zero.
     /// These are the only numbers taken from the real path under real
     /// traffic.
+    ///
+    /// `blocked_v6` is deliberately not consulted here, and that was a
+    /// decision rather than an oversight. It counts a refusal working as
+    /// designed, not a fault: on any dual-stack network it climbs from
+    /// the first second and never stops, so a complaint keyed on it
+    /// would be permanently lit. This whole function exists to be
+    /// believed -- see `WARMUP`, which is here because one false alarm
+    /// during a healthy start was judged worse than saying nothing -- and
+    /// a warning that is always on is one nobody reads by the time it
+    /// matters. What a customer needs to know about IPv6 is true of
+    /// Custom mode always, not of this session, so it is stated in the
+    /// Custom-mode line on the dashboard (`dash.customActive`) where it
+    /// sits beside "on" instead of pretending to be news.
     pub fn complaint(&self, session_age: Duration) -> Option<String> {
         // Nothing is wrong yet, by definition: the redirect has not
         // had time to be wrong. See WARMUP.
@@ -296,6 +428,19 @@ const DNS_PORT: u16 = 53;
 /// `not` in front of a parenthesised expression, and it rejects it at
 /// load time with a position offset and nothing else. Found by the
 /// compile test below, which exists for exactly this.
+/// The IPv6 half is deliberately narrower than a mirror of the IPv4
+/// one. Two bounds, not six, because IPv6 has nothing to mirror: there
+/// is no RFC1918 to carve out, since a home IPv6 network numbers its own
+/// devices out of the global prefix its ISP delegates. What can be
+/// excluded by address is only what is genuinely not the internet --
+/// everything from `fc00::` up, which is unique-local, link-local and
+/// multicast in one comparison -- and everything below
+/// `0:0:0:0:ffff:ffff:ffff:ffff`, which is the unspecified address,
+/// loopback, and the IPv4-mapped range that is IPv4 traffic wearing a
+/// v6 shape and already handled above.
+///
+/// Nothing excludes the node here: no node this client talks to has an
+/// IPv6 address, so the tunnel itself can never appear in this half.
 pub fn filter_for(redirect: &Redirect) -> String {
     format!(
         "(outbound and ip and (tcp or udp) and not loopback \
@@ -306,6 +451,9 @@ pub fn filter_for(redirect: &Redirect) -> String {
            and (ip.DstAddr < 172.16.0.0 or ip.DstAddr > 172.31.255.255) \
            and (ip.DstAddr < 192.168.0.0 or ip.DstAddr > 192.168.255.255) \
            and ip.DstAddr < 224.0.0.0) \
+         or (outbound and ipv6 and (tcp or udp) and not loopback \
+           and ipv6.DstAddr > 0:0:0:0:ffff:ffff:ffff:ffff \
+           and ipv6.DstAddr < fc00::) \
          or (ip and tcp.SrcPort == {tcp}) \
          or (ip and udp.SrcPort == {udp})",
         node = redirect.node_addr,
@@ -532,6 +680,190 @@ fn parse(packet: &[u8]) -> Option<Parsed> {
     })
 }
 
+/// The header offsets an IPv6 decision needs.
+///
+/// Deliberately much less than [`Parsed`] carries. An IPv6 packet here
+/// is only ever passed through or dropped, never rewritten, so the
+/// addresses are not needed -- and not reading them keeps this from
+/// looking like the beginning of a v6 rewrite that does not exist.
+struct ParsedV6 {
+    transport: Transport,
+    source_port: u16,
+    destination_port: u16,
+    tcp_flags: u8,
+}
+
+/// Extension headers, which sit between the IPv6 header and the
+/// transport one and must be walked rather than assumed away.
+const IPPROTO_HOPOPTS: u8 = 0;
+const IPPROTO_ROUTING: u8 = 43;
+const IPPROTO_FRAGMENT: u8 = 44;
+const IPPROTO_AH: u8 = 51;
+const IPPROTO_DSTOPTS: u8 = 60;
+
+/// The fixed IPv6 header, before any extension header.
+const IPV6_HEADER: usize = 40;
+
+/// How many extension headers are walked before giving up.
+///
+/// A real packet has none or one. A long chain is either malformed or
+/// built to be, and either way the answer is to stop rather than to keep
+/// following a next-header field around a packet an attacker supplied.
+const MAX_EXTENSION_HEADERS: usize = 8;
+
+/// Reads the ports out of an IPv6 packet, or `None` when they cannot be
+/// found.
+///
+/// `None` is not "this is not TCP or UDP" -- the filter already settled
+/// that, since WinDivert walks the chain itself to decide `tcp or udp`.
+/// It means *this code* could not follow the chain: an extension header
+/// it does not know, or a fragment after the first, which carries no
+/// transport header at all. The caller must treat that as an unknown
+/// owner rather than as permission to pass the packet on.
+fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
+    if packet.len() < IPV6_HEADER || packet.first()? >> 4 != 6 {
+        return None;
+    }
+
+    let mut next = packet[6];
+    let mut offset = IPV6_HEADER;
+
+    for _ in 0..MAX_EXTENSION_HEADERS {
+        let transport = match next {
+            IPPROTO_TCP => Transport::Tcp,
+            IPPROTO_UDP => Transport::Udp,
+            // Header length is in 8-byte units, not counting the first.
+            IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
+                let header = packet.get(offset..offset + 2)?;
+                next = header[0];
+                offset += (header[1] as usize + 1) * 8;
+                continue;
+            }
+            // Authentication headers count in 4-byte units and subtract
+            // two rather than one, which is the sort of detail that
+            // makes a hand-rolled walk worth writing down.
+            IPPROTO_AH => {
+                let header = packet.get(offset..offset + 2)?;
+                next = header[0];
+                offset += (header[1] as usize + 2) * 4;
+                continue;
+            }
+            IPPROTO_FRAGMENT => {
+                let header = packet.get(offset..offset + 8)?;
+                // Only the first fragment carries the transport header;
+                // the rest have no ports to read and no owner to find.
+                if u16::from_be_bytes([header[2], header[3]]) & 0xFFF8 != 0 {
+                    return None;
+                }
+                next = header[0];
+                offset += 8;
+                continue;
+            }
+            _ => return None,
+        };
+
+        // Flags sit at offset 13 of a TCP header, so 14 bytes covers
+        // both reads -- the same reasoning as the IPv4 parser.
+        let ports = packet.get(offset..offset + 14)?;
+        return Some(ParsedV6 {
+            transport,
+            source_port: u16::from_be_bytes([ports[0], ports[1]]),
+            destination_port: u16::from_be_bytes([ports[2], ports[3]]),
+            tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
+        });
+    }
+    None
+}
+
+/// What to do with an IPv6 packet, which this loop has no way to carry.
+///
+/// Drop when the flow is one whose traffic belongs in the tunnel, pass
+/// it through otherwise. See the module comment for why blocking is the
+/// answer here and carrying is not.
+///
+/// The decision is made per packet with no flow table behind it, unlike
+/// the IPv4 path. Nothing needs remembering: the verdict is the same
+/// every time it is asked, so there is no earlier answer to stay
+/// consistent with and nothing a reused port could inherit.
+fn handle_ipv6(
+    packet: &[u8],
+    redirect: &Redirect,
+    selection: &Selection,
+    owner: &mut OwnerLookup,
+    stats: &Stats,
+) -> Option<Leg> {
+    let block = |stats: &Stats| {
+        stats.blocked_v6.fetch_add(1, Ordering::Relaxed);
+        Some(Leg::Swallowed)
+    };
+
+    // A packet whose ports could not be read. Answered the same way the
+    // IPv4 path answers an unknown owner, and for the same reason: which
+    // way to fail depends on which way the customer's list reads.
+    let Some(parsed) = parse_v6(packet) else {
+        return if selection.tunnel_when_owner_unknown() { block(stats) } else { None };
+    };
+
+    // A SYN is asked about insistently, exactly as on the IPv4 side. A
+    // miss here is not merely a dropped packet: the SYN goes out over
+    // IPv6, **the far end answers it**, and the connection is then
+    // established in the clear from the customer's own address. That is
+    // the leak, not a slower version of it.
+    let is_new_connection = matches!(parsed.transport, Transport::Tcp)
+        && parsed.tcp_flags & TCP_FLAG_SYN != 0
+        && parsed.tcp_flags & TCP_FLAG_ACK == 0;
+    let owner_image = if is_new_connection {
+        owner.image_for_new_connection(Family::V6, parsed.transport, parsed.source_port)
+    } else {
+        owner.image_for_port(Family::V6, parsed.transport, parsed.source_port)
+    };
+
+    // This service's own traffic is never touched, on either family.
+    let is_own = owner_image
+        .map(|image| {
+            redirect
+                .own_images
+                .iter()
+                .any(|own| image.eq_ignore_ascii_case(own))
+        })
+        .unwrap_or(false);
+    if is_own {
+        return None;
+    }
+
+    // A lookup sent over IPv6 would be answered by the resolver the
+    // network handed out -- for somebody in Iran, their ISP -- which is
+    // the precise leak `is_dns` exists to close, arriving over the other
+    // family. It cannot be carried instead: the redirect that carries a
+    // lookup rewrites it towards an IPv4 resolver through an IPv4 proxy,
+    // and there is no v6 equivalent to send it to.
+    //
+    // Dropping it is not the end of the lookup. Windows asks its
+    // configured resolvers in turn, so the query is re-sent over IPv4 a
+    // moment later and carried through the tunnel as usual. The gap
+    // worth stating: on a network whose *only* resolver is IPv6,
+    // Custom mode has no honest way to resolve names, and this makes
+    // that visible as slow lookups rather than silently handing them to
+    // the ISP.
+    if redirect.carry_dns && parsed.destination_port == DNS_PORT {
+        return block(stats);
+    }
+
+    let tunnelled = match owner_image {
+        Some(image) => selection.should_tunnel(image),
+        None => selection.tunnel_when_owner_unknown(),
+    };
+    if tunnelled {
+        stats.matched.fetch_add(1, Ordering::Relaxed);
+        block(stats)
+    } else {
+        // An application the customer did not choose. Its IPv6 is none
+        // of this feature's business and goes out exactly as it did
+        // before Custom mode was switched on.
+        None
+    }
+}
+
 /// Rewrites the packet in place if it should be redirected. Returns
 /// whether anything changed, which is what decides if the checksums need
 /// recomputing.
@@ -544,6 +876,14 @@ fn handle_packet(
     owner: &mut OwnerLookup,
     stats: &Stats,
 ) -> Option<Leg> {
+    // Decided before anything below is consulted, because none of it can
+    // carry an IPv6 packet: the NAT table, the rewrite and the proxy's
+    // upstream socket are all IPv4, and so is the address on the tunnel
+    // adapter they would send it to.
+    if packet.first().map(|first| first >> 4) == Some(6) {
+        return handle_ipv6(packet, redirect, selection, owner, stats);
+    }
+
     let parsed = parse(packet)?;
 
     let proxy_port = match parsed.transport {
@@ -650,9 +990,9 @@ fn decide(
     // decides where a whole connection lives, and the one whose miss
     // cannot be taken back afterwards.
     let owner_image = if is_new_connection {
-        owner.image_for_new_connection(parsed.transport, parsed.source_port)
+        owner.image_for_new_connection(Family::V4, parsed.transport, parsed.source_port)
     } else {
-        owner.image_for_port(parsed.transport, parsed.source_port)
+        owner.image_for_port(Family::V4, parsed.transport, parsed.source_port)
     };
     let known_owner = owner_image.is_some();
     // This service, resolving for itself. Checked separately because it
@@ -856,6 +1196,7 @@ mod tests {
             redirected: AtomicU64::new(redirected),
             returned: AtomicU64::new(returned),
             rejected: AtomicU64::new(rejected),
+            blocked_v6: AtomicU64::new(0),
         }
     }
 
@@ -1180,6 +1521,308 @@ mod tests {
         assert!(!filter.contains("not ("));
         assert!(filter.contains("tcp.SrcPort == 19999"));
         assert!(filter.contains("udp.SrcPort == 19998"));
+    }
+
+    fn sample_redirect() -> Redirect {
+        Redirect {
+            local_addr: Ipv4Addr::new(192, 168, 1, 20),
+            node_addr: Ipv4Addr::new(203, 0, 113, 7),
+            tcp_proxy_port: 19999,
+            udp_proxy_port: 19998,
+            own_images: Vec::new(),
+            own_sockets: Arc::new(OwnSockets::default()),
+            dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
+            carry_dns: true,
+            local_interface: 5,
+        }
+    }
+
+    /// A minimal IPv6 TCP packet, with an optional extension-header
+    /// chain in front of the transport header.
+    fn ipv6_packet(destination: &str, destination_port: u16, chain: &[(u8, usize)]) -> Vec<u8> {
+        // Each extension header here is written with an 8-byte body, so
+        // its length field is `words - 1` in 8-byte units.
+        let extension_bytes: usize = chain.iter().map(|(_, bytes)| *bytes).sum();
+        let mut packet = vec![0u8; IPV6_HEADER + extension_bytes + 20];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&((extension_bytes + 20) as u16).to_be_bytes());
+        packet[7] = 64; // hop limit
+        let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst: std::net::Ipv6Addr = destination.parse().unwrap();
+        packet[8..24].copy_from_slice(&src.octets());
+        packet[24..40].copy_from_slice(&dst.octets());
+
+        // Walk the chain forwards, writing each header's "next" field.
+        let mut cursor = IPV6_HEADER;
+        let mut previous_next = 6usize; // the fixed header's Next Header
+        for (kind, bytes) in chain {
+            packet[previous_next] = *kind;
+            if *kind == IPPROTO_FRAGMENT {
+                // Offset and flags live in bytes 2..4; left at zero this
+                // is the first fragment.
+                previous_next = cursor;
+            } else if *kind == IPPROTO_AH {
+                packet[cursor + 1] = (bytes / 4 - 2) as u8;
+                previous_next = cursor;
+            } else {
+                packet[cursor + 1] = (bytes / 8 - 1) as u8;
+                previous_next = cursor;
+            }
+            cursor += bytes;
+        }
+        packet[previous_next] = IPPROTO_TCP;
+
+        packet[cursor..cursor + 2].copy_from_slice(&51234u16.to_be_bytes());
+        packet[cursor + 2..cursor + 4].copy_from_slice(&destination_port.to_be_bytes());
+        packet[cursor + 12] = 0x50; // data offset
+        packet[cursor + 13] = TCP_FLAG_SYN;
+        packet
+    }
+
+    fn outbound_address(ipv6: bool) -> WINDIVERT_ADDRESS {
+        let mut address = WINDIVERT_ADDRESS::default();
+        address.set_layer(windivert_sys::WinDivertLayer::Network);
+        address.set_event(windivert_sys::WinDivertEvent::NetworkPacket);
+        address.set_outbound(true);
+        address.set_ipv6(ipv6);
+        address
+    }
+
+    /// A well-formed IPv4 TCP SYN, with the length fields the filter
+    /// evaluator insists on -- `tcp_packet` above leaves them zero,
+    /// which the evaluator rejects before it looks at an address.
+    fn ipv4_syn(destination: Ipv4Addr, destination_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&40u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = IPPROTO_TCP;
+        packet[12..16].copy_from_slice(&Ipv4Addr::new(192, 168, 1, 20).octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        packet[20..22].copy_from_slice(&51234u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = TCP_FLAG_SYN;
+        packet
+    }
+
+    #[test]
+    fn the_filter_used_to_be_blind_to_ipv6_and_no_longer_is() {
+        // The measurement that started this, reduced to something a test
+        // can hold. Asked of WinDivert's own evaluator -- the code the
+        // driver runs -- rather than of a reading of the filter string,
+        // because the shipped filter matched IPv4 and silently matched
+        // no IPv6 at all, and nothing in the counters could say so: a
+        // packet the driver never delivers leaves no trace to count.
+        //
+        // On a VM with a router-advertised IPv6 prefix the old filter
+        // delivered ipv4=25 ipv6=0 while eight IPv6 packets left the
+        // machine, one of them to a global-unicast address. See the
+        // module comment.
+        let filter = filter_for(&sample_redirect());
+        let real_google_v6 = ipv6_packet("2607:f8b0:400a:809::200e", 443, &[]);
+
+        assert!(
+            super::super::divert::eval_filter(&filter, &real_google_v6, &outbound_address(true)),
+            "an IPv6 connection to the internet must reach the loop"
+        );
+        assert!(
+            super::super::divert::eval_filter(
+                &filter,
+                &ipv4_syn(Ipv4Addr::new(142, 250, 74, 78), 443),
+                &outbound_address(false)
+            ),
+            "the IPv4 half must be unchanged"
+        );
+    }
+
+    #[test]
+    fn the_ipv6_half_leaves_the_local_network_alone() {
+        // The IPv4 filter excludes the LAN so a split tunnel does not
+        // disturb it, and the same has to hold here. Multicast matters
+        // most: a tunnel coming up makes Windows spray mDNS and SSDP,
+        // and over IPv6 that is ff02::fb and ff02::c.
+        let filter = filter_for(&sample_redirect());
+        for (address, why) in [
+            ("fe80::1", "link-local"),
+            ("fd00::950d:8fd1:26eb:d4a", "unique-local"),
+            ("ff02::fb", "multicast mDNS"),
+            ("::1", "loopback"),
+            ("::ffff:8.8.8.8", "IPv4-mapped, which the IPv4 half handles"),
+        ] {
+            assert!(
+                !super::super::divert::eval_filter(
+                    &filter,
+                    &ipv6_packet(address, 443, &[]),
+                    &outbound_address(true)
+                ),
+                "{address} ({why}) must not be handed over"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_ports_of_a_plain_ipv6_packet() {
+        let parsed = parse_v6(&ipv6_packet("2001:db8::2", 443, &[])).expect("must parse");
+        assert_eq!(parsed.transport, Transport::Tcp);
+        assert_eq!(parsed.source_port, 51234);
+        assert_eq!(parsed.destination_port, 443);
+        assert_eq!(parsed.tcp_flags, TCP_FLAG_SYN);
+    }
+
+    #[test]
+    fn walks_the_extension_headers_rather_than_assuming_none() {
+        // IPv6 puts optional headers between the fixed header and the
+        // transport one, so the ports are not at a fixed offset. Reading
+        // at 40 regardless would find option bytes, produce a plausible
+        // port, attribute the flow to whatever process happened to own
+        // it -- and, for a selected app, leave the real flow leaking.
+        for chain in [
+            vec![(IPPROTO_HOPOPTS, 8)],
+            vec![(IPPROTO_DSTOPTS, 16)],
+            vec![(IPPROTO_ROUTING, 24)],
+            vec![(IPPROTO_AH, 12)],
+            vec![(IPPROTO_HOPOPTS, 8), (IPPROTO_DSTOPTS, 8)],
+            vec![(IPPROTO_FRAGMENT, 8)],
+        ] {
+            let packet = ipv6_packet("2001:db8::2", 443, &chain);
+            let parsed = parse_v6(&packet).unwrap_or_else(|| panic!("{chain:?} should parse"));
+            assert_eq!(parsed.destination_port, 443, "{chain:?}");
+            assert_eq!(parsed.source_port, 51234, "{chain:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_an_ipv6_packet_whose_ports_it_cannot_find() {
+        // Each of these has to come back None so the caller falls to the
+        // unknown-owner rule instead of inventing an attribution. A
+        // wrong one here either leaks a selected app's traffic or stops
+        // an unselected app's, and both are worse than "cannot tell".
+        assert!(parse_v6(&[]).is_none());
+        assert!(parse_v6(&[0x60; 20]).is_none(), "shorter than a v6 header");
+
+        let mut truncated = ipv6_packet("2001:db8::2", 443, &[]);
+        truncated.truncate(IPV6_HEADER + 6);
+        assert!(parse_v6(&truncated).is_none(), "the transport header is incomplete");
+
+        // A later fragment carries no ports at all.
+        let mut later_fragment = ipv6_packet("2001:db8::2", 443, &[(IPPROTO_FRAGMENT, 8)]);
+        later_fragment[IPV6_HEADER + 2..IPV6_HEADER + 4]
+            .copy_from_slice(&(185u16 << 3).to_be_bytes());
+        assert!(parse_v6(&later_fragment).is_none(), "a later fragment has no ports");
+
+        // A chain long enough to be an attack rather than a packet.
+        let endless = vec![(IPPROTO_DSTOPTS, 8); MAX_EXTENSION_HEADERS + 2];
+        assert!(parse_v6(&ipv6_packet("2001:db8::2", 443, &endless)).is_none());
+
+        // IPv4 must not be answered by the IPv6 reader.
+        assert!(parse_v6(&ipv4_syn(Ipv4Addr::new(1, 1, 1, 1), 443)).is_none());
+    }
+
+    /// The live rig the module comment's before/after numbers came from.
+    ///
+    /// Ignored because it needs three things no unit test has:
+    /// administrator rights to open a WinDivert handle, a machine with
+    /// working IPv6, and real traffic. Everything it runs is the
+    /// production path -- the real filter, the real relays, the real
+    /// owner lookup -- with only the tunnel absent: `TunnelInterface`
+    /// is left cleared, which is the fail-open case the proxy already
+    /// has, so a redirected IPv4 flow is carried straight out instead of
+    /// through a node. That is deliberate. It keeps a live node out of
+    /// the loop while still exercising interception, attribution,
+    /// rewriting and relaying, which are the parts this change touches.
+    /// It proves nothing about encryption and is not evidence about it.
+    ///
+    /// Told where it is by environment, so one binary runs on any rig:
+    ///
+    /// ```text
+    /// NEOX_LOCAL_ADDR  this machine's address on the physical link
+    /// NEOX_LOCAL_IF    that link's interface index
+    /// NEOX_V6_URL      a global-unicast IPv6 URL that must be blocked
+    /// NEOX_V4_URL      a URL that must keep working through the relay
+    /// NEOX_DUAL_URL    a name with both an A and a blocked AAAA record
+    /// ```
+    #[test]
+    #[ignore]
+    fn live_custom_mode_blocks_ipv6_and_keeps_carrying_ipv4() {
+        use super::super::{firewall, proxy};
+        use neoconnect_ipc::SplitTunnelMode;
+        use std::process::Command;
+        use std::sync::RwLock;
+
+        let env = |key: &str| std::env::var(key).unwrap_or_else(|_| panic!("{key} must be set"));
+        let local_addr: Ipv4Addr = env("NEOX_LOCAL_ADDR").parse().expect("NEOX_LOCAL_ADDR");
+        let local_interface: u32 = env("NEOX_LOCAL_IF").parse().expect("NEOX_LOCAL_IF");
+        let curl = r"C:\Windows\System32\curl.exe";
+
+        let nat = Arc::new(Nat::new());
+        // Index zero is the fail-open signal, so this is a relay with no
+        // tunnel under it rather than one pointed at a broken tunnel.
+        let tunnel = Arc::new(proxy::TunnelInterface::new(0, Ipv4Addr::UNSPECIFIED));
+        let relays = proxy::start(nat.clone(), tunnel).expect("relays must start");
+        let mut allowance =
+            firewall::Allowance::install(&[local_addr], relays.tcp_port, relays.udp_port)
+                .expect("the inbound allowance must install");
+        firewall::wait_until_reachable(local_addr, relays.tcp_port).expect("relay must be up");
+
+        let selection: SharedSelection = Arc::new(RwLock::new(Selection::new(
+            [curl.to_string()],
+            SplitTunnelMode::OnlySelected,
+        )));
+        let own = std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let running = start(
+            Redirect {
+                local_addr,
+                node_addr: Ipv4Addr::new(203, 0, 113, 7),
+                tcp_proxy_port: relays.tcp_port,
+                udp_proxy_port: relays.udp_port,
+                own_images: vec![own],
+                own_sockets: relays.own_sockets.clone(),
+                local_interface,
+                // Left off on purpose. Carrying DNS points every lookup
+                // on the machine at a resolver reached through a tunnel
+                // that does not exist here, which would take name
+                // resolution out for the whole rig for the length of
+                // the test.
+                carry_dns: false,
+                dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
+            },
+            nat,
+            selection,
+        )
+        .expect("the redirect loop must start");
+
+        let fetch = |url: String, family: &str| -> (bool, Duration) {
+            let began = std::time::Instant::now();
+            let out = Command::new(curl)
+                .args([family, "-s", "-o", "NUL", "--max-time", "8", &url])
+                .output()
+                .expect("curl must run");
+            (out.status.success(), began.elapsed())
+        };
+
+        let (v6_reached, _) = fetch(env("NEOX_V6_URL"), "-6");
+        let (v4_reached, _) = fetch(env("NEOX_V4_URL"), "-4");
+        let (dual_reached, dual_took) = fetch(env("NEOX_DUAL_URL"), "-s");
+
+        let summary = running.stats.summary();
+        let blocked = running.stats.blocked_v6.load(Ordering::Relaxed);
+        running.stop();
+        relays.stop();
+        allowance.remove();
+
+        println!("{summary}");
+        println!("v6 reached={v6_reached} v4 reached={v4_reached} dual={dual_reached} in {dual_took:?}");
+
+        assert!(blocked > 0, "IPv6 from the selected app must have been dropped: {summary}");
+        assert!(!v6_reached, "the IPv6-only destination must not have been reached");
+        assert!(v4_reached, "IPv4 must still be carried: {summary}");
+        // The point of blocking rather than carrying: a destination
+        // that has both records is still reached, over IPv4.
+        assert!(dual_reached, "a dual-stack destination must still connect over IPv4");
     }
 
     #[test]

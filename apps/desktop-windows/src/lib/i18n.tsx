@@ -185,7 +185,8 @@ const en = {
   "settings.passwordChanged": "Password changed. Any other devices have been signed out.",
   "settings.changing": "Changing...",
   "settings.tooShort": "At least 8 characters.",
-  "dash.customActive": "Custom mode: only your chosen apps are going through the VPN.",
+  "dash.customActive":
+    "Custom mode: only your chosen apps are going through the VPN. Their IPv6 is blocked rather than sent outside it, so an IPv6-only site will not open for them.",
   "voucher.title": "Have a voucher?",
   "voucher.subtitle": "Enter a code to activate a plan without paying.",
   "voucher.placeholder": "Enter your code",
@@ -511,7 +512,8 @@ const fa: Record<TranslationKey, string> = {
   "settings.passwordChanged": "رمز عبور تغییر کرد. دستگاه‌های دیگر از حساب خارج شدند.",
   "settings.changing": "در حال تغییر...",
   "settings.tooShort": "حداقل ۸ کاراکتر.",
-  "dash.customActive": "حالت سفارشی: فقط برنامه‌های انتخابی شما از VPN عبور می‌کنند.",
+  "dash.customActive":
+    "حالت سفارشی: فقط برنامه‌های انتخابی شما از VPN عبور می‌کنند. IPv6 آن‌ها به جای ارسال بیرون از تونل مسدود می‌شود، بنابراین سایتی که فقط IPv6 دارد برایشان باز نمی‌شود.",
   "voucher.title": "کد هدیه دارید؟",
   "voucher.subtitle": "با وارد کردن کد، بدون پرداخت اشتراک فعال کنید.",
   "voucher.placeholder": "کد خود را وارد کنید",

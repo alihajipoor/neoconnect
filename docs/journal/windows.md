@@ -5660,3 +5660,118 @@ fleet decision, still deliberately not taken here.
 do, finland1 does not. nginx arrives for the loopback fallback site and
 Ubuntu's default vhost comes with it. It is a fleet-wide fingerprint of
 its own and nobody put it there on purpose.
+
+---
+
+## 2026-08-22 — Custom mode leaked every IPv6 packet, and the full tunnel still does
+
+**Status:** Custom-mode leak fixed and measured, PR #29; the full-tunnel
+case is **inferred, not measured** — see below before acting on it
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/`{`redirect.rs`,`owner.rs`,`divert.rs`},
+`apps/desktop-windows/src/lib/i18n.tsx`
+
+Custom mode's packet loop parses IPv4 only. Nobody had ever run it on a
+machine with IPv6, so nobody had seen what that does. It leaks —
+completely and silently.
+
+Reproduced on `Neoxify-Test2` (bridged, so it takes the router's
+`fd00::/64` RA) with a global-unicast prefix routed off-box for good
+measure. One 22-second window:
+
+```
+PRODUCTION FILTER delivered: ipv4=25 ipv6=0
+ALL-IPV6 observer saw:       ipv4=0  ipv6=8
+```
+
+Eight IPv6 packets left the machine and the filter handed over none. A
+listener on this box caught the payload: `GET /BEFORE-ula HTTP/1.1`,
+plaintext, from the guest's own address, while the app said Custom mode
+was on.
+
+**Fixed by blocking, not carrying.** Carrying is not reachable from the
+client: the tunnel adapter has no IPv6 address (`Address = 10.77.0.8/32`,
+`AllowedIPs = 0.0.0.0/0`) and every route the client installs is v4, so
+there is nowhere to send a v6 packet. Giving it one means the node hands
+out v6 addressing — **server-side work, not started, not decided.** If
+anyone picks that up, that is the blocker to solve first; the client-side
+parts (v6 NAT table, v6 rewrite, `IPV6_UNICAST_IF` with its host-order
+index) are ordinary work behind it.
+
+### The thing that is NOT fixed and is bigger — and is NOT proven
+
+**Read this line before repeating the claim anywhere: nothing in this
+section was measured.** It is a reading of the source, and the whole
+reason the Custom-mode leak above went unnoticed is that reading the
+source is exactly what everyone had done.
+
+What *is* established, by grep and by opening the files:
+
+- `engines/routing.rs` contains zero occurrences of `ipv6`/`Ipv6`. The
+  full tunnel installs `0.0.0.0/1` + `128.0.0.0/1`; the passive route is
+  a real `0.0.0.0/0`. All IPv4.
+- `engines/wireguard.rs` sets `allowed_ips: "0.0.0.0/0"`, and the tunnel
+  address is a v4 `/32`, so the adapter has no IPv6 address at all.
+- Nothing in the client runs `netsh interface ipv6` or installs a `::/0`.
+
+What that **suggests**, and what nobody has yet seen happen: on a
+dual-stack network an ordinary connect — Custom mode entirely off —
+leaves IPv6 going out in the clear. That is the default path, so it
+would affect every customer rather than only Custom-mode users.
+
+What would settle it: connect normally on a rig with working IPv6 and
+watch whether v6 still leaves the physical adapter — a WinDivert sniff
+handle on `outbound and ipv6 and (tcp or udp)`, plus a listener on
+another machine to confirm plaintext arrival. It needs a real node, which
+is why it was not done here. **Measure it first; do not fix it on the
+strength of this note.**
+
+Note also that the fix above does **not** cover it. The block lives in
+the redirect packet loop, which only runs while Custom mode is on. Both
+Custom-mode directions (`OnlySelected` and `AllExcept`) are covered
+because both go through that loop. A plain connect does not.
+
+### Techniques worth reusing
+
+- **`WinDivertHelperEvalFilter` answers "what is this filter blind to".**
+  A packet the driver never delivers leaves no trace, so "we saw none"
+  and "none were sent" are indistinguishable in the counters — which is
+  exactly why this went years unnoticed. The evaluator is userspace and
+  needs no driver and no admin, so it turns that question into a unit
+  test. `divert::eval_filter`, test-only.
+- **`ip` in a WinDivert filter means IPv4 only.** `ipv6` is a separate
+  keyword. Any filter here that opens `outbound and ip and ...` is
+  covering half the traffic and saying nothing about it.
+- **To prove a packet was *dropped*, sniff below the loop.** A second
+  WinDivert handle at priority -1000 sees only what the real handle let
+  past. Before: it counted the escaping packets. After: zero. The
+  service's own counter could not have shown that — it reports intent.
+- **Scope was proven with the same binary twice.** `curl.exe` selected,
+  a copy at another path not: 21 v6 packets in, 5 blocked, 16 out, same
+  destination on both sides. Cheaper and far more convincing than
+  reasoning about `should_tunnel`.
+
+### Rig gotchas that cost time
+
+- **A test binary built for the VM needs `+crt-static`.** The VM has no
+  VC++ redist; without it every exe dies with `0xC0000135`
+  (`STATUS_DLL_NOT_FOUND`) and looks like a missing `WinDivert.dll`.
+- **`cargo build` fails in the scratchpad for the same MAX_PATH reason
+  the panel build does** — `LNK1104: cannot open file ...`. Build from a
+  short path (`C:\Users\aliha\v6p`).
+- **`keyboardputstring` lands in the Start *search box* if the menu is
+  not where you think**, and Enter then opens a Bing search in Edge
+  rather than running anything. Screenshot between the keystrokes; do
+  not fire the whole sequence blind.
+- **Opening a WinDivert handle from a temp directory registers the
+  driver service pointing at that path.** Deleting the directory
+  afterwards leaves a `WinDivert` service whose `ImagePath` no longer
+  exists, which would break the real client's Custom mode on that box.
+  `sc delete WinDivert` before removing the files — done here, VM
+  verified clean and powered off.
+
+The customer-facing line changed with it: `dash.customActive` now says
+IPv6 is blocked rather than sent outside the tunnel. Deliberately *not*
+in `Stats::complaint()` — that counter climbs from the first second on
+any dual-stack network, so a complaint keyed on it would be permanently
+lit, and this codebase already decided (see `WARMUP`) that a standing
+false alarm is worse than silence.
