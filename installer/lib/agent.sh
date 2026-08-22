@@ -975,8 +975,21 @@ install_xray() {
       local trojan_suggested
       trojan_suggested="$(suggest_plausible_tls_port "${vless_tls_port:-}")"
       [[ -n "$trojan_suggested" ]] && echo "  $trojan_suggested is free here and is an ordinary HTTPS port."
-      read -r -p "Port for Trojan over TLS, or 'skip' [skip]: " trojan_port
-      trojan_port="${trojan_port:-skip}"
+      # Defaults to installing it, like every other engine in this
+      # sequence. It used to default to 'skip', so an operator who
+      # pressed Enter through the install got a node with two fewer
+      # transports and nothing anywhere said so -- and a transport that
+      # was never installed is one a filtered customer cannot fall back
+      # to. Skipping is still one word away; it just has to be chosen
+      # now rather than obtained by not reading.
+      if [[ -n "$trojan_suggested" ]]; then
+        read -r -p "Port for Trojan over TLS, or 'skip' [$trojan_suggested]: " trojan_port
+        trojan_port="${trojan_port:-$trojan_suggested}"
+      else
+        echo "  No free plausible HTTPS port was found here, so this one has to be named by hand."
+        read -r -p "Port for Trojan over TLS, or 'skip' [skip]: " trojan_port
+        trojan_port="${trojan_port:-skip}"
+      fi
       [[ "${trojan_port,,}" == "skip" ]] && trojan_port=""
     fi
 
@@ -1032,8 +1045,17 @@ install_xray() {
     local ss_suggested
     ss_suggested="$(suggest_free_port)"
     echo "  $ss_suggested is free on this box if you want one picked for you."
-    read -r -p "Port for Shadowsocks 2022, or 'skip' [skip]: " ss_port
-    ss_port="${ss_port:-skip}"
+    # Installed by default, for the same reason as Trojan above -- and
+    # more so: this is the transport that survives where the
+    # certificate-based ports do not, so it is the last one that should
+    # be dropped by an operator who simply held Enter.
+    if [[ -n "$ss_suggested" ]]; then
+      read -r -p "Port for Shadowsocks 2022, or 'skip' [$ss_suggested]: " ss_port
+      ss_port="${ss_port:-$ss_suggested}"
+    else
+      read -r -p "Port for Shadowsocks 2022, or 'skip' [skip]: " ss_port
+      ss_port="${ss_port:-skip}"
+    fi
     if [[ "${ss_port,,}" == "skip" ]]; then
       ss_port=""
     else

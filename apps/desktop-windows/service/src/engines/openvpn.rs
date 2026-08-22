@@ -42,6 +42,27 @@ use crate::adapters;
 const CONFIG_FILE: &str = "neoconnect.ovpn";
 const LOG_FILE: &str = "openvpn.log";
 
+/// The largest encapsulated packet this client will put on the wire,
+/// counted the way `mssfix ... mtu` counts it: outer IP header included.
+///
+/// Not 1500. A tunnel sized for the link it is measured on is sized for
+/// a lab; the links this product exists to work on are narrower than
+/// that. 1400 is the value a home PPPoE or mobile path routinely comes
+/// out at, and every path wider than 1400 carries a 1400-byte packet
+/// perfectly well -- so this is chosen to be right on the bad link
+/// rather than optimal on the good one.
+///
+/// The cost of being wrong in the safe direction is about 7% more
+/// per-packet header overhead. The cost of being wrong in the other
+/// direction is a tunnel that says "connected" and loads nothing.
+const LINK_BUDGET: u16 = 1400;
+
+/// What OpenVPN adds around each tunnelled packet on UDP with
+/// AES-256-GCM: 20 IPv4 + 8 UDP + 4 opcode/peer-id + 4 packet id +
+/// 16 GCM tag. Subtracted from the budget to get the tun's own MTU, so
+/// a full-size packet from the tun still fits inside it.
+const UDP_ENCAP_OVERHEAD: u16 = 52;
+
 /// Name of the Wintun adapter OpenVPN binds to.
 ///
 /// Distinct from the one Xray creates ("neoconnect0"), so the two
@@ -130,9 +151,57 @@ fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     // as running a test.
     let dns = if passive { "" } else { "block-outside-dns\n" };
 
+    // The tunnel's MTU, pinned, and the server's pushed value refused.
+    //
+    // This is the failure `MTU = 1420` in wireguard.rs already exists to
+    // prevent, and OpenVPN had no equivalent at all. No node config sets
+    // `tun-mtu`, so OpenVPN 2.6 pushes its own default of 1500 and the
+    // client's tun comes up exactly as wide as the link underneath it.
+    // Every full-size packet is then over the path MTU the moment
+    // OpenVPN's ~52 bytes of UDP encapsulation go on -- and OpenVPN sets
+    // DF on those datagrams, so the network drops them rather than
+    // fragmenting.
+    //
+    // What makes it worth pinning rather than leaving to the network is
+    // that the failure is size-dependent, not on/off. The handshake
+    // completes, the adapter gets its address, ICMP crosses, DNS
+    // answers -- and then anything carrying real data disappears. The
+    // app is correctly reporting a tunnel that is up, and the customer
+    // is looking at a browser that will not load a page.
+    //
+    // The three lines are one fix, and each covers a direction the
+    // others cannot:
+    //
+    //   - `tun-mtu` bounds what this machine *sends*. The local stack
+    //     will not put a packet larger than the tun's MTU into it, so
+    //     this is what keeps our own uploads inside the budget.
+    //   - `mssfix` bounds what the far end sends *back*. It rewrites the
+    //     MSS option in the SYNs leaving through the tunnel, so remote
+    //     servers never offer us segments too big to survive the return
+    //     path. Set explicitly and in `mtu` units because its own
+    //     default of 1492 is derived from a 1500-byte link -- which is
+    //     the size that was black-holing.
+    //   - `pull-filter` is what makes either of them stick. Without it
+    //     the server's pushed 1500 simply replaces them.
+    //
+    // Non-TCP inner traffic is covered by `tun-mtu` outbound and, for
+    // the return path, by the fact that nothing we carry generates
+    // inbound datagrams larger than this: QUIC sizes its own at ~1200.
+    //
+    // Custom mode gets it too. The packets are the same size whether
+    // one application is on the tunnel or all of them.
+    let mtu = format!(
+        "pull-filter ignore \"tun-mtu\"\n\
+         tun-mtu {}\n\
+         mssfix {} mtu\n",
+        LINK_BUDGET - UDP_ENCAP_OVERHEAD,
+        LINK_BUDGET,
+    );
+
     Ok(format!(
         "client\n\
          {routing}\
+         {mtu}\
          {dns}\
          dev tun\n\
          windows-driver wintun\n\
@@ -228,6 +297,55 @@ mod tests {
         // silently becomes a full tunnel.
         assert!(build_config(&profile(), true).unwrap().contains("route-nopull"));
         assert!(!build_config(&profile(), false).unwrap().contains("route-nopull"));
+    }
+
+    #[test]
+    fn every_config_pins_the_mtu_and_refuses_the_pushed_one() {
+        // The three lines are one fix and only work together: pinning
+        // tun-mtu without the pull-filter is silently undone by the
+        // server's pushed 1500, and lowering tun-mtu without mssfix
+        // leaves TCP clamped at OpenVPN's own 1492 default -- which is
+        // derived from a 1500-byte link and is the size that was
+        // black-holing in the first place.
+        //
+        // Asserted for passive as well: a packet is the same size
+        // whether one application is on the tunnel or all of them, and
+        // Custom mode is where a customer is most likely to read the
+        // failure as "the app I selected is broken".
+        for passive in [false, true] {
+            let conf = build_config(&profile(), passive).unwrap();
+            assert!(
+                conf.contains("pull-filter ignore \"tun-mtu\""),
+                "passive={passive}: the server's pushed tun-mtu must be refused"
+            );
+            assert!(
+                conf.contains("tun-mtu 1348"),
+                "passive={passive}: tun-mtu must be pinned below the link budget"
+            );
+            assert!(
+                conf.contains("mssfix 1400 mtu"),
+                "passive={passive}: TCP must be clamped to the same budget, in the same units"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pinned_mtu_leaves_room_for_our_own_encapsulation() {
+        // The arithmetic, rather than the two literals above, so a
+        // future change to the budget cannot quietly produce a tun wider
+        // than the packets it is supposed to fit inside.
+        let conf = build_config(&profile(), false).unwrap();
+        let tun: u16 = conf
+            .lines()
+            .find_map(|l| l.strip_prefix("tun-mtu "))
+            .expect("tun-mtu is set")
+            .parse()
+            .expect("tun-mtu is a number");
+        assert!(
+            tun + UDP_ENCAP_OVERHEAD <= LINK_BUDGET,
+            "a full-size packet from the tun ({tun}) plus encapsulation \
+             ({UDP_ENCAP_OVERHEAD}) must fit the budget ({LINK_BUDGET})"
+        );
     }
 
     #[test]
