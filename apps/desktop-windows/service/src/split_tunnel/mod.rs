@@ -518,6 +518,7 @@ impl SplitTunnel {
             tcp_proxy_port: relays.tcp_port,
             udp_proxy_port: relays.udp_port,
             own_images: own_images(),
+            own_sockets: relays.own_sockets.clone(),
             dns_resolver: CUSTOM_MODE_RESOLVER,
             // A full tunnel already resolves through the VPN, so there
             // is nothing to rescue and redirecting lookups would push

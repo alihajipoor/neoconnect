@@ -316,11 +316,35 @@ async fn call(request: &Request) -> Result<Response, String> {
         .await
         .map_err(|e| format!("could not send request to the background service: {e}"))?;
 
+    // Bounded, because an unbounded read here is a hang with no way out.
+    //
+    // The service accepting the connection is not a promise that it will
+    // answer: it handles one request at a time on purpose, so a reply can
+    // be waiting behind something slow, and a wedged handler means no
+    // reply at all. Without a deadline that leaves this future pending
+    // for the life of the process, and every piece of UI waiting on it
+    // pending with it -- which is exactly what "the app is stuck on
+    // Disconnecting and I can't click anything" is.
+    //
+    // Long enough that a connect, which tears an engine down and brings
+    // another up, still answers inside it. Short enough that a customer
+    // gets an error they can act on rather than a spinner that never
+    // ends.
+    const REPLY_TIMEOUT: Duration = Duration::from_secs(45);
+
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .await
-        .map_err(|e| format!("could not read the background service's reply: {e}"))?;
+    match tokio::time::timeout(REPLY_TIMEOUT, reader.read_line(&mut line)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            return Err(format!("could not read the background service's reply: {e}"))
+        }
+        Err(_) => {
+            return Err(format!(
+                "The Neoxify background service did not answer within {}s.                  It may be stuck -- restarting the app usually clears it.",
+                REPLY_TIMEOUT.as_secs()
+            ))
+        }
+    }
 
     serde_json::from_str(line.trim())
         .map_err(|e| format!("could not decode the background service's reply: {e}"))

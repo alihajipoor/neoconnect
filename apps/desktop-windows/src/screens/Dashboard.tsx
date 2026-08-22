@@ -15,6 +15,7 @@ import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cac
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
+import { isServiceTimeout, withTimeout } from "../lib/service-call";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
@@ -49,6 +50,19 @@ type VpnStatus = {
     | { state: "unknown" };
 };
 
+/** Every call the screen makes to the service goes through one of these
+ * two, never through a bare invoke.
+ *
+ * A call that can hang forever is a state that can stay on screen
+ * forever -- see service-call for the teardown that proved it. */
+function serviceStatus(): Promise<VpnStatus> {
+  return withTimeout(invoke<VpnStatus>("vpn_status"), "vpn_status");
+}
+
+function serviceDisconnect(): Promise<void> {
+  return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect");
+}
+
 /** How often to re-check a live tunnel.
  *
  * WireGuard rehandshakes roughly every two minutes, so this is frequent
@@ -73,6 +87,63 @@ const MID_SESSION_STRIKES = 2;
  * burns battery and makes the real problem harder to see. */
 const MID_SESSION_COOLDOWN_MS = 120_000;
 
+/** Consecutive unanswered polls before a live-looking connection is
+ * downgraded to "we don't know".
+ *
+ * One miss holds the last answer, because failing to ask is not the
+ * same as learning the tunnel is down. But an answer nothing has been
+ * able to confirm for a minute is no longer an observation, and a green
+ * "You're protected" that the app cannot currently back is the exact
+ * shape of claim this screen exists not to make. */
+const STATUS_MISSES_BEFORE_UNKNOWN = 4;
+
+/** How long a state that is supposed to be passing through may stand
+ * before the app stops believing its own bookkeeping and asks the
+ * service instead.
+ *
+ * Transient states describe an operation, not the tunnel, and both of
+ * them outlived their operation tonight: "Disconnecting..." stayed on
+ * screen after the engines and adapters were gone, and a connect
+ * spinner survived every press that was supposed to end it. Whatever
+ * was driving the state is not always going to arrive, so each one gets
+ * a deadline and the service settles it.
+ *
+ * Also the retry clock for "unknown": that state is not a resting place
+ * either, and the service is usually back within seconds. */
+const TRANSIENT_RECHECK_MS: Partial<Record<ConnectionState, number>> = {
+  // Every one of these is longer than SERVICE_CALL_TIMEOUT_MS on
+  // purpose: a shorter one would start a second question before the
+  // first had been given up on, and against a service that has stopped
+  // answering they would simply accumulate.
+  disconnecting: 10_000,
+  connecting: 30_000,
+  verifying: 30_000,
+  unknown: 8_000,
+};
+
+/** How long to keep asking after a teardown before believing a status
+ * that still reports a tunnel. See confirmTornDown -- Windows removes
+ * the adapter after the service has acknowledged the request, so the
+ * first answer is routinely a stale "up". */
+const TEARDOWN_SETTLE_MS = 6_000;
+const TEARDOWN_POLL_MS = 1_000;
+
+/** After this, a ladder pass is presumed never to return.
+ *
+ * A boolean guard was enough while every step was guaranteed to finish.
+ * It is not once a step can hang forever: the pass holding the guard
+ * may never reach its own `finally`, and then every press of Connect
+ * reads as "cancel the pass in progress" and the app can never connect
+ * again. That is the third press that froze the window.
+ *
+ * Sized off the ladder's own worst case rather than picked: four
+ * rejected candidates at roughly ten seconds each, plus a last one
+ * given the patient budgets (six to settle, thirty to prove egress,
+ * eight to confirm reachability), lands near ninety seconds. Two and a
+ * half minutes is comfortably past that, so no real pass is ever
+ * declared dead, and a wedged one stops holding the app hostage. */
+const LADDER_MAX_MS = 150_000;
+
 /** How long to give a fresh tunnel to prove itself before calling it
  * degraded.
  *
@@ -96,7 +167,7 @@ async function confirmReachable(): Promise<ConnectionState> {
   while (Date.now() < deadline) {
     let status: VpnStatus;
     try {
-      status = await invoke<VpnStatus>("vpn_status");
+      status = await serviceStatus();
     } catch {
       // The service being briefly unreachable is not evidence about the
       // tunnel, so keep waiting rather than concluding anything.
@@ -376,10 +447,21 @@ export function Dashboard({
   } | null>(null);
   /** Guards the ladder against running twice at once. The health poll
    * and the Connect button can both start one, and two of them
-   * interleaving would have each tearing down the other's engine. */
+   * interleaving would have each tearing down the other's engine.
+   *
+   * Read through `ladderInFlight`, never directly: the guard is held for
+   * as long as a pass could still plausibly be alive, not forever. */
   const ladderRunningRef = useRef(false);
+  /** When the pass holding the guard began, so the guard can expire. */
+  const ladderStartedAtRef = useRef(0);
+  /** Which pass is the current one. A pass that outlived its deadline
+   * has been superseded, and must not be allowed to clear a newer
+   * pass's guard or write state on its way out. */
+  const ladderGenerationRef = useRef(0);
   /** Consecutive polls that found a live tunnel not carrying traffic. */
   const strikesRef = useRef(0);
+  /** Consecutive polls the service did not answer at all. */
+  const statusMissesRef = useRef(0);
   /** Earliest time an automatic attempt may run again. */
   const cooldownUntilRef = useRef(0);
   /** Set when the customer asks to stop a ladder in progress. Checked
@@ -421,6 +503,103 @@ export function Dashboard({
    * exactly the kind of quiet wrongness the rest of this screen exists
    * to avoid. */
   const [offlineSince, setOfflineSince] = useState<number | null>(null);
+
+  /** Whether a ladder pass could still be running.
+   *
+   * Time-limited rather than a plain flag, because a pass can hang on a
+   * service call that never returns, and a guard that can never be
+   * released turns every later press into a cancel for a pass that is
+   * not going to end. Letting a stale guard expire risks a stalled pass
+   * waking up beside a newer one; leaving it set guaranteed an app the
+   * customer had to kill. The generation check on the way out is what
+   * keeps the first risk from costing anything visible.
+   */
+  function ladderInFlight(): boolean {
+    return ladderRunningRef.current && Date.now() - ladderStartedAtRef.current < LADDER_MAX_MS;
+  }
+
+  /** What the service says, without putting it on screen.
+   *
+   * Separate from `syncFromService` so a caller waiting for something to
+   * settle can look more than once without showing the customer each
+   * intermediate answer.
+   */
+  async function readServiceState(): Promise<ConnectionState> {
+    let status: VpnStatus;
+    try {
+      status = await serviceStatus();
+    } catch {
+      // Not answered is not the same as not connected, and saying
+      // "You're not protected" here is a lie in the one direction that
+      // still gets somebody hurt: they believe it, and act as though
+      // their traffic is their own.
+      //
+      // Seen exactly that way -- the app could not reach the service, so
+      // it showed a Connect button and "You're not protected", while the
+      // browser beside it was going out through the node's exit address.
+      // Failing to ask the question is reported as not knowing the
+      // answer.
+      return "unknown";
+    }
+
+    statusMissesRef.current = 0;
+    setSplitTunnelActive(Boolean(status.splitTunnelActive));
+    setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+    return stateFromStatus(status);
+  }
+
+  /** Replaces what the screen believes with what the service says.
+   *
+   * The single place a connection state is allowed to come from. Every
+   * wrong state shown tonight was the UI concluding something on its
+   * own -- a Connect button over a live tunnel, a "Disconnecting..."
+   * that outlived the engine it was tearing down -- and the service knew
+   * better in all three cases. It always does: it is the thing that
+   * starts and stops the engines.
+   *
+   * Returns what it settled on so a caller can act on the answer rather
+   * than on the state it was hoping for.
+   */
+  async function syncFromService(): Promise<ConnectionState> {
+    const settled = await readServiceState();
+    setConnectionState(settled);
+    // The clock is only honest while something is up.
+    if (settled === "disconnected") setConnectedAt(null);
+    return settled;
+  }
+
+  /** Waits for a teardown to actually be gone before reporting on it.
+   *
+   * `vpn_disconnect` returns when the service has asked for the
+   * teardown, not when Windows has finished it -- the tunnel service and
+   * its adapter go away asynchronously, which is the same lag
+   * settleAndCaptureBaseline exists for. For a second or two afterwards
+   * the service's status, which asks the OS rather than remembering,
+   * still answers "up". Publishing that first answer would flip the
+   * screen back to "You're protected" the instant someone pressed
+   * Disconnect and make a teardown that worked look like one that
+   * failed.
+   *
+   * So it is only the settled answer that reaches the screen -- and a
+   * tunnel that really is still installed after the wait still gets
+   * reported, which is the case that must not be swallowed.
+   */
+  async function confirmTornDown(): Promise<ConnectionState> {
+    const deadline = Date.now() + TEARDOWN_SETTLE_MS;
+    for (;;) {
+      const state = await readServiceState();
+      if (state !== "connected" && state !== "degraded") {
+        setConnectionState(state);
+        if (state === "disconnected") setConnectedAt(null);
+        return state;
+      }
+      if (Date.now() >= deadline) {
+        setConnectionState(state);
+        return state;
+      }
+      await new Promise((r) => setTimeout(r, TEARDOWN_POLL_MS));
+    }
+  }
 
   // The stored pin is read *before* the first load, and handed to it
   // directly rather than left to arrive via state.
@@ -550,35 +729,18 @@ export function Dashboard({
 
     // The tunnel outlives the app: the helper service keeps it up if the
     // window is closed, so on open the UI has to adopt whatever is
-    // actually running rather than assuming disconnected. Failure here is
-    // deliberately silent -- it just means "show disconnected", and the
-    // real error surfaces on the next Connect attempt with context.
-    let adopted: ConnectionState | null = null;
-    try {
-      const status = await invoke<VpnStatus>("vpn_status");
-      adopted = stateFromStatus(status);
-      setConnectionState(adopted);
-      setSplitTunnelActive(Boolean(status.splitTunnelActive));
-      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
-    } catch {
-      // Not answered is not the same as not connected, and saying
-      // "You're not protected" here is a lie in the one direction that
-      // still gets somebody hurt: they believe it, and act as though
-      // their traffic is their own.
-      //
-      // Seen exactly that way -- the app could not reach its API, so it
-      // showed a Connect button and "You're not protected", while the
-      // browser beside it was going out through the VPN. Failing to ask
-      // the question is reported as not knowing the answer.
-      setConnectionState((current) => (current === "connected" ? "connected" : current));
-    }
+    // actually running rather than assuming disconnected. A pass already
+    // under way owns the state and must not be overwritten by a reload
+    // of the account data -- and takes its own baseline besides, so null
+    // here leaves both alone.
+    const adopted = ladderInFlight() ? null : await syncFromService();
 
     // Only meaningful while nothing is up: taken through a live tunnel
     // this would record the exit address as the "before" value and every
     // later comparison would wrongly read as a leak.
-    // Only when the service actually said so. Taken while a tunnel may
-    // still be up, this would record the exit address as the "before"
-    // value and turn every later comparison into a false leak report.
+    // Only when the service actually said so -- "unknown" is not a no,
+    // and a baseline captured through a tunnel we simply could not ask
+    // about turns every later comparison into a false leak report.
     if (adopted === "disconnected") {
       baselineIpRef.current = await captureBaselineIp();
       setExitIp(null);
@@ -602,17 +764,30 @@ export function Dashboard({
     const id = setInterval(async () => {
       // A ladder already running will decide the state itself; polling
       // underneath it would fight over the same fields.
-      if (ladderRunningRef.current) return;
+      if (ladderInFlight()) return;
 
       let fromStatus: ConnectionState;
       try {
-        const status = await invoke<VpnStatus>("vpn_status");
+        const status = await serviceStatus();
         setSplitTunnelActive(Boolean(status.splitTunnelActive));
-      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+        setSplitTunnelProblem(status.splitTunnelProblem ?? null);
         fromStatus = stateFromStatus(status);
+        statusMissesRef.current = 0;
       } catch {
         // Failing to ask is not the same as learning the tunnel is
         // down, so the last known state stands and no strike is counted.
+        //
+        // It does not stand indefinitely, though. The last answer was an
+        // observation when it arrived; a minute of silence later it is
+        // only a memory, and leaving "You're protected" on screen on the
+        // strength of a memory is the same claim-without-evidence this
+        // screen exists to refuse. Several misses in a row means the
+        // honest answer has become "we don't know".
+        statusMissesRef.current += 1;
+        if (statusMissesRef.current >= STATUS_MISSES_BEFORE_UNKNOWN) {
+          setConnectionState("unknown");
+          strikesRef.current = 0;
+        }
         return;
       }
 
@@ -704,29 +879,115 @@ export function Dashboard({
     // avoid.
   }, [connectionState, splitTunnelActive]);
 
+  // Nothing that is only passing through gets to stay.
+  //
+  // "Connecting...", "Disconnecting..." and "Can't tell right now" all
+  // describe an operation or an absence of information, not the tunnel,
+  // and each of them is set by code that assumes something later will
+  // move it on. Twice tonight nothing did: a teardown whose reply never
+  // came left "Disconnecting..." on screen over a machine with no engine
+  // and no adapter, and a connect spinner outlived every press meant to
+  // end it. Neither state could be argued out of on its own terms,
+  // because neither was ever measured.
+  //
+  // So they expire. What replaces them comes from the service, which is
+  // the only party that knows -- including, when it will not answer,
+  // that we do not.
+  useEffect(() => {
+    const recheckMs = TRANSIENT_RECHECK_MS[connectionState];
+    if (recheckMs === undefined) return;
+
+    const id = setInterval(() => {
+      // A pass inside its own deadline owns the state, and overwriting
+      // it here would put "You're not protected" on screen in the middle
+      // of a connect that is still working.
+      if (ladderInFlight()) return;
+      void syncFromService();
+    }, recheckMs);
+
+    return () => clearInterval(id);
+  }, [connectionState]);
+
+  /** Every press does something, and no press can leave the app worse
+   * off than it found it.
+   *
+   * The rule the old version broke is that a press had to be one of two
+   * things -- connect or disconnect -- and anything else fell through to
+   * whichever branch happened to match. A second press during a pass
+   * ended in a "Disconnecting..." nothing would clear, and a third
+   * landed on a dead button. Every branch here now finishes by asking
+   * the service what is true, so the worst a redundant press can do is
+   * refresh the screen with the truth.
+   */
   async function handleConnectToggle() {
     if (!protocolUser) return;
     setConnectionError(null);
 
     // Pressing it during a pass means stop. The ladder checks this
     // between steps and unwinds itself; the tunnel teardown below is
-    // what actually makes the machine usable again.
-    if (ladderRunningRef.current) {
+    // what actually makes the machine usable again. Then the service is
+    // asked, because a cancelled pass is exactly the case where what
+    // the app was about to claim and what is actually installed have
+    // most reason to differ.
+    if (ladderInFlight()) {
       cancelRef.current = true;
       setConnectionState("disconnecting");
-      await invoke("vpn_disconnect").catch(() => undefined);
+      await serviceDisconnect().catch(() => undefined);
+      await confirmTornDown();
       return;
+    }
+
+    // A press while a teardown is already in flight must not start a
+    // connect on top of it, and must not do nothing either -- doing
+    // nothing is what made the window look frozen. Repeating the
+    // teardown is safe (the service tears down whatever is there, and
+    // there is nothing there twice), and the answer that follows is the
+    // way out of a "Disconnecting..." that has stopped describing
+    // anything.
+    if (connectionState === "disconnecting") {
+      await serviceDisconnect().catch(() => undefined);
+      await confirmTornDown();
+      return;
+    }
+
+    // Nothing is known, so this press buys an answer rather than an
+    // action. Connecting on the assumption that nothing is up would
+    // tear down a tunnel the customer may be relying on, and
+    // disconnecting on the same assumption is no better -- both are
+    // acting on a guess about the one thing the app has just admitted
+    // it cannot see. Once the service answers, the orb says what it is
+    // and the next press means what it says.
+    if (connectionState === "unknown") {
+      const settled = await syncFromService();
+      if (settled !== "disconnected") return;
     }
 
     if (connectionState === "connected" || connectionState === "degraded") {
       setConnectionState("disconnecting");
       try {
-        await invoke("vpn_disconnect");
-        setConnectionState("disconnected");
-        setConnectedAt(null);
+        await serviceDisconnect();
+        // Acknowledged is not the same as finished, so the state comes
+        // from what the service reports once the teardown has settled
+        // rather than from the acknowledgement. An engine that survives
+        // it is a thing the customer needs to know about, and setting
+        // "disconnected" here on the strength of an ack is exactly how
+        // that would be hidden.
+        await confirmTornDown();
       } catch (err) {
-        setConnectionError(classifyConnectionError(err));
-        setConnectionState("connected");
+        // A teardown that never answered is not a teardown that failed.
+        // The engines may well be gone -- that is how the app came to be
+        // stuck on "Disconnecting..." with nothing left running -- so
+        // the generic classifier's "Couldn't reach this server", which
+        // is where anything containing "timeout" lands, would assert
+        // something about the node that nothing here measured.
+        setConnectionError(
+          isServiceTimeout(err)
+            ? { kind: "serviceUnavailable", messageKey: "err.teardownStuck", detail: String(err) }
+            : classifyConnectionError(err),
+        );
+        // Not back to "connected": the tunnel may be down, may be up,
+        // and this press produced no evidence either way. Ask.
+        await confirmTornDown();
       }
       return;
     }
@@ -744,8 +1005,14 @@ export function Dashboard({
    * Duplicating it would mean two ladders drifting apart.
    */
   async function runLadder(): Promise<boolean> {
-    if (!protocolUser || ladderRunningRef.current) return false;
+    if (!protocolUser || ladderInFlight()) return false;
+    // Its own number, so a pass that stalled past its deadline can be
+    // told apart from the one that replaced it. Without that, a stalled
+    // pass finally waking would clear the live pass's guard and write
+    // its own long-obsolete verdict over the screen.
+    const generation = ++ladderGenerationRef.current;
     ladderRunningRef.current = true;
+    ladderStartedAtRef.current = Date.now();
     cancelRef.current = false;
     try {
       setConnectionState("connecting");
@@ -760,7 +1027,7 @@ export function Dashboard({
       // exactly that way when a live WireGuard tunnel was blocked.
       //
       // Harmless from the Connect button, where nothing is up.
-      await invoke("vpn_disconnect").catch(() => undefined);
+      await serviceDisconnect().catch(() => undefined);
 
       // Re-sent on every pass, not only when the setting changes. The
       // helper is a Windows service with its own lifetime: it can be
@@ -997,6 +1264,12 @@ export function Dashboard({
         if (!isLast) setConnectionState("connecting");
       }
 
+      // Superseded while it was running: a newer pass is now driving the
+      // engines, so this one leaves without tearing anything down and
+      // without a word on screen. Its verdict is about a tunnel that no
+      // longer exists.
+      if (ladderGenerationRef.current !== generation) return false;
+
       // The clock is set on each engine start, so a run that ultimately
       // failed leaves it running against nothing.
       setConnectedAt(null);
@@ -1015,11 +1288,25 @@ export function Dashboard({
           attempts: rungsFrom(attempts),
         });
       }
-      setConnectionState("disconnected");
-      await invoke("vpn_disconnect").catch(() => undefined);
+      setConnectionState("disconnecting");
+      await serviceDisconnect().catch(() => undefined);
+      // What the service says, not what this pass assumes. The
+      // assumption is usually right, and "disconnected" is still the one
+      // wrong answer that matters: a failed pass can leave an engine
+      // running -- that is why the teardown above exists -- and telling
+      // someone they are unprotected while an adapter is still carrying
+      // their traffic is the same lie in the other direction.
+      const left = await confirmTornDown();
+      // An engine that outlived the teardown is one this pass has just
+      // proven carries nothing. "Connected" would throw that proof away
+      // for the sake of a handshake; degraded is what was measured.
+      if (left === "connected") setConnectionState("degraded");
       return false;
     } finally {
-      ladderRunningRef.current = false;
+      // Only the pass that still owns the guard may release it. One that
+      // outlived its deadline has already been replaced, and clearing
+      // the guard here would unlock a newer pass that is still running.
+      if (ladderGenerationRef.current === generation) ladderRunningRef.current = false;
     }
   }
 
@@ -1090,7 +1377,12 @@ export function Dashboard({
             ? t("dash.verifying")
             : connectionState === "disconnecting"
               ? t("dash.disconnecting")
-              : t("dash.connect");
+              : // Named for what the press actually does. "Connect" here
+                // would promise an action the app is in no position to
+                // take, on a tunnel it cannot currently see.
+                connectionState === "unknown"
+                ? t("dash.recheck")
+                : t("dash.connect");
 
   if (loading) {
     return (
@@ -1158,7 +1450,13 @@ export function Dashboard({
                   ? "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]"
                   : connectionState === "degraded"
                     ? "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]"
-                  : "size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
+                    : connectionState === "unknown"
+                      ? // Neither lit nor plainly off: the dot is the one
+                        // thing read from across a room, and both of the
+                        // other two would answer a question the app
+                        // cannot answer.
+                        "size-1.5 shrink-0 animate-pulse rounded-full bg-muted-foreground"
+                      : "size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
               }
             />
             <span className="truncate">{me?.email}</span>
@@ -1192,16 +1490,26 @@ export function Dashboard({
                             ? "text-sm font-semibold text-success"
                             : connectionState === "degraded"
                               ? "text-sm font-semibold text-warning"
-                              : "text-sm font-semibold text-foreground"
+                              : connectionState === "unknown"
+                                ? "text-sm font-semibold text-muted-foreground"
+                                : "text-sm font-semibold text-foreground"
                         }
                       >
+                        {/* "Not protected" is a claim, and it only gets
+                            made where the service has actually said so.
+                            The unknown branch sits above the fallback for
+                            that reason: it is the case that used to fall
+                            through to it and tell a customer with a live
+                            tunnel that they had none. */}
                         {connectionState === "connected"
                           ? t("dash.protected")
                           : connectionState === "degraded"
                             ? t("dash.degraded")
                             : connectionState === "connecting" || connectionState === "verifying"
                               ? t("dash.verifying")
-                              : t("dash.notProtected")}
+                              : connectionState === "unknown"
+                                ? t("dash.unknown")
+                                : t("dash.notProtected")}
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
                         {connectionState === "connected"
@@ -1210,7 +1518,9 @@ export function Dashboard({
                             ? t("dash.degradedHint")
                             : connectionState === "connecting" || connectionState === "verifying"
                               ? t("dash.verifyingHint")
-                            : t("dash.notProtectedHint")}
+                              : connectionState === "unknown"
+                                ? t("dash.unknownHint")
+                                : t("dash.notProtectedHint")}
                       </p>
                       {/* The proof, shown rather than just acted on: this
                           is the address the outside world actually saw,
