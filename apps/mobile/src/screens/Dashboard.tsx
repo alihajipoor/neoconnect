@@ -1033,7 +1033,10 @@ export function Dashboard({
                   <MapPin className="size-4 text-primary" />
                   {t("dash.changeLocation")}
                 </span>
-                <ChevronRight className="size-4 text-muted-foreground" />
+                {/* Points the way the language reads. This screen is
+                    mobile's own copy, so the shared fix did not reach
+                    it. */}
+                <ChevronRight className="size-4 text-muted-foreground rtl:rotate-180" />
               </Button>
               {connectionState !== "disconnected" ? (
                 <p className="-mt-1 text-center text-xs text-muted-foreground">
