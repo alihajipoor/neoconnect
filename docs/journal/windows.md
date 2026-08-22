@@ -5332,3 +5332,194 @@ go green in a `.claude/worktree` — `@neoxify/panel#build` dies on
 `module-not-found` against deep `node_modules/.pnpm` paths, the Windows
 260-char limit. Confirmed pre-existing by stashing and rebuilding clean.
 Everything else, mobile included, passes. Linux CI is the gate.
+
+---
+
+## 2026-08-22 — All 34 routes, measured through a browser instead of curl
+
+**Status:** done; two fixes in PR #26, three findings left for the owner
+**Touches:** `apps/desktop-windows/service/src/engines/openvpn.rs`,
+`installer/lib/agent.sh`
+
+### Why the previous pass could not fail
+
+It ran `curl` against a 40-byte JSON endpoint and passed on all 26
+routes while browsers were unusable. This one drives a real headless
+Edge over the DevTools protocol on `Neoxify-Test2`, connecting through
+the app's own service (0.9.25, installed for this run — the rig was on
+0.9.21), full tunnel, and takes three things per route:
+
+- the exit IP **as a page renders it** — `ifconfig.me`, falling back to
+  `checkip.amazonaws.com`;
+- `en.wikipedia.org/wiki/Iran` on a fresh profile, **scrolled to the
+  bottom and left to settle**, then counted: resources, hosts, bytes,
+  images asked for that came back blank, and subresource failures caught
+  by an `error` listener installed before the document exists;
+- throughput from inside that same browser against
+  `speed.cloudflare.com` — four parallel streams, fixed 15s window,
+  bytes actually received — plus a median of six small requests for
+  latency.
+
+**Scrolling is not a detail.** Measured at the load event, Wikipedia
+reports 103 of 111 images blank on a route that is working perfectly:
+that is lazy loading counted as breakage. Scrolled, every healthy route
+reports the same 116 resources, 2.0 MB, and exactly 2 blank images.
+
+**Those 2 were identified rather than assumed.** Both are the same
+thumbnail, `40px-Flag_of_Iran.svg.png`, which had already decoded to
+40x23 pixels but whose `complete` flag had not flipped at the instant of
+the snapshot — a race in the harness's own predicate. Reproduced with no
+tunnel at all, so it is not a route property. That is why the baseline
+is 2 and not 0.
+
+The service tears the tunnel down after 60s of silence on its pipe
+(`IDLE_GRACE`), and one page load plus a speed test is longer than that,
+so the harness keeps a keepalive job running. Without it the tunnel dies
+mid-measurement and the number is a lie about the route.
+
+### Result: 32 pass, 2 slow, 0 failures
+
+Every one of the 34 routes returned its own node's address to a browser.
+Full table in the PR; the shape of it:
+
+| transport | n | median down | median up | latency | page load |
+|---|---|---|---|---|---|
+| WireGuard | 4 | 52.2 Mbps | 50.6 | 305 ms | 5.3 s |
+| VLESS+TLS | 4 | 45.1 | 105.4 | 398 ms | 4.6 s |
+| Shadowsocks | 4 | 44.8 | 118.8 | 294 ms | 4.7 s |
+| Trojan | 4 | 35.9 | 47.3 | 250 ms | 5.3 s |
+| VLESS+TLS over WS | 4 | 34.0 | 60.0 | 292 ms | 5.0 s |
+| IKEv2 | 5 | 33.4 | 7.1 | 280 ms | 5.5 s |
+| VLESS+REALITY | 4 | 26.7 | 24.3 | 240 ms | 7.2 s |
+| OpenVPN | 5 | 20.2 | 44.6 | 272 ms | 5.4 s |
+
+The two flagged slow are both OpenVPN: finland1 at 6.0 Mbps against 61.1
+for the same node's best route, turkey-1 at 12.3 against 52.2. Correct
+exit, page loads, but a quarter or less of what the customer could have
+had by picking a different protocol on the same server.
+
+**The upload column is the weak one and should not be quoted.** It came
+from a fixed-size POST (2 MB, retried at 8 MB if the first was quick),
+and on a 200-600 ms path that is mostly TCP slow start — the same node
+reported 118 Mbps on one route and 2.75 on another. A rewrite streaming
+for a fixed window did not fix it either: Cloudflare's `/__up` answers
+before the body finishes, so it measured 786 KB in 0.2 s. Download,
+latency and page load are sound; treat upload as a floor.
+
+**DNS was not isolated.** Resource Timing zeroes `domainLookup*` for
+cross-origin resources without `Timing-Allow-Origin`, so the planned
+per-route DNS number came back empty. What the latency column *does*
+give is the cross-transport baseline that was missing: REALITY's median
+request latency is 240 ms against WireGuard's 305 ms, so at the request
+level REALITY is not the slow one. The 2.0-5.6 s figure was DNS
+specifically and remains unexplained.
+
+### finland1's REALITY route was never broken — the fixture was stale
+
+`allroutes.json` carried `serverName=cloudflare.com`; the node has been
+configured for `www.shatel.ir` since **2026-07-25**. Proven directly,
+same node, same credentials, only the SNI changed, through a SOCKS-only
+xray with no tunnel at all:
+
+```
+SNI www.shatel.ir   -> exits at 204.168.161.100   (the node)
+SNI cloudflare.com  -> curl exit 35, nothing
+```
+
+REALITY is built to fail exactly that way: a client whose SNI the server
+does not recognise is not refused, it is quietly proxied to the site the
+server is imitating. A stale parameter is indistinguishable from a
+broken route.
+
+**The lesson is about the fixture, not the route.** Route profiles were
+a file on disk nobody re-fetched, so every run since July dialled a
+server that had moved. This run pulls all 34 from
+`/customer/protocol-users` at start; `routes34.json` is generated, not
+edited.
+
+### OpenVPN had no MTU of its own
+
+`wireguard.rs` pins `MTU = 1420` and explains at length why leaving it
+to the network is not neutral. OpenVPN had no equivalent line at all,
+and no node config sets `tun-mtu`, so OpenVPN 2.6 pushes its default of
+1500 and the client's tun comes up as wide as the link underneath it.
+
+Measured against turkey-1, which has no customers on it, with the link
+narrowed deliberately:
+
+| link MTU | config | tun0 | exit IP | 8 MB download |
+|---|---|---|---|---|
+| 1500 | as shipped | 1500 | 130.94.0.27 | 8388608 B in 3 s |
+| **1400** | **as shipped** | **1500** | **(none)** | **0 B in 15 s** |
+| 1400 | with the fix | 1348 | 130.94.0.27 | 8388608 B in 3 s |
+| 1500 | with the fix | 1348 | 130.94.0.27 | 8388608 B in 2 s |
+
+The tunnel reports "Initialization Sequence Completed" in every row,
+including the one that carries nothing. Sub-1500 paths are ordinary on
+PPPoE and mobile.
+
+Three lines, each covering a direction the others cannot: `tun-mtu`
+bounds what we send, `mssfix` rewrites the MSS in outgoing SYNs and so
+bounds what the far end sends back, `pull-filter` stops the server's
+pushed 1500 replacing either.
+
+**Client-side only, deliberately.** Mobile has no OpenVPN at all
+(`apps/mobile` implements none), so every OpenVPN customer is on the
+desktop client and the fix reaches all of them without touching a node.
+If OpenVPN ever comes to mobile, `push "tun-mtu"` on the server is the
+right place and the installer is where it goes.
+
+### Rig facts that cost time here
+
+- **`keyboardputscancode` does not reach the guest when the VM was
+  started `--type headless`.** The command returns success, the guest is
+  demonstrably alive, nothing arrives. Started `--type separate` the
+  identical command opens the Run dialog first try. That is a *third*
+  cause of "the rig stopped accepting keys", after the frozen-guest
+  theory (wrong) and the plural-command typo (right). **Start
+  Neoxify-Test2 `--type separate`.**
+- **The Run-dialog session is not elevated, and cannot be.**
+  `Start-Process -Verb RunAs` returns without error and without
+  elevating — no UAC prompt, no output, nothing. So `netsh interface
+  ipv4 set subinterface ... mtu=` and any write into Program Files fail
+  **silently** from that session. The first MTU experiment printed a
+  complete set of results describing a 1500-byte link while claiming
+  1400, and the only reason it was caught is that the script also
+  printed the subinterface table and a DF ping sweep, which disagreed
+  with what it said it had done. The narrow-link work moved to WSL2,
+  which is a separate VM with its own routing table; the host's default
+  route was checked before and after and was unchanged.
+- **Do not write PowerShell into the share with a bash heredoc.**
+  `printf` and heredoc expansion collapse `\\vboxsvr` to `\vboxsvr`, and
+  a script that writes its results to an invalid path looks exactly like
+  a script that did not run. Two separate mysteries this session were
+  this.
+- **The guest froze twice, and the tell is the clock.** The VM process
+  kept burning ~5% host CPU while the guest stopped dead: guest clock 36
+  minutes behind the host, and `ImageChops.difference` over two
+  screenshots a minute apart returning `None` — measured, not eyeballed.
+  Host free RAM was 2.8-4.1 GB against a 6144 MB guest. **Guest memory
+  reduced to 4096 MB**, which is ample for one headless Edge and took
+  host free memory to 5.6 GB. No freeze after that. Cost of the second
+  one: 21 minutes of a batch, resumed with `-Start 25`.
+
+### Left for the owner
+
+- **germany-1's API mirror is dead.** `/api/` returns 502 on both TLS
+  ports while its fallback *site* serves 200, which is the stale-upstream
+  shape the installer now avoids with a resolver plus a variable
+  `proxy_pass` — turkey-1, built last night, has that shape and works.
+  Needs `ensure_fallback_site` re-run on germany-1; I have no SSH key
+  for that node. Of five nodes only finland1 and france-1 carry a mirror
+  that behaves as designed: turkey-1's returns the node's own address
+  (the Cloudflare/XFF finding, confirmed from outside) and singapore-1
+  has none at all.
+- **singapore-1 serves only IKEv2 and OpenVPN** — the two transports
+  Iran identifies first, and no Xray at all, which is also why it can
+  host no mirror. Every other direct node serves all eight. Adding the
+  Xray engines is an installer run, not a two-minute change.
+- **turkey-1 and finland1 OpenVPN are a quarter the speed of their own
+  nodes' best route.** Not investigated; OpenVPN is the slowest
+  transport in the fleet by median (20.2 Mbps against WireGuard's 52.2).
+
+**Nothing was changed on any node.** All node access was read-only.
