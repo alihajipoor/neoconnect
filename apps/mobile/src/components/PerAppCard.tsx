@@ -129,10 +129,17 @@ export function PerAppCard() {
               : "border-white/12 bg-white/8",
           ].join(" ")}
         >
+          {/* Positioned from the inline start, not from the left. Under
+              Persian the whole card mirrors, and a knob pinned to a
+              physical edge slid the wrong way: "on" sat where the eye
+              reads "off". The Windows client had the same bug in its own
+              copy of this card; both are fixed, separately, because this
+              card is Android's own -- it lists installed packages where
+              Windows browses for a .exe. */}
           <span
             className={[
-              "absolute top-0.5 size-4 rounded-full bg-white transition-[left]",
-              settings.enabled ? "left-[1.375rem]" : "left-0.5",
+              "absolute top-0.5 size-4 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.5)] transition-[inset-inline-start] duration-200",
+              settings.enabled ? "start-[1.375rem]" : "start-0.5",
             ].join(" ")}
           />
         </button>
@@ -162,12 +169,17 @@ export function PerAppCard() {
           {apps !== null ? (
             <>
               <div className="relative">
-                <Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                {/* Logical inset, so the glyph sits at the edge the text
+                    starts from -- under Persian a physical `left` put it
+                    on top of the first characters typed, and the padding
+                    that was meant to clear it opened a gap on the empty
+                    side instead. */}
+                <Search className="pointer-events-none absolute top-1/2 start-3 size-3.5 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder={t("settings.customSearch")}
-                  className="pl-9"
+                  className="ps-9"
                 />
               </div>
 
@@ -182,7 +194,7 @@ export function PerAppCard() {
                         aria-checked={on}
                         onClick={() => toggleApp(app.packageName)}
                         className={[
-                          "press flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors",
+                          "press flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-start transition-colors",
                           on
                             ? "border-primary/40 bg-primary/10"
                             : "border-white/8 bg-white/[0.025] hover:bg-white/[0.05]",
