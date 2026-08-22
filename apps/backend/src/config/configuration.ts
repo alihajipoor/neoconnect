@@ -80,6 +80,16 @@ export default () => ({
     // when this is unset -- see common/guards/service-token.guard.ts.
     serviceToken: process.env.INTEGRATIONS_SERVICE_TOKEN,
   },
+  github: {
+    // Optional read-only token for the release-feed lookups in
+    // modules/updates. Unauthenticated calls get 60 an hour per IP,
+    // authenticated ones 5,000 -- so this takes the rate ceiling off the
+    // table as a failure mode. Needs no scopes at all: the repo is
+    // public and only public release metadata is read. Left unset (local
+    // dev, CI) the calls are made anonymously and everything still
+    // works, just against the smaller budget.
+    token: process.env.GITHUB_API_TOKEN,
+  },
   alerting: {
     // Optional generic webhook (Slack/Discord/Telegram-via-adapter/custom
     // endpoint all accept a plain JSON POST) -- alerting is a silent
