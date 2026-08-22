@@ -1,9 +1,16 @@
 import { useId } from "react";
-import { AlertTriangle, Power } from "lucide-react";
+import { AlertTriangle, HelpCircle, Power } from "lucide-react";
 import { cn } from "../lib/utils";
 
 export type ConnectionState =
   | "disconnected"
+  /** The helper service could not be asked, so nothing is known about
+   * the tunnel. Its own state because the only alternative is to guess,
+   * and guessing "disconnected" is the guess that gets somebody hurt:
+   * the app showed "You're not protected" and a Connect button while
+   * the browser beside it was going out through the node's exit
+   * address. Not being able to ask is reported as not knowing. */
+  | "unknown"
   | "connecting"
   /** The engine is up and we are establishing whether traffic actually
    * flows. Its own state because the answer is genuinely not known yet,
@@ -55,6 +62,10 @@ export function ConnectOrb({
   const busy = state === "connecting" || state === "disconnecting" || state === "verifying";
   const on = state === "connected";
   const degraded = state === "degraded";
+  // Rendered in grey rather than in the idle violet. The idle orb reads
+  // as "press me to connect", which is a claim about the tunnel being
+  // down, and that is precisely the claim this state exists to withhold.
+  const unsure = state === "unknown";
 
   // r=54 in a 128 viewBox -> circumference 339.29. The arc is a quarter
   // while spinning, and 88% once connected (the gap keeps it reading as a
@@ -85,17 +96,19 @@ export function ConnectOrb({
             ? "bg-success/35"
             : degraded
               ? "bg-warning/35"
-              : busy
-                ? "animate-breathe bg-primary/40"
-                : "bg-primary/20",
+              : unsure
+                ? "animate-breathe bg-muted-foreground/25"
+                : busy
+                  ? "animate-breathe bg-primary/40"
+                  : "bg-primary/20",
         )}
       />
 
       <svg viewBox="0 0 128 128" className={cn("absolute size-44", busy && "animate-spin-slow")}>
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor={on ? "#10b981" : degraded ? "#f59e0b" : "#a78bfa"} />
-            <stop offset="1" stopColor={degraded ? "#f97316" : "#22d3ee"} />
+            <stop offset="0" stopColor={on ? "#10b981" : degraded ? "#f59e0b" : unsure ? "#94a3b8" : "#a78bfa"} />
+            <stop offset="1" stopColor={degraded ? "#f97316" : unsure ? "#64748b" : "#22d3ee"} />
           </linearGradient>
         </defs>
         <circle cx="64" cy="64" r="54" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="3" />
@@ -116,12 +129,19 @@ export function ConnectOrb({
 
       <button
         onClick={onToggle}
-        // Deliberately NOT disabled while busy. A failover pass can take
-        // tens of seconds, and disabling the only control for its
-        // duration left no way to stop it -- reported from real use by
-        // someone who had to kill the app from Task Manager. An action
-        // the customer cannot cancel is worse than one that fails.
-        disabled={disabled || state === "disconnecting"}
+        // Deliberately NOT disabled by any state of its own. A failover
+        // pass can take tens of seconds, and disabling the only control
+        // for its duration left no way to stop it -- reported from real
+        // use by someone who had to kill the app from Task Manager. An
+        // action the customer cannot cancel is worse than one that
+        // fails.
+        //
+        // "disconnecting" used to be the one exception, and it is how
+        // that same kill-from-Task-Manager ending came back: a
+        // vpn_disconnect that never answered left the state stuck, the
+        // stuck state left the button dead, and there was no press that
+        // could undo either. A control that can wedge is not a control.
+        disabled={disabled}
         aria-label={label}
         className={cn(
           "press relative flex size-28 flex-col items-center justify-center gap-1.5 rounded-full border backdrop-blur-md",
@@ -130,11 +150,15 @@ export function ConnectOrb({
             ? "border-success/40 bg-success/12 text-success shadow-[0_0_50px_-12px_var(--success),inset_0_1px_0_rgba(255,255,255,0.12)]"
             : degraded
               ? "border-warning/45 bg-warning/12 text-warning shadow-[0_0_50px_-12px_var(--warning),inset_0_1px_0_rgba(255,255,255,0.12)]"
-              : "border-primary/35 bg-primary/10 text-primary shadow-[0_0_50px_-12px_var(--primary),inset_0_1px_0_rgba(255,255,255,0.12)] hover:bg-primary/16",
+              : unsure
+                ? "border-white/15 bg-white/5 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] hover:bg-white/8"
+                : "border-primary/35 bg-primary/10 text-primary shadow-[0_0_50px_-12px_var(--primary),inset_0_1px_0_rgba(255,255,255,0.12)] hover:bg-primary/16",
         )}
       >
         {degraded ? (
           <AlertTriangle className="size-7" strokeWidth={2.25} />
+        ) : unsure ? (
+          <HelpCircle className="size-7" strokeWidth={2.25} />
         ) : (
           <Power className={cn("size-7 transition-transform duration-300", on && "scale-110")} strokeWidth={2.25} />
         )}
