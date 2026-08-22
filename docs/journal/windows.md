@@ -5250,3 +5250,85 @@ The fix was deployed from `claude/new-season-start-646af6`, so
 `/root/neoconnect` is no longer on `main`. **The documented runbook
 (`git pull --ff-only origin main`) will quietly revert this fix** until
 the PR merges. Merge first, then the runbook is correct again.
+
+---
+
+## 2026-08-22 — android-v0.2.15: what "shared" actually reaches mobile
+
+**Status:** done
+**Touches:** `apps/mobile/src/components/PerAppCard.tsx`,
+`apps/mobile/src/screens/Dashboard.tsx`, mobile version files
+
+The brand marks and the four RTL fixes from 4281f68 were landed entirely
+in `apps/desktop-windows/**`, on the reasoning that "one edit reaches
+every client, because apps/mobile imports the shared component". That is
+half true, and the half that is false is the important half.
+
+### The rule, stated properly
+
+The `@shared` alias makes a fix travel **only for components mobile both
+imports and renders**. Mobile keeps its own copies of anything the two
+platforms genuinely differ on, and a fix to the Windows twin does not
+reach them. Checked one by one against the built bundle rather than
+inferred:
+
+| Fix | Lives in | Reaches Android? |
+|---|---|---|
+| Discord/Instagram/Telegram marks | `CommunityLinks` + `BrandIcons` | yes — Dashboard renders it |
+| `Stat` chevron mirroring, `text-start` | `components/ui.tsx` | yes |
+| `LocationPicker` row `text-start` | shared | yes |
+| Settings rail, nav chevrons, `text-start` | shared `screens/Settings.tsx` | yes |
+| Support ticket row `text-start` | shared `screens/Support.tsx` | yes |
+| **Custom-mode toggle knob** | `CustomModeCard.tsx` | **no** |
+| **Picker search icon** | `RunningAppPicker.tsx` | **no** |
+| **Change-location chevron** | desktop `screens/Dashboard.tsx` | **no** |
+
+The three "no" rows are the ones that mattered. Android's Custom mode is
+`PerAppCard.tsx` — its own component, because Android lists installed
+packages where Windows browses for a `.exe` — and it carried a verbatim
+copy of every bug: `transition-[left]` with `left-[1.375rem]`/`left-0.5`
+on the knob, `left-3` + `pl-9` on the search field, `text-left` on the
+app rows. So the release that was supposed to *fix* "on sits where a
+Persian reader reads off" would have shipped it unchanged on the platform
+most of those readers use. Ported deliberately, not by re-aliasing.
+
+The desktop visual pass (status headline, exit-IP chip, data-used gauge)
+is **not** in 0.2.15. Mobile's Dashboard keeps its own copies of those
+blocks and they were left alone — scope was the marks and the RTL bugs.
+
+### Verified by rendering it, not by reading it
+
+A throwaway harness mounted the real components — mobile's own
+`PerAppCard` plus the shared ones through the real `@shared` alias — with
+only the four Tauri modules stubbed, forced to Persian. Measured, not
+eyeballed: knob at 3px from the right edge when off and 5px from the left
+when on (`inset-inline-start: 22px`), and mirrored correctly back in
+English. Discord/Instagram/Telegram came out as filled brand paths, not
+lucide. Harness deleted afterwards.
+
+**Two traps in that harness, both of which produced a confident false
+result before being caught:**
+
+1. **Tailwind v4 will not scan outside the Vite root.** With the harness
+   rooted at a subdirectory, `@source "../src"` in `globals.css` was
+   silently ignored — `start-*`, `ps-*` and `text-start` were simply
+   absent from the CSS, so the real knob measured as "not moving". The
+   classes were correct the whole time. Root the harness at `apps/mobile`
+   and it scans as the real build does.
+2. **A hidden page never ticks transitions.** The preview pane was not
+   compositing (`document.visibilityState === "hidden"`), so anything
+   with a `transition` froze at its *start* value forever. That read
+   exactly like a broken control, and cost a wrong "fix" that replaced
+   the knob's logical insets with transforms before the cause was found.
+   Neutralise transitions (`transition-duration: 0s !important`) and ask
+   where the thing comes to rest — that is the actual question anyway.
+
+Both faults look like application bugs and are not. Anything measured in
+that pane needs the transition killed and the CSS presence confirmed
+before the measurement means anything.
+
+**Also worth keeping:** `pnpm turbo run lint typecheck build test` cannot
+go green in a `.claude/worktree` — `@neoxify/panel#build` dies on
+`module-not-found` against deep `node_modules/.pnpm` paths, the Windows
+260-char limit. Confirmed pre-existing by stashing and rebuilding clean.
+Everything else, mobile included, passes. Linux CI is the gate.
