@@ -6573,3 +6573,46 @@ otherwise does what it advertises.
   call — to get the genuine state.
 - `pre-verify3`'s image has **no `selapp.exe`**; one whole run produced
   no selected-app reading because of it. `f0.ps1` now plants one.
+
+---
+
+## 2026-08-23 — 0.9.29 is out; the rig VM is gone and one branch is stranded by it
+
+**Status:** released (`desktop-v0.9.29`, PR #34, merge `fccace2`)
+
+Two things went in: `claude/fix-orphaned-redirect` (the redirect loop
+that outlived its tunnel — mechanism and rig numbers are in the two
+entries above) and `claude/connect-intent` (the Connect button rendering
+"Disconnecting" and needing three or four presses). They merged with no
+conflicts at all: one is service Rust, the other is app TypeScript, and
+the IPC surface between them did not move.
+
+The parts worth carrying forward, none of which git records:
+
+- **The rig VM has been deleted.** Every hardware claim in this file up
+  to and including the 0.9.29 split-tunnel numbers was measured on
+  `Neoxify-Test2` / `pre-verify3`, and there is now nothing to measure
+  on. Anything touching the tunnel from here is unproven until a rig
+  exists again. Rebuilding one is the prerequisite for the item below,
+  not an optional tidy-up.
+- **`claude/selected-apps-ipv6` is built, unmerged and stranded.** It is
+  deliberately not in 0.9.29: it has never run on the rig, and it
+  changes the same subsystem 0.9.29 exists to stabilise. Do not merge it
+  on the strength of a green CI run — CI compiles it, nothing more.
+- **The connect-button fix shipped unverified against a real tunnel.**
+  Its evidence is a unit suite over pure functions that fails against
+  the 0.9.28 Dashboard and passes against this one. That is a controlled
+  test and worth something, but nobody has pressed Connect on a censored
+  network with it. If the "three presses" report comes back, that is the
+  first thing to doubt — and note the underlying connects really were
+  failing, so a report of *failing* connects is a different bug and not
+  a regression of this one.
+- **OpenVPN under Custom mode is still unexercised.** It shares the
+  `Active::Child` arm with Xray, which was covered on the rig, so it is
+  a small gap rather than an untested branch — but it is the one arm of
+  the fix nothing has run.
+- **Still unsigned.** 0.9.24–0.9.29 have all shipped without
+  Authenticode because `AZURE_CLIENT_ID` is unset; identity validation
+  is blocked with Microsoft support. The release workflow says so in an
+  annotation on every run, so a green release is not evidence signing
+  came back.
