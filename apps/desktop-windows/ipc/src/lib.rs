@@ -243,6 +243,22 @@ pub enum Response {
         /// packet vanished. One did, for a tester, for three sessions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         split_tunnel_problem: Option<String>,
+        /// Whether this session is holding a machine-wide IPv6 block.
+        ///
+        /// Reported because the customer has to be told, and because it
+        /// is not derivable from anything else here. Every node is
+        /// IPv4-only, so a full tunnel has nowhere to send IPv6 and the
+        /// service blocks it rather than letting it out in the clear --
+        /// measured leaking on OpenVPN, IKEv2 and the Xray protocols,
+        /// with the app reporting `connected: true` throughout.
+        ///
+        /// False is not "IPv6 is carried": it means no block of ours is
+        /// installed. WireGuard sessions are false because
+        /// `wireguard.exe` blocks it itself, and Custom mode is false
+        /// because the redirect handles IPv6 per application instead.
+        /// See `engines::ipv6_block`.
+        #[serde(default)]
+        ipv6_blocked: bool,
     },
     Error {
         message: String,
