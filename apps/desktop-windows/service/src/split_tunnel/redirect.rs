@@ -638,6 +638,42 @@ impl Running {
             let _ = thread.join();
         }
     }
+
+    /// A handle that can stop interception from another thread, without
+    /// owning the session or being able to join it.
+    ///
+    /// This exists for the backstop in `split_tunnel::Watchdog`, which
+    /// runs *inside* the session and therefore cannot take the session
+    /// apart. What it can do is the one thing that matters to somebody
+    /// whose machine has stopped working: close the driver's grip on it.
+    pub fn stopper(&self) -> Stopper {
+        Stopper { handle: self.handle.clone(), stop: self.stop.clone() }
+    }
+}
+
+/// The half of a running redirect that can switch it off.
+///
+/// Deliberately cannot join the workers. Joining from a thread that the
+/// session owns would deadlock the teardown that is trying to join *it*,
+/// and the whole point of this type is to be safe to hold from the
+/// inside. `Running::stop` still joins afterwards; the flag and the
+/// shutdown are both idempotent, so the two cannot get in each other's
+/// way whichever order they arrive in.
+#[derive(Clone)]
+pub struct Stopper {
+    handle: Arc<Handle>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Stopper {
+    /// Stops taking packets off the machine. Everything the session
+    /// still holds -- relays, firewall allowance, route -- stays until
+    /// somebody tears it down properly, but nothing is being intercepted
+    /// any more, which is what fails the machine open.
+    pub fn stop_intercepting(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.handle.shutdown();
+    }
 }
 
 pub fn start(
