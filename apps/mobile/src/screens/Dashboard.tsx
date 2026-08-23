@@ -18,6 +18,8 @@ import { LocationPicker } from "@shared/components/LocationPicker";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "@shared/lib/credential-cache";
+import { refreshConnectionConfig } from "@shared/lib/connection-config";
+import { useRefreshOnResume } from "@shared/lib/resume";
 import { outcomeFromError, reportAttempt, rungsFrom } from "@shared/lib/attempts";
 import { loadAllowedApps } from "../lib/per-app";
 import {
@@ -266,6 +268,21 @@ export function Dashboard({
     })();
   }, []);
 
+  // The case that made the stale-config window unbounded rather than
+  // merely long. Android keeps this WebView across backgrounding, so
+  // re-opening the app restores the same React tree and `loadAll` --
+  // which only runs on mount -- never runs again. A customer who has not
+  // force-stopped the app since install is dialling install-day values.
+  //
+  // Credentials only, and only when the cache is past its horizon. See
+  // useRefreshOnResume for why this is not a poll.
+  useRefreshOnResume(async () => {
+    const refreshed = await refreshConnectionConfig({ held: protocolUsers, force: true });
+    if (refreshed.source !== "network") return;
+    setProtocolUsers(refreshed.protocolUsers);
+    setProtocolUser((current) => refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current);
+  });
+
   useEffect(() => {
     setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -484,7 +501,20 @@ export function Dashboard({
     setUnsupportedChoice(null);
     cancelRef.current = false;
 
-    const all = protocolUsers.length > 0 ? protocolUsers : [protocolUser!];
+    // One small question before dialling: are these still the right
+    // servers? It cannot block the connect -- `refreshConnectionConfig`
+    // never throws, gives up on its own short budget, and hands back
+    // what is already held. A refresh that failed must never be the
+    // reason somebody on a censored network cannot connect.
+    const refreshed = await refreshConnectionConfig({
+      held: protocolUsers.length > 0 ? protocolUsers : [protocolUser!],
+    });
+    if (refreshed.source === "network") {
+      setProtocolUsers(refreshed.protocolUsers);
+      setProtocolUser((current) => refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current);
+    }
+
+    const all = refreshed.protocolUsers.length > 0 ? refreshed.protocolUsers : [protocolUser!];
     const usable = all.filter((u) => SUPPORTED.has(u.protocol));
 
     // Said before the attempt rather than discovered after it. A customer
