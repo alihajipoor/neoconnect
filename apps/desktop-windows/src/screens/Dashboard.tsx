@@ -22,6 +22,16 @@ import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
 import { isServiceTimeout, withTimeout } from "../lib/service-call";
+import {
+  concludeIntent,
+  declareIntent,
+  IDLE_INTENT,
+  isCurrent,
+  phaseFor,
+  pressFor,
+  type IntentState,
+  type PressAction,
+} from "../lib/connect-intent";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
 import { Logo } from "../components/Logo";
@@ -29,6 +39,17 @@ import { Flag } from "../components/Flag";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { useI18n } from "../lib/i18n";
+
+/** How a ladder pass ended.
+ *
+ * "declined" is its own answer rather than folded into "failed", because
+ * the two need different words to the customer: a pass that ran and
+ * could not carry traffic has a report to show, while one that never
+ * started has nothing to say about any server and must not pretend
+ * otherwise. It also used to be silent, which is what a dead-looking
+ * button is made of.
+ */
+type LadderOutcome = "connected" | "failed" | "declined";
 
 /** What the helper service reports about the far end.
  *
@@ -485,6 +506,15 @@ export function Dashboard({
    * between steps rather than interrupting one, so the engine is never
    * left half-started. */
   const cancelRef = useRef(false);
+  /** What the customer last asked for, and the stamp that lets an answer
+   * still in flight discover it has been overtaken.
+   *
+   * The screen's phase and the customer's intent used to be the same
+   * variable, which is how a press could come to mean the opposite of
+   * its label: any of three async writers could land an old observation
+   * on top of a fresh press, and the next press branched on it. See
+   * `lib/connect-intent`. */
+  const intentRef = useRef<IntentState>(IDLE_INTENT);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
@@ -549,6 +579,48 @@ export function Dashboard({
     return ladderRunningRef.current && Date.now() - ladderStartedAtRef.current < LADDER_MAX_MS;
   }
 
+  /** Records what the customer just asked for and returns its stamp.
+   *
+   * Everything published from then on has to quote the stamp, so an
+   * answer that was already in flight when the press happened is dropped
+   * instead of overwriting it. */
+  function beginIntent(intent: IntentState["intent"]): number {
+    intentRef.current = declareIntent(intentRef.current, intent);
+    return intentRef.current.generation;
+  }
+
+  /** Marks an operation finished, so later observations are shown as
+   * they are rather than through the wording of an operation that is
+   * over.
+   *
+   * Only the operation that still owns the stamp may do this. One that
+   * has been superseded is not entitled to declare the app idle -- its
+   * replacement is still running. */
+  function endIntent(generation: number): void {
+    intentRef.current = concludeIntent(intentRef.current, generation);
+  }
+
+  /** Puts an observation on screen, unless it has been overtaken.
+   *
+   * Two guards, and they answer different questions. `isCurrent` asks
+   * whether this answer is still about the operation the app is running
+   * -- a status fetched before Connect was pressed says nothing about
+   * the connect, and landing it afterwards is what let the button come
+   * to mean the opposite of its label. `phaseFor` asks how the answer
+   * should be worded given what the customer asked for, which is why a
+   * teardown inside a connect never reaches the screen as
+   * "Disconnecting...".
+   *
+   * Returns what was shown, or null when the answer was dropped, so a
+   * caller waiting on a settled state can tell the difference.
+   */
+  function publishObserved(generation: number, observed: ConnectionState): ConnectionState | null {
+    if (!isCurrent(intentRef.current, generation)) return null;
+    const phase = phaseFor(intentRef.current.intent, observed);
+    setConnectionState(phase);
+    return phase;
+  }
+
   /** What the service says, without putting it on screen.
    *
    * Separate from `syncFromService` so a caller waiting for something to
@@ -593,8 +665,9 @@ export function Dashboard({
    * than on the state it was hoping for.
    */
   async function syncFromService(): Promise<ConnectionState> {
+    const generation = intentRef.current.generation;
     const settled = await readServiceState();
-    setConnectionState(settled);
+    publishObserved(generation, settled);
     // The clock is only honest while something is up.
     if (settled === "disconnected") setConnectedAt(null);
     return settled;
@@ -616,19 +689,30 @@ export function Dashboard({
    * tunnel that really is still installed after the wait still gets
    * reported, which is the case that must not be swallowed.
    */
-  async function confirmTornDown(): Promise<ConnectionState> {
+  async function confirmTornDown(under?: number): Promise<ConnectionState> {
+    // Captured once, not per iteration: a press that arrives while this
+    // is settling declares its own intent, and every answer this loop is
+    // still owed belongs to the teardown that press replaced.
+    //
+    // A caller may supply its own stamp instead. The ladder does, so a
+    // pass the customer cancelled still tears its engines down -- which
+    // it must, or one started just before the press outlives it -- while
+    // saying nothing on screen about a teardown the press has already
+    // reported.
+    const generation = under ?? intentRef.current.generation;
     const deadline = Date.now() + TEARDOWN_SETTLE_MS;
     for (;;) {
       const state = await readServiceState();
       if (state !== "connected" && state !== "degraded") {
-        setConnectionState(state);
+        publishObserved(generation, state);
         if (state === "disconnected") setConnectedAt(null);
         return state;
       }
       if (Date.now() >= deadline) {
-        setConnectionState(state);
+        publishObserved(generation, state);
         return state;
       }
+      if (!isCurrent(intentRef.current, generation)) return state;
       await new Promise((r) => setTimeout(r, TEARDOWN_POLL_MS));
     }
   }
@@ -847,6 +931,20 @@ export function Dashboard({
       // underneath it would fight over the same fields.
       if (ladderInFlight()) return;
 
+      // Stamped before the first question, not after the last answer.
+      //
+      // This callback takes seconds -- a status call has a six-second
+      // budget and the egress probe below has its own -- and for all of
+      // that time it is holding a verdict about a tunnel the customer
+      // may since have asked to replace. The guard at the top of this
+      // function was the only one there was, and it is checked before
+      // any of the waiting rather than after it, so a press landing in
+      // between used to be overwritten by an observation older than
+      // itself. That is how a screen came to read "You're protected"
+      // over a connect that had already begun, and the next press then
+      // meant Disconnect.
+      const generation = intentRef.current.generation;
+
       let fromStatus: ConnectionState;
       try {
         const status = await serviceStatus();
@@ -867,14 +965,13 @@ export function Dashboard({
         // honest answer has become "we don't know".
         statusMissesRef.current += 1;
         if (statusMissesRef.current >= STATUS_MISSES_BEFORE_UNKNOWN) {
-          setConnectionState("unknown");
-          strikesRef.current = 0;
+          if (publishObserved(generation, "unknown")) strikesRef.current = 0;
         }
         return;
       }
 
       if (fromStatus === "disconnected") {
-        setConnectionState("disconnected");
+        if (publishObserved(generation, "disconnected") === null) return;
         setConnectedAt(null);
         strikesRef.current = 0;
         return;
@@ -908,8 +1005,7 @@ export function Dashboard({
       const live = carrying && fromStatus === "connected";
 
       if (live) {
-        strikesRef.current = 0;
-        setConnectionState("connected");
+        if (publishObserved(generation, "connected") !== null) strikesRef.current = 0;
         return;
       }
 
@@ -931,12 +1027,14 @@ export function Dashboard({
       // protocol. The engine's own handshake decides whether the tunnel
       // is alive; if it is, the session stands.
       if (splitTunnelActive && fromStatus === "connected") {
-        strikesRef.current = 0;
-        setConnectionState("connected");
+        if (publishObserved(generation, "connected") !== null) strikesRef.current = 0;
         return;
       }
 
-      setConnectionState("degraded");
+      // Dropped rather than counted when it has been overtaken: a strike
+      // is evidence about the tunnel the customer is on, and this
+      // verdict is about one they have already asked to leave.
+      if (publishObserved(generation, "degraded") === null) return;
       strikesRef.current += 1;
 
       // Below the threshold, or too soon after a full pass already
@@ -984,6 +1082,14 @@ export function Dashboard({
       // it here would put "You're not protected" on screen in the middle
       // of a connect that is still working.
       if (ladderInFlight()) return;
+      // Past its deadline, it owns nothing -- and the intent it declared
+      // has to go with it. Leaving that standing would be a new way to
+      // wedge the screen rather than a fix for the old one: `phaseFor`
+      // would keep rewording every "disconnected" this recheck fetched
+      // back into "Connecting..." on behalf of a pass that is never
+      // going to report, which is the exact stuck spinner this recheck
+      // exists to end.
+      endIntent(intentRef.current.generation);
       void syncFromService();
     }, recheckMs);
 
@@ -993,88 +1099,116 @@ export function Dashboard({
   /** Every press does something, and no press can leave the app worse
    * off than it found it.
    *
-   * The rule the old version broke is that a press had to be one of two
-   * things -- connect or disconnect -- and anything else fell through to
-   * whichever branch happened to match. A second press during a pass
-   * ended in a "Disconnecting..." nothing would clear, and a third
-   * landed on a dead button. Every branch here now finishes by asking
-   * the service what is true, so the worst a redundant press can do is
-   * refresh the screen with the truth.
+   * The action is not worked out here. It is computed in the render that
+   * drew the label -- see `pressFor` -- and handed in with the press, so
+   * the button cannot dispatch the opposite of what it promised. That
+   * was not a theoretical hazard: the label came from one chain of
+   * ternaries and the press from another, over a `connectionState` that
+   * three asynchronous writers could overwrite between the render and
+   * the click, and the customer-visible result was Connect running a
+   * teardown.
+   *
+   * Every branch finishes by asking the service what is true, so the
+   * worst a redundant press can do is refresh the screen with the truth.
    */
-  async function handleConnectToggle() {
+  async function handleConnectToggle(action: PressAction) {
     if (!protocolUser) return;
     setConnectionError(null);
 
-    // Pressing it during a pass means stop. The ladder checks this
-    // between steps and unwinds itself; the tunnel teardown below is
-    // what actually makes the machine usable again. Then the service is
-    // asked, because a cancelled pass is exactly the case where what
-    // the app was about to claim and what is actually installed have
-    // most reason to differ.
-    if (ladderInFlight()) {
-      cancelRef.current = true;
-      setConnectionState("disconnecting");
-      await serviceDisconnect().catch(() => undefined);
-      await confirmTornDown();
-      return;
-    }
-
-    // A press while a teardown is already in flight must not start a
-    // connect on top of it, and must not do nothing either -- doing
-    // nothing is what made the window look frozen. Repeating the
-    // teardown is safe (the service tears down whatever is there, and
-    // there is nothing there twice), and the answer that follows is the
-    // way out of a "Disconnecting..." that has stopped describing
-    // anything.
-    if (connectionState === "disconnecting") {
-      await serviceDisconnect().catch(() => undefined);
-      await confirmTornDown();
-      return;
-    }
-
-    // Nothing is known, so this press buys an answer rather than an
-    // action. Connecting on the assumption that nothing is up would
-    // tear down a tunnel the customer may be relying on, and
-    // disconnecting on the same assumption is no better -- both are
-    // acting on a guess about the one thing the app has just admitted
-    // it cannot see. Once the service answers, the orb says what it is
-    // and the next press means what it says.
-    if (connectionState === "unknown") {
-      const settled = await syncFromService();
-      if (settled !== "disconnected") return;
-    }
-
-    if (connectionState === "connected" || connectionState === "degraded") {
-      setConnectionState("disconnecting");
-      try {
-        await serviceDisconnect();
-        // Acknowledged is not the same as finished, so the state comes
-        // from what the service reports once the teardown has settled
-        // rather than from the acknowledgement. An engine that survives
-        // it is a thing the customer needs to know about, and setting
-        // "disconnected" here on the strength of an ack is exactly how
-        // that would be hidden.
+    switch (action) {
+      // Pressing during a pass means stop. The ladder checks `cancelRef`
+      // between steps and unwinds itself; the teardown below is what
+      // actually makes the machine usable again. Then the service is
+      // asked, because a cancelled pass is exactly the case where what
+      // the app was about to claim and what is actually installed have
+      // most reason to differ.
+      //
+      // The intent flips to "disconnect" first, which does three things
+      // at once: it stamps out every answer the abandoned pass is still
+      // owed, it lets this teardown be shown as a teardown (the customer
+      // did ask for this one), and it means the *next* press reads the
+      // settled state rather than finding a pass still nominally in
+      // flight. Needing three or four presses was that last one.
+      case "cancelConnect": {
+        const generation = beginIntent("disconnect");
+        cancelRef.current = true;
+        setConnectionState("disconnecting");
+        await serviceDisconnect().catch(() => undefined);
         await confirmTornDown();
-      } catch (err) {
-        // A teardown that never answered is not a teardown that failed.
-        // The engines may well be gone -- that is how the app came to be
-        // stuck on "Disconnecting..." with nothing left running -- so
-        // the generic classifier's "Couldn't reach this server", which
-        // is where anything containing "timeout" lands, would assert
-        // something about the node that nothing here measured.
-        setConnectionError(
-          isServiceTimeout(err)
-            ? { kind: "serviceUnavailable", messageKey: "err.teardownStuck", detail: String(err) }
-            : classifyConnectionError(err),
-        );
-        // Not back to "connected": the tunnel may be down, may be up,
-        // and this press produced no evidence either way. Ask.
-        await confirmTornDown();
+        endIntent(generation);
+        return;
       }
-      return;
-    }
 
-    await runLadder();
+      // Covers both a live tunnel and a teardown already in flight. A
+      // press during a teardown must not start a connect on top of it,
+      // and must not do nothing either -- doing nothing is what made the
+      // window look frozen. Repeating the teardown is safe (the service
+      // tears down whatever is there, and there is nothing there twice),
+      // and the answer that follows is the way out of a
+      // "Disconnecting..." that has stopped describing anything.
+      case "disconnect": {
+        const generation = beginIntent("disconnect");
+        setConnectionState("disconnecting");
+        try {
+          await serviceDisconnect();
+          // Acknowledged is not the same as finished, so the state comes
+          // from what the service reports once the teardown has settled
+          // rather than from the acknowledgement. An engine that
+          // survives it is a thing the customer needs to know about, and
+          // setting "disconnected" here on the strength of an ack is
+          // exactly how that would be hidden.
+          await confirmTornDown();
+        } catch (err) {
+          // A teardown that never answered is not a teardown that
+          // failed. The engines may well be gone -- that is how the app
+          // came to be stuck on "Disconnecting..." with nothing left
+          // running -- so the generic classifier's "Couldn't reach this
+          // server", which is where anything containing "timeout" lands,
+          // would assert something about the node that nothing here
+          // measured.
+          setConnectionError(
+            isServiceTimeout(err)
+              ? { kind: "serviceUnavailable", messageKey: "err.teardownStuck", detail: String(err) }
+              : classifyConnectionError(err),
+          );
+          // Not back to "connected": the tunnel may be down, may be up,
+          // and this press produced no evidence either way. Ask.
+          await confirmTornDown();
+        }
+        endIntent(generation);
+        return;
+      }
+
+      // Nothing is known, so this press buys an answer rather than an
+      // action. Connecting on the assumption that nothing is up would
+      // tear down a tunnel the customer may be relying on, and
+      // disconnecting on the same assumption is no better -- both are
+      // acting on a guess about the one thing the app has just admitted
+      // it cannot see. Once the service answers, the orb says what it is
+      // and the next press means what it says.
+      case "recheck": {
+        await syncFromService();
+        return;
+      }
+
+      case "connect": {
+        const outcome = await runLadder();
+        // A press that produced no attempt at all has to say so. It used
+        // to return quietly: the guard from a pass that had stalled was
+        // still set, `runLadder` declined, and the button looked dead
+        // for as long as the guard lasted. Silence there is part of what
+        // taught people to press three or four times.
+        if (outcome === "declined") {
+          setConnectionError({
+            kind: "serviceUnavailable",
+            messageKey: "err.connectBusy",
+            detail: "a connection attempt was already running",
+          });
+          await syncFromService();
+        }
+        return;
+      }
+    }
   }
 
   /** Works down the protocols this subscription holds until one is
@@ -1086,18 +1220,30 @@ export function Dashboard({
    * does, using the same order, the same evidence and the same memory.
    * Duplicating it would mean two ladders drifting apart.
    */
-  async function runLadder(): Promise<boolean> {
-    if (!protocolUser || ladderInFlight()) return false;
+  async function runLadder(): Promise<LadderOutcome> {
+    if (!protocolUser || ladderInFlight()) return "declined";
     // Its own number, so a pass that stalled past its deadline can be
     // told apart from the one that replaced it. Without that, a stalled
     // pass finally waking would clear the live pass's guard and write
     // its own long-obsolete verdict over the screen.
     const generation = ++ladderGenerationRef.current;
+    // The customer's side of the same fact. The ladder generation guards
+    // the ladder against itself; this one tells every answer still in
+    // flight anywhere in the file that a connect is now what the app is
+    // doing -- and, through `phaseFor`, that the teardowns inside it are
+    // part of connecting rather than something to narrate.
+    const intent = beginIntent("connect");
     ladderRunningRef.current = true;
     ladderStartedAtRef.current = Date.now();
     cancelRef.current = false;
     try {
-      setConnectionState("connecting");
+      // Every phase this pass shows goes through its own stamp, progress
+      // included. A pass the customer has since cancelled, or one a
+      // newer pass replaced, is not entitled to keep narrating: it used
+      // to be able to put "Connected" on screen after the press that
+      // stopped it, which is the same claim-without-evidence the rest of
+      // this screen exists to refuse.
+      publishObserved(intent, "connecting");
       setFailedOverTo(null);
 
       // Whatever is up comes down first, and this is not a formality.
@@ -1207,7 +1353,7 @@ export function Dashboard({
           // forces the handshake and answers the stronger question at
           // the same time -- did our packets actually leave via the
           // server.
-          setConnectionState("verifying");
+          publishObserved(intent, "verifying");
           if (cancelRef.current) break;
 
           // Custom mode has to be checked a different way, and the
@@ -1296,7 +1442,7 @@ export function Dashboard({
           }
 
           if (verdict === "connected") {
-            setConnectionState("connected");
+            publishObserved(intent, "connected");
             const movedFromShown = Boolean(shownRouteId) && candidate.routeId !== shownRouteId;
             if (index > 0 || movedFromShown) {
               // Compared against what was on screen when Connect was
@@ -1333,7 +1479,7 @@ export function Dashboard({
               routeId: candidate.routeId,
               attempts: attempts.length > 0 ? rungsFrom([...attempts, `${label}: connected`]) : undefined,
             });
-            return true;
+            return "connected";
           }
 
           attempts.push(`${label}: up but ${reason}`);
@@ -1352,14 +1498,14 @@ export function Dashboard({
         // this one's routes and fails for a reason that has nothing to
         // do with it.
         await invoke("vpn_disconnect").catch(() => undefined);
-        if (!isLast) setConnectionState("connecting");
+        if (!isLast) publishObserved(intent, "connecting");
       }
 
       // Superseded while it was running: a newer pass is now driving the
       // engines, so this one leaves without tearing anything down and
       // without a word on screen. Its verdict is about a tunnel that no
       // longer exists.
-      if (ladderGenerationRef.current !== generation) return false;
+      if (ladderGenerationRef.current !== generation) return "failed";
 
       // The clock is set on each engine start, so a run that ultimately
       // failed leaves it running against nothing.
@@ -1379,21 +1525,49 @@ export function Dashboard({
           attempts: rungsFrom(attempts),
         });
       }
-      setConnectionState("disconnecting");
+      // No "Disconnecting..." here, and this line is the whole reported
+      // bug.
+      //
+      // A failed pass still has to clear up after itself -- an engine
+      // left running would hold the default route -- but that teardown
+      // is the app's housekeeping, not something the customer asked for.
+      // Announcing it told someone who had pressed Connect that the app
+      // was disconnecting, for the second or two the cleanup takes, and
+      // then dropped back to "Connect" with nothing having happened.
+      // Pressed again, they got the same thing again. That is the
+      // "shows DISCONNECTING, stops after 1-2 seconds, takes three or
+      // four tries" report, and there was no tunnel state involved in it
+      // at all -- only the app narrating its own cleanup as the opposite
+      // of the request.
+      //
+      // The phase stays "connecting" until there is an outcome to give,
+      // which is the truth of the operation from where the customer is
+      // standing. `phaseFor` enforces it rather than this comment: while
+      // the intent is "connect", nothing published can render as a
+      // teardown.
       await serviceDisconnect().catch(() => undefined);
+      // The outcome is now known, so the wording rule is lifted before
+      // the answer is asked for -- otherwise the settled "disconnected"
+      // below would come back out as "connecting" and the spinner would
+      // never end.
+      endIntent(intent);
       // What the service says, not what this pass assumes. The
       // assumption is usually right, and "disconnected" is still the one
       // wrong answer that matters: a failed pass can leave an engine
       // running -- that is why the teardown above exists -- and telling
       // someone they are unprotected while an adapter is still carrying
       // their traffic is the same lie in the other direction.
-      const left = await confirmTornDown();
+      const left = await confirmTornDown(intent);
       // An engine that outlived the teardown is one this pass has just
       // proven carries nothing. "Connected" would throw that proof away
       // for the sake of a handshake; degraded is what was measured.
-      if (left === "connected") setConnectionState("degraded");
-      return false;
+      if (left === "connected") publishObserved(intent, "degraded");
+      return "failed";
     } finally {
+      // Same ownership rule as the guard below: a pass that has been
+      // superseded does not get to declare the app idle, because its
+      // replacement is still connecting.
+      endIntent(intent);
       // Only the pass that still owns the guard may release it. One that
       // outlived its deadline has already been replaced, and clearing
       // the guard here would unlock a newer pass that is still running.
@@ -1457,23 +1631,16 @@ export function Dashboard({
     return Math.max(0, Math.ceil(ms / 86_400_000));
   }, [subscription, now]);
 
-  const connectLabel =
-    connectionState === "connected"
-      ? t("dash.connected")
-      : connectionState === "degraded"
-        ? t("dash.degraded")
-        : connectionState === "connecting"
-          ? t("dash.connecting")
-          : connectionState === "verifying"
-            ? t("dash.verifying")
-            : connectionState === "disconnecting"
-              ? t("dash.disconnecting")
-              : // Named for what the press actually does. "Connect" here
-                // would promise an action the app is in no position to
-                // take, on a tunnel it cannot currently see.
-                connectionState === "unknown"
-                ? t("dash.recheck")
-                : t("dash.connect");
+  // The label and what the press does, from one table, in one render.
+  //
+  // They used to be two independent chains of ternaries -- this one, and
+  // another inside the press handler -- over a `connectionState` that
+  // could change between the render and the click. Nothing made them
+  // agree, and when they did not, the button ran the opposite of what it
+  // said. `pressFor` is total over the phase and returns both, so there
+  // is no longer a pair to disagree.
+  const press = pressFor(connectionState);
+  const connectLabel = t(press.labelKey);
 
   if (loading) {
     return (
@@ -1566,7 +1733,9 @@ export function Dashboard({
                   <>
                     <ConnectOrb
                       state={connectionState}
-                      onToggle={() => void handleConnectToggle()}
+                      // The action travels with the press, decided in the
+                      // same render as the label above it.
+                      onToggle={() => void handleConnectToggle(press.action)}
                       label={connectLabel}
                     />
 
