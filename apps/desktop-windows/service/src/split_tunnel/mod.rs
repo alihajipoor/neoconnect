@@ -50,7 +50,7 @@
 //! is the failure this project has spent the most effort removing.
 
 mod divert;
-mod firewall;
+pub(crate) mod firewall;
 mod flows;
 mod icon;
 mod owner;
