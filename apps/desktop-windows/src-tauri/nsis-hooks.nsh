@@ -148,6 +148,14 @@
   nsExec::ExecToLog 'sc.exe delete WinDivert'
   Pop $0
 
+  ; The same stale binary the uninstall hook removes: pre-resources
+  ; builds put neoconnect-service.exe directly in $INSTDIR, and this
+  ; install writes only to resources\, so an upgrade would leave a
+  ; second, older copy sitting in the install root forever. Nothing runs
+  ; it; it just misidentifies the build to whoever reads versions off
+  ; disk. WaitForProcessGone above has already ensured nothing holds it.
+  Delete "$INSTDIR\neoconnect-service.exe"
+
   ; The old install directory is left in place rather than deleted here.
   ; Removing files from a path this installer does not own is the kind of
   ; thing that goes badly wrong if the assumption is ever off, and a stale
@@ -196,6 +204,36 @@
   nsExec::ExecToLog '"$INSTDIR\resources\neoconnect-service.exe" uninstall'
   Pop $0
 
+  ; And again by name, because the line above was the only thing removing
+  ; the service and it asks a binary to do it.
+  ;
+  ; Measured on the rig, in the exact machine state this whole section
+  ; exists for: with resources\WinDivert.dll missing, the service
+  ; executable cannot load at all -- no stdout, no stderr, no exit code
+  ; -- so `uninstall` did nothing, uninstall.exe /S still exited 0, and
+  ; NeoxifyService was left registered pointing at a binary that had just
+  ; been removed. Every other cleanup below passed. The one that failed
+  ; was the one that needed the broken component to clean up after
+  ; itself, which is the assumption this section was written to reject.
+  ;
+  ; PREINSTALL has done exactly this since the rename, and it is why an
+  ; upgrade over a broken install recovers where an uninstall did not.
+  ; Same four calls for the same reasons: BOTH names, because a machine
+  ; upgraded from a pre-rename build can still carry NeoConnectService;
+  ; by name via sc.exe, so it works no matter where the old build put
+  ; itself. All four fail harmlessly on a machine that never had them,
+  ; and none of them can stop the uninstall. `sc.exe delete` returns
+  ; SUCCESS immediately even when the binary it names is gone -- checked
+  ; by hand on the rig in this state.
+  nsExec::ExecToLog 'sc.exe stop NeoConnectService'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete NeoConnectService'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe stop NeoxifyService'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete NeoxifyService'
+  Pop $0
+
   ; And the tunnel service, for the same reason it matters on install: it
   ; is registered by wireguard.exe rather than by us, and outlives a
   ; helper that was killed rather than stopped.
@@ -213,6 +251,19 @@
   !insertmacro WaitForProcessGone "xray.exe"
   !insertmacro WaitForProcessGone "openvpn.exe"
 
+  ; The service binary from the old layout, which lived directly in
+  ; $INSTDIR before it moved under resources\. The uninstaller only knows
+  ; about files the current build installs, so this one is left behind
+  ; and then survives every future install and uninstall.
+  ;
+  ; Found on the rig: "C:\Program Files\Neoxify\neoconnect-service.exe"
+  ; beside the live one under resources\, months stale, still there after
+  ; a clean uninstall. Harmless to have running -- nothing runs it -- but
+  ; not harmless to leave: anyone diagnosing a machine finds it first,
+  ; reads its version, and is now debugging a build that is not
+  ; installed. Deleted after WaitForProcessGone, so nothing holds it.
+  Delete "$INSTDIR\neoconnect-service.exe"
+
   ; WinDivert's kernel driver, used by Custom mode. WinDivert registers it
   ; as a service on first use and unregisters it when the last handle
   ; closes -- which the helper service does on disconnect and on stop, so
@@ -227,5 +278,78 @@
   nsExec::ExecToLog 'sc.exe stop WinDivert'
   Pop $0
   nsExec::ExecToLog 'sc.exe delete WinDivert'
+  Pop $0
+
+  ; ---------------------------------------------------------------
+  ; Removals that do not go through our service.
+  ;
+  ; Everything above asks neoconnect-service.exe to undo its own work,
+  ; which is the thorough path -- and the one that is unavailable in
+  ; exactly the case customers reported: a service that cannot run.
+  ; It will not start if WinDivert.dll is missing after a bad upgrade,
+  ; and it cannot be asked anything once it has crashed. Uninstalling
+  ; is what somebody does *because* the machine's networking is
+  ; broken, so the uninstaller cannot assume the component that broke
+  ; is available to clean up after itself.
+  ;
+  ; Each of these is idempotent, fails harmlessly on a machine that
+  ; never had the thing, and none of them can stop the uninstall.
+
+  ; The NRPT rule, which is the one that strands a whole machine. It
+  ; sends every lookup to the tunnel's resolver, lives in the registry
+  ; rather than in any process, and survives both a reboot and Windows'
+  ; own "network reset" -- so a customer who uninstalls to fix their
+  ; DNS keeps the rule that broke it.
+  ;
+  ; Backquoted strings so the PowerShell can carry both quote
+  ; characters, and $$ for a literal dollar: $_ alone is an NSIS
+  ; variable.
+  ;
+  ; The cmdlet first, then the registry directly, because a machine in
+  ; this state is one where the cmdlets may be exactly what is not
+  ; working. Matched on the comment this product writes, so nothing
+  ; else's rules are touched.
+  nsExec::ExecToLog `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-DnsClientNrptRule | Where-Object { $$_.Comment -eq 'Neoxify tunnel DNS' } | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue"`
+  Pop $0
+  nsExec::ExecToLog `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "@('HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig','HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig') | Where-Object { Test-Path $$_ } | Get-ChildItem | Where-Object { (Get-ItemProperty -Path $$_.PSPath -Name Comment -ErrorAction SilentlyContinue).Comment -eq 'Neoxify tunnel DNS' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue"`
+  Pop $0
+  ; The DNS client caches the table, so the registry delete above is
+  ; not live until it is told to re-read. Restarting Dnscache is
+  ; refused (it is a protected service) and gpupdate /force re-applies
+  ; every machine policy to poke one table; paramchange is the narrow
+  ; signal for it. A reboot finalises anything this does not take.
+  nsExec::ExecToLog 'sc.exe control dnscache paramchange'
+  Pop $0
+  nsExec::ExecToLog 'ipconfig /flushdns'
+  Pop $0
+
+  ; Custom mode's inbound allowance. Named identically by the service
+  ; (see split_tunnel/firewall.rs), so one delete removes both the TCP
+  ; and the UDP entry -- including a pair left by a service that was
+  ; killed while Custom mode was on, which would otherwise sit in the
+  ; customer's firewall allowing traffic to ports nothing listens on,
+  ; under a product name that is no longer installed.
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Neoxify Split Tunnel"'
+  Pop $0
+
+  ; The Wintun adapter OpenVPN attaches to. The service creates it with
+  ; tapctl.exe and deliberately never deletes it -- creating one is slow
+  ; and a dormant adapter costs nothing between sessions. After this
+  ; uninstall there are no more sessions, and what is left is an adapter
+  ; in the customer's network connections list that nothing on the
+  ; machine can explain or remove.
+  ${If} ${FileExists} "$INSTDIR\resources\tapctl.exe"
+    nsExec::ExecToLog '"$INSTDIR\resources\tapctl.exe" delete Neoxify-OpenVPN'
+    Pop $0
+  ${EndIf}
+
+  ; The IKEv2 phonebook entry. The service removes it on every
+  ; disconnect, so this is purely the fallback for a service that never
+  ; got to run one -- an entry called "Neoxify" left in the Windows VPN
+  ; list, dialable by hand, for a product that is gone. Hung up first,
+  ; because a connected entry cannot be removed.
+  nsExec::ExecToLog 'rasdial Neoxify /disconnect'
+  Pop $0
+  nsExec::ExecToLog `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Remove-VpnConnection -Name 'Neoxify' -AllUserConnection -Force -ErrorAction SilentlyContinue"`
   Pop $0
 !macroend

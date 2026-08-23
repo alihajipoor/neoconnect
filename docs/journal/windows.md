@@ -5775,3 +5775,441 @@ in `Stats::complaint()` — that counter climbs from the first second on
 any dual-stack network, so a complaint keyed on it would be permanently
 lit, and this codebase already decided (see `WARMUP`) that a standing
 false alarm is worse than silence.
+
+---
+
+## 2026-08-22 — The full-tunnel IPv6 leak was real; blocked in our code on the three engines that leaked
+
+**Status:** written and building; **the rig re-run is NOT done** — see
+"What still has to be measured" before quoting this anywhere
+**Branch:** `claude/full-tunnel-ipv6` (not pushed, no PR)
+**Touches:** `apps/desktop-windows/service/src/engines/`{`ipv6_block.rs` (new), `mod.rs`},
+`service/src/pipe.rs`, `ipc/src/lib.rs`, `src-tauri/src/`{`vpn.rs`,`lib.rs`},
+`src/lib/`{`egress.ts`,`i18n.tsx`}, `src/screens/Dashboard.tsx`
+
+The section above said the full-tunnel case was inferred and told the
+next session to measure it before fixing it. It was measured, and the
+inference held.
+
+Client 0.9.25, node germany-1, dual-stack guest, capture taken **host
+side at the vNIC** — outside anything the client can influence. Plain
+full tunnel, split tunnel **off**, clear-text public-destination IPv6
+packets:
+
+```
+OpenVPN             13 (disconnected)  ->  14   LEAK
+IKEv2               13                 ->  14   LEAK
+Xray VLESS-REALITY  13                 ->  smaller, non-zero   LEAK
+WireGuard           13                 ->   0   blocked
+```
+
+In every leaking case the app said `connected: true` and the v4 exit
+address was the node's. That is the combination that hid this: IPv4
+genuinely tunnelled, IPv6 in the clear, and every instrument the app
+owned agreeing that the customer was protected.
+
+**REALITY's smaller number is not partial protection.** Xray captures
+DNS, so a v6-only hostname never resolves and never produces a packet.
+Raw v6 — literal addresses, cached `AAAA` — still egressed; ICMPv6 and
+inbound TCP 443 were both seen.
+
+### WireGuard was safe, and not because of us
+
+`wireguard.exe` arms its own WFP kill-switch. The capture read it
+directly: provider **"WireGuard"** owning a BLOCK filter named
+`Block all outbound (IPv6)` at `FWPM_LAYER_ALE_AUTH_CONNECT_V6`, the
+matching inbound one, and permits for NDP, DHCP, loopback, its TUN
+interface and its service.
+
+So the mechanism was already proven on customers' machines by a binary
+we already ship. The fix is that shape, in our code, for the engines
+that do not bring one — `engines/ipv6_block.rs`. Ten filters: BLOCK at
+`ALE_AUTH_CONNECT_V6` and `ALE_AUTH_RECV_ACCEPT_V6` at weight 0, and at
+weight 12 above them, per layer, permits for loopback (both the `::1`
+address form and `FWP_CONDITION_FLAG_IS_LOOPBACK`), `fe80::/10` and
+`ff00::/8`. The last two are what keep NDP, RA, DAD and DHCPv6 alive —
+without them this does not stop internet IPv6, it stops the machine
+talking to its own router.
+
+### Things worth knowing before touching it
+
+- **User-mode WFP is enough.** `fwpmu.h`, no driver. User mode may add
+  PERMIT/BLOCK at the ALE layers; only *redirection* needs a kernel
+  callout. Nothing here redirects.
+- **The session is `FWPM_SESSION_FLAG_DYNAMIC`, and that is the whole
+  safety argument.** Every object belongs to the engine handle, so the
+  kernel removes them when the process dies — killed, crashed, or
+  stopped. No persistent filter, nothing boot-time, nothing that can
+  strand a customer's networking. Removal is "close the handle"; there
+  is deliberately no per-filter delete loop that could miss one.
+- **Everything goes in inside one transaction.** A half-installed set is
+  worse than nothing: the ordering that fails first leaves the
+  machine-wide BLOCK up with the permits missing, which takes the LAN
+  down.
+- **Gates.** WireGuard is exempt (its own kill-switch; two providers
+  blocking the same thing is a debugging trap). Custom mode is exempt —
+  `redirect.rs` already handles v6 there *per application*, and a
+  machine-wide block would change unselected apps' behaviour, which
+  nobody asked for. Residual gap, stated: in `AllExcept`, the excluded
+  apps and everything else keep their IPv6.
+- **`ALE_AUTH_CONNECT_V6` classifies at flow establishment.** A v6
+  connection already open when the tunnel comes up is not re-examined.
+  WireGuard's kill-switch has the same property.
+- **Struct layouts are windows-sys generated bindings, not hand-written.**
+  `FWPM_FILTER0` is a nest of unions and this repo has already paid for
+  hand-declaring a Windows structure once (three wrong RAS layouts, one
+  of which dialled and then killed the service from inside RASAPI32).
+
+### The blind spot that hid it, and what replaced it
+
+`egress.ts` compared the address `/health/ip` saw before and after
+connecting. On every node that is an IPv4 conversation, so a machine
+leaking v6 beside a working v4 tunnel came back `throughTunnel`. The
+check was not wrong; it could not see half the machine.
+
+New question, `vpn::probe_ipv6_egress`: can a public IPv6 *literal* be
+reached from here? Literal, because a hostname is resolved by Windows and
+may answer with an `A` record. Two operators (`2606:4700:4700::1111`,
+`2001:4860:4860::8888`, TCP 443, concurrent, 2.5s) so one filtered
+anycast address does not read as "no IPv6".
+
+**It had to be native.** The app's HTTP permission is scoped to
+`*.neoxify.site` in `src-tauri/capabilities/default.json`, so a `fetch`
+to any probe address is refused by Tauri's own ACL before a packet
+leaves — a check that always answers "no IPv6" and can never fail. That
+was caught by reading the capability file, not by running it; worth
+remembering for any future probe written in the frontend.
+
+A baseline is taken **before** connecting, because most machines have no
+public IPv6 at all. Without it, "the probe failed" cannot tell a blocked
+machine from one that never had any, and either would be a false alarm
+on the common case.
+
+A leak is surfaced and deliberately does **not** mark the tunnel
+degraded: that hands it to the failover ladder, which tears down a
+working connection for the next protocol — which leaks identically — and
+cycles every candidate before ending where it started.
+
+### What still has to be measured
+
+Nothing below has been run. `cargo build`, `cargo check --workspace
+--all-targets`, `cargo test --workspace`, `tsc`, `vite build` and
+`vitest` all pass, and that means it compiles.
+
+1. **Re-run the matrix.** Same rig, same node, split tunnel off, capture
+   host-side. Baseline vs connected clear-text public-v6 counts must go
+   13 -> 0 for OpenVPN, IKEv2 and REALITY, the way WireGuard already
+   does. Anything above zero is the fix not working, whatever the log
+   says.
+2. **Crash test.** Kill the service while connected (`taskkill /F`, not
+   a stop). The filters must vanish — `netsh wfp show filters` should
+   have no `Neoxify` provider — and IPv6 must come back without a
+   reboot. This is the claim the dynamic session makes and it is the one
+   that hurts customers if it is wrong.
+3. **LAN survival.** With the block up, confirm NDP/RA still work: the
+   machine keeps its link-local neighbours and does not lose its router.
+   The permits are what this tests.
+4. `wfp_accepts_the_whole_filter_set_then_it_is_aborted` (in
+   `ipv6_block.rs`) hands the real filter set to the real engine inside a
+   transaction and aborts it, so WFP validates every structure without
+   filtering a packet. **It skipped locally** — adding filters needs
+   administrator and this shell is not elevated (`FwpmTransactionBegin0`
+   returned `0x5`). CI's Windows runner is elevated, so it runs there.
+
+### Still the interim
+
+Blocking is not the destination. Every node is IPv4-only — the server
+configs carry no v6 addressing, no tunnel adapter gets a v6 address, and
+every route the client installs is v4 — so there is nowhere to send a v6
+packet. The real fix is IPv6 on the nodes, after which this module
+should carry v6 rather than drop it and `dash.fullTunnelIpv6Blocked`
+should go with it.
+
+Until then it is a stated gap, not a silent one: the dashboard says IPv6
+is blocked while connected, in English and Persian, and says it only
+when the service reports a block is actually installed.
+
+## 2026-08-23 — 0928 verified on the wire: IPv6 fixed, the uninstall was not
+
+**Status:** three rig-found defects fixed on `claude/integration-0928`;
+**none of the three fixes has itself been through the rig** — see "What
+a re-test has to do"
+**Branch:** `claude/integration-0928` (not pushed, no PR)
+**Touches:** `src-tauri/nsis-hooks.nsh`,
+`service/src/split_tunnel/`{`owner.rs`,`mod.rs`,`redirect.rs`},
+`service/src/engines/dns.rs`
+
+The 0928 integration branch — teardown/janitor, split-tunnel wave 1,
+full-tunnel IPv6 block — went to the VM with packet captures. What
+follows is what the wire said, then the three things it said were
+wrong.
+
+### IPv6: the claim held, and it is now zero
+
+The previous entry left "re-run the matrix" as the outstanding
+measurement. It was run, host-side at the vNIC, split tunnel off.
+Clear-text public-destination IPv6 packets, connected:
+
+```
+OpenVPN             LEAK  ->  0
+IKEv2               LEAK  ->  0
+Xray VLESS-REALITY  LEAK  ->  0
+WireGuard              0  ->  0   (never ours; see below)
+```
+
+The crash test passed too: `taskkill /F` on the service while
+connected, and the filters are gone — no `Neoxify` provider in WFP —
+with IPv6 back without a reboot. That is the one claim the dynamic
+session makes that would hurt customers if it were wrong, and it is now
+measured rather than argued.
+
+**WireGuard is exempt on purpose and stays exempt.** `wireguard.exe`
+arms its own kill-switch and the capture reads it directly under
+provider "WireGuard". Two providers blocking the same thing is a
+debugging trap, not defence in depth.
+
+### The split-tunnel wave
+
+**B-1, the activation race: 20 of 20.** What makes that number worth
+anything is not the counters — this file's whole history is counters
+reading healthy through a leak — it is that each trial ended with an
+exit-IP check that had to come back as the node. A pass is "the
+connection that survived activation is demonstrably inside the tunnel",
+not "nothing threw".
+
+**B-2, the browser: 219 -> 0.** Plaintext UDP/443 datagrams from Chrome
+before activation, and after. A real QUIC client holds its socket open,
+so the second datagram is always attributable and the first is caught
+by `image_for_new_connection`.
+
+**And the gap that is left.** A UDP socket closed microseconds after
+its send still egresses in clear text from a selected app: Windows
+drops the port from the endpoint table when the socket closes, so by
+the time the owner lookup rebuilds there is no row naming the owner,
+and in `OnlySelected` an unknown owner means leave alone. 13 of 15 in
+one run, 14 of 15 in the next. Reproducible, not a race retrying wins,
+and **not fixable by asking harder** — the fact the lookup needs is
+already gone. It needs the B2 WFP `ALE_APP_ID` filter, classified in
+the sending process at send time. Written down at the decision point in
+`redirect.rs`; nothing about it changed.
+
+### The three defects, and what was done about them
+
+**1. Uninstall left `NeoxifyService` registered. This was the real
+failure of the session.** On a machine where `resources\WinDivert.dll`
+is missing the service binary cannot load at all — no stdout, no
+stderr, no exit code — and `NSIS_HOOK_PREUNINSTALL` removed the service
+*only* by running that binary. `uninstall.exe /S` exited 0 and left a
+registered service pointing at a deleted binary. Everything else in the
+same test passed: NRPT gone from both registry locations, firewall rule
+gone, `Neoxify-OpenVPN` adapter gone, RAS entry gone, ARP entry gone,
+WinDivert gone.
+
+That is the exact field state the "removals that do not go through our
+service" section was written for, and it was the one removal still
+inside it. `NSIS_HOOK_PREINSTALL` has done the right thing since the
+rename — unconditional `sc.exe stop` + `sc.exe delete` for both
+`NeoxifyService` and `NeoConnectService` — which is why upgrading over
+a broken install recovers where uninstalling did not. The uninstall
+hook now makes the same four calls. `sc.exe delete NeoxifyService`
+returns SUCCESS immediately in that state; checked by hand on the rig.
+
+Also found: an orphaned `C:\Program Files\Neoxify\neoconnect-service.exe`
+from the pre-`resources\` layout, beside the live one, months stale,
+surviving uninstall. Nothing runs it — but anyone diagnosing a machine
+reads its version first and is then debugging a build that is not
+installed. Deleted on both install and uninstall now.
+
+**2. The activation convergence loop was closing connections it had
+just carried.** With zero selected processes running before activation
+and dialling started only after `split_tunnel_active`, the log still
+said `activation reset settled after 12 rescan(s): 30 connection(s)
+closed in total`. All thirty had been carried successfully.
+`reset_selected_connections` filtered only by remote address, so by the
+second rescan a freshly redirected connection is indistinguishable from
+a stale one. It now takes the same `carried` predicate the escape audit
+takes (`Nat::has_flow`, non-refreshing — `lookup_flow` would renew every
+entry it read and stop `expire_idle` retiring anything).
+
+**3. `dns::clear()` never looked at the GPO registry location on the
+normal path.** It returned the moment PowerShell reported a clean `0`,
+which is what normal operation reports — so the registry sweep only ever
+ran on the fallback. A rule of ours under
+`HKLM\SOFTWARE\Policies\...\DNSClient\DnsPolicyConfig` survived every
+ordinary disconnect. `Get-DnsClientNrptRule` does not enumerate that
+location, so a clean cmdlet report says nothing about it. The sweep is
+unconditional now; the resolver poke stays gated on something actually
+having been removed.
+
+**The PowerShell fallback is not going anywhere.** The rig watched the
+removal blow the 15s helper budget three times under load. "The cmdlets
+answered" is not something to build on.
+
+### What a re-test has to do
+
+None of the three fixes above has been measured. Specifically:
+
+1. **The uninstall.** Restore `pre-0928`, install, delete
+   `resources\WinDivert.dll`, run `uninstall.exe /S`, then
+   `sc.exe query NeoxifyService` — must be "does not exist" — and check
+   `$INSTDIR\neoconnect-service.exe` is gone. This one **cannot be
+   proven any other way**; there is no unit test for an NSIS macro.
+2. **The convergence loop.** Same shape as the run that found it: no
+   selected process before activation, dial after `split_tunnel_active`,
+   read the settle line. It must report 0 closed, and a selected app's
+   exit IP must still be the node afterwards — a reset that closes
+   nothing because it now skips everything would look identical.
+3. **`dns::clear()`.** Plant a rule carrying our comment at the GPO
+   location, connect, disconnect, and confirm it is gone and the
+   cleanup log names it as one the cmdlets did not report.
+
+The hook edits were compiled with Tauri's own makensis
+(`%LOCALAPPDATA%\tauri\NSIS`) through a harness that inserts the three
+macros into sections the way the generated `installer.nsi` does. That
+proves they parse. `cargo build -p neoconnect-service`,
+`cargo check --workspace --all-targets` and `cargo test --workspace`
+all pass, and that means it compiles.
+
+### Rig traps that cost real time this session
+
+- **The guest CAN elevate.** Older notes in this file say otherwise.
+  They are wrong; do not plan around them.
+- **Defender blocks hidden PowerShell launched from the `Z:` share.**
+  Copy the script into the guest first, or it dies with nothing useful
+  on screen.
+- **`keyboardputstring` eats `\`, `>` and `|`.** Every path and every
+  redirect typed that way arrives mangled. Base64 the command, or type
+  it somewhere it can be checked before running.
+- **VirtualBox under Hyper-V wedges the guest.** AHCI reset followed by
+  a heartbeat flatline, with the host disk idle — so it is not I/O
+  pressure and waiting does not help.
+- **Live snapshots fail** with `VERR_VM_UNEXPECTED_UNSTABLE_STATE`.
+  Power off first and take them offline.
+- **The v6net NAT answers every v6 SYN with a local `ACK|RST` in about
+  350us.** "Got a reply" therefore proves nothing at all about
+  reachability. Read the capture, not the connect result.
+- **UDP to TEST-NET ranges stops leaving the guest** once the NAT starts
+  answering with ICMP. Use a fresh routable destination for each phase
+  or the second phase measures nothing.
+- **Searching WFP filters by display name gives false all-clears.**
+  Group by provider key instead; that is how the WireGuard set was found
+  and how ours is confirmed gone after a crash.
+
+### Snapshots on the VM
+
+- **`pre-0928`** — clean install of the pre-integration build. The
+  starting point for the uninstall re-test, and the only state in which
+  the `NeoxifyService` failure reproduces.
+- **`pre-verify2`** — taken after the IPv6 matrix and before the
+  split-tunnel runs, so the B-1/B-2 measurements can be repeated without
+  redoing the matrix.
+
+Both are offline snapshots, for the reason above.
+
+## 2026-08-23 — the three fixes went back through the rig, and all three hold
+
+**Status:** done — this **supersedes** the previous entry's "none of the
+three fixes has itself been through the rig". That was true when it was
+written; it is no longer. The re-test in "What a re-test has to do" has
+been run in full, plus an IPv6 regression check.
+**Branch:** `claude/integration-0928`
+**Touches:** nothing in the tree — measurement only
+
+The installer under test was `Neoxify_0.9.27_x64-setup.exe`, built from
+`38f4fe4` at `C:\nx0928`, SHA-256
+`2b7068447868c5b8371630301f4cdac5941208f6f2f7a0771e6dc52463a3986e`.
+
+**Confirming the new build was actually the one installed took work.**
+Both the old and new builds report 0.9.27 — the version bump lands in
+`a3322bd`, after the hooks — so the version string cannot tell them
+apart and reading it would have been a false pass. Binary hashes before
+and after were compared instead, and the stale root-level
+`C:\Program Files\Neoxify\neoconnect-service.exe` was absent after the
+install, which only the new PREINSTALL hook does.
+
+### 1. Uninstall on a service that cannot load — PASS, against a negative control
+
+The OLD build was put through the identical broken state first and **did
+leave the service registered**: `sc query NeoxifyService` →
+`SERVICE_NAME: NeoxifyService  STATE: 1 STOPPED`, the key still there
+with `ImagePath` naming the deleted binary. That control is the whole
+point: without it a clean "does not exist" only proves the test never
+reproduced the failure.
+
+New build, same state: `sc query NeoxifyService` → `FAILED 1060: The
+specified service does not exist`, the same for `NeoConnectService`,
+both registry keys absent, `C:\Program Files\Neoxify` gone, NRPT clear
+in the cmdlets *and* both registry locations, firewall rule gone,
+`Neoxify-OpenVPN` adapter gone, `rasphone.pbk` absent, and
+`sc query WinDivert` → 1060.
+
+**Two false-pass traps were found while building this test, and both
+would have produced a green result on a broken build:**
+
+- **Deleting `WinDivert.dll` while the service is running fails
+  silently.** The process holds the handle, the delete does not take,
+  and the binary then loads perfectly well and removes its own service —
+  the exact scenario the test exists to break. Stop the service first
+  and confirm the file is actually gone before running the uninstall.
+- **The RAS check was unfalsifiable.** The service removes that entry on
+  every disconnect, so `rasphone.pbk` being absent after an uninstall
+  says nothing about the uninstall at all. An entry was planted back in
+  before each run, in both the control and the test, so the check could
+  fail.
+
+### 2. Activation reset — PASS, twice
+
+`activation reset settled after 12 rescan(s): 0 connection(s) closed in
+total`, with `redirected` still climbing — 68/38 and 60/30
+seen/matched/redirected/returned across the two runs — and the selected
+app's exit IP reading `38.60.249.229` while an unselected app read
+`50.34.35.228`. The counter alone would not have been evidence: a reset
+that closes nothing because it now skips everything reports the same 0.
+The exit IPs are what make it mean something.
+
+Run twice deliberately, because the old build's closed-count varied run
+to run (30 / 120 / 124 / 128). One 0 could have been luck.
+
+### 3. NRPT GPO-location sweep — PASS
+
+A rule of ours was planted at
+`HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig`
+**while connected**, alongside two foreign rules. After a normal
+disconnect — not the fallback path — ours was gone, both foreign rules
+survived with their comments intact, and `cleanup.log` recorded
+`removed 1 rule(s) from the registry that the cmdlets did not report`.
+`Get-DnsClientNrptRule` was empty for the whole run, which is the point:
+the cmdlets never saw any of it, so a clean cmdlet report proves nothing
+about that location.
+
+### 4. IPv6 regression — PASS
+
+The hook and DNS changes are nowhere near the WFP code, but the same
+build was checked rather than assumed. `analyze6.py`: baseline 13 egress
+/ 10 ingress disconnected, **0 / 0** connected. WFP provider key
+`{a1e1f9c2-6b7d-4f4a-9c33-2d5b8e7a41d0}`: 0 filters disconnected → 10
+connected (5 per layer) → 0 after disconnect.
+
+**On the two sets of IPv6 numbers in this file — both are right.** The
+"13 → 14 / 14 / smaller" figures are the *original leak measurement* on
+client 0.9.25. The "13 egress / 10 ingress" figures are the
+*disconnected baselines* of this verification run on the fixed build,
+where every connected count is 0. Different runs, different instruments;
+neither supersedes the other and neither should be quoted as if it did.
+
+### Defender flags the unsigned local build
+
+Windows Defender detects the locally built, **unsigned** installer as
+`Trojan:Win32/Bearfoos.B!ml` (threatID 2147731849) and quarantined it on
+a second install attempt. `!ml` is the machine-learning bucket — an
+unsigned Tauri/NSIS binary with an installer hook that shells out to
+`sc.exe` is a textbook false positive. CI-signed releases are not
+affected. **No Defender settings were changed** to get the run done; if
+this bites again, restore the snapshot and copy the installer in fresh
+rather than turning protection off.
+
+### Snapshots on the VM
+
+Now `pre-0928` → `pre-verify2` → `pre-verify3`. `pre-verify3` is the
+state the uninstall control and test both start from. All offline
+snapshots, for the reason in the previous entry.

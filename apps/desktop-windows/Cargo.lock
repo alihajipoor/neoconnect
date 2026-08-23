@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "neoconnect-desktop"
-version = "0.9.27"
+version = "0.9.28"
 dependencies = [
  "neoconnect-ipc",
  "serde",
@@ -2731,6 +2731,7 @@ dependencies = [
  "windows 0.43.0",
  "windows-service",
  "windows-sys 0.59.0",
+ "winreg",
 ]
 
 [[package]]

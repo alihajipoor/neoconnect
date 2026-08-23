@@ -310,12 +310,25 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                     // The counters live behind the lock, so there is
                     // nothing to report rather than nothing wrong.
                     split_tunnel_problem: None,
+                    // Same reason, and the same rule: whether a block is
+                    // installed is only knowable behind the lock, so
+                    // this says "we are not asserting one" rather than
+                    // guessing from the protocol name.
+                    ipv6_blocked: false,
                 };
             };
             let (connected, protocol, health) = engines.status();
             let split_tunnel_active = engines.split_tunnel_running();
             let split_tunnel_problem = engines.split_tunnel_complaint();
-            Response::State { connected, protocol, health, split_tunnel_active, split_tunnel_problem }
+            let ipv6_blocked = engines.ipv6_blocked();
+            Response::State {
+                connected,
+                protocol,
+                health,
+                split_tunnel_active,
+                split_tunnel_problem,
+                ipv6_blocked,
+            }
         }
         // Nothing here touches the machine, so there is no reason for
         // the app's picker to go blank while a connect runs.
@@ -393,7 +406,7 @@ fn spawn_idle_watchdog(engines: Arc<Mutex<Engines>>, last_seen: Arc<Mutex<Instan
             }
             eprintln!("app silent for {IDLE_GRACE:?} with a tunnel up -- tearing it down");
             if let Err(err) = engines.disconnect() {
-                eprintln!("app-gone cleanup: {err}");
+                crate::cleanup_log::note("tear the tunnel down after the app went away", &err);
             }
         }
     });

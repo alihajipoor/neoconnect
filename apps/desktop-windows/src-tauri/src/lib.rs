@@ -125,6 +125,11 @@ pub fn run() {
             vpn::vpn_probe_split_tunnel,
             vpn::vpn_list_running_apps,
             vpn::vpn_status,
+            // Asked from a socket rather than the frontend's fetch: the
+            // app's HTTP permission is scoped to *.neoxify.site, so a
+            // probe address would be refused by the ACL and the check
+            // would always answer "no IPv6". See vpn::probe_ipv6_egress.
+            vpn::probe_ipv6_egress,
             vpn::measure_latency,
             vpn::network_fingerprint,
             get_launch_deep_link
