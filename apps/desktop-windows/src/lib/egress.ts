@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints } from "./api-endpoints";
 
@@ -10,10 +11,18 @@ import { apiEndpoints } from "./api-endpoints";
  * probe succeeds and the app reports success: precisely the false
  * "Connected" this exists to catch.
  *
- * Comparing the public IP before and after has no such hole. If the
+ * Comparing the public IP before and after closes that hole. If the
  * world sees a different address afterwards, the packets provably left
  * via somewhere else. If it sees the same one, traffic is bypassing the
  * tunnel no matter how healthy the interface looks.
+ *
+ * It closes that hole for **IPv4 and nothing else**, which this file
+ * used to claim was no hole at all. The comparison is done over
+ * whichever family reached `/health/ip`, and on every node that is
+ * IPv4 -- so a machine leaking IPv6 alongside a perfectly good IPv4
+ * tunnel reads as "throughTunnel". That combination was measured, on
+ * three of the four protocols tested. The IPv6 check at the bottom of
+ * this file exists because of it.
  */
 
 /** Short: this runs while the customer is watching a spinner, and a
@@ -76,4 +85,87 @@ export async function verifyEgress(baselineIp: string | null): Promise<EgressVer
   return exitIp === baselineIp
     ? { state: "bypassingTunnel", exitIp }
     : { state: "throughTunnel", exitIp };
+}
+
+/* ------------------------------------------------------------------ *
+ * IPv6, which everything above is blind to.
+ *
+ * The check at the top of this file compares one address against
+ * another. That is a complete answer for IPv4 and no answer at all for
+ * IPv6, because a machine can have both families and they can behave
+ * differently: `/health/ip` is reached over IPv4, returns the node's
+ * address, and the comparison says "throughTunnel" -- while the same
+ * machine's IPv6 walks out of the physical NIC in clear text.
+ *
+ * That is not hypothetical. It is what was measured on client 0.9.25
+ * with plain full tunnel and split tunnel off, on OpenVPN, IKEv2 and
+ * Xray VLESS-REALITY, with a packet capture taken outside the guest. In
+ * every case this file said the customer was protected.
+ *
+ * So the leak has its own instrument. The question it asks is not "does
+ * the internet work" but the narrower one that can actually come back
+ * negative: **can this machine still reach a public IPv6 address while
+ * connected?** Every Neoxify node is IPv4-only, so a yes means those
+ * packets did not go through the tunnel -- there is no tunnel for them
+ * to have gone through. A yes is a leak.
+ * ------------------------------------------------------------------ */
+
+/** Whether a public IPv6 destination is reachable from here, right now.
+ *
+ * Answered by a socket in the Rust side rather than by `fetch` here, and
+ * that is not a style choice. The app's HTTP permission is scoped to
+ * `*.neoxify.site` (see `src-tauri/capabilities/default.json`), so a
+ * request to any probe address would be refused by Tauri's own ACL
+ * before a packet left -- producing a check that always answers "no
+ * IPv6" and can therefore never report the leak it exists to find. This
+ * project has shipped enough tests that could not fail.
+ *
+ * See `vpn::probe_ipv6_egress` for which addresses and why.
+ *
+ * Never throws: a command that could not be reached is reported as no
+ * evidence, not as an accusation.
+ */
+async function ipv6Reaches(): Promise<boolean> {
+  return invoke<boolean>("probe_ipv6_egress").catch(() => false);
+}
+
+/** Whether this machine has public IPv6 at all, taken before connecting.
+ *
+ * The reason to take a baseline rather than just probing once while
+ * connected is the common case: **most Windows machines cannot reach
+ * public IPv6 to begin with**. Without a baseline, "the probe failed" is
+ * indistinguishable between a machine that has no IPv6 and a machine
+ * whose IPv6 we successfully blocked, and reporting either as a finding
+ * would be inventing evidence.
+ *
+ * Cheap enough to sit beside the IPv4 baseline: on a machine with no
+ * IPv6 the connection fails at once with no route.
+ */
+export const captureIpv6Baseline = ipv6Reaches;
+
+export type Ipv6Verdict =
+  /** Public IPv6 is still getting out while connected. Every node is
+   * IPv4-only, so this traffic is provably not in the tunnel. */
+  | "escaping"
+  /** This machine had IPv6 before connecting and does not now: the block
+   * is doing its job, and the customer is told the gap exists. */
+  | "blocked"
+  /** No public IPv6 here either way. Nothing to report, and nothing to
+   * alarm about -- this is what most machines look like. */
+  | "absent";
+
+/** Checks IPv6 against the baseline taken before the tunnel came up.
+ *
+ * `hadIpv6` null means no baseline was taken -- adopting a tunnel that
+ * was already up when the app opened, for instance. That is treated as
+ * "absent" rather than guessed at: a probe that succeeds with no
+ * baseline still means IPv6 is reaching the internet outside an
+ * IPv4-only tunnel, but a probe that fails proves nothing, and claiming
+ * a block we did not observe would be the same lie in the other
+ * direction.
+ */
+export async function checkIpv6(hadIpv6: boolean | null): Promise<Ipv6Verdict> {
+  const reaches = await ipv6Reaches();
+  if (reaches) return "escaping";
+  return hadIpv6 === true ? "blocked" : "absent";
 }
