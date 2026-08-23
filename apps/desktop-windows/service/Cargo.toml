@@ -26,6 +26,13 @@ windows = { version = "0.43", features = ["Win32_Foundation"] }
 # out std's TcpStream::connect. socket2 is the standard way to build a
 # socket, configure it, and only then hand it to std.
 socket2 = { version = "0.5", features = ["all"] }
+# The NRPT cleanup fallback in engines/dns.rs. Removing our DNS rule via
+# PowerShell needs a working PowerShell, and the whole point of that
+# fallback is the machine where nothing works any more -- so the rule is
+# deleted straight out of the registry instead. Already in the lockfile
+# (embed-resource pulls the same version), so this adds no new code to
+# the tree.
+winreg = "0.55"
 
 [dependencies.windows-sys]
 version = "0.59"
