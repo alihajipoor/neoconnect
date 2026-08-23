@@ -1,0 +1,42 @@
+# Pins the Rust compiler for the mobile app -- BOTH platforms.
+#
+# It lives here, next to the crate, rather than at the repo root on
+# purpose: the desktop client is a separate workspace with its own
+# release history and live beta users, and it should not be dragged onto
+# a new compiler by a change made for Android.
+#
+# Why pin at all: android-v0.2.15's direct APK grew 15.4 MB against
+# 0.2.14 with no repository change beyond version strings. The cause was
+# toolchain drift in the Android build -- an unpinned compiler produced
+# a differently-linked binary from identical source, and nothing in the
+# repo recorded which compiler built which release, so the regression
+# could only be attributed by unzipping the published artifacts and
+# diffing ELF sections. That is not a diagnosis anyone should have to
+# repeat. Every build input that can change the shipped bytes is now
+# named in a file.
+#
+# 1.97.1 because it is the stable release the Android artifacts were
+# last verified against. This is a floor to move deliberately, not a
+# ceiling -- bump it when there is a reason, and re-measure the APK when
+# you do.
+#
+# BOTH platforms' targets are listed, and that is load-bearing rather
+# than tidy. Android and iOS are one app compiled from one crate, so
+# whichever machine runs cargo in this directory picks up this file.
+# Listing only the Android targets would have pinned the compiler for
+# the Mac's iOS build while leaving it without a target to build for.
+# rustup installs everything named here on first use, so the iOS build
+# keeps working -- it just becomes reproducible too.
+#
+# If iOS needs the device target (aarch64-apple-ios, no -sim) once there
+# is a Network Extension to build, add it here. Adding a target is
+# additive and safe from either session; changing the version is not --
+# agree that one across both machines first.
+[toolchain]
+channel = "1.97.1"
+targets = [
+  "aarch64-linux-android",
+  "armv7-linux-androideabi",
+  "aarch64-apple-ios-sim",
+]
+profile = "minimal"
