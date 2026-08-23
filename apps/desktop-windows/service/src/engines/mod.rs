@@ -13,6 +13,10 @@ mod ipv6_block;
 mod janitor;
 mod ras;
 mod openvpn;
+/// "Repair my network" -- the superset teardown, reusing every module
+/// above. A child of this one so it can call the same private teardowns
+/// the disconnect path does rather than growing second copies of them.
+pub(crate) mod repair;
 pub mod routing;
 mod wireguard;
 mod xray;
