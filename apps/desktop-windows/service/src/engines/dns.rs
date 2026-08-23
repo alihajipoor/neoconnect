@@ -78,12 +78,13 @@ pub fn clear() {
         // The only verified-clean answer. Everything else falls through
         // to the registry.
         Ok(out) if out.trim() == "0" => return,
-        Ok(out) => eprintln!(
-            "nrpt cleanup: PowerShell removal left rules behind (reported {:?}), falling back to the registry",
-            out.trim()
+        Ok(out) => crate::cleanup_log::note(
+            "clear the tunnel DNS rule",
+            &format!("PowerShell removal left {:?} rule(s) behind, falling back to the registry", out.trim()),
         ),
-        Err(e) => eprintln!(
-            "nrpt cleanup: PowerShell removal failed ({e}), falling back to the registry"
+        Err(e) => crate::cleanup_log::note(
+            "clear the tunnel DNS rule",
+            &format!("PowerShell removal failed ({e}), falling back to the registry"),
         ),
     }
 
@@ -92,10 +93,16 @@ pub fn clear() {
         // was wrong or unavailable, not the removal. Clean either way.
         Ok(0) => {}
         Ok(n) => {
-            eprintln!("nrpt cleanup: removed {n} rule(s) directly from the registry");
+            // Recorded even though it succeeded. This is the path that
+            // only runs when the normal one did not, so its having run
+            // at all is the fact a support conversation needs.
+            crate::cleanup_log::note(
+                "clear the tunnel DNS rule",
+                &format!("removed {n} rule(s) directly from the registry"),
+            );
             poke_resolver();
         }
-        Err(e) => eprintln!("nrpt cleanup: registry fallback failed: {e}"),
+        Err(e) => crate::cleanup_log::note("clear the tunnel DNS rule", &format!("registry fallback failed: {e}")),
     }
 }
 
@@ -171,11 +178,14 @@ fn poke_resolver() {
         sc,
         &[OsStr::new("control"), OsStr::new("dnscache"), OsStr::new("paramchange")],
     ) {
-        eprintln!("nrpt cleanup: could not signal the DNS client to reload policy ({e}); a reboot finalises the cleanup");
+        crate::cleanup_log::note(
+            "signal the DNS client to reload policy",
+            &format!("{e}; the registry is already clear and a reboot finalises it"),
+        );
     }
     let ipconfig = Path::new(r"C:\Windows\System32\ipconfig.exe");
     if let Err(e) = super::run_hidden(ipconfig, &[OsStr::new("/flushdns")]) {
-        eprintln!("nrpt cleanup: could not flush the DNS cache ({e})");
+        crate::cleanup_log::note("flush the DNS cache", &e.to_string());
     }
 }
 

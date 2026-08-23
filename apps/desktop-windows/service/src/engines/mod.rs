@@ -456,7 +456,7 @@ impl Engines {
     pub fn uninstall_cleanup(&mut self) -> Result<(), String> {
         let result = self.disconnect();
         if let Err(err) = openvpn::delete_adapter(self) {
-            eprintln!("teardown: {err}");
+            crate::cleanup_log::note("remove the OpenVPN adapter at uninstall", &err);
         }
         result
     }

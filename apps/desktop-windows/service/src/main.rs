@@ -31,6 +31,7 @@
 //!   SYSTEM and Administrators only.
 
 mod adapters;
+mod cleanup_log;
 mod engines;
 mod pipe;
 mod security;
@@ -55,7 +56,7 @@ const SERVICE_NAME: &str = "NeoxifyService";
 const SERVICE_DISPLAY_NAME: &str = "Neoxify VPN Service";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     // ProgramData rather than the install directory: config is mutable
     // per-connection state, and Program Files is meant to be read-only
     // after install. The ACL is set explicitly at creation -- see
@@ -153,7 +154,7 @@ fn set_recovery_actions(service: &windows_service::service::Service) {
         actions: Some(vec![restart_after(5), restart_after(30), restart_after(60)]),
     };
     if let Err(err) = service.update_failure_actions(actions) {
-        eprintln!("could not set service recovery actions: {err}");
+        cleanup_log::note("set the service's recovery actions", &err.to_string());
     }
 }
 
@@ -185,7 +186,7 @@ fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(exe_dir) = exe_dir() {
         let mut engines = engines::Engines::new(exe_dir, config_dir());
         if let Err(err) = engines.uninstall_cleanup() {
-            eprintln!("uninstall cleanup: {err}");
+            cleanup_log::note("tear the tunnel down before uninstalling", &err);
         }
     }
 
@@ -278,8 +279,10 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = engines.disconnect() {
         // Not fatal: a failed cleanup must not stop the service coming
         // up, or a stuck tunnel would also cost the user the ability to
-        // connect at all.
-        eprintln!("startup cleanup: {err}");
+        // connect at all. Recorded rather than printed: a service's
+        // standard error goes nowhere, and this is the one teardown
+        // nobody is ever watching, because it runs at boot.
+        cleanup_log::note("clear leftovers at service start", &err);
     }
 
     let engines = Arc::new(Mutex::new(engines));
