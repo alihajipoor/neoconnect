@@ -992,6 +992,33 @@ const MIB_TCP_STATE_ESTAB: u32 = 5;
 ///
 /// # What is deliberately left alone
 ///
+/// Connections the redirect is already carrying, which is what `carried`
+/// answers. This is not an optimisation. The reset runs once inline and
+/// then rescans every few hundred milliseconds for the length of the
+/// activation window, and a connection an application rebuilt after the
+/// first pass is, by the second pass, indistinguishable by remote
+/// address from one that predates activation -- so without this the loop
+/// closes the very connections it just arranged. Measured on the rig
+/// with *no* selected process running before activation and dialling
+/// started only after `split_tunnel_active`: "activation reset settled
+/// after 12 rescan(s): 30 connection(s) closed in total". All thirty had
+/// been carried successfully. A selected application got three seconds
+/// of churn for nothing.
+///
+/// The NAT table is the only thing that can tell the two apart. A
+/// carried flow is keyed on the application's own local port and the
+/// real destination -- the rewrite happens on the wire, not in the
+/// socket, so the connection table still shows the pre-rewrite address
+/// the table was keyed on. The escape audit turns on exactly the same
+/// question for exactly the same reason; see
+/// [`escaped_connections`].
+///
+/// `carried` must not disturb what it reads. Pass
+/// [`super::flows::Nat::has_flow`], never `lookup_flow` -- the latter
+/// refreshes `last_seen`, and a rescan loop asking about every
+/// established connection twice a second would keep every entry alive
+/// forever and stop `expire_idle` retiring anything.
+///
 /// Connections to the LAN, to loopback and to the node itself. Closing
 /// those is pure harm and buys nothing, because none of them would ever
 /// have been redirected: the kernel filter excludes every one of those
@@ -1030,6 +1057,29 @@ pub fn reset_selected_connections(
     selection: &Selection,
     node: Ipv4Addr,
     own_images: &[String],
+    carried: &dyn Fn(Transport, u16, Ipv4Addr, u16) -> bool,
+) -> ResetOutcome {
+    // SAFETY: `row` is a correctly shaped MIB_TCPROW; the call only
+    // reads it.
+    reset_with(selection, node, own_images, carried, &|row| unsafe {
+        SetTcpEntry(row.as_mut_ptr() as *mut _)
+    })
+}
+
+/// The reset with the one thing that touches the machine handed in.
+///
+/// Split out only so it can be tested. `reset_selected_connections`
+/// walks this machine's real connection table -- there is no other kind
+/// -- so a test that exercised the real closer would tear down whatever
+/// the developer or the build agent happened to have open. With the
+/// closer stubbed, the classification can be checked against real rows
+/// without a single `SetTcpEntry`.
+fn reset_with(
+    selection: &Selection,
+    node: Ipv4Addr,
+    own_images: &[String],
+    carried: &dyn Fn(Transport, u16, Ipv4Addr, u16) -> bool,
+    close: &dyn Fn(&mut [u32; 5]) -> u32,
 ) -> ResetOutcome {
     let mut outcome = ResetOutcome::default();
     let Some(words) = query_table(|buf, size| {
@@ -1075,6 +1125,15 @@ pub fn reset_selected_connections(
             continue;
         }
 
+        // Already in the tunnel, so closing it would undo this
+        // function's own work -- see the doc comment. Asked before the
+        // owner is resolved, because this is a hash lookup under a
+        // mutex and `image_path` opens a process handle.
+        let local_port = (fields[2] as u16).swap_bytes();
+        if carried(Transport::Tcp, local_port, remote, remote_port) {
+            continue;
+        }
+
         let image = images
             .entry(pid)
             .or_insert_with(|| image_path(pid))
@@ -1093,9 +1152,7 @@ pub fn reset_selected_connections(
 
         // MIB_TCPROW is the same five leading fields without the pid.
         let mut set = [MIB_TCP_STATE_DELETE_TCB, fields[1], fields[2], fields[3], fields[4]];
-        // SAFETY: `set` is a correctly shaped MIB_TCPROW; the call only
-        // reads it.
-        let ret = unsafe { SetTcpEntry(set.as_mut_ptr() as *mut _) };
+        let ret = close(&mut set);
         if ret == NO_ERROR {
             outcome.closed += 1;
         } else {
@@ -1499,9 +1556,77 @@ mod audit_tests {
         // because the cost of being wrong about that is other people's
         // connections dying on a developer's desktop.
         let selection = Selection::new(Vec::new(), SplitTunnelMode::OnlySelected);
-        let outcome = reset_selected_connections(&selection, Ipv4Addr::new(203, 0, 113, 7), &[]);
+        let outcome = reset_selected_connections(
+            &selection,
+            Ipv4Addr::new(203, 0, 113, 7),
+            &[],
+            &|_, _, _, _| false,
+        );
         assert_eq!(outcome.closed, 0);
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    }
+
+    /// The convergence loop's own connections, which it used to close.
+    ///
+    /// `AllExcept` with an empty exclusion list selects everything on
+    /// the machine, which is the widest the reset can ever be asked to
+    /// be. With `carried` saying every flow is already in the tunnel,
+    /// the correct number of closures is zero -- that is the whole
+    /// claim. Before the predicate existed the same call closed every
+    /// established public connection on the machine, which is what the
+    /// rig measured as thirty closures across twelve rescans with
+    /// nothing stale to close.
+    ///
+    /// Run through `reset_with` with the closer stubbed, so a
+    /// regression fails the assertion instead of tearing down the
+    /// developer's connections to prove it.
+    #[test]
+    fn a_flow_the_redirect_already_holds_is_not_reset() {
+        let selection = Selection::new(Vec::new(), SplitTunnelMode::AllExcept);
+        let attempts = std::cell::Cell::new(0usize);
+
+        let outcome = reset_with(
+            &selection,
+            Ipv4Addr::new(203, 0, 113, 7),
+            &[],
+            &|_, _, _, _| true,
+            &|_| {
+                attempts.set(attempts.get() + 1);
+                NO_ERROR
+            },
+        );
+
+        assert_eq!(attempts.get(), 0, "a carried flow was handed to SetTcpEntry");
+        assert_eq!(outcome.closed, 0);
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    }
+
+    /// The other direction, which is what stops the test above passing
+    /// because the walk found nothing.
+    ///
+    /// Same selection, same stub closer, `carried` saying nothing is in
+    /// the tunnel. Whatever this machine holds open to the public
+    /// internet should now be a candidate. The count is not asserted --
+    /// a build agent may legitimately hold none -- but it is printed,
+    /// and if it is non-zero then the assertion above means something.
+    #[test]
+    fn without_the_predicate_the_same_walk_finds_candidates() {
+        let selection = Selection::new(Vec::new(), SplitTunnelMode::AllExcept);
+        let attempts = std::cell::Cell::new(0usize);
+
+        let outcome = reset_with(
+            &selection,
+            Ipv4Addr::new(203, 0, 113, 7),
+            &[],
+            &|_, _, _, _| false,
+            &|_| {
+                attempts.set(attempts.get() + 1);
+                NO_ERROR
+            },
+        );
+
+        println!("{} connection(s) would have been closed", attempts.get());
+        assert_eq!(outcome.closed, attempts.get());
     }
 
     #[test]
