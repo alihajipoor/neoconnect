@@ -212,6 +212,15 @@ const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const TCP_FLAG_SYN: u8 = 0x02;
 const TCP_FLAG_ACK: u8 = 0x10;
+const TCP_FLAG_FIN: u8 = 0x01;
+const TCP_FLAG_RST: u8 = 0x04;
+
+/// The hop limit put on a synthesised reset.
+///
+/// It never crosses a router -- the packet is injected straight into
+/// this machine's receive path -- so the value only has to be something
+/// no stack objects to. 64 is what everything else uses.
+const RESET_HOP_LIMIT: u8 = 64;
 
 /// What the loop has actually done, for diagnosis.
 ///
@@ -290,6 +299,21 @@ pub struct Stats {
     /// three seconds of a session in which a selected application was
     /// already running, and means nothing at all after that.
     pub grace_dropped: AtomicU64,
+    /// Resets injected back to an application whose IPv6 was blocked,
+    /// and accepted by the driver.
+    ///
+    /// Counted after the injection rather than after the build, for the
+    /// reason `redirected` is: a run where every reset was constructed
+    /// and every injection refused would otherwise be indistinguishable
+    /// from one that worked, and the whole point of the reset is that
+    /// the application finds out.
+    ///
+    /// A refused injection is deliberately *not* folded into `rejected`.
+    /// `complaint` treats `rejected` as evidence that redirected traffic
+    /// is not arriving, and a dual-stack network produces resets
+    /// continuously -- so a failure here would light a warning about
+    /// something else entirely.
+    pub reset_v6: AtomicU64,
 }
 
 /// How many packets must have gone out before silence means anything.
@@ -315,7 +339,7 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} grace_dropped={}",
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} grace_dropped={} reset_v6={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
@@ -324,6 +348,7 @@ impl Stats {
             self.blocked_v6.load(Ordering::Relaxed),
             self.escaped.load(Ordering::Relaxed),
             self.grace_dropped.load(Ordering::Relaxed),
+            self.reset_v6.load(Ordering::Relaxed),
         )
     }
 
@@ -713,6 +738,7 @@ fn worker(
         // tester report that changing the list did nothing until they
         // restarted the app.
         let chosen = selection.read().unwrap_or_else(|e| e.into_inner());
+        let mut reset = None;
         let rewrote = handle_packet(
             &mut packet[..len as usize],
             &mut address,
@@ -721,12 +747,21 @@ fn worker(
             &chosen,
             &mut owner,
             &stats,
+            &mut reset,
         );
 
         // Released before the send: nothing below consults it, and a
         // lock held across a syscall would make every other worker wait
         // on this one.
         drop(chosen);
+
+        // Injected before the original packet is dealt with, so the
+        // application learns its connection is gone in the same breath
+        // as the segment being refused. It is built from that segment
+        // and does not touch it -- see `build_v6_reset`.
+        if let Some(reset) = reset {
+            inject_v6_reset(&handle, &reset, &address, &stats);
+        }
 
         // Deliberately not re-injected: the only way a packet is meant
         // to disappear here. Everything else must reach the network,
@@ -831,6 +866,15 @@ struct ParsedV6 {
     source_port: u16,
     destination_port: u16,
     tcp_flags: u8,
+    /// Where the transport header begins, after however many extension
+    /// headers this packet carried.
+    ///
+    /// Added when the block gained a reset. Everything above can be
+    /// decided from the ports alone, but building a reset the
+    /// application's own stack will accept means reading the sequence
+    /// numbers out of the segment being refused -- and those are not at
+    /// a fixed offset for exactly the reason `parse_v6` exists.
+    transport_offset: usize,
 }
 
 /// Extension headers, which sit between the IPv6 header and the
@@ -910,9 +954,148 @@ fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
             source_port: u16::from_be_bytes([ports[0], ports[1]]),
             destination_port: u16::from_be_bytes([ports[2], ports[3]]),
             tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
+            transport_offset: offset,
         });
     }
     None
+}
+
+/// A TCP reset addressed back to the application, built from the packet
+/// being refused.
+///
+/// # Why a blocked connection is told rather than left hanging
+///
+/// Blocking a selected application's IPv6 is the right answer -- see the
+/// module comment -- but *silently* blocking it is not the same thing.
+/// A new connection recovers on its own: the SYN is swallowed, no answer
+/// comes, and every browser and every resolver falls back to the A
+/// record within a fraction of a second. Measured at 385ms on the rig.
+///
+/// A connection that already existed does not recover. The application
+/// holds a socket it believes is fine, its segments vanish, and TCP does
+/// what TCP does about a black hole: it retransmits, backs off, and
+/// keeps the socket for minutes before giving up. Nothing tells it there
+/// is a perfectly good IPv4 path to the same host. So Custom mode coming
+/// on turned a working page into a hang, and the counters read
+/// `blocked_v6` climbing, which looks exactly like the feature working.
+///
+/// A reset converts that into the case that already recovers. The
+/// application is told its connection is gone -- which it is -- and
+/// opens a new one, which fails over to IPv4 in milliseconds.
+///
+/// # Why it is built from the packet in hand
+///
+/// A stack does not accept any reset addressed at it; a reset outside
+/// the receive window is discarded, which is the whole reason blind
+/// reset attacks are hard. The one already in the window is the one
+/// derived from a segment the socket just sent: its acknowledgement
+/// number is, by definition, the sequence number the peer would next
+/// send from. So the reset is sent with `seq` equal to that
+/// acknowledgement, and acknowledges everything the segment consumed.
+/// A pure SYN carries no acknowledgement to borrow, so a reset for one
+/// starts at zero and acknowledges the initial sequence number, which is
+/// what a refusing host sends.
+///
+/// UDP gets no equivalent, and cannot: there is no in-band way to tell a
+/// datagram socket that its peer is unreachable, so a selected
+/// application's IPv6 UDP stays silently swallowed. That is a gap, and
+/// this comment is where it is stated rather than a decision hidden in
+/// the shape of the code.
+fn build_v6_reset(packet: &[u8], parsed: &ParsedV6) -> Option<Vec<u8>> {
+    if !matches!(parsed.transport, Transport::Tcp) {
+        return None;
+    }
+    // Never answer a reset with a reset. The connection is already gone
+    // and the two ends would otherwise have something to say to each
+    // other about it.
+    if parsed.tcp_flags & TCP_FLAG_RST != 0 {
+        return None;
+    }
+
+    let tcp = packet.get(parsed.transport_offset..parsed.transport_offset + 14)?;
+    let their_seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+    let their_ack = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
+    // The data offset is in 32-bit words and cannot legally be under
+    // five; a malformed one is clamped rather than trusted, because it
+    // is subtracted below and an under-count would acknowledge bytes
+    // that were never sent.
+    let data_offset = (((tcp[12] >> 4) as usize) * 4).max(20);
+
+    // How much sequence space the segment being refused consumed, which
+    // is what the reset has to acknowledge. `payload_length` counts
+    // everything after the fixed header; the captured packet may be
+    // shorter than it claims, so the smaller of the two is used.
+    let declared = IPV6_HEADER + u16::from_be_bytes([*packet.get(4)?, *packet.get(5)?]) as usize;
+    let segment = declared.min(packet.len()).checked_sub(parsed.transport_offset)?;
+    let consumed = segment.saturating_sub(data_offset) as u32
+        + u32::from(parsed.tcp_flags & TCP_FLAG_SYN != 0)
+        + u32::from(parsed.tcp_flags & TCP_FLAG_FIN != 0);
+
+    let (seq, ack) = if parsed.tcp_flags & TCP_FLAG_ACK != 0 {
+        (their_ack, their_seq.wrapping_add(consumed))
+    } else {
+        // A first SYN. Nothing has been acknowledged yet, so there is
+        // no number to borrow and the reset starts where a refusing
+        // host starts.
+        (0, their_seq.wrapping_add(consumed))
+    };
+
+    let source = packet.get(8..24)?;
+    let destination = packet.get(24..40)?;
+
+    let mut reset = vec![0u8; IPV6_HEADER + 20];
+    reset[0] = 0x60;
+    reset[4..6].copy_from_slice(&20u16.to_be_bytes());
+    reset[6] = IPPROTO_TCP;
+    reset[7] = RESET_HOP_LIMIT;
+    // Both ends swapped: this has to look like the remote answering.
+    reset[8..24].copy_from_slice(destination);
+    reset[24..40].copy_from_slice(source);
+
+    let tcp = IPV6_HEADER;
+    reset[tcp..tcp + 2].copy_from_slice(&parsed.destination_port.to_be_bytes());
+    reset[tcp + 2..tcp + 4].copy_from_slice(&parsed.source_port.to_be_bytes());
+    reset[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
+    reset[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
+    reset[tcp + 12] = 0x50; // data offset: five words, no options
+    reset[tcp + 13] = TCP_FLAG_RST | TCP_FLAG_ACK;
+    // Window, checksum and urgent pointer stay zero. The checksum is
+    // computed by the driver's own helper at injection, because a
+    // hand-rolled one that is wrong is discarded by the receiving stack
+    // without a word -- which would put this straight back to the silent
+    // black hole it exists to remove.
+    Some(reset)
+}
+
+/// Hands a synthesised reset to the driver, addressed the way the
+/// application expects to receive it.
+///
+/// Inbound, on the interface the original packet was seen on. The same
+/// reasoning as the return leg: a packet whose source is the real remote
+/// is legitimate arriving inbound, and the interface is the only record
+/// of where the application's socket expects its peer to be.
+fn inject_v6_reset(
+    handle: &Handle,
+    reset: &[u8],
+    original: &WINDIVERT_ADDRESS,
+    stats: &Stats,
+) {
+    let mut address = *original;
+    address.set_outbound(false);
+    address.set_ipv6(true);
+
+    let mut packet = reset.to_vec();
+    let len = packet.len() as u32;
+    recalculate_checksums(&mut packet, len, &mut address);
+
+    if handle.send(&packet, len, &address) {
+        stats.reset_v6.fetch_add(1, Ordering::Relaxed);
+    }
+    // A refusal is deliberately not counted anywhere. `rejected` is what
+    // `complaint` reads to decide that redirected traffic is not
+    // arriving, and on a dual-stack network these are produced
+    // continuously -- so folding a failure here into that number would
+    // light a warning about something else entirely.
 }
 
 /// What to do with an IPv6 packet, which this loop has no way to carry.
@@ -931,6 +1114,7 @@ fn handle_ipv6(
     selection: &Selection,
     owner: &mut OwnerLookup,
     stats: &Stats,
+    reset: &mut Option<Vec<u8>>,
 ) -> Option<Leg> {
     let block = |stats: &Stats| {
         stats.blocked_v6.fetch_add(1, Ordering::Relaxed);
@@ -995,6 +1179,16 @@ fn handle_ipv6(
     };
     if tunnelled {
         stats.matched.fetch_add(1, Ordering::Relaxed);
+        // Told, not merely stopped. A new connection recovers from
+        // silence on its own -- the SYN goes unanswered and the
+        // application falls back to the A record in milliseconds -- but
+        // one that already existed does not: it retransmits into a black
+        // hole for minutes while the customer watches a page hang with
+        // Custom mode switched on. See `build_v6_reset`.
+        //
+        // Only TCP. UDP has no in-band way to say this and stays
+        // silently swallowed, which is a gap and is stated as one.
+        *reset = build_v6_reset(packet, &parsed);
         block(stats)
     } else {
         // An application the customer did not choose. Its IPv6 is none
@@ -1015,13 +1209,14 @@ fn handle_packet(
     selection: &Selection,
     owner: &mut OwnerLookup,
     stats: &Stats,
+    reset: &mut Option<Vec<u8>>,
 ) -> Option<Leg> {
     // Decided before anything below is consulted, because none of it can
     // carry an IPv6 packet: the NAT table, the rewrite and the proxy's
     // upstream socket are all IPv4, and so is the address on the tunnel
     // adapter they would send it to.
     if packet.first().map(|first| first >> 4) == Some(6) {
-        return handle_ipv6(packet, redirect, selection, owner, stats);
+        return handle_ipv6(packet, redirect, selection, owner, stats, reset);
     }
 
     let parsed = parse(packet)?;
@@ -1405,6 +1600,7 @@ mod tests {
             blocked_v6: AtomicU64::new(0),
             escaped: AtomicU64::new(0),
             grace_dropped: AtomicU64::new(0),
+            reset_v6: AtomicU64::new(0),
         }
     }
 
@@ -2070,6 +2266,136 @@ mod tests {
             assert_eq!(parsed.destination_port, 443, "{chain:?}");
             assert_eq!(parsed.source_port, 51234, "{chain:?}");
         }
+    }
+
+    /// The same builder the loop uses, given a segment shaped like one
+    /// an established connection sends.
+    fn established_v6_segment(seq: u32, ack: u32, payload: usize) -> Vec<u8> {
+        let mut packet = vec![0u8; IPV6_HEADER + 20 + payload];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&((20 + payload) as u16).to_be_bytes());
+        packet[6] = IPPROTO_TCP;
+        packet[7] = 64;
+        let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst: std::net::Ipv6Addr = "2607:f8b0:400a:809::200e".parse().unwrap();
+        packet[8..24].copy_from_slice(&src.octets());
+        packet[24..40].copy_from_slice(&dst.octets());
+        packet[40..42].copy_from_slice(&51234u16.to_be_bytes());
+        packet[42..44].copy_from_slice(&443u16.to_be_bytes());
+        packet[44..48].copy_from_slice(&seq.to_be_bytes());
+        packet[48..52].copy_from_slice(&ack.to_be_bytes());
+        packet[52] = 0x50;
+        packet[53] = TCP_FLAG_ACK;
+        packet
+    }
+
+    #[test]
+    fn a_blocked_connection_is_told_rather_than_left_hanging() {
+        // The whole point of the reset. A pre-existing IPv6 connection
+        // whose packets are swallowed does not fail fast: TCP
+        // retransmits into the black hole and holds the socket for
+        // minutes, so the customer sees a page hang while `blocked_v6`
+        // climbs and looks like the feature working.
+        //
+        // A stack does not accept just any reset -- one outside the
+        // receive window is discarded -- so the numbers here are the
+        // property being tested, not decoration. The reset's sequence
+        // number is the acknowledgement the segment just carried, which
+        // is by definition where the peer would send from next.
+        let segment = established_v6_segment(1_000, 5_000, 120);
+        let parsed = parse_v6(&segment).expect("must parse");
+        let reset = build_v6_reset(&segment, &parsed).expect("a TCP segment must produce one");
+
+        assert_eq!(reset.len(), IPV6_HEADER + 20);
+        // Both ends swapped: it has to look like the remote answering.
+        assert_eq!(&reset[8..24], &segment[24..40]);
+        assert_eq!(&reset[24..40], &segment[8..24]);
+        assert_eq!(u16::from_be_bytes([reset[40], reset[41]]), 443);
+        assert_eq!(u16::from_be_bytes([reset[42], reset[43]]), 51234);
+        assert_eq!(
+            u32::from_be_bytes([reset[44], reset[45], reset[46], reset[47]]),
+            5_000,
+            "the reset must start where the peer would have"
+        );
+        assert_eq!(
+            u32::from_be_bytes([reset[48], reset[49], reset[50], reset[51]]),
+            1_120,
+            "and acknowledge every byte the segment carried"
+        );
+        assert_eq!(reset[53], TCP_FLAG_RST | TCP_FLAG_ACK);
+        assert_eq!(reset[6], IPPROTO_TCP);
+    }
+
+    #[test]
+    fn a_refused_syn_gets_the_reset_a_refusing_host_would_send() {
+        // A first SYN carries no acknowledgement to borrow, so the
+        // reset starts at zero and acknowledges the initial sequence
+        // number -- which is exactly what a host with nothing listening
+        // sends, and therefore exactly what the connecting stack is
+        // already prepared to accept.
+        let mut segment = established_v6_segment(7_777, 0, 0);
+        segment[53] = TCP_FLAG_SYN;
+        let parsed = parse_v6(&segment).expect("must parse");
+        let reset = build_v6_reset(&segment, &parsed).expect("a SYN must produce one");
+
+        assert_eq!(u32::from_be_bytes([reset[44], reset[45], reset[46], reset[47]]), 0);
+        assert_eq!(u32::from_be_bytes([reset[48], reset[49], reset[50], reset[51]]), 7_778);
+    }
+
+    #[test]
+    fn a_fin_is_acknowledged_like_the_byte_it_is() {
+        let mut segment = established_v6_segment(400, 900, 0);
+        segment[53] = TCP_FLAG_ACK | TCP_FLAG_FIN;
+        let parsed = parse_v6(&segment).expect("must parse");
+        let reset = build_v6_reset(&segment, &parsed).unwrap();
+        assert_eq!(u32::from_be_bytes([reset[48], reset[49], reset[50], reset[51]]), 401);
+    }
+
+    #[test]
+    fn nothing_answers_a_reset_with_a_reset() {
+        // The connection is already gone. Two ends exchanging resets
+        // about it is a loop, not a recovery.
+        let mut segment = established_v6_segment(1, 2, 0);
+        segment[53] = TCP_FLAG_RST;
+        let parsed = parse_v6(&segment).expect("must parse");
+        assert!(build_v6_reset(&segment, &parsed).is_none());
+    }
+
+    #[test]
+    fn udp_gets_no_reset_because_there_is_none_to_send() {
+        // Stated rather than implied. There is no in-band way to tell a
+        // datagram socket its peer is unreachable, so a selected app's
+        // IPv6 UDP stays silently swallowed -- a gap, not a decision
+        // buried in the shape of the code.
+        let mut segment = established_v6_segment(1, 2, 8);
+        segment[6] = IPPROTO_UDP;
+        let parsed = parse_v6(&segment).expect("must parse");
+        assert!(matches!(parsed.transport, Transport::Udp));
+        assert!(build_v6_reset(&segment, &parsed).is_none());
+    }
+
+    #[test]
+    fn a_segment_behind_extension_headers_is_still_answered() {
+        // The sequence numbers are not at a fixed offset, for the same
+        // reason the ports are not. Reading them at 40 regardless would
+        // build a reset the application's stack discards as out of
+        // window, which is the silent black hole all over again.
+        let packet = ipv6_packet("2607:f8b0:400a:809::200e", 443, &[(IPPROTO_DSTOPTS, 16)]);
+        let parsed = parse_v6(&packet).expect("must parse");
+        assert_eq!(parsed.transport_offset, IPV6_HEADER + 16);
+        let reset = build_v6_reset(&packet, &parsed).expect("must produce a reset");
+        assert_eq!(u16::from_be_bytes([reset[40], reset[41]]), 443);
+        assert_eq!(u16::from_be_bytes([reset[42], reset[43]]), 51234);
+    }
+
+    #[test]
+    fn a_truncated_segment_produces_nothing_rather_than_nonsense() {
+        // A service running as LocalSystem, with every packet on the
+        // machine going past it.
+        let mut segment = established_v6_segment(1, 2, 0);
+        let parsed = parse_v6(&segment).expect("must parse");
+        segment.truncate(IPV6_HEADER + 10);
+        assert!(build_v6_reset(&segment, &parsed).is_none());
     }
 
     #[test]

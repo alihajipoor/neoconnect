@@ -263,7 +263,13 @@ struct Convergence {
 }
 
 impl Convergence {
-    fn start(selection: SharedSelection, path: PathBuf, closed_already: usize) -> Self {
+    fn start(
+        selection: SharedSelection,
+        path: PathBuf,
+        node: Ipv4Addr,
+        own_images: Vec<String>,
+        closed_already: usize,
+    ) -> Self {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
@@ -282,7 +288,8 @@ impl Convergence {
                     }
                     let selection =
                         selection.read().unwrap_or_else(|e| e.into_inner()).clone();
-                    let outcome = owner::reset_selected_connections(&selection);
+                    let outcome =
+                        owner::reset_selected_connections(&selection, node, &own_images);
                     closed += outcome.closed;
                     passes += 1;
                     for failure in outcome.failures {
@@ -819,7 +826,7 @@ impl SplitTunnel {
                 // same connection back.
                 let outcome = {
                     let selection = self.selection.read().expect("selection lock");
-                    owner::reset_selected_connections(&selection)
+                    owner::reset_selected_connections(&selection, node, &own_images())
                 };
                 append(
                     &log_path,
@@ -839,6 +846,8 @@ impl SplitTunnel {
                 let convergence = Convergence::start(
                     self.selection.clone(),
                     log_path.clone(),
+                    node,
+                    own_images(),
                     outcome.closed,
                 );
 
