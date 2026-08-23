@@ -148,6 +148,14 @@
   nsExec::ExecToLog 'sc.exe delete WinDivert'
   Pop $0
 
+  ; The same stale binary the uninstall hook removes: pre-resources
+  ; builds put neoconnect-service.exe directly in $INSTDIR, and this
+  ; install writes only to resources\, so an upgrade would leave a
+  ; second, older copy sitting in the install root forever. Nothing runs
+  ; it; it just misidentifies the build to whoever reads versions off
+  ; disk. WaitForProcessGone above has already ensured nothing holds it.
+  Delete "$INSTDIR\neoconnect-service.exe"
+
   ; The old install directory is left in place rather than deleted here.
   ; Removing files from a path this installer does not own is the kind of
   ; thing that goes badly wrong if the assumption is ever off, and a stale
@@ -196,6 +204,36 @@
   nsExec::ExecToLog '"$INSTDIR\resources\neoconnect-service.exe" uninstall'
   Pop $0
 
+  ; And again by name, because the line above was the only thing removing
+  ; the service and it asks a binary to do it.
+  ;
+  ; Measured on the rig, in the exact machine state this whole section
+  ; exists for: with resources\WinDivert.dll missing, the service
+  ; executable cannot load at all -- no stdout, no stderr, no exit code
+  ; -- so `uninstall` did nothing, uninstall.exe /S still exited 0, and
+  ; NeoxifyService was left registered pointing at a binary that had just
+  ; been removed. Every other cleanup below passed. The one that failed
+  ; was the one that needed the broken component to clean up after
+  ; itself, which is the assumption this section was written to reject.
+  ;
+  ; PREINSTALL has done exactly this since the rename, and it is why an
+  ; upgrade over a broken install recovers where an uninstall did not.
+  ; Same four calls for the same reasons: BOTH names, because a machine
+  ; upgraded from a pre-rename build can still carry NeoConnectService;
+  ; by name via sc.exe, so it works no matter where the old build put
+  ; itself. All four fail harmlessly on a machine that never had them,
+  ; and none of them can stop the uninstall. `sc.exe delete` returns
+  ; SUCCESS immediately even when the binary it names is gone -- checked
+  ; by hand on the rig in this state.
+  nsExec::ExecToLog 'sc.exe stop NeoConnectService'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete NeoConnectService'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe stop NeoxifyService'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete NeoxifyService'
+  Pop $0
+
   ; And the tunnel service, for the same reason it matters on install: it
   ; is registered by wireguard.exe rather than by us, and outlives a
   ; helper that was killed rather than stopped.
@@ -212,6 +250,19 @@
   !insertmacro WaitForProcessGone "wireguard.exe"
   !insertmacro WaitForProcessGone "xray.exe"
   !insertmacro WaitForProcessGone "openvpn.exe"
+
+  ; The service binary from the old layout, which lived directly in
+  ; $INSTDIR before it moved under resources\. The uninstaller only knows
+  ; about files the current build installs, so this one is left behind
+  ; and then survives every future install and uninstall.
+  ;
+  ; Found on the rig: "C:\Program Files\Neoxify\neoconnect-service.exe"
+  ; beside the live one under resources\, months stale, still there after
+  ; a clean uninstall. Harmless to have running -- nothing runs it -- but
+  ; not harmless to leave: anyone diagnosing a machine finds it first,
+  ; reads its version, and is now debugging a build that is not
+  ; installed. Deleted after WaitForProcessGone, so nothing holds it.
+  Delete "$INSTDIR\neoconnect-service.exe"
 
   ; WinDivert's kernel driver, used by Custom mode. WinDivert registers it
   ; as a service on first use and unregisters it when the last handle
