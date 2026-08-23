@@ -260,6 +260,17 @@ pub struct Stats {
     /// says only that nothing tried. Before this was written it read
     /// zero because there was nothing to count -- the packets were
     /// leaving unexamined.
+    ///
+    /// **It now reads lower than it used to, and that is not a
+    /// regression.** `engines::ipv6_block::SelectedAppsIpv6Block`
+    /// refuses a selected application's IPv6 at `connect()`, before a
+    /// packet is built, so a session where those filters installed
+    /// cleanly produces nothing here for a selected app's new TCP
+    /// connections at all -- the refusal happened a layer up. What
+    /// still lands here is what that block does not cover: connections
+    /// that were already open, and applications the filters could not
+    /// be installed for. Read the two together, from
+    /// `ipv6-block-custom.log` and this line, or read neither.
     pub blocked_v6: AtomicU64,
     /// Connections found living outside the tunnel that should be
     /// inside it -- see `owner::escaped_connections`.
@@ -598,6 +609,15 @@ const DNS_PORT: u16 = 53;
 ///
 /// Nothing excludes the node here: no node this client talks to has an
 /// IPv6 address, so the tunnel itself can never appear in this half.
+///
+/// **The two IPv6 bounds below are mirrored in
+/// `engines::ipv6_block::SPLIT_PERMITTED`**, which expresses the same
+/// boundary as WFP prefixes for the per-app block that now sits above
+/// this loop. Changing one without the other gives a selected
+/// application two different answers about what counts as the LAN,
+/// which is a class of bug nobody would think to look for. The test
+/// `the_permits_are_exactly_what_the_loop_leaves_alone` holds them
+/// together.
 pub fn filter_for(redirect: &Redirect) -> String {
     format!(
         "(outbound and ip and (tcp or udp) and not loopback \
@@ -1445,15 +1465,48 @@ fn decide(
         // real.
         //
         // Closing it needs a mechanism that does not depend on the
-        // socket still existing when the packet is classified. A WFP
-        // filter at `FWPM_LAYER_ALE_AUTH_CONNECT_V4` keyed on
-        // `FWPM_CONDITION_ALE_APP_ID` is classified by the kernel at
-        // send time, inside the sending process, where the owner is not
-        // a lookup but the caller -- the B2 proposal on the roadmap.
-        // `engines/ipv6_block.rs` already builds and installs a dynamic
-        // filter set from this service, so the machinery exists; what is
-        // missing is the decision about what such a filter should do
-        // with a datagram it cannot hand to the relay.
+        // socket still existing when the packet is classified, and the
+        // obvious candidate has now been ruled out rather than left
+        // open. It was: a WFP filter at
+        // `FWPM_LAYER_ALE_AUTH_CONNECT_V4` keyed on
+        // `FWPM_CONDITION_ALE_APP_ID`, blocking whatever this loop
+        // could not carry -- the B2 proposal on the roadmap. It does
+        // not work, and the reason is structural rather than a detail
+        // that could be worked around.
+        //
+        // ALE classifies at `connect()` -- or, for UDP, at the first
+        // `sendto` to a new remote endpoint -- with the address the
+        // *application* asked for, before any packet exists. This loop
+        // rewrites the destination much later, at
+        // `FWPM_LAYER_OUTBOUND_IPPACKET_V4`, which is where WinDivert
+        // registers its callout. Microsoft's documented order for a
+        // client open is `ALE_AUTH_CONNECT` -> `OUTBOUND_TRANSPORT` ->
+        // `OUTBOUND_IPPACKET`. So at ALE, the datagram this arm leaks
+        // and the datagram the next line successfully redirects are
+        // indistinguishable: both are "selected application, public
+        // destination". A filter that blocked one would block the
+        // other, which is to say it would refuse the traffic Custom
+        // mode exists to carry.
+        //
+        // Nor is there another layer to try. Application identity
+        // exists only at the ALE layers -- `ALE_APP_ID` is not a
+        // condition at `OUTBOUND_TRANSPORT` or `OUTBOUND_IPPACKET`, and
+        // process id is not a filtering condition anywhere -- and every
+        // ALE layer runs before the rewrite. Mullvad and Windscribe
+        // both avoid this, and both do it the same way: a signed kernel
+        // callout at `ALE_BIND_REDIRECT` / `ALE_CONNECT_REDIRECT`
+        // rewrites the **local** address at connect time, so their
+        // block filters key on local address or local interface instead
+        // of on the remote one. This loop deliberately leaves the
+        // source address alone -- see the module header -- so even that
+        // discriminator does not exist here.
+        //
+        // What did survive the same analysis is the IPv6 half, because
+        // no IPv6 is ever redirected and so there is nothing to confuse
+        // a block with. That is
+        // `engines::ipv6_block::SelectedAppsIpv6Block`, which closes
+        // this exact hole for v6 while leaving it open for v4. Closing
+        // it for v4 needs the kernel callout driver, and nothing less.
         None => selection.tunnel_when_owner_unknown(),
     };
 
