@@ -114,15 +114,28 @@ pub fn clear() {
 /// is on the `Comment` value only, so rules belonging to anything else
 /// on the machine are never touched.
 fn clear_registry_rules() -> Result<u32, String> {
-    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
 
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    remove_tagged_rules(&RegKey::predef(HKEY_LOCAL_MACHINE), &NRPT_REGISTRY_PATHS)
+}
+
+/// The removal itself, against whichever root it is given.
+///
+/// Split from its caller for one reason: what has to be *proved* here
+/// is that a rule belonging to something else is left alone. Deleting
+/// registry keys under a match is the kind of code that works and then
+/// takes a neighbour's rule with it, and this service runs as
+/// LocalSystem. The test below builds both kinds of rule under HKCU,
+/// where it needs no elevation, and checks that exactly one survives.
+fn remove_tagged_rules(root: &winreg::RegKey, paths: &[&str]) -> Result<u32, String> {
+    use winreg::enums::KEY_READ;
+
     let mut removed = 0u32;
     let mut failures: Vec<String> = Vec::new();
-    for path in NRPT_REGISTRY_PATHS {
+    for path in paths {
         // An absent parent key just means no rules of that kind exist.
-        let Ok(parent) = hklm.open_subkey_with_flags(path, KEY_READ) else {
+        let Ok(parent) = root.open_subkey_with_flags(path, KEY_READ) else {
             continue;
         };
         // Collected first: deleting while enumerating shifts the
@@ -137,7 +150,7 @@ fn clear_registry_rules() -> Result<u32, String> {
                 continue;
             }
             drop(rule);
-            match hklm.delete_subkey_all(format!(r"{path}\{name}")) {
+            match root.delete_subkey_all(format!(r"{path}\{name}")) {
                 Ok(()) => removed += 1,
                 Err(e) => failures.push(format!(r"{path}\{name}: {e}")),
             }
@@ -203,4 +216,60 @@ fn powershell(script: &str) -> Result<String, String> {
         return Err(out.stderr.trim().to_string());
     }
     Ok(out.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    use winreg::RegKey;
+
+    /// The failure this fallback could introduce, rather than the one
+    /// it fixes.
+    ///
+    /// Deleting registry keys that match something is how a cleanup
+    /// ends up taking a neighbour's configuration with it, and this
+    /// runs as LocalSystem against a table other VPN clients and
+    /// domain-joined machines also write to. Removing somebody else's
+    /// NRPT rule would break their name resolution in exactly the way
+    /// this module exists to prevent -- with no clue pointing here.
+    ///
+    /// Built under HKCU so it needs no elevation and cannot touch the
+    /// real table.
+    #[test]
+    fn the_registry_fallback_removes_only_the_rules_we_tagged() {
+        const PATH: &str = r"Software\Neoxify\nrpt-fallback-test";
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let _ = hkcu.delete_subkey_all(PATH);
+
+        let (parent, _) = hkcu.create_subkey(PATH).expect("should create the test key");
+        let (ours, _) = parent.create_subkey("{ours}").expect("should create a rule");
+        ours.set_value("Comment", &NRPT_COMMENT)
+            .expect("should tag the rule");
+        let (theirs, _) = parent.create_subkey("{theirs}").expect("should create a rule");
+        theirs.set_value("Comment", &"Some other VPN")
+            .expect("should tag the rule");
+        // A rule with no Comment at all, which is what a plain
+        // domain-policy entry looks like.
+        parent.create_subkey("{untagged}").expect("should create a rule");
+        drop(ours);
+        drop(theirs);
+        drop(parent);
+
+        let removed = remove_tagged_rules(&hkcu, &[PATH]).expect("should not fail");
+        assert_eq!(removed, 1, "removed the wrong number of rules");
+
+        let parent = hkcu
+            .open_subkey_with_flags(PATH, KEY_READ)
+            .expect("the parent key should survive");
+        let left: Vec<String> = parent.enum_keys().filter_map(Result::ok).collect();
+        assert_eq!(
+            left,
+            vec!["{theirs}".to_string(), "{untagged}".to_string()],
+            "a rule that was not ours was removed"
+        );
+
+        drop(parent);
+        let _ = hkcu.delete_subkey_all(PATH);
+    }
 }
