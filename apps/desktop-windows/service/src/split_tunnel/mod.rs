@@ -101,6 +101,17 @@ pub struct SplitTunnel {
     enabled: bool,
     selection: SharedSelection,
     active: Option<Active>,
+    /// How many times [`SplitTunnel::stop`] has been called.
+    ///
+    /// Test-only, and it exists because the invariant it checks cannot
+    /// be observed any other way. `stop()` on a session that is not
+    /// running is correctly a no-op, so a test that "ends a session"
+    /// and then looks at `is_running()` passes whether or not the stop
+    /// ever happened -- which is precisely the shape of test that let
+    /// the 2026-08-23 bug ship. Counting the calls is the difference
+    /// between a test that can come back negative and one that cannot.
+    #[cfg(test)]
+    stops: std::sync::atomic::AtomicU32,
 }
 
 struct Active {
@@ -115,6 +126,15 @@ struct Active {
     /// The reset loop that keeps closing pre-existing connections for
     /// the first seconds. Held so it is stopped with the session.
     convergence: Convergence,
+    /// The backstop that switches interception off if the tunnel goes
+    /// away without anybody noticing. Held so it is stopped with the
+    /// session.
+    watchdog: Watchdog,
+    /// Set by the watchdog when it has stopped interception, so the
+    /// status poll can say so instead of reporting a Custom mode that
+    /// looks live and is not. Nothing in this product reports a state
+    /// it has not verified, and "still intercepting" is such a state.
+    watchdog_tripped: Arc<std::sync::atomic::AtomicBool>,
     log_path: PathBuf,
     /// When interception began, so a warm-up is not mistaken
     /// for a fault. See redirect::WARMUP.
@@ -220,6 +240,161 @@ impl Logger {
                     append(&path, &stats.summary());
                 }
                 append(&path, &format!("stopped {}", stats.summary()));
+            })
+        };
+        Self { stop, thread: Some(thread) }
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// How often the backstop looks at the adapter it was pinned to.
+///
+/// Three seconds. The thing it is watching for leaves the machine with
+/// no working name resolution at all, so the cost of noticing late is
+/// paid by somebody staring at a browser that will not load, and the
+/// check itself is one adapter enumeration.
+const WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How many consecutive looks must say "gone" before interception stops.
+///
+/// Two, so a single unlucky enumeration cannot take down a healthy
+/// session. It is only ever consecutive *evidence* that counts -- a
+/// query that failed is not evidence, see [`Liveness::NoEvidence`] --
+/// and the run is reset by any look that finds the adapter well.
+const WATCHDOG_STRIKES: u32 = 2;
+
+/// What one look at the tunnel adapter established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    /// The adapter is there, up, and still carrying the address the
+    /// relays bind their upstream sockets to.
+    Alive,
+    /// The adapter this session was built on is not usable any more.
+    Gone,
+    /// The question could not be answered. **Not** the same as `Gone`,
+    /// and the distinction is the entire reason this is a three-valued
+    /// answer rather than a bool: an adapter enumeration that fails
+    /// says something about the enumeration, and tearing a working
+    /// customer's tunnel down over it would be a self-inflicted outage
+    /// of exactly the kind this backstop exists to prevent.
+    NoEvidence,
+}
+
+/// Whether the tunnel this session was pinned to is still there.
+///
+/// Split out from the thread so it can be tested, because every branch
+/// here is a decision to leave a customer's traffic alone or to stop
+/// carrying it, and neither is safe to get wrong.
+fn liveness(
+    expected_index: u32,
+    expected_address: Ipv4Addr,
+    found: &std::io::Result<Option<adapters::Adapter>>,
+) -> Liveness {
+    match found {
+        Err(_) => Liveness::NoEvidence,
+        // The adapter is not there at all. This is what a WireGuard
+        // tunnel service going away looks like, and an Xray engine
+        // exiting, and a RAS connection dropping.
+        Ok(None) => Liveness::Gone,
+        Ok(Some(adapter)) => {
+            if !adapter.is_up {
+                return Liveness::Gone;
+            }
+            // A same-named adapter with a different index or address is
+            // not this session's tunnel -- it is a new one, built by
+            // somebody else, and the relays are still pinned to the old
+            // one. Treated as gone rather than alive, because that is
+            // what it is from this session's point of view.
+            if adapter.index != expected_index || adapter.ipv4 != Some(expected_address) {
+                return Liveness::Gone;
+            }
+            Liveness::Alive
+        }
+    }
+}
+
+/// Stops interception if the tunnel underneath it disappears.
+///
+/// The belt to `session::Slot`'s braces. `Slot` makes it impossible for
+/// the engine layer to end a session without stopping Custom mode; this
+/// covers the case where nobody up there noticed at all -- an adapter
+/// pulled out from under a process that is still running, a driver
+/// reset, an engine that is alive and no longer carrying anything.
+///
+/// The failure it exists to prevent is not subtle. A redirect loop with
+/// no tunnel behind it takes every DNS lookup on the machine, from every
+/// process, and hands them to a relay whose upstream socket cannot bind
+/// -- so nothing resolves, for anything, including other VPN clients,
+/// until this service's process is killed. That was a real customer's
+/// afternoon on 2026-08-23.
+///
+/// It can only switch interception off, not take the session apart:
+/// joining the redirect's workers from a thread the session owns would
+/// deadlock the teardown that is trying to join this one. Switching it
+/// off is what gives the machine back.
+struct Watchdog {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        adapter_name: String,
+        index: u32,
+        address: Ipv4Addr,
+        tunnel: Arc<proxy::TunnelInterface>,
+        stopper: redirect::Stopper,
+        log_path: PathBuf,
+        tripped: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut strikes = 0;
+                while sleep_unless_stopped(&stop, WATCHDOG_INTERVAL) {
+                    match liveness(index, address, &adapters::find_by_name(&adapter_name)) {
+                        Liveness::Alive => strikes = 0,
+                        Liveness::NoEvidence => {}
+                        Liveness::Gone => {
+                            strikes += 1;
+                            if strikes < WATCHDOG_STRIKES {
+                                continue;
+                            }
+                            let detail = format!(
+                                "the tunnel adapter {adapter_name} (interface {index}, {address}) \
+                                 is gone, but Custom mode was still intercepting this machine's \
+                                 packets -- interception has been stopped so traffic can flow \
+                                 normally again"
+                            );
+                            // Both files on purpose. cleanup.log is the
+                            // one a support conversation asks for, and
+                            // split-tunnel.log is where the counters
+                            // that stop moving are, so the two halves of
+                            // the story are readable together.
+                            crate::cleanup_log::note(
+                                "stop Custom mode after its tunnel disappeared",
+                                &detail,
+                            );
+                            append(&log_path, &format!("WATCHDOG {detail}"));
+                            tripped.store(true, std::sync::atomic::Ordering::SeqCst);
+                            // Cleared as well as shut down: any relay
+                            // thread already past the redirect sees no
+                            // tunnel and takes the ordinary route rather
+                            // than retrying a bind that cannot succeed.
+                            tunnel.clear();
+                            stopper.stop_intercepting();
+                            return;
+                        }
+                    }
+                }
             })
         };
         Self { stop, thread: Some(thread) }
@@ -624,7 +799,20 @@ impl Default for SplitTunnel {
 
 impl SplitTunnel {
     pub fn new() -> Self {
-        Self { enabled: false, selection: SharedSelection::default(), active: None }
+        Self {
+            enabled: false,
+            selection: SharedSelection::default(),
+            active: None,
+            #[cfg(test)]
+            stops: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// How many times `stop()` has been called on this one. See the
+    /// field's own note for why counting is the only honest check.
+    #[cfg(test)]
+    pub fn stop_calls(&self) -> u32 {
+        self.stops.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Replaces the customer's choice. Takes effect on the next
@@ -653,12 +841,22 @@ impl SplitTunnel {
     /// Whether packets must be intercepted at all, whichever way the
     /// list reads.
     ///
-    /// Distinct from `wants_passive_tunnel` because "everything except
-    /// these" needs a *full* tunnel with interception on top: the tunnel
-    /// carries the machine as usual and the chosen applications are
-    /// pushed out of it. Asking the passive question there would answer
-    /// no and leave the excluded applications tunnelled, which is the
-    /// setting doing nothing.
+    /// The same answer as `wants_passive_tunnel`, and deliberately so.
+    /// **Both** modes build a passive tunnel and lift traffic into it
+    /// through the redirect; they differ only in which side of the list
+    /// gets lifted, which is [`Selection::should_tunnel`]'s business and
+    /// nothing this function needs to know.
+    ///
+    /// This carried a note for a long time claiming the two were
+    /// distinct, because "everything except these" supposedly built a
+    /// *full* tunnel and pushed the named applications back out of it.
+    /// That is not what the code does and, on the evidence, never was:
+    /// `mode` reaches exactly two places in this file -- the selection
+    /// it is stored in, and the log header -- so there is no branch
+    /// anywhere that could build a different shape of tunnel for it.
+    /// The note was removed rather than the code changed, because the
+    /// code is right: one shape, proven by one route probe, is one
+    /// failure mode instead of two.
     pub fn wants_interception(&self) -> bool {
         self.enabled && !self.selection.read().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
@@ -709,16 +907,25 @@ impl SplitTunnel {
         let nat = Arc::new(flows::Nat::new());
 
         // Which interface the proxy sends a redirected connection out
-        // of, and it is the only thing that differs between the two
-        // directions.
+        // of: the VPN adapter, in both directions of the list.
         //
-        // Tunnelling the chosen applications means pinning to the VPN
-        // adapter, with the tunnel itself passive so nothing else uses
-        // it. Excluding them means the opposite in both halves: the
-        // tunnel stays full and carries the machine as usual, and the
-        // redirected connections are pinned to the physical link so they
-        // leave the way they would with no VPN at all. The rewriting,
-        // the NAT and the return leg are identical either way.
+        // Being redirected *is* being tunnelled here. The tunnel is
+        // passive either way -- it owns no default route, so nothing
+        // reaches it except what this pins there -- and the two modes
+        // differ only in which processes get pinned:
+        // `Selection::should_tunnel` answers `matches()` for "only
+        // these" and `!matches()` for "everything except these". So
+        // "everything except these" is a passive tunnel with almost
+        // everything redirected into it, not a full tunnel with a few
+        // applications carved out.
+        //
+        // A comment here used to describe that second design -- full
+        // tunnel, redirected connections pinned to the physical link --
+        // and it was wrong in a way worth naming, because it reads like
+        // an invariant somebody could build on. There is no branch on
+        // `mode` in this function at all; the line below is what runs
+        // for both. The rewriting, the NAT and the return leg really are
+        // identical either way, which is the part that was true.
         let tunnel =
             Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
 
@@ -878,6 +1085,21 @@ impl SplitTunnel {
                     outcome.closed,
                 );
 
+                // Started last, with everything it watches already up,
+                // so it cannot mistake a session still being assembled
+                // for one whose tunnel has failed.
+                let watchdog_tripped =
+                    Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let watchdog = Watchdog::start(
+                    adapter_name.to_string(),
+                    tunnel_adapter.index,
+                    tunnel_address,
+                    tunnel.clone(),
+                    running.stopper(),
+                    log_path.clone(),
+                    watchdog_tripped.clone(),
+                );
+
                 self.active = Some(Active {
                     redirect: running,
                     relays,
@@ -886,6 +1108,8 @@ impl SplitTunnel {
                     route,
                     logger,
                     convergence,
+                    watchdog,
+                    watchdog_tripped,
                     log_path,
                     started: Instant::now(),
                 });
@@ -918,6 +1142,18 @@ impl SplitTunnel {
     /// have actually tried to send something.
     pub fn complaint(&self) -> Option<String> {
         let active = self.active.as_ref()?;
+        // Ahead of the counters, because it explains them. Once the
+        // backstop has switched interception off the numbers stop
+        // moving, and "nothing is coming back" would be a true reading
+        // pointed at the wrong cause.
+        if active.watchdog_tripped.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some(
+                "The VPN adapter Custom mode was using disappeared, so it stopped \
+                 redirecting and your applications are using your ordinary \
+                 connection. Reconnect to protect them again."
+                    .to_string(),
+            );
+        }
         active.redirect.stats.complaint(active.started.elapsed())
     }
 
@@ -961,17 +1197,20 @@ impl SplitTunnel {
         outcome
     }
 
-    /// Marks that no tunnel is available, so redirected traffic goes out
-    /// unprotected instead of failing. See the fail-open note above.
-    pub fn detach_tunnel(&self) {
-        if let Some(active) = &self.active {
-            active.tunnel.clear();
-        }
-    }
-
     pub fn stop(&mut self) {
+        // Counted before the early return, so the count answers "was
+        // this asked to stop", not "did it have something to stop".
+        // The invariant under test is about the call being made.
+        #[cfg(test)]
+        self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let Some(active) = self.active.take() else { return };
         RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        // First of all, and before the join below can take any time:
+        // the backstop must not be looking for a vanished adapter while
+        // the session it would complain about is being taken down on
+        // purpose. Stopping it is also what keeps `stop()` from being
+        // joined by a thread it is itself joining.
+        active.watchdog.stop();
         // Interception first. Stopping the relays while packets were
         // still being rewritten to them would send a selected app's
         // traffic to a port with nothing behind it -- a blackout rather
@@ -1090,6 +1329,88 @@ mod tests {
         split.stop();
         split.stop();
         assert!(!split.is_running());
+    }
+
+    /// A tunnel adapter that is present and well must never be read as
+    /// gone. This is the case the backstop must not get wrong in the
+    /// expensive direction -- tearing a working customer's Custom mode
+    /// down would be an outage this code caused.
+    fn adapter(index: u32, ipv4: Option<Ipv4Addr>, is_up: bool) -> adapters::Adapter {
+        adapters::Adapter {
+            index,
+            name: "neoconnect".to_string(),
+            gateway: None,
+            ipv4,
+            is_up,
+            description: "WireGuard Tunnel".to_string(),
+        }
+    }
+
+    const IDX: u32 = 20;
+    fn addr() -> Ipv4Addr {
+        Ipv4Addr::new(10, 66, 0, 2)
+    }
+
+    #[test]
+    fn a_healthy_tunnel_adapter_is_left_alone() {
+        assert_eq!(
+            liveness(IDX, addr(), &Ok(Some(adapter(IDX, Some(addr()), true)))),
+            Liveness::Alive
+        );
+    }
+
+    #[test]
+    fn an_adapter_that_has_gone_is_reported_gone() {
+        // The measured shape of the 2026-08-23 field bug: the WireGuard
+        // tunnel service was uninstalled, the adapter went with it, and
+        // the relays kept trying to bind to interface 20 / 10.66.0.2 --
+        // "upstream attach FAILED for 1.1.1.1:53 ... (interface 20,
+        // source 10.66.0.2)", several times a second, forever.
+        assert_eq!(liveness(IDX, addr(), &Ok(None)), Liveness::Gone);
+        // Present but down is the same thing from here.
+        assert_eq!(
+            liveness(IDX, addr(), &Ok(Some(adapter(IDX, Some(addr()), false)))),
+            Liveness::Gone
+        );
+        // Present, up, and no longer holding the address the relays bind
+        // their upstream sockets to. Binding is what fails first, so an
+        // adapter that kept its index and lost its address is just as
+        // dead to this session.
+        assert_eq!(
+            liveness(IDX, addr(), &Ok(Some(adapter(IDX, None, true)))),
+            Liveness::Gone
+        );
+        // A same-named adapter that somebody else rebuilt. Not ours.
+        assert_eq!(
+            liveness(IDX, addr(), &Ok(Some(adapter(IDX + 1, Some(addr()), true)))),
+            Liveness::Gone
+        );
+    }
+
+    /// The control, and the reason `liveness` has three values rather
+    /// than two.
+    ///
+    /// A `bool` implementation reading "not provably alive means dead"
+    /// passes every assertion above and fails this one. Without it the
+    /// whole matrix could not come back negative for the mistake most
+    /// worth catching: an adapter enumeration that failed says nothing
+    /// about the adapter, and treating it as death would let one
+    /// unlucky syscall drop a working customer out of their tunnel.
+    #[test]
+    fn a_failed_enumeration_is_not_evidence_of_anything() {
+        let failed = Err(std::io::Error::new(std::io::ErrorKind::Other, "GetAdaptersAddresses"));
+        assert_eq!(liveness(IDX, addr(), &failed), Liveness::NoEvidence);
+        assert_ne!(
+            liveness(IDX, addr(), &failed),
+            Liveness::Gone,
+            "a query that failed must never be read as the tunnel having gone"
+        );
+    }
+
+    /// One bad look is not enough, and the run has to be consecutive.
+    #[test]
+    fn the_backstop_needs_more_than_one_look() {
+        assert!(WATCHDOG_STRIKES > 1, "a single unlucky look must not stop interception");
     }
 
     #[test]
