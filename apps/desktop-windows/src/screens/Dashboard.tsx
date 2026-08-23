@@ -28,6 +28,7 @@ import { Logo } from "../components/Logo";
 import { Flag } from "../components/Flag";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
+import { RepairNetwork } from "../components/RepairNetwork";
 import { useI18n } from "../lib/i18n";
 
 /** What the helper service reports about the far end.
@@ -1740,6 +1741,32 @@ export function Dashboard({
                               {connectionError.detail}
                             </p>
                           </details>
+                          {/* The moment the repair is worth offering.
+                              Leftover state from a previous session --
+                              an NRPT rule pointing at an unreachable
+                              resolver, routes on an adapter whose engine
+                              is gone, a stranded tunnel service holding
+                              the default route -- presents exactly like
+                              this: a connect that will not complete. Put
+                              here rather than only in Settings because
+                              somebody who cannot connect is already
+                              looking at this line, and asking them to go
+                              hunting for a fix is how a fix goes unused.
+
+                              Collapsed until asked for. Most connect
+                              failures are a blocked server, not a broken
+                              machine, and a repair offered as the first
+                              answer to every failure would train people
+                              to reach for it instead of switching
+                              location.
+
+                              No state is set here when it finishes: the
+                              repair disconnects, and the status poll a
+                              few seconds later is what observes that.
+                              Writing "disconnected" from here would be
+                              this screen asserting a tunnel state it had
+                              not checked. */}
+                          <RepairNetwork variant="inline" />
                         </>
                       ) : null}
                     </div>
