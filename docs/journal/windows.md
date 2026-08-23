@@ -5775,3 +5775,156 @@ in `Stats::complaint()` — that counter climbs from the first second on
 any dual-stack network, so a complaint keyed on it would be permanently
 lit, and this codebase already decided (see `WARMUP`) that a standing
 false alarm is worse than silence.
+
+---
+
+## 2026-08-22 — The full-tunnel IPv6 leak was real; blocked in our code on the three engines that leaked
+
+**Status:** written and building; **the rig re-run is NOT done** — see
+"What still has to be measured" before quoting this anywhere
+**Branch:** `claude/full-tunnel-ipv6` (not pushed, no PR)
+**Touches:** `apps/desktop-windows/service/src/engines/`{`ipv6_block.rs` (new), `mod.rs`},
+`service/src/pipe.rs`, `ipc/src/lib.rs`, `src-tauri/src/`{`vpn.rs`,`lib.rs`},
+`src/lib/`{`egress.ts`,`i18n.tsx`}, `src/screens/Dashboard.tsx`
+
+The section above said the full-tunnel case was inferred and told the
+next session to measure it before fixing it. It was measured, and the
+inference held.
+
+Client 0.9.25, node germany-1, dual-stack guest, capture taken **host
+side at the vNIC** — outside anything the client can influence. Plain
+full tunnel, split tunnel **off**, clear-text public-destination IPv6
+packets:
+
+```
+OpenVPN             13 (disconnected)  ->  14   LEAK
+IKEv2               13                 ->  14   LEAK
+Xray VLESS-REALITY  13                 ->  smaller, non-zero   LEAK
+WireGuard           13                 ->   0   blocked
+```
+
+In every leaking case the app said `connected: true` and the v4 exit
+address was the node's. That is the combination that hid this: IPv4
+genuinely tunnelled, IPv6 in the clear, and every instrument the app
+owned agreeing that the customer was protected.
+
+**REALITY's smaller number is not partial protection.** Xray captures
+DNS, so a v6-only hostname never resolves and never produces a packet.
+Raw v6 — literal addresses, cached `AAAA` — still egressed; ICMPv6 and
+inbound TCP 443 were both seen.
+
+### WireGuard was safe, and not because of us
+
+`wireguard.exe` arms its own WFP kill-switch. The capture read it
+directly: provider **"WireGuard"** owning a BLOCK filter named
+`Block all outbound (IPv6)` at `FWPM_LAYER_ALE_AUTH_CONNECT_V6`, the
+matching inbound one, and permits for NDP, DHCP, loopback, its TUN
+interface and its service.
+
+So the mechanism was already proven on customers' machines by a binary
+we already ship. The fix is that shape, in our code, for the engines
+that do not bring one — `engines/ipv6_block.rs`. Ten filters: BLOCK at
+`ALE_AUTH_CONNECT_V6` and `ALE_AUTH_RECV_ACCEPT_V6` at weight 0, and at
+weight 12 above them, per layer, permits for loopback (both the `::1`
+address form and `FWP_CONDITION_FLAG_IS_LOOPBACK`), `fe80::/10` and
+`ff00::/8`. The last two are what keep NDP, RA, DAD and DHCPv6 alive —
+without them this does not stop internet IPv6, it stops the machine
+talking to its own router.
+
+### Things worth knowing before touching it
+
+- **User-mode WFP is enough.** `fwpmu.h`, no driver. User mode may add
+  PERMIT/BLOCK at the ALE layers; only *redirection* needs a kernel
+  callout. Nothing here redirects.
+- **The session is `FWPM_SESSION_FLAG_DYNAMIC`, and that is the whole
+  safety argument.** Every object belongs to the engine handle, so the
+  kernel removes them when the process dies — killed, crashed, or
+  stopped. No persistent filter, nothing boot-time, nothing that can
+  strand a customer's networking. Removal is "close the handle"; there
+  is deliberately no per-filter delete loop that could miss one.
+- **Everything goes in inside one transaction.** A half-installed set is
+  worse than nothing: the ordering that fails first leaves the
+  machine-wide BLOCK up with the permits missing, which takes the LAN
+  down.
+- **Gates.** WireGuard is exempt (its own kill-switch; two providers
+  blocking the same thing is a debugging trap). Custom mode is exempt —
+  `redirect.rs` already handles v6 there *per application*, and a
+  machine-wide block would change unselected apps' behaviour, which
+  nobody asked for. Residual gap, stated: in `AllExcept`, the excluded
+  apps and everything else keep their IPv6.
+- **`ALE_AUTH_CONNECT_V6` classifies at flow establishment.** A v6
+  connection already open when the tunnel comes up is not re-examined.
+  WireGuard's kill-switch has the same property.
+- **Struct layouts are windows-sys generated bindings, not hand-written.**
+  `FWPM_FILTER0` is a nest of unions and this repo has already paid for
+  hand-declaring a Windows structure once (three wrong RAS layouts, one
+  of which dialled and then killed the service from inside RASAPI32).
+
+### The blind spot that hid it, and what replaced it
+
+`egress.ts` compared the address `/health/ip` saw before and after
+connecting. On every node that is an IPv4 conversation, so a machine
+leaking v6 beside a working v4 tunnel came back `throughTunnel`. The
+check was not wrong; it could not see half the machine.
+
+New question, `vpn::probe_ipv6_egress`: can a public IPv6 *literal* be
+reached from here? Literal, because a hostname is resolved by Windows and
+may answer with an `A` record. Two operators (`2606:4700:4700::1111`,
+`2001:4860:4860::8888`, TCP 443, concurrent, 2.5s) so one filtered
+anycast address does not read as "no IPv6".
+
+**It had to be native.** The app's HTTP permission is scoped to
+`*.neoxify.site` in `src-tauri/capabilities/default.json`, so a `fetch`
+to any probe address is refused by Tauri's own ACL before a packet
+leaves — a check that always answers "no IPv6" and can never fail. That
+was caught by reading the capability file, not by running it; worth
+remembering for any future probe written in the frontend.
+
+A baseline is taken **before** connecting, because most machines have no
+public IPv6 at all. Without it, "the probe failed" cannot tell a blocked
+machine from one that never had any, and either would be a false alarm
+on the common case.
+
+A leak is surfaced and deliberately does **not** mark the tunnel
+degraded: that hands it to the failover ladder, which tears down a
+working connection for the next protocol — which leaks identically — and
+cycles every candidate before ending where it started.
+
+### What still has to be measured
+
+Nothing below has been run. `cargo build`, `cargo check --workspace
+--all-targets`, `cargo test --workspace`, `tsc`, `vite build` and
+`vitest` all pass, and that means it compiles.
+
+1. **Re-run the matrix.** Same rig, same node, split tunnel off, capture
+   host-side. Baseline vs connected clear-text public-v6 counts must go
+   13 -> 0 for OpenVPN, IKEv2 and REALITY, the way WireGuard already
+   does. Anything above zero is the fix not working, whatever the log
+   says.
+2. **Crash test.** Kill the service while connected (`taskkill /F`, not
+   a stop). The filters must vanish — `netsh wfp show filters` should
+   have no `Neoxify` provider — and IPv6 must come back without a
+   reboot. This is the claim the dynamic session makes and it is the one
+   that hurts customers if it is wrong.
+3. **LAN survival.** With the block up, confirm NDP/RA still work: the
+   machine keeps its link-local neighbours and does not lose its router.
+   The permits are what this tests.
+4. `wfp_accepts_the_whole_filter_set_then_it_is_aborted` (in
+   `ipv6_block.rs`) hands the real filter set to the real engine inside a
+   transaction and aborts it, so WFP validates every structure without
+   filtering a packet. **It skipped locally** — adding filters needs
+   administrator and this shell is not elevated (`FwpmTransactionBegin0`
+   returned `0x5`). CI's Windows runner is elevated, so it runs there.
+
+### Still the interim
+
+Blocking is not the destination. Every node is IPv4-only — the server
+configs carry no v6 addressing, no tunnel adapter gets a v6 address, and
+every route the client installs is v4 — so there is nowhere to send a v6
+packet. The real fix is IPv6 on the nodes, after which this module
+should carry v6 rather than drop it and `dash.fullTunnelIpv6Blocked`
+should go with it.
+
+Until then it is a stated gap, not a silent one: the dashboard says IPv6
+is blocked while connected, in English and Persian, and says it only
+when the service reports a block is actually installed.
