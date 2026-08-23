@@ -439,6 +439,28 @@ impl Engines {
         result
     }
 
+    /// Everything that must not outlive the installation.
+    ///
+    /// [`disconnect`](Self::disconnect) undoes the tunnel and, through
+    /// its leftovers path, the orphaned engines, the firewall
+    /// allowance, the routes on our adapters, the RAS entry and the
+    /// NRPT rule. What it deliberately leaves is the OpenVPN adapter,
+    /// kept between sessions because creating one is slow -- reasoning
+    /// that inverts exactly here, since after this there is no product
+    /// left on the machine that knows what that adapter is or how to
+    /// remove it.
+    ///
+    /// Best-effort, and the tunnel teardown's own result is still what
+    /// is returned: an uninstall that cannot clean up must still
+    /// uninstall, or the customer is left with both problems.
+    pub fn uninstall_cleanup(&mut self) -> Result<(), String> {
+        let result = self.disconnect();
+        if let Err(err) = openvpn::delete_adapter(self) {
+            eprintln!("teardown: {err}");
+        }
+        result
+    }
+
     /// Removes the generated engine configs once nothing is using them.
     ///
     /// These files contain live credentials -- a WireGuard private key, an

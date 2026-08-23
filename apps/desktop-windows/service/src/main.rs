@@ -184,7 +184,7 @@ fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     // still uninstall, or the user is stuck with both problems.
     if let Ok(exe_dir) = exe_dir() {
         let mut engines = engines::Engines::new(exe_dir, config_dir());
-        if let Err(err) = engines.disconnect() {
+        if let Err(err) = engines.uninstall_cleanup() {
             eprintln!("uninstall cleanup: {err}");
         }
     }
