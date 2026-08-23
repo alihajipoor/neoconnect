@@ -6213,3 +6213,175 @@ rather than turning protection off.
 Now `pre-0928` → `pre-verify2` → `pre-verify3`. `pre-verify3` is the
 state the uninstall control and test both start from. All offline
 snapshots, for the reason in the previous entry.
+
+---
+
+## 2026-08-23 — Two fingerprints nobody chose: rotted REALITY decoys, and the default nginx page
+
+**Status:** installer fixed and proven; **the live fleet is not fixed —
+five items below need an owner decision**
+**Touches:** `installer/lib/agent.sh`, `installer/lib/deps.sh`,
+`installer/maintenance/**`, `docs/detection-resistance.md`. No node was
+changed. Everything below marked "measured" is read-only: DNS, TLS
+handshakes, HTTP GETs, and `ssh` commands that only print.
+
+Branch `fix/reality-dest-ownership-and-port-80`, commits `70d909b`
+(REALITY probe) and `9134f7d` (port 80).
+
+### The decoy probe was testing the wrong thing, and now is not
+
+`probe_reality_dest` checked TLS 1.3, ALPN h2, X25519 and "the
+certificate verifies". Every one of those passes for a CDN-fronted
+decoy, which is why `www.asus.com` and `www.leboncoin.fr` went on being
+offered as the installer's defaults long after they moved into
+CloudFront. `Verify return code: 0 (ok)` was also doing less than it
+looked: it says the chain is trusted, never that the name on it is the
+name we are about to claim.
+
+The probe now resolves the name, connects to *that* address, and asks
+who announces it — Team Cymru over DNS for the origin AS, the CNAME
+chain, and the edge headers in the site's own replies. Three signals
+because each is evadable alone, and because two of them survive on a
+node with no `dig`. When the DNS half cannot run it prints
+"criterion 1 is UNVERIFIED" rather than passing quietly, which is the
+behaviour the old probe should have had.
+
+Two more checks came out of upstream's own docs rather than from us:
+`-verify_hostname`, and a chain-size ceiling — REALITY's server side
+abandons the handshake above 8192 bytes and the customer sees a bare
+reset (XTLS/Xray-core#6356).
+
+**Proven, not inferred.** `installer/maintenance/reality-dest-audit.sh
+--self-test` is the control case, committed so it can be re-run:
+`www.torob.com` (AS215708 Mobin Arvand) passes, `www.asus.com`
+(AS16509 AMAZON-02, `x-amz-cf-pop`) does not. Both passed identically
+before. The degraded path was tested too, by shadowing `dig` with a
+stub: CloudFront is still caught on the header signal, and `torob`
+comes back flagged UNVERIFIED instead of clean.
+
+**Three outcomes now, not two.** Usable / weak disguise / will not work.
+Only a clean result is ever a default; a weak one has to be typed and
+confirmed. That is deliberate — refusing a weak dest outright would drop
+REALITY on a node with no clean option, and taking a transport away from
+Iranian customers to win an argument about tidiness is the wrong trade.
+The hardcoded `www.speedtest.net` fallback is gone; it has been
+Cloudflare for over a year, so the one path that fired when everything
+else failed was guaranteed to produce the exact mismatch the rest of the
+function exists to prevent.
+
+### What the fleet is actually wearing
+
+Measured from this machine on 2026-08-23, so **the CDN verdicts are
+durable and the specific addresses are not** — DNS answers depend on
+where you ask. Re-run the audit on the node before acting.
+
+| node | dest | verdict |
+|---|---|---|
+| finland1 | `www.shatel.ir` | sound — AS31549 Aria Shatel, IR |
+| france-1 | **`cloudflare.com`** | worst case: AS13335, `server: cloudflare` |
+| germany-1 | `www.shatel.ir` | works, but an Iranian ISP's name on a German address — **and the same dest as finland1** |
+| singapore-1 | `www.shopee.sg` | sound — AS138341 Shopee Singapore |
+| turkey-1 | `www.donanimhaber.com` | sound — AS6205 HizliNet, TR |
+
+france-1's dest was read from `/usr/local/etc/xray/config.json` over
+SSH. germany-1 refuses every key we hold, so its dest was recovered from
+*outside* instead: open a plain TLS connection to `:443` with an SNI
+REALITY will not authenticate, and it proxies you to the dest, which
+hands back the dest's own certificate. Useful trick, and worth knowing
+it works against us too.
+
+Replacements measured clean the same day, per region:
+`www.helsinki.fi` (FI, AS1741 FUNET), `www.heise.de` (DE, AS12306
+Plus.line), `www.web.de`/`www.gmx.net` (DE, AS8560 IONOS), `www.free.fr`
+(FR, AS12322 Proxad). The rejections are recorded in
+`docs/detection-resistance.md` so nobody re-proposes them.
+
+**Changing a live node's dest is not a client-side change.** The SNI
+comes from the panel's Protocol Config; both ends move together or every
+customer on that node fails exactly the way an intercepted domain does.
+Owner decision, with a window.
+
+### "Welcome to nginx!" — and it is four nodes, not three
+
+The handover said singapore-1, turkey-1 and germany-1. **france-1 has it
+too.** All four return the same 615 bytes with
+`Server: nginx/1.24.0 (Ubuntu)` on it, so the version and the distro are
+being volunteered as well. finland1 refuses the connection outright —
+`ECONNREFUSED`, not a timeout, so nothing is listening rather than a
+firewall dropping it.
+
+**Why finland1 escaped:** `/etc/nginx/sites-available/default` is still
+on the box; only the `sites-enabled` symlink is missing. Somebody removed
+it there by hand and it never landed in the installer. `panel.sh` has
+done `rm -f /etc/nginx/sites-enabled/default` since forever; `agent.sh`
+never did. This is the "a hotfix on a live box is not done until a fresh
+install is correct" rule, in the wild.
+
+**Port 80 has to stay open, and this nearly went the other way.**
+Renewal, not issue, is what needs it: certbot replays the authenticator
+recorded per certificate. Read off the nodes —
+
+| node | authenticator | consequence |
+|---|---|---|
+| france-1 | `webroot /var/www/html` | renews *through the default vhost being removed* |
+| turkey-1 | `webroot /var/www/html` | same |
+| finland1 | `standalone` | fine today; port 80 is free there |
+| singapore-1 | `standalone` | **already broken** — nginx holds 0.0.0.0:80, so nothing can bind it |
+
+So closing 80 breaks france-1 and turkey-1 immediately, and the failure
+would not surface for ninety days, at which point Xray refuses a config
+whose certificate it cannot read and the node loses *every* TLS inbound
+at once. Redirecting to https is wrong for a different reason: 443 is
+REALITY, so a 301 walks the scanner into a handshake returning a
+certificate for somebody else's domain — louder than the page we are
+removing.
+
+`ensure_port80_site` therefore serves a deliberate page: the same dull
+per-node text as the loopback fallback, `server_tokens off`, and an ACME
+location out of `/var/www/html`. Proven on a throwaway Ubuntu with
+nginx, from the "Welcome to nginx!" state to:
+
+```
+GET /                                   200, Server: nginx  (no version)
+GET /.well-known/acme-challenge/probe   200, text/plain, exact token
+GET a missing challenge                 404
+```
+
+and on the rollback path — a second vhost also claiming `default_server`
+— it returns 1, says why, and puts the old link back, because a port 80
+answering *nothing* is worse than one answering badly.
+
+The `standalone` → `webroot` migration was proven by certbot's own
+parser: after the rewrite it reads back
+`'authenticator': 'webroot', 'webroot_path': ['/var/www/html'],
+'webroot_map': {...}`. **What is NOT proven is a real renewal** — the rig
+had no live certificate. `certbot renew --dry-run` is the ground truth
+and the script tells the operator to run it rather than claiming it
+works.
+
+### Still to do, per node, and none of it done
+
+Nothing on any node was touched. In the order I would do it:
+
+1. **france-1's dest is `cloudflare.com`.** Worst case in the fleet and
+   the one the code comments have argued against for months. Needs a
+   panel Protocol Config change and a node change together.
+   `www.free.fr` measured clean for it.
+2. **germany-1 and finland1 share `www.shatel.ir`.** One dest across two
+   nodes is one signature across two nodes. `www.heise.de` or
+   `www.web.de` for germany-1. Blocked on germany-1's SSH key either
+   way — `ovh_neo`, `azs_vps` and `neo_tr1` were all refused again
+   today, so that key is now blocking two open items.
+3. **`fix-node-port-80.sh --apply` on france-1, germany-1, singapore-1
+   and turkey-1.** Run it without `--apply` first; the report tells you
+   which of the two renewal states that node is in. Then
+   `certbot renew --dry-run`, then `curl -sI http://<ip>/` from off the
+   node.
+4. **singapore-1's certificate renewal is already broken** and item 3
+   fixes it as a side effect. Worth doing on its own schedule if item 3
+   slips.
+5. **finland1 needs nothing for the fingerprint** — but if anything ever
+   puts nginx on its port 80, its `standalone` renewal breaks the same
+   way singapore-1's did. `ensure_port80_site` migrates it if the
+   installer is ever re-run there, which is the safe outcome, but it is
+   worth knowing before that happens rather than after.
