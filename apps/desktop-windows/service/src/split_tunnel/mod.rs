@@ -268,6 +268,7 @@ impl Convergence {
         path: PathBuf,
         node: Ipv4Addr,
         own_images: Vec<String>,
+        nat: Arc<flows::Nat>,
         closed_already: usize,
     ) -> Self {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -288,8 +289,21 @@ impl Convergence {
                     }
                     let selection =
                         selection.read().unwrap_or_else(|e| e.into_inner()).clone();
-                    let outcome =
-                        owner::reset_selected_connections(&selection, node, &own_images);
+                    // Skipping whatever the redirect is already
+                    // carrying. By the second pass an application has
+                    // rebuilt its connections into the tunnel, and
+                    // without this the loop closes them again -- see
+                    // `owner::reset_selected_connections`. `has_flow`,
+                    // not `lookup_flow`, so asking twice a second does
+                    // not keep every entry alive.
+                    let outcome = owner::reset_selected_connections(
+                        &selection,
+                        node,
+                        &own_images,
+                        &|transport, port, destination, destination_port| {
+                            nat.has_flow(transport, port, destination, destination_port)
+                        },
+                    );
                     closed += outcome.closed;
                     passes += 1;
                     for failure in outcome.failures {
@@ -814,6 +828,11 @@ impl SplitTunnel {
             last_run: Instant::now(),
         };
 
+        // The same table the redirect loop fills and the audit reads,
+        // held once more so the reset can ask it whether a row it is
+        // about to close is one the tunnel is already carrying.
+        let reset_nat = nat.clone();
+
         match redirect::start(redirect, nat, self.selection.clone()) {
             Ok(running) => {
                 let logger =
@@ -826,7 +845,14 @@ impl SplitTunnel {
                 // same connection back.
                 let outcome = {
                     let selection = self.selection.read().expect("selection lock");
-                    owner::reset_selected_connections(&selection, node, &own_images())
+                    owner::reset_selected_connections(
+                        &selection,
+                        node,
+                        &own_images(),
+                        &|transport, port, destination, destination_port| {
+                            reset_nat.has_flow(transport, port, destination, destination_port)
+                        },
+                    )
                 };
                 append(
                     &log_path,
@@ -848,6 +874,7 @@ impl SplitTunnel {
                     log_path.clone(),
                     node,
                     own_images(),
+                    reset_nat,
                     outcome.closed,
                 );
 
