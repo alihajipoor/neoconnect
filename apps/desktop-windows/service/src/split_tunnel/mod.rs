@@ -112,6 +112,9 @@ struct Active {
     tunnel: Arc<proxy::TunnelInterface>,
     route: InstalledRoutes,
     logger: Logger,
+    /// The reset loop that keeps closing pre-existing connections for
+    /// the first seconds. Held so it is stopped with the session.
+    convergence: Convergence,
     log_path: PathBuf,
     /// When interception began, so a warm-up is not mistaken
     /// for a fault. See redirect::WARMUP.
@@ -136,6 +139,42 @@ const LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 /// config directory.
 const LOG_FILE: &str = "split-tunnel.log";
 
+/// How often the escape audit walks the machine's connection tables.
+///
+/// Thirty seconds, which is a compromise between two costs that pull in
+/// opposite directions. It is four table walks plus a process lookup per
+/// unseen pid, so it is far too expensive to sit anywhere near the packet
+/// path; and an escape is a connection a browser will happily keep alive
+/// for minutes, so a sweep that arrives half a minute late still catches
+/// it. The one thing it is deliberately *not* tuned for is catching an
+/// escape quickly enough to do something about it -- nothing here does
+/// anything about it. See `owner::escaped_connections`.
+const AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many escaping connections are named in the log per sweep.
+///
+/// A cap rather than a truncation for its own sake: the failure this
+/// audit is looking for is usually one browser holding a handful of
+/// connections, and the pathological case -- `AllExcept` a moment after
+/// activation, where every pre-existing connection on the machine
+/// qualifies -- would otherwise write hundreds of lines into a log a
+/// customer is expected to paste into a support message. The count above
+/// them is the number that matters; the names are there to say which
+/// program to look at.
+const AUDIT_NAMES_PER_SWEEP: usize = 5;
+
+/// How often the activation reset rescans while it converges.
+///
+/// Chosen against what it is chasing rather than for its own sake. The
+/// rows it is waiting for are connections in `SYN_SENT`, which reach
+/// ESTABLISHED as soon as the far end answers -- a few tens of
+/// milliseconds on a local path, a few hundred on the sort of long,
+/// lossy route this product's customers are on. A quarter of a second is
+/// short enough that such a connection is closed before an application
+/// has sent anything down it, and long enough that the whole window
+/// costs a dozen table walks rather than hundreds.
+const RESET_RESCAN: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Writes the redirect counters to disk periodically.
 ///
 /// This exists because of how the spike went: three attempts were spent
@@ -150,7 +189,12 @@ struct Logger {
 }
 
 impl Logger {
-    fn start(path: PathBuf, stats: Arc<redirect::Stats>, header: String) -> Self {
+    fn start(
+        path: PathBuf,
+        stats: Arc<redirect::Stats>,
+        header: String,
+        mut audit: Audit,
+    ) -> Self {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
@@ -164,6 +208,15 @@ impl Logger {
                 trim_if_large(&path);
                 append(&path, &format!("--- {header}"));
                 while sleep_unless_stopped(&stop, LOG_INTERVAL) {
+                    // The audit rides this thread rather than bringing
+                    // its own. It is periodic housekeeping on the same
+                    // cadence order as the counters, it is torn down by
+                    // the same stop flag, and a second thread would be a
+                    // second thing to join on a Disconnect that
+                    // customers have already reported as slow.
+                    if audit.due() {
+                        audit.run(&path, &stats);
+                    }
                     append(&path, &stats.summary());
                 }
                 append(&path, &format!("stopped {}", stats.summary()));
@@ -177,6 +230,190 @@ impl Logger {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+/// Keeps closing a selected app's pre-existing connections for the first
+/// seconds of a session.
+///
+/// One pass at activation is not enough, and the reason is a real
+/// limitation rather than an oversight: `SetTcpEntry` can only tear down
+/// a connection that has reached ESTABLISHED. A connection that is in
+/// `SYN_SENT` at the instant Custom mode starts survives the pass,
+/// completes against the real destination a moment later, and lives
+/// outside the tunnel for as long as the application keeps it. That is
+/// issue 9 in the handover, and for a browser -- which keeps sockets
+/// alive and reuses them -- it is the difference between Custom mode
+/// applying and appearing not to.
+///
+/// So the pass becomes a loop: rescan every [`RESET_RESCAN`] for
+/// [`redirect::ACTIVATION_GRACE`], closing rows as they arrive in a state
+/// that can be closed. The two durations are the same one on purpose --
+/// while this is running, the redirect loop refuses those connections
+/// rather than exempting them, and a refusal that outlived the thing
+/// arranging a replacement would just be an outage.
+///
+/// On its own thread, so `connect()` returns no later than it did
+/// before. The first pass still runs inline, which is what keeps the
+/// existing behaviour and the existing log line intact; this only adds
+/// the ones that were not closeable yet.
+struct Convergence {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Convergence {
+    fn start(
+        selection: SharedSelection,
+        path: PathBuf,
+        node: Ipv4Addr,
+        own_images: Vec<String>,
+        closed_already: usize,
+    ) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + redirect::ACTIVATION_GRACE;
+                let mut closed = closed_already;
+                let mut passes = 0usize;
+
+                while Instant::now() < deadline {
+                    // Interruptible, because Custom mode can be stopped
+                    // inside this window -- a failover does exactly that
+                    // -- and closing a customer's connections on behalf
+                    // of a session that no longer exists is pure harm.
+                    if !sleep_unless_stopped(&stop, RESET_RESCAN) {
+                        return;
+                    }
+                    let selection =
+                        selection.read().unwrap_or_else(|e| e.into_inner()).clone();
+                    let outcome =
+                        owner::reset_selected_connections(&selection, node, &own_images);
+                    closed += outcome.closed;
+                    passes += 1;
+                    for failure in outcome.failures {
+                        append(&path, &format!("  reset: {failure}"));
+                    }
+                }
+
+                append(
+                    &path,
+                    &format!(
+                        "activation reset settled after {passes} rescan(s): {closed} connection(s) closed in total"
+                    ),
+                );
+            })
+        };
+        Self { stop, thread: Some(thread) }
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The periodic check for connections that got away.
+///
+/// Everything `redirect::Stats` counts is counted from inside the packet
+/// loop, so all of it is blind to a connection the loop never saw -- and
+/// a connection the loop never saw is exactly what a leak is. This walks
+/// the machine's own connection tables instead and asks which of them
+/// ought to be in the tunnel and is not. See
+/// [`owner::escaped_connections`] for what qualifies and what is
+/// deliberately excluded.
+///
+/// It changes nothing. No connection is closed, no packet is dropped and
+/// no verdict is revised on the strength of what it finds: it writes a
+/// count and a few names into the log. That restraint is on purpose --
+/// the count has never been read against a packet capture, and this
+/// project does not act on a number nobody has checked against the wire.
+struct Audit {
+    nat: Arc<flows::Nat>,
+    selection: SharedSelection,
+    own_images: Vec<String>,
+    node: Ipv4Addr,
+    /// The relay's TCP and UDP ports, whose own connections are not
+    /// escapes from the thing they are part of.
+    proxy_ports: (u16, u16),
+    /// Escapes already named in the log, so a connection that lives for
+    /// ten minutes is described once rather than twenty times.
+    named: std::collections::HashSet<(u16, std::net::IpAddr, u16)>,
+    last_run: Instant,
+}
+
+impl Audit {
+    fn due(&self) -> bool {
+        self.last_run.elapsed() >= AUDIT_INTERVAL
+    }
+
+    fn run(&mut self, path: &Path, stats: &redirect::Stats) {
+        self.last_run = Instant::now();
+
+        // Copied rather than held: what follows is four table walks and
+        // a process lookup per unseen pid, and the redirect loop reads
+        // this lock on every packet.
+        let selection = self.selection.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let nat = self.nat.clone();
+        let escapes = owner::escaped_connections(
+            &selection,
+            &self.own_images,
+            self.node,
+            self.proxy_ports,
+            // `has_flow` rather than `lookup_flow`, because asking must
+            // not renew the entry -- see `Nat::has_flow`.
+            &|transport, port, destination, destination_port| {
+                nat.has_flow(transport, port, destination, destination_port)
+            },
+        );
+
+        stats
+            .escaped
+            .store(escapes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+        if escapes.is_empty() {
+            // Nothing is out. Forget what was named, so a connection
+            // that comes back later is reported again rather than being
+            // silenced by a sweep it was absent from.
+            self.named.clear();
+            return;
+        }
+
+        append(
+            path,
+            &format!(
+                "escape audit: {} established connection(s) outside the tunnel that should be inside",
+                escapes.len()
+            ),
+        );
+
+        let mut written = 0usize;
+        for escape in &escapes {
+            let key = (escape.local_port, escape.remote, escape.remote_port);
+            if self.named.contains(&key) {
+                continue;
+            }
+            if written >= AUDIT_NAMES_PER_SWEEP {
+                append(path, "  ... and more, not listed");
+                break;
+            }
+            append(
+                path,
+                &format!(
+                    "  escape {} -> {}:{} (local port {})",
+                    escape.image, escape.remote, escape.remote_port, escape.local_port
+                ),
+            );
+            written += 1;
+        }
+
+        self.named = escapes
+            .iter()
+            .map(|e| (e.local_port, e.remote, e.remote_port))
+            .collect();
     }
 }
 
@@ -542,6 +779,10 @@ impl SplitTunnel {
             // whatever is not carried resolves on the local network
             // otherwise, which is the leak this closes.
             carry_dns: true,
+            // Overwritten by `redirect::start`, which stamps it when
+            // interception actually begins -- the route probe and the
+            // firewall wait sit between here and there.
+            activated: Instant::now(),
         };
 
         // Recorded before anything can go wrong with it: if Custom mode
@@ -560,23 +801,56 @@ impl SplitTunnel {
             }
         );
 
+        // Cloned before the table is handed to the redirect loop: the
+        // audit has to ask the same table the loop is filling, or it
+        // would report every carried flow as an escape from itself.
+        let audit = Audit {
+            nat: nat.clone(),
+            selection: self.selection.clone(),
+            own_images: own_images(),
+            node,
+            proxy_ports: (relays.tcp_port, relays.udp_port),
+            named: std::collections::HashSet::new(),
+            last_run: Instant::now(),
+        };
+
         match redirect::start(redirect, nat, self.selection.clone()) {
             Ok(running) => {
-                let logger = Logger::start(log_path.clone(), running.stats.clone(), header);
+                let logger =
+                    Logger::start(log_path.clone(), running.stats.clone(), header, audit);
 
                 // Only now, with the redirect actually running, so
                 // that what an application reconnects into is the
                 // tunnel rather than the ordinary route it just
                 // left. Doing it earlier would simply hand it the
                 // same connection back.
-                let closed = {
+                let outcome = {
                     let selection = self.selection.read().expect("selection lock");
-                    owner::reset_selected_connections(&selection)
+                    owner::reset_selected_connections(&selection, node, &own_images())
                 };
                 append(
                     &log_path,
-                    &format!("closed {closed} existing connection(s) so they rebuild through the tunnel"),
+                    &format!(
+                        "closed {} existing connection(s) so they rebuild through the tunnel",
+                        outcome.closed
+                    ),
                 );
+                for failure in &outcome.failures {
+                    append(&log_path, &format!("  reset: {failure}"));
+                }
+
+                // One pass cannot close a connection that is still in
+                // SYN_SENT -- SetTcpEntry has no way to -- so keep
+                // rescanning for the length of the redirect's activation
+                // window. See Convergence.
+                let convergence = Convergence::start(
+                    self.selection.clone(),
+                    log_path.clone(),
+                    node,
+                    own_images(),
+                    outcome.closed,
+                );
+
                 self.active = Some(Active {
                     redirect: running,
                     relays,
@@ -584,6 +858,7 @@ impl SplitTunnel {
                     tunnel,
                     route,
                     logger,
+                    convergence,
                     log_path,
                     started: Instant::now(),
                 });
@@ -675,6 +950,11 @@ impl SplitTunnel {
         // traffic to a port with nothing behind it -- a blackout rather
         // than the fail-open this promises.
         active.redirect.stop();
+        // Before the relays, and for the same reason interception is
+        // stopped before them: this thread closes customers' connections
+        // on the assumption that a tunnel is there to rebuild them
+        // through, and that assumption stops being true here.
+        active.convergence.stop();
         active.relays.stop();
         let mut allowance = active.allowance;
         allowance.remove();
