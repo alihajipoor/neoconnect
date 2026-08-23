@@ -228,4 +228,77 @@
   Pop $0
   nsExec::ExecToLog 'sc.exe delete WinDivert'
   Pop $0
+
+  ; ---------------------------------------------------------------
+  ; Removals that do not go through our service.
+  ;
+  ; Everything above asks neoconnect-service.exe to undo its own work,
+  ; which is the thorough path -- and the one that is unavailable in
+  ; exactly the case customers reported: a service that cannot run.
+  ; It will not start if WinDivert.dll is missing after a bad upgrade,
+  ; and it cannot be asked anything once it has crashed. Uninstalling
+  ; is what somebody does *because* the machine's networking is
+  ; broken, so the uninstaller cannot assume the component that broke
+  ; is available to clean up after itself.
+  ;
+  ; Each of these is idempotent, fails harmlessly on a machine that
+  ; never had the thing, and none of them can stop the uninstall.
+
+  ; The NRPT rule, which is the one that strands a whole machine. It
+  ; sends every lookup to the tunnel's resolver, lives in the registry
+  ; rather than in any process, and survives both a reboot and Windows'
+  ; own "network reset" -- so a customer who uninstalls to fix their
+  ; DNS keeps the rule that broke it.
+  ;
+  ; Backquoted strings so the PowerShell can carry both quote
+  ; characters, and $$ for a literal dollar: $_ alone is an NSIS
+  ; variable.
+  ;
+  ; The cmdlet first, then the registry directly, because a machine in
+  ; this state is one where the cmdlets may be exactly what is not
+  ; working. Matched on the comment this product writes, so nothing
+  ; else's rules are touched.
+  nsExec::ExecToLog `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-DnsClientNrptRule | Where-Object { $$_.Comment -eq 'Neoxify tunnel DNS' } | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue"`
+  Pop $0
+  nsExec::ExecToLog `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "@('HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig','HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig') | Where-Object { Test-Path $$_ } | Get-ChildItem | Where-Object { (Get-ItemProperty -Path $$_.PSPath -Name Comment -ErrorAction SilentlyContinue).Comment -eq 'Neoxify tunnel DNS' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue"`
+  Pop $0
+  ; The DNS client caches the table, so the registry delete above is
+  ; not live until it is told to re-read. Restarting Dnscache is
+  ; refused (it is a protected service) and gpupdate /force re-applies
+  ; every machine policy to poke one table; paramchange is the narrow
+  ; signal for it. A reboot finalises anything this does not take.
+  nsExec::ExecToLog 'sc.exe control dnscache paramchange'
+  Pop $0
+  nsExec::ExecToLog 'ipconfig /flushdns'
+  Pop $0
+
+  ; Custom mode's inbound allowance. Named identically by the service
+  ; (see split_tunnel/firewall.rs), so one delete removes both the TCP
+  ; and the UDP entry -- including a pair left by a service that was
+  ; killed while Custom mode was on, which would otherwise sit in the
+  ; customer's firewall allowing traffic to ports nothing listens on,
+  ; under a product name that is no longer installed.
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Neoxify Split Tunnel"'
+  Pop $0
+
+  ; The Wintun adapter OpenVPN attaches to. The service creates it with
+  ; tapctl.exe and deliberately never deletes it -- creating one is slow
+  ; and a dormant adapter costs nothing between sessions. After this
+  ; uninstall there are no more sessions, and what is left is an adapter
+  ; in the customer's network connections list that nothing on the
+  ; machine can explain or remove.
+  ${If} ${FileExists} "$INSTDIR\resources\tapctl.exe"
+    nsExec::ExecToLog '"$INSTDIR\resources\tapctl.exe" delete Neoxify-OpenVPN'
+    Pop $0
+  ${EndIf}
+
+  ; The IKEv2 phonebook entry. The service removes it on every
+  ; disconnect, so this is purely the fallback for a service that never
+  ; got to run one -- an entry called "Neoxify" left in the Windows VPN
+  ; list, dialable by hand, for a product that is gone. Hung up first,
+  ; because a connected entry cannot be removed.
+  nsExec::ExecToLog 'rasdial Neoxify /disconnect'
+  Pop $0
+  nsExec::ExecToLog `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Remove-VpnConnection -Name 'Neoxify' -AllUserConnection -Force -ErrorAction SilentlyContinue"`
+  Pop $0
 !macroend
