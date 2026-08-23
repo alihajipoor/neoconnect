@@ -153,7 +153,9 @@
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use neoconnect_ipc::SplitTunnelMode;
 
 use windivert_sys::address::WINDIVERT_ADDRESS;
 use windivert_sys::{WinDivertFlags, WinDivertLayer};
@@ -173,6 +175,38 @@ const MAX_PACKET: usize = 65_575;
 /// forward; only a few, because packets are reordered across threads and
 /// a latency-sensitive audience is the reason this feature exists.
 const WORKERS: usize = 2;
+
+/// How long after activation a selected app's pre-existing TCP
+/// connections are refused rather than exempted.
+///
+/// This exists because closing them at the moment Custom mode starts
+/// cannot close all of them. `SetTcpEntry` can only tear down an
+/// ESTABLISHED connection -- there is no variant that works on one still
+/// in `SYN_SENT` -- so a connection that happens to be half-open at that
+/// instant survives the reset, completes a moment later against the real
+/// destination, and is then met by the mid-connection rule below, which
+/// exempts it permanently. A browser keeps such a socket alive and reuses
+/// it, so the customer sees their own address for minutes with Custom
+/// mode switched on. That is issue 9 in the handover, and the same class
+/// of dishonesty as a false "Connected".
+///
+/// Three seconds because it has to cover a SYN that is retransmitting on
+/// a slow or half-dead host: Windows sends the second SYN about a second
+/// after the first and the third about two seconds after that, so three
+/// seconds covers the common case of a connection that completes late
+/// without holding the window open long enough to matter. It is a window
+/// in which a selected app's *pre-existing* connections fail and are
+/// remade through the tunnel -- an application handles that routinely,
+/// it is what happens when a network changes -- and it deliberately does
+/// not extend to anything else.
+///
+/// The same value bounds the reset's convergence loop (see
+/// `split_tunnel::Convergence`), and it must: the drop is only defensible
+/// while something is still working to close these connections properly.
+/// A window that outlived the loop would be a period where a selected
+/// app simply could not use a connection it already had, with nothing
+/// arranging for it to get a better one.
+pub const ACTIVATION_GRACE: Duration = Duration::from_secs(3);
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -246,6 +280,16 @@ pub struct Stats {
     /// wrong on the strength of a number nobody has checked against the
     /// wire yet.
     pub escaped: AtomicU64,
+    /// Mid-connection packets refused during the activation window --
+    /// see [`ACTIVATION_GRACE`].
+    ///
+    /// Counted, like `blocked_v6`, because it reports a *deliberate*
+    /// refusal rather than a fault, and because a drop that nothing
+    /// records is the one kind of change to this loop that cannot be
+    /// argued about afterwards. Non-zero here is normal for the first
+    /// three seconds of a session in which a selected application was
+    /// already running, and means nothing at all after that.
+    pub grace_dropped: AtomicU64,
 }
 
 /// How many packets must have gone out before silence means anything.
@@ -271,7 +315,7 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={}",
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} grace_dropped={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
@@ -279,6 +323,7 @@ impl Stats {
             self.rejected.load(Ordering::Relaxed),
             self.blocked_v6.load(Ordering::Relaxed),
             self.escaped.load(Ordering::Relaxed),
+            self.grace_dropped.load(Ordering::Relaxed),
         )
     }
 
@@ -409,6 +454,64 @@ pub struct Redirect {
     /// Every lookup goes here, through the tunnel, whoever asked. See
     /// `is_dns` for why that is not the overreach it looks like.
     pub dns_resolver: Ipv4Addr,
+    /// When interception began, which is what the activation window is
+    /// measured from -- see [`ACTIVATION_GRACE`].
+    ///
+    /// State on the redirect rather than a global, deliberately. Two
+    /// sessions can overlap for a moment during a failover -- Custom
+    /// mode is stopped and restarted against the new adapter -- and a
+    /// process-wide clock would let the outgoing session's age decide
+    /// what the incoming one does with a packet.
+    ///
+    /// Whatever the caller puts here is overwritten by [`start`]. The
+    /// window has to begin when packets begin arriving, not when the
+    /// struct was assembled, and the gap between the two is a route
+    /// probe and a firewall wait -- seconds, on the path where this
+    /// matters most.
+    pub activated: Instant,
+}
+
+impl Redirect {
+    /// Whether the activation reset is still converging, so a
+    /// pre-existing connection should be refused rather than exempted.
+    fn within_activation_grace(&self) -> bool {
+        self.activated.elapsed() < ACTIVATION_GRACE
+    }
+}
+
+/// Whether a mid-connection packet should be dropped rather than
+/// permanently exempted, because the activation reset has not finished
+/// yet.
+///
+/// Split out from [`decide`] because it is the whole of the new
+/// behaviour and every one of its clauses is load-bearing:
+///
+/// * **Only inside the window.** Outside it, the mid-connection rule is
+///   right and has been for a long time: a connection that predates
+///   Custom mode holds a socket to the real destination, and rewriting
+///   half of a live connection is not a redirect, it is breaking it.
+/// * **Only `OnlySelected`.** In `AllExcept` an unknown owner means
+///   "carry it", so the same rule there would refuse traffic belonging to
+///   programs nobody has identified -- including, for the first seconds
+///   of a session, most of the machine. Changing that direction needs its
+///   own evidence and is not part of this wave.
+/// * **Only a known owner.** A miss must never cause a drop. Attributing
+///   a packet is exactly the thing this file has been wrong about
+///   before, and the cost of being wrong here lands on an application the
+///   customer never selected.
+/// * **Never this service's own.** The proxy's upstream sockets look
+///   like any other application's, and refusing them would take out the
+///   relay carrying everything else.
+fn drop_while_converging(
+    within_grace: bool,
+    selection: &Selection,
+    owner_image: Option<&str>,
+    is_own: bool,
+) -> bool {
+    within_grace
+        && matches!(selection.mode(), SplitTunnelMode::OnlySelected)
+        && !is_own
+        && owner_image.map(|image| selection.should_tunnel(image)).unwrap_or(false)
 }
 
 /// Whether this packet is a name lookup.
@@ -513,10 +616,18 @@ impl Running {
 }
 
 pub fn start(
-    redirect: Redirect,
+    mut redirect: Redirect,
     nat: Arc<Nat>,
     selection: SharedSelection,
 ) -> Result<Running, String> {
+    // Stamped here rather than trusted from the caller: the window has
+    // to start when packets start arriving. Between the caller building
+    // this struct and the driver handing over a first packet sit a route
+    // probe and a wait for the firewall rule to become effective, which
+    // on the path where any of this matters take seconds -- long enough
+    // to spend the whole grace window before a single packet is seen.
+    redirect.activated = Instant::now();
+
     let filter = filter_for(&redirect);
     // Checked before opening so a filter problem is reported as one.
     // WinDivertOpen fails with a generic error for a bad expression,
@@ -1009,7 +1120,43 @@ fn decide(
     // Custom mode did, or before its app was selected. Moving it now
     // would break it: the app holds a socket to the real destination,
     // and rewriting half a live connection is not a redirect.
+    //
+    // That is right in general and wrong for the first seconds of a
+    // session, and the difference is what this branch now makes.
+    // Activation closes a selected app's existing connections so they
+    // are rebuilt through the tunnel -- but `SetTcpEntry` cannot close a
+    // connection that is still in `SYN_SENT`, and one that was half-open
+    // at that instant completes a moment later against the real
+    // destination. It then arrives here as an ordinary mid-connection
+    // packet, is exempted, and lives outside the tunnel for as long as
+    // the application keeps it -- which for a browser is minutes.
+    //
+    // Inside the window, refuse it instead. The application sees the
+    // connection fail, which is a thing every application handles, and
+    // opens a new one that this loop is on time for. Outside the window
+    // the old behaviour returns unchanged. See `drop_while_converging`
+    // for why each clause of the test is there.
     if matches!(parsed.transport, Transport::Tcp) && !is_new_connection {
+        if redirect.within_activation_grace() {
+            // Not `image_for_new_connection`: this packet is not opening
+            // a connection, and forcing a table rebuild for every
+            // mid-connection packet on the machine for three seconds
+            // would be a table walk per packet at the busiest moment a
+            // session has.
+            let image = owner.image_for_port(Family::V4, parsed.transport, parsed.source_port);
+            let is_own = image
+                .map(|image| {
+                    redirect
+                        .own_images
+                        .iter()
+                        .any(|own| image.eq_ignore_ascii_case(own))
+                })
+                .unwrap_or(false);
+            if drop_while_converging(true, selection, image, is_own) {
+                stats.grace_dropped.fetch_add(1, Ordering::Relaxed);
+                return Verdict::Drop;
+            }
+        }
         nat.record_direct(parsed.transport, parsed.source_port);
         return Verdict::Direct;
     }
@@ -1227,6 +1374,7 @@ mod tests {
             rejected: AtomicU64::new(rejected),
             blocked_v6: AtomicU64::new(0),
             escaped: AtomicU64::new(0),
+            grace_dropped: AtomicU64::new(0),
         }
     }
 
@@ -1317,6 +1465,79 @@ mod tests {
         // "none of your apps have sent traffic" would be true but
         // useless noise a second after switching it on.
         assert_eq!(stats(10, 0, 0, 0, 0).complaint(WARMUP * 2), None);
+    }
+
+    fn selection_of(paths: &[&str], mode: SplitTunnelMode) -> Selection {
+        Selection::new(paths.iter().map(|p| p.to_string()), mode)
+    }
+
+    #[test]
+    fn a_selected_apps_surviving_connection_is_refused_while_the_reset_converges() {
+        // The SYN_SENT hole: a connection that was half-open when Custom
+        // mode started completes against the real destination a moment
+        // later, and the mid-connection rule would exempt it for its
+        // whole life. Inside the window it is refused instead, so the
+        // application opens a new one the loop is on time for.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(drop_while_converging(true, &selection, Some(r"c:\games\game.exe"), false));
+    }
+
+    #[test]
+    fn the_window_closes_and_the_old_behaviour_returns() {
+        // Outside it, exempting a pre-existing connection is right and
+        // has been for a long time: the app holds a socket to the real
+        // destination and rewriting half of a live connection breaks it.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(!drop_while_converging(false, &selection, Some(r"c:\games\game.exe"), false));
+    }
+
+    #[test]
+    fn a_packet_nobody_can_attribute_is_never_dropped() {
+        // The miss must not cost anything. Attributing a packet is the
+        // thing this file has been wrong about before, and here the
+        // price of being wrong is paid by an application the customer
+        // never chose.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(!drop_while_converging(true, &selection, None, false));
+    }
+
+    #[test]
+    fn an_unselected_app_keeps_its_connections_through_the_window() {
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(!drop_while_converging(true, &selection, Some(r"c:\windows\explorer.exe"), false));
+    }
+
+    #[test]
+    fn this_service_is_never_refused() {
+        // The proxy's upstream sockets look like any other
+        // application's. Refusing them would take out the relay carrying
+        // everything else -- and in AllExcept the service is "selected"
+        // by default, so this is the common case there, not the corner.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(!drop_while_converging(true, &selection, Some(r"c:\games\game.exe"), true));
+    }
+
+    #[test]
+    fn everything_except_these_is_left_exactly_as_it_was() {
+        // In AllExcept an unknown owner means "carry it", so this rule
+        // there would refuse traffic belonging to programs nobody has
+        // identified -- most of the machine, for the first seconds of a
+        // session. Changing that direction needs its own evidence.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::AllExcept);
+        assert!(!drop_while_converging(true, &selection, Some(r"c:\windows\explorer.exe"), false));
+        assert!(!drop_while_converging(true, &selection, None, false));
+    }
+
+    #[test]
+    fn the_window_is_measured_from_when_interception_began() {
+        // Per-redirect rather than global: a failover stops Custom mode
+        // and starts it again against the new adapter, and a
+        // process-wide clock would let the outgoing session's age decide
+        // what the incoming one does with a packet.
+        let mut redirect = sample_redirect();
+        assert!(redirect.within_activation_grace());
+        redirect.activated = Instant::now() - ACTIVATION_GRACE - Duration::from_millis(1);
+        assert!(!redirect.within_activation_grace());
     }
 
     /// A minimal IPv4 TCP packet, so the parser is exercised against
@@ -1551,6 +1772,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
+            activated: Instant::now(),
         });
 
         assert!(filter.contains("ip.DstAddr != 203.0.113.7"));
@@ -1576,6 +1798,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
+            activated: Instant::now(),
         }
     }
 
@@ -1831,6 +2054,8 @@ mod tests {
                 // the test.
                 carry_dns: false,
                 dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
+                // Overwritten by `start`; see ACTIVATION_GRACE.
+                activated: Instant::now(),
             },
             nat,
             selection,
@@ -1882,6 +2107,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
+            activated: Instant::now(),
         });
         super::super::divert::compile_filter(&filter).expect("the filter must compile");
     }

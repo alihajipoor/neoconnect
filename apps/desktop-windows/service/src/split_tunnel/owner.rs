@@ -990,24 +990,40 @@ const MIB_TCP_STATE_ESTAB: u32 = 5;
 /// alternative is a feature that silently does not apply until every
 /// program is restarted.
 ///
-/// Returns how many were closed, for the log.
-pub fn reset_selected_connections(selection: &Selection) -> usize {
+/// What one pass of the reset managed, and what it could not.
+#[derive(Debug, Default)]
+pub struct ResetOutcome {
+    pub closed: usize,
+    /// Rows `SetTcpEntry` refused, described well enough to act on.
+    ///
+    /// These used to be swallowed: the return value was checked, and a
+    /// failure simply did not increment the count. That made a refusal
+    /// indistinguishable from a row that was never a candidate, which
+    /// matters more now that the reset runs repeatedly -- a connection
+    /// that cannot be closed is one the loop will keep failing to close
+    /// for the whole window, and the log would show only a number that
+    /// did not move.
+    pub failures: Vec<String>,
+}
+
+/// Returns what was closed and what refused to close, for the log.
+pub fn reset_selected_connections(selection: &Selection) -> ResetOutcome {
+    let mut outcome = ResetOutcome::default();
     let Some(words) = query_table(|buf, size| {
         // SAFETY: `buf` is null (sizing) or a buffer of `*size` bytes.
         unsafe { GetExtendedTcpTable(buf, size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0) }
     }) else {
-        return 0;
+        return outcome;
     };
 
     let Some(&count) = words.first() else {
-        return 0;
+        return outcome;
     };
 
     // MIB_TCPROW_OWNER_PID: state, local addr, local port, remote addr,
     // remote port, owning pid -- six DWORDs.
     const ROW: usize = 6;
     let mut images: HashMap<u32, Option<String>> = HashMap::new();
-    let mut closed = 0usize;
 
     for row in 0..count as usize {
         let base = 1 + row * ROW;
@@ -1038,10 +1054,22 @@ pub fn reset_selected_connections(selection: &Selection) -> usize {
         // reads it.
         let ret = unsafe { SetTcpEntry(set.as_mut_ptr() as *mut _) };
         if ret == NO_ERROR {
-            closed += 1;
+            outcome.closed += 1;
+        } else {
+            // Said out loud rather than swallowed. A connection that
+            // will not close is one that goes on carrying the
+            // customer's traffic outside the tunnel, and it is the
+            // single most useful thing this function can report: the
+            // count alone cannot tell "there was nothing to close" from
+            // "Windows refused every attempt".
+            outcome.failures.push(format!(
+                "could not close {image} -> {}:{} (error {ret})",
+                Ipv4Addr::from(fields[3].to_ne_bytes()),
+                (fields[4] as u16).swap_bytes(),
+            ));
         }
     }
-    closed
+    outcome
 }
 
 /// Whether an IPv4 destination is out on the internet, rather than
