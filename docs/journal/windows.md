@@ -6213,3 +6213,91 @@ rather than turning protection off.
 Now `pre-0928` → `pre-verify2` → `pre-verify3`. `pre-verify3` is the
 state the uninstall control and test both start from. All offline
 snapshots, for the reason in the previous entry.
+
+---
+
+## 2026-08-23 — "Repair my network", on branch `claude/repair-my-network`
+
+**Status:** built and compiling; the elevated behaviour is UNVERIFIED
+**Touches:** `apps/desktop-windows/**` only. Not merged, not pushed.
+
+The in-product escape hatch every mature competitor has and we did not.
+Windscribe has `-firewall_off` out of band, Mullvad has
+`mullvad-setup.exe reset-firewall`, GearUP has literal "Reset local
+network" buttons. Ours is `service/src/engines/repair.rs`, reached two
+ways that run the same code:
+
+- **`neoconnect-service.exe repair`** from an elevated prompt. Stops the
+  service, does the whole teardown, starts it again, prints per step.
+  Exit 0 clean-or-fixed, 1 naming what is not, 2 not elevated.
+- **Settings → Repair network**, and a collapsed line in the
+  connect-failure message on the dashboard.
+
+Nine steps: tunnel + Custom-mode redirect, orphaned engines, NRPT, our
+routes, the split-tunnel firewall rule, WFP filters under our provider,
+the WireGuard tunnel service, the RAS entry, DNS cache.
+
+### What is actually proven, and what is not
+
+Proven here: it compiles, `cargo test --workspace` and the desktop
+`tsc` / `vite build` / `vitest` are green, and the unelevated run prints
+the elevation message and exits 2. **That is all.** Every step's real
+behaviour needs elevation, so none of it has been run against a machine
+that actually had residue on it. Do not describe this as working.
+
+### The rig test, per step
+
+Take a snapshot first. Then, for each, create the residue and run
+`repair`:
+
+- **NRPT** — connect, kill the service with Task Manager (not stop),
+  confirm the rule via `Get-DnsClientNrptRule` *and* under
+  `HKLM\SYSTEM\...\Dnscache\Parameters\DnsPolicyConfig`. Repair. Both
+  must be empty and a name must resolve.
+- **Group Policy NRPT** — write a rule of ours by hand under
+  `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig`
+  with `Comment = Neoxify tunnel DNS`. `Get-DnsClientNrptRule` will not
+  show it; the sweep must still remove it. **Control: put a second key
+  there with a different Comment and check it survives.**
+- **Orphaned engines** — kill the service while Xray is up, confirm
+  `xray.exe` is still running from our resources directory. **Control:
+  start a copy of `xray.exe` from somewhere else first and check it
+  lives.**
+- **Routes** — after the same kill, `Get-NetRoute -InterfaceIndex` on
+  `neoconnect0`. Repair, re-check. **Control: the physical adapter's
+  default route must still be there** — deleting a destination
+  machine-wide is a fault this could cause.
+- **WireGuard tunnel service** — `/installtunnelservice`, kill the
+  service, confirm `WireGuardTunnel$neoconnect` in `sc query`. Repair.
+  Then the harder one: get it into RUNNING-marked-for-delete (install,
+  then uninstall immediately) and check `force_remove_tunnel_service`
+  reports honestly rather than claiming success.
+- **WFP** — this one has never executed. `our_filter_ids` enumerates
+  with `providerKey` set, a zeroed `layerKey` and
+  `FWP_FILTER_ENUM_FULLY_CONTAINED`; if Windows refuses that
+  combination the step reports Unknown, which is honest but useless.
+  Check `netsh wfp show filters` for the Neoxify provider before and
+  after, and confirm the enumerate call returns 0.
+- **RAS entry** — connect over IKEv2, kill the service, confirm
+  "Neoxify" is in the Windows VPN list. Repair.
+- **Service stop/start** — run `repair` with the service running and
+  confirm it comes back (`sc query NeoxifyService`), and again with the
+  service already stopped and confirm it is left stopped.
+
+### The one that cannot be tested this way
+
+The split-tunnel redirect loop outliving its tunnel is undone only by
+the service process ending or by `disconnect()` running. The
+command-line form covers it by stopping the service; the button covers
+it because `step_tunnel` calls `disconnect()` first. Neither reaches the
+case where the service is wedged *and* refuses to stop — that is still
+"restart Windows", and the command says so rather than claiming
+otherwise.
+
+### Files another session should know about
+
+`engines/mod.rs` gained exactly one line (`pub(crate) mod repair;`) and
+`split_tunnel/firewall.rs` one word (`pub(crate)` on `RULE`). Everything
+else is a new module or an additive return value on an existing
+teardown. `dns::clear`, `janitor::reconcile` and
+`routing::purge_interface` behave exactly as they did.
