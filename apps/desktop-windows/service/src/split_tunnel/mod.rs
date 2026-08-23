@@ -841,12 +841,22 @@ impl SplitTunnel {
     /// Whether packets must be intercepted at all, whichever way the
     /// list reads.
     ///
-    /// Distinct from `wants_passive_tunnel` because "everything except
-    /// these" needs a *full* tunnel with interception on top: the tunnel
-    /// carries the machine as usual and the chosen applications are
-    /// pushed out of it. Asking the passive question there would answer
-    /// no and leave the excluded applications tunnelled, which is the
-    /// setting doing nothing.
+    /// The same answer as `wants_passive_tunnel`, and deliberately so.
+    /// **Both** modes build a passive tunnel and lift traffic into it
+    /// through the redirect; they differ only in which side of the list
+    /// gets lifted, which is [`Selection::should_tunnel`]'s business and
+    /// nothing this function needs to know.
+    ///
+    /// This carried a note for a long time claiming the two were
+    /// distinct, because "everything except these" supposedly built a
+    /// *full* tunnel and pushed the named applications back out of it.
+    /// That is not what the code does and, on the evidence, never was:
+    /// `mode` reaches exactly two places in this file -- the selection
+    /// it is stored in, and the log header -- so there is no branch
+    /// anywhere that could build a different shape of tunnel for it.
+    /// The note was removed rather than the code changed, because the
+    /// code is right: one shape, proven by one route probe, is one
+    /// failure mode instead of two.
     pub fn wants_interception(&self) -> bool {
         self.enabled && !self.selection.read().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
@@ -897,16 +907,25 @@ impl SplitTunnel {
         let nat = Arc::new(flows::Nat::new());
 
         // Which interface the proxy sends a redirected connection out
-        // of, and it is the only thing that differs between the two
-        // directions.
+        // of: the VPN adapter, in both directions of the list.
         //
-        // Tunnelling the chosen applications means pinning to the VPN
-        // adapter, with the tunnel itself passive so nothing else uses
-        // it. Excluding them means the opposite in both halves: the
-        // tunnel stays full and carries the machine as usual, and the
-        // redirected connections are pinned to the physical link so they
-        // leave the way they would with no VPN at all. The rewriting,
-        // the NAT and the return leg are identical either way.
+        // Being redirected *is* being tunnelled here. The tunnel is
+        // passive either way -- it owns no default route, so nothing
+        // reaches it except what this pins there -- and the two modes
+        // differ only in which processes get pinned:
+        // `Selection::should_tunnel` answers `matches()` for "only
+        // these" and `!matches()` for "everything except these". So
+        // "everything except these" is a passive tunnel with almost
+        // everything redirected into it, not a full tunnel with a few
+        // applications carved out.
+        //
+        // A comment here used to describe that second design -- full
+        // tunnel, redirected connections pinned to the physical link --
+        // and it was wrong in a way worth naming, because it reads like
+        // an invariant somebody could build on. There is no branch on
+        // `mode` in this function at all; the line below is what runs
+        // for both. The rewriting, the NAT and the return leg really are
+        // identical either way, which is the part that was true.
         let tunnel =
             Arc::new(proxy::TunnelInterface::new(tunnel_adapter.index, tunnel_address));
 
