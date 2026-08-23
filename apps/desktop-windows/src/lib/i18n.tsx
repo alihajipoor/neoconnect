@@ -322,6 +322,75 @@ const en = {
   "err.unknown": "Couldn't connect.",
   "err.showDetail": "Technical details",
 
+  // "Repair my network".
+  //
+  // Worded for somebody whose internet is already broken and who is
+  // reading this on a phone next to a laptop that will not load
+  // anything. Every sentence says what will happen rather than what the
+  // feature is called: the promise is made before the button is pressed,
+  // and the result afterwards names what was actually found -- never a
+  // blanket "done", because the app does not report a state it has not
+  // checked.
+  "settings.repair": "Repair network",
+  "repair.title": "Repair my network",
+  "repair.subtitle": "Remove anything Neoxify has left behind on Windows.",
+  "repair.explain":
+    "Neoxify looks for, and removes: VPN engines left running, the DNS rule it sets while you're connected, routes on its own network adapters, its firewall rule, a leftover WireGuard tunnel service, and its entry in Windows' VPN list. Then it clears the DNS cache.",
+  "repair.disconnects": "If you're connected, this disconnects you first.",
+  // The fail-open promise, said out loud. Somebody in Iran deciding
+  // whether to press a button labelled "repair" on the machine they use
+  // to get online deserves to know it cannot lock anything down.
+  "repair.safety":
+    "It only removes things. It never blocks traffic, and it doesn't touch your normal internet settings.",
+  "repair.run": "Repair now",
+  "repair.running": "Repairing...",
+  "repair.runAgain": "Repair again",
+  "repair.resultClean": "Nothing was left behind — your network settings are as Windows had them.",
+  "repair.resultFixed": "Repaired. Try connecting again.",
+  "repair.resultProblems":
+    "Some of it could not be repaired. Restarting Windows usually clears the rest; if it doesn't, run the command below as an administrator and send us what it prints.",
+  "repair.failed": "The repair could not be run.",
+  "repair.stepClean": "Nothing found",
+  "repair.stepFixed": "Removed",
+  "repair.stepFailed": "Still there",
+  "repair.stepUnknown": "Couldn't check",
+  "repair.step.tunnel": "Tunnel and Custom mode",
+  "repair.step.engines": "Leftover VPN engines",
+  "repair.step.dns": "Tunnel DNS rule",
+  "repair.step.routes": "Routes on Neoxify adapters",
+  "repair.step.firewall": "Custom mode firewall rule",
+  "repair.step.wfp": "Windows traffic filters",
+  "repair.step.wireguardService": "Leftover WireGuard tunnel service",
+  "repair.step.ras": "Neoxify in Windows' VPN list",
+  "repair.step.dnsCache": "DNS cache",
+  // The case this button cannot serve, and the one that matters most:
+  // the service being unreachable is exactly when a machine needs
+  // repairing. So it hands over the command instead of failing quietly.
+  "repair.noService": "The Neoxify service isn't answering, so the app can't repair anything for you.",
+  "repair.noServiceHint":
+    "Open Start, type cmd, right-click Command Prompt and choose \"Run as administrator\". Then run this:",
+  "repair.copyCommand": "Copy command",
+  "repair.copied": "Copied",
+  // Offered in the connect-failure path, where somebody who cannot
+  // connect is already looking, rather than only in a settings screen
+  // they would have to think to open.
+  "repair.inlineCta": "Still not connecting? Repair my network",
+
+  // The diagnostics snapshot, in Support.
+  "diag.title": "Send us your details",
+  "diag.subtitle":
+    "A short summary of what Neoxify has on this computer. Copy it into your message and we can see what you see.",
+  "diag.collect": "Collect details",
+  "diag.collecting": "Collecting...",
+  "diag.copy": "Copy",
+  "diag.copied": "Copied",
+  // Said plainly, because a customer in Iran being asked to paste
+  // something about their machine into a chat is right to want to know
+  // what is in it.
+  "diag.privacy":
+    "No passwords, keys, server details or anything about which sites you visit. You can read all of it before you send it.",
+  "diag.failed": "The Neoxify service isn't answering, so there's nothing to collect.",
+
   "plans.back": "Back",
   "plans.perDays": "for {days} days",
   "plans.data": "Data",
@@ -623,6 +692,53 @@ const fa: Record<TranslationKey, string> = {
   "err.subscriptionInactive": "اشتراک شما فعال نیست.",
   "err.unknown": "اتصال برقرار نشد.",
   "err.showDetail": "جزئیات فنی",
+
+  "settings.repair": "ترمیم شبکه",
+  "repair.title": "ترمیم شبکهٔ من",
+  "repair.subtitle": "هر چیزی را که نئوکسیفای در ویندوز جا گذاشته پاک می‌کند.",
+  "repair.explain":
+    "نئوکسیفای این موارد را پیدا و پاک می‌کند: موتورهای VPN که هنوز در حال اجرا مانده‌اند، قانون DNS که هنگام اتصال تنظیم می‌شود، مسیرهای روی کارت‌های شبکهٔ خودش، قانون فایروال آن، سرویس تونل وایرگارد جامانده، و ورودی آن در فهرست VPN ویندوز. در پایان هم حافظهٔ نهان DNS را خالی می‌کند.",
+  "repair.disconnects": "اگر متصل باشید، ابتدا اتصال شما قطع می‌شود.",
+  "repair.safety":
+    "این کار فقط چیزها را حذف می‌کند. هیچ ترافیکی را مسدود نمی‌کند و به تنظیمات اینترنت عادی شما دست نمی‌زند.",
+  "repair.run": "شروع ترمیم",
+  "repair.running": "در حال ترمیم...",
+  "repair.runAgain": "ترمیم دوباره",
+  "repair.resultClean": "چیزی جا نمانده بود — تنظیمات شبکهٔ شما همان است که ویندوز داشت.",
+  "repair.resultFixed": "ترمیم انجام شد. دوباره برای اتصال تلاش کنید.",
+  "repair.resultProblems":
+    "بخشی از آن ترمیم نشد. معمولاً راه‌اندازی دوبارهٔ ویندوز باقی را پاک می‌کند؛ اگر نشد، دستور زیر را با دسترسی مدیر اجرا کنید و خروجی آن را برای ما بفرستید.",
+  "repair.failed": "ترمیم انجام نشد.",
+  "repair.stepClean": "چیزی پیدا نشد",
+  "repair.stepFixed": "پاک شد",
+  "repair.stepFailed": "هنوز باقی است",
+  "repair.stepUnknown": "قابل بررسی نبود",
+  "repair.step.tunnel": "تونل و حالت سفارشی",
+  "repair.step.engines": "موتورهای جاماندهٔ VPN",
+  "repair.step.dns": "قانون DNS تونل",
+  "repair.step.routes": "مسیرها روی کارت‌های شبکهٔ نئوکسیفای",
+  "repair.step.firewall": "قانون فایروال حالت سفارشی",
+  "repair.step.wfp": "فیلترهای ترافیک ویندوز",
+  "repair.step.wireguardService": "سرویس تونل جاماندهٔ وایرگارد",
+  "repair.step.ras": "نئوکسیفای در فهرست VPN ویندوز",
+  "repair.step.dnsCache": "حافظهٔ نهان DNS",
+  "repair.noService": "سرویس نئوکسیفای پاسخ نمی‌دهد، بنابراین برنامه نمی‌تواند این کار را برای شما انجام دهد.",
+  "repair.noServiceHint":
+    "منوی Start را باز کنید، cmd را بنویسید، روی Command Prompt راست‌کلیک کنید و «Run as administrator» را بزنید. سپس این دستور را اجرا کنید:",
+  "repair.copyCommand": "کپی دستور",
+  "repair.copied": "کپی شد",
+  "repair.inlineCta": "هنوز وصل نمی‌شود؟ شبکه‌ام را ترمیم کن",
+
+  "diag.title": "ارسال اطلاعات دستگاه",
+  "diag.subtitle":
+    "خلاصه‌ای کوتاه از آنچه نئوکسیفای روی این کامپیوتر دارد. آن را در پیام خود بگذارید تا ما هم همان چیزی را ببینیم که شما می‌بینید.",
+  "diag.collect": "جمع‌آوری اطلاعات",
+  "diag.collecting": "در حال جمع‌آوری...",
+  "diag.copy": "کپی",
+  "diag.copied": "کپی شد",
+  "diag.privacy":
+    "هیچ رمز عبور، کلید، مشخصات سرور یا اطلاعاتی دربارهٔ سایت‌هایی که باز می‌کنید در آن نیست. پیش از ارسال می‌توانید همهٔ آن را بخوانید.",
+  "diag.failed": "سرویس نئوکسیفای پاسخ نمی‌دهد، بنابراین چیزی برای جمع‌آوری نیست.",
 
   "plans.back": "بازگشت",
   "plans.perDays": "برای {days} روز",

@@ -10,10 +10,12 @@ import {
   LifeBuoy,
   Loader2,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import { changePassword, deleteAccount } from "../lib/auth";
 import { LANGUAGES, useI18n, type Language } from "../lib/i18n";
 import { Button, Card, Input, Label } from "../components/ui";
+import { RepairNetwork } from "../components/RepairNetwork";
 import { cn } from "../lib/utils";
 
 /** The app's settings surface.
@@ -28,7 +30,7 @@ import { cn } from "../lib/utils";
  * the same reason -- and worth keeping the two consistent, since they
  * are the same product.
  */
-type SectionId = "custom" | "general" | "account";
+type SectionId = "custom" | "general" | "repair" | "account";
 
 export function Settings({
   onBack,
@@ -36,6 +38,7 @@ export function Settings({
   onOpenSupport,
   onLoggedOut,
   customSection,
+  initialSection = "custom",
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
@@ -55,15 +58,26 @@ export function Settings({
    * from the installed-app list. Same feature, nothing shared but the
    * slot it sits in. */
   customSection: ReactNode;
+  /** Which pane to open on.
+   *
+   * Exists so the connect-failure path can send somebody straight to
+   * the repair rather than to a rail they then have to read. Defaults
+   * to Custom mode, which is what every other entry point wants. */
+  initialSection?: SectionId;
 }) {
   const { t } = useI18n();
-  const [section, setSection] = useState<SectionId>("custom");
+  const [section, setSection] = useState<SectionId>(initialSection);
 
   const sections: { id: SectionId; label: string; icon: typeof AppWindow }[] = [
     // Custom mode leads: it is the only one that changes how the VPN
     // behaves, and the only one anybody opens this screen twice for.
     { id: "custom", label: t("settings.custom"), icon: AppWindow },
     { id: "general", label: t("settings.general"), icon: Languages },
+    // Between the everyday settings and the account ones, because that
+    // is what it is: something you reach for when the product has gone
+    // wrong, not something you configure and not something that touches
+    // your account.
+    { id: "repair", label: t("settings.repair"), icon: Wrench },
     { id: "account", label: t("settings.account"), icon: KeyRound },
   ];
 
@@ -149,6 +163,7 @@ export function Settings({
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
           {section === "custom" ? customSection : null}
           {section === "general" ? <LanguageSection /> : null}
+          {section === "repair" ? <RepairNetwork /> : null}
           {section === "account" ? (
             <div className="flex flex-col gap-4">
               <PasswordSection />
