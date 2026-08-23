@@ -9,7 +9,7 @@
 
 mod dns;
 mod ikev2;
-mod ipv6_block;
+pub(crate) mod ipv6_block;
 mod janitor;
 mod ras;
 mod openvpn;
