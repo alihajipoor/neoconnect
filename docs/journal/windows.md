@@ -6525,12 +6525,20 @@ otherwise does what it advertises.
 
 **Not proven:**
 
-- **Not proven on Xray/OpenVPN.** The `Active::Child` arm goes through
-  the same `Verdict::Dead` funnel and the unit tests cover the funnel,
-  but no rig run killed an `xray.exe` under Custom mode. `f2.ps1` was
-  written for exactly this and never ran -- the VM aborted twice and
-  WireGuard was prioritised as the arm the field report implicates.
-  This is the biggest remaining gap.
+- **Xray IS covered** (`f2.ps1`, run after the above was first
+  written). `xray.exe` killed under Custom mode: `split_tunnel_active`
+  went false on the next poll, `seen` froze at **186 -> 186** over 45s,
+  DNS stayed at 14ms, the selected app fell open to its own address, and
+  the watchdog logged the Xray adapter by name -- `neoconnect0
+  (interface 7, 198.18.0.1)`. **OpenVPN was still not exercised**; it
+  shares the `Active::Child` arm with Xray, so this is now a small gap
+  rather than an untested branch.
+- **The crash and reconnect variants pass.** Service killed with a
+  WireGuard tunnel up: DNS back at 16ms immediately, selected app on its
+  own address -- the kernel closing the handle is doing the work, as
+  designed. A fresh service then reconnected cleanly, selected-app exit
+  IP back to `38.60.249.229`, and a normal Disconnect left the machine
+  at 10ms DNS.
 - **Not proven: the exact path the user's own session took.** An
   explicit Disconnect always did stop the split tunnel, even before this
   fix. What is proven is that a tunnel dying on its own strands the
@@ -6542,10 +6550,6 @@ otherwise does what it advertises.
   working session is not evidence that either half of this is resolved.
 - **Not proven: that the 0.9.28 QUIC fix resolves symptom 1.** Not
   investigated.
-- **Not exercised: `f2.ps1`'s service-crash and reconnect variants.**
-  The crash case is partly covered -- every run ends by killing the
-  service, and the machine recovered each time -- but not as a
-  deliberate measurement with a tunnel up.
 
 ### Rig traps, added to the pile
 
