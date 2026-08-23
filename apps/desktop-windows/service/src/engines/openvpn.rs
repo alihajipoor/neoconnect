@@ -112,6 +112,32 @@ fn ensure_adapter(engines: &Engines) -> Result<(), String> {
     Ok(())
 }
 
+/// Removes the Wintun adapter this engine attaches to.
+///
+/// The opposite of [`ensure_adapter`], and deliberately *not* called on
+/// disconnect -- creating an adapter is slow and churns the network
+/// stack, so a dormant one is left in place between sessions.
+///
+/// Uninstall is the one moment where that reasoning inverts. An adapter
+/// nothing created it can explain is left behind on a machine whose VPN
+/// is gone: it shows up in the network connections list, it keeps
+/// whatever routes were last installed on it alive, and there is no
+/// longer any product on the machine that knows how to remove it. That
+/// is a leftover a customer can only clear by hand, if they ever work
+/// out what it is.
+///
+/// Best-effort: no adapter, no tapctl.exe, or a refusal all mean the
+/// uninstall carries on.
+pub fn delete_adapter(engines: &Engines) -> Result<(), String> {
+    let tapctl = engines.engine_path("tapctl.exe")?;
+    run_hidden_capture(
+        &tapctl,
+        &[OsStr::new("delete"), OsStr::new(ADAPTER_NAME)],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("could not remove the {ADAPTER_NAME} adapter: {e}"))
+}
+
 fn build_config(p: &OpenvpnProfile, passive: bool) -> Result<String, String> {
     let (host, port) = p
         .endpoint

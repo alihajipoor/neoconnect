@@ -31,6 +31,7 @@
 //!   SYSTEM and Administrators only.
 
 mod adapters;
+mod cleanup_log;
 mod engines;
 mod pipe;
 mod security;
@@ -43,8 +44,9 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceInfo,
-    ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
+    ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
+    ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -54,7 +56,7 @@ const SERVICE_NAME: &str = "NeoxifyService";
 const SERVICE_DISPLAY_NAME: &str = "Neoxify VPN Service";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     // ProgramData rather than the install directory: config is mutable
     // per-connection state, and Program Files is meant to be read-only
     // after install. The ACL is set explicitly at creation -- see
@@ -110,8 +112,50 @@ fn install() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     service.set_description("Manages Neoxify VPN tunnels so connecting never requires an administrator prompt.")?;
+    set_recovery_actions(&service);
     let _ = service.start(&[] as &[&std::ffi::OsStr]);
     Ok(())
+}
+
+/// Tells the Service Control Manager to start this service again if it
+/// ever dies.
+///
+/// Windows' default is to do nothing at all, and a service registered
+/// with that default is a service that stops existing the first time it
+/// panics. Everything that keeps a machine's networking honest lives in
+/// this process: the idle watchdog that tears a tunnel down once the app
+/// stops talking (see `pipe::spawn_idle_watchdog`), the reconcile that
+/// removes leftovers at start, and the NRPT rule whose removal is the
+/// difference between a working resolver and none. A dead service means
+/// a machine left full-tunnelled or DNS-stranded with nothing that will
+/// ever fix it -- and the customer has no reason to suspect a service
+/// they never knew was there.
+///
+/// Three attempts at widening intervals, then stop: 5s catches a
+/// transient fault, 30s and 60s cover something slower to clear, and
+/// beyond that the fault is not transient and restarting forever would
+/// only churn. The counter resets after a day without a failure, so a
+/// machine that fails once a week is retried every time rather than
+/// being written off for good.
+///
+/// Best-effort, deliberately. This runs during install, and a service
+/// that is registered and running but without recovery configured is
+/// enormously better than an installer that failed -- which is a
+/// product that cannot connect at all.
+fn set_recovery_actions(service: &windows_service::service::Service) {
+    let restart_after = |secs| ServiceAction {
+        action_type: ServiceActionType::Restart,
+        delay: Duration::from_secs(secs),
+    };
+    let actions = ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86_400)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![restart_after(5), restart_after(30), restart_after(60)]),
+    };
+    if let Err(err) = service.update_failure_actions(actions) {
+        cleanup_log::note("set the service's recovery actions", &err.to_string());
+    }
 }
 
 /// Stops and deregisters the service, waiting for the process to
@@ -141,8 +185,8 @@ fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     // still uninstall, or the user is stuck with both problems.
     if let Ok(exe_dir) = exe_dir() {
         let mut engines = engines::Engines::new(exe_dir, config_dir());
-        if let Err(err) = engines.disconnect() {
-            eprintln!("uninstall cleanup: {err}");
+        if let Err(err) = engines.uninstall_cleanup() {
+            cleanup_log::note("tear the tunnel down before uninstalling", &err);
         }
     }
 
@@ -235,8 +279,10 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = engines.disconnect() {
         // Not fatal: a failed cleanup must not stop the service coming
         // up, or a stuck tunnel would also cost the user the ability to
-        // connect at all.
-        eprintln!("startup cleanup: {err}");
+        // connect at all. Recorded rather than printed: a service's
+        // standard error goes nowhere, and this is the one teardown
+        // nobody is ever watching, because it runs at boot.
+        cleanup_log::note("clear leftovers at service start", &err);
     }
 
     let engines = Arc::new(Mutex::new(engines));

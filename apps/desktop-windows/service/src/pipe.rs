@@ -393,7 +393,7 @@ fn spawn_idle_watchdog(engines: Arc<Mutex<Engines>>, last_seen: Arc<Mutex<Instan
             }
             eprintln!("app silent for {IDLE_GRACE:?} with a tunnel up -- tearing it down");
             if let Err(err) = engines.disconnect() {
-                eprintln!("app-gone cleanup: {err}");
+                crate::cleanup_log::note("tear the tunnel down after the app went away", &err);
             }
         }
     });

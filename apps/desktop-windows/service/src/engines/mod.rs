@@ -9,6 +9,7 @@
 
 mod dns;
 mod ikev2;
+mod janitor;
 mod ras;
 mod openvpn;
 pub mod routing;
@@ -389,6 +390,16 @@ impl Engines {
                 // process, so a crash or a service restart would leave
                 // "Neoxify" in the customer's Windows VPN list.
                 let _ = ikev2::disconnect();
+                // Everything else that outlives this process and was
+                // not being tracked: an orphaned engine, the firewall
+                // allowance, routes on our adapters. Nothing tracked
+                // means either this service has just started -- where
+                // anything present is by definition a leftover -- or a
+                // previous life ended without running its teardown.
+                //
+                // Cheap on a clean machine: no adapter means no route
+                // purge, and the process scan costs one snapshot.
+                janitor::reconcile(&self.exe_dir);
                 Ok(())
             }
             Some(Active::WireguardTunnel) => wireguard::disconnect(self),
@@ -425,6 +436,28 @@ impl Engines {
         // there is nothing to remove.
         dns::clear();
         self.wipe_generated_configs();
+        result
+    }
+
+    /// Everything that must not outlive the installation.
+    ///
+    /// [`disconnect`](Self::disconnect) undoes the tunnel and, through
+    /// its leftovers path, the orphaned engines, the firewall
+    /// allowance, the routes on our adapters, the RAS entry and the
+    /// NRPT rule. What it deliberately leaves is the OpenVPN adapter,
+    /// kept between sessions because creating one is slow -- reasoning
+    /// that inverts exactly here, since after this there is no product
+    /// left on the machine that knows what that adapter is or how to
+    /// remove it.
+    ///
+    /// Best-effort, and the tunnel teardown's own result is still what
+    /// is returned: an uninstall that cannot clean up must still
+    /// uninstall, or the customer is left with both problems.
+    pub fn uninstall_cleanup(&mut self) -> Result<(), String> {
+        let result = self.disconnect();
+        if let Err(err) = openvpn::delete_adapter(self) {
+            crate::cleanup_log::note("remove the OpenVPN adapter at uninstall", &err);
+        }
         result
     }
 
