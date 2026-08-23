@@ -39,6 +39,54 @@ export interface ConnectionSnapshot {
 const VERSION = 1 as const;
 const KEY = "snapshot";
 
+/** How long a snapshot is treated as describing the servers as they are
+ * now.
+ *
+ * Read the name carefully: this is a *freshness horizon*, not an expiry.
+ * Nothing here ever deletes or refuses a snapshot for being old, and
+ * `loadSnapshot` returns a week-old one exactly as readily as a
+ * ten-second-old one. That is deliberate and non-negotiable -- the whole
+ * reason this file exists is that a customer in Iran whose control plane
+ * is filtered must still be able to connect, and a cache that expired
+ * itself would reintroduce the outage it was written to end.
+ *
+ * What the TTL does is tell the connect path whether it is entitled to
+ * dial on what it already holds, or owes the server one small question
+ * first. See `refreshConnectionConfig` in connection-config.ts.
+ *
+ * Ten minutes, and the number comes from what it is protecting against.
+ * A server-side change that clients cannot be told about -- a REALITY
+ * decoy SNI being moved off cloudflare.com, which is the change this was
+ * written for -- strands every client still holding the old value, and
+ * the strand lasts until something refetches. Before this, on Android,
+ * that was "until the app is restarted", which is unbounded: the WebView
+ * survives backgrounding and adopts a running tunnel on open, so
+ * toggling the VPN off and on re-dialled the same dead SNI forever.
+ *
+ * Ten minutes bounds the window at one coffee break rather than one
+ * reinstall, while being long enough that the common case -- open the
+ * app, press Connect, press it again after a hiccup -- costs one request
+ * and not three. It is not a poll: nothing wakes up on this interval.
+ * It is only ever consulted at the moment somebody is about to connect
+ * or has just brought the app back to the foreground.
+ */
+export const SNAPSHOT_TTL_MS = 10 * 60_000;
+
+/** Whether a snapshot is past the freshness horizon.
+ *
+ * A snapshot with no usable `savedAt` counts as stale: an unknown age is
+ * not evidence of youth, and treating it as fresh is how a cache written
+ * by an older build would silently opt out of every refresh.
+ */
+export function isSnapshotStale(snapshot: Pick<ConnectionSnapshot, "savedAt"> | null, now = Date.now()): boolean {
+  if (!snapshot) return true;
+  if (typeof snapshot.savedAt !== "number" || snapshot.savedAt <= 0) return true;
+  // A savedAt in the future is a clock that moved backwards, not a
+  // snapshot from the future. Refetching is the cheap, safe answer.
+  if (snapshot.savedAt > now) return true;
+  return now - snapshot.savedAt > SNAPSHOT_TTL_MS;
+}
+
 /** Its own file rather than session.json.
  *
  * Signing out clears the session; it must also clear this, and keeping
@@ -97,6 +145,33 @@ export async function loadSnapshot(): Promise<ConnectionSnapshot | null> {
   } catch {
     return null;
   }
+}
+
+/** Replaces just the credentials, keeping the subscription and routes
+ * that are already cached.
+ *
+ * The pre-connect refresh asks for one thing only -- the protocol users,
+ * because that is where a server's address, port and REALITY SNI live --
+ * so it must not write a snapshot at all through `saveSnapshot`, which
+ * takes the whole object. Doing that would null out the subscription and
+ * empty the route list, and the next offline start would come up with no
+ * plan and an empty location picker: a strictly worse cache written by a
+ * *successful* fetch.
+ *
+ * Refuses to write when there is nothing cached yet. A snapshot with
+ * credentials and no subscription is a shape `loadSnapshot` would hand
+ * back and the offline path would then render as a customer with no
+ * plan; the full `loadAll` will write a complete one soon enough.
+ */
+export async function updateSnapshotProtocolUsers(protocolUsers: ProtocolUser[]): Promise<void> {
+  if (protocolUsers.length === 0) return;
+  const existing = await loadSnapshot();
+  if (!existing) return;
+  await saveSnapshot({
+    subscription: existing.subscription,
+    protocolUsers,
+    routes: existing.routes,
+  });
 }
 
 /** Forgets everything. Called on sign-out: leaving one customer's
