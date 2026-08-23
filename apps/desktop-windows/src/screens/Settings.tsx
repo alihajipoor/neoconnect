@@ -38,7 +38,6 @@ export function Settings({
   onOpenSupport,
   onLoggedOut,
   customSection,
-  initialSection = "custom",
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
@@ -58,15 +57,9 @@ export function Settings({
    * from the installed-app list. Same feature, nothing shared but the
    * slot it sits in. */
   customSection: ReactNode;
-  /** Which pane to open on.
-   *
-   * Exists so the connect-failure path can send somebody straight to
-   * the repair rather than to a rail they then have to read. Defaults
-   * to Custom mode, which is what every other entry point wants. */
-  initialSection?: SectionId;
 }) {
   const { t } = useI18n();
-  const [section, setSection] = useState<SectionId>(initialSection);
+  const [section, setSection] = useState<SectionId>("custom");
 
   const sections: { id: SectionId; label: string; icon: typeof AppWindow }[] = [
     // Custom mode leads: it is the only one that changes how the VPN
