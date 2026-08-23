@@ -6213,3 +6213,114 @@ rather than turning protection off.
 Now `pre-0928` → `pre-verify2` → `pre-verify3`. `pre-verify3` is the
 state the uninstall control and test both start from. All offline
 snapshots, for the reason in the previous entry.
+
+---
+
+## 2026-08-23 — The releases are not signed either
+
+**Status:** done (correction) / blocked (the signing itself)
+**Touches:** `docs/journal/windows.md` only
+
+Correcting the previous entry. It said Defender's
+`Trojan:Win32/Bearfoos.B!ml` hit "affects the locally built, unsigned
+installer" and that "CI-signed releases are not affected". The second
+half is wrong, and wrong in the direction that matters: **there are no
+CI-signed releases.** Every published installer is unsigned, including
+the one on the download page right now.
+
+### Signing has never run once
+
+Not "since 0.9.24" — never. The steps went in with 74ccf1a on
+2026-08-11, and the first release after that, `desktop-v0.9.4`, already
+skipped them. So has every release since. Checked all 25 release runs
+from 0.9.4 to 0.9.28, individually: each one emitted
+
+> AZURE_CLIENT_ID is not set, so this build is NOT Authenticode-signed.
+
+The whole block is gated on one expression at line 39 of
+`release-desktop-windows.yml`:
+
+    SIGNING_ENABLED: ${{ secrets.AZURE_CLIENT_ID != '' }}
+
+and `Azure login`, `Sign the installer`, `Re-sign the updater payload`,
+`Sign the bootstrapper` and `Verify both binaries are signed and
+timestamped` are each `if: env.SIGNING_ENABLED == 'true'`. `gh secret
+list` returns four secrets — the two `TAURI_SIGNING_*`, the two
+`ANDROID_KEYSTORE_*`. No `AZURE_*` anything, and no repo variables at
+all. All six Azure secrets the workflow reads (`AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_SIGNING_ENDPOINT`,
+`AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`) have never existed.
+
+The degrade-instead-of-fail behaviour is deliberate and documented in
+the file, and the `Verify` step does guard against a signing step that
+silently no-ops. But that guard is itself gated on `SIGNING_ENABLED`,
+so with no credentials there is nothing asserting anything — the
+release goes out green and unsigned, which is exactly what has happened
+twenty-five times.
+
+**Why:** shared.md's 2026-08-11 entry has it. The Azure Artifact
+Signing account exists (`neoxify-signing`, West US 2), but identity
+validation stalled at credentials.microsoft.com with "No access" and
+was never resumed. It is still Action Required, not failed. Nothing is
+wrong with the workflow; the enrolment was never finished, so the
+secrets were never created. Resume via the existing validation's
+"complete your verification" link — **do not start a second one.**
+
+### Defender does not flag the published 0.9.28 assets
+
+Measured, not assumed, on the host (Win11, real-time protection on,
+signatures 1.457.304.0 from 2026-08-22). Downloaded both assets from
+the release, verified against `sha256sums.txt` (both OK), then:
+
+- `Get-MpThreat` / `Get-MpThreatDetection` — nothing.
+- `Start-MpScan -ScanType CustomScan` over the directory — clean.
+- `MpCmdRun.exe -Scan -ScanType 3` per file — "found no threats",
+  exit 0, both.
+- Both files still on disk afterwards with unchanged hashes. Nothing
+  was quarantined.
+
+`Get-AuthenticodeSignature` on both: `Status: NotSigned`,
+`SignerCertificate: <null>`. So the released `Neoxify-Setup.exe` and
+`Neoxify_0.9.28_x64-setup.exe` are in exactly the state the Bearfoos
+entry assumed they were not.
+
+**The scan was a real negative, not a false pass.** A 40 MB custom
+scan returning in one second is the shape of a result this repo has
+been burned by before, so it got a control: an EICAR test file written
+into the same scratch directory was caught in seconds as
+`Virus:DOS/EICAR_Test_File` (2147519003), and both `Get-MpThreat` and
+`Get-MpThreatDetection` reported it **from the same unelevated shell**
+that had just returned empty. That proves three things at once — the
+directory is not excluded, real-time protection is live on it, and the
+cmdlets do surface detections without elevation. The empty result on
+the installers is therefore a true negative. Control file deleted
+afterwards; no exclusions were added and no protection was disabled.
+
+**What this does not prove.** One host, one signature version, one
+point in time. `!ml` verdicts are per-file-hash and cloud-scored, and
+they move — the VM hit a real detection on a locally built installer
+with these same characteristics. A clean scan today is not a promise
+about tomorrow's build, and it says nothing about third-party AV. It
+only refutes the specific claim that release assets are protected by a
+signature they do not have.
+
+### What being unsigned costs
+
+Every customer gets "Unknown publisher" on the UAC prompt and a
+SmartScreen block on first download — for a VPN, downloaded by people
+in Iran who are already taking a risk running a binary from a stranger,
+on a product asking for money. That is the actual cost, and it is being
+paid on every install today. AV detection is the second-order risk:
+unproven against the shipped asset, demonstrated against a local build.
+
+Unsigned SmartScreen reputation is not a way out. It accrues per
+certificate, and per file hash absent one — this project has shipped a
+new installer nearly every day for two weeks, so each release starts
+from zero and never reaches the threshold.
+
+Fix path is unchanged and still #91: finish the Azure identity
+validation. Certum OV + SimplySign stays the fallback. Worth noting for
+the driver question on the roadmap — a WFP callout driver cannot be
+covered by any of this. Kernel-mode needs EV plus Microsoft Partner
+Center attestation signing, which is a separate enrolment from
+Authenticode, not an upgrade to it.
