@@ -218,6 +218,34 @@ pub struct Stats {
     /// zero because there was nothing to count -- the packets were
     /// leaving unexamined.
     pub blocked_v6: AtomicU64,
+    /// Connections found living outside the tunnel that should be
+    /// inside it -- see `owner::escaped_connections`.
+    ///
+    /// The only number here that is not counted from inside the packet
+    /// loop, and it exists because every number that *is* counted there
+    /// is blind in the same direction. The loop can only describe
+    /// packets it was handed; a connection that escaped -- a SYN that
+    /// raced the owner lookup, a socket established before Custom mode
+    /// came on, an IPv6 connection blocked rather than carried --
+    /// produces no packet the loop will ever see. Every counter above
+    /// reads healthy while it carries the customer's traffic out in the
+    /// clear, which is precisely how this failed in 0.9.20, 0.9.25 and
+    /// 0.9.27. This is read from the machine's own connection tables
+    /// instead, every thirty seconds.
+    ///
+    /// A **gauge, not a total**: it holds what the most recent sweep
+    /// found. The same connection is one escape for as long as it lives,
+    /// so adding each sweep up would report a number that grows with how
+    /// long Custom mode has been on rather than with how much has got
+    /// away -- and a number that only ever climbs is one nobody can read
+    /// a trend out of.
+    ///
+    /// Deliberately not consulted by [`Stats::complaint`] in this
+    /// version. It has never been read against a packet capture, and
+    /// this project does not let the app tell a customer something is
+    /// wrong on the strength of a number nobody has checked against the
+    /// wire yet.
+    pub escaped: AtomicU64,
 }
 
 /// How many packets must have gone out before silence means anything.
@@ -243,13 +271,14 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={}",
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
             self.returned.load(Ordering::Relaxed),
             self.rejected.load(Ordering::Relaxed),
             self.blocked_v6.load(Ordering::Relaxed),
+            self.escaped.load(Ordering::Relaxed),
         )
     }
 
@@ -1197,6 +1226,7 @@ mod tests {
             returned: AtomicU64::new(returned),
             rejected: AtomicU64::new(rejected),
             blocked_v6: AtomicU64::new(0),
+            escaped: AtomicU64::new(0),
         }
     }
 
@@ -1226,6 +1256,18 @@ mod tests {
         // that read as a fault, Custom mode would report itself broken
         // every single time it started.
         assert_eq!(stats(0, 0, 0, 0, 0).complaint(WARMUP * 2), None);
+    }
+
+    #[test]
+    fn escapes_are_recorded_without_changing_what_the_customer_is_told() {
+        // Observability only, in this version. The escape count has
+        // never been read against a packet capture, and a complaint
+        // keyed on an unverified number is exactly the false alarm
+        // WARMUP exists to prevent -- see the field's own comment.
+        let healthy = stats(4000, 900, 850, 800, 0);
+        healthy.escaped.store(7, Ordering::Relaxed);
+        assert_eq!(healthy.complaint(WARMUP * 2), None);
+        assert!(healthy.summary().contains("escaped=7"), "{}", healthy.summary());
     }
 
     #[test]
