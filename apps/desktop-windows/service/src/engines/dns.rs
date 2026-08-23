@@ -62,9 +62,23 @@ const NRPT_REGISTRY_PATHS: [&str; 2] = [
 /// The old version ran one PowerShell removal and believed it. Now the
 /// same invocation reports how many of our rules remain, and anything
 /// other than a clean zero -- rules left, unparseable output, or
-/// PowerShell itself failing -- falls back to deleting the rule
-/// straight out of the registry, which needs nothing but this process
-/// and the registry API.
+/// PowerShell itself failing -- is recorded, because it means the
+/// cmdlets are not to be trusted on this machine.
+///
+/// The registry sweep runs either way, which it did not used to. A
+/// clean `0` from PowerShell returned immediately, and a clean `0` is
+/// what normal operation reports -- so the sweep, and with it the only
+/// look this code ever takes at the Group Policy location, ran only on
+/// the fallback path. A rule of ours sitting under
+/// `SOFTWARE\Policies\...\DnsPolicyConfig` therefore survived every
+/// ordinary disconnect, while the comment two definitions up said it
+/// was ours to remove wherever it sits. It is a key enumeration over at
+/// most a handful of subkeys; making it unconditional costs less than
+/// the sentence explaining why it was not.
+///
+/// The fallback is not going anywhere either: the rig watched the
+/// PowerShell removal exceed the 15s helper budget three times under
+/// load, so "the cmdlets answered" is not something to build on.
 pub fn clear() {
     // Removal and verification in a single invocation, because this
     // runs with the `Engines` lock held on every connect and
@@ -74,32 +88,53 @@ pub fn clear() {
         "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
          (Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }} | Measure-Object).Count"
     );
-    match powershell(&script) {
-        // The only verified-clean answer. Everything else falls through
-        // to the registry.
-        Ok(out) if out.trim() == "0" => return,
-        Ok(out) => crate::cleanup_log::note(
-            "clear the tunnel DNS rule",
-            &format!("PowerShell removal left {:?} rule(s) behind, falling back to the registry", out.trim()),
-        ),
-        Err(e) => crate::cleanup_log::note(
-            "clear the tunnel DNS rule",
-            &format!("PowerShell removal failed ({e}), falling back to the registry"),
-        ),
-    }
-
-    match clear_registry_rules() {
-        // Nothing of ours in either location: the verification above
-        // was wrong or unavailable, not the removal. Clean either way.
-        Ok(0) => {}
-        Ok(n) => {
-            // Recorded even though it succeeded. This is the path that
-            // only runs when the normal one did not, so its having run
-            // at all is the fact a support conversation needs.
+    // The only verified-clean answer. Anything else says the cmdlets
+    // did not do the job, which changes what the sweep below means but
+    // not whether it runs.
+    let cmdlets_reported_clean = match powershell(&script) {
+        Ok(out) if out.trim() == "0" => true,
+        Ok(out) => {
             crate::cleanup_log::note(
                 "clear the tunnel DNS rule",
-                &format!("removed {n} rule(s) directly from the registry"),
+                &format!("PowerShell removal left {:?} rule(s) behind, falling back to the registry", out.trim()),
             );
+            false
+        }
+        Err(e) => {
+            crate::cleanup_log::note(
+                "clear the tunnel DNS rule",
+                &format!("PowerShell removal failed ({e}), falling back to the registry"),
+            );
+            false
+        }
+    };
+
+    match clear_registry_rules() {
+        // Nothing of ours in either location. On the normal path this is
+        // the expected answer and says the cmdlets and the registry
+        // agree; on the fallback path it says the verification was wrong
+        // or unavailable rather than the removal. Clean either way, and
+        // nothing to tell the DNS client about.
+        Ok(0) => {}
+        Ok(n) => {
+            // Always recorded. Rules found here after a clean cmdlet
+            // report are the interesting case -- they are rules
+            // Get-DnsClientNrptRule does not enumerate, which in
+            // practice means the Group Policy location -- and a support
+            // conversation needs to know which of the two happened.
+            crate::cleanup_log::note(
+                "clear the tunnel DNS rule",
+                &if cmdlets_reported_clean {
+                    format!("removed {n} rule(s) from the registry that the cmdlets did not report")
+                } else {
+                    format!("removed {n} rule(s) directly from the registry")
+                },
+            );
+            // Only when something actually went. The poke is two
+            // process spawns on a path that runs on every connect and
+            // every disconnect with the `Engines` lock held, and there
+            // is nothing to reload when the registry was already as the
+            // DNS client believes it to be.
             poke_resolver();
         }
         Err(e) => crate::cleanup_log::note("clear the tunnel DNS rule", &format!("registry fallback failed: {e}")),
@@ -110,9 +145,11 @@ pub fn clear() {
 /// directly, returning how many were removed.
 ///
 /// This is the path that still works when PowerShell does not -- or
-/// when its cmdlets claim success while the rule sits there. Matching
-/// is on the `Comment` value only, so rules belonging to anything else
-/// on the machine are never touched.
+/// when its cmdlets claim success while the rule sits there, which is
+/// exactly what the Group Policy location looks like from
+/// `Get-DnsClientNrptRule`. Both locations, every time. Matching is on
+/// the `Comment` value only, so rules belonging to anything else on the
+/// machine are never touched.
 fn clear_registry_rules() -> Result<u32, String> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
@@ -236,40 +273,68 @@ mod tests {
     ///
     /// Built under HKCU so it needs no elevation and cannot touch the
     /// real table.
+    ///
+    /// Both locations, because the sweep is given both and the Group
+    /// Policy one is the whole reason it now runs on the happy path: a
+    /// rule of ours there is invisible to `Get-DnsClientNrptRule`, so
+    /// nothing else would ever find it. A sweep that only really
+    /// searched the first path would pass a one-path test.
     #[test]
     fn the_registry_fallback_removes_only_the_rules_we_tagged() {
-        const PATH: &str = r"Software\Neoxify\nrpt-fallback-test";
+        const LOCAL: &str = r"Software\Neoxify\nrpt-fallback-test\local";
+        const POLICY: &str = r"Software\Neoxify\nrpt-fallback-test\policy";
+        const ROOT: &str = r"Software\Neoxify\nrpt-fallback-test";
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let _ = hkcu.delete_subkey_all(PATH);
+        let _ = hkcu.delete_subkey_all(ROOT);
 
-        let (parent, _) = hkcu.create_subkey(PATH).expect("should create the test key");
-        let (ours, _) = parent.create_subkey("{ours}").expect("should create a rule");
-        ours.set_value("Comment", &NRPT_COMMENT)
-            .expect("should tag the rule");
-        let (theirs, _) = parent.create_subkey("{theirs}").expect("should create a rule");
-        theirs.set_value("Comment", &"Some other VPN")
-            .expect("should tag the rule");
-        // A rule with no Comment at all, which is what a plain
-        // domain-policy entry looks like.
-        parent.create_subkey("{untagged}").expect("should create a rule");
-        drop(ours);
-        drop(theirs);
-        drop(parent);
+        for path in [LOCAL, POLICY] {
+            let (parent, _) = hkcu.create_subkey(path).expect("should create the test key");
+            let (ours, _) = parent.create_subkey("{ours}").expect("should create a rule");
+            ours.set_value("Comment", &NRPT_COMMENT)
+                .expect("should tag the rule");
+            let (theirs, _) = parent.create_subkey("{theirs}").expect("should create a rule");
+            theirs.set_value("Comment", &"Some other VPN")
+                .expect("should tag the rule");
+            // A rule with no Comment at all, which is what a plain
+            // domain-policy entry looks like.
+            parent.create_subkey("{untagged}").expect("should create a rule");
+            drop(ours);
+            drop(theirs);
+            drop(parent);
+        }
 
-        let removed = remove_tagged_rules(&hkcu, &[PATH]).expect("should not fail");
-        assert_eq!(removed, 1, "removed the wrong number of rules");
+        let removed = remove_tagged_rules(&hkcu, &[LOCAL, POLICY]).expect("should not fail");
+        assert_eq!(removed, 2, "one of ours was left behind in one of the two locations");
 
-        let parent = hkcu
-            .open_subkey_with_flags(PATH, KEY_READ)
-            .expect("the parent key should survive");
-        let left: Vec<String> = parent.enum_keys().filter_map(Result::ok).collect();
-        assert_eq!(
-            left,
-            vec!["{theirs}".to_string(), "{untagged}".to_string()],
-            "a rule that was not ours was removed"
-        );
+        for path in [LOCAL, POLICY] {
+            let parent = hkcu
+                .open_subkey_with_flags(path, KEY_READ)
+                .expect("the parent key should survive");
+            let left: Vec<String> = parent.enum_keys().filter_map(Result::ok).collect();
+            assert_eq!(
+                left,
+                vec!["{theirs}".to_string(), "{untagged}".to_string()],
+                "a rule that was not ours was removed from {path}"
+            );
+            drop(parent);
+        }
 
-        drop(parent);
-        let _ = hkcu.delete_subkey_all(PATH);
+        let _ = hkcu.delete_subkey_all(ROOT);
+    }
+
+    /// An absent location is not a failure, which is what makes the
+    /// unconditional sweep safe to run on every disconnect.
+    ///
+    /// The Group Policy key does not exist on a machine that is not
+    /// domain-joined, and this now runs there twice per connection.
+    #[test]
+    fn a_location_that_does_not_exist_is_simply_no_rules() {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let removed = remove_tagged_rules(
+            &hkcu,
+            &[r"Software\Neoxify\nrpt-no-such-key-here"],
+        )
+        .expect("an absent key must not be an error");
+        assert_eq!(removed, 0);
     }
 }
