@@ -148,7 +148,12 @@ const TUNNEL_SERVICE_POLL: Duration = Duration::from_millis(250);
 /// So the stop is issued from here, where it can be repeated until the
 /// service is actually in a state that accepts it, and the wait is ours
 /// and bounded rather than wireguard.exe's and endless.
-fn clear_tunnel_service() -> Result<(), String> {
+/// `pub(super)` for `repair`, which has to be able to clear a stranded
+/// tunnel service on a machine where `wireguard.exe` is not usable at
+/// all -- a killed service, a half-removed install, or the
+/// START_PENDING-then-marked-for-delete state described above, where
+/// asking wireguard.exe again is precisely what hangs.
+pub(super) fn clear_tunnel_service() -> Result<(), String> {
     let deadline = Instant::now() + TUNNEL_SERVICE_GONE_WITHIN;
     loop {
         let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
@@ -197,6 +202,72 @@ pub fn remove_tunnel_if_present(engines: &Engines) {
         return;
     }
     let _ = disconnect(engines);
+}
+
+/// Removes the tunnel service without going through wireguard.exe.
+///
+/// The last resort in `repair`, and only reached when the ordinary path
+/// -- `/uninstalltunnelservice` followed by [`clear_tunnel_service`] --
+/// has already been tried and the service is still registered. That
+/// happens for two reasons worth separating: wireguard.exe is not
+/// usable (a half-removed install, a deleted resources directory), or it
+/// ran and the name is still taken.
+///
+/// Stop then delete, in that order and both bounded, because a
+/// `DeleteService` on a running service only *marks* it for deletion --
+/// which is the exact state that stranded customers in 0.9.24, with a
+/// tunnel service RUNNING marked-for-delete and nothing left that would
+/// ever stop it.
+///
+/// This does not remove the WireGuardNT adapter the service created;
+/// Windows removes that with the service. Nor does it touch any other
+/// `WireGuardTunnel$...` service: the name is the one derived from our
+/// own config file, so an official WireGuard client's tunnels are not
+/// ours to end.
+pub(super) fn force_remove_tunnel_service() -> Result<(), String> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| format!("the service manager could not be reached: {e}"))?;
+    let Ok(service) = manager.open_service(
+        TUNNEL_SERVICE_NAME,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+    ) else {
+        // Already gone, which is the outcome this is for.
+        return Ok(());
+    };
+
+    let deadline = Instant::now() + TUNNEL_SERVICE_GONE_WITHIN;
+    loop {
+        match service.query_status() {
+            Ok(status) if status.current_state == ServiceState::Stopped => break,
+            // Only when it can be accepted -- a stop sent at
+            // START_PENDING is refused, and being refused is how a
+            // machine gets into this state.
+            Ok(status) if status.current_state == ServiceState::Running => {
+                let _ = service.stop();
+            }
+            Ok(_) => {}
+            // It cannot be interrogated any more, which for our purposes
+            // is indistinguishable from it having gone.
+            Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            // Deleted anyway. A marked-for-delete service that is still
+            // running is a worse state than a stopped one, but it is not
+            // a worse state than the one we found -- and it goes at the
+            // next boot rather than never.
+            let _ = service.delete();
+            return Err(format!(
+                "the WireGuard tunnel service would not stop within {}s; it is marked for removal \
+                 and will be gone after a restart",
+                TUNNEL_SERVICE_GONE_WITHIN.as_secs()
+            ));
+        }
+        std::thread::sleep(TUNNEL_SERVICE_POLL);
+    }
+
+    service
+        .delete()
+        .map_err(|e| format!("the WireGuard tunnel service could not be removed: {e}"))
 }
 
 /// A handshake older than this means the peer has stopped answering.

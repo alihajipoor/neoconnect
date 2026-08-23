@@ -238,6 +238,28 @@ pub fn is_connected() -> bool {
     matches!(powershell(&script), Ok(out) if out.trim().eq_ignore_ascii_case("Connected"))
 }
 
+/// Whether the entry exists at all, connected or not.
+///
+/// Different from [`is_connected`], and the difference is what `repair`
+/// is for: an entry left sitting in the customer's Windows VPN list is
+/// dialable by hand and outlives the app, so it counts as residue even
+/// while nothing is dialled through it.
+///
+/// A `None` answer means the question could not be asked -- PowerShell
+/// refused, or the RAS cmdlets are not available -- which is reported as
+/// unknown rather than as absent.
+pub(super) fn entry_present() -> Option<bool> {
+    let script = format!(
+        "if (Get-VpnConnection -Name '{ENTRY_NAME}' -AllUserConnection -ErrorAction SilentlyContinue) \
+         {{ 'yes' }} else {{ 'no' }}"
+    );
+    match powershell(&script) {
+        Ok(out) if out.trim() == "yes" => Some(true),
+        Ok(out) if out.trim() == "no" => Some(false),
+        _ => None,
+    }
+}
+
 fn remove_entry() -> Result<(), String> {
     let script = format!(
         "Remove-VpnConnection -Name '{ENTRY_NAME}' -AllUserConnection -Force -ErrorAction SilentlyContinue"

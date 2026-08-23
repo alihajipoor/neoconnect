@@ -80,6 +80,27 @@ const NRPT_REGISTRY_PATHS: [&str; 2] = [
 /// PowerShell removal exceed the 15s helper budget three times under
 /// load, so "the cmdlets answered" is not something to build on.
 pub fn clear() {
+    let _ = clear_reporting();
+}
+
+/// What one NRPT clear did, for the caller that has to say so.
+///
+/// `clear()` above stays exactly as it was -- a call that returns
+/// nothing and cannot fail -- because it runs on every connect and
+/// disconnect and nothing there has anything to do with the answer.
+/// `repair` needs the answer, and duplicating the removal to get it is
+/// how a machine ends up with two implementations of the one teardown
+/// that must not be wrong.
+#[derive(Default)]
+pub(super) struct DnsCleared {
+    /// Rules removed by the cmdlets and by the registry sweep together.
+    pub removed: u32,
+    /// Set when the removal could not be verified -- PowerShell failed,
+    /// or the registry delete refused. Never treated as clean.
+    pub unverified: Option<String>,
+}
+
+pub(super) fn clear_reporting() -> DnsCleared {
     // Removal and verification in a single invocation, because this
     // runs with the `Engines` lock held on every connect and
     // disconnect: a second PowerShell spawn would double the latency of
@@ -91,6 +112,7 @@ pub fn clear() {
     // The only verified-clean answer. Anything else says the cmdlets
     // did not do the job, which changes what the sweep below means but
     // not whether it runs.
+    let mut cleared = DnsCleared::default();
     let cmdlets_reported_clean = match powershell(&script) {
         Ok(out) if out.trim() == "0" => true,
         Ok(out) => {
@@ -115,7 +137,16 @@ pub fn clear() {
         // agree; on the fallback path it says the verification was wrong
         // or unavailable rather than the removal. Clean either way, and
         // nothing to tell the DNS client about.
-        Ok(0) => {}
+        Ok(0) => {
+            // The cmdlets are the only witness that anything went, and
+            // on this arm they either said "none left" (nothing to
+            // report) or could not be believed (nothing to report
+            // either, but not the same thing).
+            if !cmdlets_reported_clean {
+                cleared.unverified =
+                    Some("the DNS cmdlets did not confirm the removal; the registry held no rules of ours".into());
+            }
+        }
         Ok(n) => {
             // Always recorded. Rules found here after a clean cmdlet
             // report are the interesting case -- they are rules
@@ -136,9 +167,55 @@ pub fn clear() {
             // is nothing to reload when the registry was already as the
             // DNS client believes it to be.
             poke_resolver();
+            cleared.removed = n;
         }
-        Err(e) => crate::cleanup_log::note("clear the tunnel DNS rule", &format!("registry fallback failed: {e}")),
+        Err(e) => {
+            crate::cleanup_log::note("clear the tunnel DNS rule", &format!("registry fallback failed: {e}"));
+            cleared.unverified = Some(e);
+        }
     }
+    cleared
+}
+
+/// How many NRPT rules of ours exist right now, without removing any.
+///
+/// For the diagnostics snapshot. Reads the registry directly rather than
+/// asking `Get-DnsClientNrptRule`, for the reason the sweep exists at
+/// all: a rule of ours under the Group Policy key is invisible to that
+/// cmdlet, and a snapshot reporting zero while one sat there would send
+/// support looking somewhere else.
+pub(super) fn rule_count() -> u32 {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+
+    let root = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let mut count = 0u32;
+    for path in NRPT_REGISTRY_PATHS {
+        let Ok(parent) = root.open_subkey_with_flags(path, KEY_READ) else {
+            continue;
+        };
+        for name in parent.enum_keys().filter_map(Result::ok) {
+            let Ok(rule) = parent.open_subkey(&name) else {
+                continue;
+            };
+            let comment: String = rule.get_value("Comment").unwrap_or_default();
+            if comment == NRPT_COMMENT {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Tells the DNS client to reload its policy and empties its cache.
+///
+/// `pub(super)` for `repair`, which runs it unconditionally rather than
+/// only when a rule was removed. The cheap-path reasoning that keeps the
+/// poke off the ordinary disconnect does not apply on a machine somebody
+/// has had to ask for a repair on: there, a stale cached answer resolved
+/// under a rule that is now gone is exactly the residue being chased.
+pub(super) fn flush_and_reload() {
+    poke_resolver();
 }
 
 /// Deletes every NRPT rule carrying our comment from the registry
