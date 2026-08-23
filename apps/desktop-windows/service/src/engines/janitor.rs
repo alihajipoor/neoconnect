@@ -1,0 +1,179 @@
+//! Reaping what a previous life left behind.
+//!
+//! [`Engines::disconnect`](super::Engines::disconnect) can only undo
+//! what it is still holding. A service that was killed rather than
+//! stopped -- Task Manager, a crash, an installer that ran `taskkill`,
+//! a machine that lost power -- comes back with `active` set to `None`
+//! and no memory of the engine it started, while the machine still
+//! carries every side effect: an xray.exe or openvpn.exe with no parent,
+//! a firewall allowance for ports nothing listens on any more, and
+//! routes pointing into an adapter that is not carrying anything.
+//!
+//! Those are the leftovers behind "I uninstalled it and my network was
+//! still broken". None of them is undone by removing the application,
+//! and none of them is visible to a customer looking for a cause.
+//!
+//! So this runs whenever nothing is tracked: at service start (which is
+//! by definition the leftovers case -- no client has asked for anything
+//! yet) and on any disconnect that finds nothing of its own to tear
+//! down. Every step is best-effort and independently fallible: a
+//! janitor that aborts halfway leaves exactly the state it exists to
+//! remove, and one that refuses to let the service start would cost the
+//! customer the ability to connect at all.
+
+use std::path::Path;
+
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE,
+};
+
+use crate::adapters;
+
+use super::{openvpn, routing, xray};
+
+/// The engines that are plain child processes of this service, and so
+/// are the ones that can be orphaned by it dying.
+///
+/// wireguard.exe is deliberately absent: its tunnel is a Windows
+/// service in its own right, which
+/// [`wireguard::remove_tunnel_if_present`](super::wireguard::remove_tunnel_if_present)
+/// already removes on this same path. IKEv2 has no process at all.
+const ORPHANABLE: [&str; 2] = ["xray.exe", "openvpn.exe"];
+
+/// Undoes what a service that never got to run its teardown left on the
+/// machine.
+///
+/// `exe_dir` is this service's own directory, which is where the
+/// engines it starts live -- and the only thing that makes killing by
+/// image name safe.
+pub(super) fn reconcile(exe_dir: &Path) {
+    kill_orphaned_engines(exe_dir);
+    crate::split_tunnel::firewall::delete_rule();
+    purge_adapter_routes();
+}
+
+/// Kills engine processes that came from our installation and have
+/// nobody left to stop them.
+///
+/// **Matched on the full image path, never on the name alone.** xray.exe
+/// is a widely shipped binary and openvpn.exe is the official OpenVPN
+/// client's own executable: a customer may perfectly well be running
+/// either for something that has nothing to do with this product, and
+/// killing it would be this service reaching outside itself to break
+/// somebody else's software. Only a process running the exact file we
+/// installed is ours to end.
+fn kill_orphaned_engines(exe_dir: &Path) {
+    // Compared lowercased, because Windows paths are case-insensitive
+    // and a process reports whatever casing it was started with.
+    let mut ours = exe_dir.to_string_lossy().to_lowercase();
+    if !ours.ends_with('\\') {
+        ours.push('\\');
+    }
+
+    // SAFETY: a plain call; an invalid handle is checked below.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot.is_null() {
+        eprintln!("teardown: could not enumerate processes to reap orphaned engines");
+        return;
+    }
+    // SAFETY: zeroed is a valid PROCESSENTRY32W once dwSize is set, and
+    // setting it is what the API uses to version the struct.
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    // SAFETY: the handle is valid until CloseHandle below.
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
+    while ok != 0 {
+        let pid = entry.th32ProcessID;
+        // The cheap test first: the name comes with the snapshot, while
+        // the path costs a handle per process.
+        if has_orphanable_name(&entry) {
+            match image_path(pid) {
+                Some(path) if path.to_lowercase().starts_with(&ours) => kill(pid, &path),
+                // Either it is somebody else's engine, or it is a
+                // process this service is not allowed to look at --
+                // which is itself a reason to leave it alone.
+                _ => {}
+            }
+        }
+        // SAFETY: same handle and entry as above.
+        ok = unsafe { Process32NextW(snapshot, &mut entry) };
+    }
+    // SAFETY: the snapshot handle is valid and not used again.
+    unsafe { CloseHandle(snapshot) };
+}
+
+fn has_orphanable_name(entry: &PROCESSENTRY32W) -> bool {
+    let end = entry
+        .szExeFile
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(entry.szExeFile.len());
+    let name = String::from_utf16_lossy(&entry.szExeFile[..end]).to_lowercase();
+    ORPHANABLE.contains(&name.as_str())
+}
+
+fn image_path(pid: u32) -> Option<String> {
+    // SAFETY: a plain call; a failure returns a null handle.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 32_768];
+    let mut len = buffer.len() as u32;
+    // SAFETY: the buffer is valid for `len` wide characters and the API
+    // writes at most that many, updating `len` with what it wrote.
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut len) };
+    // SAFETY: `process` came from OpenProcess and is not used again.
+    unsafe { CloseHandle(process) };
+    if ok == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..len as usize]))
+}
+
+fn kill(pid: u32, path: &str) {
+    // SAFETY: a plain call; a failure returns a null handle.
+    let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if process.is_null() {
+        eprintln!("teardown: could not open orphaned {path} (pid {pid}) to end it");
+        return;
+    }
+    // SAFETY: the handle came from OpenProcess with PROCESS_TERMINATE.
+    let ok = unsafe { TerminateProcess(process, 1) };
+    // SAFETY: `process` came from OpenProcess and is not used again.
+    unsafe { CloseHandle(process) };
+    if ok == 0 {
+        eprintln!("teardown: could not end orphaned {path} (pid {pid})");
+    } else {
+        eprintln!("reaped orphaned engine {path} (pid {pid})");
+    }
+}
+
+/// Removes IPv4 routes left on the adapters this product creates.
+///
+/// A route into an adapter whose engine is gone black-holes whatever it
+/// matches, and the default route is exactly the kind that gets left:
+/// Xray's routes are installed by this service rather than by the
+/// engine, so a killed service never withdrew them. Windows keeps them
+/// as long as the adapter exists -- and the OpenVPN adapter is
+/// deliberately never deleted (see `openvpn::ensure_adapter`), so
+/// "reboot and it clears" does not apply to it.
+///
+/// Asked of the adapter first, which is the common case's escape: on a
+/// machine that has never run these engines there is no adapter, so
+/// this costs one API call and spawns nothing.
+fn purge_adapter_routes() {
+    for name in [xray::ADAPTER_NAME, openvpn::ADAPTER_NAME] {
+        match adapters::find_by_name(name) {
+            Ok(Some(adapter)) => routing::purge_interface(adapter.index),
+            Ok(None) => {}
+            Err(e) => eprintln!("teardown: could not look up the {name} adapter to purge its routes: {e}"),
+        }
+    }
+}

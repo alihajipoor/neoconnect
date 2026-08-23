@@ -139,7 +139,13 @@ fn add_rule(protocol: &str, sources: &[Ipv4Addr], port: u16) -> Result<(), Strin
     ))
 }
 
-fn delete_rule() {
+/// Removes the rule, whether or not this session installed it.
+///
+/// `pub(crate)` for the janitor: a service that was killed rather than
+/// stopped never dropped its [`Allowance`], so the rule outlives the
+/// ports it was written for and there is no `Allowance` left to remove
+/// it. See `engines::janitor`.
+pub(crate) fn delete_rule() {
     // Failure here is expected and ignored: on the first run there is
     // nothing to delete, and netsh reports that as an error.
     let mut command = Command::new(NETSH);

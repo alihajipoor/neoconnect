@@ -9,6 +9,7 @@
 
 mod dns;
 mod ikev2;
+mod janitor;
 mod ras;
 mod openvpn;
 pub mod routing;
@@ -389,6 +390,16 @@ impl Engines {
                 // process, so a crash or a service restart would leave
                 // "Neoxify" in the customer's Windows VPN list.
                 let _ = ikev2::disconnect();
+                // Everything else that outlives this process and was
+                // not being tracked: an orphaned engine, the firewall
+                // allowance, routes on our adapters. Nothing tracked
+                // means either this service has just started -- where
+                // anything present is by definition a leftover -- or a
+                // previous life ended without running its teardown.
+                //
+                // Cheap on a clean machine: no adapter means no route
+                // purge, and the process scan costs one snapshot.
+                janitor::reconcile(&self.exe_dir);
                 Ok(())
             }
             Some(Active::WireguardTunnel) => wireguard::disconnect(self),
