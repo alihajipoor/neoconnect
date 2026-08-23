@@ -6350,12 +6350,14 @@ a Verified ID card presented back from Microsoft Authenticator. It is
 an interactive same-session flow, minutes rather than the 1–20 business
 days the organisation path quotes.
 
-**Option 2 — a conventional OV/IV certificate.** ~$250–400/yr, plus a
-hardware token or cloud-HSM add-on: since June 2023 the CA/B Forum
-requires **OV as well as EV** keys to live in a FIPS 140-2 Level 2
-module, so there is no "just put the .pfx in a secret" option any more.
-SSL.com sells an Individual Validation cert with no business required.
-Certum + SimplySign, already noted in shared.md, is the same shape.
+**Option 2 — a conventional OV certificate.** **$150–300/yr**
+([code-signing-options][cso]), plus a hardware token or cloud HSM:
+since June 2023 the CA/B Forum requires **OV as well as EV** keys to
+live in a FIPS 140-2 Level 2 (or CC EAL4+) module, so there is no "put
+the .pfx in a secret" option any more. Certum + SimplySign, already
+noted in shared.md, is this shape. Microsoft frames OV as the option
+for people who *cannot* use Artifact Signing on geography — which is
+not us.
 Strictly worse than option 1 on both cost and CI ergonomics; it is the
 fallback if Azure sours, not the plan.
 
@@ -6405,10 +6407,11 @@ identified as EXE-viable and blocked on exactly this signing work.
 For the prospective WFP callout driver, none of the above helps.
 Artifact Signing **cannot sign kernel drivers and will never issue EV
 certificates**; kernel-mode goes through Partner Center attestation
-signing, which requires a real EV cert (~$250–560/yr) *and* an
-organisation-level registration — D-U-N-S, an Entra global admin, a
-legal signatory. That is company-gated, and the company does not exist
-yet. Two consequences: the driver cannot be costed as an upgrade to
+signing, which requires a real **EV cert ($400+/yr)** *and* an
+organisation-level registration — you register as a **global
+administrator of an organisation's Entra tenant**, and the EV cert is
+needed to register at all, independently of signing the driver. That is
+company-gated, and the company does not exist yet. Two consequences: the driver cannot be costed as an upgrade to
 whatever we do now, and the current user-mode WFP kill-switch
 (`fwpmu.h`, no driver — only *redirection* needs a callout) is worth
 protecting precisely because it keeps us out of that gate.
@@ -6424,6 +6427,28 @@ a real legal name instead of "Unknown publisher". For this product that
 is the whole point, and it is currently blocked on a phone, an ID
 document and twenty minutes — not on money or engineering.
 
+### Two loose ends, flagged rather than buried
+
+**The Store path does not dodge signing.** #94's EXE route still
+requires the installer to be Authenticode-signed with a certificate
+chaining to a Microsoft Trusted Root Program CA — only *MSIX* gets
+re-signed by Microsoft for free. So the Store is downstream of this
+work, not an alternative to it.
+
+**SignPath Foundation offers free OV-level signing for qualifying
+open-source projects** ([code-signing-options][cso]). This repo is
+public, but Neoxify is commercial, and I have not checked their
+eligibility rules. Worth ten minutes before paying for anything —
+recorded as a lead, not a plan.
+
+**On sourcing.** The dollar figures above are Microsoft's own published
+comparison, not estimates. An earlier draft of this entry carried
+invented ranges for the OV and EV costs; they were wrong in both
+directions and are corrected here. Numbers in this section that are not
+followed by a citation should be treated as unverified.
+
 [ts-qs]: https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart
 [ts-cert]: https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management
 [ss]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation
+[cso]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options
+[csc31]: https://www.digicert.com/blog/understanding-the-new-code-signing-certificate-validity-change
