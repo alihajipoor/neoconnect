@@ -476,6 +476,27 @@ impl Engines {
                 //
                 // Cheap on a clean machine: no adapter means no route
                 // purge, and the process scan costs one snapshot.
+                //
+                // The IPv6 block is deliberately not among the leftovers
+                // this reaps, and the order relative to the `take` above
+                // therefore does not matter. Every other side effect
+                // here is one Windows keeps after the process that made
+                // it is gone -- a wireguard.exe tunnel service, a RAS
+                // phonebook entry, a netsh rule, a route -- which is why
+                // they need reaping at all. The block is the one that
+                // cleans itself up: its WFP session is opened
+                // `FWPM_SESSION_FLAG_DYNAMIC`, so the kernel destroys
+                // every filter in it when the owning process dies,
+                // killed or otherwise. There is nothing a later life
+                // could find to remove, and equally nothing it could
+                // remove too early. See `ipv6_block`.
+                //
+                // Two consequences worth stating rather than rediscovering:
+                // a service killed mid-tunnel unblocks IPv6 at the same
+                // instant it stops carrying IPv4, so it fails open on
+                // both rather than stranding the machine; and on this
+                // arm `self.ipv6_block` is `None` by construction, since
+                // it is only ever set alongside `self.active`.
                 janitor::reconcile(&self.exe_dir);
                 Ok(())
             }
