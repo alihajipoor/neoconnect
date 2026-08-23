@@ -6105,3 +6105,111 @@ all pass, and that means it compiles.
   redoing the matrix.
 
 Both are offline snapshots, for the reason above.
+
+## 2026-08-23 — the three fixes went back through the rig, and all three hold
+
+**Status:** done — this **supersedes** the previous entry's "none of the
+three fixes has itself been through the rig". That was true when it was
+written; it is no longer. The re-test in "What a re-test has to do" has
+been run in full, plus an IPv6 regression check.
+**Branch:** `claude/integration-0928`
+**Touches:** nothing in the tree — measurement only
+
+The installer under test was `Neoxify_0.9.27_x64-setup.exe`, built from
+`38f4fe4` at `C:\nx0928`, SHA-256
+`2b7068447868c5b8371630301f4cdac5941208f6f2f7a0771e6dc52463a3986e`.
+
+**Confirming the new build was actually the one installed took work.**
+Both the old and new builds report 0.9.27 — the version bump lands in
+`a3322bd`, after the hooks — so the version string cannot tell them
+apart and reading it would have been a false pass. Binary hashes before
+and after were compared instead, and the stale root-level
+`C:\Program Files\Neoxify\neoconnect-service.exe` was absent after the
+install, which only the new PREINSTALL hook does.
+
+### 1. Uninstall on a service that cannot load — PASS, against a negative control
+
+The OLD build was put through the identical broken state first and **did
+leave the service registered**: `sc query NeoxifyService` →
+`SERVICE_NAME: NeoxifyService  STATE: 1 STOPPED`, the key still there
+with `ImagePath` naming the deleted binary. That control is the whole
+point: without it a clean "does not exist" only proves the test never
+reproduced the failure.
+
+New build, same state: `sc query NeoxifyService` → `FAILED 1060: The
+specified service does not exist`, the same for `NeoConnectService`,
+both registry keys absent, `C:\Program Files\Neoxify` gone, NRPT clear
+in the cmdlets *and* both registry locations, firewall rule gone,
+`Neoxify-OpenVPN` adapter gone, `rasphone.pbk` absent, and
+`sc query WinDivert` → 1060.
+
+**Two false-pass traps were found while building this test, and both
+would have produced a green result on a broken build:**
+
+- **Deleting `WinDivert.dll` while the service is running fails
+  silently.** The process holds the handle, the delete does not take,
+  and the binary then loads perfectly well and removes its own service —
+  the exact scenario the test exists to break. Stop the service first
+  and confirm the file is actually gone before running the uninstall.
+- **The RAS check was unfalsifiable.** The service removes that entry on
+  every disconnect, so `rasphone.pbk` being absent after an uninstall
+  says nothing about the uninstall at all. An entry was planted back in
+  before each run, in both the control and the test, so the check could
+  fail.
+
+### 2. Activation reset — PASS, twice
+
+`activation reset settled after 12 rescan(s): 0 connection(s) closed in
+total`, with `redirected` still climbing — 68/38 and 60/30
+seen/matched/redirected/returned across the two runs — and the selected
+app's exit IP reading `38.60.249.229` while an unselected app read
+`50.34.35.228`. The counter alone would not have been evidence: a reset
+that closes nothing because it now skips everything reports the same 0.
+The exit IPs are what make it mean something.
+
+Run twice deliberately, because the old build's closed-count varied run
+to run (30 / 120 / 124 / 128). One 0 could have been luck.
+
+### 3. NRPT GPO-location sweep — PASS
+
+A rule of ours was planted at
+`HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig`
+**while connected**, alongside two foreign rules. After a normal
+disconnect — not the fallback path — ours was gone, both foreign rules
+survived with their comments intact, and `cleanup.log` recorded
+`removed 1 rule(s) from the registry that the cmdlets did not report`.
+`Get-DnsClientNrptRule` was empty for the whole run, which is the point:
+the cmdlets never saw any of it, so a clean cmdlet report proves nothing
+about that location.
+
+### 4. IPv6 regression — PASS
+
+The hook and DNS changes are nowhere near the WFP code, but the same
+build was checked rather than assumed. `analyze6.py`: baseline 13 egress
+/ 10 ingress disconnected, **0 / 0** connected. WFP provider key
+`{a1e1f9c2-6b7d-4f4a-9c33-2d5b8e7a41d0}`: 0 filters disconnected → 10
+connected (5 per layer) → 0 after disconnect.
+
+**On the two sets of IPv6 numbers in this file — both are right.** The
+"13 → 14 / 14 / smaller" figures are the *original leak measurement* on
+client 0.9.25. The "13 egress / 10 ingress" figures are the
+*disconnected baselines* of this verification run on the fixed build,
+where every connected count is 0. Different runs, different instruments;
+neither supersedes the other and neither should be quoted as if it did.
+
+### Defender flags the unsigned local build
+
+Windows Defender detects the locally built, **unsigned** installer as
+`Trojan:Win32/Bearfoos.B!ml` (threatID 2147731849) and quarantined it on
+a second install attempt. `!ml` is the machine-learning bucket — an
+unsigned Tauri/NSIS binary with an installer hook that shells out to
+`sc.exe` is a textbook false positive. CI-signed releases are not
+affected. **No Defender settings were changed** to get the run done; if
+this bites again, restore the snapshot and copy the installer in fresh
+rather than turning protection off.
+
+### Snapshots on the VM
+
+Now `pre-0928` → `pre-verify2` → `pre-verify3`. `pre-verify3` is the
+state the uninstall control and test both start from. All offline
+snapshots, for the reason in the previous entry.
