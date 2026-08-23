@@ -494,6 +494,66 @@ pub struct VpnStatus {
 /// does not hold up the whole list.
 const LATENCY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 
+/// Public IPv6 addresses used to ask whether IPv6 still leaves this
+/// machine.
+///
+/// Literal addresses, which is the entire point: a hostname is resolved
+/// by Windows and may come back with an `A` record, so reaching it
+/// proves nothing about which family carried the packets. A connection
+/// to a literal IPv6 address either goes over IPv6 or does not happen.
+///
+/// Two operators rather than two addresses at one, because a single
+/// filtered anycast address would otherwise read as "this machine has no
+/// IPv6" -- which silently turns the check off, and a check that cannot
+/// come back positive is the failure this whole change exists to
+/// correct. Both are public resolvers with a TCP listener on 443
+/// (DNS-over-HTTPS), so a completed handshake is a genuine round trip.
+const IPV6_PROBES: [(&str, u16); 2] =
+    [("2606:4700:4700::1111", 443), ("2001:4860:4860::8888", 443)];
+
+/// Long enough for a real round trip on a slow path, short enough that
+/// nothing the customer is waiting on notices. Nothing blocks on this.
+const IPV6_PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// Whether a public IPv6 destination can still be reached from here.
+///
+/// Exists because the app's egress check cannot ask this. That check
+/// compares the address `/health/ip` saw before and after connecting,
+/// which is an IPv4 conversation on every node we run -- so a machine
+/// leaking IPv6 beside a perfectly good IPv4 tunnel reads as protected.
+/// Measured exactly that way on OpenVPN, IKEv2 and Xray VLESS-REALITY.
+///
+/// Native rather than a `fetch` from the frontend, and not for
+/// tidiness. The app's HTTP permission is scoped to `*.neoxify.site`, so
+/// a request to any probe address would be refused by Tauri's own ACL
+/// before a packet was sent -- giving a check that always answers "no
+/// IPv6" and can never fail. A socket has no such scope, and a completed
+/// TCP handshake is stronger evidence than an HTTP response anyway:
+/// packets left and came back.
+///
+/// True means IPv6 reached the internet. While connected that is a leak,
+/// because every Neoxify node is IPv4-only and there is no tunnel those
+/// packets could have taken. The frontend compares it against the same
+/// answer taken *before* connecting, so a machine with no IPv6 at all --
+/// the common case -- is never reported as anything.
+#[tauri::command]
+pub async fn probe_ipv6_egress() -> bool {
+    use tokio::net::TcpStream;
+
+    // Concurrently, so the whole check costs one timeout rather than
+    // two. It is taken on the connect path, and this screen has already
+    // been paid for being patient there.
+    let attempts = IPV6_PROBES.map(|(address, port)| async move {
+        matches!(
+            tokio::time::timeout(IPV6_PROBE_TIMEOUT, TcpStream::connect((address, port))).await,
+            Ok(Ok(_))
+        )
+    });
+    let [first, second] = attempts;
+    let (first, second) = tokio::join!(first, second);
+    first || second
+}
+
 /// Round-trip time to a server, measured by how long a TCP connection
 /// takes to establish.
 ///
