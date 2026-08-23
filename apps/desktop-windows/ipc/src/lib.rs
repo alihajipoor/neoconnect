@@ -64,6 +64,168 @@ pub enum Request {
     /// not elevated and cannot read the image path of a process it does
     /// not own -- which is exactly the path Custom mode matches on.
     ListRunningApps,
+    /// Undo every side effect this product can leave on a machine, in
+    /// one pass, whether or not this service put them there.
+    ///
+    /// The customer-facing name is "Repair my network", and it exists
+    /// because the residual state is not theoretical: a leftover NRPT
+    /// rule points the whole machine's DNS at a resolver it can no
+    /// longer reach, and survives both a reboot and Windows' own network
+    /// reset. Until now the only cure was the customer running netsh and
+    /// registry commands by hand, which is what "I had to reset my
+    /// network settings" in their reports actually means.
+    ///
+    /// Tears down any live tunnel first -- there is no version of this
+    /// that is safe to run underneath one -- so the app has to say so
+    /// before sending it.
+    Repair,
+    /// A redacted snapshot of what this product has on the machine right
+    /// now, for pasting into a support conversation.
+    ///
+    /// Deliberately a fixed set of named fields rather than a dump:
+    /// several things the service can see (engine configs, the
+    /// phonebook, the profile it last connected with) carry live
+    /// credentials, and a diagnostics blob that a customer pastes into a
+    /// ticket is the last place any of that should appear.
+    Diagnostics,
+}
+
+/// What one repair step did.
+///
+/// Four outcomes rather than a boolean, because the difference between
+/// them is the whole product requirement here: this app does not report
+/// a state it has not verified, and "we tried and it is still there" has
+/// to be distinguishable from "there was nothing to do".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum RepairOutcome {
+    /// Nothing of ours was there. The common case on a healthy machine.
+    AlreadyClean,
+    /// Something was there and is not any more, verified where the step
+    /// can verify it.
+    Fixed { detail: String },
+    /// Something was there and this could not remove it. The only
+    /// outcome that makes the whole repair report failure.
+    Failed { detail: String },
+    /// The step could not be attempted, so it says nothing either way --
+    /// never counted as clean.
+    Unknown { detail: String },
+}
+
+impl RepairOutcome {
+    pub fn is_failure(&self) -> bool {
+        matches!(self, RepairOutcome::Failed { .. })
+    }
+}
+
+/// One named step of the repair, in the order it ran.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairStep {
+    /// A stable identifier the app maps to a translated label. Never
+    /// shown raw: the customer reading this may not read English.
+    pub id: String,
+    /// English wording for the command-line summary and `cleanup.log`,
+    /// which are read by whoever is helping rather than by the customer.
+    pub label: String,
+    /// Flattened so the wire shape is `{id, label, outcome, detail}`
+    /// rather than an outcome object nested inside a field of the same
+    /// name -- the app reads this as a plain record, and a shape that
+    /// reads oddly in TypeScript is a shape somebody will eventually
+    /// destructure wrongly.
+    #[serde(flatten)]
+    pub outcome: RepairOutcome,
+}
+
+/// The result of a repair pass.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairReport {
+    pub steps: Vec<RepairStep>,
+}
+
+impl RepairReport {
+    pub fn push(&mut self, id: &str, label: &str, outcome: RepairOutcome) {
+        self.steps.push(RepairStep {
+            id: id.to_string(),
+            label: label.to_string(),
+            outcome,
+        });
+    }
+
+    /// Every step either found nothing or fixed what it found.
+    ///
+    /// `Unknown` deliberately does not count as success. A step that
+    /// could not look is not a step that found the machine clean, and
+    /// treating the two as the same is exactly how this product has
+    /// reported states it never verified.
+    pub fn is_clean(&self) -> bool {
+        self.steps.iter().all(|s| {
+            matches!(
+                s.outcome,
+                RepairOutcome::AlreadyClean | RepairOutcome::Fixed { .. }
+            )
+        })
+    }
+
+    /// The steps that stop this being a success, for naming them.
+    pub fn unresolved(&self) -> Vec<&RepairStep> {
+        self.steps
+            .iter()
+            .filter(|s| !matches!(s.outcome, RepairOutcome::AlreadyClean | RepairOutcome::Fixed { .. }))
+            .collect()
+    }
+}
+
+/// What the machine looks like right now, for a support conversation.
+///
+/// Every field is either a count, a boolean, or a string this code
+/// produced -- never a value read out of a config, a profile or a
+/// credential store. See [`Request::Diagnostics`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostics {
+    /// The helper service's own build version, which can differ from the
+    /// app's: the service is replaced by the installer and the app by
+    /// the updater, and a mismatch between them has explained more than
+    /// one report.
+    pub service_version: String,
+    /// Our two adapters, by the fixed names this product gives them, and
+    /// whether each is present. Deliberately not the machine's adapter
+    /// list -- a customer's Wi-Fi network name is theirs, not ours.
+    pub our_adapters: Vec<AdapterPresence>,
+    /// Other VPN clients' adapters that are up right now, by friendly
+    /// name. The same list the connect path already shows the customer,
+    /// and a common cause of "the VPN broke my network".
+    pub other_vpns_up: Vec<String>,
+    /// IPv4 routes sitting on our adapters, as `destination/prefix`.
+    /// Destinations only; no gateways, which can name the customer's own
+    /// LAN.
+    pub our_routes: Vec<String>,
+    /// How many NRPT rules carrying our comment exist, across both
+    /// registry locations. Non-zero while disconnected is the fault that
+    /// started all of this.
+    pub nrpt_rules: u32,
+    pub split_tunnel_firewall_rule: bool,
+    /// Orphaned engine processes, by image file name and pid only --
+    /// never the full path, which on a per-user install contains the
+    /// customer's account name.
+    pub orphaned_engines: Vec<String>,
+    pub wireguard_tunnel_service: bool,
+    pub ras_entry: bool,
+    /// WFP filters carrying our provider key.
+    pub wfp_filters: u32,
+    /// The tail of `cleanup.log`, with user-profile paths reduced to
+    /// `C:\Users\<user>\`.
+    pub cleanup_log_tail: Vec<String>,
+}
+
+/// Whether one of our adapters is on the machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterPresence {
+    pub name: String,
+    pub present: bool,
 }
 
 /// One running application, as the picker shows it.
@@ -259,6 +421,17 @@ pub enum Response {
         /// See `engines::ipv6_block`.
         #[serde(default)]
         ipv6_blocked: bool,
+    },
+    /// What the repair found and what it did about it.
+    ///
+    /// Returned even when steps failed: a repair that could not finish
+    /// still has to say which parts it did undo, because the customer's
+    /// next move depends on which one is stuck.
+    Repaired {
+        report: RepairReport,
+    },
+    Diagnostics {
+        diagnostics: Box<Diagnostics>,
     },
     Error {
         message: String,
@@ -818,6 +991,87 @@ mod ikev2_validation {
             password: "s3cret".to_string(),
         });
         assert!(bad.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod repair_wire_tests {
+    use super::*;
+
+    /// The repair report's shape on the wire, pinned.
+    ///
+    /// This crosses a language boundary: the app reads it as a plain
+    /// TypeScript record (`src/lib/repair.ts`), and TypeScript cannot
+    /// fail to compile over a shape Rust changed. A nested `outcome`
+    /// object, or a `detail` that moved, would surface as every step
+    /// rendering as "couldn't check" -- which is a repair telling a
+    /// customer nothing worked when everything did.
+    #[test]
+    fn a_step_is_a_flat_record_the_app_can_read() {
+        let mut report = RepairReport::default();
+        report.push("dns", "Tunnel DNS rule (NRPT)", RepairOutcome::Fixed { detail: "removed 1 rule(s)".into() });
+        report.push("routes", "Routes on Neoxify adapters", RepairOutcome::AlreadyClean);
+
+        let json: serde_json::Value = serde_json::to_value(&report).expect("should encode");
+        let steps = json["steps"].as_array().expect("steps should be an array");
+
+        assert_eq!(steps[0]["id"], "dns");
+        assert_eq!(steps[0]["label"], "Tunnel DNS rule (NRPT)");
+        // Flat: the discriminant is the `outcome` field itself, not an
+        // object under it, and `detail` sits beside it.
+        assert_eq!(steps[0]["outcome"], "fixed");
+        assert_eq!(steps[0]["detail"], "removed 1 rule(s)");
+
+        assert_eq!(steps[1]["outcome"], "alreadyClean");
+        // The control: a clean step carries no detail at all, so the app
+        // must not be shown an empty string where it expects nothing.
+        assert!(steps[1].get("detail").is_none(), "a clean step should carry no detail");
+
+        // And it survives the round trip, which is what the service
+        // actually does with it.
+        let decoded: RepairReport = serde_json::from_value(json).expect("should decode");
+        assert_eq!(decoded, report);
+    }
+
+    /// The response envelope, since the app matches on `status` first.
+    #[test]
+    fn the_repair_response_is_tagged_the_way_every_other_one_is() {
+        let response = Response::Repaired { report: RepairReport::default() };
+        let json: serde_json::Value = serde_json::to_value(&response).expect("should encode");
+        assert_eq!(json["status"], "repaired");
+        assert!(json["report"]["steps"].is_array());
+    }
+
+    /// Diagnostics carry counts and names, never values.
+    ///
+    /// Not a schema check for its own sake: this text is written to be
+    /// pasted into a support conversation, so the field list is the
+    /// privacy boundary. A field added here without thinking is a field
+    /// a customer sends to a stranger.
+    #[test]
+    fn the_diagnostics_snapshot_carries_only_the_named_fields() {
+        let json: serde_json::Value =
+            serde_json::to_value(Diagnostics::default()).expect("should encode");
+        let mut fields: Vec<&str> = json.as_object().expect("an object").keys().map(|k| k.as_str()).collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            vec![
+                "cleanupLogTail",
+                "nrptRules",
+                "orphanedEngines",
+                "otherVpnsUp",
+                "ourAdapters",
+                "ourRoutes",
+                "rasEntry",
+                "serviceVersion",
+                "splitTunnelFirewallRule",
+                "wfpFilters",
+                "wireguardTunnelService",
+            ],
+            "the diagnostics snapshot gained or lost a field -- check it carries nothing \
+             a customer would not want to paste into a support ticket, then update this list"
+        );
     }
 }
 
