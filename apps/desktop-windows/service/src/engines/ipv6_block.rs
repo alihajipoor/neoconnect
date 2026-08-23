@@ -175,9 +175,9 @@ pub struct Ipv6Block {
     /// dereferenced anywhere; it is only ever handed straight back to
     /// the Fwpm functions.
     engine: isize,
-    /// How many filters went in, for the log line on the way out. A
-    /// removal that says "8 filters" when it installed 8 is the cheapest
-    /// possible check that the teardown matched the setup.
+    /// How many filters went in, for the log line on the way out. The
+    /// two lines in `ipv6-block.log` naming the same count is the
+    /// cheapest possible check that the teardown matched the setup.
     filters: usize,
     log: PathBuf,
 }
@@ -253,7 +253,7 @@ impl Drop for Ipv6Block {
 
 /// Opens the filtering engine with a session that cannot outlive us.
 fn open_dynamic_session() -> Result<HANDLE, String> {
-    let mut name = wide("Neoxify IPv6 block");
+    let mut name = wide(SUBLAYER_NAME);
     let mut description = wide("Blocks IPv6 while a Neoxify full tunnel is up");
 
     let mut session: FWPM_SESSION0 = unsafe { std::mem::zeroed() };
@@ -402,7 +402,7 @@ unsafe fn add_everything(engine: HANDLE) -> Result<usize, String> {
 /// # Safety
 /// Called only from [`add_everything`].
 unsafe fn add_provider(engine: HANDLE) -> Result<(), String> {
-    let mut name = wide("Neoxify");
+    let mut name = wide(PROVIDER_NAME);
     let mut description = wide("Neoxify VPN");
 
     let mut provider: FWPM_PROVIDER0 = std::mem::zeroed();
@@ -425,7 +425,7 @@ unsafe fn add_provider(engine: HANDLE) -> Result<(), String> {
 /// # Safety
 /// Called only from [`add_everything`].
 unsafe fn add_sublayer(engine: HANDLE) -> Result<(), String> {
-    let mut name = wide("Neoxify IPv6 block");
+    let mut name = wide(SUBLAYER_NAME);
     let mut description = wide("Full-tunnel IPv6 block; removed on disconnect");
     let mut provider_key = PROVIDER_KEY;
 
