@@ -306,6 +306,201 @@ Check the agent with: systemctl status neoxify-agentd
 EOF
 }
 
+# One dull page, written where it is asked for.
+#
+# Deliberately dull and impersonal. A page claiming to be some real
+# organisation would be a lie told to whoever looks, and a page saying
+# "VPN" would undo the entire point.
+#
+# Different on every node, which is the part that took a second pass.
+# This page is what an active prober gets when it opens a port and
+# speaks ordinary HTTP or HTTPS -- and at one point every node in the
+# fleet returned the same 118 bytes. That is a fingerprint of *us*:
+# probe a suspected address, hash the response, compare against a known
+# Neoxify node, and the whole fleet is enumerable without breaking a
+# single tunnel. Varying the text, the title and the length means a
+# match has to be made some other way.
+#
+# Not idempotent by design: a re-run picks again. Nothing depends on the
+# page's contents, and a node whose disguise changes occasionally is if
+# anything the more ordinary-looking one.
+write_disguise_page() {
+  local dir="$1"
+  install -d -m 755 "$dir" || return 1
+  local pages=(
+    "Welcome|This site is being set up."
+    "Coming soon|Content will appear here shortly."
+    "Index of /|Nothing to see here yet."
+    "Under construction|This page is not finished."
+    "Hello|Server is running."
+  )
+  local choice="${pages[RANDOM % ${#pages[@]}]}"
+  local title="${choice%%|*}"
+  local body="${choice##*|}"
+  cat > "$dir/index.html" <<HTML
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>${title}</title></head>
+<body><h1>${title}</h1><p>${body}</p>
+<!-- $(openssl rand -hex 8) --></body>
+</html>
+HTML
+}
+
+# What port 80 answers, and why it answers at all.
+#
+# Installing nginx for the loopback fallback also enables Ubuntu's stock
+# default vhost, and that one listens on 0.0.0.0:80 no matter what the
+# fallback does. Four of the five live nodes were therefore serving
+# "Welcome to nginx!" -- byte-identical, 615 bytes, `Server:
+# nginx/1.24.0 (Ubuntu)` and all -- to anyone who asked. Nobody chose
+# that. It is a fleet-wide fingerprint on a product whose entire value is
+# not looking like a VPN, and it is exactly what a sweep for "default
+# nginx on a VPS with odd high ports open" is built to find.
+#
+# Three options were on the table, and two of them are wrong:
+#
+#   * Close port 80. Wrong, and this is the expensive way to find out.
+#     Let's Encrypt's HTTP-01 challenge needs inbound TCP 80 at *every
+#     renewal*, not just at issue, and certbot replays whatever
+#     authenticator is recorded in /etc/letsencrypt/renewal/*.conf. On
+#     the live fleet that is `webroot` with /var/www/html on france-1 and
+#     turkey-1 -- served today by the very default vhost we are
+#     removing -- and `standalone` on finland1 and singapore-1. Closing
+#     80 breaks the first pair immediately and the second pair as soon as
+#     anything else takes the port. Certificates expire silently, and
+#     Xray fails its whole config on an unreadable certificate, so the
+#     node loses every TLS inbound at once about ninety days later.
+#   * Redirect to https. Wrong for a node specifically. Port 443 here is
+#     REALITY, which impersonates somebody else's site: a 301 to
+#     https://<this node> walks the scanner into a handshake that returns
+#     a certificate for a Turkish hardware forum on a Scaleway address.
+#     That is a louder mismatch than the page we are trying to remove,
+#     and a node addressed by IP has no name to redirect to anyway.
+#   * Serve a plain static page. Chosen. It is the same dull, per-node
+#     page the loopback fallback already serves, so the two agree with
+#     each other; `server_tokens off` drops the version banner the
+#     default vhost was volunteering; and an ACME location keeps the
+#     renewal path that france-1 and turkey-1 depend on today working
+#     unchanged.
+#
+# Taking the port also means taking responsibility for the two nodes
+# whose certificates renew with `standalone`, which cannot bind a port
+# nginx is holding. Those are migrated to webroot here rather than left
+# to fail in the quietest possible way three months from now.
+ensure_port80_site() {
+  command -v nginx >/dev/null 2>&1 || return 0
+
+  # The webroot ACME wants, whether or not certbot is on the box yet:
+  # install_ikev2 looks for this directory before it decides between the
+  # webroot and standalone challenges.
+  install -d -m 755 /var/www/html/.well-known/acme-challenge
+  write_disguise_page /var/www/html || return 1
+
+  cat > /etc/nginx/sites-available/neoxify-http <<'CONF'
+# Managed by the Neoxify agent installer.
+#
+# Ubuntu's default vhost used to hold this port and announce both nginx's
+# version and the fact that nobody had configured it. This replaces it
+# with something an internet-wide scan has no reason to record.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    # The version string is a fingerprint of its own, and the default
+    # vhost was handing it out.
+    server_tokens off;
+
+    root /var/www/html;
+    index index.html;
+
+    # Let's Encrypt's HTTP-01 challenge, for both the Xray certificate
+    # and IKEv2's. This location is the reason port 80 stays open at all;
+    # deleting it breaks certificate renewal on every node that uses the
+    # webroot authenticator, and the failure surfaces ninety days later
+    # as expired certificates rather than as anything pointing here.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+CONF
+
+  # The distro default and this one both claim default_server, so the
+  # old link has to go before nginx will accept the new one.
+  local had_default="n"
+  [[ -e /etc/nginx/sites-enabled/default ]] && had_default="y"
+  rm -f /etc/nginx/sites-enabled/default
+  ln -sf /etc/nginx/sites-available/neoxify-http /etc/nginx/sites-enabled/neoxify-http
+
+  # A node with IPv6 disabled cannot bind [::]:80 and nginx refuses the
+  # whole config for it. Drop that one line and retry rather than leave
+  # the port to whatever was there.
+  if ! nginx -t >/dev/null 2>&1; then
+    sed -i '/listen \[::\]:80 default_server;/d' /etc/nginx/sites-available/neoxify-http
+  fi
+
+  if ! nginx -t >/dev/null 2>&1; then
+    # Put the port back the way it was, fingerprint and all. An ugly
+    # page is survivable; a port 80 that answers nothing is not, because
+    # the webroot ACME challenge renews through it and the certificate
+    # failure would surface three months later as dead TLS inbounds.
+    echo "nginx rejected the port 80 site -- something else may already claim" >&2
+    echo "default_server there. Restoring what was there before." >&2
+    rm -f /etc/nginx/sites-enabled/neoxify-http
+    [[ "$had_default" == "y" ]] && ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+    nginx -t >/dev/null 2>&1 && { systemctl reload nginx 2>/dev/null || true; }
+    return 1
+  fi
+  systemctl reload nginx 2>/dev/null || systemctl restart nginx
+
+  migrate_standalone_acme_to_webroot
+}
+
+# Certificates that renew by binding port 80 themselves cannot do that
+# once nginx holds it.
+#
+# certbot records its authenticator per certificate and replays it at
+# renewal, so a certificate first issued with --standalone keeps trying
+# to bind :80 forever. That is fine on a node with nothing else there and
+# fatal the moment nginx arrives -- and nginx arrives with the fallback
+# site, on every node that serves Trojan or VLESS over TLS. singapore-1
+# is in exactly that state today: `authenticator = standalone` recorded,
+# nginx listening on 0.0.0.0:80, and a renewal that will fail with an
+# address already in use.
+#
+# Rewriting the renewal file is the documented way to change an
+# authenticator without forcing an early renewal; `certbot renew
+# --dry-run` afterwards is what proves it, and the caller is told to run
+# it rather than being told it worked.
+migrate_standalone_acme_to_webroot() {
+  local conf name changed=0
+  [[ -d /etc/letsencrypt/renewal ]] || return 0
+  for conf in /etc/letsencrypt/renewal/*.conf; do
+    [[ -e "$conf" ]] || continue
+    grep -qE '^[[:space:]]*authenticator[[:space:]]*=[[:space:]]*standalone' "$conf" || continue
+    name="$(basename "$conf" .conf)"
+    cp -a "$conf" "${conf}.bak-$(date +%s)"
+    # Drop any stale webroot keys first so this is safe to run twice.
+    sed -i -E '/^[[:space:]]*webroot_path[[:space:]]*=/d; /^\[\[webroot_map\]\]/,$d' "$conf"
+    sed -i -E 's|^([[:space:]]*authenticator[[:space:]]*=[[:space:]]*)standalone[[:space:]]*$|\1webroot|' "$conf"
+    printf 'webroot_path = /var/www/html,\n[[webroot_map]]\n%s = /var/www/html\n' "$name" >> "$conf"
+    echo "  $name renewed with --standalone, which cannot bind a port nginx now holds."
+    echo "  Switched it to the webroot challenge under /var/www/html."
+    changed=1
+  done
+  if [[ "$changed" == 1 ]]; then
+    echo "  Verify before trusting it:  certbot renew --dry-run"
+  fi
+  return 0
+}
+
 # The site a wrong Trojan password is handed to.
 #
 # This is the disguise, not decoration. Without a fallback, a prober who
@@ -323,41 +518,14 @@ ensure_fallback_site() {
     apt-get install -y -qq nginx || return 1
   fi
 
-  install -d -m 755 /var/www/neoxify-fallback
-  # Deliberately dull and impersonal. A page claiming to be some real
-  # organisation would be a lie told to whoever looks, and a page saying
-  # "VPN" would undo the entire point.
-  #
-  # Different on every node, which is the part that took a second pass.
-  # This page is what an active prober gets when it opens the TLS port
-  # and speaks ordinary HTTPS -- and until now every node in the fleet
-  # returned the same 118 bytes. That is a fingerprint of *us*: probe a
-  # suspected address, hash the response, compare against a known
-  # Neoxify node, and the whole fleet is enumerable without breaking a
-  # single tunnel. Varying the text, the title and the length means a
-  # match has to be made some other way.
-  #
-  # Not idempotent by design: a re-run picks again. Nothing depends on
-  # the page's contents, and a node whose disguise changes occasionally
-  # is if anything the more ordinary-looking one.
-  local fb_pages=(
-    "Welcome|This site is being set up."
-    "Coming soon|Content will appear here shortly."
-    "Index of /|Nothing to see here yet."
-    "Under construction|This page is not finished."
-    "Hello|Server is running."
-  )
-  local fb_choice="${fb_pages[RANDOM % ${#fb_pages[@]}]}"
-  local fb_title="${fb_choice%%|*}"
-  local fb_body="${fb_choice##*|}"
-  cat > /var/www/neoxify-fallback/index.html <<HTML
-<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>${fb_title}</title></head>
-<body><h1>${fb_title}</h1><p>${fb_body}</p>
-<!-- $(openssl rand -hex 8) --></body>
-</html>
-HTML
+  write_disguise_page /var/www/neoxify-fallback || return 1
+
+  # nginx is on the box now, and on Ubuntu that means its stock default
+  # site is on the box too -- listening on 0.0.0.0:80 whatever this
+  # loopback-only vhost does. Take port 80 deliberately before anything
+  # else, so a fresh install never has a window where it is answering
+  # "Welcome to nginx!" to the whole internet.
+  ensure_port80_site || return 1
 
   # Where this node's API mirror forwards to. Read from the agent's own
   # config rather than a shell variable: this also runs on re-runs from
@@ -506,11 +674,30 @@ issue_tls_certificate() {
     echo "Certificate for $domain already present -- reusing it."
   else
     echo "Requesting a certificate for $domain..."
-    echo "Port 80 must be free and $domain must already resolve to this server."
+    echo "Inbound TCP 80 must reach this node and $domain must already resolve here."
     read -r -p "Email for expiry notices: " le_email
-    if ! certbot certonly --standalone -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
+    # Webroot when something already holds port 80, standalone only on a
+    # node that genuinely has nothing there -- the same order install_ikev2
+    # uses, and for the same reason.
+    #
+    # On a fresh install this runs before nginx exists, so standalone is
+    # what fires and the renewal file records `standalone`. That is the
+    # state singapore-1 and finland1 are in, and it is a slow-motion
+    # outage: nginx arrives minutes later for the fallback site, takes
+    # port 80, and every future renewal fails to bind it. ensure_port80_site
+    # migrates those records to webroot once it owns the port. Re-runs
+    # from the management menu reach here with nginx already up, and take
+    # the webroot branch directly.
+    local acme_args=(--standalone)
+    if [[ -d /var/www/html ]] && ss -tln 2>/dev/null | grep -qE "[^0-9]:80[[:space:]]"; then
+      echo "Something already serves port 80; using the webroot challenge."
+      acme_args=(--webroot -w /var/www/html)
+    fi
+    if ! certbot certonly "${acme_args[@]}" -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
       echo "Could not obtain a certificate for $domain." >&2
-      echo "Check that its DNS record points here and that nothing else holds port 80." >&2
+      echo "Check that its DNS record points here, that inbound TCP 80 reaches" >&2
+      echo "this node including any cloud firewall, and that whatever holds" >&2
+      echo "port 80 serves /var/www/html." >&2
       return 1
     fi
   fi
@@ -2243,11 +2430,11 @@ install_ikev2() {
   # Observed against sg1 from the emulator on 2026-08-11. Reissuing as
   # RSA fixed it on the very next attempt with nothing else changed.
   # Standalone binds port 80 itself, which is fine on a bare node and
-  # not fine here. Installing nginx for the Trojan fallback also enables
-  # nginx's stock default site, and that one *does* listen on 0.0.0.0:80
-  # even though the fallback vhost is loopback-only -- so by the time
-  # this runs, port 80 is usually taken and standalone fails with an
-  # address-in-use that reads like a firewall problem.
+  # not fine here. A node that serves Trojan or VLESS over TLS has nginx
+  # on port 80 by the time this runs -- once because installing nginx
+  # enabled Ubuntu's default vhost by accident, now because
+  # ensure_port80_site puts a deliberate one there -- so standalone fails
+  # with an address-in-use that reads like a firewall problem.
   #
   # Webroot serves the challenge through whatever already holds the port
   # instead, with no restart and no window where the fallback site is
