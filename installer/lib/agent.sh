@@ -610,86 +610,362 @@ HOOK
 # that as permanent: hosting moves, and the probe below is what decides,
 # not this list.
 REALITY_DEST_CANDIDATES_IR=(
-  # MobinhostInfrastructure -- an ordinary Iranian hosting block, the
-  # same shape of address as a VPS. This is what ir1 uses.
+  # AS215708 Mobin Arvand Infrastructure -- an ordinary Iranian hosting
+  # block, the same shape of address as a VPS. This is what ir1 uses.
   www.torob.com
-  # SHTL-NET-INFRA-HSTG, Shatel's own hosting infrastructure.
+  # AS31549 Aria Shatel, the ISP's own infrastructure.
   www.shatel.ir
-  # Sotoon CDN, so weaker than the two above on the range argument, but
-  # kept as a third option that does pass the handshake checks.
-  www.zoomit.ir
 )
-# WARNING: this list rots, and the probe below cannot tell you that.
+# www.zoomit.ir was the third entry here, kept because it passed the
+# handshake checks. It answers from AS202319 Sotoon-CDN and stamps an
+# x-edge- header on its responses, so the ownership check added below
+# now rejects it -- which is the same conclusion the paragraph about
+# AbrArvan and Sotoon above had already reached in prose, finally being
+# enforced by something.
+# The rot this second list used to carry, and why the fix was not a new
+# list.
 #
-# www.speedtest.net was removed from it once for resolving into
-# Cloudflare. Measured again on 2026-08-22 from a Singapore node, BOTH
-# remaining entries have gone the same way: www.asus.com -> 13.249.231.81
-# and www.leboncoin.fr -> 13.35.36.62, which are AWS CloudFront edge
-# ranges Amazon publishes. They still pass every check probe_reality_dest
-# makes -- TLS 1.3, h2, X25519, certificate verified -- because that
-# function tests the handshake and nothing tests criterion 1. So the
-# default offered to an operator who holds Enter is currently a CDN name
-# on a non-CDN address: exactly the one-table-lookup mismatch this list
-# was created to stop.
+# www.speedtest.net was dropped from here once for resolving into
+# Cloudflare. On 2026-08-22 both remaining entries had gone the same way:
+# www.asus.com and www.leboncoin.fr answer from AWS CloudFront edge
+# ranges. They passed every check probe_reality_dest made -- TLS 1.3, h2,
+# X25519, certificate verified -- because that function tested the
+# handshake and nothing tested *who owns the address*. The default handed
+# to an operator holding Enter was therefore a CDN's name on a non-CDN
+# address: exactly the one-lookup mismatch this list exists to avoid.
 #
-# Treat these as a last resort, not a recommendation, and prefer a name
-# measured for the node being built. Doing that for Singapore found the
-# hard part: every consumer-facing .sg site probed sat behind Cloudflare,
-# Imperva, Akamai or CloudFront, and the two genuinely SG-hosted hosts
-# found (www.pacific.net.sg, www.simba.sg) offer neither TLS 1.3 nor h2.
-# What worked was www.shopee.sg -- SHOPEE-SG, the company's own Singapore
-# netblock -- and it was reached by checking who owns the address, which
-# is the check missing from here.
+# Swapping in fresh names would rot the same way, on nobody's schedule
+# but the decoy operator's. So the ownership test moved into the probe
+# below, where it runs on every install against whatever the name
+# resolves to that day, and a rotted entry is rejected loudly instead of
+# being offered as the default. This list is a seed, not an answer.
+#
+# Spread across regions on purpose: a node wants a name from the country
+# it is hosted in (criterion 1 below), and the probe prints each
+# candidate's country and network so the operator can see which of these
+# fits this box.
 REALITY_DEST_CANDIDATES_ABROAD=(
-  www.asus.com
-  www.leboncoin.fr
+  # Each of these was run through the probe below on 2026-08-23 and
+  # passed every check, with the announcing AS named next to it. That
+  # measurement was taken from one vantage point; the probe re-takes it
+  # from the node being installed, which is the only one that counts.
+  #
+  # AS6205 HizliNet Teknoloji, TR. turkey-1 already uses this one.
+  www.donanimhaber.com
+  # AS12306 Plus.line AG, DE.
+  www.heise.de
+  # AS8560 IONOS SE, DE -- a hosting company's own range, not a CDN.
+  www.web.de
+  # AS12322 Proxad/Free SAS, FR: a French ISP answering from its own
+  # French addresses.
+  www.free.fr
+  # AS1741 FUNET, FI.
+  www.helsinki.fi
+  # AS138341 Shopee Singapore. Every consumer-facing .sg name probed for
+  # singapore-1 sat behind Cloudflare, Imperva, Akamai or CloudFront;
+  # this was the one that did not.
+  www.shopee.sg
 )
+
+# Networks whose address ranges are published, which is what makes a name
+# resolving into them a weak decoy.
+#
+# REALITY's disguise is a claim: "this connection is ordinary HTTPS to
+# <name>". The cheapest way to catch a lie is to check that claim against
+# the address the packet was actually sent to -- and Cloudflare, Amazon,
+# Akamai, Fastly, Google and Microsoft all publish their ranges as
+# machine-readable lists. "The ClientHello says www.asus.com, which lives
+# in CloudFront, but this packet went to a Linode box in Singapore" is
+# one table lookup at line rate with no inspection whatsoever. That is
+# criterion 1, and until now nothing checked it.
+#
+# Matched three independent ways below, because each is evadable alone:
+# the AS that originates the route, the CNAME chain the name resolves
+# through, and the headers the edge adds to its own responses. By AS
+# *name* as well as number, because numbers churn and a CDN nobody
+# listed yet would slip past a fixed list in silence.
+REALITY_CDN_AS_NAME_RE='CLOUDFLARE|AMAZON|AWS|CLOUDFRONT|AKAMAI|FASTLY|GOOGLE|MICROSOFT|AZURE|EDGECAST|EDGIO|INCAPSULA|IMPERVA|LIMELIGHT|LLNW|STACKPATH|HIGHWINDS|CDN77|BUNNY|SUCURI|GCORE|G-CORE|CACHEFLY|KEYCDN|QUANTIL|WANGSU|CHINANETCENTER|ARVANCLOUD|ABR-ARVAN|DERAK|SOTOON|ALIBABA|ALICLOUD|TENCENT'
+REALITY_CDN_ASNS=' 13335 16509 14618 16625 20940 12222 35994 21342 21357 54113 15133 199524 19551 22822 33438 60068 200325 30148 30081 15169 396982 8075 8068 8069 202468 44869 34011 '
+REALITY_CDN_ZONE_RE='(cloudfront\.net|awsglobalaccelerator\.com|elb\.amazonaws\.com|akamaiedge\.net|akamai\.net|akamaized\.net|edgekey\.net|edgesuite\.net|akadns\.net|fastly\.net|fastlylb\.net|cloudflare\.net|azureedge\.net|azurefd\.net|trafficmanager\.net|incapdns\.net|impervadns\.net|b-cdn\.net|cdn77\.org|llnwd\.net|edgecastcdn\.net|stackpathdns\.com|sucuri\.net|gcdn\.co|cachefly\.net|kxcdn\.com|arvancdn\.ir|arvancloud\.ir|derak\.cloud|sotoon\.ir)\.?$'
+REALITY_CDN_HEADER_RE='^(cf-ray|cf-cache-status|cf-apo-via|x-amz-cf-id|x-amz-cf-pop|x-akamai-|akamai-|x-iinfo|x-cdn|x-azure-ref|x-msedge-ref|x-fastly|x-served-by|x-sucuri-id|x-bunnycdn|x-edg[eio]-|x-gcore|server: *(cloudflare|akamaighost|ecacc|ecs|bunnycdn|sucuri|imperva|awselb))'
+
+# One TXT lookup, by whatever this box can make one with.
+#
+# `dig` is not on a stock Ubuntu -- it lives in bind9-dnsutils, which
+# install_base_deps now pulls in for exactly this. Kept degradable
+# anyway, so a node built before that change still runs the rest of the
+# probe instead of failing every candidate over a missing package.
+reality_txt_lookup() {
+  local name="$1"
+  if command -v dig >/dev/null 2>&1; then
+    dig +short +time=3 +tries=2 -t TXT "$name" 2>/dev/null | tr -d '"' | head -1
+  elif command -v host >/dev/null 2>&1; then
+    host -W 3 -t TXT "$name" 2>/dev/null | sed -n 's/.*descriptive text "\(.*\)"/\1/p' | head -1
+  else
+    return 1
+  fi
+}
+
+# Who announces this address, printed as "ASN|AS name|country".
+#
+# Team Cymru's DNS interface rather than whois: it answers over ordinary
+# UDP/53 using resolver tools that are already there, and it returns the
+# *origin* AS -- the network that actually announces the route -- which
+# is the field a censor's own table would be keyed on. Nothing else gives
+# that without a whois client and one parse per registry.
+# https://team-cymru.com/community-services/ip-asn-mapping/
+reality_ip_owner() {
+  local ip="$1" rev origin asn cc as_line as_name
+  rev="$(awk -F. 'NF==4 {print $4"."$3"."$2"."$1}' <<<"$ip")"
+  [[ -n "$rev" ]] || return 1
+  origin="$(reality_txt_lookup "${rev}.origin.asn.cymru.com")" || return 1
+  [[ -n "$origin" ]] || return 1
+  # "16509 14618 | 13.32.0.0/15 | US | arin | 2011-01-06". More than one
+  # AS can originate the same prefix; the first is enough to name it.
+  asn="$(awk -F'|' '{print $1}' <<<"$origin" | tr -s ' ' '\n' | grep -E '^[0-9]+$' | head -1)"
+  cc="$(awk -F'|' '{gsub(/ /,"",$3); print $3}' <<<"$origin")"
+  as_name="unknown"
+  if [[ -n "$asn" ]]; then
+    as_line="$(reality_txt_lookup "AS${asn}.asn.cymru.com" || true)"
+    # "16509 | US | arin | 2000-05-04 | AMAZON-02, US"
+    if [[ -n "$as_line" ]]; then
+      as_name="$(awk -F'|' '{sub(/^ +/,"",$5); sub(/ +$/,"",$5); print $5}' <<<"$as_line")"
+    fi
+  fi
+  printf '%s|%s|%s\n' "${asn:-0}" "${as_name:-unknown}" "${cc:-??}"
+}
+
+# The CNAME chain a name is resolved through, one per line.
+#
+# A CDN is usually joined by pointing a CNAME at its zone, and that
+# stays visible even when the edge address itself is announced by the
+# customer's own AS. Empty when dig is unavailable, which is why this is
+# one signal of three rather than the check.
+reality_cname_chain() {
+  local host="$1"
+  command -v dig >/dev/null 2>&1 || return 0
+  dig +short +time=3 +tries=2 "$host" CNAME 2>/dev/null
+  # The A lookup prints the CNAMEs it walked through as well as the
+  # addresses; keeping only the non-numeric lines leaves the chain.
+  dig +short +time=3 +tries=2 "$host" A 2>/dev/null | grep -vE '^[0-9.]+$' || true
+}
+
+# The names a leaf certificate actually carries, for the message printed
+# when it is not the name that was asked for. A mismatch is most legible
+# next to what the host does claim to be.
+reality_leaf_names() {
+  local s_client_output="$1" leaf names=""
+  leaf="$(awk '/BEGIN CERTIFICATE/{p=1} p{print} /END CERTIFICATE/{if (p) exit}' <<<"$s_client_output")"
+  [[ -n "$leaf" ]] || return 0
+  names="$(openssl x509 -noout -ext subjectAltName 2>/dev/null <<<"$leaf" | tail -n +2 | tr -d ' ' | sed 's/DNS://g')"
+  [[ -z "$names" ]] && names="$(openssl x509 -noout -subject 2>/dev/null <<<"$leaf" || true)"
+  printf '%s\n' "${names:0:200}"
+}
+
+# Roughly how large the TLS Certificate handshake message is, in bytes.
+#
+# The DER chain plus TLS 1.3's framing: 4 bytes of handshake header, 1
+# for the (empty) certificate_request_context, 3 for the list length,
+# and 3 + 2 per entry for its length and its extensions. Good to a
+# handful of bytes, which is all that is needed against a ceiling of
+# 8192.
+reality_chain_bytes() {
+  local s_client_output="$1" total=8 der=0 tmp count=0 f
+  tmp="$(mktemp -d)" || return 0
+  awk -v d="$tmp" '/BEGIN CERTIFICATE/{n++; p=1} p {print > (d "/cert" n ".pem")} /END CERTIFICATE/{p=0}' <<<"$s_client_output"
+  for f in "$tmp"/cert*.pem; do
+    [[ -e "$f" ]] || continue
+    der="$(openssl x509 -in "$f" -outform DER 2>/dev/null | wc -c)"
+    [[ "$der" -gt 0 ]] || continue
+    total=$(( total + der + 5 ))
+    count=$(( count + 1 ))
+  done
+  rm -rf "$tmp"
+  [[ "$count" -gt 0 ]] || return 0
+  printf '%s\n' "$total"
+}
 
 # Checks a candidate the way REALITY will actually use it.
 #
 # REALITY hands any connection that fails authentication straight to this
-# host, so the disguise is only as good as this handshake: a dest that is
-# unreachable from the node, or that cannot do TLS 1.3, produces a node
-# that drops probers instead of proxying them to a real site -- which is
-# a louder signal than having no disguise at all. h2 matters because the
-# inbound advertises it, and X25519 because REALITY reuses the
-# handshake's key share.
+# host, so the disguise is only as good as this handshake -- and only as
+# good as the *claim*, which is the part that used to go unchecked.
 #
-# Returns 0 and prints nothing on success; prints the reason it failed
-# otherwise. Deliberately quiet about *why* it succeeded -- the caller
-# prints its own summary.
+# What upstream requires of a dest: "websites out of China's GFW, support
+# TLSv1.3 and H2, the domain name is not used for redirection".
+# https://github.com/XTLS/REALITY/blob/main/README.en.md
+# Its bonus list adds "target website IP reside closer to proxy IP (looks
+# more reasonable, and lower latency)". Against a censor rather than a
+# curious observer that is not a bonus at all -- it is the first thing a
+# filter can check -- so criterion 1 here treats it as a requirement.
+#
+# The checks, and what each catches that the others do not:
+#   * TLS 1.3, ALPN h2, X25519 -- the handshake REALITY forwards has to
+#     look like the one the inbound advertises. This is what the probe
+#     already did, and all it did.
+#   * The certificate must be valid AND carry the name we intend to
+#     claim. "Verify return code: 0" says the chain is trusted and
+#     nothing about whose name is on it, so a host answering with
+#     somebody else's perfectly valid certificate used to pass.
+#   * Not CDN-fronted -- see the tables above. This is the ownership test
+#     that was missing, and the reason www.asus.com kept passing for
+#     months after it stopped being a usable decoy.
+#   * Not a redirector, because upstream says so: a dest that answers /
+#     with a 301 somewhere else produces traffic that does not look like
+#     anyone browsing that site.
+#   * A certificate chain small enough for REALITY to relay. The server
+#     side breaks off the handshake when the Certificate message exceeds
+#     8192 bytes and the customer sees only a connection reset:
+#     https://github.com/XTLS/Xray-core/issues/6356
+#
+# Three outcomes rather than two, because "this will not work" and "this
+# will work but it is a poor disguise" want different handling and the
+# caller cannot tell them apart from a message:
+#   0  usable; any advisory notes are printed
+#   1  will not work at all -- unreachable, no TLS 1.3, no h2, wrong or
+#      broken certificate, chain too large for REALITY to relay
+#   2  works, but the disguise is weak: fronted by a CDN, announced from
+#      a published range, or a redirector
+# In every non-zero case it prints every reason it found, joined with
+# "; ", so an operator can go and pick a better name instead of guessing
+# which check bit.
 probe_reality_dest() {
-  local host="$1" port="${2:-443}" out=""
+  local host="$1" port="${2:-443}"
+  local out="" ip="" owner="" asn="" as_name="" cc="" chain="" headers=""
+  local -a bad=() weak=() note=()
+
   if ! command -v openssl >/dev/null 2>&1; then
     echo "openssl is not installed, so this could not be checked"
     return 1
   fi
+
+  ip="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
+  if [[ -z "$ip" ]]; then
+    echo "$host does not resolve from this server, so REALITY could never forward to it"
+    return 1
+  fi
+
+  # Connected to the address just resolved, not to the name again.
+  # Otherwise the ownership check and the handshake can land on two
+  # different edges of the same CDN and disagree about what was tested.
+  #
   # tr -d '\0' because s_client relays whatever the server sends and
   # command substitution warns on every NUL byte in it -- noise the
   # operator would read as an error. pipefail (set at the top of this
   # file) keeps openssl's own exit status as the pipeline's, so a failed
   # handshake is still a failed probe.
-  out="$(timeout 8 openssl s_client -connect "${host}:${port}" -servername "$host" \
-    -alpn h2 -tls1_3 </dev/null 2>/dev/null | tr -d '\0')" || {
-    echo "no TLS 1.3 handshake from this server"
+  #
+  # -verify_hostname is the whole point of this line: without it openssl
+  # checks that the chain is trusted and never that the name on it is
+  # the name this node is about to claim.
+  #
+  # No -tls1_3: forcing it turns "only speaks TLS 1.2" into a bare
+  # handshake failure, and the operator then cannot tell that from an
+  # unreachable host. Let it negotiate and report what it chose.
+  out="$(timeout 12 openssl s_client -connect "${ip}:${port}" -servername "$host" \
+    -verify_hostname "$host" -alpn h2 -showcerts -status </dev/null 2>/dev/null | tr -d '\0')" || {
+    echo "no TLS handshake from $ip -- this server cannot reach it, or nothing there speaks TLS"
     return 1
   }
-  if ! grep -q "ALPN protocol: h2" <<<"$out"; then
-    echo "does not offer HTTP/2"
-    return 1
+
+  grep -q "Protocol *: *TLSv1.3" <<<"$out" ||
+    bad+=("negotiated $(grep -m1 'Protocol *:' <<<"$out" | awk '{print $NF}'), and REALITY requires TLS 1.3")
+  grep -q "ALPN protocol: h2" <<<"$out" ||
+    bad+=("does not offer HTTP/2 over ALPN, so the inbound's h2 advertisement would not match what this dest answers")
+
+  if grep -q "Verify return code: 0 (ok)" <<<"$out"; then
+    :
+  elif grep -qi "Hostname mismatch" <<<"$out"; then
+    bad+=("serves a certificate that is not for $host (it names $(reality_leaf_names "$out")) -- REALITY would be claiming a name this host does not hold")
+  else
+    bad+=("certificate did not verify -- $(grep -m1 'Verify return code:' <<<"$out" | sed 's/^ *//'); intercepted, expired, or a broken chain")
   fi
-  if ! grep -q "Verify return code: 0 (ok)" <<<"$out"; then
-    echo "certificate did not verify from this server (intercepted, or a broken chain)"
-    return 1
+
+  # Fronting, signal by signal. Any one is enough on its own: they are
+  # three observations of the same fact, not a score to be totalled.
+  chain="$(reality_cname_chain "$host" || true)"
+  if [[ -n "$chain" ]] && grep -qEi "$REALITY_CDN_ZONE_RE" <<<"$chain"; then
+    weak+=("resolves through $(grep -Eim1 "$REALITY_CDN_ZONE_RE" <<<"$chain" | sed 's/\.$//'), a CDN zone -- the name is fronted and $ip is not the site's own address")
   fi
-  # Advisory rather than fatal: a dest that negotiates something else
-  # still works, it just gives REALITY less to hide behind. Reported
-  # only when s_client actually printed the line -- not every build
-  # does, and treating a missing line as a missing X25519 would flag
-  # every candidate on those boxes.
+
+  if owner="$(reality_ip_owner "$ip")"; then
+    asn="${owner%%|*}"
+    as_name="$(cut -d'|' -f2 <<<"$owner")"
+    cc="${owner##*|}"
+    if [[ "$REALITY_CDN_ASNS" == *" $asn "* ]] || grep -qEi "$REALITY_CDN_AS_NAME_RE" <<<"$as_name"; then
+      weak+=("$ip is announced by AS$asn ($as_name), whose ranges are published -- 'SNI says $host, packet went to this node' is then one table lookup for a filter")
+    else
+      note+=("$ip is AS$asn ${as_name%, ??} in $cc")
+    fi
+  else
+    note+=("could not look up who owns $ip, so criterion 1 is UNVERIFIED here -- install bind9-dnsutils and re-run")
+  fi
+
+  # What the site itself says on the way back. An edge that stamps its
+  # own tracing header has identified itself more reliably than any
+  # address list could.
+  if command -v curl >/dev/null 2>&1; then
+    headers="$(timeout 12 curl -4 -s -o /dev/null -D - --max-time 10 \
+      --resolve "${host}:${port}:${ip}" "https://${host}:${port}/" 2>/dev/null | tr -d '\r' | tr 'A-Z' 'a-z' || true)"
+    if [[ -n "$headers" ]] && grep -qE "$REALITY_CDN_HEADER_RE" <<<"$headers"; then
+      weak+=("its responses carry '$(grep -oEm1 "$REALITY_CDN_HEADER_RE" <<<"$headers" | sed 's/ *$//')', a CDN edge header -- this name is served by a CDN, not by its own host")
+    fi
+    # Upstream's third requirement. www -> apex and apex -> www are the
+    # documented exception, so only a hop to a different site counts.
+    local status redir redir_host
+    status="$(awk '/^http\/[0-9.]+ /{print $2}' <<<"$headers" | tail -1)"
+    redir="$(awk '/^location:/{print $2}' <<<"$headers" | tail -1)"
+    if [[ "$status" =~ ^30[12378]$ && -n "$redir" ]]; then
+      redir_host="${redir#*://}"
+      redir_host="${redir_host%%/*}"
+      if [[ "${redir_host#www.}" != "${host#www.}" ]]; then
+        weak+=("answers / with $status to $redir_host, and upstream requires a dest whose name is not used for redirection")
+      fi
+    fi
+  fi
+
+  # The 8192-byte ceiling. Estimated from the DER chain rather than read
+  # off the wire, so the number is printed next to the verdict: a dest
+  # sitting within a few bytes of the limit deserves a human's eye
+  # rather than a silent pass or a silent rejection.
+  local chain_bytes
+  chain_bytes="$(reality_chain_bytes "$out")"
+  if [[ -n "$chain_bytes" ]] && [[ "$chain_bytes" -gt 8192 ]]; then
+    bad+=("its certificate chain is about $chain_bytes bytes, over the 8192 REALITY's server side will relay -- customers would see a bare connection reset (XTLS/Xray-core#6356)")
+  elif [[ -n "$chain_bytes" ]] && [[ "$chain_bytes" -gt 7500 ]]; then
+    note+=("certificate chain is ~$chain_bytes bytes, close to REALITY's 8192-byte ceiling")
+  fi
+
+  # Advisory, not fatal: a dest that negotiates something else still
+  # works, it just gives REALITY less to hide behind. Reported only when
+  # s_client actually printed the line -- not every build does, and
+  # treating a missing line as a missing X25519 would flag every
+  # candidate on those boxes.
   if grep -q "Server Temp Key" <<<"$out" && ! grep -qi "Server Temp Key: *X25519" <<<"$out"; then
-    echo "ok, but does not negotiate X25519"
-    return 0
+    note+=("does not negotiate X25519")
+  fi
+  # A bonus point upstream names explicitly, and free to observe here.
+  if grep -q "OCSP response: *no response sent" <<<"$out"; then
+    note+=("no OCSP stapling")
+  fi
+
+  # A dest that cannot work is reported with the weak-disguise findings
+  # alongside it -- an operator debugging one name wants everything that
+  # is wrong with it in one pass, not one reason per attempt.
+  local joined=""
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    joined="$(printf '%s; ' "${bad[@]}" "${weak[@]}")"
+    echo "${joined%; }"
+    return 1
+  fi
+  if [[ ${#weak[@]} -gt 0 ]]; then
+    joined="$(printf '%s; ' "${weak[@]}")"
+    echo "${joined%; }"
+    return 2
+  fi
+  if [[ ${#note[@]} -gt 0 ]]; then
+    joined="$(printf '%s; ' "${note[@]}")"
+    echo "${joined%; }"
   fi
   return 0
 }
@@ -769,14 +1045,16 @@ install_xray() {
     echo "Three things make a good choice, in order of how cheaply a filter"
     echo "can catch a bad one:"
     echo "  1. Plausible for THIS node's IP. Prefer a site hosted in the same"
-    echo "     country as this server. A big CDN's name on an address outside"
-    echo "     that CDN's published ranges is a mismatch checked at line rate."
+    echo "     country as this server, on its own or its host's addresses."
+    echo "     A CDN-fronted name is a mismatch a filter checks at line rate,"
+    echo "     so the check below rejects one and names the network it found."
     echo "  2. Not blocked where your customers are, and not blocking this"
     echo "     server -- the handshake is forwarded there on every probe."
-    echo "  3. TLS 1.3 and HTTP/2, verified below rather than assumed."
+    echo "  3. TLS 1.3, HTTP/2, and a certificate actually issued for the"
+    echo "     name -- all verified below rather than assumed."
     echo
     echo "Checking a few candidates from this server (a few seconds each)..."
-    local candidate reason first_ok=""
+    local candidate reason first_ok="" first_weak=""
     local group_label
     for group_label in "hosted in Iran" "hosted abroad"; do
       echo "  -- $group_label --"
@@ -786,23 +1064,50 @@ install_xray() {
       else
         group=("${REALITY_DEST_CANDIDATES_ABROAD[@]}")
       fi
+      local probe_rc
       for candidate in "${group[@]}"; do
-        if reason="$(probe_reality_dest "$candidate" 443)"; then
-          if [[ -n "$reason" ]]; then
-            echo "     $candidate -- $reason"
-          else
-            echo "     $candidate -- TLS 1.3, h2, X25519, certificate verified"
-          fi
-          [[ -z "$first_ok" ]] && first_ok="$candidate"
-        else
-          echo "     $candidate -- unusable from here ($reason)"
-        fi
+        reason="$(probe_reality_dest "$candidate" 443)" && probe_rc=0 || probe_rc=$?
+        case "$probe_rc" in
+          0)
+            if [[ -n "$reason" ]]; then
+              echo "     $candidate -- OK: $reason"
+            else
+              echo "     $candidate -- OK: TLS 1.3, h2, X25519, certificate for that name, not fronted"
+            fi
+            [[ -z "$first_ok" ]] && first_ok="$candidate"
+            ;;
+          2)
+            # Offered, but never as the default: it would still carry
+            # traffic, and it would still be the mismatch that gets a
+            # node found.
+            echo "     $candidate -- WEAK DISGUISE: $reason"
+            [[ -z "$first_weak" ]] && first_weak="$candidate"
+            ;;
+          *)
+            echo "     $candidate -- REJECTED: $reason"
+            ;;
+        esac
       done
     done
     echo
     echo "Pick the group that matches where THIS server is, not where your"
     echo "customers are. Anything you know to be a better fit beats this list."
-    local dest_default="${first_ok:-www.speedtest.net}:443"
+    # No hardcoded fallback any more. It used to be www.speedtest.net,
+    # which has resolved into Cloudflare for well over a year -- so the
+    # one path that fired when nothing else worked was guaranteed to
+    # produce the exact mismatch the rest of this function exists to
+    # avoid, silently, on the node least able to afford it. If every
+    # candidate was rejected the operator is told to bring their own
+    # name instead of being handed a bad one.
+    local dest_default=""
+    if [[ -n "$first_ok" ]]; then
+      dest_default="${first_ok}:443"
+    else
+      echo
+      echo "None of the candidates above is usable from this server." >&2
+      echo "Enter a name you know to be hosted near this node and not behind" >&2
+      echo "a CDN -- it will be checked the same way before it is accepted." >&2
+    fi
     # Bounded rather than `while true`: an install driven from a pipe
     # runs out of stdin, every `read` then returns immediately with an
     # empty answer, and an unbounded loop would spin forever printing
@@ -841,11 +1146,18 @@ install_xray() {
           continue
           ;;
       esac
-      if reason="$(probe_reality_dest "$server_name" "$dest_port")"; then
+      local chosen_rc
+      reason="$(probe_reality_dest "$server_name" "$dest_port")" && chosen_rc=0 || chosen_rc=$?
+      if [[ "$chosen_rc" == 0 ]]; then
         [[ -n "$reason" ]] && echo "  Note: $reason."
         break
       fi
-      echo "  $server_name is not usable as a dest from this server: $reason." >&2
+      if [[ "$chosen_rc" == 2 ]]; then
+        echo "  $server_name works, but it is a weak disguise: $reason." >&2
+        echo "  It will carry traffic. It will also be what gets this node found." >&2
+      else
+        echo "  $server_name is not usable as a dest from this server: $reason." >&2
+      fi
       read -r -p "  Use it anyway? [y/N]: " force_dest || force_dest=""
       [[ "${force_dest,,}" == "y" ]] && break
       # Cleared so the loop cannot fall out of its last iteration still
@@ -853,8 +1165,31 @@ install_xray() {
       dest=""
     done
     if [[ -z "$dest" ]]; then
-      echo "No usable camouflage destination was chosen; falling back to $dest_default." >&2
-      dest="$dest_default"
+      # Ranked, and never silently: a clean candidate first, then one
+      # that only fails the ownership test, and only then a refusal.
+      # Dropping REALITY here would take a transport away from the
+      # customers who most need alternatives, so a weak disguise beats
+      # no disguise -- but it is said out loud, and it is written where
+      # a later re-run of this menu entry will show it again.
+      if [[ -n "$dest_default" ]]; then
+        echo "No camouflage destination was chosen; using $dest_default." >&2
+        dest="$dest_default"
+      elif [[ -n "$first_weak" ]]; then
+        echo "No camouflage destination was chosen, and nothing passed cleanly." >&2
+        echo "Falling back to $first_weak, which works but is CDN-fronted or" >&2
+        echo "otherwise checkable at line rate. Re-run menu entry 5 with a" >&2
+        echo "better name for this node's country when you have one." >&2
+        dest="${first_weak}:443"
+      else
+        echo "No camouflage destination is usable from this server -- not one" >&2
+        echo "candidate could even be reached over TLS. That is a network" >&2
+        echo "problem before it is a disguise problem, so this step stops here" >&2
+        echo "rather than writing a config around a name that does not answer." >&2
+        echo "Nothing has been written yet; every protocol Xray would serve is" >&2
+        echo "still unconfigured. Fix outbound HTTPS from this node, or supply" >&2
+        echo "a reachable name, then re-run menu entry 5." >&2
+        return 1
+      fi
       server_name="${dest%%:*}"
     fi
   fi
