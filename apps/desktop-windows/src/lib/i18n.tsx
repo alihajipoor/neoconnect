@@ -187,6 +187,20 @@ const en = {
   "settings.tooShort": "At least 8 characters.",
   "dash.customActive":
     "Custom mode: only your chosen apps are going through the VPN. Their IPv6 is blocked rather than sent outside it, so an IPv6-only site will not open for them.",
+  // The full-tunnel counterpart of the line above, and deliberately the
+  // same shape of sentence: what is blocked, why, and what the customer
+  // will notice. It is shown whenever the service reports a block is
+  // actually installed -- never inferred from the protocol -- because
+  // this is a promise about the machine's state and the app does not
+  // make those without evidence.
+  "dash.fullTunnelIpv6Blocked":
+    "IPv6 is blocked while you're connected. Neoxify's servers carry IPv4 only, so IPv6 is stopped here rather than sent out around the VPN. An IPv6-only site won't open until you disconnect.",
+  // Shown when the app's own check finds IPv6 still reaching the
+  // internet while connected. That is the leak this release exists to
+  // close, so the wording says "not protected" without hedging: the
+  // customer's IPv4 may well be tunnelled, and their IPv6 is not.
+  "dash.ipv6Escaping":
+    "Some of your traffic is leaving over IPv6, outside the VPN. Your IPv6 address is visible to your network. Disconnect and reconnect; if it keeps happening, tell support.",
   "voucher.title": "Have a voucher?",
   "voucher.subtitle": "Enter a code to activate a plan without paying.",
   "voucher.placeholder": "Enter your code",
@@ -514,6 +528,10 @@ const fa: Record<TranslationKey, string> = {
   "settings.tooShort": "حداقل ۸ کاراکتر.",
   "dash.customActive":
     "حالت سفارشی: فقط برنامه‌های انتخابی شما از VPN عبور می‌کنند. IPv6 آن‌ها به جای ارسال بیرون از تونل مسدود می‌شود، بنابراین سایتی که فقط IPv6 دارد برایشان باز نمی‌شود.",
+  "dash.fullTunnelIpv6Blocked":
+    "تا زمانی که متصل هستید، IPv6 مسدود است. سرورهای Neoxify فقط IPv4 را منتقل می‌کنند، بنابراین IPv6 به جای ارسال بیرون از VPN همین‌جا متوقف می‌شود. سایتی که فقط IPv6 دارد تا وقتی اتصال را قطع نکنید باز نمی‌شود.",
+  "dash.ipv6Escaping":
+    "بخشی از ترافیک شما از طریق IPv6 و بیرون از VPN ارسال می‌شود. نشانی IPv6 شما برای شبکه‌تان دیده می‌شود. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
   "voucher.title": "کد هدیه دارید؟",
   "voucher.subtitle": "با وارد کردن کد، بدون پرداخت اشتراک فعال کنید.",
   "voucher.placeholder": "کد خود را وارد کنید",

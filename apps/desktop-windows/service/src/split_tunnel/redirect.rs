@@ -153,7 +153,9 @@
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use neoconnect_ipc::SplitTunnelMode;
 
 use windivert_sys::address::WINDIVERT_ADDRESS;
 use windivert_sys::{WinDivertFlags, WinDivertLayer};
@@ -174,10 +176,51 @@ const MAX_PACKET: usize = 65_575;
 /// a latency-sensitive audience is the reason this feature exists.
 const WORKERS: usize = 2;
 
+/// How long after activation a selected app's pre-existing TCP
+/// connections are refused rather than exempted.
+///
+/// This exists because closing them at the moment Custom mode starts
+/// cannot close all of them. `SetTcpEntry` can only tear down an
+/// ESTABLISHED connection -- there is no variant that works on one still
+/// in `SYN_SENT` -- so a connection that happens to be half-open at that
+/// instant survives the reset, completes a moment later against the real
+/// destination, and is then met by the mid-connection rule below, which
+/// exempts it permanently. A browser keeps such a socket alive and reuses
+/// it, so the customer sees their own address for minutes with Custom
+/// mode switched on. That is issue 9 in the handover, and the same class
+/// of dishonesty as a false "Connected".
+///
+/// Three seconds because it has to cover a SYN that is retransmitting on
+/// a slow or half-dead host: Windows sends the second SYN about a second
+/// after the first and the third about two seconds after that, so three
+/// seconds covers the common case of a connection that completes late
+/// without holding the window open long enough to matter. It is a window
+/// in which a selected app's *pre-existing* connections fail and are
+/// remade through the tunnel -- an application handles that routinely,
+/// it is what happens when a network changes -- and it deliberately does
+/// not extend to anything else.
+///
+/// The same value bounds the reset's convergence loop (see
+/// `split_tunnel::Convergence`), and it must: the drop is only defensible
+/// while something is still working to close these connections properly.
+/// A window that outlived the loop would be a period where a selected
+/// app simply could not use a connection it already had, with nothing
+/// arranging for it to get a better one.
+pub const ACTIVATION_GRACE: Duration = Duration::from_secs(3);
+
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const TCP_FLAG_SYN: u8 = 0x02;
 const TCP_FLAG_ACK: u8 = 0x10;
+const TCP_FLAG_FIN: u8 = 0x01;
+const TCP_FLAG_RST: u8 = 0x04;
+
+/// The hop limit put on a synthesised reset.
+///
+/// It never crosses a router -- the packet is injected straight into
+/// this machine's receive path -- so the value only has to be something
+/// no stack objects to. 64 is what everything else uses.
+const RESET_HOP_LIMIT: u8 = 64;
 
 /// What the loop has actually done, for diagnosis.
 ///
@@ -218,6 +261,59 @@ pub struct Stats {
     /// zero because there was nothing to count -- the packets were
     /// leaving unexamined.
     pub blocked_v6: AtomicU64,
+    /// Connections found living outside the tunnel that should be
+    /// inside it -- see `owner::escaped_connections`.
+    ///
+    /// The only number here that is not counted from inside the packet
+    /// loop, and it exists because every number that *is* counted there
+    /// is blind in the same direction. The loop can only describe
+    /// packets it was handed; a connection that escaped -- a SYN that
+    /// raced the owner lookup, a socket established before Custom mode
+    /// came on, an IPv6 connection blocked rather than carried --
+    /// produces no packet the loop will ever see. Every counter above
+    /// reads healthy while it carries the customer's traffic out in the
+    /// clear, which is precisely how this failed in 0.9.20, 0.9.25 and
+    /// 0.9.27. This is read from the machine's own connection tables
+    /// instead, every thirty seconds.
+    ///
+    /// A **gauge, not a total**: it holds what the most recent sweep
+    /// found. The same connection is one escape for as long as it lives,
+    /// so adding each sweep up would report a number that grows with how
+    /// long Custom mode has been on rather than with how much has got
+    /// away -- and a number that only ever climbs is one nobody can read
+    /// a trend out of.
+    ///
+    /// Deliberately not consulted by [`Stats::complaint`] in this
+    /// version. It has never been read against a packet capture, and
+    /// this project does not let the app tell a customer something is
+    /// wrong on the strength of a number nobody has checked against the
+    /// wire yet.
+    pub escaped: AtomicU64,
+    /// Mid-connection packets refused during the activation window --
+    /// see [`ACTIVATION_GRACE`].
+    ///
+    /// Counted, like `blocked_v6`, because it reports a *deliberate*
+    /// refusal rather than a fault, and because a drop that nothing
+    /// records is the one kind of change to this loop that cannot be
+    /// argued about afterwards. Non-zero here is normal for the first
+    /// three seconds of a session in which a selected application was
+    /// already running, and means nothing at all after that.
+    pub grace_dropped: AtomicU64,
+    /// Resets injected back to an application whose IPv6 was blocked,
+    /// and accepted by the driver.
+    ///
+    /// Counted after the injection rather than after the build, for the
+    /// reason `redirected` is: a run where every reset was constructed
+    /// and every injection refused would otherwise be indistinguishable
+    /// from one that worked, and the whole point of the reset is that
+    /// the application finds out.
+    ///
+    /// A refused injection is deliberately *not* folded into `rejected`.
+    /// `complaint` treats `rejected` as evidence that redirected traffic
+    /// is not arriving, and a dual-stack network produces resets
+    /// continuously -- so a failure here would light a warning about
+    /// something else entirely.
+    pub reset_v6: AtomicU64,
 }
 
 /// How many packets must have gone out before silence means anything.
@@ -243,13 +339,16 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={}",
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} grace_dropped={} reset_v6={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
             self.returned.load(Ordering::Relaxed),
             self.rejected.load(Ordering::Relaxed),
             self.blocked_v6.load(Ordering::Relaxed),
+            self.escaped.load(Ordering::Relaxed),
+            self.grace_dropped.load(Ordering::Relaxed),
+            self.reset_v6.load(Ordering::Relaxed),
         )
     }
 
@@ -380,6 +479,64 @@ pub struct Redirect {
     /// Every lookup goes here, through the tunnel, whoever asked. See
     /// `is_dns` for why that is not the overreach it looks like.
     pub dns_resolver: Ipv4Addr,
+    /// When interception began, which is what the activation window is
+    /// measured from -- see [`ACTIVATION_GRACE`].
+    ///
+    /// State on the redirect rather than a global, deliberately. Two
+    /// sessions can overlap for a moment during a failover -- Custom
+    /// mode is stopped and restarted against the new adapter -- and a
+    /// process-wide clock would let the outgoing session's age decide
+    /// what the incoming one does with a packet.
+    ///
+    /// Whatever the caller puts here is overwritten by [`start`]. The
+    /// window has to begin when packets begin arriving, not when the
+    /// struct was assembled, and the gap between the two is a route
+    /// probe and a firewall wait -- seconds, on the path where this
+    /// matters most.
+    pub activated: Instant,
+}
+
+impl Redirect {
+    /// Whether the activation reset is still converging, so a
+    /// pre-existing connection should be refused rather than exempted.
+    fn within_activation_grace(&self) -> bool {
+        self.activated.elapsed() < ACTIVATION_GRACE
+    }
+}
+
+/// Whether a mid-connection packet should be dropped rather than
+/// permanently exempted, because the activation reset has not finished
+/// yet.
+///
+/// Split out from [`decide`] because it is the whole of the new
+/// behaviour and every one of its clauses is load-bearing:
+///
+/// * **Only inside the window.** Outside it, the mid-connection rule is
+///   right and has been for a long time: a connection that predates
+///   Custom mode holds a socket to the real destination, and rewriting
+///   half of a live connection is not a redirect, it is breaking it.
+/// * **Only `OnlySelected`.** In `AllExcept` an unknown owner means
+///   "carry it", so the same rule there would refuse traffic belonging to
+///   programs nobody has identified -- including, for the first seconds
+///   of a session, most of the machine. Changing that direction needs its
+///   own evidence and is not part of this wave.
+/// * **Only a known owner.** A miss must never cause a drop. Attributing
+///   a packet is exactly the thing this file has been wrong about
+///   before, and the cost of being wrong here lands on an application the
+///   customer never selected.
+/// * **Never this service's own.** The proxy's upstream sockets look
+///   like any other application's, and refusing them would take out the
+///   relay carrying everything else.
+fn drop_while_converging(
+    within_grace: bool,
+    selection: &Selection,
+    owner_image: Option<&str>,
+    is_own: bool,
+) -> bool {
+    within_grace
+        && matches!(selection.mode(), SplitTunnelMode::OnlySelected)
+        && !is_own
+        && owner_image.map(|image| selection.should_tunnel(image)).unwrap_or(false)
 }
 
 /// Whether this packet is a name lookup.
@@ -484,10 +641,18 @@ impl Running {
 }
 
 pub fn start(
-    redirect: Redirect,
+    mut redirect: Redirect,
     nat: Arc<Nat>,
     selection: SharedSelection,
 ) -> Result<Running, String> {
+    // Stamped here rather than trusted from the caller: the window has
+    // to start when packets start arriving. Between the caller building
+    // this struct and the driver handing over a first packet sit a route
+    // probe and a wait for the firewall rule to become effective, which
+    // on the path where any of this matters take seconds -- long enough
+    // to spend the whole grace window before a single packet is seen.
+    redirect.activated = Instant::now();
+
     let filter = filter_for(&redirect);
     // Checked before opening so a filter problem is reported as one.
     // WinDivertOpen fails with a generic error for a bad expression,
@@ -573,6 +738,7 @@ fn worker(
         // tester report that changing the list did nothing until they
         // restarted the app.
         let chosen = selection.read().unwrap_or_else(|e| e.into_inner());
+        let mut reset = None;
         let rewrote = handle_packet(
             &mut packet[..len as usize],
             &mut address,
@@ -581,12 +747,21 @@ fn worker(
             &chosen,
             &mut owner,
             &stats,
+            &mut reset,
         );
 
         // Released before the send: nothing below consults it, and a
         // lock held across a syscall would make every other worker wait
         // on this one.
         drop(chosen);
+
+        // Injected before the original packet is dealt with, so the
+        // application learns its connection is gone in the same breath
+        // as the segment being refused. It is built from that segment
+        // and does not touch it -- see `build_v6_reset`.
+        if let Some(reset) = reset {
+            inject_v6_reset(&handle, &reset, &address, &stats);
+        }
 
         // Deliberately not re-injected: the only way a packet is meant
         // to disappear here. Everything else must reach the network,
@@ -691,6 +866,15 @@ struct ParsedV6 {
     source_port: u16,
     destination_port: u16,
     tcp_flags: u8,
+    /// Where the transport header begins, after however many extension
+    /// headers this packet carried.
+    ///
+    /// Added when the block gained a reset. Everything above can be
+    /// decided from the ports alone, but building a reset the
+    /// application's own stack will accept means reading the sequence
+    /// numbers out of the segment being refused -- and those are not at
+    /// a fixed offset for exactly the reason `parse_v6` exists.
+    transport_offset: usize,
 }
 
 /// Extension headers, which sit between the IPv6 header and the
@@ -770,9 +954,148 @@ fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
             source_port: u16::from_be_bytes([ports[0], ports[1]]),
             destination_port: u16::from_be_bytes([ports[2], ports[3]]),
             tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
+            transport_offset: offset,
         });
     }
     None
+}
+
+/// A TCP reset addressed back to the application, built from the packet
+/// being refused.
+///
+/// # Why a blocked connection is told rather than left hanging
+///
+/// Blocking a selected application's IPv6 is the right answer -- see the
+/// module comment -- but *silently* blocking it is not the same thing.
+/// A new connection recovers on its own: the SYN is swallowed, no answer
+/// comes, and every browser and every resolver falls back to the A
+/// record within a fraction of a second. Measured at 385ms on the rig.
+///
+/// A connection that already existed does not recover. The application
+/// holds a socket it believes is fine, its segments vanish, and TCP does
+/// what TCP does about a black hole: it retransmits, backs off, and
+/// keeps the socket for minutes before giving up. Nothing tells it there
+/// is a perfectly good IPv4 path to the same host. So Custom mode coming
+/// on turned a working page into a hang, and the counters read
+/// `blocked_v6` climbing, which looks exactly like the feature working.
+///
+/// A reset converts that into the case that already recovers. The
+/// application is told its connection is gone -- which it is -- and
+/// opens a new one, which fails over to IPv4 in milliseconds.
+///
+/// # Why it is built from the packet in hand
+///
+/// A stack does not accept any reset addressed at it; a reset outside
+/// the receive window is discarded, which is the whole reason blind
+/// reset attacks are hard. The one already in the window is the one
+/// derived from a segment the socket just sent: its acknowledgement
+/// number is, by definition, the sequence number the peer would next
+/// send from. So the reset is sent with `seq` equal to that
+/// acknowledgement, and acknowledges everything the segment consumed.
+/// A pure SYN carries no acknowledgement to borrow, so a reset for one
+/// starts at zero and acknowledges the initial sequence number, which is
+/// what a refusing host sends.
+///
+/// UDP gets no equivalent, and cannot: there is no in-band way to tell a
+/// datagram socket that its peer is unreachable, so a selected
+/// application's IPv6 UDP stays silently swallowed. That is a gap, and
+/// this comment is where it is stated rather than a decision hidden in
+/// the shape of the code.
+fn build_v6_reset(packet: &[u8], parsed: &ParsedV6) -> Option<Vec<u8>> {
+    if !matches!(parsed.transport, Transport::Tcp) {
+        return None;
+    }
+    // Never answer a reset with a reset. The connection is already gone
+    // and the two ends would otherwise have something to say to each
+    // other about it.
+    if parsed.tcp_flags & TCP_FLAG_RST != 0 {
+        return None;
+    }
+
+    let tcp = packet.get(parsed.transport_offset..parsed.transport_offset + 14)?;
+    let their_seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+    let their_ack = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]);
+    // The data offset is in 32-bit words and cannot legally be under
+    // five; a malformed one is clamped rather than trusted, because it
+    // is subtracted below and an under-count would acknowledge bytes
+    // that were never sent.
+    let data_offset = (((tcp[12] >> 4) as usize) * 4).max(20);
+
+    // How much sequence space the segment being refused consumed, which
+    // is what the reset has to acknowledge. `payload_length` counts
+    // everything after the fixed header; the captured packet may be
+    // shorter than it claims, so the smaller of the two is used.
+    let declared = IPV6_HEADER + u16::from_be_bytes([*packet.get(4)?, *packet.get(5)?]) as usize;
+    let segment = declared.min(packet.len()).checked_sub(parsed.transport_offset)?;
+    let consumed = segment.saturating_sub(data_offset) as u32
+        + u32::from(parsed.tcp_flags & TCP_FLAG_SYN != 0)
+        + u32::from(parsed.tcp_flags & TCP_FLAG_FIN != 0);
+
+    let (seq, ack) = if parsed.tcp_flags & TCP_FLAG_ACK != 0 {
+        (their_ack, their_seq.wrapping_add(consumed))
+    } else {
+        // A first SYN. Nothing has been acknowledged yet, so there is
+        // no number to borrow and the reset starts where a refusing
+        // host starts.
+        (0, their_seq.wrapping_add(consumed))
+    };
+
+    let source = packet.get(8..24)?;
+    let destination = packet.get(24..40)?;
+
+    let mut reset = vec![0u8; IPV6_HEADER + 20];
+    reset[0] = 0x60;
+    reset[4..6].copy_from_slice(&20u16.to_be_bytes());
+    reset[6] = IPPROTO_TCP;
+    reset[7] = RESET_HOP_LIMIT;
+    // Both ends swapped: this has to look like the remote answering.
+    reset[8..24].copy_from_slice(destination);
+    reset[24..40].copy_from_slice(source);
+
+    let tcp = IPV6_HEADER;
+    reset[tcp..tcp + 2].copy_from_slice(&parsed.destination_port.to_be_bytes());
+    reset[tcp + 2..tcp + 4].copy_from_slice(&parsed.source_port.to_be_bytes());
+    reset[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
+    reset[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
+    reset[tcp + 12] = 0x50; // data offset: five words, no options
+    reset[tcp + 13] = TCP_FLAG_RST | TCP_FLAG_ACK;
+    // Window, checksum and urgent pointer stay zero. The checksum is
+    // computed by the driver's own helper at injection, because a
+    // hand-rolled one that is wrong is discarded by the receiving stack
+    // without a word -- which would put this straight back to the silent
+    // black hole it exists to remove.
+    Some(reset)
+}
+
+/// Hands a synthesised reset to the driver, addressed the way the
+/// application expects to receive it.
+///
+/// Inbound, on the interface the original packet was seen on. The same
+/// reasoning as the return leg: a packet whose source is the real remote
+/// is legitimate arriving inbound, and the interface is the only record
+/// of where the application's socket expects its peer to be.
+fn inject_v6_reset(
+    handle: &Handle,
+    reset: &[u8],
+    original: &WINDIVERT_ADDRESS,
+    stats: &Stats,
+) {
+    let mut address = *original;
+    address.set_outbound(false);
+    address.set_ipv6(true);
+
+    let mut packet = reset.to_vec();
+    let len = packet.len() as u32;
+    recalculate_checksums(&mut packet, len, &mut address);
+
+    if handle.send(&packet, len, &address) {
+        stats.reset_v6.fetch_add(1, Ordering::Relaxed);
+    }
+    // A refusal is deliberately not counted anywhere. `rejected` is what
+    // `complaint` reads to decide that redirected traffic is not
+    // arriving, and on a dual-stack network these are produced
+    // continuously -- so folding a failure here into that number would
+    // light a warning about something else entirely.
 }
 
 /// What to do with an IPv6 packet, which this loop has no way to carry.
@@ -791,6 +1114,7 @@ fn handle_ipv6(
     selection: &Selection,
     owner: &mut OwnerLookup,
     stats: &Stats,
+    reset: &mut Option<Vec<u8>>,
 ) -> Option<Leg> {
     let block = |stats: &Stats| {
         stats.blocked_v6.fetch_add(1, Ordering::Relaxed);
@@ -855,6 +1179,16 @@ fn handle_ipv6(
     };
     if tunnelled {
         stats.matched.fetch_add(1, Ordering::Relaxed);
+        // Told, not merely stopped. A new connection recovers from
+        // silence on its own -- the SYN goes unanswered and the
+        // application falls back to the A record in milliseconds -- but
+        // one that already existed does not: it retransmits into a black
+        // hole for minutes while the customer watches a page hang with
+        // Custom mode switched on. See `build_v6_reset`.
+        //
+        // Only TCP. UDP has no in-band way to say this and stays
+        // silently swallowed, which is a gap and is stated as one.
+        *reset = build_v6_reset(packet, &parsed);
         block(stats)
     } else {
         // An application the customer did not choose. Its IPv6 is none
@@ -875,13 +1209,14 @@ fn handle_packet(
     selection: &Selection,
     owner: &mut OwnerLookup,
     stats: &Stats,
+    reset: &mut Option<Vec<u8>>,
 ) -> Option<Leg> {
     // Decided before anything below is consulted, because none of it can
     // carry an IPv6 packet: the NAT table, the rewrite and the proxy's
     // upstream socket are all IPv4, and so is the address on the tunnel
     // adapter they would send it to.
     if packet.first().map(|first| first >> 4) == Some(6) {
-        return handle_ipv6(packet, redirect, selection, owner, stats);
+        return handle_ipv6(packet, redirect, selection, owner, stats, reset);
     }
 
     let parsed = parse(packet)?;
@@ -980,7 +1315,43 @@ fn decide(
     // Custom mode did, or before its app was selected. Moving it now
     // would break it: the app holds a socket to the real destination,
     // and rewriting half a live connection is not a redirect.
+    //
+    // That is right in general and wrong for the first seconds of a
+    // session, and the difference is what this branch now makes.
+    // Activation closes a selected app's existing connections so they
+    // are rebuilt through the tunnel -- but `SetTcpEntry` cannot close a
+    // connection that is still in `SYN_SENT`, and one that was half-open
+    // at that instant completes a moment later against the real
+    // destination. It then arrives here as an ordinary mid-connection
+    // packet, is exempted, and lives outside the tunnel for as long as
+    // the application keeps it -- which for a browser is minutes.
+    //
+    // Inside the window, refuse it instead. The application sees the
+    // connection fail, which is a thing every application handles, and
+    // opens a new one that this loop is on time for. Outside the window
+    // the old behaviour returns unchanged. See `drop_while_converging`
+    // for why each clause of the test is there.
     if matches!(parsed.transport, Transport::Tcp) && !is_new_connection {
+        if redirect.within_activation_grace() {
+            // Not `image_for_new_connection`: this packet is not opening
+            // a connection, and forcing a table rebuild for every
+            // mid-connection packet on the machine for three seconds
+            // would be a table walk per packet at the busiest moment a
+            // session has.
+            let image = owner.image_for_port(Family::V4, parsed.transport, parsed.source_port);
+            let is_own = image
+                .map(|image| {
+                    redirect
+                        .own_images
+                        .iter()
+                        .any(|own| image.eq_ignore_ascii_case(own))
+                })
+                .unwrap_or(false);
+            if drop_while_converging(true, selection, image, is_own) {
+                stats.grace_dropped.fetch_add(1, Ordering::Relaxed);
+                return Verdict::Drop;
+            }
+        }
         nat.record_direct(parsed.transport, parsed.source_port);
         return Verdict::Direct;
     }
@@ -989,7 +1360,37 @@ fn decide(
     // `image_for_new_connection`. This is the one packet whose answer
     // decides where a whole connection lives, and the one whose miss
     // cannot be taken back afterwards.
-    let owner_image = if is_new_connection {
+    //
+    // A UDP datagram that has reached this line asks exactly the same
+    // question, and until now it was not being asked. `is_new_connection`
+    // is SYN-only, because UDP has no SYN -- but the flow table and the
+    // leave-alone cache between them say the same thing a SYN says: both
+    // were consulted above, and reaching here means this datagram belongs
+    // to a flow nothing is carrying and nothing has decided about. For
+    // UDP that *is* the new-flow signal, and it is available without any
+    // help from the protocol.
+    //
+    // What it costs to keep missing it is the 0.9.25 bug arriving over
+    // UDP. A socket is microseconds old when it sends its first
+    // datagram, which puts that datagram inside `MIN_REFRESH_INTERVAL`,
+    // where the owner lookup will not rebuild and answers "nobody". In
+    // `OnlySelected` that means leave it alone, so a selected app's very
+    // first datagram goes out direct -- and for a browser that datagram
+    // is the QUIC Initial. Twenty milliseconds later the snapshot is
+    // stale enough to rebuild, datagram two is attributed correctly and
+    // redirected, and the handshake is now split across two paths with
+    // two source addresses. It does not fail fast: the browser waits out
+    // its whole QUIC timeout before falling back to TCP.
+    //
+    // The residual cost is one extra pair of table walks per UDP flow
+    // whose owner cannot be resolved at all, since those record nothing
+    // and so ask again on the next datagram. That is the same trade
+    // `image_for_new_connection` already accepted for SYNs, and it is
+    // bounded by how rare an unattributable UDP source port is -- a live
+    // socket is in the table from the moment it is created. It has not
+    // been measured under load; see the rig note.
+    let opens_a_flow = is_new_connection || matches!(parsed.transport, Transport::Udp);
+    let owner_image = if opens_a_flow {
         owner.image_for_new_connection(Family::V4, parsed.transport, parsed.source_port)
     } else {
         owner.image_for_port(Family::V4, parsed.transport, parsed.source_port)
@@ -1013,6 +1414,46 @@ fn decide(
         Some(image) => !is_own && selection.should_tunnel(image),
         // A port with no owner this can see. Which way to fail depends
         // on the direction -- see `tunnel_when_owner_unknown`.
+        //
+        // # The measured gap this arm cannot close
+        //
+        // A UDP socket that is closed immediately after its send leaks
+        // in `OnlySelected`, and no amount of asking harder fixes it.
+        // Windows drops the port from the UDP endpoint table when the
+        // socket closes, and this loop is handed the datagram after the
+        // send returns -- so by the time `image_for_new_connection`
+        // rebuilds, the row naming the owner is already gone. No owner
+        // means `tunnel_when_owner_unknown()`, which in `OnlySelected`
+        // is false, which is "leave it alone". The datagram egresses in
+        // clear text from a selected application.
+        //
+        // Measured on the rig, twice: a selected program sending 15
+        // datagrams from 15 sockets, each closed microseconds after the
+        // send, put 13 and 14 of them respectively on the wire
+        // unredirected. It is reproducible, it is not a race that
+        // retrying wins, and it is the one hole the redesign of the
+        // paragraph above did not close.
+        //
+        // It is deliberately not the browser case, and the same session
+        // measured that too: a real QUIC client holds its socket open
+        // for the life of the connection, so the second datagram is
+        // always attributable and the first is caught by
+        // `image_for_new_connection`. Chrome went from 219 plaintext
+        // UDP/443 datagrams before activation to 0 after. What is left
+        // is fire-and-forget senders -- a beacon, a one-shot resolver, a
+        // telemetry ping -- which is a smaller shape than QUIC and still
+        // real.
+        //
+        // Closing it needs a mechanism that does not depend on the
+        // socket still existing when the packet is classified. A WFP
+        // filter at `FWPM_LAYER_ALE_AUTH_CONNECT_V4` keyed on
+        // `FWPM_CONDITION_ALE_APP_ID` is classified by the kernel at
+        // send time, inside the sending process, where the owner is not
+        // a lookup but the caller -- the B2 proposal on the roadmap.
+        // `engines/ipv6_block.rs` already builds and installs a dynamic
+        // filter set from this service, so the machinery exists; what is
+        // missing is the decision about what such a filter should do
+        // with a datagram it cannot hand to the relay.
         None => selection.tunnel_when_owner_unknown(),
     };
 
@@ -1197,6 +1638,9 @@ mod tests {
             returned: AtomicU64::new(returned),
             rejected: AtomicU64::new(rejected),
             blocked_v6: AtomicU64::new(0),
+            escaped: AtomicU64::new(0),
+            grace_dropped: AtomicU64::new(0),
+            reset_v6: AtomicU64::new(0),
         }
     }
 
@@ -1226,6 +1670,18 @@ mod tests {
         // that read as a fault, Custom mode would report itself broken
         // every single time it started.
         assert_eq!(stats(0, 0, 0, 0, 0).complaint(WARMUP * 2), None);
+    }
+
+    #[test]
+    fn escapes_are_recorded_without_changing_what_the_customer_is_told() {
+        // Observability only, in this version. The escape count has
+        // never been read against a packet capture, and a complaint
+        // keyed on an unverified number is exactly the false alarm
+        // WARMUP exists to prevent -- see the field's own comment.
+        let healthy = stats(4000, 900, 850, 800, 0);
+        healthy.escaped.store(7, Ordering::Relaxed);
+        assert_eq!(healthy.complaint(WARMUP * 2), None);
+        assert!(healthy.summary().contains("escaped=7"), "{}", healthy.summary());
     }
 
     #[test]
@@ -1275,6 +1731,164 @@ mod tests {
         // "none of your apps have sent traffic" would be true but
         // useless noise a second after switching it on.
         assert_eq!(stats(10, 0, 0, 0, 0).complaint(WARMUP * 2), None);
+    }
+
+    fn selection_of(paths: &[&str], mode: SplitTunnelMode) -> Selection {
+        Selection::new(paths.iter().map(|p| p.to_string()), mode)
+    }
+
+    #[test]
+    fn a_selected_apps_surviving_connection_is_refused_while_the_reset_converges() {
+        // The SYN_SENT hole: a connection that was half-open when Custom
+        // mode started completes against the real destination a moment
+        // later, and the mid-connection rule would exempt it for its
+        // whole life. Inside the window it is refused instead, so the
+        // application opens a new one the loop is on time for.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(drop_while_converging(true, &selection, Some(r"c:\games\game.exe"), false));
+    }
+
+    #[test]
+    fn the_window_closes_and_the_old_behaviour_returns() {
+        // Outside it, exempting a pre-existing connection is right and
+        // has been for a long time: the app holds a socket to the real
+        // destination and rewriting half of a live connection breaks it.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(!drop_while_converging(false, &selection, Some(r"c:\games\game.exe"), false));
+    }
+
+    #[test]
+    fn a_packet_nobody_can_attribute_is_never_dropped() {
+        // The miss must not cost anything. Attributing a packet is the
+        // thing this file has been wrong about before, and here the
+        // price of being wrong is paid by an application the customer
+        // never chose.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(!drop_while_converging(true, &selection, None, false));
+    }
+
+    #[test]
+    fn an_unselected_app_keeps_its_connections_through_the_window() {
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(!drop_while_converging(true, &selection, Some(r"c:\windows\explorer.exe"), false));
+    }
+
+    #[test]
+    fn this_service_is_never_refused() {
+        // The proxy's upstream sockets look like any other
+        // application's. Refusing them would take out the relay carrying
+        // everything else -- and in AllExcept the service is "selected"
+        // by default, so this is the common case there, not the corner.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        assert!(!drop_while_converging(true, &selection, Some(r"c:\games\game.exe"), true));
+    }
+
+    #[test]
+    fn everything_except_these_is_left_exactly_as_it_was() {
+        // In AllExcept an unknown owner means "carry it", so this rule
+        // there would refuse traffic belonging to programs nobody has
+        // identified -- most of the machine, for the first seconds of a
+        // session. Changing that direction needs its own evidence.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::AllExcept);
+        assert!(!drop_while_converging(true, &selection, Some(r"c:\windows\explorer.exe"), false));
+        assert!(!drop_while_converging(true, &selection, None, false));
+    }
+
+    #[test]
+    fn a_udp_socket_created_inside_the_rate_limiter_window_is_still_attributed() {
+        // The UDP twin of the 0.9.25 fix, and the reason it needed one.
+        // A SYN forces the owner snapshot to be rebuilt because a miss
+        // there cannot be taken back; UDP has no SYN, so a brand-new
+        // socket's first datagram landed inside OwnerLookup's 20ms floor,
+        // was attributed to nobody, and in OnlySelected went out direct.
+        // For a browser that datagram is the QUIC Initial, and datagram
+        // two -- attributed correctly and redirected -- arrives from a
+        // different address: the handshake does not fail fast, it hangs
+        // until QUIC gives up and TCP is tried instead.
+        //
+        // Both socket operations here happen microseconds apart, which
+        // is what puts the second inside the floor and makes this the
+        // case being tested rather than an ordinary hit.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let selection = Selection::new([me], SplitTunnelMode::OnlySelected);
+
+        // Builds the snapshot and marks it freshly refreshed, so the
+        // socket opened next cannot be in it and a miss on its own
+        // cannot force a rebuild.
+        let warm = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let _ =
+            owner.image_for_port(Family::V4, Transport::Udp, warm.local_addr().unwrap().port());
+
+        let fresh = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = fresh.local_addr().unwrap().port();
+
+        // Not port 53: the DNS branch carries a lookup whoever made it,
+        // so it would answer this without ever consulting the owner and
+        // the test would prove nothing.
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            443,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats);
+
+        assert!(
+            matches!(verdict, Verdict::Redirect { .. }),
+            "a selected app's first datagram must be carried, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn an_unselected_apps_first_datagram_is_still_left_alone() {
+        // The forced rebuild changes how confidently the question is
+        // answered, not what the answer means. An app the customer did
+        // not choose keeps its ordinary connection -- the whole premise
+        // of a split tunnel -- and its port is remembered so the next
+        // datagram costs a hash lookup instead of another walk.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+
+        let fresh = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = fresh.local_addr().unwrap().port();
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            443,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct
+        );
+        assert_eq!(
+            nat.lookup(Transport::Udp, port, Ipv4Addr::new(203, 0, 113, 9), 443),
+            Verdict::Direct,
+            "a known owner's verdict must be remembered"
+        );
+    }
+
+    #[test]
+    fn the_window_is_measured_from_when_interception_began() {
+        // Per-redirect rather than global: a failover stops Custom mode
+        // and starts it again against the new adapter, and a
+        // process-wide clock would let the outgoing session's age decide
+        // what the incoming one does with a packet.
+        let mut redirect = sample_redirect();
+        assert!(redirect.within_activation_grace());
+        redirect.activated = Instant::now() - ACTIVATION_GRACE - Duration::from_millis(1);
+        assert!(!redirect.within_activation_grace());
     }
 
     /// A minimal IPv4 TCP packet, so the parser is exercised against
@@ -1509,6 +2123,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
+            activated: Instant::now(),
         });
 
         assert!(filter.contains("ip.DstAddr != 203.0.113.7"));
@@ -1534,6 +2149,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
+            activated: Instant::now(),
         }
     }
 
@@ -1692,6 +2308,136 @@ mod tests {
         }
     }
 
+    /// The same builder the loop uses, given a segment shaped like one
+    /// an established connection sends.
+    fn established_v6_segment(seq: u32, ack: u32, payload: usize) -> Vec<u8> {
+        let mut packet = vec![0u8; IPV6_HEADER + 20 + payload];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&((20 + payload) as u16).to_be_bytes());
+        packet[6] = IPPROTO_TCP;
+        packet[7] = 64;
+        let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst: std::net::Ipv6Addr = "2607:f8b0:400a:809::200e".parse().unwrap();
+        packet[8..24].copy_from_slice(&src.octets());
+        packet[24..40].copy_from_slice(&dst.octets());
+        packet[40..42].copy_from_slice(&51234u16.to_be_bytes());
+        packet[42..44].copy_from_slice(&443u16.to_be_bytes());
+        packet[44..48].copy_from_slice(&seq.to_be_bytes());
+        packet[48..52].copy_from_slice(&ack.to_be_bytes());
+        packet[52] = 0x50;
+        packet[53] = TCP_FLAG_ACK;
+        packet
+    }
+
+    #[test]
+    fn a_blocked_connection_is_told_rather_than_left_hanging() {
+        // The whole point of the reset. A pre-existing IPv6 connection
+        // whose packets are swallowed does not fail fast: TCP
+        // retransmits into the black hole and holds the socket for
+        // minutes, so the customer sees a page hang while `blocked_v6`
+        // climbs and looks like the feature working.
+        //
+        // A stack does not accept just any reset -- one outside the
+        // receive window is discarded -- so the numbers here are the
+        // property being tested, not decoration. The reset's sequence
+        // number is the acknowledgement the segment just carried, which
+        // is by definition where the peer would send from next.
+        let segment = established_v6_segment(1_000, 5_000, 120);
+        let parsed = parse_v6(&segment).expect("must parse");
+        let reset = build_v6_reset(&segment, &parsed).expect("a TCP segment must produce one");
+
+        assert_eq!(reset.len(), IPV6_HEADER + 20);
+        // Both ends swapped: it has to look like the remote answering.
+        assert_eq!(&reset[8..24], &segment[24..40]);
+        assert_eq!(&reset[24..40], &segment[8..24]);
+        assert_eq!(u16::from_be_bytes([reset[40], reset[41]]), 443);
+        assert_eq!(u16::from_be_bytes([reset[42], reset[43]]), 51234);
+        assert_eq!(
+            u32::from_be_bytes([reset[44], reset[45], reset[46], reset[47]]),
+            5_000,
+            "the reset must start where the peer would have"
+        );
+        assert_eq!(
+            u32::from_be_bytes([reset[48], reset[49], reset[50], reset[51]]),
+            1_120,
+            "and acknowledge every byte the segment carried"
+        );
+        assert_eq!(reset[53], TCP_FLAG_RST | TCP_FLAG_ACK);
+        assert_eq!(reset[6], IPPROTO_TCP);
+    }
+
+    #[test]
+    fn a_refused_syn_gets_the_reset_a_refusing_host_would_send() {
+        // A first SYN carries no acknowledgement to borrow, so the
+        // reset starts at zero and acknowledges the initial sequence
+        // number -- which is exactly what a host with nothing listening
+        // sends, and therefore exactly what the connecting stack is
+        // already prepared to accept.
+        let mut segment = established_v6_segment(7_777, 0, 0);
+        segment[53] = TCP_FLAG_SYN;
+        let parsed = parse_v6(&segment).expect("must parse");
+        let reset = build_v6_reset(&segment, &parsed).expect("a SYN must produce one");
+
+        assert_eq!(u32::from_be_bytes([reset[44], reset[45], reset[46], reset[47]]), 0);
+        assert_eq!(u32::from_be_bytes([reset[48], reset[49], reset[50], reset[51]]), 7_778);
+    }
+
+    #[test]
+    fn a_fin_is_acknowledged_like_the_byte_it_is() {
+        let mut segment = established_v6_segment(400, 900, 0);
+        segment[53] = TCP_FLAG_ACK | TCP_FLAG_FIN;
+        let parsed = parse_v6(&segment).expect("must parse");
+        let reset = build_v6_reset(&segment, &parsed).unwrap();
+        assert_eq!(u32::from_be_bytes([reset[48], reset[49], reset[50], reset[51]]), 401);
+    }
+
+    #[test]
+    fn nothing_answers_a_reset_with_a_reset() {
+        // The connection is already gone. Two ends exchanging resets
+        // about it is a loop, not a recovery.
+        let mut segment = established_v6_segment(1, 2, 0);
+        segment[53] = TCP_FLAG_RST;
+        let parsed = parse_v6(&segment).expect("must parse");
+        assert!(build_v6_reset(&segment, &parsed).is_none());
+    }
+
+    #[test]
+    fn udp_gets_no_reset_because_there_is_none_to_send() {
+        // Stated rather than implied. There is no in-band way to tell a
+        // datagram socket its peer is unreachable, so a selected app's
+        // IPv6 UDP stays silently swallowed -- a gap, not a decision
+        // buried in the shape of the code.
+        let mut segment = established_v6_segment(1, 2, 8);
+        segment[6] = IPPROTO_UDP;
+        let parsed = parse_v6(&segment).expect("must parse");
+        assert!(matches!(parsed.transport, Transport::Udp));
+        assert!(build_v6_reset(&segment, &parsed).is_none());
+    }
+
+    #[test]
+    fn a_segment_behind_extension_headers_is_still_answered() {
+        // The sequence numbers are not at a fixed offset, for the same
+        // reason the ports are not. Reading them at 40 regardless would
+        // build a reset the application's stack discards as out of
+        // window, which is the silent black hole all over again.
+        let packet = ipv6_packet("2607:f8b0:400a:809::200e", 443, &[(IPPROTO_DSTOPTS, 16)]);
+        let parsed = parse_v6(&packet).expect("must parse");
+        assert_eq!(parsed.transport_offset, IPV6_HEADER + 16);
+        let reset = build_v6_reset(&packet, &parsed).expect("must produce a reset");
+        assert_eq!(u16::from_be_bytes([reset[40], reset[41]]), 443);
+        assert_eq!(u16::from_be_bytes([reset[42], reset[43]]), 51234);
+    }
+
+    #[test]
+    fn a_truncated_segment_produces_nothing_rather_than_nonsense() {
+        // A service running as LocalSystem, with every packet on the
+        // machine going past it.
+        let mut segment = established_v6_segment(1, 2, 0);
+        let parsed = parse_v6(&segment).expect("must parse");
+        segment.truncate(IPV6_HEADER + 10);
+        assert!(build_v6_reset(&segment, &parsed).is_none());
+    }
+
     #[test]
     fn refuses_an_ipv6_packet_whose_ports_it_cannot_find() {
         // Each of these has to come back None so the caller falls to the
@@ -1789,6 +2535,8 @@ mod tests {
                 // the test.
                 carry_dns: false,
                 dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
+                // Overwritten by `start`; see ACTIVATION_GRACE.
+                activated: Instant::now(),
             },
             nat,
             selection,
@@ -1840,6 +2588,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
+            activated: Instant::now(),
         });
         super::super::divert::compile_filter(&filter).expect("the filter must compile");
     }

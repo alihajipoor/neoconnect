@@ -6,7 +6,13 @@ import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { formatBytes } from "../lib/utils";
 import { customerProtocolLabel } from "../lib/protocol-labels";
-import { captureBaselineIp, verifyEgress, type EgressVerdict } from "../lib/egress";
+import {
+  captureBaselineIp,
+  captureIpv6Baseline,
+  checkIpv6,
+  verifyEgress,
+  type EgressVerdict,
+} from "../lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
@@ -42,6 +48,17 @@ type VpnStatus = {
    * phrased for the customer by the service. The only signal here
    * measured on the path a chosen app's traffic actually takes. */
   splitTunnelProblem?: string;
+  /** Whether the service is holding a machine-wide IPv6 block for this
+   * session.
+   *
+   * Read rather than inferred. Every node is IPv4-only, so a full tunnel
+   * has nowhere to send IPv6 and blocks it instead of letting it out in
+   * the clear -- but which sessions actually have a block is a fact
+   * about the machine, not about the protocol name: WireGuard has none
+   * of ours (it installs its own), Custom mode has none (the redirect
+   * handles IPv6 per app), and an install that failed has none either.
+   * The customer is told about the gap, so the claim has to be true. */
+  ipv6Blocked?: boolean;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }
@@ -495,6 +512,20 @@ export function Dashboard({
    * machine is. */
   const [splitTunnelActive, setSplitTunnelActive] = useState(false);
   const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
+  /** Whether the service says IPv6 is blocked for this session. */
+  const [ipv6Blocked, setIpv6Blocked] = useState(false);
+  /** Whether this machine could reach public IPv6 *before* connecting.
+   *
+   * The whole point of taking it beforehand: most machines cannot reach
+   * public IPv6 at all, and without this a failed probe while connected
+   * is indistinguishable between "we blocked it" and "there was never
+   * any". A ref, like the IPv4 baseline, because nothing renders from
+   * it. */
+  const ipv6BaselineRef = useRef<boolean | null>(null);
+  /** True only when the app has *observed* IPv6 still reaching the
+   * internet while connected. Never inferred, and never set from the
+   * absence of a block. */
+  const [ipv6Escaping, setIpv6Escaping] = useState(false);
   /** When the shown data was last fetched, if the server could not be
    * reached this time. Null means everything on screen is current.
    *
@@ -545,6 +576,7 @@ export function Dashboard({
     statusMissesRef.current = 0;
     setSplitTunnelActive(Boolean(status.splitTunnelActive));
     setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+    setIpv6Blocked(Boolean(status.ipv6Blocked));
     return stateFromStatus(status);
   }
 
@@ -743,9 +775,58 @@ export function Dashboard({
     // about turns every later comparison into a false leak report.
     if (adopted === "disconnected") {
       baselineIpRef.current = await captureBaselineIp();
+      // The same window, for the same reason, and the same trap: asked
+      // while a tunnel is up, "can this machine reach public IPv6" is
+      // the question being tested rather than the baseline for it.
+      ipv6BaselineRef.current = await captureIpv6Baseline();
       setExitIp(null);
     }
   }
+
+  // Asks the one question the IPv4 egress check cannot: is IPv6 still
+  // reaching the internet while we are connected?
+  //
+  // Every node is IPv4-only, so there is no tunnel for a v6 packet to
+  // have gone through. A yes therefore means it left around the VPN, in
+  // the clear, from the customer's own address -- which is exactly what
+  // was measured on OpenVPN, IKEv2 and REALITY while this screen said
+  // "You're protected".
+  //
+  // Three things this deliberately does not do.
+  //
+  // It does not block anything. The check fires once the state has
+  // already settled, and the customer never waits on it.
+  //
+  // It does not alarm on a machine with no IPv6, which is most of them.
+  // A probe that fails is evidence only when one succeeded before
+  // connecting -- see `checkIpv6`.
+  //
+  // And it does not feed `combineEvidence`. Reporting "degraded" would
+  // hand the tunnel to the failover ladder, which would tear down a
+  // working connection and try the next protocol -- which leaks IPv6
+  // identically. It would cycle every candidate, break an IPv4 tunnel
+  // that was fine, and end where it started. The honest response to a
+  // gap every protocol shares is to say so, not to shuffle.
+  useEffect(() => {
+    if (connectionState !== "connected") {
+      // Cleared on the way out, and the baseline with it: the next
+      // connect may be on a different network, where the answer
+      // differs.
+      setIpv6Escaping(false);
+      if (connectionState === "disconnected") ipv6BaselineRef.current = null;
+      return;
+    }
+
+    let abandoned = false;
+    void checkIpv6(ipv6BaselineRef.current).then((verdict) => {
+      // A verdict about a tunnel that has since gone must not land on a
+      // screen describing a different one.
+      if (!abandoned) setIpv6Escaping(verdict === "escaping");
+    });
+    return () => {
+      abandoned = true;
+    };
+  }, [connectionState]);
 
   // Keeps checking a live tunnel, and moves it if it has stopped
   // working.
@@ -771,6 +852,7 @@ export function Dashboard({
         const status = await serviceStatus();
         setSplitTunnelActive(Boolean(status.splitTunnelActive));
         setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+        setIpv6Blocked(Boolean(status.ipv6Blocked));
         fromStatus = stateFromStatus(status);
         statusMissesRef.current = 0;
       } catch {
@@ -1105,6 +1187,15 @@ export function Dashboard({
         // Fresh every attempt, and taken only once plain networking is
         // confirmed working. See settleAndCaptureBaseline.
         baselineIpRef.current = await settleAndCaptureBaseline(settleBudget);
+        // Once per pass, not once per candidate: whether this machine
+        // has public IPv6 is a fact about its network, not about which
+        // protocol is being tried, and re-measuring it five times would
+        // add a timeout to each rejected candidate for no new
+        // information. Taken here rather than before the loop so it
+        // still lands after the previous engine's routes are gone.
+        if (ipv6BaselineRef.current === null) {
+          ipv6BaselineRef.current = await captureIpv6Baseline();
+        }
 
         try {
           await invoke("vpn_connect", { payload: candidate });
@@ -1600,6 +1691,35 @@ export function Dashboard({
                         ) : (
                           <p className="mt-1 text-xs text-highlight">{t("dash.customActive")}</p>
                         )
+                      ) : null}
+
+                      {/* The full-tunnel counterpart, in the same place
+                          and the same voice. Shown only when the service
+                          reports a block is actually installed -- never
+                          derived from the protocol -- because this is a
+                          statement about the machine's state and the
+                          rule on this screen is that it does not make
+                          those without evidence.
+
+                          Not shown in Custom mode: the line above
+                          already describes what happens to IPv6 there,
+                          and it is a different thing (per app, not
+                          machine-wide). */}
+                      {connectionState === "connected" && !splitTunnelActive && ipv6Blocked ? (
+                        <p className="mt-1 text-xs text-highlight">
+                          {t("dash.fullTunnelIpv6Blocked")}
+                        </p>
+                      ) : null}
+
+                      {/* And the case both of the above are meant to
+                          make impossible: IPv6 observed still reaching
+                          the internet while connected. Destructive
+                          styling and no hedging -- their IPv4 may be
+                          perfectly tunnelled and their IPv6 is going out
+                          in the clear, which is the exact combination
+                          that made this leak invisible for so long. */}
+                      {connectionState === "connected" && ipv6Escaping ? (
+                        <p className="mt-1 text-xs text-destructive">{t("dash.ipv6Escaping")}</p>
                       ) : null}
                     </div>
 
