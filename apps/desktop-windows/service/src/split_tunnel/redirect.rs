@@ -1414,6 +1414,46 @@ fn decide(
         Some(image) => !is_own && selection.should_tunnel(image),
         // A port with no owner this can see. Which way to fail depends
         // on the direction -- see `tunnel_when_owner_unknown`.
+        //
+        // # The measured gap this arm cannot close
+        //
+        // A UDP socket that is closed immediately after its send leaks
+        // in `OnlySelected`, and no amount of asking harder fixes it.
+        // Windows drops the port from the UDP endpoint table when the
+        // socket closes, and this loop is handed the datagram after the
+        // send returns -- so by the time `image_for_new_connection`
+        // rebuilds, the row naming the owner is already gone. No owner
+        // means `tunnel_when_owner_unknown()`, which in `OnlySelected`
+        // is false, which is "leave it alone". The datagram egresses in
+        // clear text from a selected application.
+        //
+        // Measured on the rig, twice: a selected program sending 15
+        // datagrams from 15 sockets, each closed microseconds after the
+        // send, put 13 and 14 of them respectively on the wire
+        // unredirected. It is reproducible, it is not a race that
+        // retrying wins, and it is the one hole the redesign of the
+        // paragraph above did not close.
+        //
+        // It is deliberately not the browser case, and the same session
+        // measured that too: a real QUIC client holds its socket open
+        // for the life of the connection, so the second datagram is
+        // always attributable and the first is caught by
+        // `image_for_new_connection`. Chrome went from 219 plaintext
+        // UDP/443 datagrams before activation to 0 after. What is left
+        // is fire-and-forget senders -- a beacon, a one-shot resolver, a
+        // telemetry ping -- which is a smaller shape than QUIC and still
+        // real.
+        //
+        // Closing it needs a mechanism that does not depend on the
+        // socket still existing when the packet is classified. A WFP
+        // filter at `FWPM_LAYER_ALE_AUTH_CONNECT_V4` keyed on
+        // `FWPM_CONDITION_ALE_APP_ID` is classified by the kernel at
+        // send time, inside the sending process, where the owner is not
+        // a lookup but the caller -- the B2 proposal on the roadmap.
+        // `engines/ipv6_block.rs` already builds and installs a dynamic
+        // filter set from this service, so the machinery exists; what is
+        // missing is the decision about what such a filter should do
+        // with a datagram it cannot hand to the relay.
         None => selection.tunnel_when_owner_unknown(),
     };
 
