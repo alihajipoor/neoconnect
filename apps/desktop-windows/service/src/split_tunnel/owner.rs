@@ -990,6 +990,25 @@ const MIB_TCP_STATE_ESTAB: u32 = 5;
 /// alternative is a feature that silently does not apply until every
 /// program is restarted.
 ///
+/// # What is deliberately left alone
+///
+/// Connections to the LAN, to loopback and to the node itself. Closing
+/// those is pure harm and buys nothing, because none of them would ever
+/// have been redirected: the kernel filter excludes every one of those
+/// destinations before the redirect loop is given a packet, so a
+/// connection to a printer, a NAS or the machine's own services is not
+/// a connection that is missing out on the tunnel -- it is one the
+/// tunnel was never for. The node's own address is worse than pointless:
+/// it is the tunnel, and in `AllExcept` it would be closed on every
+/// activation.
+///
+/// Neoxify's own connections, for the same reason plus a sharper one.
+/// In `AllExcept` the service and the app are "selected" by default --
+/// nobody thinks to exclude the VPN client -- so without this the reset
+/// would close the app's link to its own API every time Custom mode came
+/// on, which is the 0.9.22 bug arriving through a different door. It
+/// matters more now that this runs repeatedly rather than once.
+///
 /// What one pass of the reset managed, and what it could not.
 #[derive(Debug, Default)]
 pub struct ResetOutcome {
@@ -1007,7 +1026,11 @@ pub struct ResetOutcome {
 }
 
 /// Returns what was closed and what refused to close, for the log.
-pub fn reset_selected_connections(selection: &Selection) -> ResetOutcome {
+pub fn reset_selected_connections(
+    selection: &Selection,
+    node: Ipv4Addr,
+    own_images: &[String],
+) -> ResetOutcome {
     let mut outcome = ResetOutcome::default();
     let Some(words) = query_table(|buf, size| {
         // SAFETY: `buf` is null (sizing) or a buffer of `*size` bytes.
@@ -1039,11 +1062,31 @@ pub fn reset_selected_connections(selection: &Selection) -> ResetOutcome {
             continue;
         }
 
+        // Where the far end is, decided before the more expensive
+        // question of who owns the row.
+        let remote = Ipv4Addr::from(fields[3].to_ne_bytes());
+        let remote_port = (fields[4] as u16).swap_bytes();
+
+        // The node is the tunnel itself; everything else excluded here
+        // is a destination the kernel filter would never have handed to
+        // the redirect loop anyway. Closing them would break a printer,
+        // a NAS or a local service to gain exactly nothing.
+        if remote == node || !is_public_v4(remote) {
+            continue;
+        }
+
         let image = images
             .entry(pid)
             .or_insert_with(|| image_path(pid))
             .clone();
         let Some(image) = image else { continue };
+        // Never Neoxify's own. In AllExcept the app and the service are
+        // carried by default, and closing the app's link to its own API
+        // on every activation is the 0.9.22 failure arriving by another
+        // route.
+        if own_images.iter().any(|own| image.eq_ignore_ascii_case(own)) {
+            continue;
+        }
         if !selection.should_tunnel(&image) {
             continue;
         }
@@ -1062,11 +1105,9 @@ pub fn reset_selected_connections(selection: &Selection) -> ResetOutcome {
             // single most useful thing this function can report: the
             // count alone cannot tell "there was nothing to close" from
             // "Windows refused every attempt".
-            outcome.failures.push(format!(
-                "could not close {image} -> {}:{} (error {ret})",
-                Ipv4Addr::from(fields[3].to_ne_bytes()),
-                (fields[4] as u16).swap_bytes(),
-            ));
+            outcome
+                .failures
+                .push(format!("could not close {image} -> {remote}:{remote_port} (error {ret})"));
         }
     }
     outcome
@@ -1448,6 +1489,19 @@ mod audit_tests {
                 IpAddr::V6(addr) => assert!(is_public_v6(addr), "{escape:?}"),
             }
         }
+    }
+
+    #[test]
+    fn the_reset_leaves_a_machine_alone_when_nothing_is_selected() {
+        // Against this machine's real connection table, which is the
+        // only way to run it. An empty OnlySelected list carries
+        // nothing, so nothing may be closed -- and this test exists
+        // because the cost of being wrong about that is other people's
+        // connections dying on a developer's desktop.
+        let selection = Selection::new(Vec::new(), SplitTunnelMode::OnlySelected);
+        let outcome = reset_selected_connections(&selection, Ipv4Addr::new(203, 0, 113, 7), &[]);
+        assert_eq!(outcome.closed, 0);
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
     }
 
     #[test]
