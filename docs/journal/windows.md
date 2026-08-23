@@ -6385,3 +6385,141 @@ Nothing on any node was touched. In the order I would do it:
    way singapore-1's did. `ensure_port80_site` migrates it if the
    installer is ever re-run there, which is the safe outcome, but it is
    worth knowing before that happens rather than after.
+
+## 2026-08-23 — Port 80 taken back on three live nodes, and the probe that failed everything
+
+Applied `fix-node-port-80.sh --apply` to the live fleet. france-1,
+singapore-1 and turkey-1 are done and verified from outside.
+**germany-1 was not touched — `ovh_neo`, `azs_vps` and `neo_tr1` were all
+refused again.** That key now blocks three items: the 502 mirror, its
+shared `www.shatel.ir` dest, and now this.
+
+| node | pre-apply state | after | `certbot renew --dry-run` |
+|---|---|---|---|
+| france-1 | default vhost, `webroot /var/www/html` | `Server: nginx`, 188-byte page | **success** |
+| singapore-1 | default vhost, `standalone` | `Server: nginx`, 188-byte page | **failed before, success after** |
+| turkey-1 | default vhost, `webroot /var/www/html` | `Server: nginx`, 203-byte page | **success** |
+| germany-1 | default vhost | untouched | not run — no SSH |
+| finland1 | nothing on 80 at all | untouched | not run |
+
+`certbot renew --dry-run` had never been run against a real renewal
+before today. It passes on all three. The `standalone` → `webroot`
+migration is now proven end to end and not just by certbot's parser.
+
+**singapore-1's renewal was already broken, and now it is proven both
+ways.** Before the change: `Could not bind TCP port 80 because it is
+already in use`. After: `all simulated renewals succeeded`. The
+certificate expires 2026-11-09, so this was a real outage due in about
+eleven weeks — every TLS inbound on the node at once — not a theoretical
+one.
+
+finland1 was confirmed rather than assumed: nginx *is* installed there,
+but only `neoxify-fallback` is enabled, nothing binds 80, and the port
+refuses from outside. Its `standalone` renewal works *because* 80 is
+free, which is the same coin singapore-1 landed on tails.
+
+Nothing was restarted anywhere. Every engine's `ActiveEnterTimestamp`
+still predates the change, and `agentd` on all three was seen executing
+`reassert:… (CREATE_USER)` from the panel within a minute of it.
+
+### The probe rejected every dest on every node
+
+`reality-dest-audit.sh --self-test` **failed its own control case** the
+first time it was run on a node — `www.torob.com`, the name the test
+exists to accept, came back `BAD  negotiated , and REALITY requires TLS
+1.3`. So did `cloudflare.com`, which had just completed a TLS 1.3
+handshake from this machine.
+
+Note the empty version in that message. `probe_reality_dest` read the
+version out of the `SSL-Session:` summary block (`Protocol  : TLSv1.3`),
+and Ubuntu's OpenSSL 3.0.13 **does not print that block** when the peer
+closes first — which is every probe it makes, because stdin is
+`/dev/null`. Only `New, TLSv1.3, Cipher is …` is reliably there. The
+check therefore failed for *everything*, on the exact platform every
+node runs.
+
+This never showed up locally because the dev machine's openssl does
+print the block. It would have shipped as: the installer offers no clean
+candidate on any node, and the operator either types a weak dest past
+the warning or drops REALITY there — the precise outcome commit
+`70d909b` was written to prevent. Fixed by reading whichever of the two
+lines exists. After the fix, on france-1: `www.torob.com` OK,
+`www.asus.com` WEAK, self-test passes.
+
+A harness reporting total failure is more likely broken than the thing
+it measures. That is now twice this month.
+
+**Second gotcha, smaller:** the `== Proof, from this node ==` block
+inside `--apply` prints `Server: nginx/1.24.0 (Ubuntu)` even on a
+successful run. It is racing its own `systemctl reload` — an old worker
+still holding the listening socket answers it, and serves the *new*
+index.html because the file on disk already changed, so the output looks
+like a half-applied change and is not one. From outside, seconds later,
+it is `Server: nginx`. Do not debug that line; check from off the node.
+
+The ACME path was also proven from outside, through whatever firewall
+each provider has in front: a token written into
+`/var/www/html/.well-known/acme-challenge/` comes back byte-exact over
+both the IP and the FQDN on all three nodes, and a nonexistent token
+returns 404 rather than the index page.
+
+### france-1's decoy: measured, and NOT applied
+
+`www.free.fr` re-verified **from france-1 itself** with the repaired
+probe: `212.27.48.10 is AS12322 PROXAD - Free SAS in FR`. Clean, and it
+agrees with the earlier reading from this machine. `cloudflare.com`
+confirmed WEAK from the node: AS13335, `server: cloudflare`.
+
+The change was **not made**, because measuring the blast radius turned up
+two things that are worse than "customers briefly reconnect":
+
+1. **france-1's REALITY config is the exit for five ir1 relay routes** —
+   Trojan, Shadowsocks, VLESS+REALITY, VLESS+TLS and VLESS+WS, each with
+   its own `inboundTag`. The relay's uplink outbound is built from the
+   *exit's* `publicParamsJson` (`agent-gateway.service.ts:430` →
+   `relay/provisioner.go:213`). So this is not a france-1 REALITY change;
+   it is a change to five protocols on a node in Iran. Routes reassert
+   every 60s and should self-heal, but the failure mode while they do not
+   is the one already in the journal: unmatched relay traffic egresses
+   **at the relay**, in Iran.
+2. **Mobile clients never refetch.** `getProtocolUsers()` has exactly one
+   call site — `loadAll`, on mount / retry / server-switch. No poll, no
+   TTL, no refetch on resume, and `credential-cache.json` has no expiry
+   (`savedAt` is read only to render a label). Android keeps the WebView
+   alive across backgrounding and adopts a running tunnel on open, so a
+   stale `serverName` survives until the app is restarted. Toggling the
+   VPN off and on inside the same session re-dials with the same dead
+   SNI.
+
+Add the desktop split-tunnel case: `Dashboard.tsx:933` short-circuits the
+egress check to `connected` whenever `fromStatus === "connected"`, and
+Xray's status is *always* `connected` (`engines/mod.rs:681` returns
+`Unknown`). A Custom-mode user with a mismatched dest sees a green orb
+over dead traffic, indefinitely. REALITY does not refuse an unknown SNI —
+it proxies the customer to the decoy, so the handshake keeps succeeding.
+
+Desktop full-tunnel is the only well-behaved path: two strikes, ~30s,
+then the ladder moves them to another protocol — but `runLadder` re-reads
+the same stale `protocolUsers`, so REALITY specifically stays dead until
+a `loadAll`.
+
+29 protocol_users hold a france-1 REALITY credential; the route is on
+Trial, Starter, Pro and Ultimate Max.
+
+**Sequencing, when it is approved.** Node first, panel second, and the
+gap is what costs: node-side is `dest` + `serverNames` in
+`/usr/local/etc/xray/config.json` and takes effect only on an Xray
+restart, which is the one thing that cannot be done casually here. Panel
+side is one PATCH to `protocol_configs.publicParamsJson` (the whole blob
+is replaced; `dest` and `serverName` move together atomically). Ordering
+node-then-panel keeps the disagreement to the seconds between them for
+*new* connections, but that is not the number that matters — the number
+that matters is how long a mobile customer keeps the old SNI, and that is
+unbounded.
+
+The honest options are (a) do it and accept mobile users are broken until
+they restart the app, (b) ship a client that refetches before connecting
+first, or (c) stand up the new dest on a second REALITY inbound on
+another port, move the panel row, and retire the old one once nobody is
+on it. (c) costs a port and no customer.
+

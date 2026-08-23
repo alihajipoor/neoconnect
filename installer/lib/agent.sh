@@ -1055,8 +1055,29 @@ probe_reality_dest() {
     return 1
   }
 
-  grep -q "Protocol *: *TLSv1.3" <<<"$out" ||
-    bad+=("negotiated $(grep -m1 'Protocol *:' <<<"$out" | awk '{print $NF}'), and REALITY requires TLS 1.3")
+  # openssl names the negotiated version in two places and does not
+  # always print both. The "SSL-Session:" summary block -- the one
+  # carrying "Protocol  : TLSv1.3" -- is absent on Ubuntu's OpenSSL
+  # 3.0.13 when the peer closes the connection first, which is every
+  # probe made here because stdin is /dev/null. The "New, TLSv1.3,
+  # Cipher is ..." line is the one that is always there.
+  #
+  # Reading only the summary block made this check fail for *every*
+  # dest on a node, with an empty version in the message. Measured on
+  # france-1 (OpenSSL 3.0.13): www.free.fr, www.torob.com and even
+  # cloudflare.com all came back "negotiated , and REALITY requires TLS
+  # 1.3", and --self-test failed its own control case. A probe that
+  # rejects everything is worse than no probe: it pushes the operator
+  # into typing a weak dest past the warning, or into dropping REALITY
+  # on that node entirely.
+  local tls_ver=""
+  if [[ "$out" =~ Protocol[[:space:]]*:[[:space:]]*(TLSv[0-9.]+) ]]; then
+    tls_ver="${BASH_REMATCH[1]}"
+  elif [[ "$out" =~ New,[[:space:]]*(TLSv[0-9.]+) ]]; then
+    tls_ver="${BASH_REMATCH[1]}"
+  fi
+  [[ "$tls_ver" == "TLSv1.3" ]] ||
+    bad+=("negotiated ${tls_ver:-nothing openssl would name a version}, and REALITY requires TLS 1.3")
   grep -q "ALPN protocol: h2" <<<"$out" ||
     bad+=("does not offer HTTP/2 over ALPN, so the inbound's h2 advertisement would not match what this dest answers")
 
