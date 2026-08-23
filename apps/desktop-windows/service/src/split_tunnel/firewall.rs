@@ -40,7 +40,11 @@ const NETSH: &str = r"C:\Windows\System32\netsh.exe";
 /// The rule's name, shared by the TCP and UDP entries so that a single
 /// delete removes both -- including one left behind by a service that
 /// was killed rather than stopped.
-const RULE: &str = "Neoxify Split Tunnel";
+/// `pub(crate)` so `engines::repair` can ask whether it is there before
+/// calling [`delete_rule`] -- netsh's delete reports the same failure
+/// for "there was nothing to delete" as for "it refused", and the repair
+/// has to tell a customer which happened.
+pub(crate) const RULE: &str = "Neoxify Split Tunnel";
 
 /// An inbound allowance that lasts as long as the value does.
 pub struct Allowance {
