@@ -78,7 +78,7 @@ fn kill_orphaned_engines(exe_dir: &Path) {
     // SAFETY: a plain call; an invalid handle is checked below.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot.is_null() {
-        eprintln!("teardown: could not enumerate processes to reap orphaned engines");
+        crate::cleanup_log::note("reap orphaned engines", "could not enumerate processes");
         return;
     }
     // SAFETY: zeroed is a valid PROCESSENTRY32W once dwSize is set, and
@@ -141,7 +141,10 @@ fn kill(pid: u32, path: &str) {
     // SAFETY: a plain call; a failure returns a null handle.
     let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
     if process.is_null() {
-        eprintln!("teardown: could not open orphaned {path} (pid {pid}) to end it");
+        crate::cleanup_log::note(
+            "reap orphaned engines",
+            &format!("could not open {path} (pid {pid}) to end it"),
+        );
         return;
     }
     // SAFETY: the handle came from OpenProcess with PROCESS_TERMINATE.
@@ -149,9 +152,12 @@ fn kill(pid: u32, path: &str) {
     // SAFETY: `process` came from OpenProcess and is not used again.
     unsafe { CloseHandle(process) };
     if ok == 0 {
-        eprintln!("teardown: could not end orphaned {path} (pid {pid})");
+        crate::cleanup_log::note("reap orphaned engines", &format!("could not end {path} (pid {pid})"));
     } else {
-        eprintln!("reaped orphaned engine {path} (pid {pid})");
+        // A success worth recording: an orphan being here at all means
+        // a previous life ended without running its teardown, which is
+        // the fact that explains everything else in the file.
+        crate::cleanup_log::note("reap orphaned engines", &format!("ended {path} (pid {pid})"));
     }
 }
 
@@ -173,7 +179,10 @@ fn purge_adapter_routes() {
         match adapters::find_by_name(name) {
             Ok(Some(adapter)) => routing::purge_interface(adapter.index),
             Ok(None) => {}
-            Err(e) => eprintln!("teardown: could not look up the {name} adapter to purge its routes: {e}"),
+            Err(e) => crate::cleanup_log::note(
+                "purge leftover routes",
+                &format!("could not look up the {name} adapter: {e}"),
+            ),
         }
     }
 }
