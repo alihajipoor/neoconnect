@@ -6523,3 +6523,153 @@ first, or (c) stand up the new dest on a second REALITY inbound on
 another port, move the panel row, and retire the old one once nobody is
 on it. (c) costs a port and no customer.
 
+
+## 2026-08-23 — france-1's second REALITY inbound is up and proven; the panel row did NOT move
+
+Option (c) from the previous entry: stand the new decoy up beside the old
+one rather than swapping under live customers. The node half is done and
+proven. **The panel half is not, and must not be done as specified** —
+see "why it stopped" below.
+
+### What is live on france-1 now
+
+A second REALITY inbound, `vless-reality-free-in`, on **2083**,
+`dest`/`serverNames` = `www.free.fr`. It reuses the *existing* keypair and
+shortId deliberately, so `realityPublicKey` and `shortIds` in the panel
+row stay byte-identical — the panel's stored public key hashes to the same
+12 hex chars as the one derived from the live private key. Only
+`serverName` and `port` would ever change client-side.
+
+No restart. `xray api adi` over the local API at 127.0.0.1:10085
+(`HandlerService` was already enabled). `xray` still reports
+`ActiveEnterTimestamp` of 2026-08-19 04:00:23 UTC throughout, and all
+eight protocols stayed up.
+
+Rehearsed before doing it: `adi` a dokodemo-door on 127.0.0.1:19999,
+confirm the socket, `rmi` it, confirm it is gone, confirm the six
+production inbounds are still listed. `rmi <tag>` is the rollback and it
+is proven, not assumed.
+
+**Port 2083, and the warning that came with it.** Free on this node (TCP
+in use: 22, 53, 80, 443, 2053, 7505, 8080, 8081, 8443, 10085, 10086,
+37651), a conventional HTTPS-alt port, and consistent with what this node
+already looks like from outside — it already answers TLS on 2053 and
+8443, so 2083 adds one more port to a cluster a scanner already reads as
+"host with several HTTPS endpoints" rather than a new *kind* of signal.
+
+But Xray itself said, on the way in:
+
+```
+[Warning] infra/conf: REALITY: Listening on non-443 ports may get your IP blocked by the GFW
+```
+
+That is upstream's own warning and it cuts against the entire point of
+the change. `www.free.fr` does not serve its site on 2083, so the decoy
+is now port-inconsistent in a way `cloudflare.com:443` at least was not.
+**There is no way around it on this node:** one global IPv4
+(104.105.205.233), and xray's existing inbound binds `*:443`, which
+covers v6 too — measured, not assumed. A second REALITY on 443 here is
+impossible. So the honest framing of option (c) is *better decoy
+identity, worse port*, and whether that trade is worth taking is the
+owner's call, not mine.
+
+### Proven end to end, from a vantage that could have said no
+
+A real client, not a handshake:
+
+| check | result |
+|---|---|
+| TLS from outside, SNI `www.free.fr` | `CN=free.fr`, Sectigo — byte-identical issuer/subject to the real site |
+| wrong SNI (`example.org`) to 2083 | still `CN=free.fr` — prober gets the decoy, not a reset |
+| **exit IP through the tunnel** | **104.105.205.233** |
+| the client host's own IP | 172.236.143.200 |
+| 1 MB payload | 1048576 bytes in 1555 ms |
+| HTTPS to a third host | `example.com` → HTTP 200 |
+
+Run from **singapore-1**, deliberately: a client on france-1 would report
+france-1's address whether or not the tunnel carried anything. Separate
+`xray run` process, loopback socks, killed afterwards; neither node's
+xray service was touched. Test user removed after — the new inbound now
+has **zero** users.
+
+**Persisted.** `xray api adi` does not write to `config.json`, and nothing
+in this repo re-adds an inbound after a restart — the 60s sweeps restore
+*users* and *routes*, never *inbounds*. So the inbound was merged into
+`/usr/local/etc/xray/config.json`, `xray run -test` first (it refused a
+bad candidate once and left the live file untouched, which is the guard
+working). Runtime and file now list the same seven tags.
+
+That mattered more than it looks: **`xray.service` has no `ExecReload`**,
+and `/etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh` ends in
+`systemctl reload xray 2>/dev/null || systemctl restart xray`. So a
+certificate renewal *restarts* Xray on every node. fr1 expires
+2026-11-17, i.e. renews around 18 October. A hot-added inbound would have
+silently vanished then, with customers pointed at a dead port.
+
+### Why the panel row did not move
+
+Three things, any one of which is enough.
+
+**1. It would break all 29 direct REALITY customers.** The new inbound
+has a new tag. `protocol_configs.inboundTag` for france-1 is empty, and
+with it empty the backend omits the key
+(`protocol-users.service.ts:454-456`) and `agentd` falls back to its
+`--xray-inbound-tag` default of `vless-in`
+(`agent/cmd/agentd/main.go:34`; the unit passes no flags). So the 60s
+reassert would keep writing all 29 users onto the **old** inbound while
+their clients dialled 2083. Setting that column is the fix — but
+`UpdateProtocolConfigDto` accepts only `listenPort`, `publicParamsJson`
+and `isEnabled`, so `inboundTag` **cannot be set through the API at
+all**. It needs direct SQL, which is a bigger decision than "move the
+panel row".
+
+**2. The five ir1 relay routes would not follow, and would say they
+had.** The uplink outbound tag is `route-<routeId>-out`, derived from the
+route id alone — it encodes nothing about the exit
+(`relay/provisioner.go:80-82`). Xray's `AddOutbound` rejects a duplicate
+tag rather than replacing it, and the agent swallows exactly that error
+as success (`relay/provisioner.go:93-104`). So the sweep would send the
+new port every 60s, ir1 would ack five healthy routes, and every one of
+them would still be dialling 2083's predecessor. A green panel over an
+unchanged reality — the exact failure mode this journal keeps recording.
+
+**3. Retirement is off the table anyway.** 29 users sit on the old
+inbound right now. It stays.
+
+### A live problem found on the way: the relay uplinks are already gone
+
+Looking for the uplink credentials turned up none. On france-1's
+`vless-in`: **29 users, zero whose email starts with `route:`** — the
+29 are exactly the 29 direct `protocol_users`.
+
+The five `-> France` relay routes were created **2026-08-13**. france-1's
+xray restarted **2026-08-19 04:00 UTC**. The uplink user is created
+*once*, at route creation (`routes.service.ts:268-277`), has no
+`ProtocolUser` row, and `reassertProvisionedUsers` reads only
+`protocolUser` — so **nothing re-asserts it, ever**. The restart wiped
+all five and they have not come back.
+
+Each of those five routes has 1 ACTIVE customer, and they are Iran-relay
+customers. This predates today's work by five days and I did not cause
+it, but it is almost certainly a live outage. **Not yet confirmed from
+ir1's side** — I have no key for ir1 and did not go looking for one. That
+confirmation is the first thing to do next.
+
+It also explains something that would otherwise be puzzling later: even a
+*correct* panel move would not have restored these, because the code path
+that creates them never runs again.
+
+### Gotchas worth the next session's minutes
+
+- `xray api adu` needs `port` and `listen` on the inbound stanza you hand
+  it, or it fails with `Listen on AnyIP but no Port(s) set in
+  InboundDetour` and cheerfully reports `Added 0 user(s)`.
+- `xray api rmu` takes `-tag=<tag>` plus bare emails — it does **not**
+  take the same JSON file `adu` does, and given one it says `inbound tag
+  not specified`.
+- `xray run -test -config <file>` needs the filename to **end in
+  `.json`**, otherwise `Failed to get format` — which looks exactly like
+  a malformed config and is not.
+- `xray x25519 -i` wants the key as an argument; `-i /dev/stdin` silently
+  yields nothing.
+
