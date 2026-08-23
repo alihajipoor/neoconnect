@@ -205,6 +205,35 @@ impl Nat {
         }
     }
 
+    /// Whether this exact flow is already being carried, without
+    /// touching its idle timer.
+    ///
+    /// Deliberately not [`Nat::lookup_flow`], which refreshes
+    /// `last_seen` as a side effect. The escape audit walks every
+    /// established connection on the machine every thirty seconds and
+    /// asks this about each one; doing that through `lookup_flow` would
+    /// renew every entry it read, and `expire_idle` would then never
+    /// retire anything for as long as Custom mode was on. An observer
+    /// that changes what it observes is worse than no observer, because
+    /// the leak it introduces is invisible in the numbers it produces.
+    pub fn has_flow(
+        &self,
+        transport: Transport,
+        client_port: u16,
+        destination: Ipv4Addr,
+        destination_port: u16,
+    ) -> bool {
+        let key = FlowKey { transport, client_port, destination, destination_port };
+        let tables = self.tables.lock().unwrap();
+        match tables.forward.get(&key) {
+            // The same orphan check `lookup_flow` makes: a forward entry
+            // whose reverse half has been retired carries nothing, so
+            // the flow it names is not being carried either.
+            Some(&nat_port) => tables.reverse.contains_key(&(transport, nat_port)),
+            None => false,
+        }
+    }
+
     /// Records that a port belongs to an application that was not
     /// selected, as of now.
     pub fn record_direct(&self, transport: Transport, client_port: u16) {
@@ -406,6 +435,28 @@ mod tests {
 
         let again = nat.lookup_flow(Transport::Tcp, 5450, Ipv4Addr::new(1, 1, 1, 1), 443);
         assert_eq!(again, Some(first));
+    }
+
+    #[test]
+    fn asking_whether_a_flow_is_carried_does_not_keep_it_alive() {
+        // The escape audit asks this about every established connection
+        // on the machine, every thirty seconds. If the question renewed
+        // the entry, an idle flow would never be retired for as long as
+        // Custom mode stayed on -- and the audit would have created a
+        // leak of sockets while looking for a leak of traffic.
+        let nat = Nat::new();
+        let origin = origin_to(Ipv4Addr::new(1, 1, 1, 1), 53, 5600);
+        let nat_port = nat.redirect(Transport::Udp, origin).unwrap();
+
+        {
+            let mut tables = nat.tables.lock().unwrap();
+            tables.reverse.get_mut(&(Transport::Udp, nat_port)).unwrap().last_seen =
+                Instant::now() - UDP_IDLE * 2;
+        }
+
+        assert!(nat.has_flow(Transport::Udp, 5600, Ipv4Addr::new(1, 1, 1, 1), 53));
+        assert_eq!(nat.expire_idle(), vec![nat_port], "the question must not have renewed it");
+        assert!(!nat.has_flow(Transport::Udp, 5600, Ipv4Addr::new(1, 1, 1, 1), 53));
     }
 
     #[test]

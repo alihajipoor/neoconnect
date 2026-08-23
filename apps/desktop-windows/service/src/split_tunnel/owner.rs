@@ -24,6 +24,7 @@
 //! cached and the refresh rate-limited below.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStrExt;
 use std::sync::{Arc, RwLock};
 
@@ -959,6 +960,15 @@ mod tests {
 /// The TCP state that tells Windows to tear a connection down.
 const MIB_TCP_STATE_DELETE_TCB: u32 = 12;
 
+/// The state of a connection that is actually carrying traffic.
+///
+/// Named because two separate places now turn on it -- the reset below
+/// and the escape audit -- and a bare `5` in either of them reads like a
+/// magic number rather than like the one state where a remote address in
+/// the table means anything. In every other state the row's remote
+/// fields are zero or provisional.
+const MIB_TCP_STATE_ESTAB: u32 = 5;
+
 /// Established connections belonging to selected applications, closed so
 /// they are rebuilt through the tunnel.
 ///
@@ -1009,7 +1019,7 @@ pub fn reset_selected_connections(selection: &Selection) -> usize {
         // Only connections that actually carry traffic. A listener has
         // no peer to re-route and killing one would stop a program
         // accepting connections, which is not what was asked for.
-        if state != 5 {
+        if state != MIB_TCP_STATE_ESTAB {
             continue;
         }
 
@@ -1032,4 +1042,404 @@ pub fn reset_selected_connections(selection: &Selection) -> usize {
         }
     }
     closed
+}
+
+/// Whether an IPv4 destination is out on the internet, rather than
+/// somewhere a split tunnel deliberately leaves alone.
+///
+/// The exclusions are deliberately the *same set* the kernel filter
+/// carries (see `redirect::filter_for`), and keeping them in step is the
+/// whole point rather than a tidiness argument. The filter decides what
+/// the redirect loop is ever allowed to see; this decides what the audit
+/// is allowed to call an escape. If the two drifted apart the audit
+/// would report a stream of "escapes" the loop was never given a chance
+/// to carry -- a number that looks like a leak and is really a
+/// disagreement between two lists, which is exactly the sort of false
+/// alarm this project has already decided is worse than saying nothing.
+pub fn is_public_v4(addr: Ipv4Addr) -> bool {
+    let o = addr.octets();
+    !(addr.is_unspecified()
+        || addr.is_loopback()
+        // Multicast, the reserved space above it, and the all-ones
+        // broadcast, in one comparison -- as in the filter.
+        || o[0] >= 224
+        || o[0] == 10
+        || (o[0] == 172 && (16..32).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 169 && o[1] == 254))
+}
+
+/// The same question for IPv6, and necessarily a weaker answer.
+///
+/// There is no RFC1918 to carve out: a home IPv6 network numbers its own
+/// devices out of the global prefix its ISP delegates, so a LAN
+/// neighbour on a `2000::/3` address is indistinguishable here from the
+/// internet. What can be excluded is only what is genuinely not the
+/// internet -- loopback, the unspecified address, multicast, unique-local
+/// and link-local -- which mirrors the IPv6 half of the filter for the
+/// same reason the IPv4 version mirrors the IPv4 half.
+///
+/// An IPv4-mapped address is IPv4 traffic wearing a v6 shape, and is
+/// answered by the IPv4 rules so the two cannot disagree about one
+/// destination written two ways.
+pub fn is_public_v6(addr: Ipv6Addr) -> bool {
+    if let Some(mapped) = addr.to_ipv4_mapped() {
+        return is_public_v4(mapped);
+    }
+    let first = addr.segments()[0];
+    !(addr.is_unspecified()
+        || addr.is_loopback()
+        || addr.is_multicast()
+        // fc00::/7, unique-local.
+        || first & 0xfe00 == 0xfc00
+        // fe80::/10, link-local.
+        || first & 0xffc0 == 0xfe80)
+}
+
+/// One row of the machine's TCP tables, in the shape the audit needs.
+///
+/// Separate from the `port -> pid` maps [`OwnerLookup`] builds, because
+/// those deliberately throw away the two things the audit turns on: the
+/// connection's state, and where its far end is.
+struct TcpConnection {
+    state: u32,
+    local_port: u16,
+    remote: IpAddr,
+    remote_port: u16,
+    pid: u32,
+}
+
+/// Every IPv4 TCP row, with its state and remote end intact.
+fn tcp_connections_v4() -> Vec<TcpConnection> {
+    let Some(words) = query_table(|buf, size| {
+        // SAFETY: `buf` is null (sizing) or a buffer of `*size` bytes.
+        unsafe { GetExtendedTcpTable(buf, size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0) }
+    }) else {
+        return Vec::new();
+    };
+    let Some(&count) = words.first() else {
+        return Vec::new();
+    };
+
+    // MIB_TCPROW_OWNER_PID: state, local addr, local port, remote addr,
+    // remote port, owning pid -- six DWORDs.
+    const ROW: usize = 6;
+    let mut rows = Vec::new();
+    for row in 0..count as usize {
+        let base = 1 + row * ROW;
+        let Some(fields) = words.get(base..base + ROW) else {
+            break;
+        };
+        rows.push(TcpConnection {
+            state: fields[0],
+            // A port sits network-order in the low half of its DWORD; an
+            // address is already a network-order byte sequence, so the
+            // DWORD's own bytes are the octets in order.
+            local_port: (fields[2] as u16).swap_bytes(),
+            remote: IpAddr::V4(Ipv4Addr::from(fields[3].to_ne_bytes())),
+            remote_port: (fields[4] as u16).swap_bytes(),
+            pid: fields[5],
+        });
+    }
+    rows
+}
+
+/// Every IPv6 TCP row.
+///
+/// Walked as well as the IPv4 table, and that is the point rather than
+/// completeness for its own sake: a selected app's IPv6 is *blocked*
+/// while Custom mode runs, so any established v6 connection it still
+/// holds predates the switch and is living entirely outside the tunnel,
+/// with nothing in the counters able to say so.
+fn tcp_connections_v6() -> Vec<TcpConnection> {
+    let Some(words) = query_table(|buf, size| {
+        // SAFETY: as above.
+        unsafe { GetExtendedTcpTable(buf, size, 0, AF_INET6 as u32, TCP_TABLE_OWNER_PID_ALL, 0) }
+    }) else {
+        return Vec::new();
+    };
+    let Some(&count) = words.first() else {
+        return Vec::new();
+    };
+
+    // MIB_TCP6ROW_OWNER_PID: ucLocalAddr[16], dwLocalScopeId,
+    // dwLocalPort, ucRemoteAddr[16], dwRemoteScopeId, dwRemotePort,
+    // dwState, dwOwningPid -- fourteen 32-bit words.
+    const ROW: usize = 14;
+    let mut rows = Vec::new();
+    for row in 0..count as usize {
+        let base = 1 + row * ROW;
+        let Some(fields) = words.get(base..base + ROW) else {
+            break;
+        };
+        let mut octets = [0u8; 16];
+        for (i, word) in fields[6..10].iter().enumerate() {
+            octets[i * 4..i * 4 + 4].copy_from_slice(&word.to_ne_bytes());
+        }
+        rows.push(TcpConnection {
+            state: fields[12],
+            local_port: (fields[5] as u16).swap_bytes(),
+            remote: IpAddr::V6(Ipv6Addr::from(octets)),
+            remote_port: (fields[11] as u16).swap_bytes(),
+            pid: fields[13],
+        });
+    }
+    rows
+}
+
+/// A connection living outside the tunnel that should be inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Escape {
+    pub image: String,
+    pub remote: IpAddr,
+    pub remote_port: u16,
+    pub local_port: u16,
+}
+
+/// Established connections belonging to applications whose traffic is
+/// supposed to be carried, which the redirect is not carrying.
+///
+/// # Why this exists at all
+///
+/// Every number in `redirect::Stats` is counted from inside the packet
+/// loop, which means all of them are blind in the same direction: they
+/// can only describe packets the loop was given. A connection that
+/// escaped -- because its SYN raced the owner lookup, because it was
+/// established before Custom mode came on, or because it is IPv6 and was
+/// blocked rather than carried -- produces no packet the loop will ever
+/// count. `seen`, `matched` and `redirected` all read healthy while it
+/// carries the customer's traffic out in the clear. That is the failure
+/// this feature has now shipped three separate versions of, and the
+/// counters structurally cannot report it.
+///
+/// So this asks the other question, from the other side: not what the
+/// loop did, but what the machine is actually holding open. The
+/// connection tables know about every socket whether or not a packet of
+/// its was ever intercepted, so a flow that got away is visible here and
+/// nowhere else.
+///
+/// # What it deliberately does not report
+///
+/// * Rows whose owning process cannot be resolved. In `AllExcept` an
+///   unresolvable owner is supposed to be tunnelled, so skipping it
+///   under-reports -- but calling a connection an escape without being
+///   able to name the program that made it produces a number nobody can
+///   act on, and this file's history says an alarm nobody can act on is
+///   worse than silence.
+/// * Anything belonging to Neoxify itself. The relay's own onward
+///   sockets are established to exactly the public destinations the
+///   customer's apps asked for and have no NAT entry of their own, so
+///   without this every carried flow would be counted twice: once as
+///   itself and once as its own escape.
+/// * The node, the LAN, loopback and the relay's own two ports -- none
+///   of which the redirect was ever supposed to carry.
+///
+/// `carried` answers whether the redirect already holds a flow. It is
+/// passed in rather than reached for, so this stays testable without a
+/// NAT table and so the caller can guarantee the read does not disturb
+/// the table's idle timers -- see `Nat::has_flow`.
+///
+/// This is **observation only**. Nothing here closes, drops or rewrites
+/// anything: it produces a count and a list for the log, and every
+/// decision about what to do with them is made elsewhere.
+pub fn escaped_connections(
+    selection: &Selection,
+    own_images: &[String],
+    node: Ipv4Addr,
+    proxy_ports: (u16, u16),
+    carried: &dyn Fn(Transport, u16, Ipv4Addr, u16) -> bool,
+) -> Vec<Escape> {
+    let mut images: HashMap<u32, Option<String>> = HashMap::new();
+    let mut escapes = Vec::new();
+
+    for row in tcp_connections_v4().into_iter().chain(tcp_connections_v6()) {
+        // Only a connection that is carrying traffic. In every other
+        // state the remote fields are zero or provisional, so there is
+        // nothing to classify and nothing that has leaked yet.
+        if row.state != MIB_TCP_STATE_ESTAB {
+            continue;
+        }
+
+        // The relay's own ports, on either end of the row. The proxy's
+        // listening side and the app's connection into it are both
+        // ordinary TCP connections on this machine, and would otherwise
+        // read as traffic that got away from the very thing carrying it.
+        if row.local_port == proxy_ports.0
+            || row.local_port == proxy_ports.1
+            || row.remote_port == proxy_ports.0
+            || row.remote_port == proxy_ports.1
+        {
+            continue;
+        }
+
+        match row.remote {
+            // The node is the tunnel itself. Everything else excluded
+            // here is the local network a split tunnel exists to leave
+            // alone.
+            IpAddr::V4(addr) if addr == node || !is_public_v4(addr) => continue,
+            IpAddr::V6(addr) if !is_public_v6(addr) => continue,
+            _ => {}
+        }
+
+        let image = images.entry(row.pid).or_insert_with(|| image_path(row.pid)).clone();
+        let Some(image) = image else { continue };
+        if own_images.iter().any(|own| image.eq_ignore_ascii_case(own)) {
+            continue;
+        }
+        if !selection.should_tunnel(&image) {
+            continue;
+        }
+
+        // A carried flow is keyed on the app's own port and the real
+        // destination, which is what the connection table still shows:
+        // the rewrite happens on the wire, not in the socket, so the
+        // stack's idea of where this connection is going is the
+        // pre-rewrite address the NAT table was keyed on.
+        //
+        // There is no v6 half to ask. The NAT table is IPv4 only, so an
+        // established v6 connection belonging to a carried application
+        // is an escape by construction -- which is the honest reading of
+        // the 0.9.27 decision to block rather than carry, not a fault in
+        // it.
+        if let IpAddr::V4(addr) = row.remote {
+            if carried(Transport::Tcp, row.local_port, addr, row.remote_port) {
+                continue;
+            }
+        }
+
+        escapes.push(Escape {
+            image,
+            remote: row.remote,
+            remote_port: row.remote_port,
+            local_port: row.local_port,
+        });
+    }
+
+    escapes
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn the_public_test_matches_what_the_kernel_filter_hands_over() {
+        // These are the same list seen from opposite ends -- see
+        // is_public_v4. Every address the filter string in redirect.rs
+        // excludes must be excluded here too, or the audit reports
+        // escapes for traffic the loop was never given.
+        for local in [
+            "0.0.0.0",
+            "127.0.0.1",
+            "10.4.4.4",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.20",
+            "169.254.10.10",
+            "224.0.0.251",
+            "255.255.255.255",
+        ] {
+            assert!(!is_public_v4(local.parse().unwrap()), "{local} must not count as public");
+        }
+        // The near misses, which is where an off-by-one range would
+        // show: 172.15 and 172.32 are outside RFC1918, and 192.169 is
+        // not 192.168.
+        for public in
+            ["1.1.1.1", "8.8.8.8", "38.60.249.229", "172.15.0.1", "172.32.0.1", "192.169.0.1"]
+        {
+            assert!(is_public_v4(public.parse().unwrap()), "{public} must count as public");
+        }
+    }
+
+    #[test]
+    fn the_ipv6_test_leaves_the_local_network_alone() {
+        for local in ["::", "::1", "fe80::1", "fd00::950d:8fd1:26eb:d4a", "ff02::fb", "fc00::5"] {
+            assert!(!is_public_v6(local.parse().unwrap()), "{local} must not count as public");
+        }
+        for public in ["2607:f8b0:400a:809::200e", "2001:db8:6ec5::1"] {
+            assert!(is_public_v6(public.parse().unwrap()), "{public} must count as public");
+        }
+    }
+
+    #[test]
+    fn an_ipv4_mapped_address_is_answered_by_the_ipv4_rules() {
+        // One destination written two ways must not get two answers, or
+        // a LAN address wearing a v6 shape becomes an escape.
+        assert!(!is_public_v6("::ffff:192.168.1.20".parse().unwrap()));
+        assert!(is_public_v6("::ffff:8.8.8.8".parse().unwrap()));
+    }
+
+    /// The audit against this machine's real tables, with a selection
+    /// that carries nothing.
+    ///
+    /// Not an assertion about a number -- that depends on whatever
+    /// happens to be running -- but about the one property that holds
+    /// whatever is running: an empty `OnlySelected` selection tunnels
+    /// nothing, so nothing can have escaped from it. A non-zero answer
+    /// would mean the classification is wrong, not that the machine is
+    /// leaking.
+    #[test]
+    fn nothing_escapes_a_selection_that_carries_nothing() {
+        let selection = Selection::new(Vec::new(), SplitTunnelMode::OnlySelected);
+        let escapes = escaped_connections(
+            &selection,
+            &[],
+            Ipv4Addr::new(203, 0, 113, 7),
+            (19999, 19998),
+            &|_, _, _, _| false,
+        );
+        assert!(escapes.is_empty(), "found {escapes:?}");
+    }
+
+    /// The opposite direction, which is what shows the walk returns real
+    /// rows rather than nothing at all.
+    ///
+    /// `AllExcept` with an empty list means everything is supposed to be
+    /// carried, and `carried` here says nothing is -- so every
+    /// established public connection this machine holds should come
+    /// back. The count is not asserted, because a build agent may hold
+    /// none; what is asserted is that whatever comes back is well formed
+    /// and passes the classification it claims to have passed.
+    #[test]
+    fn the_walk_returns_rows_that_are_what_they_claim_to_be() {
+        let selection = Selection::new(Vec::new(), SplitTunnelMode::AllExcept);
+        let escapes = escaped_connections(
+            &selection,
+            &[],
+            Ipv4Addr::new(203, 0, 113, 7),
+            (19999, 19998),
+            &|_, _, _, _| false,
+        );
+        println!("{} established connection(s) outside a nothing-carried tunnel", escapes.len());
+        for escape in escapes.iter().take(5) {
+            println!("{} -> {}:{}", escape.image, escape.remote, escape.remote_port);
+            assert!(escape.image.to_lowercase().ends_with(".exe"), "{escape:?}");
+            assert_ne!(escape.remote_port, 0, "{escape:?}");
+            match escape.remote {
+                IpAddr::V4(addr) => assert!(is_public_v4(addr), "{escape:?}"),
+                IpAddr::V6(addr) => assert!(is_public_v6(addr), "{escape:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_flow_the_redirect_already_holds_is_not_an_escape() {
+        // The predicate the whole audit turns on, said with a stub
+        // rather than a live NAT table so the test states the rule
+        // instead of restating the table's implementation.
+        let selection = Selection::new(Vec::new(), SplitTunnelMode::AllExcept);
+        let escapes = escaped_connections(
+            &selection,
+            &[],
+            Ipv4Addr::new(203, 0, 113, 7),
+            (19999, 19998),
+            &|_, _, _, _| true,
+        );
+        // Every IPv4 row is claimed as carried, so only IPv6 rows -- for
+        // which there is no NAT table to ask -- may remain.
+        assert!(
+            escapes.iter().all(|e| matches!(e.remote, IpAddr::V6(_))),
+            "an IPv4 flow the NAT table holds must not be an escape: {escapes:?}"
+        );
+    }
 }
