@@ -1165,7 +1165,37 @@ fn decide(
     // `image_for_new_connection`. This is the one packet whose answer
     // decides where a whole connection lives, and the one whose miss
     // cannot be taken back afterwards.
-    let owner_image = if is_new_connection {
+    //
+    // A UDP datagram that has reached this line asks exactly the same
+    // question, and until now it was not being asked. `is_new_connection`
+    // is SYN-only, because UDP has no SYN -- but the flow table and the
+    // leave-alone cache between them say the same thing a SYN says: both
+    // were consulted above, and reaching here means this datagram belongs
+    // to a flow nothing is carrying and nothing has decided about. For
+    // UDP that *is* the new-flow signal, and it is available without any
+    // help from the protocol.
+    //
+    // What it costs to keep missing it is the 0.9.25 bug arriving over
+    // UDP. A socket is microseconds old when it sends its first
+    // datagram, which puts that datagram inside `MIN_REFRESH_INTERVAL`,
+    // where the owner lookup will not rebuild and answers "nobody". In
+    // `OnlySelected` that means leave it alone, so a selected app's very
+    // first datagram goes out direct -- and for a browser that datagram
+    // is the QUIC Initial. Twenty milliseconds later the snapshot is
+    // stale enough to rebuild, datagram two is attributed correctly and
+    // redirected, and the handshake is now split across two paths with
+    // two source addresses. It does not fail fast: the browser waits out
+    // its whole QUIC timeout before falling back to TCP.
+    //
+    // The residual cost is one extra pair of table walks per UDP flow
+    // whose owner cannot be resolved at all, since those record nothing
+    // and so ask again on the next datagram. That is the same trade
+    // `image_for_new_connection` already accepted for SYNs, and it is
+    // bounded by how rare an unattributable UDP source port is -- a live
+    // socket is in the table from the moment it is created. It has not
+    // been measured under load; see the rig note.
+    let opens_a_flow = is_new_connection || matches!(parsed.transport, Transport::Udp);
+    let owner_image = if opens_a_flow {
         owner.image_for_new_connection(Family::V4, parsed.transport, parsed.source_port)
     } else {
         owner.image_for_port(Family::V4, parsed.transport, parsed.source_port)
@@ -1526,6 +1556,91 @@ mod tests {
         let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::AllExcept);
         assert!(!drop_while_converging(true, &selection, Some(r"c:\windows\explorer.exe"), false));
         assert!(!drop_while_converging(true, &selection, None, false));
+    }
+
+    #[test]
+    fn a_udp_socket_created_inside_the_rate_limiter_window_is_still_attributed() {
+        // The UDP twin of the 0.9.25 fix, and the reason it needed one.
+        // A SYN forces the owner snapshot to be rebuilt because a miss
+        // there cannot be taken back; UDP has no SYN, so a brand-new
+        // socket's first datagram landed inside OwnerLookup's 20ms floor,
+        // was attributed to nobody, and in OnlySelected went out direct.
+        // For a browser that datagram is the QUIC Initial, and datagram
+        // two -- attributed correctly and redirected -- arrives from a
+        // different address: the handshake does not fail fast, it hangs
+        // until QUIC gives up and TCP is tried instead.
+        //
+        // Both socket operations here happen microseconds apart, which
+        // is what puts the second inside the floor and makes this the
+        // case being tested rather than an ordinary hit.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let selection = Selection::new([me], SplitTunnelMode::OnlySelected);
+
+        // Builds the snapshot and marks it freshly refreshed, so the
+        // socket opened next cannot be in it and a miss on its own
+        // cannot force a rebuild.
+        let warm = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let _ =
+            owner.image_for_port(Family::V4, Transport::Udp, warm.local_addr().unwrap().port());
+
+        let fresh = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = fresh.local_addr().unwrap().port();
+
+        // Not port 53: the DNS branch carries a lookup whoever made it,
+        // so it would answer this without ever consulting the owner and
+        // the test would prove nothing.
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            443,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats);
+
+        assert!(
+            matches!(verdict, Verdict::Redirect { .. }),
+            "a selected app's first datagram must be carried, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn an_unselected_apps_first_datagram_is_still_left_alone() {
+        // The forced rebuild changes how confidently the question is
+        // answered, not what the answer means. An app the customer did
+        // not choose keeps its ordinary connection -- the whole premise
+        // of a split tunnel -- and its port is remembered so the next
+        // datagram costs a hash lookup instead of another walk.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+
+        let fresh = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = fresh.local_addr().unwrap().port();
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            443,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct
+        );
+        assert_eq!(
+            nat.lookup(Transport::Udp, port, Ipv4Addr::new(203, 0, 113, 9), 443),
+            Verdict::Direct,
+            "a known owner's verdict must be remembered"
+        );
     }
 
     #[test]
