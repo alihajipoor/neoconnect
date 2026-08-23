@@ -476,6 +476,15 @@ pub struct VpnStatus {
     /// sessions while the app told him it was connected.
     #[serde(rename = "splitTunnelProblem", skip_serializing_if = "Option::is_none")]
     split_tunnel_problem: Option<String>,
+    /// Whether the service is holding IPv6 down for this session.
+    ///
+    /// Carried to the UI because the customer is told about it in
+    /// words. Every node is IPv4-only, so a full tunnel has nowhere to
+    /// put IPv6 and blocks it instead of letting it leave in the clear
+    /// -- and a gap the customer knows about is the whole difference
+    /// between this and the leak it replaced.
+    #[serde(rename = "ipv6Blocked")]
+    ipv6_blocked: bool,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -639,12 +648,14 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             health,
             split_tunnel_active,
             split_tunnel_problem,
+            ipv6_blocked,
         } => Ok(VpnStatus {
             connected,
             protocol,
             health,
             split_tunnel_active,
             split_tunnel_problem,
+            ipv6_blocked,
         }),
         Response::Error { message } => Err(message),
         Response::Ok | Response::RunningApps { .. } => {
