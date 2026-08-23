@@ -19,6 +19,24 @@ export type ConnectionState =
    * customer about a connection that is merely still negotiating. */
   | "verifying"
   | "connected"
+  /** An engine is up, nothing has come back negative, and no check has
+   * come back positive either.
+   *
+   * Its own state because both neighbours assert something the app has
+   * not measured. "connected" is the original lie in its purest form:
+   * for Xray, OpenVPN and IKEv2 the service reports `unknown` health for
+   * as long as the process is alive, and folding that into "connected"
+   * meant a customer in Custom mode could sit on a green orb
+   * indefinitely while nothing flowed. "degraded" is the same invention
+   * pointed the other way, and it is not the harmless direction: a
+   * customer in Iran who is told they are unprotected may disconnect and
+   * expose themselves, so a check that merely abstained must not be
+   * allowed to say it.
+   *
+   * Rendered in the brand cyan rather than in green or amber, which is
+   * the whole point of giving it a colour of its own: it must not be
+   * mistaken across a room for either answer. */
+  | "unverified"
   /** An engine is running but the far end is not answering, so traffic
    * is not actually protected. Its own state because the alternative --
    * folding it into "connected" -- is what told customers they were safe
@@ -62,6 +80,10 @@ export function ConnectOrb({
   const busy = state === "connecting" || state === "disconnecting" || state === "verifying";
   const on = state === "connected";
   const degraded = state === "degraded";
+  // Up, but nothing has confirmed traffic is flowing. Deliberately given
+  // neither the success rings nor the warning triangle: the rings are
+  // the claim being withheld, and the triangle is the opposite claim.
+  const unconfirmed = state === "unverified";
   // Rendered in grey rather than in the idle violet. The idle orb reads
   // as "press me to connect", which is a claim about the tunnel being
   // down, and that is precisely the claim this state exists to withhold.
@@ -70,8 +92,18 @@ export function ConnectOrb({
   // r=54 in a 128 viewBox -> circumference 339.29. The arc is a quarter
   // while spinning, and 88% once connected (the gap keeps it reading as a
   // dial rather than a plain circle).
+  // The arc length is itself a statement, so `unverified` gets its own:
+  // shorter than a confirmed connection, longer than an idle app. A
+  // dial that is nearly closed reads as "done", which is precisely what
+  // has not been established.
   const CIRCUMFERENCE = 2 * Math.PI * 54;
-  const dash = busy ? CIRCUMFERENCE * 0.25 : on ? CIRCUMFERENCE * 0.88 : CIRCUMFERENCE * 0.6;
+  const dash = busy
+    ? CIRCUMFERENCE * 0.25
+    : on
+      ? CIRCUMFERENCE * 0.88
+      : unconfirmed
+        ? CIRCUMFERENCE * 0.72
+        : CIRCUMFERENCE * 0.6;
 
   return (
     <div className="relative flex size-44 items-center justify-center">
@@ -96,18 +128,33 @@ export function ConnectOrb({
             ? "bg-success/35"
             : degraded
               ? "bg-warning/35"
-              : unsure
-                ? "animate-breathe bg-muted-foreground/25"
-                : busy
-                  ? "animate-breathe bg-primary/40"
-                  : "bg-primary/20",
+              : unconfirmed
+                ? "bg-highlight/30"
+                : unsure
+                  ? "animate-breathe bg-muted-foreground/25"
+                  : busy
+                    ? "animate-breathe bg-primary/40"
+                    : "bg-primary/20",
         )}
       />
 
       <svg viewBox="0 0 128 128" className={cn("absolute size-44", busy && "animate-spin-slow")}>
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor={on ? "#10b981" : degraded ? "#f59e0b" : unsure ? "#94a3b8" : "#a78bfa"} />
+            <stop
+              offset="0"
+              stopColor={
+                on
+                  ? "#10b981"
+                  : degraded
+                    ? "#f59e0b"
+                    : unsure
+                      ? "#94a3b8"
+                      : unconfirmed
+                        ? "#22d3ee"
+                        : "#a78bfa"
+              }
+            />
             <stop offset="1" stopColor={degraded ? "#f97316" : unsure ? "#64748b" : "#22d3ee"} />
           </linearGradient>
         </defs>
@@ -158,7 +205,9 @@ export function ConnectOrb({
             ? "border-success/40 bg-success/12 text-success shadow-[0_0_50px_-12px_var(--success),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)]"
             : degraded
               ? "border-warning/45 bg-warning/12 text-warning shadow-[0_0_50px_-12px_var(--warning),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)]"
-              : unsure
+              : unconfirmed
+                ? "border-highlight/40 bg-highlight/10 text-highlight shadow-[0_0_50px_-16px_var(--highlight),inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-14px_28px_-14px_rgba(0,0,0,0.5)]"
+                : unsure
                 ? "border-white/15 bg-white/5 text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.08),inset_0_-14px_28px_-14px_rgba(0,0,0,0.45)] hover:bg-white/8"
                 : "border-primary/35 bg-primary/10 text-primary shadow-[0_0_50px_-12px_var(--primary),inset_0_1px_0_rgba(255,255,255,0.14),inset_0_-14px_28px_-14px_rgba(0,0,0,0.55)] hover:bg-primary/16",
         )}
