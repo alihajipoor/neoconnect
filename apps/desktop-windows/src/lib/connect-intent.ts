@@ -135,6 +135,11 @@ const PRESS: Record<ConnectionState, { action: PressAction; labelKey: Translatio
   connecting: { action: "cancelConnect", labelKey: "dash.connecting" },
   verifying: { action: "cancelConnect", labelKey: "dash.verifying" },
   connected: { action: "disconnect", labelKey: "dash.connected" },
+  // An engine is up, so the press that makes sense is the one that takes
+  // it down -- the same as `connected`, because the tunnel is equally
+  // real in both. Only the label differs, and it has to: promising
+  // "Connected" here would be the claim this state exists to withhold.
+  unverified: { action: "disconnect", labelKey: "dash.unverifiedShort" },
   degraded: { action: "disconnect", labelKey: "dash.degraded" },
   // Repeating a teardown is safe (there is nothing there twice) and is
   // the way out of a "Disconnecting..." that has stopped describing
