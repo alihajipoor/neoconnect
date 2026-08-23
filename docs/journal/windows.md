@@ -6324,3 +6324,106 @@ the driver question on the roadmap — a WFP callout driver cannot be
 covered by any of this. Kernel-mode needs EV plus Microsoft Partner
 Center attestation signing, which is a separate enrolment from
 Authenticode, not an upgrade to it.
+
+### The fix path, costed
+
+Researched against Microsoft's current docs, because two things
+everybody "knows" about this are out of date.
+
+**Eligibility is about where *we* are, not where customers are.** Azure
+Trusted Signing was renamed **Azure Artifact Signing** (docs moved to
+`/azure/artifact-signing/`, CLI is `az artifact-signing`; the resource
+provider is still `Microsoft.CodeSigning`). Public Trust certificates
+are open to organisations in the US, Canada, EU, UK and a handful of
+others — but **individual developers must be in the US or Canada**
+([quickstart prerequisites][ts-qs]). We validate as an individual and
+we are US-based, so the individual path is open. Iran is where the
+users are; it has no bearing on eligibility.
+
+**Option 1 — finish Azure Artifact Signing. $9.99/month, Basic.**
+5,000 signatures/month, far beyond a daily release. No hardware token,
+works from GitHub Actions, which is what the workflow is already built
+against. Requires a Pay-As-You-Go subscription (free/trial/sponsored
+are refused — shared.md already hit that). Individual validation is
+AU10TIX Verified ID: government photo ID, phone, proof of address, then
+a Verified ID card presented back from Microsoft Authenticator. It is
+an interactive same-session flow, minutes rather than the 1–20 business
+days the organisation path quotes.
+
+**Option 2 — a conventional OV/IV certificate.** ~$250–400/yr, plus a
+hardware token or cloud-HSM add-on: since June 2023 the CA/B Forum
+requires **OV as well as EV** keys to live in a FIPS 140-2 Level 2
+module, so there is no "just put the .pfx in a secret" option any more.
+SSL.com sells an Individual Validation cert with no business required.
+Certum + SimplySign, already noted in shared.md, is the same shape.
+Strictly worse than option 1 on both cost and CI ergonomics; it is the
+fallback if Azure sours, not the plan.
+
+**Option 3 — stay unsigned and build reputation. Not viable, and worth
+being definite about.** Microsoft: *"When a file is not signed,
+SmartScreen reputation must build for each new version of your files,
+starting with zero reputation. Reputation cannot transfer from previous
+versions unless both were signed using the same publisher identity"*,
+and it *"can take several weeks and hundreds of clean installs from a
+wide audience"* ([smartscreen-reputation][ss]). We have shipped 25
+installers in twelve days. Every one starts at zero and none will ever
+reach the threshold. There is also **no submission mechanism** for
+consumer SmartScreen — the WDSI portal is an enterprise-admin path
+only. Doing nothing is a permanent choice, not a delay.
+
+### Two things in this repo that are now wrong
+
+**The 460-day figure is misattributed.** The workflow comment (lines
+148–153) and shared.md both tie it to the Azure certificate. It is
+actually the CA/Browser Forum cap on *conventional* code-signing certs
+issued from 2026-03-01. Artifact Signing certificates are **renewed
+daily and valid for 72 hours** ([cert management][ts-cert]). The
+conclusion the comment draws is still right and in fact stronger —
+without `timestamp-rfc3161` a signature dies in three days — but the
+reason is the 72-hour cert, not a 460-day one. Not fixing it here; this
+task is investigation plus this correction.
+
+**"Do not create a second identity validation" may no longer hold.**
+The docs say validation email links **expire in seven days**, and that
+if email verification fails you must start a new request. Ours was
+created 2026-08-11 — twelve days ago. Whoever picks this up should
+check whether the existing link is still live before assuming it can be
+resumed; the shared.md advice was written when it was fresh. Flagging
+rather than asserting — I could not verify the link's state without the
+Azure portal.
+
+### EV buys nothing here, and the driver is a separate purchase
+
+Worth killing an assumption before it costs money. **EV certificates no
+longer bypass SmartScreen** — Microsoft removed that in 2024 and now
+says plainly that *"paying a premium for EV solely to avoid SmartScreen
+warnings is no longer justified"* ([smartscreen-reputation][ss]).
+Nothing gives instant trust except shipping through the Microsoft Store
+(re-signed by Microsoft, no warning at all) — which #94 already
+identified as EXE-viable and blocked on exactly this signing work.
+
+For the prospective WFP callout driver, none of the above helps.
+Artifact Signing **cannot sign kernel drivers and will never issue EV
+certificates**; kernel-mode goes through Partner Center attestation
+signing, which requires a real EV cert (~$250–560/yr) *and* an
+organisation-level registration — D-U-N-S, an Entra global admin, a
+legal signatory. That is company-gated, and the company does not exist
+yet. Two consequences: the driver cannot be costed as an upgrade to
+whatever we do now, and the current user-mode WFP kill-switch
+(`fwpmu.h`, no driver — only *redirection* needs a callout) is worth
+protecting precisely because it keeps us out of that gate.
+
+**Recommendation: finish option 1.** It is $9.99/month against a
+half-finished enrolment, it is the only option that makes reputation
+accumulate across releases instead of resetting daily, and it is the
+one the workflow is already wired for — six secrets and nothing else.
+It will not stop the SmartScreen warning on day one; nothing will. What
+it changes is that the warning starts decaying instead of resetting,
+and that a customer in Iran deciding whether to trust a VPN binary sees
+a real legal name instead of "Unknown publisher". For this product that
+is the whole point, and it is currently blocked on a phone, an ID
+document and twenty minutes — not on money or engineering.
+
+[ts-qs]: https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart
+[ts-cert]: https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management
+[ss]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation
