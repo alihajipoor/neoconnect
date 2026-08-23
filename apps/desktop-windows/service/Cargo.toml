@@ -74,4 +74,14 @@ features = [
     # IP_ADAPTER_ADDRESSES_LH is gated behind Ndis as well as WinSock.
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
+    # The user-mode Windows Filtering Platform (fwpuclnt.dll), for the
+    # full-tunnel IPv6 block in `engines::ipv6_block`. Generated bindings
+    # rather than hand-written declarations, for the same reason the RAS
+    # structures above are: FWPM_FILTER0 is a nest of unions whose layout
+    # a person gets wrong silently.
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    # SEC_WINNT_AUTH_IDENTITY_W, which FwpmEngineOpen0 takes (as null --
+    # the service is already LocalSystem) and windows-sys puts here.
+    # RPC_C_AUTHN_WINNT comes from the same module.
+    "Win32_System_Rpc",
 ]

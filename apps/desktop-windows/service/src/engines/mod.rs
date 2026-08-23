@@ -9,6 +9,7 @@
 
 mod dns;
 mod ikev2;
+mod ipv6_block;
 mod janitor;
 mod ras;
 mod openvpn;
@@ -16,6 +17,7 @@ pub mod routing;
 mod wireguard;
 mod xray;
 
+use ipv6_block::Ipv6Block;
 use routing::InstalledRoutes;
 
 use std::io;
@@ -67,6 +69,14 @@ pub struct Engines {
     /// it -- an implementation bound to one adapter would stop working
     /// the moment failover moved the customer, and would do it silently.
     split_tunnel: SplitTunnel,
+    /// The machine-wide IPv6 block that goes with a full tunnel.
+    ///
+    /// `Some` exactly while it is installed, which is what the status
+    /// poll reports to the app -- the customer is told IPv6 is blocked
+    /// because it *is* blocked, not because the protocol usually implies
+    /// it. See `ipv6_block` for the measurement, and for why WireGuard
+    /// is the one engine that never has one here.
+    ipv6_block: Option<Ipv6Block>,
     /// The profile the live tunnel was built from.
     ///
     /// Kept so Custom mode can be switched without the customer
@@ -83,6 +93,7 @@ impl Engines {
             config_dir,
             active: None,
             split_tunnel: SplitTunnel::new(),
+            ipv6_block: None,
             last_profile: None,
         }
     }
@@ -164,6 +175,18 @@ impl Engines {
 
     pub fn split_tunnel_running(&self) -> bool {
         self.split_tunnel.is_running()
+    }
+
+    /// Whether this session is actually blocking IPv6 right now.
+    ///
+    /// Read from the installed block rather than inferred from the
+    /// protocol, because the app puts this in front of the customer in
+    /// words and the two can differ: a WireGuard session has no block of
+    /// ours at all, and an install that failed leaves none either. The
+    /// rule in this product is that the UI never reports a state nothing
+    /// verified, and "IPv6 is blocked" is exactly such a state.
+    pub fn ipv6_blocked(&self) -> bool {
+        self.ipv6_block.is_some()
     }
 
     /// What Custom mode's packet counters say is wrong, for the status
@@ -341,7 +364,48 @@ impl Engines {
         if self.split_tunnel.wants_interception() {
             self.start_split_tunnel(profile)?;
         }
+        self.block_ipv6_if_needed(profile);
         Ok(())
+    }
+
+    /// Blocks IPv6 for a full tunnel, on the engines that would
+    /// otherwise leak it.
+    ///
+    /// Two gates, and both are load-bearing.
+    ///
+    /// **Custom mode is excluded**, which is what `wants_interception`
+    /// asks. The 0.9.27 block in `split_tunnel/redirect.rs` already
+    /// covers that path, and covers it *per application*: a selected
+    /// app's IPv6 is dropped and an unselected one's is left exactly as
+    /// it was, which is the whole premise of a split tunnel. Installing
+    /// a machine-wide block on top would change the behaviour of
+    /// applications the customer deliberately kept out of the VPN --
+    /// a policy change nobody asked for, and one they could not undo
+    /// without disconnecting.
+    ///
+    /// That leaves one honest gap: in "everything except these", the
+    /// applications the customer excluded keep their IPv6, and so does
+    /// everything else on the machine, because that mode also runs
+    /// through the redirect. It is stated here rather than papered over.
+    ///
+    /// **WireGuard is excluded** because `wireguard.exe` installs its
+    /// own; see `ipv6_block::needed_for`.
+    ///
+    /// A failure is logged and not returned. The tunnel is up and
+    /// carrying IPv4 at this point, and tearing it down over a filter
+    /// that would not install leaves the customer with nothing rather
+    /// than with less than they wanted -- but it must not be reported as
+    /// a block either, which is why the field stays `None` and the app's
+    /// status follows the field.
+    fn block_ipv6_if_needed(&mut self, profile: &ConnectProfile) {
+        self.ipv6_block = None;
+        if self.split_tunnel.wants_interception() || !ipv6_block::needed_for(profile) {
+            return;
+        }
+        match Ipv6Block::install(&self.config_dir) {
+            Ok(block) => self.ipv6_block = Some(block),
+            Err(e) => eprintln!("IPv6 could not be blocked for this tunnel: {e}"),
+        }
     }
 
     /// Brings Custom mode up against the tunnel that was just started.
@@ -375,6 +439,19 @@ impl Engines {
         // redirect also restores ordinary routing for the selected apps,
         // which is the state they should be left in.
         self.split_tunnel.stop();
+        // Before the engine too, and unconditionally. Dropping the
+        // handle ends the dynamic WFP session, which is what removes the
+        // filters -- `Ipv6Block::remove` runs from `Drop`, so taking the
+        // Option is the removal and doing it twice is a no-op.
+        //
+        // The same property is what makes a crash safe: the session
+        // belongs to this process, so the kernel tears it down when the
+        // process dies whether or not any of this code ran. There is
+        // deliberately no boot-time or persistent filter that could
+        // survive to strand a customer's networking.
+        if let Some(mut block) = self.ipv6_block.take() {
+            block.remove();
+        }
         // Dropped with the tunnel: a Custom-mode toggle after a disconnect
         // must not resurrect a connection the customer ended.
         self.last_profile = None;
