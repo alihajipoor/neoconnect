@@ -319,6 +319,10 @@ const en = {
   "err.subscriptionInactive": "Your subscription isn't active right now. Check its status on the dashboard.",
   "err.teardownStuck":
     "The tunnel is still shutting down. If your internet stays down, close and reopen the app.",
+  // Said out loud rather than left as a dead button. This press started
+  // nothing, and it deliberately names no server -- nothing was dialled,
+  // so there is nothing to report about one.
+  "err.connectBusy": "A connection attempt is already running. Give it a moment, then try again.",
   "err.unknown": "Couldn't connect.",
   "err.showDetail": "Technical details",
 
@@ -621,6 +625,7 @@ const fa: Record<TranslationKey, string> = {
   "err.concurrentLimit": "سقف دستگاه‌های پلن شما پر شده است. یک دستگاه دیگر را قطع کنید.",
   "err.quotaExhausted": "حجم پلن شما تمام شده است.",
   "err.subscriptionInactive": "اشتراک شما فعال نیست.",
+  "err.connectBusy": "یک تلاش برای اتصال در حال انجام است. کمی صبر کنید و دوباره امتحان کنید.",
   "err.unknown": "اتصال برقرار نشد.",
   "err.showDetail": "جزئیات فنی",
 
