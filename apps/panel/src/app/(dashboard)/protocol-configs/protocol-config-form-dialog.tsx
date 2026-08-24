@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { createProtocolConfig } from "./actions";
+import { InboundTagField } from "./inbound-tag-field";
 import type { Node, Protocol } from "@/lib/types";
 import { ALL_PROTOCOLS } from "@/lib/types";
 import { DEFAULT_PROTOCOL_PORT, PROTOCOL_LABELS } from "@/lib/protocol-labels";
@@ -41,12 +42,17 @@ export function ProtocolConfigFormDialog({ nodes, trigger }: { nodes: Node[]; tr
       }
     }
 
+    // Omitted rather than sent as null: the create DTO has no null
+    // branch, and an empty box means "the node default" either way.
+    const inboundTag = String(formData.get("inboundTag") ?? "").trim();
+
     startTransition(async () => {
       const result = await createProtocolConfig({
         nodeId: String(formData.get("nodeId") ?? ""),
         protocol: formData.get("protocol") as Protocol,
         listenPort: Number(formData.get("listenPort")),
         publicParamsJson,
+        ...(inboundTag ? { inboundTag } : {}),
         isEnabled: formData.get("isEnabled") === "on",
       });
 
@@ -139,6 +145,10 @@ export function ProtocolConfigFormDialog({ nodes, trigger }: { nodes: Node[]; tr
               CA/certs are generated automatically).
             </p>
           </div>
+          {/* Keyed on the protocol so the resolved default in its header
+              follows the picker above rather than going stale the moment
+              somebody changes protocol. */}
+          <InboundTagField key={protocol} protocol={protocol} transport="TCP" />
           <label className="flex items-center gap-2 text-sm">
             <Checkbox name="isEnabled" defaultChecked />
             Enabled

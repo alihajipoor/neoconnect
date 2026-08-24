@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 import { updateProtocolConfig } from "./actions";
+import { InboundTagField } from "./inbound-tag-field";
 import type { ProtocolConfig } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
 import { Button } from "@/components/ui/button";
@@ -68,10 +69,19 @@ export function ProtocolConfigEditDialog({
       }
     }
 
+    // Empty box means "the node default", which the API expresses as an
+    // explicit null rather than an absent key -- absent means "leave it
+    // alone", and collapsing the two would make clearing a tag
+    // impossible from here.
+    const typedTag = String(formData.get("inboundTag") ?? "").trim();
+    const inboundTag = typedTag === "" ? null : typedTag;
+
     startTransition(async () => {
       const result = await updateProtocolConfig(config.id, {
         listenPort: Number(formData.get("listenPort")),
         publicParamsJson,
+        inboundTag,
+        confirmReprovision: formData.get("confirmReprovision") === "on",
         isEnabled: formData.get("isEnabled") === "on",
       });
 
@@ -125,6 +135,12 @@ export function ProtocolConfigEditDialog({
                 : ""}
             </p>
           </div>
+          <InboundTagField
+            protocol={config.protocol}
+            transport={config.transport}
+            currentTag={config.inboundTag}
+            showReprovisionInterlock
+          />
           <label className="flex items-center gap-2 text-sm">
             <Checkbox name="isEnabled" defaultChecked={config.isEnabled} />
             Enabled
