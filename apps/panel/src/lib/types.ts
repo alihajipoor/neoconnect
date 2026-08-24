@@ -91,6 +91,15 @@ export interface ProtocolConfig {
   nodeId: string;
   protocol: Protocol;
   listenPort: number;
+  /** How the inbound is carried. Part of which Xray inbound the node
+   * default resolves to: VLESS+TLS over TCP and over WebSocket are two
+   * listeners sharing one port and one certificate. */
+  transport?: "TCP" | "WS" | "GRPC" | null;
+  /** Which Xray inbound on the node serves this config, or null for the
+   * node's default for this protocol and transport. Set when a node runs
+   * more than one inbound of the same protocol -- which is what lets one
+   * relay serve more than one exit country. */
+  inboundTag?: string | null;
   publicParamsJson: Record<string, unknown>;
   isEnabled: boolean;
   createdAt: string;

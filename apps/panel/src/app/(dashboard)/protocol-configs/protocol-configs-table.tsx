@@ -3,6 +3,7 @@
 import { MoreHorizontal, Plus } from "lucide-react";
 import type { Node, ProtocolConfig } from "@/lib/types";
 import { PROTOCOL_LABELS } from "@/lib/protocol-labels";
+import { defaultInboundTag } from "@/lib/inbound-tags";
 import { deleteProtocolConfig } from "./actions";
 import { ProtocolConfigFormDialog } from "./protocol-config-form-dialog";
 import { ProtocolConfigEditDialog } from "./protocol-config-edit-dialog";
@@ -53,6 +54,12 @@ export function ProtocolConfigsTable({
               <TableHead>Node</TableHead>
               <TableHead>Protocol</TableHead>
               <TableHead>Port</TableHead>
+              {/* Shown in the list, not only in the edit dialog. Which
+                  inbound a config is served on is the field that decides
+                  where a relayed customer's traffic leaves the world
+                  from, and two rows sharing one is the failure worth
+                  spotting at a glance rather than by opening each one. */}
+              <TableHead>Inbound</TableHead>
               <TableHead>Status</TableHead>
               {canManage && <TableHead className="w-10" />}
             </TableRow>
@@ -60,7 +67,7 @@ export function ProtocolConfigsTable({
           <TableBody>
             {protocolConfigs.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
                   No protocol configs yet.
                 </TableCell>
               </TableRow>
@@ -70,6 +77,21 @@ export function ProtocolConfigsTable({
                   <TableCell className="font-medium">{nodeName(pc.nodeId)}</TableCell>
                   <TableCell>{PROTOCOL_LABELS[pc.protocol]}</TableCell>
                   <TableCell className="font-mono text-xs">{pc.listenPort}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {(() => {
+                      const fallback = defaultInboundTag(pc.protocol, pc.transport);
+                      if (pc.inboundTag) return <span>{pc.inboundTag}</span>;
+                      // An explicit tag and an inherited one are not the
+                      // same fact, and rendering both as plain text
+                      // would hide which rows somebody deliberately
+                      // routed.
+                      return fallback ? (
+                        <span className="text-muted-foreground">{fallback}</span>
+                      ) : (
+                        <span className="text-muted-foreground">--</span>
+                      );
+                    })()}
+                  </TableCell>
                   <TableCell>
                     <Badge variant={pc.isEnabled ? "success" : "secondary"}>
                       {pc.isEnabled ? "Enabled" : "Disabled"}
