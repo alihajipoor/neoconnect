@@ -763,6 +763,16 @@ html[lang="fa"] .brand__beta {
   gap: 0.15rem;
 }
 
+/* The `hidden` attribute is how site.js closes this drawer, and a UA
+   stylesheet's `[hidden] { display: none }` loses to the author rule above.
+   Without this line the drawer sets display:grid forever: JS sets .hidden,
+   nothing happens, and every page under 56rem renders with the whole
+   navigation permanently expanded under the header. Measured in a real
+   browser at 375px -- hidden === true, computed display still `grid`. */
+.mobile-nav[hidden] {
+  display: none;
+}
+
 .mobile-nav a {
   padding: 0.7rem 0.6rem;
   border-radius: var(--radius);
@@ -1375,7 +1385,10 @@ html[lang="fa"] .brand__beta {
   color: var(--fg-muted);
   font-size: 0.9rem;
   margin-block-start: 0.35rem;
-  min-height: 2.6em;
+  /* Reserve exactly two rendered lines so the price row lines up across
+     the three cards. 2.6em was less than two lines at either locale's line
+     height, which left Ultimate's price sitting ~11px below the others. */
+  min-height: calc(2em * var(--line-body));
 }
 
 .plan__price {
@@ -2716,6 +2729,23 @@ html[lang="fa"] .stat__value {
   }
   .bento__cell--wide {
     grid-column: span 2;
+  }
+}
+
+/* A bento nested in a split column only has half the container to work with,
+   but the media queries above ask the VIEWPORT, which knows nothing about
+   that. At 1280px the home page's nested bento was laid out in three columns
+   inside a ~570px box: the wide cell took two of them and the remaining cell
+   came out about 170px wide, rendering one word per line. Stack instead --
+   once the split itself is two-column there is no width left to divide. A
+   container query would say this more directly but is not safe to rely on
+   for this audience's browsers. */
+@media (min-width: 62rem) {
+  .split__media .bento {
+    grid-template-columns: 1fr;
+  }
+  .split__media .bento__cell--wide {
+    grid-column: auto;
   }
 }
 
