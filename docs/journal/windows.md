@@ -8058,3 +8058,92 @@ because the CLI generates the entire uncommitted `gen/android` Gradle
 project (AGP, wrapper, minify, `debugSymbolLevel`, packaging). The
 lockfile holds it at 2.11.4 today, so it is latent rather than active
 drift, but it means those Gradle settings are unreviewable in this repo.
+## 2026-08-24 — Four latency defects in the split-tunnel relay, fixed but unproven
+
+**Status:** landed on `claude/split-tunnel-latency`, **nothing verified
+on the wire** — the rig VM was being rebuilt
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/{proxy.rs,redirect.rs,mod.rs}`
+
+Found by a research pass framed around gamers; all four hit every user.
+Each was located in source, none is speculative. One commit per item.
+
+1. **No `TCP_NODELAY` anywhere.** Zero hits for `nodelay` across the
+   service, agent and tauri source, so both sockets a relayed connection
+   crosses ran Nagled. Two Nagles in series against a peer using delayed
+   ACK is up to 200ms on Windows, 40ms on Linux, on exactly the traffic
+   made of small writes. Set in `pump`, both halves. The probe socket is
+   deliberately left alone — it writes zero bytes, so the option would
+   change nothing.
+2. **UDP head-of-line blocking.** `serve_udp` called
+   `bind_upstream_retrying` inline, so one new flow that could not bind
+   froze *every* UDP flow on the machine for up to six seconds — and the
+   condition that makes a bind fail is a tentative tunnel address, i.e.
+   the seconds after a connect or a failover. The freeze landed exactly
+   when the customer was already watching. Measured 5.83s in a test with
+   the retry put back on the loop. Now: one inline bind attempt, then a
+   per-flow setup thread. 0.9.20 is intact — datagrams are held, not
+   dropped, and sent in the order they arrived.
+3. **Packet reordering by design.** Both workers received from the
+   shared handle with no flow affinity, which the WORKERS comment
+   admitted. Now one dispatcher receives, in driver order, and hashes
+   the 5-tuple to a worker.
+4. **Silent UDP send failures.** `let _ = upstream.send_to(..)`. Now
+   three counters — `udp_send_failed`, `udp_reply_failed`,
+   `udp_unbound` — in `Stats`, logged and rate limited. Behaviour on
+   failure is unchanged; only the silence is.
+
+`Stats` is now created in `mod.rs` and shared by the relay and the
+redirect loop, because the relay starts first — the firewall allowance
+and the reachability wait sit between the two.
+
+### The rig experiments these need
+
+Nothing below has been run. `cargo test --workspace` passing means the
+logic holds against loopback and synthetic packets; none of it says a
+packet went anywhere.
+
+- **Nagle.** A selected app talking to a listener on the node that
+  echoes small writes. Capture on the node. Compare the inter-arrival
+  gaps of a request/response ping-pong at 10/s, before and after. Fixed
+  looks like the 40ms/200ms mode disappearing from the histogram, not
+  like a lower mean.
+- **UDP freeze (the important one).** Hold a UDP flow live — `iperf3 -u`
+  at a low rate, or a game sitting in a match — then **force the
+  tentative-address window**: connect, or trigger a failover by stopping
+  the active engine while Custom mode is on. Both bring up a fresh TUN
+  whose address is under duplicate address detection, which is the only
+  thing that makes the bind fail. Measure the *established* flow's
+  datagram gap across that moment, from a capture at the node rather
+  than from the client. Fixed = no gap above ~100ms. Broken = a gap of
+  up to 6s. "Nobody complained" is not the measurement.
+- **Ordering.** `iperf3 -u` through a selected app and read the
+  receiver's out-of-order count at the node. Worth also capturing a real
+  game's UDP flow and checking its sequence numbers arrive monotonic.
+- **Throughput cost of the dispatcher.** The one thing this change could
+  plausibly make *worse*: one thread now receives every packet, and each
+  packet gets a copy and a channel hop. Measure with a saturating TCP
+  transfer through a selected app, before and after, watching `seen` per
+  second. If the dispatcher turns out to be the ceiling, the answer is a
+  buffer pool and a deeper queue — not going back to two receivers,
+  which is what reordered packets in the first place.
+- **The counters.** Read `udp_send_failed` / `udp_reply_failed` /
+  `udp_unbound` against a capture before letting `Stats::complaint` ever
+  speak on their behalf. They are deliberately not consulted by it yet,
+  for the same reason `escaped` is not.
+
+### Gotchas worth keeping
+
+- Two tests binding the same synthetic port collided under the parallel
+  test runner, because every `Nat` starts allocating from the same
+  number. With `SO_REUSEADDR` both binds succeed and Windows delivers
+  replies to whichever socket it likes — a test that passes or fails on
+  the scheduler. `udp_flow` now binds exclusively and takes another flow
+  if the port is already held.
+- `0.0.0.0:9` fails `sendto` with WSAEADDRNOTAVAIL every time, and an
+  address in `203.0.113.0/24` fails `bind` the same way. Both are good
+  deterministic stand-ins for failures that otherwise need a live
+  tunnel — the second reproduces the tentative-address condition without
+  a driver, a tunnel or elevation.
+- The dispatcher is joined **before** the workers: a worker ends only
+  when the dispatcher drops its end of the queue, so the other order
+  would hang the teardown.
