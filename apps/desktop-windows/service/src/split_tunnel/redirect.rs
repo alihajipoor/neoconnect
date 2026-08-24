@@ -314,6 +314,39 @@ pub struct Stats {
     /// continuously -- so a failure here would light a warning about
     /// something else entirely.
     pub reset_v6: AtomicU64,
+    /// Datagrams the relay could not hand on towards their destination.
+    ///
+    /// The relay used to discard the result of that send entirely
+    /// (`let _ = upstream.send_to(..)`), which made it a silent loss
+    /// point on the exact path voice and gaming depend on -- and an
+    /// invisible one from every angle, because a datagram that never
+    /// leaves the relay is still counted `redirected` by the loop that
+    /// handed it over. `returned` staying at zero was the only trace,
+    /// and that reads identically to a tunnel that is not carrying
+    /// traffic, which is a different fault with a different fix.
+    ///
+    /// The behaviour on failure is unchanged -- the datagram is dropped
+    /// and the next one is served. UDP has no retransmission to hook
+    /// into and the application above has its own; retrying here would
+    /// duplicate a datagram the application may already have resent.
+    pub udp_send_failed: AtomicU64,
+    /// Replies the relay could not hand back to the application.
+    ///
+    /// Counted apart from `udp_send_failed` because the two point at
+    /// opposite halves of the machine. A failure sending upstream says
+    /// something about the tunnel; a failure sending back to the
+    /// application over loopback says something about this host. Folded
+    /// together they would be one number that cannot answer either
+    /// question.
+    pub udp_reply_failed: AtomicU64,
+    /// Datagrams dropped because their flow never got an upstream
+    /// socket -- see `proxy::PendingFlows`.
+    ///
+    /// Either the bind was still failing after the full retry, or the
+    /// flow held its cap of datagrams while it waited. Both are the
+    /// tentative-address window of 0.9.20 outlasting the patience the
+    /// relay has for it, and both used to be a `continue`.
+    pub udp_unbound: AtomicU64,
 }
 
 /// How many packets must have gone out before silence means anything.
@@ -339,7 +372,8 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} grace_dropped={} reset_v6={}",
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} \
+             grace_dropped={} reset_v6={} udp_send_failed={} udp_reply_failed={} udp_unbound={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
@@ -349,6 +383,9 @@ impl Stats {
             self.escaped.load(Ordering::Relaxed),
             self.grace_dropped.load(Ordering::Relaxed),
             self.reset_v6.load(Ordering::Relaxed),
+            self.udp_send_failed.load(Ordering::Relaxed),
+            self.udp_reply_failed.load(Ordering::Relaxed),
+            self.udp_unbound.load(Ordering::Relaxed),
         )
     }
 
@@ -382,6 +419,14 @@ impl Stats {
     /// Custom mode always, not of this session, so it is stated in the
     /// Custom-mode line on the dashboard (`dash.customActive`) where it
     /// sits beside "on" instead of pretending to be news.
+    ///
+    /// The three `udp_*` counters are not consulted here either, for the
+    /// reason `escaped` is not: they have never been read against a
+    /// packet capture. They exist so that a loss which used to leave no
+    /// trace at all shows up in the log the moment somebody looks; what
+    /// threshold on them means "tell the customer something is wrong" is
+    /// a question the rig has to answer first. Until it has, this
+    /// function does not speak on their behalf.
     pub fn complaint(&self, session_age: Duration) -> Option<String> {
         // Nothing is wrong yet, by definition: the redirect has not
         // had time to be wrong. See WARMUP.
@@ -676,10 +721,15 @@ impl Stopper {
     }
 }
 
+/// `stats` is passed in rather than created here because the relay
+/// counts into the same table -- see `Stats::udp_send_failed` -- and the
+/// relay is started first, before the firewall allowance and the
+/// reachability wait that sit between the two.
 pub fn start(
     mut redirect: Redirect,
     nat: Arc<Nat>,
     selection: SharedSelection,
+    stats: Arc<Stats>,
 ) -> Result<Running, String> {
     // Stamped here rather than trusted from the caller: the window has
     // to start when packets start arriving. Between the caller building
@@ -702,7 +752,6 @@ pub fn start(
     let handle = Arc::new(handle);
     let redirect = Arc::new(redirect);
     let stop = Arc::new(AtomicBool::new(false));
-    let stats = Arc::new(Stats::default());
 
     let threads = (0..WORKERS)
         .map(|_| {
@@ -1677,7 +1726,43 @@ mod tests {
             escaped: AtomicU64::new(0),
             grace_dropped: AtomicU64::new(0),
             reset_v6: AtomicU64::new(0),
+            udp_send_failed: AtomicU64::new(0),
+            udp_reply_failed: AtomicU64::new(0),
+            udp_unbound: AtomicU64::new(0),
         }
+    }
+
+    #[test]
+    fn the_relays_own_udp_losses_reach_the_log() {
+        // The counters are only worth adding if somebody reads them, and
+        // the only place anybody reads them is this line. A number that
+        // is incremented and never printed is the same silence it was
+        // meant to end.
+        let counters = stats(1, 1, 1, 1, 0);
+        counters.udp_send_failed.store(4, Ordering::Relaxed);
+        counters.udp_reply_failed.store(5, Ordering::Relaxed);
+        counters.udp_unbound.store(6, Ordering::Relaxed);
+
+        let summary = counters.summary();
+        assert!(summary.contains("udp_send_failed=4"), "got {summary}");
+        assert!(summary.contains("udp_reply_failed=5"), "got {summary}");
+        assert!(summary.contains("udp_unbound=6"), "got {summary}");
+    }
+
+    #[test]
+    fn the_relays_udp_losses_do_not_speak_to_the_customer_yet() {
+        // Deliberate, and the same decision `escaped` carries: these
+        // numbers have never been read against a packet capture, and
+        // this project does not let the app tell somebody their VPN is
+        // broken on the strength of a number nobody has checked against
+        // the wire. They belong in the log until the rig says what a
+        // healthy value looks like.
+        let counters = stats(1000, 900, 800, 700, 0);
+        counters.udp_send_failed.store(5000, Ordering::Relaxed);
+        counters.udp_reply_failed.store(5000, Ordering::Relaxed);
+        counters.udp_unbound.store(5000, Ordering::Relaxed);
+
+        assert_eq!(counters.complaint(WARMUP * 2), None);
     }
 
     #[test]
@@ -2541,7 +2626,12 @@ mod tests {
         // Index zero is the fail-open signal, so this is a relay with no
         // tunnel under it rather than one pointed at a broken tunnel.
         let tunnel = Arc::new(proxy::TunnelInterface::new(0, Ipv4Addr::UNSPECIFIED));
-        let relays = proxy::start(nat.clone(), tunnel).expect("relays must start");
+        // One table for both halves, as production wires it: the relay
+        // counts its own UDP losses into the same counters the loop
+        // fills.
+        let stats = Arc::new(Stats::default());
+        let relays =
+            proxy::start(nat.clone(), tunnel, stats.clone()).expect("relays must start");
         let mut allowance =
             firewall::Allowance::install(&[local_addr], relays.tcp_port, relays.udp_port)
                 .expect("the inbound allowance must install");
@@ -2576,6 +2666,7 @@ mod tests {
             },
             nat,
             selection,
+            stats,
         )
         .expect("the redirect loop must start");
 
