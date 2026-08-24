@@ -8232,3 +8232,155 @@ otherwise.
 else is a new module or an additive return value on an existing
 teardown. `dns::clear`, `janitor::reconcile` and
 `routing::purge_interface` behave exactly as they did.
+## 2026-08-23 — B2 is dead; its IPv6 half is not
+
+**Status:** finding recorded + one change landed, unverified on the wire
+**Touches:** `apps/desktop-windows/service/src/engines/ipv6_block.rs`,
+`split_tunnel/{mod,owner,redirect}.rs`
+
+### B2, as written on the roadmap, cannot work
+
+The proposal was: while Custom mode is on, add user-mode WFP BLOCK
+filters keyed on `FWPM_CONDITION_ALE_APP_ID` for each selected app,
+refusing their outbound traffic to everything except loopback, LAN and
+the relay path — so a flow the WinDivert loop fails to attribute is
+**refused instead of leaked**. It would have flipped the failure
+direction on the worst outcome this product has.
+
+It is unsound, and structurally rather than fixably so.
+
+`ALE_AUTH_CONNECT_V4` classifies at `connect()` — MS states plainly that
+for TCP there is **no packet** at that layer — and for UDP at the first
+`sendto` to each new remote tuple. The redirect rewrites the destination
+at `FWPM_LAYER_OUTBOUND_IPPACKET_V4`, which is where WinDivert's NETWORK
+layer actually registers (there is no `FWPM_LAYER_OUTBOUND_NETWORK_V4`;
+that name does not exist in `Fwpmu.h`). MS's documented client-open
+order is `ALE_AUTH_CONNECT` → `OUTBOUND_TRANSPORT` → `OUTBOUND_IPPACKET`.
+So at ALE, the connection that will be carried and the connection that
+will escape are **the same event**: selected app, public destination.
+
+And there is nowhere else to look. `ALE_APP_ID` is a filtering
+condition only at the ALE layers; `FWPS_METADATA_FIELD_PROCESS_ID` is
+callout metadata, never a `FWPM_CONDITION_*`, so **user mode cannot key
+on PID at any layer at all**; `OUTBOUND_TRANSPORT` has neither. Every
+layer that knows *who* runs before the rewrite; every layer that sees
+the rewrite has forgotten who. `ALE_FLOW_ESTABLISHED` has both
+`ALE_APP_ID` and `IP_REMOTE_ADDRESS` and is the tease — MS says a filter
+there "should not return Block or Permit".
+
+**Mullvad and Windscribe confirm it from the other side.** Both redirect
+at `ALE_BIND_REDIRECT` / `ALE_CONNECT_REDIRECT` with a signed kernel
+callout that rewrites the **local** address, which is why their block
+filters can key on local address (Mullvad, `IP_LOCAL_ADDRESS == tunnel
+IP`) or local interface LUID (Windscribe) and never on the remote one.
+Neither ships user-mode-only per-app splitting; both hard-fail the
+feature if their driver is not running. Our loop deliberately leaves the
+source address alone — the module header says why — so we do not even
+have the discriminator they built the design around.
+
+Two variants died with it. **(a) activation-window blocking** is worse
+than redundant: 0.9.28's grace drop already covers *mid-connection*
+packets only, and new connections in that window are exactly what
+`image_for_new_connection` gets right — an ALE block there would refuse
+the flows the loop is handling correctly. **(b) fail-closed on detach**
+is technically expressible (nothing is being carried at that point, so
+nothing is confusable) but it is a reversal of the stated fail-open
+policy, not an engineering question. Left for a product decision.
+
+Worth knowing while that decision is open: `detach_tunnel()` is called
+only when a *child* engine process exits. The WireGuard arm of
+`Engines::status` clears `self.active` without it, so a WireGuard tunnel
+that dies leaves Custom mode still pinning to an interface index that no
+longer exists. Neither behaviour has been measured; both should be,
+together, if (b) is ever picked up.
+
+### The IPv6 half survives, and it is now in
+
+`SelectedAppsIpv6Block` in `engines/ipv6_block.rs`. Sound for exactly
+one reason: **no IPv6 is ever redirected**, so a block has nothing to be
+confused with.
+
+What it closes is the v6 form of the gap the 0928 entry called *not
+fixable by asking harder*: the loop's v6 block still has to attribute a
+packet through the endpoint tables, and in `OnlySelected` an unknown
+owner means *leave alone*. A socket closed microseconds after its send,
+or younger than the 20ms snapshot, therefore leaks v6 in clear text with
+every counter reading healthy. ALE has no lookup to lose — the kernel
+classifies in the calling thread, inside the sending process.
+
+Shape, and each clause is deliberate:
+
+- `ALE_AUTH_CONNECT_V6` only. Outbound only, because the loop is.
+- `OnlySelected` only. In `AllExcept` the loop already answers *block*
+  for an unknown owner, so the hole does not exist, and the WFP shape
+  there would be machine-wide-with-holes.
+- Every filter carries an `ALE_APP_ID` condition, permits included, so
+  the sublayer says nothing about any other program.
+- **`::/64` is permitted and that is load-bearing.** A dual-stack
+  socket's IPv4 classifies at the *V6* layer with an IPv4-mapped address
+  (`::ffff:a.b.c.d`). Without that permit this refuses a selected app's
+  IPv4 — i.e. breaks Custom mode outright, only on machines that have
+  IPv6.
+- Rebuilt on `set_selection`, because the list is editable live and the
+  loop reads it per packet while filters do not. Deselecting an app must
+  give it its IPv6 back without a reconnect.
+
+Reuses 0.9.28's dynamic session, provider and one-transaction install,
+so the crash guarantee is the same one already proven by `taskkill /F`.
+
+`blocked_v6` in the redirect log **will read lower** on a session where
+these installed. That is the refusal happening a layer up, not a
+regression; the counter's doc comment now says so.
+
+### What has NOT been proven
+
+Nothing here has touched a wire. Specifically:
+
+1. The `FwpmFilterAdd0` acceptance test —
+   `wfp_accepts_the_per_app_filter_set_then_it_is_aborted` — **skipped**
+   on the dev box: `FwpmTransactionBegin0` returns `0x5`, needs admin.
+   It has never once run. Run it elevated before believing any of this:
+   `cargo test -p neoconnect-service --bin neoconnect-service ipv6_block`
+   from an Administrator shell, and check the output does not say
+   "skipped".
+2. The wire test, on `Neoxify-Test2` from `pre-verify3`, host-side pcap:
+   select `curl.exe`, Custom mode on, dual-stack guest. (i) a selected
+   app's v6 to a public address produces **zero** clear-text packets and
+   `connect()` fails immediately rather than hanging; (ii) a *second,
+   unselected* copy of the same binary at another path still reaches the
+   same v6 address — the scope control, the same one the 0.9.27 v6 work
+   used; (iii) **the IPv4-mapped case**: the selected app's ordinary
+   IPv4 still exits at the node. That third one is what catches a
+   missing `::/64` and it must not be skipped. (iv) `netsh wfp show
+   filters` shows the `Neoxify Custom-mode IPv6 block` sublayer appear
+   on activation and go on `taskkill /F`. (v) deselect the app while
+   connected and confirm its IPv6 comes back without a reconnect.
+3. Whether the fire-and-forget shape leaks over v6 at all was never
+   measured — it was measured over v4 (13–14 of 15) and inferred here.
+   The fix is right either way, but do not quote a v6 number nobody took.
+
+### What this means for B1
+
+It strengthens the case, and it is now the *only* case for the v4 gap.
+That gap has **no user-mode-reachable fix** — established now rather
+than suspected — and a kernel callout at `ALE_CONNECT_REDIRECT` is what
+buys the two things missing: attribution in the sending process at
+connect time, and the local-address rewrite that makes fail-closed
+filters expressible at all. EV cert plus Partner Center attestation
+signing is the price of the whole category, not of one bug.
+
+**Before paying it, one cheaper thing is worth a spike.** WinDivert's
+`WINDIVERT_LAYER_SOCKET` — already in the driver we ship, already in
+`windivert-sys` 0.9.3 — delivers `SocketBind` / `SocketConnect` /
+`SocketClose` events carrying **`process_id`, local port and protocol**,
+and WinDivert implements that layer on `ALE_RESOURCE_ASSIGNMENT` /
+`ALE_AUTH_CONNECT`. That is the fact the endpoint-table lookup cannot
+get, delivered at socket creation rather than inferred afterwards. A
+second handle feeding a port→PID map that `owner.rs` consults ahead of
+the tables would sidestep the race with no driver of ours. It does not
+give the *rewrite* — only B1 does — but attribution is where every
+measured leak in this feature has actually come from. Not started; no
+evidence yet beyond the layer table and the struct definition. The
+ordering question a spike has to answer first: whether a `SocketBind`
+event is reliably queued before the datagram reaches the NETWORK-layer
+handle, since the two handles have independent queues.
