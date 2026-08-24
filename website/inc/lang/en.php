@@ -19,7 +19,13 @@ return array(
     // -----------------------------------------------------------------
 
     'brand.name' => 'Neoxify',
-    'brand.tagline' => 'Fast, hard to block, built for gamers.',
+    'brand.tagline' => 'Hard to block. Eight ways through.',
+
+    // Units. Separated from the number so nx_format_data() can put the
+    // amount through nx_num() and still name the unit in the reader's own
+    // language -- "30 GB" in a Persian sentence came out as "GB 30".
+    'unit.gb' => 'GB',
+    'unit.tb' => 'TB',
 
     'nav.home' => 'Home',
     'nav.features' => 'Features',
@@ -28,6 +34,7 @@ return array(
     'nav.contact' => 'Contact',
     'nav.reseller' => 'Resellers',
     'nav.privacy' => 'Privacy',
+    'nav.delete_account' => 'Delete account',
     'nav.signin' => 'Sign in',
     'nav.cta' => 'Get the app',
     'nav.menu' => 'Menu',
@@ -47,17 +54,22 @@ return array(
     // Page metadata
     // -----------------------------------------------------------------
 
-    'meta.home.title' => 'Neoxify — a VPN built for gamers on restricted networks',
-    'meta.home.description' => 'Encrypted, low-latency connections built for gaming on networks that filter heavily. One app, several ways to connect, and no configuration files to import.',
+    // Rewritten 2026-08. The previous title was "Neoxify — a VPN built for
+    // gamers on restricted networks", which sold to the wrong audience
+    // (gaming is one segment, not the market) and led on the one claim
+    // the product can least substantiate. This one leads with what it
+    // actually is and what it actually carries.
+    'meta.home.title' => 'Neoxify — a VPN with eight ways through a filtered network',
+    'meta.home.description' => 'WireGuard, OpenVPN, Shadowsocks, VLESS REALITY and four more in one app. Servers in five countries, an Iran relay path, and nothing to import.',
 
-    'meta.download.title' => 'Download — Neoxify',
-    'meta.download.description' => 'Get the Neoxify app for Windows and Android. macOS and iOS are in development.',
+    'meta.download.title' => 'Download Neoxify for Windows and Android — direct installer and APK',
+    'meta.download.description' => 'Get the Neoxify app for Windows or Android. Direct download, always the current release. No macOS or iOS app yet.',
 
-    'meta.contact.title' => 'Contact — Neoxify',
-    'meta.contact.description' => 'Questions about Neoxify? Send us a message and we will get back to you.',
+    'meta.contact.title' => 'Contact Neoxify — questions before you buy, and support',
+    'meta.contact.description' => 'Ask about plans, payment, or whether a connection method will work on your network. Write to us and a person answers. Existing customers get faster help in the app.',
 
-    'meta.privacy.title' => 'Privacy — Neoxify',
-    'meta.privacy.description' => 'What Neoxify collects, why we have it, and how to ask us to remove it.',
+    'meta.privacy.title' => 'Privacy — what Neoxify records, and what it does not',
+    'meta.privacy.description' => 'What we hold for your account, what our servers log, what payment providers see, how long it is kept and how to have it deleted. We make no no-logs claim.',
 
     'delete.title' => "Delete your account",
     'delete.subtitle' => "Remove your Neoxify account and everything on it.",
@@ -86,8 +98,8 @@ return array(
     'privacy.contact.title' => 'Contact',
     'privacy.contact.body' => 'Questions about any of this, or a request about your own data, go to :email. Write from the address on your account and we will deal with it.',
 
-    'meta.reseller.title' => 'Become a reseller — Neoxify',
-    'meta.reseller.description' => 'Apply to resell Neoxify. Terms are agreed individually with every partner.',
+    'meta.reseller.title' => 'Become a Neoxify reseller — sell VPN accounts to your own audience',
+    'meta.reseller.description' => 'For Telegram channels, gaming communities, local shops and network admins. Terms are agreed individually with every partner, not from a published price list.',
 
     // -----------------------------------------------------------------
     // Home — hero
@@ -103,8 +115,14 @@ return array(
     'home.hero.cta_primary' => 'Download for Windows',
     'home.hero.cta_primary_soon' => 'See download options',
     'home.hero.cta_secondary' => 'See plans',
-    'home.hero.note_available' => 'Windows and Android apps available now. macOS and iOS are in development.',
-    'home.hero.note_soon' => 'Windows app releasing soon. macOS and iOS are in development.',
+    // "in development" was an overclaim on both counts. No macOS client
+    // exists in any form, and iOS has no VPN code at all -- it is blocked
+    // on an Apple *organization* enrolment that cannot begin until a legal
+    // entity exists. CI builds an iOS simulator target, which cannot run a
+    // tunnel and is not evidence of a client. "Not yet" is the true
+    // statement; a date would be a guess.
+    'home.hero.note_available' => 'Windows and Android apps out now. There is no macOS or iOS app yet.',
+    'home.hero.note_soon' => 'Windows app releasing soon. There is no macOS or iOS app yet.',
 
     'beta.badge' => 'Beta',
     'beta.hero' => 'In beta — early, and moving fast.',
@@ -203,11 +221,11 @@ return array(
     'home.assure.noconfig' => 'No config files',
     'home.assure.switch' => 'Switch location anytime',
 
-    'home.mockup.alt' => 'The Neoxify app running on Windows, with mobile and macOS versions still in development.',
+    'home.mockup.alt' => 'The Neoxify app running on Windows, beside the Android app and a macOS window marked as not yet available.',
     'home.mockup.windows' => 'Windows',
     'home.mockup.mobile' => 'Mobile',
     'home.mockup.macos' => 'macOS',
-    'home.mockup.soon' => 'Soon',
+    'home.mockup.soon' => 'Not yet',
     'home.mockup.subscription' => 'Subscription',
     'home.mockup.status' => 'Active',
     'home.mockup.expires' => 'Renews in 24 days',
@@ -327,11 +345,11 @@ return array(
     'download.android.steps.4' => 'Choose a location and connect. Android will ask once for permission to create a VPN — tap OK.',
 
     'download.other.title' => 'Other platforms',
-    'download.other.body' => 'These are in development. We would rather ship them properly than ship them early.',
+    'download.other.body' => 'Not built yet, and we are not putting a date on either. An app that does not exist is not "coming soon".',
     'download.other.macos' => 'macOS',
     'download.other.android' => 'Android',
     'download.other.ios' => 'iOS',
-    'download.other.status' => 'In development',
+    'download.other.status' => 'Not available yet',
 
     // -----------------------------------------------------------------
     // Contact
@@ -444,4 +462,331 @@ return array(
     'error.404.title' => 'That page does not exist',
     'error.404.body' => 'The link may be out of date, or there may be a typo in the address. The pages below definitely work.',
     'error.404.home' => 'Back to the home page',
+
+    // =================================================================
+    // 2026-08 rebuild — new pages, structured data, honest positioning
+    // =================================================================
+
+    // -----------------------------------------------------------------
+    // Missing keys that shipped to production as ⟪placeholders⟫
+    //
+    // Measured on the live site 2026-08-24: /delete-account/ and
+    // /fa/delete-account/ both served
+    //     <title>⟪meta.delete-account.title⟫</title>
+    // and the same in the meta description and both OG tags. The page had
+    // strings for its body (delete.title, delete.subtitle) but nobody
+    // added the meta.* pair, and nx_t() renders a missing key visibly
+    // rather than blank -- which is the right behaviour, and it was
+    // shouting into production for months because no page-level test ever
+    // looked at a <title>.
+    //
+    // scripts/check-site-strings.php now fails on any ⟪⟫ reaching a
+    // rendered page, so this class of bug cannot ship silently again.
+    // -----------------------------------------------------------------
+
+    'meta.delete-account.title' => 'Delete your account — Neoxify',
+    'meta.delete-account.description' => 'How to permanently delete your Neoxify account and everything on it, from inside the app or by asking us directly.',
+
+    // -----------------------------------------------------------------
+    // Social preview
+    // -----------------------------------------------------------------
+
+    // Describes the card image itself, for someone who cannot see it.
+    'meta.og.image_alt' => 'Neoxify — a VPN with eight ways to connect, built for heavily filtered networks.',
+
+    // -----------------------------------------------------------------
+    // Structured data
+    //
+    // Read by machines and repeated in search results, so held to the
+    // same bar as the visible copy: nothing here that is not checkable
+    // against the product.
+    // -----------------------------------------------------------------
+
+    'schema.org.description' => 'Neoxify is a commercial VPN service with eight connection methods, built for people on heavily filtered networks.',
+    'schema.product.description' => 'A VPN subscription with eight connection methods, servers in five countries plus an Iran relay path, and apps for Windows and Android.',
+    'schema.app.windows.name' => 'Neoxify for Windows',
+    'schema.app.android.name' => 'Neoxify for Android',
+    'schema.app.trial' => 'Free trial for new accounts, no payment method required.',
+
+    // -----------------------------------------------------------------
+    // Navigation additions
+    // -----------------------------------------------------------------
+
+    'nav.faq' => 'FAQ',
+    'nav.support' => 'Support',
+    'footer.resources' => 'Resources',
+    'footer.legal' => 'Legal',
+
+    // -----------------------------------------------------------------
+    // Shared vocabulary
+    // -----------------------------------------------------------------
+
+    'locations.city_country' => ':city, :country',
+    'common.windows' => 'Windows',
+    'common.android' => 'Android',
+    'common.yes' => 'Supported',
+    'common.no' => 'Not available',
+    'common.learn_more' => 'Learn more',
+
+    // -----------------------------------------------------------------
+    // Home — hero
+    //
+    // POSITIONING CHANGE, 2026-08. Read this before reverting it.
+    //
+    // The previous hero was "Low latency. Hard to block. / Built for
+    // gamers." Two problems, one factual and one strategic:
+    //
+    // 1. FACTUAL. "Low latency" as an end-to-end claim is not currently
+    //    supportable. Measured from Tehran, the direct path to Blizzard's
+    //    EU servers is 73.7 ms; the closest Neoxify node is 84.6 ms. For
+    //    that workload the product ADDS latency, which is what a VPN
+    //    normally does -- there is no shorter path than the short path.
+    //    What IS supportable, and is the real product, is that the
+    //    connection survives a network that is actively breaking it.
+    //
+    // 2. STRATEGIC. "Built for gamers" was corrected internally on
+    //    2026-07-25: gamers are one segment, not the audience. Phones and
+    //    general use dominate, and the narrow framing was already skewing
+    //    decisions elsewhere in the product.
+    //
+    // Gaming has NOT been dropped -- it is named as a use case on the
+    // features page, without a speed claim attached. The old strings are
+    // kept directly below, commented, so reverting is one edit rather
+    // than a rewrite. This is the owner's call to make; it is flagged in
+    // the handover rather than decided quietly.
+    //
+    //   'home.hero.title' => 'Low latency. Hard to block.',
+    //   'home.hero.title_accent' => 'Built for gamers.',
+    //   'brand.tagline' => 'Fast, hard to block, built for gamers.',
+    // -----------------------------------------------------------------
+
+    'home.hero.title' => 'When the network fights back,',
+    'home.hero.title_accent' => 'this keeps working.',
+    'home.hero.subtitle' => 'Eight different ways to connect, servers in five countries, and an app that checks traffic is really flowing before it tells you it is connected. Built for networks that filter hard.',
+
+    'home.hero.cta_primary' => 'Download the app',
+    'home.hero.cta_secondary' => 'Compare plans',
+
+    // -----------------------------------------------------------------
+    // Home — stat strip
+    //
+    // Every one of these numbers is counted from a data file at render
+    // time, never typed here. The labels are the only text.
+    // -----------------------------------------------------------------
+
+    'home.stats.protocols' => 'Ways to connect',
+    'home.stats.locations' => 'Server countries',
+    'home.stats.platforms' => 'Apps out now',
+    'home.stats.platforms_value' => 'Windows + Android',
+
+    // -----------------------------------------------------------------
+    // Home — protocols teaser
+    // -----------------------------------------------------------------
+
+    'home.protocols.eyebrow' => 'Connection methods',
+    'home.protocols.title' => 'Eight ways in, because one is never enough',
+    'home.protocols.body' => 'A filtered network does not block "VPNs" — it blocks specific, recognisable patterns, one at a time, and what worked last week can be gone today. So the app carries eight different methods and moves between them. When one stops getting through, you pick another and carry on.',
+    'home.protocols.link' => 'See every connection method',
+
+    // -----------------------------------------------------------------
+    // Home — locations teaser
+    // -----------------------------------------------------------------
+
+    'home.locations.eyebrow' => 'Server locations',
+    'home.locations.title' => 'Where your traffic comes out',
+    'home.locations.body' => 'Pick a country in the app and change it whenever you like. Server addresses come from our backend rather than being built into the app, so they can be rotated without you reinstalling or importing anything.',
+    'home.locations.relay_note' => 'Plus a relay inside Iran — an entry point that hands your traffic on to a server abroad, for networks where a direct connection will not hold. It is a way in, not a place you come out.',
+
+    // -----------------------------------------------------------------
+    // Home — honest trust section
+    //
+    // This is the section that would normally hold fabricated badges:
+    // "audited", "no logs", "10 million users". None of those are true
+    // here, so this says what IS true instead, including the awkward
+    // parts. Being the VPN that does not overclaim is a real position,
+    // and it is the only one this product can currently defend.
+    // -----------------------------------------------------------------
+
+    'home.trust.eyebrow' => 'Straight answers',
+    'home.trust.title' => 'What we will and will not claim',
+    'home.trust.body' => 'Most VPN sites make promises nobody checks. Here is where this one stands, including the parts that are not flattering.',
+
+    'home.trust.state.title' => 'The app does not lie about being connected',
+    'home.trust.state.body' => 'Before it shows you as connected, it checks that traffic is genuinely reaching the internet through the tunnel. A green light that means nothing is worse than a red one, especially if you are relying on it.',
+
+    'home.trust.logs.title' => 'We do not claim to keep no logs',
+    'home.trust.logs.body' => 'Plenty of services advertise a no-logs policy. We are not going to, because our servers do write connection logs, and saying otherwise would be a lie that happens to be popular. Read the privacy page for what is actually recorded and why.',
+
+    'home.trust.beta.title' => 'It is beta, and the installer is unsigned',
+    'home.trust.beta.body' => 'People use this every day and it works, but it is early and it changes fast. Windows will warn you about the installer because it is not code-signed yet. We would rather you heard that here than found it out mid-download.',
+
+    'home.trust.honest.title' => 'No route stays open forever',
+    'home.trust.honest.body' => 'Nobody can promise a specific connection method will keep working on a filtered network — anyone who does is guessing. That is precisely why you get eight of them and can switch in a couple of taps.',
+
+    // -----------------------------------------------------------------
+    // Home — closing
+    // -----------------------------------------------------------------
+
+    'home.pricing.link' => 'See full plan comparison',
+    'home.faq.link' => 'Read all questions',
+
+    // =================================================================
+    // Features page
+    // =================================================================
+
+    'meta.features.title' => 'Features — eight VPN protocols and split tunnelling | Neoxify',
+    'meta.features.description' => 'WireGuard, OpenVPN, Shadowsocks, VLESS REALITY and four more in one app. Per-app split tunnelling, five server countries and an Iran relay path.',
+
+    'features.title' => 'What is actually in it',
+    'features.subtitle' => 'The features below are the ones that exist and work today. Where something only works on one platform, it says so.',
+    'features.eyebrow' => 'Features',
+
+    'features.protocols.title' => 'Eight connection methods',
+    'features.protocols.body' => 'Each one is a different way of getting your traffic out, and they fail in different circumstances — which is the whole point of carrying more than one. The names in the app describe the trade-off; the technology behind each is listed beside it.',
+    'features.protocols.table.method' => 'Method',
+    'features.protocols.table.what' => 'When to use it',
+    'features.protocols.table.windows' => 'Windows',
+    'features.protocols.table.android' => 'Android',
+    'features.protocols.note' => 'OpenVPN is the one gap on Android: the client does not carry it. Every other method works on both. iOS and macOS apps do not exist yet, so neither carries any of them.',
+
+    'features.failover.title' => 'It switches when a route dies — and checks before saying so',
+    'features.failover.body' => 'If the method you are on stops getting through, the app moves you to another one. What makes that trustworthy rather than cosmetic is the check underneath: it confirms traffic is actually reaching the internet through the new route before it reports success. An indicator that turns green without verifying anything is exactly the bug this was built to fix.',
+
+    'features.split.title' => 'Send only the apps you choose',
+    'features.split.body' => 'Custom mode routes the applications you pick through the tunnel and leaves everything else on your normal connection. Chosen per application, not per website — so a browser and a game can genuinely take different paths.',
+    'features.split.platforms' => 'Windows and Android. Not available on iOS: Apple restricts per-app VPN to devices managed by an organisation, so no consumer app can offer it. Saying that plainly is better than shipping a switch that quietly does nothing.',
+
+    'features.relay.title' => 'A relay path for the hardest networks',
+    'features.relay.body' => 'Some networks will not hold a direct connection abroad at all. The relay route starts at a server inside Iran, which is reachable when foreign addresses are not, and hands your traffic on from there. Two hops instead of one: more reliable where it matters, and slower, because the traffic is travelling further.',
+
+    'features.locations.title' => 'Choose where you come out',
+    'features.locations.body' => 'Change country from inside the app as often as you like.',
+
+    'features.dns.title' => 'DNS and IPv6, handled rather than ignored',
+    'features.dns.body' => 'On Windows the app sets DNS for the tunnel specifically, so lookups do not leak out over your normal connection. IPv6 is blocked rather than carried — if we cannot protect it, it does not go, and the app tells you that instead of quietly leaking it.',
+
+    'features.usage.title' => 'Your usage, counted openly',
+    'features.usage.body' => 'Data use is measured per account and shown in the app, so you always know where you stand against your plan. Plan changes, renewals and upgrades apply to a connection that is already running — nothing drops because your subscription renewed in the background.',
+
+    'features.support.title' => 'Support inside the app',
+    'features.support.body' => 'Support is a conversation in the app, where your account is already visible, so nobody has to ask you to describe it. Every payment produces an invoice you can open and print, whether you paid by card or with crypto.',
+
+    'features.uses.eyebrow' => 'Who uses it',
+    'features.uses.title' => 'Built for a filtered network, not for one hobby',
+    'features.uses.body' => 'Most people here are doing ordinary things that a filtered network makes difficult: reading, watching, messaging, working, playing. The product is general-purpose on purpose — gaming is one use among several, not the whole pitch.',
+
+    // =================================================================
+    // Pricing page
+    // =================================================================
+
+    'meta.pricing.title' => 'Plans and pricing — Neoxify VPN',
+    'meta.pricing.description' => 'Compare Neoxify plans: unlimited-data tiers, device limits, and the relay route built for heavily filtered networks. Pay by international card or crypto.',
+
+    'pricing.title' => 'Plans',
+    'pricing.subtitle' => 'Every plan includes all eight connection methods and every server location, unless the plan itself says otherwise. Buy inside the app or in your account area.',
+
+    'pricing.compare.title' => 'Compare the plans',
+    'pricing.compare.feature' => 'What you get',
+    'pricing.compare.hint' => 'Scroll the table sideways to see every plan.',
+    'pricing.compare.data' => 'Data',
+    'pricing.compare.devices' => 'Devices at once',
+    'pricing.compare.routes' => 'Routes',
+    'pricing.compare.locations' => 'Locations',
+    'pricing.compare.protocols' => 'Connection methods',
+    'pricing.compare.support' => 'In-app support',
+    'pricing.compare.routes_standard' => 'Direct',
+    'pricing.compare.routes_relay' => 'Iran relay only',
+    'pricing.compare.locations_all' => 'All',
+    'pricing.compare.locations_relay' => 'Relay path',
+    'pricing.compare.protocols_all' => 'All eight',
+
+    // Trial, which is granted rather than sold. It exists in the plans
+    // table with a price on it, but isPurchasable is false -- it is what a
+    // new account starts on, not a tier you buy. Presenting it as a
+    // purchasable plan would send people looking for a checkout that does
+    // not exist for it.
+    'pricing.trial.title' => 'Every new account starts on a trial',
+    'pricing.trial.body' => 'You are not asked for a payment method to begin. Create an account in the app, confirm your email, and you are connected — which means you can find out whether this works on your own network before you spend anything.',
+
+    'pricing.payment.title' => 'How you pay',
+    'pricing.payment.body' => 'By international card or with cryptocurrency, both from inside the app. There is no Iranian payment gateway — if you are in Iran, crypto is the route that works. Every payment produces an invoice you can open and print.',
+
+    'pricing.refund.title' => 'Before you buy',
+    'pricing.refund.body' => 'There is a free trial, so you can find out whether this works on your own network before paying anything. We do not publish a money-back guarantee, and we are not going to imply one that has not been written down — if something goes wrong, contact support and talk to us.',
+
+    'pricing.voucher.title' => 'Bought from a reseller?',
+    'pricing.voucher.body' => 'Redeem your voucher code inside the app or in your account area. A valid code activates the plan straight away, with no payment step.',
+
+    // =================================================================
+    // FAQ page
+    // =================================================================
+
+    'meta.faq.title' => 'Frequently asked questions — Neoxify VPN',
+    'meta.faq.description' => 'Devices, payment, data limits, server locations, filtered networks and vouchers — the questions people ask before signing up to Neoxify.',
+
+    'faq.title' => 'Questions and straight answers',
+    'faq.subtitle' => 'If your question is not here, the contact form goes to a person.',
+    'faq.still.title' => 'Still stuck?',
+    'faq.still.body' => 'Write to us and a human will answer. If you already have an account, support inside the app is faster — we can see your account there instead of asking you to describe it.',
+
+    // Renamed from 'relay_gaming'. Same plan, same route; the line no
+    // longer leads with a gaming claim, for the reason set out in the
+    // positioning note above.
+    'home.pricing.relay_filtered' => 'Built for networks that filter hardest',
+
+
+    // -----------------------------------------------------------------
+    // Features page — diagrams, examples and remaining labels
+    // -----------------------------------------------------------------
+
+    'locations.relay_label' => 'Relay entry point',
+
+    'features.failover.diagram_alt' => 'A blocked connection method, an automatic switch to another, a check that traffic is really flowing, and only then a connected state.',
+    'features.failover.step_blocked' => 'Route stops getting through',
+    'features.failover.step_switch' => 'Switches method',
+    'features.failover.step_verify' => 'Checks traffic really flows',
+    'features.failover.step_connected' => 'Reports connected',
+
+    // Categories rather than named applications: naming them would be an
+    // endorsement, and every specific name dates.
+    'features.split.example.browser.title' => 'Your browser, through the tunnel',
+    'features.split.example.browser.body' => 'Read and watch what you came for, from a server abroad.',
+    'features.split.example.game.title' => 'A game, on whichever path suits it',
+    'features.split.example.game.body' => 'Route it through the tunnel or leave it on your own connection — whichever actually works better for that server.',
+    'features.split.example.stream.title' => 'Streaming apps, kept separate',
+    'features.split.example.stream.body' => 'Send the ones that need a different country, and leave the rest alone.',
+    // The single most searched-for symptom in this market, named by the
+    // problem people actually describe rather than by the feature. See the
+    // Persian string for this key -- it is the one that matters.
+    'features.split.example.bank.title' => 'Local banking and government sites',
+    'features.split.example.bank.body' => 'These reject foreign addresses, so a full tunnel breaks them. Leave them off the tunnel and they keep working while everything else goes through it.',
+
+    'features.relay.link' => 'See the plan that includes it',
+    'features.relay.diagram_alt' => 'Your device connects to a relay inside Iran, which passes the traffic on to a server abroad.',
+    'features.relay.you' => 'Your device',
+    'features.relay.entry' => 'Relay inside Iran',
+    'features.relay.exit' => 'Server abroad',
+
+    'features.more.title' => 'The rest of it',
+
+    'pricing.compare.price' => 'Price',
+
+    // -----------------------------------------------------------------
+    // Home — the "no config files" argument
+    //
+    // This market's unit of trade is the کانفیگ -- a config or
+    // subscription link pasted into a third-party client. Neoxify does not
+    // work that way, which is a genuine advantage and also the reason the
+    // site is invisible to the biggest transactional search cluster there
+    // is. The answer is to meet the vocabulary head-on and argue against
+    // it honestly, rather than to pretend the word does not exist.
+    // -----------------------------------------------------------------
+
+    'home.config.eyebrow' => 'No config files',
+    'home.config.title' => 'Nothing to paste, nothing to renew by hand',
+    'home.config.body' => 'Most services here sell you a config or a subscription link that you paste into someone else\'s app. It works until the link dies, and then you are back asking for a new one. Neoxify is the app: you sign in, and it fetches what it needs and keeps it current on its own. There is nothing to copy, scan, share by accident, or replace next week.',
+    'home.config.point1' => 'No config text or subscription link to import',
+    'home.config.point2' => 'No third-party client to install first',
+    'home.config.point3' => 'Server addresses refresh by themselves when they change',
+
 );

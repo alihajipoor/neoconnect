@@ -30,6 +30,14 @@ $NX_RTL_LOCALES = array('fa');
 /** page key => URL segment, relative to the locale root. */
 $NX_ROUTES = array(
     'home'     => '',
+    // Three pages split out of the home page in the 2026-08 rebuild.
+    // Pricing and the FAQ used to exist only as #anchors on the home page,
+    // which meant neither could carry its own title, description, canonical
+    // or structured data -- and "neoxify pricing" had no page to rank. The
+    // home page still has a pricing summary and links here for the detail.
+    'features' => 'features/',
+    'pricing'  => 'pricing/',
+    'faq'      => 'faq/',
     'download' => 'download/',
     'contact'  => 'contact/',
     'reseller' => 'reseller/',
@@ -143,6 +151,23 @@ function nx_t($key, $vars = array())
         $text = str_replace(':' . $name, (string) $value, $text);
     }
     return $text;
+}
+
+/**
+ * Whether a translation key exists as a real string.
+ *
+ * nx_t() renders a missing key as ⟪key⟫, which is the right behaviour for a
+ * template -- a visible gap beats a silent blank. It is the wrong behaviour
+ * for code that wants to CHOOSE between two keys, because every key then
+ * looks present. This is that test.
+ *
+ * @param string $key
+ * @return bool
+ */
+function nx_has($key)
+{
+    global $NX_LANG;
+    return isset($NX_LANG[$key]) && is_string($NX_LANG[$key]);
 }
 
 /**
@@ -367,6 +392,159 @@ function nx_pick_list($item, $key, $locale = null)
     return array();
 }
 
+/**
+ * The FAQ entries that may actually be shown.
+ *
+ * inc/content/faq.php lets an entry declare `requires` => 'free_trial' or
+ * 'referrals', so the site stays quiet about a feature whose panel switch is
+ * off. That filter used to live inline in the home page template, which was
+ * fine while the FAQ appeared in exactly one place. It now appears in three
+ * -- the home page, the FAQ page, and the FAQPage structured data -- and a
+ * filter copied three times is a filter that will eventually disagree with
+ * itself and put a claim in the JSON-LD that is not on the page.
+ *
+ * An unknown requirement hides the entry. Failing closed is the safe
+ * direction when the claim might not be true.
+ *
+ * @return array
+ */
+function nx_visible_faq()
+{
+    $switches = array(
+        'free_trial' => nx_free_trial_enabled(),
+        'referrals'  => nx_referrals_enabled(),
+    );
+
+    $out = array();
+    foreach (nx_content('faq') as $item) {
+        if (isset($item['requires']) && empty($switches[$item['requires']])) {
+            continue;
+        }
+        $out[] = $item;
+    }
+    return $out;
+}
+
+
+// ---------------------------------------------------------------------
+// Fleet and protocols
+// ---------------------------------------------------------------------
+
+/**
+ * The direct server locations, as rows ready to render.
+ *
+ * Reads inc/content/locations.php. Returns an empty list if that file is
+ * emptied, and every caller checks -- so removing the fleet claim from the
+ * site is a one-file edit rather than a hunt through templates.
+ *
+ * @return array
+ */
+function nx_locations()
+{
+    $data = nx_content('locations');
+    return isset($data['direct']) && is_array($data['direct']) ? $data['direct'] : array();
+}
+
+/**
+ * The Iran relay entry, or null when none is configured.
+ *
+ * Separate from the list above because it is not a place traffic comes out
+ * of -- it is the way in. Rendering it as a sixth location would be a
+ * quietly false claim about where a customer appears to be.
+ *
+ * @return array|null
+ */
+function nx_relay_location()
+{
+    $data = nx_content('locations');
+    return (isset($data['relay']) && is_array($data['relay'])) ? $data['relay'] : null;
+}
+
+/** @return int how many direct locations there are, for copy that counts them */
+function nx_location_count()
+{
+    return count(nx_locations());
+}
+
+/**
+ * The connection methods, as rows ready to render.
+ *
+ * @return array
+ */
+function nx_protocols()
+{
+    $data = nx_content('protocols');
+    return is_array($data) ? $data : array();
+}
+
+/**
+ * Turn a two-letter country code into its flag emoji.
+ *
+ * Regional indicator symbols: 'f' + 'i' becomes U+1F1EB U+1F1EE, which every
+ * modern platform renders as the Finnish flag. Built from the code rather
+ * than pasted into the content file so a new location cannot arrive with a
+ * mismatched flag, and so the data file stays readable in an editor that
+ * does not render emoji.
+ *
+ * Windows renders these as two letters in a box rather than a flag -- it has
+ * shipped no flag glyphs since Windows 8, deliberately. That is fine: "FI"
+ * beside "Finland" is still perfectly legible, which is exactly why the
+ * country name is never conveyed by the flag alone.
+ *
+ * @param string $code ISO 3166-1 alpha-2, any case
+ * @return string
+ */
+function nx_flag($code)
+{
+    $code = strtoupper(trim((string) $code));
+    if (!preg_match('/^[A-Z]{2}$/', $code)) {
+        return '';
+    }
+
+    $out = '';
+    for ($i = 0; $i < 2; $i++) {
+        // 0x1F1E6 is REGIONAL INDICATOR SYMBOL LETTER A.
+        $cp = 0x1F1E6 + (ord($code[$i]) - ord('A'));
+        // mb_chr() is not guaranteed on shared hosting without mbstring, so
+        // the code point is encoded by hand. Every value here is in the
+        // 4-byte UTF-8 range, so no branching is needed.
+        $out .= chr(0xF0 | ($cp >> 18))
+            . chr(0x80 | (($cp >> 12) & 0x3F))
+            . chr(0x80 | (($cp >> 6) & 0x3F))
+            . chr(0x80 | ($cp & 0x3F));
+    }
+    return $out;
+}
+
+/** @return int how many connection methods are advertised */
+function nx_protocol_count()
+{
+    return count(nx_protocols());
+}
+
+/**
+ * Render a location as "City, Country" -- or just the country where the
+ * repo does not record a city.
+ *
+ * Built here rather than in a template because three of the five locations
+ * have no city and the fallback would otherwise be repeated at every call
+ * site, which is how "Frankfurt, " with a trailing comma gets shipped.
+ *
+ * @param array $loc
+ * @return string
+ */
+function nx_location_name($loc)
+{
+    $country = isset($loc['country']) ? nx_pick($loc['country']) : '';
+    $city = isset($loc['city']) && $loc['city'] !== null ? nx_pick($loc['city']) : '';
+
+    if ($city === '' || $city === $country) {
+        return $country;
+    }
+    return nx_t('locations.city_country', array('city' => $city, 'country' => $country));
+}
+
+
 // ---------------------------------------------------------------------
 // Customer area
 // ---------------------------------------------------------------------
@@ -473,6 +651,15 @@ function nx_referrals_enabled()
 /**
  * Render a data allowance. Whole multiples of 1024 GB read better as TB.
  *
+ * The unit is a translated word and the number goes through nx_num(),
+ * because "30 GB" dropped into a Persian sentence does not survive the
+ * bidirectional algorithm: the digits are neutral, the Latin unit is
+ * left-to-right, and the run gets reordered so the plan card rendered
+ * "GB 30" -- read right to left, the unit arrives before the amount. It
+ * was on the Persian home page, the Persian pricing cards and the Persian
+ * comparison table. Persian digits and a Persian unit have no direction
+ * to disagree about, and they match every other number on those pages.
+ *
  * @param int $gb
  * @return string
  */
@@ -480,9 +667,9 @@ function nx_format_data($gb)
 {
     $gb = (int) $gb;
     if ($gb >= 1024 && $gb % 1024 === 0) {
-        return ($gb / 1024) . ' TB';
+        return nx_num($gb / 1024) . ' ' . nx_t('unit.tb');
     }
-    return $gb . ' GB';
+    return nx_num($gb) . ' ' . nx_t('unit.gb');
 }
 
 /**

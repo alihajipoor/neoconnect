@@ -18,11 +18,25 @@ $nx_current = nx_page();
  * the account area exists. */
 $nx_portal = (string) nx_cfg('customer_portal_url');
 
-/** page key => href. Pricing is a section of the home page, not its own page. */
+/**
+ * page key => href.
+ *
+ * Features, Pricing and the FAQ became real pages in the 2026-08 rebuild.
+ * Pricing used to point at nx_url('home') . '#pricing' -- an anchor, which
+ * meant the navigation's most commercially important link could not be a
+ * search result, carried no title of its own, and dropped the visitor into
+ * the middle of a long page with the header already scrolled past.
+ *
+ * Reseller moved out of the top bar and into the footer: it is for a small
+ * number of partners, and it was taking a slot from Features, which is for
+ * everybody. It is still in the sitemap and still linked, just not competing
+ * for attention with the pages that sell.
+ */
 $nx_links = array(
+    'features' => nx_url('features'),
+    'pricing'  => nx_url('pricing'),
     'download' => nx_url('download'),
-    'pricing'  => nx_url('home') . '#pricing',
-    'reseller' => nx_url('reseller'),
+    'faq'      => nx_url('faq'),
     'contact'  => nx_url('contact'),
 );
 ?>

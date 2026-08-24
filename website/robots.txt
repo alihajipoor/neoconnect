@@ -1,10 +1,44 @@
+# Neoxify — https://neoxify.net
+#
+# Deliberately permissive. This site has nothing worth hiding from a
+# crawler and every reason to want the pages found: the whole SEO problem
+# here is being discovered at all, not being over-indexed.
+
 User-agent: *
 Allow: /
+
+# Neither of these is a page. inc/ holds templates that exit on direct
+# request; data/ holds form state and the CSRF secret. Both are also
+# blocked at the server (see nginx-website.conf.example) -- robots.txt is
+# a request, not a control, and must never be the only thing stopping
+# access to something.
 Disallow: /inc/
 Disallow: /data/
 
-# Generated rather than a static file so the URLs always match the domain in
-# inc/config.php. If you move the site to a different domain, update the line
-# below to match -- it is the one absolute URL on the site that config.php
-# cannot fill in for you.
+# The account area is a signed-in application, not content. Crawling it
+# just produces a login screen indexed under a hundred URLs.
+Disallow: /account/
+
+# Voucher short links resolve to a redirect and are handed out privately.
+Disallow: /r/
+
+# ?setlang= exists only to record a language choice and then redirect. It
+# is not a distinct page and must not be indexed as one.
+Disallow: /*?setlang=
+
+# Sitemap. This is the one absolute URL on the site that inc/config.php
+# cannot fill in for you -- update it if the domain ever changes.
+#
+# It points at the CONVENTIONAL path on purpose. /sitemap.xml is what a
+# crawler tries first, and the rewrite to sitemap.php must be live on the
+# server for it to work: measured 2026-08-24, /sitemap.xml was returning
+# the home page as text/html because the rewrite existed only in a
+# .htaccess that nginx never reads.
+# Both, deliberately. /sitemap.xml is the conventional path and the one a
+# crawler reaches for first, but it only exists because of a rewrite in the
+# server config -- and that config sat undeployed for ten days once already.
+# /sitemap.php is the file itself and works with no server configuration at
+# all. Listing both means a missed deploy costs the conventional path, not
+# the sitemap.
+Sitemap: https://neoxify.net/sitemap.xml
 Sitemap: https://neoxify.net/sitemap.php

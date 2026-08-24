@@ -38,10 +38,21 @@ cd "$SITE_DIR"
 #                 but never anyone's real submitted data.
 #   .gitignore    repository bookkeeping, no business being on a webserver
 #   *.zip         a previous archive left in the docroot
+#   scripts/      development tooling: the pre-deploy check and the router
+#                 for the built-in server. The server config denies /scripts/
+#                 too, but a file that is never uploaded cannot be served.
+#   nginx-*.example
+#                 the server configuration. Nothing rewrites it, so inside the
+#                 docroot it is served as PLAIN TEXT at
+#                 /nginx-website.conf.example -- handing over the CSP, the
+#                 fastcgi socket path and the document root to anyone who asks.
+#                 It belongs in the server's own config directory, not here.
 zip -r -q "$ARCHIVE" . \
     -x 'build/*' \
     -x 'README.md' \
     -x 'make-zip.sh' \
+    -x 'scripts/*' \
+    -x 'nginx-website.conf.example' \
     -x '.gitignore' \
     -x '*/.gitignore' \
     -x '*.zip' \
