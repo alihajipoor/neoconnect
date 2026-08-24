@@ -11,8 +11,18 @@ import {
   captureIpv6Baseline,
   checkIpv6,
   verifyEgress,
+  type BaselineIp,
   type EgressVerdict,
 } from "../lib/egress";
+import {
+  combineEvidence,
+  customModePollState,
+  fullTunnelPollState,
+  handshakeEvidence,
+  isTunnelUp,
+  stateFromStatus,
+  type VpnStatus,
+} from "../lib/connection-evidence";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
@@ -51,43 +61,6 @@ import { useI18n } from "../lib/i18n";
  */
 type LadderOutcome = "connected" | "failed" | "declined";
 
-/** What the helper service reports about the far end.
- *
- * `connected` only means an engine is running locally. `health` is the
- * part that required the server to participate, so it is what decides
- * what the customer is told.
- */
-type VpnStatus = {
-  connected: boolean;
-  protocol: string | null;
-  /** Whether Custom mode is intercepting right now, as opposed to being
-   * switched on in Settings. The difference is real -- turning it on
-   * mid-session cannot retrofit itself onto a tunnel already carrying
-   * everything -- and the customer is told which they have. */
-  splitTunnelActive?: boolean;
-  /** What Custom mode's own packet counters say is wrong, already
-   * phrased for the customer by the service. The only signal here
-   * measured on the path a chosen app's traffic actually takes. */
-  splitTunnelProblem?: string;
-  /** Whether the service is holding a machine-wide IPv6 block for this
-   * session.
-   *
-   * Read rather than inferred. Every node is IPv4-only, so a full tunnel
-   * has nowhere to send IPv6 and blocks it instead of letting it out in
-   * the clear -- but which sessions actually have a block is a fact
-   * about the machine, not about the protocol name: WireGuard has none
-   * of ours (it installs its own), Custom mode has none (the redirect
-   * handles IPv6 per app), and an install that failed has none either.
-   * The customer is told about the gap, so the claim has to be true. */
-  ipv6Blocked?: boolean;
-  health:
-    | { state: "alive"; age_secs: number }
-    | { state: "stale"; age_secs: number }
-    | { state: "neverHandshaked" }
-    | { state: "down" }
-    | { state: "unknown" };
-};
-
 /** Every call the screen makes to the service goes through one of these
  * two, never through a bare invoke.
  *
@@ -107,6 +80,18 @@ function serviceDisconnect(): Promise<void> {
  * enough to notice a dead tunnel well inside one cycle without polling
  * the service pointlessly hard. */
 const HEALTH_POLL_MS = 15_000;
+
+/** Floor on how often the poll's traffic check may actually run.
+ *
+ * The check fires once on entering a live state as well as on the
+ * interval, and the live states can alternate, so the leading edge can
+ * in principle re-arm far more often than the interval. This is what
+ * stops a flapping tunnel from turning an every-fifteen-seconds check
+ * into an every-transition one -- it runs on every customer's machine,
+ * some of them on slow censored links, and the cost of a check that
+ * cannot be throttled is paid by exactly the people least able to pay
+ * it. */
+const MIN_CHECK_GAP_MS = 5_000;
 
 /** Consecutive bad polls before the app moves a live connection itself.
  *
@@ -215,11 +200,21 @@ async function confirmReachable(): Promise<ConnectionState> {
 
     if (!status.connected) return "disconnected";
 
-    // "unknown" means no handshake evidence exists for this protocol
-    // (Xray, OpenVPN) -- there is nothing more to wait for, so don't.
-    if (status.health.state === "alive" || status.health.state === "unknown") return "connected";
+    // Two reasons to stop waiting, and they are not the same answer.
+    //
+    // `alive` is a handshake: the far end is talking to us, and that is
+    // as much as this function was ever able to establish.
+    //
+    // `unknown` means no handshake evidence exists for this protocol
+    // (Xray, OpenVPN, IKEv2), so there is nothing more to wait for --
+    // but there is also nothing to report. This used to return
+    // "connected" for it, which is the process-is-alive substitution
+    // this change exists to remove: `stateFromStatus` now answers
+    // `unverified`, and waiting longer cannot turn that into evidence.
+    const settled = stateFromStatus(status);
+    if (settled === "connected" || settled === "unverified") return settled;
 
-    last = stateFromStatus(status);
+    last = settled;
     await new Promise((r) => setTimeout(r, CONFIRM_INTERVAL_MS));
   }
 
@@ -252,14 +247,14 @@ const VERIFY_INTERVAL_MS = 1_500;
  * Returns as soon as it has proof, so a fast protocol stays fast.
  */
 async function confirmEgress(
-  baselineIp: string | null,
+  baseline: BaselineIp | null,
   budgetMs = VERIFY_TIMEOUT_MS,
 ): Promise<EgressVerdict> {
   const deadline = Date.now() + budgetMs;
   let last: EgressVerdict = { state: "unreachable" };
 
   while (Date.now() < deadline) {
-    const verdict = await verifyEgress(baselineIp);
+    const verdict = await verifyEgress(baseline);
     if (verdict.state === "throughTunnel") return verdict;
     last = verdict;
     await new Promise((r) => setTimeout(r, VERIFY_INTERVAL_MS));
@@ -334,7 +329,7 @@ const FAILOVER_SETTLE_TIMEOUT_MS = 2_500;
  * ours may not be -- so the caller proceeds without a baseline and falls
  * back to handshake evidence.
  */
-async function settleAndCaptureBaseline(budgetMs = SETTLE_TIMEOUT_MS): Promise<string | null> {
+async function settleAndCaptureBaseline(budgetMs = SETTLE_TIMEOUT_MS): Promise<BaselineIp | null> {
   const deadline = Date.now() + budgetMs;
   for (;;) {
     const ip = await captureBaselineIp();
@@ -354,56 +349,6 @@ async function settleAndCaptureBaseline(budgetMs = SETTLE_TIMEOUT_MS): Promise<s
  */
 function describeAttempts(attempts: string[], considered: number): string {
   return `tried ${attempts.length} of ${considered} available\n${attempts.join("\n")}`;
-}
-
-/** Combines the two independent pieces of evidence.
- *
- * They answer different questions and neither alone is enough: the
- * handshake proves the *server* is talking to us, the egress check proves
- * *our traffic* is going through it. A tunnel can pass the first and fail
- * the second -- the interface is healthy but the routing table never sent
- * anything into it -- which looks perfect locally while the customer is
- * completely unprotected.
- *
- * Egress therefore wins where they disagree: it is the one measured from
- * the far side of the whole path.
- */
-function combineEvidence(fromHandshake: ConnectionState, egress: EgressVerdict): ConnectionState {
-  if (fromHandshake === "disconnected") return "disconnected";
-
-  switch (egress.state) {
-    case "throughTunnel":
-      return "connected";
-    case "bypassingTunnel":
-    case "unreachable":
-      return "degraded";
-    case "indeterminate":
-      // No baseline to compare against, so fall back to whatever the
-      // handshake said rather than inventing a verdict.
-      return fromHandshake;
-  }
-}
-
-/** Turns the service's two facts into the one thing to display.
- *
- * `stale` and `neverHandshaked` both become "degraded" rather than
- * "connected": in both cases an interface exists and nothing is reaching
- * the other end, which is precisely the situation that used to render as
- * a confident "Connected".
- *
- * `unknown` stays optimistic deliberately -- it is what Xray and OpenVPN
- * report, where no cheap handshake evidence exists. Showing those as
- * degraded would cry wolf on every connection of those protocols.
- */
-function stateFromStatus(status: VpnStatus): ConnectionState {
-  if (!status.connected) return "disconnected";
-  switch (status.health.state) {
-    case "stale":
-    case "neverHandshaked":
-      return "degraded";
-    default:
-      return "connected";
-  }
 }
 
 /** The subscription worth showing, out of everything the account has.
@@ -502,6 +447,16 @@ export function Dashboard({
   const statusMissesRef = useRef(0);
   /** Earliest time an automatic attempt may run again. */
   const cooldownUntilRef = useRef(0);
+  /** When the health poll's traffic check last started.
+   *
+   * The poll now fires once immediately on entering a live state as well
+   * as on its interval, so that `unverified` is resolved in a second
+   * rather than in fifteen. That leading edge re-arms on every state
+   * change, and the states it runs in can alternate -- `connected` to
+   * `unverified` and back -- so without this a flapping tunnel would put
+   * a fresh round of requests on a censored link for every flap.
+   * Cheapness is a requirement here, not a preference. */
+  const lastCheckAtRef = useRef(0);
   /** Set when the customer asks to stop a ladder in progress. Checked
    * between steps rather than interrupting one, so the engine is never
    * left half-started. */
@@ -531,7 +486,7 @@ export function Dashboard({
    * disconnected -- taken afterwards it would be the tunnel's own exit
    * address and the comparison would be meaningless. A ref rather than
    * state because nothing renders from it. */
-  const baselineIpRef = useRef<string | null>(null);
+  const baselineIpRef = useRef<BaselineIp | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
   /** Taken from the service, never from the Settings toggle.
    *
@@ -703,7 +658,7 @@ export function Dashboard({
     const deadline = Date.now() + TEARDOWN_SETTLE_MS;
     for (;;) {
       const state = await readServiceState();
-      if (state !== "connected" && state !== "degraded") {
+      if (!isTunnelUp(state)) {
         publishObserved(generation, state);
         if (state === "disconnected") setConnectedAt(null);
         return state;
@@ -892,7 +847,7 @@ export function Dashboard({
   // that was fine, and end where it started. The honest response to a
   // gap every protocol shares is to say so, not to shuffle.
   useEffect(() => {
-    if (connectionState !== "connected") {
+    if (!isTunnelUp(connectionState)) {
       // Cleared on the way out, and the baseline with it: the next
       // connect may be on a different network, where the answer
       // differs.
@@ -924,12 +879,13 @@ export function Dashboard({
   // the same evidence the connect path uses, and the only one that works
   // for every protocol.
   useEffect(() => {
-    if (connectionState !== "connected" && connectionState !== "degraded") return;
+    if (!isTunnelUp(connectionState)) return;
 
-    const id = setInterval(async () => {
+    const check = async () => {
       // A ladder already running will decide the state itself; polling
       // underneath it would fight over the same fields.
       if (ladderInFlight()) return;
+      lastCheckAtRef.current = Date.now();
 
       // Stamped before the first question, not after the last answer.
       //
@@ -992,49 +948,45 @@ export function Dashboard({
       //
       // The same fix as the connect path, which had this corrected
       // already -- this poll was simply missed.
-      let carrying: boolean;
+      let verdict: ConnectionState;
       if (splitTunnelActive) {
-        carrying = await invoke("vpn_probe_split_tunnel")
+        // A failed probe is never grounds to change protocol -- see
+        // `customModePollState`, and the "no matter which protocol I
+        // pick it ends up on Fast" report behind it. But it is not
+        // grounds to say "protected" either, and that is the half this
+        // branch used to get wrong: it published "connected" whenever
+        // the engine was up, discarding the probe result entirely.
+        //
+        // For Xray "the engine is up" means "the process has not
+        // exited", which is true forever. So a customer in Custom mode
+        // on an Xray protocol sat on a green orb indefinitely while
+        // nothing flowed -- the one instrument that could have caught it
+        // was skipped in exactly the case it was needed.
+        const carried = await invoke("vpn_probe_split_tunnel")
           .then(() => true)
           .catch(() => false);
+        verdict = customModePollState(fromStatus, carried);
       } else {
         const egress = await verifyEgress(baselineIpRef.current);
-        carrying = egress.state === "throughTunnel" || egress.state === "indeterminate";
         if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
-      }
-      const live = carrying && fromStatus === "connected";
-
-      if (live) {
-        if (publishObserved(generation, "connected") !== null) strikesRef.current = 0;
-        return;
+        verdict = fullTunnelPollState(fromStatus, egress);
       }
 
-      // Custom mode not carrying, but the tunnel itself is healthy.
-      //
-      // This is the whole "no matter which protocol I pick it ends up on
-      // Fast" report. The connect path was taught this and the poll was
-      // not, so a protocol would connect correctly and then be dragged
-      // off it seconds later: probe fails, strikes accumulate, the
-      // ladder runs, WireGuard wins. Every time, on every protocol,
-      // which is exactly what it looked like from outside.
-      //
-      // The probe is also demonstrably capable of false negatives -- it
-      // flashed "not carrying traffic" while Chrome was visibly going
-      // through the tunnel. Letting a check that flaky throw away a
-      // working protocol is indefensible.
-      //
-      // So: a split-tunnel probe failure is never grounds to change
-      // protocol. The engine's own handshake decides whether the tunnel
-      // is alive; if it is, the session stands.
-      if (splitTunnelActive && fromStatus === "connected") {
-        if (publishObserved(generation, "connected") !== null) strikesRef.current = 0;
+      if (verdict === "connected" || verdict === "unverified") {
+        // `unverified` resets the strike count with the same authority
+        // `connected` does, and deliberately. A strike is evidence that
+        // this tunnel has stopped working, and an abstention is not
+        // evidence of anything -- letting abstentions accumulate into a
+        // teardown would hand every Xray session in Custom mode to the
+        // failover ladder on a timer.
+        if (publishObserved(generation, verdict) !== null) strikesRef.current = 0;
         return;
       }
 
       // Dropped rather than counted when it has been overtaken: a strike
       // is evidence about the tunnel the customer is on, and this
       // verdict is about one they have already asked to leave.
-      if (publishObserved(generation, "degraded") === null) return;
+      if (publishObserved(generation, verdict) === null) return;
       strikesRef.current += 1;
 
       // Below the threshold, or too soon after a full pass already
@@ -1050,7 +1002,23 @@ export function Dashboard({
       strikesRef.current = 0;
       cooldownUntilRef.current = Date.now() + MID_SESSION_COOLDOWN_MS;
       await runLadder();
-    }, HEALTH_POLL_MS);
+    };
+
+    // Once straight away, then on the interval.
+    //
+    // This is what keeps the honest third state from becoming a worse
+    // lie than the one it replaced. `stateFromStatus` answers
+    // `unverified` for Xray, OpenVPN and IKEv2 the moment a status is
+    // read -- including when the app opens over a tunnel the service
+    // kept up while the window was closed -- and with a leading edge of
+    // fifteen seconds the customer would stare at "not confirmed" for
+    // that whole time before the check that resolves it ever ran.
+    //
+    // Nothing on screen waits for this: it is fired and forgotten, and
+    // every write it makes goes through `publishObserved`, so an answer
+    // overtaken by a press is dropped rather than shown.
+    if (Date.now() - lastCheckAtRef.current >= MIN_CHECK_GAP_MS) void check();
+    const id = setInterval(() => void check(), HEALTH_POLL_MS);
 
     return () => clearInterval(id);
     // splitTunnelActive is a dependency, not incidental: the poll picks
@@ -1414,10 +1382,21 @@ export function Dashboard({
               // gets what they chose, and the fact that their selected
               // apps are NOT being routed is reported rather than
               // hidden behind a silent downgrade.
+              //
+              // What that live handshake does NOT license is the word
+              // "protected". It proves the tunnel, not the redirect --
+              // whether the apps the customer chose are being carried is
+              // a different fact, and this branch had no evidence for
+              // it. Keeping the candidate and reporting `unverified` is
+              // the answer to both halves at once. A protocol with no
+              // handshake to read (Xray, OpenVPN, IKEv2) has no evidence
+              // of any kind here, so it is still rejected and the ladder
+              // moves on: with another candidate sitting untried, moving
+              // on beats settling for a tunnel nothing has vouched for.
               const status = await invoke<VpnStatus>("vpn_status").catch(() => null);
-              const tunnelAlive = status?.health.state === "alive";
-              verdict = tunnelAlive ? "connected" : "degraded";
-              if (tunnelAlive) {
+              const tunnelProven = status !== null && handshakeEvidence(status) === "proves";
+              verdict = tunnelProven ? "unverified" : "degraded";
+              if (tunnelProven) {
                 reason = `${t("dash.customModeDetached")} ${reason}`.trim();
               }
             }
@@ -1441,8 +1420,24 @@ export function Dashboard({
             reason = egress.state;
           }
 
-          if (verdict === "connected") {
-            publishObserved(intent, "connected");
+          // `unverified` lands the pass rather than rejecting it, and the
+          // distinction it draws is the point of this whole change.
+          //
+          // Rejecting would mean walking on to the next protocol because
+          // the app could not *prove* this one carries traffic -- and
+          // for Custom mode with a live handshake, or a full tunnel with
+          // no baseline to compare against, there was never going to be
+          // proof to find. The ladder would abandon working connections
+          // in a loop and settle on whichever candidate happened to
+          // produce evidence, which is how "no matter which protocol I
+          // pick it ends up on Fast" was reported in the first place.
+          //
+          // So the pass ends here, on the protocol the customer chose,
+          // and the screen says plainly that traffic is not confirmed.
+          // What is not allowed is the old behaviour: ending here and
+          // calling it "protected".
+          if (verdict === "connected" || verdict === "unverified") {
+            publishObserved(intent, verdict);
             const movedFromShown = Boolean(shownRouteId) && candidate.routeId !== shownRouteId;
             if (index > 0 || movedFromShown) {
               // Compared against what was on screen when Connect was
@@ -1462,10 +1457,17 @@ export function Dashboard({
             }
             // Remembered only on proof it carried traffic. Recording a
             // merely-started engine would teach the app to lead with a
-            // protocol that does not actually work here.
-            const updated = rememberLastGood(lastGood, networkId, candidate.routeId);
-            setLastGood(updated);
-            void saveLastGood(updated);
+            // protocol that does not actually work here -- which is
+            // exactly why `unverified` is excluded: it is the state that
+            // means no such proof was obtained. A candidate that lands
+            // here is kept for this session and no longer, rather than
+            // promoted to the head of every future ladder on this
+            // network on the strength of nothing.
+            if (verdict === "connected") {
+              const updated = rememberLastGood(lastGood, networkId, candidate.routeId);
+              setLastGood(updated);
+              void saveLastGood(updated);
+            }
             strikesRef.current = 0;
             // Successes are reported too, and they are not filler. A
             // failure rate needs a denominator, and "Stealth works from
@@ -1561,7 +1563,7 @@ export function Dashboard({
       // An engine that outlived the teardown is one this pass has just
       // proven carries nothing. "Connected" would throw that proof away
       // for the sake of a handshake; degraded is what was measured.
-      if (left === "connected") publishObserved(intent, "degraded");
+      if (isTunnelUp(left)) publishObserved(intent, "degraded");
       return "failed";
     } finally {
       // Same ownership rule as the guard below: a pass that has been
@@ -1706,7 +1708,12 @@ export function Dashboard({
               className={
                 connectionState === "connected"
                   ? "size-1.5 shrink-0 rounded-full bg-success shadow-[0_0_8px_var(--success)]"
-                  : connectionState === "degraded"
+                  : connectionState === "unverified"
+                    ? // Lit, because an engine really is up -- but not in
+                      // the success green, which from across a room is
+                      // the claim itself.
+                      "size-1.5 shrink-0 rounded-full bg-highlight shadow-[0_0_8px_var(--highlight)]"
+                    : connectionState === "degraded"
                     ? "size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_8px_var(--warning)]"
                     : connectionState === "unknown"
                       ? // Neither lit nor plainly off: the dot is the one
@@ -1752,7 +1759,9 @@ export function Dashboard({
                         className={
                           connectionState === "connected"
                             ? "text-base font-semibold tracking-tight text-success"
-                            : connectionState === "degraded"
+                            : connectionState === "unverified"
+                              ? "text-base font-semibold tracking-tight text-highlight"
+                              : connectionState === "degraded"
                               ? "text-base font-semibold tracking-tight text-warning"
                               : connectionState === "unknown"
                                 ? "text-base font-semibold tracking-tight text-muted-foreground"
@@ -1767,7 +1776,9 @@ export function Dashboard({
                             tunnel that they had none. */}
                         {connectionState === "connected"
                           ? t("dash.protected")
-                          : connectionState === "degraded"
+                          : connectionState === "unverified"
+                            ? t("dash.unverified")
+                            : connectionState === "degraded"
                             ? t("dash.degraded")
                             : connectionState === "connecting" || connectionState === "verifying"
                               ? t("dash.verifying")
@@ -1783,7 +1794,15 @@ export function Dashboard({
                       <p className="mt-1 text-xs text-pretty text-muted-foreground">
                         {connectionState === "connected"
                           ? t("dash.protectedHint")
-                          : connectionState === "degraded"
+                          : connectionState === "unverified"
+                            ? // Custom mode is a narrower claim than a
+                              // full tunnel, so it gets the narrower
+                              // sentence: what could not be confirmed
+                              // there is that the *chosen apps* are
+                              // being carried, which is a different fact
+                              // from whether this machine is tunnelled.
+                              t(splitTunnelActive ? "dash.unverifiedCustomHint" : "dash.unverifiedHint")
+                            : connectionState === "degraded"
                             ? t("dash.degradedHint")
                             : connectionState === "connecting" || connectionState === "verifying"
                               ? t("dash.verifyingHint")
@@ -1813,7 +1832,7 @@ export function Dashboard({
                           "Connected" -- and a customer who is told which
                           transport got through has something useful to
                           report when none of them do. */}
-                      {connectionState === "connected" && failedOverTo ? (
+                      {isTunnelUp(connectionState) && failedOverTo ? (
                         <p className="mt-1 text-xs text-amber-400/90">
                           {failedOverTo.fromRegion ? (
                             // Crossed a border, so the country is named
@@ -1846,7 +1865,7 @@ export function Dashboard({
                           only the service knows whether this tunnel was
                           actually brought up to carry one app or all of
                           them. */}
-                      {connectionState === "connected" && splitTunnelActive ? (
+                      {isTunnelUp(connectionState) && splitTunnelActive ? (
                         splitTunnelProblem ? (
                           /* The service's own words, from counters taken
                              on the path the chosen apps' packets travel.
@@ -1874,7 +1893,7 @@ export function Dashboard({
                           already describes what happens to IPv6 there,
                           and it is a different thing (per app, not
                           machine-wide). */}
-                      {connectionState === "connected" && !splitTunnelActive && ipv6Blocked ? (
+                      {isTunnelUp(connectionState) && !splitTunnelActive && ipv6Blocked ? (
                         <p className="mt-1 text-xs text-highlight">
                           {t("dash.fullTunnelIpv6Blocked")}
                         </p>
@@ -1887,7 +1906,7 @@ export function Dashboard({
                           perfectly tunnelled and their IPv6 is going out
                           in the clear, which is the exact combination
                           that made this leak invisible for so long. */}
-                      {connectionState === "connected" && ipv6Escaping ? (
+                      {isTunnelUp(connectionState) && ipv6Escaping ? (
                         <p className="mt-1 text-xs text-destructive">{t("dash.ipv6Escaping")}</p>
                       ) : null}
                     </div>
