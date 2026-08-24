@@ -14,9 +14,9 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, Ikev2Profile, OpenvpnProfile, Request, Response, ShadowsocksProfile,
-    RunningApp, SplitTunnelConfig, SplitTunnelMode, TrojanProfile, TunnelHealth, VlessTlsProfile,
-    WireguardProfile, XrayProfile,
+    ConnectProfile, Diagnostics, Ikev2Profile, OpenvpnProfile, RepairReport, Request, Response,
+    ShadowsocksProfile, RunningApp, SplitTunnelConfig, SplitTunnelMode, TrojanProfile,
+    TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile,
     PIPE_NAME,
 };
 use serde::Deserialize;
@@ -283,6 +283,30 @@ impl ProtocolUserPayload {
 /// registered AutoStart so it owns the pipe name from boot, well before
 /// any user process could squat it.
 async fn call(request: &Request) -> Result<Response, String> {
+    call_within(request, REPLY_TIMEOUT).await
+}
+
+/// How long an ordinary request may take to be answered.
+///
+/// Long enough that a connect, which tears an engine down and brings
+/// another up, still answers inside it. Short enough that a customer
+/// gets an error they can act on rather than a spinner that never ends.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// The repair's own deadline, which has to be a different number.
+///
+/// It is nine steps, several of which shell out to PowerShell or netsh,
+/// and each of those is separately bounded by the service's fifteen-second
+/// helper budget. On a healthy machine the whole pass is a few seconds;
+/// on the machine somebody actually presses this button on -- where the
+/// cmdlets are the thing misbehaving, which is the documented reason the
+/// registry fallback exists at all -- the worst case is several budgets
+/// end to end. Giving it the ordinary 45s would abandon a repair that was
+/// working, leave the app with no report, and tell the customer nothing
+/// about a machine that had just been half-changed.
+const REPAIR_TIMEOUT: Duration = Duration::from_secs(150);
+
+async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Response, String> {
     const ERROR_PIPE_BUSY: i32 = 231;
     let mut attempts = 0;
     let client = loop {
@@ -326,14 +350,10 @@ async fn call(request: &Request) -> Result<Response, String> {
     // pending with it -- which is exactly what "the app is stuck on
     // Disconnecting and I can't click anything" is.
     //
-    // Long enough that a connect, which tears an engine down and brings
-    // another up, still answers inside it. Short enough that a customer
-    // gets an error they can act on rather than a spinner that never
-    // ends.
-    const REPLY_TIMEOUT: Duration = Duration::from_secs(45);
-
+    // How long is the caller's decision -- see REPLY_TIMEOUT and
+    // REPAIR_TIMEOUT above for why there are two numbers.
     let mut line = String::new();
-    match tokio::time::timeout(REPLY_TIMEOUT, reader.read_line(&mut line)).await {
+    match tokio::time::timeout(reply_timeout, reader.read_line(&mut line)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             return Err(format!("could not read the background service's reply: {e}"))
@@ -341,7 +361,7 @@ async fn call(request: &Request) -> Result<Response, String> {
         Err(_) => {
             return Err(format!(
                 "The Neoxify background service did not answer within {}s.                  It may be stuck -- restarting the app usually clears it.",
-                REPLY_TIMEOUT.as_secs()
+                reply_timeout.as_secs()
             ))
         }
     }
@@ -354,9 +374,76 @@ async fn call_expecting_ok(request: &Request) -> Result<(), String> {
     match call(request).await? {
         Response::Ok => Ok(()),
         Response::Error { message } => Err(message),
-        Response::State { .. } | Response::RunningApps { .. } => {
+        Response::State { .. }
+        | Response::RunningApps { .. }
+        | Response::Repaired { .. }
+        | Response::Diagnostics { .. } => {
             Err("the background service returned an unexpected reply".into())
         }
+    }
+}
+
+/// Runs the repair through the service, and hands back what it found.
+///
+/// Everything this does is done by the service, elevated; the app is
+/// only the thing asking. When the service cannot be reached at all --
+/// which is precisely the case the repair is most needed in -- this
+/// returns the pipe error, and the app answers it by showing the
+/// customer the elevated command to run instead. That fallback is the
+/// whole reason `neoconnect-service.exe repair` exists as a command.
+///
+/// No `Ok` short-circuit: a repair whose steps failed still returns its
+/// report, because which step is stuck decides what the customer does
+/// next. Only an error the service itself raised is surfaced as one.
+#[tauri::command]
+pub async fn vpn_repair() -> Result<RepairReport, String> {
+    match call_within(&Request::Repair, REPAIR_TIMEOUT).await? {
+        Response::Repaired { report } => Ok(report),
+        Response::Error { message } => Err(message),
+        _ => Err("the background service returned an unexpected reply".into()),
+    }
+}
+
+/// A redacted snapshot of what this product has on the machine, for
+/// pasting into a support conversation.
+///
+/// Asked of the service because almost none of it is visible to an
+/// unelevated process: the NRPT registry keys, the image path of a
+/// process the app does not own, and the service control manager all
+/// need rights the app deliberately does not have.
+#[tauri::command]
+pub async fn vpn_diagnostics() -> Result<Diagnostics, String> {
+    match call(&Request::Diagnostics).await? {
+        Response::Diagnostics { diagnostics } => Ok(*diagnostics),
+        Response::Error { message } => Err(message),
+        _ => Err("the background service returned an unexpected reply".into()),
+    }
+}
+
+/// Where the helper service is installed, for the message shown when the
+/// app cannot reach it.
+///
+/// Derived from this executable's own location rather than hardcoded:
+/// the installer puts the app in `Neoxify\` and the service beside its
+/// resources, and a per-user install puts both somewhere else entirely.
+/// Telling a customer to run a command at a path that does not exist on
+/// their machine is worse than telling them nothing -- it reads as the
+/// product not knowing where it is.
+#[tauri::command]
+pub fn repair_command_line() -> String {
+    let exe = std::env::current_exe().ok();
+    let candidate = exe
+        .as_ref()
+        .and_then(|e| e.parent())
+        .map(|dir| dir.join("resources").join("neoconnect-service.exe"))
+        .filter(|p| p.exists());
+    match candidate {
+        Some(path) => format!("\"{}\" repair", path.display()),
+        // The installed default, named plainly rather than guessed at
+        // silently. If the file is not where this expects, the customer
+        // still has the shape of the command and the name of the binary
+        // to find.
+        None => r#""C:\Program Files\Neoxify\resources\neoconnect-service.exe" repair"#.to_string(),
     }
 }
 
@@ -718,7 +805,10 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             ipv6_blocked,
         }),
         Response::Error { message } => Err(message),
-        Response::Ok | Response::RunningApps { .. } => {
+        Response::Ok
+        | Response::RunningApps { .. }
+        | Response::Repaired { .. }
+        | Response::Diagnostics { .. } => {
             Err("the background service returned an unexpected reply".into())
         }
     }

@@ -85,6 +85,37 @@ pub fn purge_interface(interface_index: u32) {
     );
 }
 
+/// The IPv4 routes currently on one interface, as `destination/prefix`.
+///
+/// Destinations only, deliberately. This feeds the diagnostics snapshot
+/// a customer pastes into a support ticket, and a route's *gateway* is
+/// their own LAN address -- which says where they are and is no part of
+/// answering "did Neoxify leave a route behind".
+///
+/// Best-effort: an interface that has gone, or a PowerShell that will
+/// not run, reads as no routes. Callers use this to decide whether there
+/// was anything to remove, never to promise there was not.
+pub fn interface_routes(interface_index: u32) -> Vec<String> {
+    // Same reasoning as `purge_interface`: `route print` is localised
+    // and Get-NetRoute returns objects, so this does not depend on what
+    // language the machine speaks.
+    let script = format!(
+        "Get-NetRoute -InterfaceIndex {interface_index} -AddressFamily IPv4 \
+         -ErrorAction SilentlyContinue | ForEach-Object {{ $_.DestinationPrefix }}"
+    );
+    let mut command = std::process::Command::new("powershell");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    let Ok(out) = super::capture_hidden(command, super::HELPER_BUDGET) else {
+        return Vec::new();
+    };
+    out.stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn route_exe() -> PathBuf {
     // In System32 on every supported Windows; not something the app ships.
     PathBuf::from(r"C:\Windows\System32\route.exe")

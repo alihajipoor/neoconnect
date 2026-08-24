@@ -130,13 +130,15 @@ use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 /// deserves the same: every object below is stamped with this key and
 /// carries a name beginning "Neoxify", so it is never mistaken for
 /// another product's kill-switch -- or ours for theirs.
-const PROVIDER_KEY: GUID = GUID::from_u128(0xa1e1f9c2_6b7d_4f4a_9c33_2d5b8e7a41d0);
+/// `pub(super)` so `repair` can sweep by it. Nothing outside this file
+/// creates objects under this key; the repair only ever deletes.
+pub(super) const PROVIDER_KEY: GUID = GUID::from_u128(0xa1e1f9c2_6b7d_4f4a_9c33_2d5b8e7a41d0);
 
 /// A sublayer of our own, for the same reason and one more: filter
 /// arbitration happens *within* a sublayer. Putting the block and its
 /// permits in someone else's would make our outcome depend on their
 /// weights.
-const SUBLAYER_KEY: GUID = GUID::from_u128(0xb2f2a0d3_7c8e_4a5b_8d44_3e6c9f8b52e1);
+pub(super) const SUBLAYER_KEY: GUID = GUID::from_u128(0xb2f2a0d3_7c8e_4a5b_8d44_3e6c9f8b52e1);
 
 /// Same value `wireguard.exe` uses for its own sublayer. The number
 /// decides the order sublayers are consulted in, not whether a block

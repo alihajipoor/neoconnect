@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   ArrowLeft,
+  Check,
+  ClipboardList,
   Clock,
+  Copy,
   Loader2,
   LifeBuoy,
   MessagesSquare,
@@ -14,6 +19,7 @@ import {
   openSupportTicket,
   replyToSupportTicket,
 } from "../lib/customer";
+import { collectDiagnostics, diagnosticsToText } from "../lib/repair";
 import { useI18n } from "../lib/i18n";
 import { Button, Card, Input, Label } from "../components/ui";
 import { cn } from "../lib/utils";
@@ -134,6 +140,8 @@ function TicketList({
         </Card>
       )}
 
+      <DiagnosticsCard />
+
       {overview.tickets.length === 0 ? (
         <Card className="flex flex-col items-center gap-2 py-10 text-center">
           <div className="flex size-10 items-center justify-center rounded-xl bg-primary/15 text-primary">
@@ -150,6 +158,120 @@ function TicketList({
         </div>
       )}
     </div>
+  );
+}
+
+/** The state snapshot a customer can attach to a message.
+ *
+ * # Why it is here
+ *
+ * People describe their machine in prose -- "the internet stopped
+ * working after I used it" -- and the questions that would settle it are
+ * ones they cannot answer: is an NRPT rule still installed, is there a
+ * WireGuard tunnel service registered, are there routes on an adapter
+ * whose engine died. Every one of those is a yes/no the service can read
+ * in a second, and none of them is visible from an unelevated app, so
+ * this asks the service for them.
+ *
+ * # Why it shows the text before sending it
+ *
+ * It is never sent automatically and never attached behind the
+ * customer's back. Somebody in Iran being asked to paste something about
+ * their computer into a support conversation is entitled to read it
+ * first, so the whole snapshot is on screen, in a box, and the only
+ * action is Copy. The service composes it from named fields only -- no
+ * credentials, no keys, no subscription identifiers, no protocol config
+ * -- and the account name is stripped out of any path the log quoted.
+ */
+function DiagnosticsCard() {
+  const { t } = useI18n();
+  const [text, setText] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  async function collect() {
+    setBusy(true);
+    setFailed(false);
+    try {
+      // The app's version comes from here rather than from the service:
+      // the two are replaced by different mechanisms -- the installer
+      // and the updater -- so they can genuinely differ, and a mismatch
+      // between them has explained more than one report.
+      const [snapshot, appVersion] = await Promise.all([
+        collectDiagnostics(),
+        getVersion().catch(() => "unknown"),
+      ]);
+      setText(diagnosticsToText(snapshot, appVersion));
+    } catch {
+      // Nothing partial. A snapshot missing the half the service
+      // answers is worse than none: it would read as "everything is
+      // fine here" about the things it could not ask.
+      setFailed(true);
+      setText(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copy() {
+    if (!text) return;
+    try {
+      await writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // The text is on screen and selectable; a clipboard that refuses
+      // is not worth an error banner.
+    }
+  }
+
+  return (
+    <Card className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-highlight/15 text-highlight">
+          <ClipboardList className="size-4" />
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold">{t("diag.title")}</p>
+          <p className="text-xs text-muted-foreground">{t("diag.subtitle")}</p>
+        </div>
+      </div>
+
+      <p className="text-xs text-muted-foreground">{t("diag.privacy")}</p>
+
+      {text ? (
+        <>
+          {/* Forced left-to-right: it is machine text with Windows paths
+              in it, and a right-to-left paragraph reorders those into
+              something that no longer matches the customer's machine. */}
+          <pre
+            className="max-h-56 overflow-auto rounded-lg border border-white/8 bg-black/30 p-2.5 font-mono text-[10px] leading-relaxed whitespace-pre-wrap text-muted-foreground"
+            data-ltr
+            dir="ltr"
+          >
+            {text}
+          </pre>
+          <div className="flex gap-2">
+            <Button onClick={() => void copy()} className="gap-2">
+              {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+              {copied ? t("diag.copied") : t("diag.copy")}
+            </Button>
+            <Button variant="ghost" onClick={() => void collect()} disabled={busy} className="gap-2 border border-white/10">
+              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
+              {t("diag.collect")}
+            </Button>
+          </div>
+        </>
+      ) : (
+        <Button onClick={() => void collect()} disabled={busy} className="gap-2 self-start">
+          {busy ? <Loader2 className="size-4 animate-spin" /> : <ClipboardList className="size-4" />}
+          {busy ? t("diag.collecting") : t("diag.collect")}
+        </Button>
+      )}
+
+      {failed ? <p className="text-xs text-destructive">{t("diag.failed")}</p> : null}
+    </Card>
   );
 }
 

@@ -55,10 +55,69 @@ pub fn note(operation: &str, detail: &str) {
     // Still printed, so running the binary by hand shows the same
     // thing the file will hold.
     eprintln!("teardown: {operation}: {detail}");
+    record(operation, detail);
+}
 
+/// The same entry, without the copy on standard error.
+///
+/// For `neoconnect-service.exe repair`, which is run by hand and prints
+/// its own summary to standard output. Going through `note` there would
+/// print every line twice, in two different wordings, to two different
+/// streams -- and the one the customer is reading is the one they will
+/// paste back.
+pub fn record(operation: &str, detail: &str) {
     let mut line = String::new();
     let _ = writeln!(line, "{} | {operation} | {detail}", now());
     append(&line);
+}
+
+/// The last `lines` entries, oldest first, for the diagnostics snapshot.
+///
+/// Reads the whole file rather than seeking: it is capped at a megabyte
+/// (see [`MAX_BYTES`]) and this runs when a person asks, not on any hot
+/// path.
+///
+/// Deliberately returns an empty list for a file that is not there. On a
+/// healthy machine nothing ever writes to it, so "no log" is the normal
+/// answer rather than an error worth reporting.
+pub fn tail(lines: usize) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(log_path()) else {
+        return Vec::new();
+    };
+    let all: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    all[all.len().saturating_sub(lines)..]
+        .iter()
+        .map(|l| redact_user_paths(l))
+        .collect()
+}
+
+/// Replaces the customer's account name in any path the log quoted.
+///
+/// The log names the image path of every orphaned engine it reaps, and a
+/// per-user install puts that under `C:\Users\<their name>\`. That is
+/// theirs, it identifies them, and this text is written to be pasted
+/// into a support ticket -- so the one identifying component comes out
+/// while the shape of the path, which is what makes the line useful,
+/// stays.
+fn redact_user_paths(line: &str) -> String {
+    let lower = line.to_lowercase();
+    let mut out = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    while let Some(found) = lower[cursor..].find(r"\users\") {
+        let start = cursor + found + r"\users\".len();
+        out.push_str(&line[cursor..start]);
+        // Up to the next separator, which is where the account name ends.
+        let end = line[start..]
+            .find(['\\', '/', ' ', '"', '\''])
+            .map(|i| start + i)
+            .unwrap_or(line.len());
+        if end > start {
+            out.push_str("<user>");
+        }
+        cursor = end;
+    }
+    out.push_str(&line[cursor..]);
+    out
 }
 
 fn append(line: &str) {
@@ -125,6 +184,38 @@ mod tests {
         assert!(!path.exists(), "the current log was not cleared");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The redaction, and the control case beside it.
+    ///
+    /// A redactor that returned a constant would pass a test that only
+    /// checked the account name was gone, so the second half asserts
+    /// that a line carrying nothing personal comes back byte for byte --
+    /// which is what makes the diagnostics worth pasting at all.
+    #[test]
+    fn the_account_name_comes_out_and_nothing_else_does() {
+        let redacted = redact_user_paths(
+            r"2026-08-23 10:00:00 | reap orphaned engines | ended C:\Users\Parisa\AppData\Local\Neoxify\resources\xray.exe (pid 4120)",
+        );
+        assert!(!redacted.contains("Parisa"), "the account name survived: {redacted}");
+        assert!(
+            redacted.contains(r"C:\Users\<user>\AppData\Local\Neoxify\resources\xray.exe"),
+            "the path shape was destroyed: {redacted}"
+        );
+        assert!(redacted.contains("(pid 4120)"), "the rest of the line was lost: {redacted}");
+
+        // Case-insensitively, because Windows paths are, and a log line
+        // reports whatever casing the process was started with.
+        let lowercased = redact_user_paths(r"ended c:\users\parisa\neoxify\xray.exe");
+        assert!(!lowercased.contains("parisa"), "lowercase path not matched: {lowercased}");
+
+        // The control: nothing to redact means nothing changes. Without
+        // this the assertions above would still pass if the function
+        // returned a fixed string.
+        const UNTOUCHED: &str =
+            r"2026-08-23 10:00:00 | clear the tunnel DNS rule | removed 1 rule(s) from C:\Windows\System32";
+        assert_eq!(redact_user_paths(UNTOUCHED), UNTOUCHED);
+        assert_eq!(redact_user_paths(""), "");
     }
 }
 
