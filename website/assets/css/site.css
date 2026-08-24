@@ -2707,6 +2707,17 @@ html[lang="fa"] .stat__value {
   letter-spacing: 0;
 }
 
+/* One of the three stats is a phrase rather than a numeral. At the shared
+   size it was two to three times the width of "8" and "5" and unbalanced
+   the whole band; at 768px it wrapped to two lines beside two single
+   characters. Smaller, and no negative tracking, since that is tuned for
+   large numerals. */
+.stat__value--text {
+  font-size: clamp(1.15rem, 2.1vw, 1.5rem);
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
 .stat__label {
   display: block;
   margin-block-start: 0.4rem;
@@ -3229,7 +3240,20 @@ html[lang="fa"] .compare__price {
   letter-spacing: 0;
 }
 
+/* Only meaningful once the table is actually scrolling; above that it is
+   noise, so it is hidden by default and shown by the query below. */
+.compare-hint {
+  display: none;
+}
+
 @media (max-width: 48rem) {
+  .compare-hint {
+    display: block;
+    margin-block-end: 0.75rem;
+    color: var(--fg-subtle);
+    font-size: 0.85rem;
+  }
+
   /* Below this the comparison genuinely does not fit and squeezing it gives
      four unreadable columns. Scroll it instead, with the row headings
      pinned so you always know which row you are on. */

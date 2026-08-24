@@ -199,7 +199,7 @@ return array(
     'home.mockup.windows' => 'ویندوز',
     'home.mockup.mobile' => 'موبایل',
     'home.mockup.macos' => 'مک',
-    'home.mockup.soon' => 'به‌زودی',
+    'home.mockup.soon' => 'هنوز نه',
     'home.mockup.subscription' => 'اشتراک',
     'home.mockup.status' => 'فعال',
     'home.mockup.expires' => 'تمدید تا ۲۴ روز دیگر',
@@ -635,6 +635,7 @@ return array(
 
     'pricing.compare.title' => 'مقایسه پلن‌ها',
     'pricing.compare.feature' => 'چه چیزی دریافت می‌کنید',
+    'pricing.compare.hint' => 'برای دیدن همه پلن‌ها جدول را به پهلو بکشید.',
     'pricing.compare.price' => 'قیمت',
     'pricing.compare.data' => 'حجم',
     'pricing.compare.devices' => 'دستگاه هم‌زمان',

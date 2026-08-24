@@ -168,6 +168,12 @@ require NX_INC . '/partials/head.php';
       <h2><?php echo nx_e('pricing.compare.title'); ?></h2>
     </div>
 
+    <?php /* The table is genuinely too wide for a phone and .compare-scroll
+             scrolls it, but a touch device draws no scrollbar, so the
+             right-most column -- Ultimate, the plan this page most wants
+             read -- simply looked absent. Says so, on small screens only. */ ?>
+    <p class="compare-hint"><?php echo nx_e('pricing.compare.hint'); ?></p>
+
     <div class="table-wrap reveal">
       <div class="compare-scroll">
         <table class="compare">
