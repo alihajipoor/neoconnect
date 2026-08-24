@@ -68,7 +68,19 @@ jobs:
             aarch64) echo "triple=aarch64-linux-android" >> "$GITHUB_OUTPUT" ;;
           esac
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Go and Rust pinned to exactly what release-android.yml uses, for
+      # the same reason the NDK below is: a debug APK built on a
+      # different toolchain is no longer evidence about the thing being
+      # shipped. Bump all of them together.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: apps/mobile/plugins/vpn/xray/go.sum
+
+      - name: Refuse a silent toolchain switch
+        run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ steps.rust.outputs.triple }}
 

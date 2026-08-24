@@ -23,11 +23,35 @@ jobs:
           go-version: "1.23"
           cache-dependency-path: agent/go.sum
 
+      # VERSION is passed explicitly rather than left to the Makefile's
+      # `git describe` fallback: actions/checkout leaves a shallow tree
+      # and describe is not something to bet a release on. github.ref_name
+      # is the tag that triggered this, which is exactly what the binary
+      # should call itself.
       - name: Build binaries
         working-directory: agent
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          make build-linux-amd64
-          make build-linux-arm64
+          make build-linux-amd64 VERSION="$VERSION"
+          make build-linux-arm64 VERSION="$VERSION"
+
+      # Releases v0.2.5 and earlier shipped without any -X stamp, so every
+      # node reported agentVersion=dev and the only way to tell which
+      # build a node was running was sha256. Assert the stamp landed
+      # rather than trusting the linker flag went in: the runner is
+      # linux/amd64, so one of the two artefacts can simply be run.
+      - name: Binary self-reports the tag
+        working-directory: agent
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          reported="$(./bin/agentd-linux-amd64 --version)"
+          echo "reported: $reported"
+          case "$reported" in
+            "agentd $VERSION (linux/amd64)") ;;
+            *) echo "ERROR: expected 'agentd $VERSION (linux/amd64)'" >&2; exit 1 ;;
+          esac
 
       - name: Generate checksums
         working-directory: agent/bin

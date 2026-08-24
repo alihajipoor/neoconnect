@@ -146,3 +146,94 @@ costs a few seconds and is within budget.
   letting it generate a key — otherwise Play builds and sideloaded APKs
   are different identities and users must uninstall to switch. Roughly
   one-way once set.
+
+---
+
+<<<<<<< HEAD
+## 2026-08-23 — Mobile Rust is now pinned, and the pin is shared
+
+**Status:** decided — **Mac: this changes your build, nothing else**
+
+Two files under `apps/mobile/src-tauri` now affect iOS as well as
+Android. Both were needed to fix a 15 MB size regression in the direct
+APK (detail in `windows.md`); neither changes any interface.
+
+**1. New `apps/mobile/src-tauri/rust-toolchain.toml`, channel
+`1.97.1`.** It is next to the crate rather than at the repo root so the
+desktop client keeps its own compiler. But cargo honours it from
+whichever machine runs in that directory, so **the iOS build now
+compiles on 1.97.1 instead of whatever `stable` was that day.**
+
+`aarch64-apple-ios-sim` is listed in its `targets` deliberately —
+without it the pin would have installed a compiler with no iOS target
+and broken `ci-ios.yml`. rustup installs everything named there on first
+use, so nothing should need changing on your side.
+
+**Adding a target is additive; do it freely** — `aarch64-apple-ios` when
+there is a Network Extension to build. **Changing `channel` is not** —
+that moves both platforms at once, so agree it here first.
+
+**2. `[profile.release]` added to `apps/mobile/src-tauri/Cargo.toml`**
+(`strip = "symbols"`, `lto = true`, `codegen-units = 1`,
+`opt-level = "s"`). There was none, so both platforms were on stock
+cargo defaults. No signatures, no dependencies, no features touched.
+
+Two consequences for iOS specifically:
+
+- **`strip = "symbols"` will strip your binary too.** Measured on
+  Android, this is 12.5 MB of symbol table. If iOS crash symbolication
+  needs those, say so here and it can be narrowed to a
+  target-conditional rather than reverted.
+- **It may help the extension memory spike.** `docs/journal/macos.md`
+  flags the ~50 MB Network Extension cap as the thing that could change
+  the architecture. `lto` + `codegen-units = 1` + `opt-level = "s"`
+  shrink the Rust core; that is on-disk size, not necessarily resident
+  memory, so treat it as possibly-helpful, not as a fix. The xray
+  geo-file hypothesis in your entry is still the one to test.
+
+`panic = "abort"` was considered and rejected — Tauri uses
+`catch_unwind`, and killing the process on a recoverable panic is a bad
+trade in the app whose job is honest connection state.
+
+None of this is verified by a build. Android cannot be built on the
+Windows machine and iOS cannot be built there at all; the next run of
+each workflow is what confirms it.
+=======
+## 2026-08-23 — Two new shared client modules, and one line added to mobile's connect path
+
+**Status:** landed on `claude/config-refresh-and-inbound-tag` (Windows),
+unpushed — **Mac read this before the next iOS build of the shared UI**
+
+Windows added a pre-connect config refresh. It is additive, but it lives
+in `apps/desktop-windows/src/lib/`, which mobile aliases as `@shared`, so
+iOS compiles it too.
+
+**New files (nothing renamed, nothing re-signatured):**
+
+- `@shared/lib/connection-config.ts` — `refreshConnectionConfig()`,
+  `describeConfigDrift()`.
+- `@shared/lib/resume.ts` — `useRefreshOnResume()`, a hook over
+  `visibilitychange` / `focus` / `online`.
+- `@shared/lib/credential-cache.ts` gained `SNAPSHOT_TTL_MS`,
+  `isSnapshotStale()` and `updateSnapshotProtocolUsers()`. Existing
+  exports are unchanged; `loadSnapshot()` still returns a snapshot of any
+  age, which is deliberate and load-bearing.
+
+**In `apps/mobile/src/screens/Dashboard.tsx`** (the shared file): a
+`useRefreshOnResume` call and, at the top of `runLadder`, a
+`refreshConnectionConfig` call whose result feeds the candidate list.
+Roughly fifteen lines, no signature moved.
+
+**Why iOS should care rather than just merging it.** The whole point of
+the resume hook is the case where a mobile OS keeps the WebView alive
+across backgrounding while the tunnel keeps running — which is Android
+today and will be iOS the moment a Network Extension exists. The three
+DOM events it listens on are the portable way to notice a resume from
+inside a WebView, but **this has been verified on neither platform's
+hardware.** If the iOS WebView turns out not to raise `visibilitychange`
+around suspension, that is a real gap for iOS and the fix belongs in
+`resume.ts` as an added listener, not as a per-platform fork of the hook.
+
+Nothing here touches `plugins/vpn/src/*.rs`, the plugin command surface,
+or the mobile version.
+>>>>>>> origin/main

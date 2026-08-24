@@ -27,3 +27,58 @@ tauri-plugin-neoxify-vpn = { path = "../plugins/vpn" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Added for the direct-download APK, which reached 141 MB and is the
+# build Iranian customers use -- Play does not serve them, so this is
+# the artifact that goes down censored, slow, often metered links. There
+# was no [profile.release] here at all, so libmobile_lib.so was being
+# built on stock cargo defaults.
+#
+# This section is shared with iOS by construction: one crate, one app.
+# It is additive -- no signature or dependency changes -- and every knob
+# below is a size/codegen setting, so the iOS effect is a smaller binary
+# on the same code. Called out in docs/journal/shared.md.
+[profile.release]
+# The measured win, and the reason this section exists. libmobile_lib.so
+# ships no DWARF (cargo already defaults debug = false) but does ship a
+# full symbol table: 6.97 MB on arm64 and 5.54 MB on armv7 in
+# android-v0.2.15, 12.5 MB of the APK.
+#
+# The tradeoff is real and worth stating rather than burying: a native
+# crash inside the Rust core will now come back as bare addresses
+# instead of function names. Rust's own panics are unaffected -- those
+# carry their message and location in the panic payload, not in .symtab
+# -- so the common case still reports itself. What is lost is
+# symbolicating a hard signal crash from a field report. If that starts
+# mattering, the fix is to archive the unstripped .so as a CI artifact
+# and symbolicate against it, not to ship the symbols to every user.
+strip = "symbols"
+
+# Whole-program optimisation across crate boundaries. Lets the linker
+# drop code nothing reaches, which on a dependency tree this size
+# (tauri, serde, the four plugins) is most of what it removes.
+lto = true
+
+# One codegen unit per crate rather than sixteen. Removes the duplicated
+# work between units that LTO would otherwise have to reconcile, and
+# gives it more to inline across. Costs build time; buys size.
+codegen-units = 1
+
+# "s" rather than "z": both optimise for size, but "z" also disables
+# loop vectorisation, and "s" is the conservative one of the pair.
+#
+# Safe here specifically because this library is not in the data path.
+# libmobile_lib.so is the Tauri core -- UI, IPC, plumbing. Packets are
+# moved by libgojni.so (Xray) and libwg-go.so (WireGuard), neither of
+# which is a cargo target and neither of which this line touches. This
+# is a general-purpose VPN where throughput matters as much as latency,
+# so the distinction is worth being explicit about.
+opt-level = "s"
+
+# Deliberately NOT set: panic = "abort".
+#
+# It would save a little more by dropping the unwind tables, but Tauri
+# uses catch_unwind internally and the plugin boundary is crossed by
+# JNI. Turning a recoverable panic into an immediate process kill, in
+# the app whose entire job is to report connection state honestly, is a
+# bad trade for a couple of hundred kilobytes.
+

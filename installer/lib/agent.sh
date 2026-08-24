@@ -17,6 +17,26 @@ AGENT_REPO="${AGENT_REPO:-alihajipoor/neoconnect}"
 ADMIN_TOKEN_CACHE="${TMPDIR:-/tmp}/neoxify-admin-token.$$"
 trap 'rm -f "$ADMIN_TOKEN_CACHE"' EXIT
 
+# Picks the agent's newest release out of a GitHub /releases response
+# fed on stdin, and prints its tag. See resolve_agent_release_base below
+# for why the tag prefix is the thing that has to be matched.
+#
+# Split out from the curl on purpose: the failure this guards against
+# cannot be reproduced against the live API on demand, so the only way
+# to know the ordering is right is to feed it a releases list that
+# contains the bad shapes.
+select_newest_agent_tag() {
+  jq -r '
+    [ .[]
+      | select(.draft == false and .prerelease == false)
+      | .tag_name // empty
+      | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))
+    ]
+    | sort_by(ltrimstr("v") | split(".") | map(tonumber))
+    | last // empty
+  '
+}
+
 # The newest *agent* release, resolved by tag rather than by asking
 # GitHub for "latest".
 #
@@ -40,12 +60,21 @@ resolve_agent_release_base() {
     return 0
   fi
 
-  local tag
-  # Newest non-draft, non-prerelease tag that looks like v1.2.3 -- the
-  # agent's own scheme. `desktop-v*` does not match, which is the point.
-  tag="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=50" 2>/dev/null     | jq -r '[.[] | select(.draft==false and .prerelease==false)
-              | select(.tag_name | test("^v[0-9]+[.][0-9]+[.][0-9]+$"))]
-             | first | .tag_name // empty')"
+  local releases tag
+  # per_page is at the API maximum rather than 50 because this list is
+  # shared with desktop-v* and android-v*, which both ship far more
+  # often than the agent does. A window too small does not fail loudly;
+  # it just stops containing any agent release.
+  releases="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=100" 2>/dev/null || true)"
+
+  # `| first` used to be here, which is GitHub's own ordering --
+  # created_at descending. That is not the newest *version*: a release
+  # that is re-published, back-dated, or promoted from a draft sorts to
+  # the front while being an older build, and every downstream step
+  # (checksum, install, restart) would have succeeded on the wrong
+  # binary without a word. Ordering by the version the tag actually
+  # states is the only thing that cannot drift.
+  tag="$(printf '%s' "$releases" | select_newest_agent_tag 2>/dev/null || true)"
 
   if [[ -z "$tag" ]]; then
     echo "ERROR: could not find an agent release (tag vX.Y.Z) in $AGENT_REPO." >&2
@@ -57,10 +86,113 @@ resolve_agent_release_base() {
   echo "https://github.com/$AGENT_REPO/releases/download/$tag"
 }
 
+# Where the binary being replaced is kept, so a bad build has something
+# to go back to.
+#
+# The v0.2.3 and v0.2.6 rollouts both did this by hand -- the operator
+# copied /usr/local/bin/agentd aside before running menu option 2 --
+# and the journal entry for each said afterwards that it was worth
+# having kept. A step that is only ever remembered is a step that gets
+# skipped on the one node where it mattered, so it is the installer's
+# job now. Path matches what the v0.2.6 rollout used by hand, so the
+# binaries already sitting on ir1 are in the right place.
+AGENT_ROLLBACK_DIR="${AGENT_ROLLBACK_DIR:-/root/agent-rollback}"
+# Deliberately small. These are ~20MB apiece and the useful window is
+# "the release before this one", not the node's whole history.
+AGENT_ROLLBACK_KEEP="${AGENT_ROLLBACK_KEEP:-5}"
+# Set by backup_current_agent so fetch_agent_binary can put the old
+# binary back without re-deriving the name.
+AGENT_ROLLBACK_LAST=""
+
+# Copies the installed agentd aside before it is overwritten, recording
+# its sha256 alongside.
+#
+# Named `agentd-<version>-<first 12 of sha256>` because neither half is
+# enough on its own: every release before v0.2.6 reports `dev` (no -X
+# stamp -- see release-agent.yml), so the version cannot tell two of
+# them apart, and a bare hash cannot be read.
+backup_current_agent() {
+  local target="/usr/local/bin/agentd"
+  AGENT_ROLLBACK_LAST=""
+  # A fresh install has nothing to keep, and that is not a problem.
+  [[ -f "$target" ]] || return 0
+
+  local sum short ver name
+  sum="$(sha256sum "$target" | awk '{print $1}')"
+  short="${sum:0:12}"
+
+  # The outgoing binary's own idea of what it is. Anything before
+  # v0.2.6 has no --version flag at all and exits non-zero on it, so an
+  # empty reading is expected rather than an error -- hence `|| true`,
+  # which pipefail would otherwise turn into an aborted update.
+  ver="$( { "$target" --version 2>/dev/null || true; } | awk 'NR==1 {print $2}')"
+  # This ends up in a filename, so keep it to what a version can contain.
+  ver="${ver//[^A-Za-z0-9._-]/}"
+  [[ -n "$ver" ]] || ver="unknown"
+
+  name="agentd-${ver}-${short}"
+  install -d -m 700 "$AGENT_ROLLBACK_DIR"
+  install -m 755 "$target" "$AGENT_ROLLBACK_DIR/$name"
+  # Written in sha256sum's own format, so checking a rollback candidate
+  # is `sha256sum -c agentd-v0.2.5-8cc30b52.sha256` rather than
+  # eyeballing hex.
+  echo "$sum  $name" > "$AGENT_ROLLBACK_DIR/$name.sha256"
+  AGENT_ROLLBACK_LAST="$AGENT_ROLLBACK_DIR/$name"
+  echo "Backed up the current agent to $AGENT_ROLLBACK_LAST"
+
+  # Bounded, or a node that updates weekly grows a 20MB file a week
+  # forever on the same disk the engines log to.
+  local stale entry
+  mapfile -t stale < <(find "$AGENT_ROLLBACK_DIR" -maxdepth 1 -type f -name 'agentd-*' ! -name '*.sha256' -printf '%T@ %p\n' 2>/dev/null | sort -rn | tail -n "+$((AGENT_ROLLBACK_KEEP + 1))" | cut -d' ' -f2-)
+  for entry in ${stale[@]+"${stale[@]}"}; do
+    [[ -n "$entry" ]] || continue
+    rm -f "$entry" "$entry.sha256"
+  done
+}
+
+# Confirms the binary now on disk is the release that was just asked
+# for, before anything restarts the service.
+#
+# This is the check six nodes needed and did not have: until v0.2.6
+# stamped the tag in, every node reported agentVersion=dev, so a rollout
+# that silently no-op'd looked exactly like one that worked and the only
+# way to tell them apart was sha256 on each box. `--version` exists to
+# make that assertable (agent/cmd/agentd/main.go handles it before it
+# reads any config), so assert it.
+check_agentd_version() {
+  local want="$1" reported
+  reported="$( { /usr/local/bin/agentd --version 2>/dev/null || true; } | head -n 1)"
+
+  # Nothing printed means a pre-v0.2.6 binary, which has no --version
+  # flag and exits on it. Pinning an old release deliberately is a real
+  # thing to do, so this is the unverifiable case, not the wrong one --
+  # said out loud rather than passed silently.
+  if [[ -z "$reported" ]]; then
+    echo "WARNING: the installed binary does not support --version, so it is a" >&2
+    echo "         pre-v0.2.6 build and $want could not be confirmed. Check it with" >&2
+    echo "         sha256sum /usr/local/bin/agentd against the release's sha256sums.txt." >&2
+    return 0
+  fi
+
+  # Exactly the string release-agent.yml asserts on the artefact at
+  # build time, so the two cannot drift apart:  agentd v0.2.6 (linux/amd64)
+  if [[ "$reported" == "agentd $want (linux/$AGENT_ARCH)" ]]; then
+    echo "Verified: $reported"
+    return 0
+  fi
+
+  echo "ERROR: $want was requested but the installed binary reports:" >&2
+  echo "         $reported" >&2
+  return 1
+}
+
 fetch_agent_binary() {
   local asset_name="agentd-linux-$AGENT_ARCH"
-  local base
+  local base tag
   base="$(resolve_agent_release_base)" || exit 1
+  # The last path segment of a release download base is its tag, for the
+  # resolved URL and for a pinned AGENT_RELEASE_URL_BASE alike.
+  tag="${base##*/}"
 
   echo "Downloading agent binary for linux/$AGENT_ARCH from ${base##*/}..."
   # Saved under the same name sha256sums.txt references (not a generic
@@ -75,8 +207,26 @@ fetch_agent_binary() {
     exit 1
   fi
 
+  backup_current_agent
   install -m 755 "/tmp/$asset_name" /usr/local/bin/agentd
   rm -f "/tmp/$asset_name" /tmp/sha256sums.txt
+
+  # Only when the tag is a version we can compare against. A self-hosted
+  # AGENT_RELEASE_URL_BASE need not end in one, and refusing to install
+  # from it would be inventing a restriction that was never there.
+  if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if ! check_agentd_version "$tag"; then
+      if [[ -n "$AGENT_ROLLBACK_LAST" && -f "$AGENT_ROLLBACK_LAST" ]]; then
+        install -m 755 "$AGENT_ROLLBACK_LAST" /usr/local/bin/agentd
+        echo "Put the previous binary back from $AGENT_ROLLBACK_LAST." >&2
+      else
+        rm -f /usr/local/bin/agentd
+        echo "Removed it -- there was no previous binary to restore." >&2
+      fi
+      echo "The service was NOT restarted, so this node is still running what it was." >&2
+      exit 1
+    fi
+  fi
 }
 
 action_install_agent() {
@@ -306,6 +456,201 @@ Check the agent with: systemctl status neoxify-agentd
 EOF
 }
 
+# One dull page, written where it is asked for.
+#
+# Deliberately dull and impersonal. A page claiming to be some real
+# organisation would be a lie told to whoever looks, and a page saying
+# "VPN" would undo the entire point.
+#
+# Different on every node, which is the part that took a second pass.
+# This page is what an active prober gets when it opens a port and
+# speaks ordinary HTTP or HTTPS -- and at one point every node in the
+# fleet returned the same 118 bytes. That is a fingerprint of *us*:
+# probe a suspected address, hash the response, compare against a known
+# Neoxify node, and the whole fleet is enumerable without breaking a
+# single tunnel. Varying the text, the title and the length means a
+# match has to be made some other way.
+#
+# Not idempotent by design: a re-run picks again. Nothing depends on the
+# page's contents, and a node whose disguise changes occasionally is if
+# anything the more ordinary-looking one.
+write_disguise_page() {
+  local dir="$1"
+  install -d -m 755 "$dir" || return 1
+  local pages=(
+    "Welcome|This site is being set up."
+    "Coming soon|Content will appear here shortly."
+    "Index of /|Nothing to see here yet."
+    "Under construction|This page is not finished."
+    "Hello|Server is running."
+  )
+  local choice="${pages[RANDOM % ${#pages[@]}]}"
+  local title="${choice%%|*}"
+  local body="${choice##*|}"
+  cat > "$dir/index.html" <<HTML
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>${title}</title></head>
+<body><h1>${title}</h1><p>${body}</p>
+<!-- $(openssl rand -hex 8) --></body>
+</html>
+HTML
+}
+
+# What port 80 answers, and why it answers at all.
+#
+# Installing nginx for the loopback fallback also enables Ubuntu's stock
+# default vhost, and that one listens on 0.0.0.0:80 no matter what the
+# fallback does. Four of the five live nodes were therefore serving
+# "Welcome to nginx!" -- byte-identical, 615 bytes, `Server:
+# nginx/1.24.0 (Ubuntu)` and all -- to anyone who asked. Nobody chose
+# that. It is a fleet-wide fingerprint on a product whose entire value is
+# not looking like a VPN, and it is exactly what a sweep for "default
+# nginx on a VPS with odd high ports open" is built to find.
+#
+# Three options were on the table, and two of them are wrong:
+#
+#   * Close port 80. Wrong, and this is the expensive way to find out.
+#     Let's Encrypt's HTTP-01 challenge needs inbound TCP 80 at *every
+#     renewal*, not just at issue, and certbot replays whatever
+#     authenticator is recorded in /etc/letsencrypt/renewal/*.conf. On
+#     the live fleet that is `webroot` with /var/www/html on france-1 and
+#     turkey-1 -- served today by the very default vhost we are
+#     removing -- and `standalone` on finland1 and singapore-1. Closing
+#     80 breaks the first pair immediately and the second pair as soon as
+#     anything else takes the port. Certificates expire silently, and
+#     Xray fails its whole config on an unreadable certificate, so the
+#     node loses every TLS inbound at once about ninety days later.
+#   * Redirect to https. Wrong for a node specifically. Port 443 here is
+#     REALITY, which impersonates somebody else's site: a 301 to
+#     https://<this node> walks the scanner into a handshake that returns
+#     a certificate for a Turkish hardware forum on a Scaleway address.
+#     That is a louder mismatch than the page we are trying to remove,
+#     and a node addressed by IP has no name to redirect to anyway.
+#   * Serve a plain static page. Chosen. It is the same dull, per-node
+#     page the loopback fallback already serves, so the two agree with
+#     each other; `server_tokens off` drops the version banner the
+#     default vhost was volunteering; and an ACME location keeps the
+#     renewal path that france-1 and turkey-1 depend on today working
+#     unchanged.
+#
+# Taking the port also means taking responsibility for the two nodes
+# whose certificates renew with `standalone`, which cannot bind a port
+# nginx is holding. Those are migrated to webroot here rather than left
+# to fail in the quietest possible way three months from now.
+ensure_port80_site() {
+  command -v nginx >/dev/null 2>&1 || return 0
+
+  # The webroot ACME wants, whether or not certbot is on the box yet:
+  # install_ikev2 looks for this directory before it decides between the
+  # webroot and standalone challenges.
+  install -d -m 755 /var/www/html/.well-known/acme-challenge
+  write_disguise_page /var/www/html || return 1
+
+  cat > /etc/nginx/sites-available/neoxify-http <<'CONF'
+# Managed by the Neoxify agent installer.
+#
+# Ubuntu's default vhost used to hold this port and announce both nginx's
+# version and the fact that nobody had configured it. This replaces it
+# with something an internet-wide scan has no reason to record.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    # The version string is a fingerprint of its own, and the default
+    # vhost was handing it out.
+    server_tokens off;
+
+    root /var/www/html;
+    index index.html;
+
+    # Let's Encrypt's HTTP-01 challenge, for both the Xray certificate
+    # and IKEv2's. This location is the reason port 80 stays open at all;
+    # deleting it breaks certificate renewal on every node that uses the
+    # webroot authenticator, and the failure surfaces ninety days later
+    # as expired certificates rather than as anything pointing here.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+CONF
+
+  # The distro default and this one both claim default_server, so the
+  # old link has to go before nginx will accept the new one.
+  local had_default="n"
+  [[ -e /etc/nginx/sites-enabled/default ]] && had_default="y"
+  rm -f /etc/nginx/sites-enabled/default
+  ln -sf /etc/nginx/sites-available/neoxify-http /etc/nginx/sites-enabled/neoxify-http
+
+  # A node with IPv6 disabled cannot bind [::]:80 and nginx refuses the
+  # whole config for it. Drop that one line and retry rather than leave
+  # the port to whatever was there.
+  if ! nginx -t >/dev/null 2>&1; then
+    sed -i '/listen \[::\]:80 default_server;/d' /etc/nginx/sites-available/neoxify-http
+  fi
+
+  if ! nginx -t >/dev/null 2>&1; then
+    # Put the port back the way it was, fingerprint and all. An ugly
+    # page is survivable; a port 80 that answers nothing is not, because
+    # the webroot ACME challenge renews through it and the certificate
+    # failure would surface three months later as dead TLS inbounds.
+    echo "nginx rejected the port 80 site -- something else may already claim" >&2
+    echo "default_server there. Restoring what was there before." >&2
+    rm -f /etc/nginx/sites-enabled/neoxify-http
+    [[ "$had_default" == "y" ]] && ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+    nginx -t >/dev/null 2>&1 && { systemctl reload nginx 2>/dev/null || true; }
+    return 1
+  fi
+  systemctl reload nginx 2>/dev/null || systemctl restart nginx
+
+  migrate_standalone_acme_to_webroot
+}
+
+# Certificates that renew by binding port 80 themselves cannot do that
+# once nginx holds it.
+#
+# certbot records its authenticator per certificate and replays it at
+# renewal, so a certificate first issued with --standalone keeps trying
+# to bind :80 forever. That is fine on a node with nothing else there and
+# fatal the moment nginx arrives -- and nginx arrives with the fallback
+# site, on every node that serves Trojan or VLESS over TLS. singapore-1
+# is in exactly that state today: `authenticator = standalone` recorded,
+# nginx listening on 0.0.0.0:80, and a renewal that will fail with an
+# address already in use.
+#
+# Rewriting the renewal file is the documented way to change an
+# authenticator without forcing an early renewal; `certbot renew
+# --dry-run` afterwards is what proves it, and the caller is told to run
+# it rather than being told it worked.
+migrate_standalone_acme_to_webroot() {
+  local conf name changed=0
+  [[ -d /etc/letsencrypt/renewal ]] || return 0
+  for conf in /etc/letsencrypt/renewal/*.conf; do
+    [[ -e "$conf" ]] || continue
+    grep -qE '^[[:space:]]*authenticator[[:space:]]*=[[:space:]]*standalone' "$conf" || continue
+    name="$(basename "$conf" .conf)"
+    cp -a "$conf" "${conf}.bak-$(date +%s)"
+    # Drop any stale webroot keys first so this is safe to run twice.
+    sed -i -E '/^[[:space:]]*webroot_path[[:space:]]*=/d; /^\[\[webroot_map\]\]/,$d' "$conf"
+    sed -i -E 's|^([[:space:]]*authenticator[[:space:]]*=[[:space:]]*)standalone[[:space:]]*$|\1webroot|' "$conf"
+    printf 'webroot_path = /var/www/html,\n[[webroot_map]]\n%s = /var/www/html\n' "$name" >> "$conf"
+    echo "  $name renewed with --standalone, which cannot bind a port nginx now holds."
+    echo "  Switched it to the webroot challenge under /var/www/html."
+    changed=1
+  done
+  if [[ "$changed" == 1 ]]; then
+    echo "  Verify before trusting it:  certbot renew --dry-run"
+  fi
+  return 0
+}
+
 # The site a wrong Trojan password is handed to.
 #
 # This is the disguise, not decoration. Without a fallback, a prober who
@@ -323,41 +668,14 @@ ensure_fallback_site() {
     apt-get install -y -qq nginx || return 1
   fi
 
-  install -d -m 755 /var/www/neoxify-fallback
-  # Deliberately dull and impersonal. A page claiming to be some real
-  # organisation would be a lie told to whoever looks, and a page saying
-  # "VPN" would undo the entire point.
-  #
-  # Different on every node, which is the part that took a second pass.
-  # This page is what an active prober gets when it opens the TLS port
-  # and speaks ordinary HTTPS -- and until now every node in the fleet
-  # returned the same 118 bytes. That is a fingerprint of *us*: probe a
-  # suspected address, hash the response, compare against a known
-  # Neoxify node, and the whole fleet is enumerable without breaking a
-  # single tunnel. Varying the text, the title and the length means a
-  # match has to be made some other way.
-  #
-  # Not idempotent by design: a re-run picks again. Nothing depends on
-  # the page's contents, and a node whose disguise changes occasionally
-  # is if anything the more ordinary-looking one.
-  local fb_pages=(
-    "Welcome|This site is being set up."
-    "Coming soon|Content will appear here shortly."
-    "Index of /|Nothing to see here yet."
-    "Under construction|This page is not finished."
-    "Hello|Server is running."
-  )
-  local fb_choice="${fb_pages[RANDOM % ${#fb_pages[@]}]}"
-  local fb_title="${fb_choice%%|*}"
-  local fb_body="${fb_choice##*|}"
-  cat > /var/www/neoxify-fallback/index.html <<HTML
-<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>${fb_title}</title></head>
-<body><h1>${fb_title}</h1><p>${fb_body}</p>
-<!-- $(openssl rand -hex 8) --></body>
-</html>
-HTML
+  write_disguise_page /var/www/neoxify-fallback || return 1
+
+  # nginx is on the box now, and on Ubuntu that means its stock default
+  # site is on the box too -- listening on 0.0.0.0:80 whatever this
+  # loopback-only vhost does. Take port 80 deliberately before anything
+  # else, so a fresh install never has a window where it is answering
+  # "Welcome to nginx!" to the whole internet.
+  ensure_port80_site || return 1
 
   # Where this node's API mirror forwards to. Read from the agent's own
   # config rather than a shell variable: this also runs on re-runs from
@@ -506,11 +824,30 @@ issue_tls_certificate() {
     echo "Certificate for $domain already present -- reusing it."
   else
     echo "Requesting a certificate for $domain..."
-    echo "Port 80 must be free and $domain must already resolve to this server."
+    echo "Inbound TCP 80 must reach this node and $domain must already resolve here."
     read -r -p "Email for expiry notices: " le_email
-    if ! certbot certonly --standalone -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
+    # Webroot when something already holds port 80, standalone only on a
+    # node that genuinely has nothing there -- the same order install_ikev2
+    # uses, and for the same reason.
+    #
+    # On a fresh install this runs before nginx exists, so standalone is
+    # what fires and the renewal file records `standalone`. That is the
+    # state singapore-1 and finland1 are in, and it is a slow-motion
+    # outage: nginx arrives minutes later for the fallback site, takes
+    # port 80, and every future renewal fails to bind it. ensure_port80_site
+    # migrates those records to webroot once it owns the port. Re-runs
+    # from the management menu reach here with nginx already up, and take
+    # the webroot branch directly.
+    local acme_args=(--standalone)
+    if [[ -d /var/www/html ]] && ss -tln 2>/dev/null | grep -qE "[^0-9]:80[[:space:]]"; then
+      echo "Something already serves port 80; using the webroot challenge."
+      acme_args=(--webroot -w /var/www/html)
+    fi
+    if ! certbot certonly "${acme_args[@]}" -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
       echo "Could not obtain a certificate for $domain." >&2
-      echo "Check that its DNS record points here and that nothing else holds port 80." >&2
+      echo "Check that its DNS record points here, that inbound TCP 80 reaches" >&2
+      echo "this node including any cloud firewall, and that whatever holds" >&2
+      echo "port 80 serves /var/www/html." >&2
       return 1
     fi
   fi
@@ -552,19 +889,122 @@ SYNC
   chmod +x /usr/local/bin/neoxify-sync-certs
   /usr/local/bin/neoxify-sync-certs || return 1
 
+  install_verified_xray_restart
+
   # Xray reads its certificate once at startup, so a renewal it is never
   # told about means serving an expired certificate roughly three months
   # from now -- long after anyone would connect the two events. The copy
-  # has to be refreshed first, or the reload just re-reads the old one.
+  # has to be refreshed first, or the restart just re-reads the old one.
   install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
   cat > /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh <<'HOOK'
 #!/bin/sh
+set -e
+# Copy the renewed certificate where Xray can read it, and stop there.
+#
+# This used to read `systemctl reload xray 2>/dev/null || systemctl
+# restart xray`, with a comment saying a renewal was no reason to drop
+# every connected customer. It always dropped them: xray.service ships no
+# ExecReload -- `systemctl show xray -p CanReload` answers `no` on every
+# node in the fleet -- so the reload could never succeed and the `||`
+# swallowed the reason. Every renewal was a full restart, announced as a
+# reload, and a restart erases every hot-added inbound, user and relay
+# route from the running process.
+#
+# Nothing needs to be signalled at all. Xray re-reads certificateFile and
+# keyFile from disk by itself, on roughly an hourly cycle: measured
+# 2026-08-24 on a throwaway loopback instance, files swapped at 00:06:16
+# and the new certificate served between +55min and +60min, with no
+# signal and no restart. certbot renews with thirty days to spare, so an
+# hour of lag costs nothing.
+#
+# The unit could not have been given a working ExecReload in any case.
+# Xray does not handle SIGHUP: sent to a running instance it terminates
+# the process (measured the same day), so
+# `ExecReload=/bin/kill -HUP $MAINPID` would be a restart wearing a
+# different name, and `ExecReload=/bin/true` would be worse still -- a
+# renewal reporting success while the old certificate is served until it
+# expires.
+#
+# If a restart is ever genuinely needed, use neoxify-xray-restart, which
+# checks that everything came back.
 /usr/local/bin/neoxify-sync-certs
-# Reload rather than restart: a certificate renewal is no reason to drop
-# every connected customer.
-systemctl reload xray 2>/dev/null || systemctl restart xray
 HOOK
   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh
+}
+
+# A restart of Xray that reports what it cost.
+#
+# Installed as its own command so anything that has to restart Xray goes
+# through the same check, and so an operator can run it by hand.
+#
+# Not wired into certificate renewal any more -- that path no longer
+# restarts anything, because Xray reloads certificate files on its own.
+# This is for the cases where a restart is genuinely unavoidable, such as
+# a config.json change.
+#
+# The failure it exists to catch: a restart empties everything hot-added
+# over the gRPC API. Customers and relay routes are re-asserted
+# by the control plane within ~60s, but an inbound that was added at
+# runtime and never written to config.json is gone for good -- and the
+# node would keep reporting itself healthy, because nothing compares what
+# is listening against what should be.
+#
+# Exits non-zero when an inbound does not come back, which is what makes
+# certbot's own output and `systemctl status certbot.timer` show it
+# rather than the whole thing passing in silence.
+install_verified_xray_restart() {
+  cat > /usr/local/bin/neoxify-xray-restart <<'RESTART'
+#!/bin/sh
+set -u
+API="127.0.0.1:10085"
+XRAY="/usr/local/bin/xray"
+MARKER="/var/log/neoxify-xray-restart.log"
+
+tags() {
+  "$XRAY" api lsi -s "$API" 2>/dev/null | sed -n 's/.*"tag": *"\([^"]*\)".*/\1/p' | sort
+}
+
+say() {
+  echo "$(date -Is) $*" >> "$MARKER"
+  logger -t neoxify-xray-restart "$*" 2>/dev/null || true
+  echo "$*"
+}
+
+BEFORE="$(tags)"
+say "restarting xray; inbounds before: $(echo "$BEFORE" | tr '\n' ' ')"
+
+systemctl restart xray || { say "FAILED: systemctl restart xray returned non-zero"; exit 1; }
+
+# The API is not up the instant systemd returns. Poll rather than sleep a
+# guessed amount: too short reports a false loss, too long is dead time on
+# a node that is currently serving nobody.
+i=0
+while [ "$i" -lt 30 ]; do
+  AFTER="$(tags)"
+  [ -n "$AFTER" ] && break
+  i=$((i + 1))
+  sleep 1
+done
+
+if [ -z "${AFTER:-}" ]; then
+  say "FAILED: xray restarted but its API never answered -- the node is serving nothing"
+  exit 1
+fi
+
+TMPB="$(mktemp)"; TMPA="$(mktemp)"
+printf '%s\n' "$BEFORE" > "$TMPB"
+printf '%s\n' "$AFTER" > "$TMPA"
+MISSING="$(comm -23 "$TMPB" "$TMPA")"
+rm -f "$TMPB" "$TMPA"
+if [ -n "$MISSING" ]; then
+  say "FAILED: inbound(s) did not come back after restart: $(echo "$MISSING" | tr '\n' ' ')"
+  say "        these existed only in the running process. Add them to /usr/local/etc/xray/config.json."
+  exit 1
+fi
+
+say "ok: all inbounds back ($(echo "$AFTER" | tr '\n' ' ')). Users and relay routes are re-asserted by the control plane within ~60s."
+RESTART
+  chmod +x /usr/local/bin/neoxify-xray-restart
 }
 
 # Candidate camouflage destinations for REALITY, checked against this
@@ -610,86 +1050,383 @@ HOOK
 # that as permanent: hosting moves, and the probe below is what decides,
 # not this list.
 REALITY_DEST_CANDIDATES_IR=(
-  # MobinhostInfrastructure -- an ordinary Iranian hosting block, the
-  # same shape of address as a VPS. This is what ir1 uses.
+  # AS215708 Mobin Arvand Infrastructure -- an ordinary Iranian hosting
+  # block, the same shape of address as a VPS. This is what ir1 uses.
   www.torob.com
-  # SHTL-NET-INFRA-HSTG, Shatel's own hosting infrastructure.
+  # AS31549 Aria Shatel, the ISP's own infrastructure.
   www.shatel.ir
-  # Sotoon CDN, so weaker than the two above on the range argument, but
-  # kept as a third option that does pass the handshake checks.
-  www.zoomit.ir
 )
-# WARNING: this list rots, and the probe below cannot tell you that.
+# www.zoomit.ir was the third entry here, kept because it passed the
+# handshake checks. It answers from AS202319 Sotoon-CDN and stamps an
+# x-edge- header on its responses, so the ownership check added below
+# now rejects it -- which is the same conclusion the paragraph about
+# AbrArvan and Sotoon above had already reached in prose, finally being
+# enforced by something.
+# The rot this second list used to carry, and why the fix was not a new
+# list.
 #
-# www.speedtest.net was removed from it once for resolving into
-# Cloudflare. Measured again on 2026-08-22 from a Singapore node, BOTH
-# remaining entries have gone the same way: www.asus.com -> 13.249.231.81
-# and www.leboncoin.fr -> 13.35.36.62, which are AWS CloudFront edge
-# ranges Amazon publishes. They still pass every check probe_reality_dest
-# makes -- TLS 1.3, h2, X25519, certificate verified -- because that
-# function tests the handshake and nothing tests criterion 1. So the
-# default offered to an operator who holds Enter is currently a CDN name
-# on a non-CDN address: exactly the one-table-lookup mismatch this list
-# was created to stop.
+# www.speedtest.net was dropped from here once for resolving into
+# Cloudflare. On 2026-08-22 both remaining entries had gone the same way:
+# www.asus.com and www.leboncoin.fr answer from AWS CloudFront edge
+# ranges. They passed every check probe_reality_dest made -- TLS 1.3, h2,
+# X25519, certificate verified -- because that function tested the
+# handshake and nothing tested *who owns the address*. The default handed
+# to an operator holding Enter was therefore a CDN's name on a non-CDN
+# address: exactly the one-lookup mismatch this list exists to avoid.
 #
-# Treat these as a last resort, not a recommendation, and prefer a name
-# measured for the node being built. Doing that for Singapore found the
-# hard part: every consumer-facing .sg site probed sat behind Cloudflare,
-# Imperva, Akamai or CloudFront, and the two genuinely SG-hosted hosts
-# found (www.pacific.net.sg, www.simba.sg) offer neither TLS 1.3 nor h2.
-# What worked was www.shopee.sg -- SHOPEE-SG, the company's own Singapore
-# netblock -- and it was reached by checking who owns the address, which
-# is the check missing from here.
+# Swapping in fresh names would rot the same way, on nobody's schedule
+# but the decoy operator's. So the ownership test moved into the probe
+# below, where it runs on every install against whatever the name
+# resolves to that day, and a rotted entry is rejected loudly instead of
+# being offered as the default. This list is a seed, not an answer.
+#
+# Spread across regions on purpose: a node wants a name from the country
+# it is hosted in (criterion 1 below), and the probe prints each
+# candidate's country and network so the operator can see which of these
+# fits this box.
 REALITY_DEST_CANDIDATES_ABROAD=(
-  www.asus.com
-  www.leboncoin.fr
+  # Each of these was run through the probe below on 2026-08-23 and
+  # passed every check, with the announcing AS named next to it. That
+  # measurement was taken from one vantage point; the probe re-takes it
+  # from the node being installed, which is the only one that counts.
+  #
+  # AS6205 HizliNet Teknoloji, TR. turkey-1 already uses this one.
+  www.donanimhaber.com
+  # AS12306 Plus.line AG, DE.
+  www.heise.de
+  # AS8560 IONOS SE, DE -- a hosting company's own range, not a CDN.
+  www.web.de
+  # AS12322 Proxad/Free SAS, FR: a French ISP answering from its own
+  # French addresses.
+  www.free.fr
+  # AS1741 FUNET, FI.
+  www.helsinki.fi
+  # AS138341 Shopee Singapore. Every consumer-facing .sg name probed for
+  # singapore-1 sat behind Cloudflare, Imperva, Akamai or CloudFront;
+  # this was the one that did not.
+  www.shopee.sg
 )
+
+# Networks whose address ranges are published, which is what makes a name
+# resolving into them a weak decoy.
+#
+# REALITY's disguise is a claim: "this connection is ordinary HTTPS to
+# <name>". The cheapest way to catch a lie is to check that claim against
+# the address the packet was actually sent to -- and Cloudflare, Amazon,
+# Akamai, Fastly, Google and Microsoft all publish their ranges as
+# machine-readable lists. "The ClientHello says www.asus.com, which lives
+# in CloudFront, but this packet went to a Linode box in Singapore" is
+# one table lookup at line rate with no inspection whatsoever. That is
+# criterion 1, and until now nothing checked it.
+#
+# Matched three independent ways below, because each is evadable alone:
+# the AS that originates the route, the CNAME chain the name resolves
+# through, and the headers the edge adds to its own responses. By AS
+# *name* as well as number, because numbers churn and a CDN nobody
+# listed yet would slip past a fixed list in silence.
+REALITY_CDN_AS_NAME_RE='CLOUDFLARE|AMAZON|AWS|CLOUDFRONT|AKAMAI|FASTLY|GOOGLE|MICROSOFT|AZURE|EDGECAST|EDGIO|INCAPSULA|IMPERVA|LIMELIGHT|LLNW|STACKPATH|HIGHWINDS|CDN77|BUNNY|SUCURI|GCORE|G-CORE|CACHEFLY|KEYCDN|QUANTIL|WANGSU|CHINANETCENTER|ARVANCLOUD|ABR-ARVAN|DERAK|SOTOON|ALIBABA|ALICLOUD|TENCENT'
+REALITY_CDN_ASNS=' 13335 16509 14618 16625 20940 12222 35994 21342 21357 54113 15133 199524 19551 22822 33438 60068 200325 30148 30081 15169 396982 8075 8068 8069 202468 44869 34011 '
+REALITY_CDN_ZONE_RE='(cloudfront\.net|awsglobalaccelerator\.com|elb\.amazonaws\.com|akamaiedge\.net|akamai\.net|akamaized\.net|edgekey\.net|edgesuite\.net|akadns\.net|fastly\.net|fastlylb\.net|cloudflare\.net|azureedge\.net|azurefd\.net|trafficmanager\.net|incapdns\.net|impervadns\.net|b-cdn\.net|cdn77\.org|llnwd\.net|edgecastcdn\.net|stackpathdns\.com|sucuri\.net|gcdn\.co|cachefly\.net|kxcdn\.com|arvancdn\.ir|arvancloud\.ir|derak\.cloud|sotoon\.ir)\.?$'
+REALITY_CDN_HEADER_RE='^(cf-ray|cf-cache-status|cf-apo-via|x-amz-cf-id|x-amz-cf-pop|x-akamai-|akamai-|x-iinfo|x-cdn|x-azure-ref|x-msedge-ref|x-fastly|x-served-by|x-sucuri-id|x-bunnycdn|x-edg[eio]-|x-gcore|server: *(cloudflare|akamaighost|ecacc|ecs|bunnycdn|sucuri|imperva|awselb))'
+
+# One TXT lookup, by whatever this box can make one with.
+#
+# `dig` is not on a stock Ubuntu -- it lives in bind9-dnsutils, which
+# install_base_deps now pulls in for exactly this. Kept degradable
+# anyway, so a node built before that change still runs the rest of the
+# probe instead of failing every candidate over a missing package.
+reality_txt_lookup() {
+  local name="$1"
+  if command -v dig >/dev/null 2>&1; then
+    dig +short +time=3 +tries=2 -t TXT "$name" 2>/dev/null | tr -d '"' | head -1
+  elif command -v host >/dev/null 2>&1; then
+    host -W 3 -t TXT "$name" 2>/dev/null | sed -n 's/.*descriptive text "\(.*\)"/\1/p' | head -1
+  else
+    return 1
+  fi
+}
+
+# Who announces this address, printed as "ASN|AS name|country".
+#
+# Team Cymru's DNS interface rather than whois: it answers over ordinary
+# UDP/53 using resolver tools that are already there, and it returns the
+# *origin* AS -- the network that actually announces the route -- which
+# is the field a censor's own table would be keyed on. Nothing else gives
+# that without a whois client and one parse per registry.
+# https://team-cymru.com/community-services/ip-asn-mapping/
+reality_ip_owner() {
+  local ip="$1" rev origin asn cc as_line as_name
+  rev="$(awk -F. 'NF==4 {print $4"."$3"."$2"."$1}' <<<"$ip")"
+  [[ -n "$rev" ]] || return 1
+  origin="$(reality_txt_lookup "${rev}.origin.asn.cymru.com")" || return 1
+  [[ -n "$origin" ]] || return 1
+  # "16509 14618 | 13.32.0.0/15 | US | arin | 2011-01-06". More than one
+  # AS can originate the same prefix; the first is enough to name it.
+  asn="$(awk -F'|' '{print $1}' <<<"$origin" | tr -s ' ' '\n' | grep -E '^[0-9]+$' | head -1)"
+  cc="$(awk -F'|' '{gsub(/ /,"",$3); print $3}' <<<"$origin")"
+  as_name="unknown"
+  if [[ -n "$asn" ]]; then
+    as_line="$(reality_txt_lookup "AS${asn}.asn.cymru.com" || true)"
+    # "16509 | US | arin | 2000-05-04 | AMAZON-02, US"
+    if [[ -n "$as_line" ]]; then
+      as_name="$(awk -F'|' '{sub(/^ +/,"",$5); sub(/ +$/,"",$5); print $5}' <<<"$as_line")"
+    fi
+  fi
+  printf '%s|%s|%s\n' "${asn:-0}" "${as_name:-unknown}" "${cc:-??}"
+}
+
+# The CNAME chain a name is resolved through, one per line.
+#
+# A CDN is usually joined by pointing a CNAME at its zone, and that
+# stays visible even when the edge address itself is announced by the
+# customer's own AS. Empty when dig is unavailable, which is why this is
+# one signal of three rather than the check.
+reality_cname_chain() {
+  local host="$1"
+  command -v dig >/dev/null 2>&1 || return 0
+  dig +short +time=3 +tries=2 "$host" CNAME 2>/dev/null
+  # The A lookup prints the CNAMEs it walked through as well as the
+  # addresses; keeping only the non-numeric lines leaves the chain.
+  dig +short +time=3 +tries=2 "$host" A 2>/dev/null | grep -vE '^[0-9.]+$' || true
+}
+
+# The names a leaf certificate actually carries, for the message printed
+# when it is not the name that was asked for. A mismatch is most legible
+# next to what the host does claim to be.
+reality_leaf_names() {
+  local s_client_output="$1" leaf names=""
+  leaf="$(awk '/BEGIN CERTIFICATE/{p=1} p{print} /END CERTIFICATE/{if (p) exit}' <<<"$s_client_output")"
+  [[ -n "$leaf" ]] || return 0
+  names="$(openssl x509 -noout -ext subjectAltName 2>/dev/null <<<"$leaf" | tail -n +2 | tr -d ' ' | sed 's/DNS://g')"
+  [[ -z "$names" ]] && names="$(openssl x509 -noout -subject 2>/dev/null <<<"$leaf" || true)"
+  printf '%s\n' "${names:0:200}"
+}
+
+# Roughly how large the TLS Certificate handshake message is, in bytes.
+#
+# The DER chain plus TLS 1.3's framing: 4 bytes of handshake header, 1
+# for the (empty) certificate_request_context, 3 for the list length,
+# and 3 + 2 per entry for its length and its extensions. Good to a
+# handful of bytes, which is all that is needed against a ceiling of
+# 8192.
+reality_chain_bytes() {
+  local s_client_output="$1" total=8 der=0 tmp count=0 f
+  tmp="$(mktemp -d)" || return 0
+  awk -v d="$tmp" '/BEGIN CERTIFICATE/{n++; p=1} p {print > (d "/cert" n ".pem")} /END CERTIFICATE/{p=0}' <<<"$s_client_output"
+  for f in "$tmp"/cert*.pem; do
+    [[ -e "$f" ]] || continue
+    der="$(openssl x509 -in "$f" -outform DER 2>/dev/null | wc -c)"
+    [[ "$der" -gt 0 ]] || continue
+    total=$(( total + der + 5 ))
+    count=$(( count + 1 ))
+  done
+  rm -rf "$tmp"
+  [[ "$count" -gt 0 ]] || return 0
+  printf '%s\n' "$total"
+}
 
 # Checks a candidate the way REALITY will actually use it.
 #
 # REALITY hands any connection that fails authentication straight to this
-# host, so the disguise is only as good as this handshake: a dest that is
-# unreachable from the node, or that cannot do TLS 1.3, produces a node
-# that drops probers instead of proxying them to a real site -- which is
-# a louder signal than having no disguise at all. h2 matters because the
-# inbound advertises it, and X25519 because REALITY reuses the
-# handshake's key share.
+# host, so the disguise is only as good as this handshake -- and only as
+# good as the *claim*, which is the part that used to go unchecked.
 #
-# Returns 0 and prints nothing on success; prints the reason it failed
-# otherwise. Deliberately quiet about *why* it succeeded -- the caller
-# prints its own summary.
+# What upstream requires of a dest: "websites out of China's GFW, support
+# TLSv1.3 and H2, the domain name is not used for redirection".
+# https://github.com/XTLS/REALITY/blob/main/README.en.md
+# Its bonus list adds "target website IP reside closer to proxy IP (looks
+# more reasonable, and lower latency)". Against a censor rather than a
+# curious observer that is not a bonus at all -- it is the first thing a
+# filter can check -- so criterion 1 here treats it as a requirement.
+#
+# The checks, and what each catches that the others do not:
+#   * TLS 1.3, ALPN h2, X25519 -- the handshake REALITY forwards has to
+#     look like the one the inbound advertises. This is what the probe
+#     already did, and all it did.
+#   * The certificate must be valid AND carry the name we intend to
+#     claim. "Verify return code: 0" says the chain is trusted and
+#     nothing about whose name is on it, so a host answering with
+#     somebody else's perfectly valid certificate used to pass.
+#   * Not CDN-fronted -- see the tables above. This is the ownership test
+#     that was missing, and the reason www.asus.com kept passing for
+#     months after it stopped being a usable decoy.
+#   * Not a redirector, because upstream says so: a dest that answers /
+#     with a 301 somewhere else produces traffic that does not look like
+#     anyone browsing that site.
+#   * A certificate chain small enough for REALITY to relay. The server
+#     side breaks off the handshake when the Certificate message exceeds
+#     8192 bytes and the customer sees only a connection reset:
+#     https://github.com/XTLS/Xray-core/issues/6356
+#
+# Three outcomes rather than two, because "this will not work" and "this
+# will work but it is a poor disguise" want different handling and the
+# caller cannot tell them apart from a message:
+#   0  usable; any advisory notes are printed
+#   1  will not work at all -- unreachable, no TLS 1.3, no h2, wrong or
+#      broken certificate, chain too large for REALITY to relay
+#   2  works, but the disguise is weak: fronted by a CDN, announced from
+#      a published range, or a redirector
+# In every non-zero case it prints every reason it found, joined with
+# "; ", so an operator can go and pick a better name instead of guessing
+# which check bit.
 probe_reality_dest() {
-  local host="$1" port="${2:-443}" out=""
+  local host="$1" port="${2:-443}"
+  local out="" ip="" owner="" asn="" as_name="" cc="" chain="" headers=""
+  local -a bad=() weak=() note=()
+
   if ! command -v openssl >/dev/null 2>&1; then
     echo "openssl is not installed, so this could not be checked"
     return 1
   fi
+
+  ip="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
+  if [[ -z "$ip" ]]; then
+    echo "$host does not resolve from this server, so REALITY could never forward to it"
+    return 1
+  fi
+
+  # Connected to the address just resolved, not to the name again.
+  # Otherwise the ownership check and the handshake can land on two
+  # different edges of the same CDN and disagree about what was tested.
+  #
   # tr -d '\0' because s_client relays whatever the server sends and
   # command substitution warns on every NUL byte in it -- noise the
   # operator would read as an error. pipefail (set at the top of this
   # file) keeps openssl's own exit status as the pipeline's, so a failed
   # handshake is still a failed probe.
-  out="$(timeout 8 openssl s_client -connect "${host}:${port}" -servername "$host" \
-    -alpn h2 -tls1_3 </dev/null 2>/dev/null | tr -d '\0')" || {
-    echo "no TLS 1.3 handshake from this server"
+  #
+  # -verify_hostname is the whole point of this line: without it openssl
+  # checks that the chain is trusted and never that the name on it is
+  # the name this node is about to claim.
+  #
+  # No -tls1_3: forcing it turns "only speaks TLS 1.2" into a bare
+  # handshake failure, and the operator then cannot tell that from an
+  # unreachable host. Let it negotiate and report what it chose.
+  out="$(timeout 12 openssl s_client -connect "${ip}:${port}" -servername "$host" \
+    -verify_hostname "$host" -alpn h2 -showcerts -status </dev/null 2>/dev/null | tr -d '\0')" || {
+    echo "no TLS handshake from $ip -- this server cannot reach it, or nothing there speaks TLS"
     return 1
   }
-  if ! grep -q "ALPN protocol: h2" <<<"$out"; then
-    echo "does not offer HTTP/2"
-    return 1
+
+  # openssl names the negotiated version in two places and does not
+  # always print both. The "SSL-Session:" summary block -- the one
+  # carrying "Protocol  : TLSv1.3" -- is absent on Ubuntu's OpenSSL
+  # 3.0.13 when the peer closes the connection first, which is every
+  # probe made here because stdin is /dev/null. The "New, TLSv1.3,
+  # Cipher is ..." line is the one that is always there.
+  #
+  # Reading only the summary block made this check fail for *every*
+  # dest on a node, with an empty version in the message. Measured on
+  # france-1 (OpenSSL 3.0.13): www.free.fr, www.torob.com and even
+  # cloudflare.com all came back "negotiated , and REALITY requires TLS
+  # 1.3", and --self-test failed its own control case. A probe that
+  # rejects everything is worse than no probe: it pushes the operator
+  # into typing a weak dest past the warning, or into dropping REALITY
+  # on that node entirely.
+  local tls_ver=""
+  if [[ "$out" =~ Protocol[[:space:]]*:[[:space:]]*(TLSv[0-9.]+) ]]; then
+    tls_ver="${BASH_REMATCH[1]}"
+  elif [[ "$out" =~ New,[[:space:]]*(TLSv[0-9.]+) ]]; then
+    tls_ver="${BASH_REMATCH[1]}"
   fi
-  if ! grep -q "Verify return code: 0 (ok)" <<<"$out"; then
-    echo "certificate did not verify from this server (intercepted, or a broken chain)"
-    return 1
+  [[ "$tls_ver" == "TLSv1.3" ]] ||
+    bad+=("negotiated ${tls_ver:-nothing openssl would name a version}, and REALITY requires TLS 1.3")
+  grep -q "ALPN protocol: h2" <<<"$out" ||
+    bad+=("does not offer HTTP/2 over ALPN, so the inbound's h2 advertisement would not match what this dest answers")
+
+  if grep -q "Verify return code: 0 (ok)" <<<"$out"; then
+    :
+  elif grep -qi "Hostname mismatch" <<<"$out"; then
+    bad+=("serves a certificate that is not for $host (it names $(reality_leaf_names "$out")) -- REALITY would be claiming a name this host does not hold")
+  else
+    bad+=("certificate did not verify -- $(grep -m1 'Verify return code:' <<<"$out" | sed 's/^ *//'); intercepted, expired, or a broken chain")
   fi
-  # Advisory rather than fatal: a dest that negotiates something else
-  # still works, it just gives REALITY less to hide behind. Reported
-  # only when s_client actually printed the line -- not every build
-  # does, and treating a missing line as a missing X25519 would flag
-  # every candidate on those boxes.
+
+  # Fronting, signal by signal. Any one is enough on its own: they are
+  # three observations of the same fact, not a score to be totalled.
+  chain="$(reality_cname_chain "$host" || true)"
+  if [[ -n "$chain" ]] && grep -qEi "$REALITY_CDN_ZONE_RE" <<<"$chain"; then
+    weak+=("resolves through $(grep -Eim1 "$REALITY_CDN_ZONE_RE" <<<"$chain" | sed 's/\.$//'), a CDN zone -- the name is fronted and $ip is not the site's own address")
+  fi
+
+  if owner="$(reality_ip_owner "$ip")"; then
+    asn="${owner%%|*}"
+    as_name="$(cut -d'|' -f2 <<<"$owner")"
+    cc="${owner##*|}"
+    if [[ "$REALITY_CDN_ASNS" == *" $asn "* ]] || grep -qEi "$REALITY_CDN_AS_NAME_RE" <<<"$as_name"; then
+      weak+=("$ip is announced by AS$asn ($as_name), whose ranges are published -- 'SNI says $host, packet went to this node' is then one table lookup for a filter")
+    else
+      note+=("$ip is AS$asn ${as_name%, ??} in $cc")
+    fi
+  else
+    note+=("could not look up who owns $ip, so criterion 1 is UNVERIFIED here -- install bind9-dnsutils and re-run")
+  fi
+
+  # What the site itself says on the way back. An edge that stamps its
+  # own tracing header has identified itself more reliably than any
+  # address list could.
+  if command -v curl >/dev/null 2>&1; then
+    headers="$(timeout 12 curl -4 -s -o /dev/null -D - --max-time 10 \
+      --resolve "${host}:${port}:${ip}" "https://${host}:${port}/" 2>/dev/null | tr -d '\r' | tr 'A-Z' 'a-z' || true)"
+    if [[ -n "$headers" ]] && grep -qE "$REALITY_CDN_HEADER_RE" <<<"$headers"; then
+      weak+=("its responses carry '$(grep -oEm1 "$REALITY_CDN_HEADER_RE" <<<"$headers" | sed 's/ *$//')', a CDN edge header -- this name is served by a CDN, not by its own host")
+    fi
+    # Upstream's third requirement. www -> apex and apex -> www are the
+    # documented exception, so only a hop to a different site counts.
+    local status redir redir_host
+    status="$(awk '/^http\/[0-9.]+ /{print $2}' <<<"$headers" | tail -1)"
+    redir="$(awk '/^location:/{print $2}' <<<"$headers" | tail -1)"
+    if [[ "$status" =~ ^30[12378]$ && -n "$redir" ]]; then
+      redir_host="${redir#*://}"
+      redir_host="${redir_host%%/*}"
+      if [[ "${redir_host#www.}" != "${host#www.}" ]]; then
+        weak+=("answers / with $status to $redir_host, and upstream requires a dest whose name is not used for redirection")
+      fi
+    fi
+  fi
+
+  # The 8192-byte ceiling. Estimated from the DER chain rather than read
+  # off the wire, so the number is printed next to the verdict: a dest
+  # sitting within a few bytes of the limit deserves a human's eye
+  # rather than a silent pass or a silent rejection.
+  local chain_bytes
+  chain_bytes="$(reality_chain_bytes "$out")"
+  if [[ -n "$chain_bytes" ]] && [[ "$chain_bytes" -gt 8192 ]]; then
+    bad+=("its certificate chain is about $chain_bytes bytes, over the 8192 REALITY's server side will relay -- customers would see a bare connection reset (XTLS/Xray-core#6356)")
+  elif [[ -n "$chain_bytes" ]] && [[ "$chain_bytes" -gt 7500 ]]; then
+    note+=("certificate chain is ~$chain_bytes bytes, close to REALITY's 8192-byte ceiling")
+  fi
+
+  # Advisory, not fatal: a dest that negotiates something else still
+  # works, it just gives REALITY less to hide behind. Reported only when
+  # s_client actually printed the line -- not every build does, and
+  # treating a missing line as a missing X25519 would flag every
+  # candidate on those boxes.
   if grep -q "Server Temp Key" <<<"$out" && ! grep -qi "Server Temp Key: *X25519" <<<"$out"; then
-    echo "ok, but does not negotiate X25519"
-    return 0
+    note+=("does not negotiate X25519")
+  fi
+  # A bonus point upstream names explicitly, and free to observe here.
+  if grep -q "OCSP response: *no response sent" <<<"$out"; then
+    note+=("no OCSP stapling")
+  fi
+
+  # A dest that cannot work is reported with the weak-disguise findings
+  # alongside it -- an operator debugging one name wants everything that
+  # is wrong with it in one pass, not one reason per attempt.
+  local joined=""
+  if [[ ${#bad[@]} -gt 0 ]]; then
+    joined="$(printf '%s; ' "${bad[@]}" "${weak[@]}")"
+    echo "${joined%; }"
+    return 1
+  fi
+  if [[ ${#weak[@]} -gt 0 ]]; then
+    joined="$(printf '%s; ' "${weak[@]}")"
+    echo "${joined%; }"
+    return 2
+  fi
+  if [[ ${#note[@]} -gt 0 ]]; then
+    joined="$(printf '%s; ' "${note[@]}")"
+    echo "${joined%; }"
   fi
   return 0
 }
@@ -769,14 +1506,16 @@ install_xray() {
     echo "Three things make a good choice, in order of how cheaply a filter"
     echo "can catch a bad one:"
     echo "  1. Plausible for THIS node's IP. Prefer a site hosted in the same"
-    echo "     country as this server. A big CDN's name on an address outside"
-    echo "     that CDN's published ranges is a mismatch checked at line rate."
+    echo "     country as this server, on its own or its host's addresses."
+    echo "     A CDN-fronted name is a mismatch a filter checks at line rate,"
+    echo "     so the check below rejects one and names the network it found."
     echo "  2. Not blocked where your customers are, and not blocking this"
     echo "     server -- the handshake is forwarded there on every probe."
-    echo "  3. TLS 1.3 and HTTP/2, verified below rather than assumed."
+    echo "  3. TLS 1.3, HTTP/2, and a certificate actually issued for the"
+    echo "     name -- all verified below rather than assumed."
     echo
     echo "Checking a few candidates from this server (a few seconds each)..."
-    local candidate reason first_ok=""
+    local candidate reason first_ok="" first_weak=""
     local group_label
     for group_label in "hosted in Iran" "hosted abroad"; do
       echo "  -- $group_label --"
@@ -786,23 +1525,50 @@ install_xray() {
       else
         group=("${REALITY_DEST_CANDIDATES_ABROAD[@]}")
       fi
+      local probe_rc
       for candidate in "${group[@]}"; do
-        if reason="$(probe_reality_dest "$candidate" 443)"; then
-          if [[ -n "$reason" ]]; then
-            echo "     $candidate -- $reason"
-          else
-            echo "     $candidate -- TLS 1.3, h2, X25519, certificate verified"
-          fi
-          [[ -z "$first_ok" ]] && first_ok="$candidate"
-        else
-          echo "     $candidate -- unusable from here ($reason)"
-        fi
+        reason="$(probe_reality_dest "$candidate" 443)" && probe_rc=0 || probe_rc=$?
+        case "$probe_rc" in
+          0)
+            if [[ -n "$reason" ]]; then
+              echo "     $candidate -- OK: $reason"
+            else
+              echo "     $candidate -- OK: TLS 1.3, h2, X25519, certificate for that name, not fronted"
+            fi
+            [[ -z "$first_ok" ]] && first_ok="$candidate"
+            ;;
+          2)
+            # Offered, but never as the default: it would still carry
+            # traffic, and it would still be the mismatch that gets a
+            # node found.
+            echo "     $candidate -- WEAK DISGUISE: $reason"
+            [[ -z "$first_weak" ]] && first_weak="$candidate"
+            ;;
+          *)
+            echo "     $candidate -- REJECTED: $reason"
+            ;;
+        esac
       done
     done
     echo
     echo "Pick the group that matches where THIS server is, not where your"
     echo "customers are. Anything you know to be a better fit beats this list."
-    local dest_default="${first_ok:-www.speedtest.net}:443"
+    # No hardcoded fallback any more. It used to be www.speedtest.net,
+    # which has resolved into Cloudflare for well over a year -- so the
+    # one path that fired when nothing else worked was guaranteed to
+    # produce the exact mismatch the rest of this function exists to
+    # avoid, silently, on the node least able to afford it. If every
+    # candidate was rejected the operator is told to bring their own
+    # name instead of being handed a bad one.
+    local dest_default=""
+    if [[ -n "$first_ok" ]]; then
+      dest_default="${first_ok}:443"
+    else
+      echo
+      echo "None of the candidates above is usable from this server." >&2
+      echo "Enter a name you know to be hosted near this node and not behind" >&2
+      echo "a CDN -- it will be checked the same way before it is accepted." >&2
+    fi
     # Bounded rather than `while true`: an install driven from a pipe
     # runs out of stdin, every `read` then returns immediately with an
     # empty answer, and an unbounded loop would spin forever printing
@@ -841,11 +1607,18 @@ install_xray() {
           continue
           ;;
       esac
-      if reason="$(probe_reality_dest "$server_name" "$dest_port")"; then
+      local chosen_rc
+      reason="$(probe_reality_dest "$server_name" "$dest_port")" && chosen_rc=0 || chosen_rc=$?
+      if [[ "$chosen_rc" == 0 ]]; then
         [[ -n "$reason" ]] && echo "  Note: $reason."
         break
       fi
-      echo "  $server_name is not usable as a dest from this server: $reason." >&2
+      if [[ "$chosen_rc" == 2 ]]; then
+        echo "  $server_name works, but it is a weak disguise: $reason." >&2
+        echo "  It will carry traffic. It will also be what gets this node found." >&2
+      else
+        echo "  $server_name is not usable as a dest from this server: $reason." >&2
+      fi
       read -r -p "  Use it anyway? [y/N]: " force_dest || force_dest=""
       [[ "${force_dest,,}" == "y" ]] && break
       # Cleared so the loop cannot fall out of its last iteration still
@@ -853,8 +1626,31 @@ install_xray() {
       dest=""
     done
     if [[ -z "$dest" ]]; then
-      echo "No usable camouflage destination was chosen; falling back to $dest_default." >&2
-      dest="$dest_default"
+      # Ranked, and never silently: a clean candidate first, then one
+      # that only fails the ownership test, and only then a refusal.
+      # Dropping REALITY here would take a transport away from the
+      # customers who most need alternatives, so a weak disguise beats
+      # no disguise -- but it is said out loud, and it is written where
+      # a later re-run of this menu entry will show it again.
+      if [[ -n "$dest_default" ]]; then
+        echo "No camouflage destination was chosen; using $dest_default." >&2
+        dest="$dest_default"
+      elif [[ -n "$first_weak" ]]; then
+        echo "No camouflage destination was chosen, and nothing passed cleanly." >&2
+        echo "Falling back to $first_weak, which works but is CDN-fronted or" >&2
+        echo "otherwise checkable at line rate. Re-run menu entry 5 with a" >&2
+        echo "better name for this node's country when you have one." >&2
+        dest="${first_weak}:443"
+      else
+        echo "No camouflage destination is usable from this server -- not one" >&2
+        echo "candidate could even be reached over TLS. That is a network" >&2
+        echo "problem before it is a disguise problem, so this step stops here" >&2
+        echo "rather than writing a config around a name that does not answer." >&2
+        echo "Nothing has been written yet; every protocol Xray would serve is" >&2
+        echo "still unconfigured. Fix outbound HTTPS from this node, or supply" >&2
+        echo "a reachable name, then re-run menu entry 5." >&2
+        return 1
+      fi
       server_name="${dest%%:*}"
     fi
   fi
@@ -1908,11 +2704,11 @@ install_ikev2() {
   # Observed against sg1 from the emulator on 2026-08-11. Reissuing as
   # RSA fixed it on the very next attempt with nothing else changed.
   # Standalone binds port 80 itself, which is fine on a bare node and
-  # not fine here. Installing nginx for the Trojan fallback also enables
-  # nginx's stock default site, and that one *does* listen on 0.0.0.0:80
-  # even though the fallback vhost is loopback-only -- so by the time
-  # this runs, port 80 is usually taken and standalone fails with an
-  # address-in-use that reads like a firewall problem.
+  # not fine here. A node that serves Trojan or VLESS over TLS has nginx
+  # on port 80 by the time this runs -- once because installing nginx
+  # enabled Ubuntu's default vhost by accident, now because
+  # ensure_port80_site puts a deliberate one there -- so standalone fails
+  # with an address-in-use that reads like a firewall problem.
   #
   # Webroot serves the challenge through whatever already holds the port
   # instead, with no restart and no window where the fallback site is
@@ -2297,9 +3093,24 @@ action_update_agent() {
   detect_os
   echo "Updating agent binary only (protocol engines are left running so"
   echo "active sessions on this node are not disrupted)..."
+  # fetch_agent_binary keeps the outgoing binary and refuses to hand back
+  # a build that does not report the release it was asked for, so by the
+  # time this returns the restart is on something checked. Anything it
+  # rejects exits before here rather than restarting the service.
   fetch_agent_binary
   systemctl restart neoxify-agentd
   echo "Agent updated and restarted."
+  echo
+  echo "If this build misbehaves, roll back to one of these:"
+  local kept
+  mapfile -t kept < <(find "$AGENT_ROLLBACK_DIR" -maxdepth 1 -type f -name 'agentd-*' ! -name '*.sha256' -printf '  %f\n' 2>/dev/null | sort)
+  if [[ ${#kept[@]} -gt 0 ]]; then
+    printf '%s\n' "${kept[@]}"
+  else
+    echo "  (none -- this node had no previous binary to keep)"
+  fi
+  echo "  install -m 755 $AGENT_ROLLBACK_DIR/<one of the above> /usr/local/bin/agentd"
+  echo "  systemctl restart neoxify-agentd"
 }
 
 action_status_agent() {
