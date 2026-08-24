@@ -1409,26 +1409,39 @@ mod tests {
     /// Records a UDP flow to `target` and returns a socket standing in
     /// for the application, bound to the synthetic port the redirect
     /// loop would have rewritten its packets to carry.
+    ///
+    /// Bound **exclusively**, and retried with a new flow if that fails.
+    /// Every `Nat` starts allocating from the same number, so two of
+    /// these tests running at once ask for the same synthetic port --
+    /// and with `SO_REUSEADDR` both binds succeed and Windows delivers
+    /// each reply to whichever socket it likes. That is a test which
+    /// passes or fails on the scheduler, which is worse than one that
+    /// does not exist. An exclusive bind makes the collision a failure
+    /// the loser can see and step around.
     fn udp_flow(nat: &Nat, target: SocketAddrV4) -> (u16, UdpSocket) {
-        let nat_port = nat
-            .redirect(
-                Transport::Udp,
-                Origin {
-                    addr: *target.ip(),
-                    port: target.port(),
-                    client: Ipv4Addr::LOCALHOST,
-                    client_port: 40000,
-                    interface_id: 1,
-                    upstream: None,
-                },
-            )
-            .unwrap();
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        socket.set_reuse_address(true).unwrap();
-        socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, nat_port)).into()).unwrap();
-        let socket: UdpSocket = socket.into();
-        socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        (nat_port, socket)
+        for _ in 0..64 {
+            let nat_port = nat
+                .redirect(
+                    Transport::Udp,
+                    Origin {
+                        addr: *target.ip(),
+                        port: target.port(),
+                        client: Ipv4Addr::LOCALHOST,
+                        client_port: 40000,
+                        interface_id: 1,
+                        upstream: None,
+                    },
+                )
+                .unwrap();
+            let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+            if socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, nat_port)).into()).is_err() {
+                continue;
+            }
+            let socket: UdpSocket = socket.into();
+            socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            return (nat_port, socket);
+        }
+        panic!("no synthetic port could be bound for a test flow");
     }
 
     #[test]
