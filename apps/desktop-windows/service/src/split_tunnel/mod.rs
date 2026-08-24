@@ -933,7 +933,12 @@ impl SplitTunnel {
         // install_verified_route.
         let route =
             install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path)?;
-        let relays = match proxy::start(nat.clone(), tunnel.clone()) {
+        // Created here rather than inside `redirect::start`, because
+        // the relay counts into the same table and the relay is started
+        // first -- the firewall allowance and the reachability wait sit
+        // between the two.
+        let stats = Arc::new(redirect::Stats::default());
+        let relays = match proxy::start(nat.clone(), tunnel.clone(), stats.clone()) {
             Ok(relays) => relays,
             Err(e) => {
                 let mut route = route;
@@ -1040,7 +1045,7 @@ impl SplitTunnel {
         // about to close is one the tunnel is already carrying.
         let reset_nat = nat.clone();
 
-        match redirect::start(redirect, nat, self.selection.clone()) {
+        match redirect::start(redirect, nat, self.selection.clone(), stats) {
             Ok(running) => {
                 let logger =
                     Logger::start(log_path.clone(), running.stats.clone(), header, audit);
