@@ -2,17 +2,14 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "web-portal",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["vite", "preview", "--port", "4173", "--strictPort"],
-      "cwd": "apps/web-portal",
-      "port": 4173
-    },
-    {
-      "name": "mobile",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--dir", "apps/mobile", "dev"],
-      "port": 1420
+      "name": "website",
+      "runtimeExecutable": "C:/Users/aliha/AppData/Local/Microsoft/WinGet/Packages/PHP.PHP.8.2_Microsoft.Winget.Source_8wekyb3d8bbwe/php.exe",
+      "runtimeArgs": [
+        "-S", "127.0.0.1:8123",
+        "-t", "C:/nxweb/website",
+        "C:/nxweb/website/scripts/dev-router.php"
+      ],
+      "port": 8123
     }
   ]
 }

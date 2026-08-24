@@ -75,14 +75,40 @@
   --border-strong: rgba(255, 255, 255, 0.14);
 
   /* Shape */
+  --radius-sm: 0.5rem;
   --radius: 0.75rem;
   --radius-lg: 1.25rem;
+  --radius-xl: 1.75rem;
   --radius-pill: 999px;
 
-  /* Rhythm */
-  --container: 72rem;
+  /* Rhythm
+     --------------------------------------------------------------
+     The container was 72rem (1152px). The owner's complaint about
+     this site was that it reads narrow and basic next to a
+     reference site that reads wide, and 1152px is genuinely the
+     narrow end for a 2026 marketing page -- it leaves ~200px of
+     dead gutter each side on a 1536px laptop, which is the single
+     biggest reason a layout feels cramped.
+
+     Three widths now, because "wide" is not one number:
+
+       --container       80rem / 1280px. The default. Wide enough
+                         to run a four-column grid without the
+                         cards turning into stamps.
+       --container-wide  90rem / 1440px. Showcase rows only --
+                         the locations grid, the protocol table --
+                         where more columns genuinely help.
+       --container-prose 44rem / 704px. Body copy. Going WIDER for
+                         everything would have been the naive read
+                         of "make it wide": prose at 1280px is 150
+                         characters per line and unreadable. The
+                         privacy policy and FAQ answers use this. */
+  --container: 80rem;
+  --container-wide: 90rem;
+  --container-prose: 44rem;
   --gutter: clamp(1.25rem, 4vw, 2.5rem);
   --section-y: clamp(4.5rem, 10vw, 8rem);
+  --section-y-lg: clamp(6rem, 13vw, 11rem);
 
   /* Type */
   --font-sans: "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto,
@@ -90,9 +116,57 @@
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
 
-  /* Elevation */
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.8);
+  /* Elevation
+     --------------------------------------------------------------
+     Each of these leads with an INSET hairline rather than only
+     casting a shadow outward. On a dark palette an outer shadow
+     alone does almost nothing -- black on near-black is invisible
+     -- so what actually separates a surface from its background is
+     the 1px lit edge along its top. That is the whole trick behind
+     why a well-made dark UI looks crisp and a naive one looks
+     flat, and it costs one shadow layer. */
+  --shadow-card:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 8px 24px -12px rgba(0, 0, 0, 0.8);
+  --shadow-lift:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 2px 4px rgba(0, 0, 0, 0.4),
+    0 18px 44px -20px rgba(0, 0, 0, 0.9);
   --shadow-glow: 0 0 32px -8px var(--primary);
+  /* Violet-tinted rather than black. A coloured ambient shadow under a
+     violet-accented card reads as light behind the object; a grey one
+     reads as dirt. */
+  --shadow-violet: 0 24px 60px -28px rgba(139, 92, 246, 0.55);
+
+  /* Washes -- the large, soft background gradients that give the page
+     depth between sections. Declared as tokens so the same two light
+     sources are reused everywhere instead of each section inventing
+     its own angle and colour. */
+  --wash-violet: radial-gradient(
+    60% 60% at 50% 0%,
+    rgba(139, 92, 246, 0.16) 0%,
+    rgba(139, 92, 246, 0) 70%
+  );
+  --wash-cyan: radial-gradient(
+    50% 50% at 85% 20%,
+    rgba(34, 211, 238, 0.1) 0%,
+    rgba(34, 211, 238, 0) 70%
+  );
+  /* The hairline that separates stacked full-bleed bands. Fades out at
+     both ends so it never looks like a table rule. */
+  --rule: linear-gradient(
+    to right,
+    transparent,
+    rgba(255, 255, 255, 0.1) 20%,
+    rgba(255, 255, 255, 0.1) 80%,
+    transparent
+  );
+
+  /* Motion. One duration and one curve, so everything on the page
+     accelerates the same way. */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur: 220ms;
 }
 
 /* Persian needs a noticeably taller line than Latin to stay readable. The
@@ -230,6 +304,17 @@ p {
   max-width: 46ch;
 }
 
+/* .lead caps its measure at 46ch, which is right, but in a centred head
+   that box then sits against the start edge while the h1 above it is
+   centred -- so the paragraph hung ~170px to the left of the heading on
+   /faq/ and /pricing/, and to the right of it in Persian. The text-align
+   centred the lines inside the box and hid what was actually wrong. */
+.page-hero--center .lead,
+.section-head--center .lead,
+.section-head--center p {
+  margin-inline: auto;
+}
+
 .gradient-text {
   background: linear-gradient(100deg, var(--primary-soft), var(--highlight));
   -webkit-background-clip: text;
@@ -280,6 +365,21 @@ html[lang="fa"] .eyebrow {
   z-index: 1;
 }
 
+/* Showcase rows that earn the extra width -- the locations grid and the
+   protocol table, both of which are genuinely tabular and get easier to
+   read with more columns rather than harder. */
+.container--wide {
+  max-width: var(--container-wide);
+}
+
+/* Body copy. Deliberately much narrower than the page: the privacy policy
+   and the FAQ answers are read line by line, and a 1280px measure is
+   roughly 150 characters, well past the point where the eye loses the
+   start of the next line. */
+.container--prose {
+  max-width: var(--container-prose);
+}
+
 .section {
   padding-block: var(--section-y);
   position: relative;
@@ -289,8 +389,54 @@ html[lang="fa"] .eyebrow {
   padding-block: clamp(3rem, 7vw, 5rem);
 }
 
+/* For the one or two sections that should breathe more than the rest --
+   used to break the metronome so the page does not scroll like a list of
+   equal-height boxes. */
+.section--roomy {
+  padding-block: var(--section-y-lg);
+}
+
+/* A full-bleed band with its own surface, separated from its neighbours by
+   the faded hairline rather than a hard border. This is what stops a long
+   page reading as one undifferentiated column. */
+.section--band {
+  background: var(--bg-soft);
+}
+
+.section--band::before,
+.section--band::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  height: 1px;
+  background: var(--rule);
+}
+
+.section--band::before {
+  inset-block-start: 0;
+}
+
+.section--band::after {
+  inset-block-end: 0;
+}
+
+/* A violet wash bled in from the top of a section. Purely decorative, so
+   it is pointer-events: none and sits behind .container's z-index: 1. */
+.section--wash {
+  isolation: isolate;
+}
+
+.section--wash::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--wash-violet);
+  pointer-events: none;
+  z-index: 0;
+}
+
 .section-head {
-  max-width: 44rem;
+  max-width: 48rem;
   margin-block-end: clamp(2.5rem, 5vw, 4rem);
 }
 
@@ -331,12 +477,26 @@ html[lang="fa"] .eyebrow {
   .grid--3 {
     grid-template-columns: repeat(2, 1fr);
   }
+  .grid--4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 @media (min-width: 62rem) {
   .grid--3 {
     grid-template-columns: repeat(3, 1fr);
   }
+  .grid--4 {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+/* Auto-fitting grid for lists whose length is data-driven and will change --
+   the server locations especially. A fixed column count would leave a lone
+   orphan card on a row the day a sixth location is added, and nobody would
+   notice until it shipped. minmax() lets the row decide. */
+.grid--auto {
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
 }
 
 .skip-link {
@@ -612,6 +772,16 @@ html[lang="fa"] .brand__beta {
   padding-block: 0.75rem 1.25rem;
   display: grid;
   gap: 0.15rem;
+}
+
+/* The `hidden` attribute is how site.js closes this drawer, and a UA
+   stylesheet's `[hidden] { display: none }` loses to the author rule above.
+   Without this line the drawer sets display:grid forever: JS sets .hidden,
+   nothing happens, and every page under 56rem renders with the whole
+   navigation permanently expanded under the header. Measured in a real
+   browser at 375px -- hidden === true, computed display still `grid`. */
+.mobile-nav[hidden] {
+  display: none;
 }
 
 .mobile-nav a {
@@ -1226,7 +1396,10 @@ html[lang="fa"] .brand__beta {
   color: var(--fg-muted);
   font-size: 0.9rem;
   margin-block-start: 0.35rem;
-  min-height: 2.6em;
+  /* Reserve exactly two rendered lines so the price row lines up across
+     the three cards. 2.6em was less than two lines at either locale's line
+     height, which left Ultimate's price sitting ~11px below the others. */
+  min-height: calc(2em * var(--line-body));
 }
 
 .plan__price {
@@ -1460,14 +1633,22 @@ html[lang="fa"] .brand__beta {
   background: rgba(245, 158, 11, 0.07);
 }
 
+/* h2 or h3 depending on what precedes the box: on /download/ and
+   /reseller/ this notice is the first heading after the h1, so an h3 there
+   was a level skip. Matched on both levels rather than pinned to one. */
+.notice h2,
 .notice h3 {
   font-size: 1rem;
+  font-weight: 650;
+  line-height: 1.4;
+  margin-block-start: 0;
   margin-block-end: 0.5rem;
   display: flex;
   align-items: center;
   gap: 0.5rem;
 }
 
+.notice h2 svg,
 .notice h3 svg {
   width: 1.05rem;
   height: 1.05rem;
@@ -1845,15 +2026,22 @@ html[lang="fa"] .brand__beta {
   }
 }
 
-.site-footer h4 {
+/* These are h2 elements, not h4: an h4 straight after the page's last h2
+   was a heading-level skip on every page of the site, and the footer's
+   groups are top-level sections of the footer landmark. Every size,
+   weight and spacing value the heading needs is set here, because the
+   element now inherits the document's h2 styling instead of h4's. */
+.site-footer__title {
   font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.4;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--fg-subtle);
-  margin-block-end: 0.9rem;
+  margin-block: 0 0.9rem;
 }
 
-html[lang="fa"] .site-footer h4 {
+html[lang="fa"] .site-footer__title {
   text-transform: none;
   letter-spacing: 0;
 }
@@ -2406,4 +2594,890 @@ html[lang="fa"] .site-footer h4 {
     opacity: 1;
     transform: none;
   }
+}
+
+/* ==========================================================================
+   16. Wide layout components (2026-08 rebuild)
+   --------------------------------------------------------------------------
+   Added when the site was widened from 1152px to 1280px. The brief was
+   "clean and wide" against a site that read narrow and basic -- and width
+   alone does not achieve that. A wider container running the same three
+   equal cards just spreads the same thinness further apart. What reads as
+   considered is a page whose sections have DIFFERENT shapes: a bento
+   block, a real table, a location grid, an alternating split row.
+
+   Direction: logical properties only, as everywhere else in this file, so
+   the Persian pages mirror from <html dir="rtl"> with no second stylesheet.
+   Three rules below need a hand-flip because gradients and transforms have
+   no logical form. Each is marked.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   16.1 Interior page hero
+   --------------------------------------------------------------------------
+   The home page has the app mockup; every other page needs an opening that
+   is more than an h1 on a flat background. Deliberately shallow -- an
+   interior hero that fills the viewport is a page that makes you scroll
+   before it has told you anything.
+   -------------------------------------------------------------------------- */
+
+.page-hero {
+  position: relative;
+  padding-block: clamp(3.5rem, 8vw, 6rem) clamp(2.5rem, 5vw, 4rem);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.page-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--wash-violet), var(--wash-cyan);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.page-hero::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: 0;
+  height: 1px;
+  background: var(--rule);
+}
+
+.page-hero__inner {
+  max-width: 52rem;
+}
+
+.page-hero--center .page-hero__inner {
+  margin-inline: auto;
+  text-align: center;
+}
+
+.page-hero--center .eyebrow {
+  justify-content: center;
+}
+
+.page-hero h1 {
+  margin-block: 0.9rem 1.1rem;
+}
+
+.page-hero .lead {
+  color: var(--fg-muted);
+}
+
+/* --------------------------------------------------------------------------
+   16.2 Stat strip
+   --------------------------------------------------------------------------
+   The figures a visitor wants before reading anything: how many locations,
+   how many ways to connect, which platforms.
+
+   Every number here is COUNTED from a data file at render time
+   (nx_location_count(), nx_protocol_count()), never typed into copy. That
+   is the entire reason this is a component and not three spans: a
+   hand-typed "5 locations" goes stale silently the day a node is added,
+   and this site has already shipped exactly that bug with plan data.
+   -------------------------------------------------------------------------- */
+
+.stat-row {
+  display: grid;
+  gap: 1px;
+  grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr));
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+
+/* The 1px gap over a border-coloured background draws the dividers --
+   cheaper and more robust than border-inline-start on each child, which
+   needs a :first-child exception that breaks the moment the row wraps. */
+.stat {
+  background: var(--card);
+  padding: clamp(1.25rem, 3vw, 2rem);
+  text-align: center;
+}
+
+.stat__value {
+  display: block;
+  font-size: clamp(1.75rem, 3.5vw, 2.5rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  /* Brand gradient: violet into cyan, running top-left to bottom-right.
+     That direction is fixed across the whole product -- see brand/README. */
+  background: linear-gradient(135deg, var(--fg) 15%, var(--primary-soft) 55%, var(--highlight));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+html[lang="fa"] .stat__value {
+  letter-spacing: 0;
+}
+
+/* One of the three stats is a phrase rather than a numeral. At the shared
+   size it was two to three times the width of "8" and "5" and unbalanced
+   the whole band; at 768px it wrapped to two lines beside two single
+   characters. Smaller, and no negative tracking, since that is tuned for
+   large numerals. */
+.stat__value--text {
+  font-size: clamp(1.15rem, 2.1vw, 1.5rem);
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
+.stat__label {
+  display: block;
+  margin-block-start: 0.4rem;
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+}
+
+/* --------------------------------------------------------------------------
+   16.3 Bento grid
+   --------------------------------------------------------------------------
+   An asymmetric feature block. The point is that the cells are NOT equal:
+   one wide cell carries the headline feature and the rest fill around it.
+   Collapses to one column on small screens, where the asymmetry would be
+   meaningless anyway.
+   -------------------------------------------------------------------------- */
+
+.bento {
+  display: grid;
+  gap: 1.25rem;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 48rem) {
+  .bento {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .bento__cell--wide {
+    grid-column: span 2;
+  }
+}
+
+@media (min-width: 68rem) {
+  .bento {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .bento__cell--wide {
+    grid-column: span 2;
+  }
+}
+
+/* A bento nested in a split column only has half the container to work with,
+   but the media queries above ask the VIEWPORT, which knows nothing about
+   that. At 1280px the home page's nested bento was laid out in three columns
+   inside a ~570px box: the wide cell took two of them and the remaining cell
+   came out about 170px wide, rendering one word per line. Stack instead --
+   once the split itself is two-column there is no width left to divide. A
+   container query would say this more directly but is not safe to rely on
+   for this audience's browsers. */
+@media (min-width: 62rem) {
+  .split__media .bento {
+    grid-template-columns: 1fr;
+  }
+  .split__media .bento__cell--wide {
+    grid-column: auto;
+  }
+}
+
+.bento__cell {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: clamp(1.35rem, 2.5vw, 2rem);
+  box-shadow: var(--shadow-card);
+  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+  overflow: hidden;
+}
+
+.bento__cell:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lift);
+}
+
+/* A soft violet corner light inside the featured cell. */
+.bento__cell--wide::after {
+  content: "";
+  position: absolute;
+  inset-block-start: -40%;
+  inset-inline-end: -20%;
+  width: 60%;
+  height: 160%;
+  background: radial-gradient(closest-side, rgba(139, 92, 246, 0.18), transparent);
+  pointer-events: none;
+}
+
+.bento__cell > * {
+  position: relative;
+  z-index: 1;
+}
+
+.bento__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.22), rgba(34, 211, 238, 0.12));
+  border: 1px solid var(--border-strong);
+  margin-block-end: 1rem;
+}
+
+.bento__icon svg {
+  width: 1.35rem;
+  height: 1.35rem;
+  stroke: var(--primary-soft);
+}
+
+.bento__cell h3 {
+  margin-block-end: 0.6rem;
+}
+
+.bento__cell p {
+  color: var(--fg-muted);
+  line-height: var(--line-body);
+  font-size: 0.95rem;
+}
+
+/* --------------------------------------------------------------------------
+   16.4 Protocol table
+   --------------------------------------------------------------------------
+   A real <table>, because eight connection methods against two platforms is
+   real tabular data. Screen readers get row and column semantics for free,
+   which a grid of divs throws away.
+
+   Below 55rem it becomes a stack of cards using the data-label trick: each
+   platform cell prints its own column heading from an attribute. One set of
+   markup, not two -- a duplicated mobile card list is how the two versions
+   drift apart.
+   -------------------------------------------------------------------------- */
+
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.proto-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: start;
+}
+
+.proto-table th,
+.proto-table td {
+  padding: 1rem clamp(0.85rem, 2vw, 1.4rem);
+  text-align: start;
+  vertical-align: middle;
+  border-block-end: 1px solid var(--border);
+}
+
+.proto-table thead th {
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+
+html[lang="fa"] .proto-table thead th {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.proto-table tbody tr:last-child th,
+.proto-table tbody tr:last-child td {
+  border-block-end: 0;
+}
+
+.proto-table tbody tr {
+  transition: background var(--dur) var(--ease);
+}
+
+.proto-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.proto__name {
+  font-weight: 650;
+  display: block;
+}
+
+.proto__tech {
+  display: block;
+  margin-block-start: 0.15rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--highlight);
+  /* Always LTR: these are Latin-script proper nouns ("VLESS + REALITY").
+     Inheriting RTL moves the plus sign to the wrong side of the pair. */
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* An isolated LTR run inside an RTL cell still needs its own alignment or
+   it hugs the wrong edge. `start` is not usable here -- the isolate has
+   already reset the direction. */
+html[lang="fa"] .proto__tech {
+  text-align: right;
+}
+
+.proto__hint {
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+}
+
+.proto__yes,
+.proto__no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: var(--radius-pill);
+}
+
+.proto__yes {
+  background: rgba(16, 185, 129, 0.14);
+  color: var(--success);
+}
+
+.proto__no {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fg-subtle);
+}
+
+.proto__yes svg,
+.proto__no svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+@media (max-width: 55rem) {
+  .proto-table thead {
+    /* Visually hidden rather than display:none -- the headings are still
+       announced through each cell's data-label, and removing them from the
+       accessibility tree would strip the table's structure entirely. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .proto-table,
+  .proto-table tbody,
+  .proto-table tr,
+  .proto-table td,
+  .proto-table th {
+    display: block;
+    width: 100%;
+  }
+
+  .proto-table tr {
+    padding: 1rem clamp(0.85rem, 3vw, 1.25rem);
+    border-block-end: 1px solid var(--border);
+  }
+
+  .proto-table tr:last-child {
+    border-block-end: 0;
+  }
+
+  .proto-table th,
+  .proto-table td {
+    border-block-end: 0;
+    padding: 0.3rem 0;
+  }
+
+  .proto-table td[data-label] {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--fg-muted);
+    font-size: 0.9rem;
+  }
+
+  .proto-table td[data-label]::before {
+    content: attr(data-label);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   16.5 Server locations
+   -------------------------------------------------------------------------- */
+
+.loc {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 1rem 1.15rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+
+.loc:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+}
+
+.loc__flag {
+  font-size: 1.6rem;
+  line-height: 1;
+  /* Flag emoji are pictographic and must never be mirrored on RTL pages. */
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.loc__name {
+  font-weight: 600;
+}
+
+.loc__meta {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--fg-subtle);
+  margin-block-start: 0.1rem;
+}
+
+/* The relay entry, called out rather than listed as a sixth location --
+   it is where traffic goes IN, not where it comes out. */
+.loc--relay {
+  border-color: rgba(139, 92, 246, 0.35);
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), transparent 60%), var(--card);
+}
+
+/* --------------------------------------------------------------------------
+   16.6 Split row
+   --------------------------------------------------------------------------
+   Text beside a visual, alternating side down the page. Reversed with
+   `order`, not row-reverse or a float, so it stays correct under RTL with
+   no directional override at all.
+   -------------------------------------------------------------------------- */
+
+.split {
+  display: grid;
+  gap: clamp(2rem, 5vw, 4rem);
+  align-items: center;
+}
+
+@media (min-width: 62rem) {
+  .split {
+    grid-template-columns: 1fr 1fr;
+  }
+  .split--flip .split__media {
+    order: -1;
+  }
+}
+
+.split__body h2 {
+  margin-block-end: 1rem;
+}
+
+.split__body p {
+  color: var(--fg-muted);
+  line-height: var(--line-body);
+}
+
+.split__media {
+  position: relative;
+}
+
+/* --------------------------------------------------------------------------
+   16.7 Checklist
+   -------------------------------------------------------------------------- */
+
+.checklist {
+  list-style: none;
+  margin: 1.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.checklist li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  color: var(--fg-muted);
+  line-height: 1.6;
+}
+
+.checklist svg {
+  flex: none;
+  width: 1.15rem;
+  height: 1.15rem;
+  margin-block-start: 0.2rem;
+  stroke: var(--success);
+}
+
+/* --------------------------------------------------------------------------
+   16.8 Callout
+   --------------------------------------------------------------------------
+   For the honest caveats -- the unsigned installer, the platforms that do
+   not exist, the fact that no VPN can promise a route stays open. Those are
+   load-bearing on this site, so they get a real component instead of being
+   buried in small grey text.
+   -------------------------------------------------------------------------- */
+
+.callout {
+  display: flex;
+  gap: 1rem;
+  padding: 1.15rem 1.35rem;
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  /* Logical, so the accent bar moves to the right edge on Persian pages. */
+  border-inline-start: 3px solid var(--primary);
+  border-block: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
+}
+
+.callout--warn {
+  border-inline-start-color: #f59e0b;
+}
+
+.callout--info {
+  border-inline-start-color: var(--highlight);
+}
+
+.callout svg {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-block-start: 0.15rem;
+  stroke: var(--primary-soft);
+}
+
+.callout--warn svg {
+  stroke: #f59e0b;
+}
+
+.callout--info svg {
+  stroke: var(--highlight);
+}
+
+.callout__title {
+  font-weight: 650;
+  margin-block-end: 0.3rem;
+}
+
+.callout p {
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+
+/* --------------------------------------------------------------------------
+   16.9 Plan comparison table
+   -------------------------------------------------------------------------- */
+
+.compare {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.compare th,
+.compare td {
+  padding: 0.95rem clamp(0.75rem, 2vw, 1.25rem);
+  border-block-end: 1px solid var(--border);
+  text-align: start;
+}
+
+.compare thead th {
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--fg);
+  border-block-end: 1px solid var(--border-strong);
+}
+
+.compare thead th:first-child {
+  color: var(--fg-subtle);
+  font-weight: 500;
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+html[lang="fa"] .compare thead th:first-child {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.compare tbody th {
+  font-weight: 500;
+  color: var(--fg-muted);
+  font-size: 0.92rem;
+}
+
+.compare td {
+  font-weight: 600;
+}
+
+.compare tbody tr:last-child th,
+.compare tbody tr:last-child td {
+  border-block-end: 0;
+}
+
+/* The highlighted column: a background tint on every cell of that column,
+   because an outline around a table column is not expressible without
+   absolute positioning. */
+.compare .is-featured {
+  background: rgba(139, 92, 246, 0.07);
+}
+
+.compare__price {
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+}
+
+html[lang="fa"] .compare__price {
+  letter-spacing: 0;
+}
+
+/* Only meaningful once the table is actually scrolling; above that it is
+   noise, so it is hidden by default and shown by the query below. */
+.compare-hint {
+  display: none;
+}
+
+@media (max-width: 48rem) {
+  .compare-hint {
+    display: block;
+    margin-block-end: 0.75rem;
+    color: var(--fg-subtle);
+    font-size: 0.85rem;
+  }
+
+  /* Below this the comparison genuinely does not fit and squeezing it gives
+     four unreadable columns. Scroll it instead, with the row headings
+     pinned so you always know which row you are on. */
+  .compare-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .compare {
+    min-width: 34rem;
+  }
+  .compare tbody th {
+    position: sticky;
+    inset-inline-start: 0;
+    background: var(--card);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   16.10 Trust pillars
+   -------------------------------------------------------------------------- */
+
+.pillar {
+  padding: clamp(1.35rem, 2.5vw, 1.85rem);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+  box-shadow: var(--shadow-card);
+}
+
+.pillar__icon {
+  display: inline-flex;
+  width: 2.4rem;
+  height: 2.4rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  background: rgba(34, 211, 238, 0.1);
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  margin-block-end: 0.9rem;
+}
+
+.pillar__icon svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  stroke: var(--highlight);
+}
+
+.pillar h3 {
+  margin-block-end: 0.5rem;
+}
+
+.pillar p {
+  color: var(--fg-muted);
+  font-size: 0.93rem;
+  line-height: var(--line-body);
+}
+
+/* --------------------------------------------------------------------------
+   16.11 Prose
+   --------------------------------------------------------------------------
+   Long-form copy: the privacy policy and the explanatory pages. Spacing is
+   set on the container rather than on each element, so the rhythm holds
+   however the content file is structured.
+   -------------------------------------------------------------------------- */
+
+.prose h2 {
+  font-size: clamp(1.4rem, 2.6vw, 1.8rem);
+  margin-block: 2.5rem 0.85rem;
+}
+
+.prose h2:first-child {
+  margin-block-start: 0;
+}
+
+.prose h3 {
+  margin-block: 1.75rem 0.6rem;
+}
+
+.prose p,
+.prose li {
+  color: var(--fg-muted);
+  line-height: var(--line-body);
+}
+
+.prose p + p {
+  margin-block-start: 1rem;
+}
+
+.prose ul {
+  margin-block: 1rem 0;
+  padding-inline-start: 1.15rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.prose a {
+  color: var(--primary-soft);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.prose a:hover {
+  color: var(--highlight);
+}
+
+/* --------------------------------------------------------------------------
+   16.12 Section link
+   -------------------------------------------------------------------------- */
+
+.section-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-block-start: 1.5rem;
+  color: var(--primary-soft);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.section-link:hover {
+  color: var(--highlight);
+}
+
+.section-link svg {
+  width: 1rem;
+  height: 1rem;
+  transition: transform var(--dur) var(--ease);
+}
+
+/* Mirrored on Persian pages -- an arrow meaning "onward" points left in
+   RTL. Same hand-flip as .eyebrow::before, and for the same reason: there
+   is no logical property for a transform. */
+[dir="rtl"] .section-link svg {
+  transform: scaleX(-1);
+}
+
+.section-link:hover svg {
+  transform: translateX(3px);
+}
+
+[dir="rtl"] .section-link:hover svg {
+  transform: scaleX(-1) translateX(3px);
+}
+
+/* --------------------------------------------------------------------------
+   16.13 Nav dropdown-free "more" row and footer widening
+   -------------------------------------------------------------------------- */
+
+/* The footer grid was three columns against a 72rem container. At 80rem
+   with a fourth link column it needs to be told, or the about block
+   stretches to half the page and the link lists bunch up at the end. */
+@media (min-width: 62rem) {
+  .site-footer__grid {
+    grid-template-columns: 1.6fr 1fr 1fr 1fr;
+  }
+}
+
+/* List reset for grids whose items are semantically a list -- the server
+   locations especially. Using <ul>/<li> keeps "list of 6 items" in the
+   accessibility tree, which a stack of <div>s throws away; this just
+   removes the marker and indent that come with it. */
+.u-list-reset {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Vertical rhythm helpers used by the pages added in the rebuild. */
+.u-mt-lg {
+  margin-block-start: clamp(2rem, 4vw, 3rem);
+}
+
+.u-mt-xl {
+  margin-block-start: clamp(3rem, 6vw, 4.5rem);
+}
+
+/* --------------------------------------------------------------------------
+   16.14 Vertical flow diagram
+   --------------------------------------------------------------------------
+   The horizontal .flow (section 7) reads as a journey across the page and
+   is right for "you -> our server -> the internet". The failover diagram is
+   a sequence in TIME, not in space, so it stacks -- and stacking also means
+   it needs no horizontal room, which is what lets it sit in a split column.
+   -------------------------------------------------------------------------- */
+
+.flow--stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.flow--stack .flow__node {
+  width: 100%;
+}
+
+.flow--stack .flow__link {
+  min-height: 2.25rem;
+  width: 100%;
+}
+
+.flow--stack .flow__line {
+  width: 1px;
+  height: 100%;
+  background: linear-gradient(to bottom, var(--border-strong), var(--primary));
+}
+
+/* The route that stopped working. Muted and struck through with a warm
+   border rather than coloured red: it is the normal, expected first step
+   of the sequence, not an error state. */
+.flow__node--dead {
+  opacity: 0.65;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.flow__node--dead svg {
+  stroke: #f59e0b;
 }

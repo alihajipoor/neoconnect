@@ -37,10 +37,10 @@ require NX_INC . '/partials/head.php';
                know what they are joining, and the request for feedback only
                works if they have read it first. */ ?>
       <div class="notice u-mb-md">
-        <h3>
+        <h2>
           <?php echo nx_icon('activity'); ?>
           <?php echo nx_e('beta.title'); ?>
-        </h3>
+        </h2>
         <p><?php echo nx_e('beta.body'); ?></p>
       </div>
     <?php endif; ?>
