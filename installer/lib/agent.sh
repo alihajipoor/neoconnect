@@ -34,18 +34,48 @@ trap 'rm -f "$ADMIN_TOKEN_CACHE"' EXIT
 #
 # Override for a self-hosted or pinned build, e.g.:
 #   AGENT_RELEASE_URL_BASE=https://example.com/releases/v0.1.0 sudo -E ./install.sh
+
+# Picks the agent's newest release out of a GitHub /releases response
+# fed on stdin, and prints its tag.
+#
+# Split out from the curl on purpose: the failure this guards against
+# cannot be reproduced against the live API on demand, so the only way
+# to know the ordering is right is to feed it a releases list that
+# contains the bad shapes. See the header comment above for why the tag
+# prefix is the thing that has to be matched.
+select_newest_agent_tag() {
+  jq -r '
+    [ .[]
+      | select(.draft == false and .prerelease == false)
+      | .tag_name // empty
+      | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))
+    ]
+    | sort_by(ltrimstr("v") | split(".") | map(tonumber))
+    | last // empty
+  '
+}
+
 resolve_agent_release_base() {
   if [[ -n "${AGENT_RELEASE_URL_BASE:-}" ]]; then
     echo "$AGENT_RELEASE_URL_BASE"
     return 0
   fi
 
-  local tag
-  # Newest non-draft, non-prerelease tag that looks like v1.2.3 -- the
-  # agent's own scheme. `desktop-v*` does not match, which is the point.
-  tag="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=50" 2>/dev/null     | jq -r '[.[] | select(.draft==false and .prerelease==false)
-              | select(.tag_name | test("^v[0-9]+[.][0-9]+[.][0-9]+$"))]
-             | first | .tag_name // empty')"
+  local releases tag
+  # per_page is at the API maximum rather than 50 because this list is
+  # shared with desktop-v* and android-v*, which both ship far more
+  # often than the agent does. A window too small does not fail loudly;
+  # it just stops containing any agent release.
+  releases="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=100" 2>/dev/null || true)"
+
+  # `| first` used to be here, which is GitHub's own ordering --
+  # created_at descending. That is not the newest *version*: a release
+  # that is re-published, back-dated, or promoted from a draft sorts to
+  # the front while being an older build, and every downstream step
+  # (checksum, install, restart) would have succeeded on the wrong
+  # binary without a word. Ordering by the version the tag actually
+  # states is the only thing that cannot drift.
+  tag="$(printf '%s' "$releases" | select_newest_agent_tag 2>/dev/null || true)"
 
   if [[ -z "$tag" ]]; then
     echo "ERROR: could not find an agent release (tag vX.Y.Z) in $AGENT_REPO." >&2
