@@ -6216,6 +6216,564 @@ snapshots, for the reason in the previous entry.
 
 ---
 
+## 2026-08-23 — the redirect loop that outlived its tunnel, and took the machine's DNS with it
+
+**Status:** fixed and proven on the rig; **not released**, not pushed.
+**Branch:** `claude/fix-orphaned-redirect` (off `81875bb`)
+**Touches:** `apps/desktop-windows/service/src/{engines/mod.rs,
+split_tunnel/{mod.rs,redirect.rs,firewall.rs}}`
+
+### The report
+
+A beta user, on Custom mode with a browser selected: Telegram fine,
+browsers very slow, YouTube would not load at all. He disconnected and
+closed the app — and his networking stayed dead. Browsers still loaded
+nothing. He connected a **different, unrelated VPN app** and still
+nothing. Then he found `neoconnect-service` in Task Manager, ended it,
+and everything worked immediately.
+
+The first symptom is very likely the UDP/QUIC attribution race 0.9.28
+already fixes (YouTube is QUIC, Telegram is TCP) and was not chased
+here. Symptoms 2–4 are this entry.
+
+### The mechanism, reproduced before it was believed
+
+The service being resident is normal — it is LocalSystem auto-start.
+What mattered was that **killing the process fixed it instantly**, and
+almost nothing this product installs behaves that way. Routes, NRPT
+rules and persistent WFP filters all survive a process death. Two
+things do not: dynamic-session WFP filters, and the **WinDivert
+handle**, because the driver stops intercepting when the last handle
+closes. That narrowed it to interception before a line of code was read.
+
+`Engines::status()` reports live state rather than a remembered flag, so
+when a WireGuard tunnel dies on its own it noticed, wrote `self.active =
+None`, and answered "disconnected". Correct as far as it went. What it
+did **not** do was stop the split tunnel. The redirect loop carried on
+with the dead adapter's index still pinned in it.
+
+That would be survivable if it only affected selected apps. It does not:
+**Custom mode carries every process's DNS**, not just the selected ones
+(`redirect.rs`, the `carry_dns && is_dns(parsed)` branch sits *above*
+the `if !selected` test, deliberately, so a lookup is never handed to
+the customer's ISP). So from that moment every lookup on the machine was
+redirected into a relay whose upstream socket could no longer bind.
+`split-tunnel.log` on the rig, several times a second:
+
+```text
+upstream attach FAILED for 1.1.1.1:53: An invalid argument was supplied.
+  (os error 10022) (interface 20, source 10.66.0.2)
+upstream bind failed for udp flow: An invalid argument was supplied. (os error 10022)
+```
+
+Interface 20 and 10.66.0.2 are the WireGuard adapter that no longer
+exists. That is the whole bug in two log lines.
+
+Everything else in the report follows from it:
+
+- **Disconnect did nothing** — the app had already been told
+  "disconnected", so it showed Connect and never sent one.
+- **Closing the app did nothing** — same reason.
+- **A different VPN did not help** — we were taking the packets
+  underneath it, at the WinDivert layer.
+- **The 60s idle watchdog never fired** — `pipe.rs` gates it on
+  `if !up { continue; }`, and `up` was false. The one thing designed to
+  reap an abandoned session skipped precisely the state that needed it.
+- **End Task fixed it instantly** — last handle closed.
+
+Two more holes in the same shape, found while tracing and fixed with it:
+the `Active::Ikev2` arm did not even clear the slot when Windows dropped
+the tunnel, so a dead IKEv2 session kept intercepting for as long as the
+app stayed open; and `set_split_tunnel` returned `Ok` early whenever no
+engine was live, so **turning Custom mode off — the customer's most
+obvious move — reported success and stopped nothing.**
+
+`detach_tunnel()`, which the `Active::Child` arm did call, was never a
+fix for any of this: it clears the interface index and leaves the loop
+and the handle exactly where they were.
+
+### Rig evidence
+
+`Neoxify-Test2`, snapshot `pre-verify3`. Its installed build is
+byte-identical to `main` for the service, `src-tauri` and the frontend
+(`git diff 38f4fe4..81875bb -- ...` is empty), so the shipping code was
+under test with no rebuild. Harness `vmx6/f1.ps1` (OnlySelected) and
+`f3.ps1` (AllExcept); the fixed binary was swapped in by hash, not by
+version string, because both builds report the same version.
+
+Shipping build `8669C855...`, fixed build `E3F3BC0B...`, swap confirmed
+in-guest (`swap took : True`).
+
+**OnlySelected, WireGuard, browser selected.** Tunnel killed with
+wireguard.exe's own `/uninstalltunnelservice` -- the product's own call,
+so the machine state is genuine. No Disconnect is ever sent afterwards,
+which is the field report's "app is gone":
+
+| after the tunnel died | BEFORE `8669C855` | AFTER `E3F3BC0B` |
+|---|---|---|
+| `connected` | false | false |
+| `split_tunnel_active` | **true** | **false** |
+| `seen=` over the next 100s | **570 -> 1264** | **99 -> 99** |
+| machine DNS | **FAIL, 12s timeout** | **OK, 7ms / 8ms** |
+| `Invoke-WebRequest` | **FAIL: name could not be resolved** | OK |
+| selected app | no answer | `50.34.35.228` (its own connection) |
+
+A frozen `seen` counter is the direct evidence that the loop stopped;
+the DNS latency is what the customer would feel. On the before build,
+End Task then restored DNS at 12ms, immediately, exactly as reported. On
+the after build there was nothing left for End Task to fix.
+
+Traffic really was carried first, so this is a broken tunnel and not a
+tunnel that never worked: selected-app exit IP `50.34.35.228`
+disconnected -> `38.60.249.229` (the node) connected.
+
+**The backstop fired, and said so.** `cleanup.log` on the fixed build:
+
+```text
+2026-08-23 14:17:32 | stop Custom mode after its tunnel disappeared | the
+tunnel adapter neoconnect (interface 20, 10.66.0.2) is gone, but Custom
+mode was still intercepting this machine's packets -- interception has
+been stopped so traffic can flow normally again
+```
+
+Worth being exact about which mechanism won: the watchdog polls every 3s
+and needs two strikes, so it got there at ~6s, before the harness's
+status poll at 8s. Both layers ran -- the watchdog stopped interception,
+the status poll's `Verdict::Dead` then tore the session down, which is
+why `split_tunnel_active` reads false rather than merely idle. The
+layering is the design, not a redundancy that happened to trigger.
+
+**AllExcept, same treatment.** Before: `split_tunnel_active` true,
+`seen` 252 -> 812 over 75s, DNS timing out at 12s -- and the **excluded**
+application, the one deliberately kept out of the VPN, got no answer
+either, because DNS is carried for every process regardless of mode.
+After: `split_tunnel_active` false, `seen` **304 -> 304**, DNS 6-7ms,
+and a subsequent connect still works.
+
+**`sc query WinDivert` turned out to be a bad instrument and is not
+quoted above.** It read PRESENT immediately after End Task while DNS had
+already recovered, and PRESENT at the *baseline* of a later run from a
+previous session's driver load. The driver service lingers independently
+of whether anything holds a handle. The `seen` counter and DNS latency
+are the measurements that mean something.
+
+### The fix
+
+**The invariant is now structural, not remembered.** The bug was one
+missing call; the next one was one `self.active = None` away in whatever
+engine arm gets added next, and a comment asking people to remember is
+not a mechanism. `Engines::active` is now a `session::Slot` whose inner
+`Option` is private to its module, and the only way to empty it is:
+
+```rust
+pub(super) fn end(&mut self, split_tunnel: &mut SplitTunnel) -> Option<Active> {
+    split_tunnel.stop();
+    self.0.take()
+}
+```
+
+It does not need the `SplitTunnel` to empty an `Option`. It takes it so
+that emptying the slot **cannot be written without it**. `status()` had
+to be restructured around this — the borrow checker will not lend out
+the slot and the split tunnel at once — so the arms that discover a dead
+engine now fall out to one `Verdict::Dead` path instead of clearing the
+slot where they noticed. That restructuring is the fix working as
+intended, not a cost of it.
+
+Also in:
+
+- **A backstop watchdog inside the session.** Every 3s it checks the
+  adapter it was pinned to is still there, up, and still holding the
+  address the relays bind to; two consecutive misses and it stops
+  interception, clears the interface, and writes to `cleanup.log`. It
+  cannot take the session apart — joining the redirect workers from a
+  thread the session owns would deadlock the teardown that is joining
+  *it* — but stopping interception is what gives the machine back.
+- **`liveness()` is three-valued on purpose.** `Alive` / `Gone` /
+  `NoEvidence`. An adapter enumeration that *failed* says nothing about
+  the adapter, and reading it as death would let one unlucky syscall
+  drop a working customer out of their tunnel — a self-inflicted outage
+  of exactly the kind the backstop exists to prevent.
+- **`set_split_tunnel` with no engine live now stops an orphaned loop**
+  instead of returning success.
+- **The IPv6 block comes down after the engine, not before.** The old
+  order left a window with the tunnel still up and IPv6 already
+  unblocked; on WireGuard's `/uninstalltunnelservice` that window is
+  seconds. It is also now outside the result match, so a failed engine
+  teardown cannot leave a machine-wide filter behind.
+- **Fail-open throughout.** No tunnel means selected apps use the
+  ordinary connection. Never a blackout — that is the product stance and
+  it is what the old code violated.
+
+### AllExcept does NOT build a full tunnel — the comments were wrong
+
+Two comments (`split_tunnel/mod.rs` at the `TunnelInterface`
+construction, `firewall.rs` above `add_rule`) claimed "everything except
+these" builds a **full** tunnel with redirected connections pinned to
+the **physical** link. It does not, and a teardown fix built on that
+belief would have been built on sand — so it was settled with a
+measurement rather than a reading.
+
+Code first: `mode` reaches exactly two places in `split_tunnel/mod.rs` —
+the selection it is stored in, and a log header. There is no branch that
+could build a different shape, and `TunnelInterface::new(tunnel_adapter
+.index, tunnel_address)` is unconditional.
+
+Then the rig, and this is where a crude test would have given the wrong
+answer. The tunnel adapter *does* own a `0.0.0.0/0` route in Custom
+mode, so "has a default route" says nothing at all. The **metric** is the
+tell:
+
+```text
+Custom mode on (either mode) :  if4 Ethernet metric 0  |  if20 neoconnect metric 9999
+Custom mode off, full tunnel :  if4 Ethernet metric 0  |  if20 neoconnect metric 0
+```
+
+Same adapter, same protocol, same machine, minutes apart. The passive
+shape installs a deliberately *losing* default route so that sockets
+**pinned** to the interface have somewhere to go while ordinary routing
+still prefers the physical link. Custom mode gets 9999; a plain full
+tunnel gets 0. The comments have been corrected to what the code does.
+
+One honesty note on that second row: at metric 0 the two default routes
+are tied, and Windows breaks the tie on *interface* metric, which the
+harness does not read -- so the script's own "which wins" label is
+unreliable there and is not relied on. The 9999-versus-0 difference is
+the evidence, and it is unambiguous.
+
+AllExcept was also confirmed to do what it advertises: excluded app
+`50.34.35.228` (its own connection), non-excluded `38.60.249.229` (the
+node), simultaneously.
+
+### Measured while in there, NOT fixed — the AllExcept activation reset
+
+`reset_selected_connections` in AllExcept closed **37 of 45** established
+TCP connections on the machine at activation on the first run
+(established count 45 -> 6; the log says "activation reset settled after
+12 rescan(s): 37 connection(s) closed in total"). A later run on a
+quieter machine closed 6 of 6. In OnlySelected the comparable figure is
+0.
+
+That is correct by the letter of the feature -- in AllExcept almost
+everything *should* be rebuilt through the tunnel -- but it is a very
+wide blast radius, and on a machine reached over RDP it would drop the
+session the customer is sitting in. The 0.9.28 activation grace-window
+drop was deliberately **not** applied to AllExcept, so those connections
+are closed with nothing refusing their replacements during the window.
+Neither was touched here; both are stated so the next person does not
+have to rediscover them, and so that if the beta user's first AllExcept
+session reports "everything disconnected for a moment", this is the
+first place to look.
+
+### The installer half — argued against, not closed
+
+The user later rebooted, updated to 0.9.28, and reports Custom mode
+working. That is consistent with a stale service binary rather than a
+0.9.28 defect, so the upgrade path was read carefully.
+
+It is **less likely than it first looked**. `NSIS_HOOK_PREINSTALL`
+(`nsis-hooks.nsh:26-43,130-133`) does far more than `sc stop`: it polls
+`tasklist` for 10s and then runs `taskkill /F /IM neoconnect-service
+.exe`, elevated, before any `File` is written. A merely wedged
+user-mode process does not survive that. And because PREINSTALL also
+does `sc.exe delete` while POSTINSTALL re-`install`s, a survivor would
+be an unregistered **orphan process**, not a registered old service.
+
+But it is not closed, and the gaps are real:
+
+- `WaitForProcessGone` **never re-checks after the `taskkill`** — it
+  sleeps 1s and exits the loop unconditionally. Every exit code in the
+  hook is `Pop $0`'d and discarded.
+- In the same macro, if `nsExec` fails to *launch*, it pushes the string
+  `"error"`, which satisfies `${If} $0 != 0` and is read as **"process
+  is gone"**.
+- There is no `SetOverwrite` / `ClearErrors` / `IfErrors` anywhere in
+  `installer.nsi`, and **no post-copy verification of the binary at
+  all** — no hash, version, size or timestamp.
+- The one POSTINSTALL check is `sc.exe query NeoxifyService`, which
+  succeeds identically for a new binary, an old un-overwritten one, and
+  a registration in `MARKED_FOR_DELETE`.
+- The updater runs `"installMode": "quiet"` (`/S`). **What stock NSIS
+  does with a failed `File` under `/S` — skip and continue, or abort —
+  is the pivot of the whole hypothesis and is not determinable from this
+  tree.** Skip-and-continue produces exactly "new app, old service,
+  installer reported success".
+- There is **no app↔service version handshake** in `ipc/src/lib.rs`, so
+  a skewed service surfaces only as `"malformed request: …"`. Nobody,
+  including us, can currently tell a customer which service build they
+  are running.
+
+Worth connecting: an orphaned old process holding the WinDivert handle
+is *exactly* the shape of this entry's field report, and the new
+watchdog would now stop such a process intercepting even if the
+installer left one behind.
+
+**The cheapest discriminator, if the user can be reached:** hash
+`C:\Program Files\Neoxify\resources\neoconnect-service.exe` against the
+0.9.28 artifact. Version strings cannot distinguish builds — the
+2026-08-23 verification entry above hit that same wall and had to
+compare hashes by hand.
+
+### What is proven and what is not
+
+**Proven:** the mechanism, before and after, on the rig, for **both**
+Custom modes on WireGuard; that traffic was genuinely carried first
+(selected-app exit IP = the node); that the machine's DNS dies and
+recovers exactly with the redirect loop; that the backstop fires and
+writes to `cleanup.log`; that AllExcept builds a passive tunnel and
+otherwise does what it advertises.
+
+**Not proven:**
+
+- **Xray IS covered** (`f2.ps1`, run after the above was first
+  written). `xray.exe` killed under Custom mode: `split_tunnel_active`
+  went false on the next poll, `seen` froze at **186 -> 186** over 45s,
+  DNS stayed at 14ms, the selected app fell open to its own address, and
+  the watchdog logged the Xray adapter by name -- `neoconnect0
+  (interface 7, 198.18.0.1)`. **OpenVPN was still not exercised**; it
+  shares the `Active::Child` arm with Xray, so this is now a small gap
+  rather than an untested branch.
+- **The crash and reconnect variants pass.** Service killed with a
+  WireGuard tunnel up: DNS back at 16ms immediately, selected app on its
+  own address -- the kernel closing the handle is doing the work, as
+  designed. A fresh service then reconnected cleanly, selected-app exit
+  IP back to `38.60.249.229`, and a normal Disconnect left the machine
+  at 10ms DNS.
+- **Not proven: the exact path the user's own session took.** An
+  explicit Disconnect always did stop the split tunnel, even before this
+  fix. What is proven is that a tunnel dying on its own strands the
+  machine and that *nothing* then reaps it. Whether his tunnel died, his
+  app was killed, or his service was a stale binary cannot be
+  established from here.
+- **Not proven: any claim about the installer under `/S`.** See above.
+- **Not proven: that his one good 0.9.28 session means anything.** One
+  working session is not evidence that either half of this is resolved.
+- **Not proven: that the 0.9.28 QUIC fix resolves symptom 1.** Not
+  investigated.
+
+### Rig traps, added to the pile
+
+- **The VM aborted twice mid-run**, once wedging at the VirtualBox EFI
+  splash for 7+ minutes and once dropping to `VMState="aborted"` with a
+  run in flight. The stalled run's in-guest heartbeat stopping is the
+  tell — check `heartbeat2.txt`'s age before believing a stalled output
+  file means anything. Power-cycle and restore; it came up in 32s the
+  next time.
+- **PowerShell 5.1 has no try-*expression*.** `(try { … } catch { … })`
+  parses `try` as a command name and fails at runtime with "The term
+  'try' is not recognized". It cost one run its final disconnect and one
+  its last line. Use a function.
+- **`sc query WinDivert` is not an instant read of "handle closed".**
+  It still reported PRESENT immediately after End Task while DNS had
+  already recovered. The DNS recovery is the operative measurement; the
+  driver service lingers.
+- **`wireguard::tunnel_is_running()` is true if the service can be
+  *opened*,** so `sc stop` does not simulate a dead tunnel. Use
+  `wireguard.exe /uninstalltunnelservice neoconnect` — the product's own
+  call — to get the genuine state.
+- `pre-verify3`'s image has **no `selapp.exe`**; one whole run produced
+  no selected-app reading because of it. `f0.ps1` now plants one.
+
+---
+
+## 2026-08-23 — 0.9.29 is out; the rig VM is gone and one branch is stranded by it
+
+**Status:** released (`desktop-v0.9.29`, PR #34, merge `fccace2`)
+
+Two things went in: `claude/fix-orphaned-redirect` (the redirect loop
+that outlived its tunnel — mechanism and rig numbers are in the two
+entries above) and `claude/connect-intent` (the Connect button rendering
+"Disconnecting" and needing three or four presses). They merged with no
+conflicts at all: one is service Rust, the other is app TypeScript, and
+the IPC surface between them did not move.
+
+The parts worth carrying forward, none of which git records:
+
+- **The rig VM has been deleted.** Every hardware claim in this file up
+  to and including the 0.9.29 split-tunnel numbers was measured on
+  `Neoxify-Test2` / `pre-verify3`, and there is now nothing to measure
+  on. Anything touching the tunnel from here is unproven until a rig
+  exists again. Rebuilding one is the prerequisite for the item below,
+  not an optional tidy-up.
+- **`claude/selected-apps-ipv6` is built, unmerged and stranded.** It is
+  deliberately not in 0.9.29: it has never run on the rig, and it
+  changes the same subsystem 0.9.29 exists to stabilise. Do not merge it
+  on the strength of a green CI run — CI compiles it, nothing more.
+- **The connect-button fix shipped unverified against a real tunnel.**
+  Its evidence is a unit suite over pure functions that fails against
+  the 0.9.28 Dashboard and passes against this one. That is a controlled
+  test and worth something, but nobody has pressed Connect on a censored
+  network with it. If the "three presses" report comes back, that is the
+  first thing to doubt — and note the underlying connects really were
+  failing, so a report of *failing* connects is a different bug and not
+  a regression of this one.
+- **OpenVPN under Custom mode is still unexercised.** It shares the
+  `Active::Child` arm with Xray, which was covered on the rig, so it is
+  a small gap rather than an untested branch — but it is the one arm of
+  the fix nothing has run.
+- **Still unsigned.** 0.9.24–0.9.29 have all shipped without
+  Authenticode because `AZURE_CLIENT_ID` is unset; identity validation
+  is blocked with Microsoft support. The release workflow says so in an
+  annotation on every run, so a green release is not evidence signing
+  came back.
+
+---
+
+## 2026-08-24 — every relay route was dead, for two independent reasons
+
+**Status:** fixed and proven on the fleet. All thirteen relay routes now
+reach the internet at their exit node's address.
+**Branch:** `claude/relay-uplink-reassert`, with `main` merged in so it
+carries 0.9.29
+**Touches:** `apps/backend` (schema + migration + agent-gateway +
+routes), `agent/internal/relay`, `installer/lib/agent.sh`
+
+### What was actually broken, and what it was not
+
+**An outage, not a leak.** This matters more than the fix. The
+deanonymisation case — a relay customer egressing at ir1, in Iran — is
+the one this system is built to prevent, and it did not happen. ir1's
+routing rules and its blackhole default were intact throughout: the
+relay's onward connection was refused at the exit, so the customer's
+connection failed. Proven, not reasoned — france-1's own access log reads
+`rejected proxy/vless/encoding: invalid request user id`, and a probe
+driven through ir1's live outbound died at the client's TLS handshake
+rather than returning a page from ir1's egress address (31.171.x.x).
+
+**Thirteen routes, not five. One customer, not five.** The five
+`-> France` routes were the visible half; the eight exiting at finland1
+were dead too. All thirteen belong to a single Ultimate (relay-only)
+subscription — one paying customer, who had no working server at all.
+
+**Duration floor:** the France routes dead since france-1's Xray restart,
+2026-08-19 04:00:23 UTC. Total blackout since finland1's, 2026-08-20
+02:21:37 UTC — three days twenty-one hours. That customer's last measured
+usage on ir1 is 2026-08-15 15:52, which suggests it was already failing
+earlier for a reason not established here; both exits' journals have
+rotated past it.
+
+### Cause one: only half a route was ever re-asserted
+
+A relay route is two hot-added things on two different nodes. The entry
+holds the outbound and the routing rule; the exit holds one shared
+credential, `route:<id>`, on its inbound. Both live only in the running
+Xray process.
+
+Only the entry half was re-asserted. The uplink is created once, by
+`RoutesService.create`, and has no `ProtocolUser` row, so the user sweep
+could not see it either. An Xray restart on an exit deleted it forever.
+On 2026-08-23 both exits held exactly their 29 direct customers and zero
+`route:` users, while ir1 held every outbound and rule, faithfully
+re-asserted every 60s, aimed at a credential neither exit recognised.
+
+Fixed by having the route sweep assert all of a route. Not by giving the
+uplink a `ProtocolUser` row: that model requires a `subscriptionId`, and
+the uplink belongs to no subscription — faking one would put a synthetic
+customer into quota, usage and concurrency accounting.
+
+### Cause two: a changed route never converged
+
+Restoring the uplink fixed the five France routes and **not** the eight
+finland1 ones. That is where the second bug was.
+
+Xray's `AddOutbound` refuses a duplicate tag and has no update operation,
+so "already applied" and "applied with different contents" arrive as the
+same error. The agent swallowed both as success. finland1's REALITY
+`serverName` is `www.shatel.ir`, the backend had been sending that in
+every `CONFIGURE_ROUTE` — thirteen of them ACKED at 00:12:08 that
+morning — and ir1's eight finland1 outbounds still carried
+`cloudflare.com` from whenever they were first built.
+
+Isolated by A/B on one route with everything else held constant: same
+credential, same shortId; `cloudflare.com` → curl exit 35,
+`www.shatel.ir` → exit IP 204.168.161.100.
+
+The agent now fingerprints the exit parameters it last installed per
+route. A matching duplicate is the genuine no-op; a differing one is
+removed and re-added. Not an unconditional rebuild — the sweep runs every
+60s, so that would drop every relay session once a minute.
+
+### The instruments, and the two that lied first
+
+- **The probe reported total failure on all thirteen routes before it
+  worked at all.** Two harness bugs in sequence: `xray api lso` returns
+  the internal protobuf form, not client-config JSON, so the first
+  version produced `CONFIG-INVALID` everywhere; then the fixed script was
+  never re-uploaded, so a positive control ran against the stale copy and
+  "failed" with a credential that was fine. A harness reporting total
+  failure is still the likeliest thing to be broken.
+- **The positive control is what made the negatives mean anything.** A
+  throwaway user added to france-1's `vless-in` and removed straight
+  after: exit IP 104.105.205.233, and france-1's log naming it. Without
+  that, thirteen FAILs prove nothing.
+- **Credentials never left the nodes.** The probe reads the live
+  outbound, builds its client config and curls, all on ir1; only the exit
+  IP comes back.
+
+### Health reporting: a relay route can now say it is down
+
+`nodeStatus` was the entry node's heartbeat, which says nothing about the
+exit. ir1 was up and heartbeating the entire time. `Route` now carries
+`uplinkAssertedAt` / `uplinkLastError`, stamped from the exit's own ack,
+and a relayed route with no confirmation inside three sweeps reports
+OFFLINE. Never-asserted counts as unhealthy, not unknown.
+
+`handleCommandAck` also tested `startsWith("reassert:")` — the user
+sweep's prefix alone — so a failed *route* re-assert matched neither that
+branch nor an `AgentCommand` row and vanished silently.
+
+### The certificate time bomb, and the measurement that changed the fix
+
+The certbot deploy hook ran `systemctl reload xray || systemctl restart
+xray`. `CanReload=no` on every node, so the reload could never succeed
+and the `||` hid it: every renewal was a restart. france-1 renews around
+18 Oct.
+
+The first fix was an honest, verified restart. Then the measurement came
+in: **Xray re-reads `certificateFile`/`keyFile` from disk by itself,
+hourly** — swapped at 00:06:16 on a throwaway loopback instance, new
+certificate served between +55 and +60 min, no signal, no restart. So the
+hook now syncs and stops. The five-second version of that same test
+showed no reload and would have sent this the other way.
+
+Also measured: **Xray does not handle SIGHUP — it terminates.** So
+`ExecReload=/bin/kill -HUP $MAINPID` would have been a restart under
+another name, and `ExecReload=/bin/true` worse: a renewal reporting
+success while serving the old certificate to expiry.
+
+`neoxify-xray-restart` stays for restarts that are genuinely unavoidable.
+It snapshots the live inbound tags, restarts, waits for the API and
+compares, exiting non-zero on anything that did not come back. Its
+detection was exercised on ir1 with `systemctl` stubbed to a no-op: clean
+run exit 0; one tag hidden from the post-restart listing → named, exit 1.
+
+### Also done
+
+france-1's `vless-reality-free-in` on port 2083 is gone, from the running
+process (`xray api rmi`, no restart) and from `config.json` (validated
+with `xray run -test` first, backup kept). Zero users, no database row,
+and the only traffic it ever carried was `e2e-probe@neoxify.test` on
+2026-08-23 — a leftover from another session's probe. An unmanaged open
+port is a fingerprint on a product whose value is not looking like a VPN.
+
+### What is NOT proven
+
+- **The agent fix is not deployed.** `agent/internal/relay` is committed
+  and unit-tested but needs an agent rollout. Until then the convergence
+  bug is live on every node: any change to an exit's REALITY parameters
+  will silently fail to reach the relays again. The eight stale outbounds
+  were cleared by hand (`xray api rmo`; the sweep re-added them in ~40s).
+- **The backend fix is deployed from an unmerged branch.**
+  `claude/relay-uplink-reassert` is checked out on the panel and built,
+  so `/root/neoconnect` is no longer on `main`. It needs a PR and a
+  re-deploy from main.
+- **The customer has not been contacted**, and nobody has confirmed the
+  route works from an actual client in Iran. The proof here is from ir1
+  outward.
+- **Why usage stopped on 2026-08-15**, four days before the earliest
+  restart that explains anything, is unexplained.
+- The installer changes are source-only; no node has been re-installed.
+
 ## 2026-08-23 — Two fingerprints nobody chose: rotted REALITY decoys, and the default nginx page
 
 **Status:** installer fixed and proven; **the live fleet is not fixed —
