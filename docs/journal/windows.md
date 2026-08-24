@@ -7726,3 +7726,240 @@ that creates them never runs again.
 - `xray x25519 -i` wants the key as an argument; `-i /dev/stdin` silently
   yields nothing.
 
+
+## 2026-08-23 — The releases are not signed either
+
+**Status:** done (correction) / blocked (the signing itself)
+**Touches:** `docs/journal/windows.md` only
+
+Correcting the previous entry. It said Defender's
+`Trojan:Win32/Bearfoos.B!ml` hit "affects the locally built, unsigned
+installer" and that "CI-signed releases are not affected". The second
+half is wrong, and wrong in the direction that matters: **there are no
+CI-signed releases.** Every published installer is unsigned, including
+the one on the download page right now.
+
+### Signing has never run once
+
+Not "since 0.9.24" — never. The steps went in with 74ccf1a on
+2026-08-11, and the first release after that, `desktop-v0.9.4`, already
+skipped them. So has every release since. Checked all 25 release runs
+from 0.9.4 to 0.9.28, individually: each one emitted
+
+> AZURE_CLIENT_ID is not set, so this build is NOT Authenticode-signed.
+
+The whole block is gated on one expression at line 39 of
+`release-desktop-windows.yml`:
+
+    SIGNING_ENABLED: ${{ secrets.AZURE_CLIENT_ID != '' }}
+
+and `Azure login`, `Sign the installer`, `Re-sign the updater payload`,
+`Sign the bootstrapper` and `Verify both binaries are signed and
+timestamped` are each `if: env.SIGNING_ENABLED == 'true'`. `gh secret
+list` returns four secrets — the two `TAURI_SIGNING_*`, the two
+`ANDROID_KEYSTORE_*`. No `AZURE_*` anything, and no repo variables at
+all. All six Azure secrets the workflow reads (`AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_SIGNING_ENDPOINT`,
+`AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`) have never existed.
+
+The degrade-instead-of-fail behaviour is deliberate and documented in
+the file, and the `Verify` step does guard against a signing step that
+silently no-ops. But that guard is itself gated on `SIGNING_ENABLED`,
+so with no credentials there is nothing asserting anything — the
+release goes out green and unsigned, which is exactly what has happened
+twenty-five times.
+
+**Why:** shared.md's 2026-08-11 entry has it. The Azure Artifact
+Signing account exists (`neoxify-signing`, West US 2), but identity
+validation stalled at credentials.microsoft.com with "No access" and
+was never resumed. It is still Action Required, not failed. Nothing is
+wrong with the workflow; the enrolment was never finished, so the
+secrets were never created. Resume via the existing validation's
+"complete your verification" link — **do not start a second one.**
+
+### Defender does not flag the published 0.9.28 assets
+
+Measured, not assumed, on the host (Win11, real-time protection on,
+signatures 1.457.304.0 from 2026-08-22). Downloaded both assets from
+the release, verified against `sha256sums.txt` (both OK), then:
+
+- `Get-MpThreat` / `Get-MpThreatDetection` — nothing.
+- `Start-MpScan -ScanType CustomScan` over the directory — clean.
+- `MpCmdRun.exe -Scan -ScanType 3` per file — "found no threats",
+  exit 0, both.
+- Both files still on disk afterwards with unchanged hashes. Nothing
+  was quarantined.
+
+`Get-AuthenticodeSignature` on both: `Status: NotSigned`,
+`SignerCertificate: <null>`. So the released `Neoxify-Setup.exe` and
+`Neoxify_0.9.28_x64-setup.exe` are in exactly the state the Bearfoos
+entry assumed they were not.
+
+**The scan was a real negative, not a false pass.** A 40 MB custom
+scan returning in one second is the shape of a result this repo has
+been burned by before, so it got a control: an EICAR test file written
+into the same scratch directory was caught in seconds as
+`Virus:DOS/EICAR_Test_File` (2147519003), and both `Get-MpThreat` and
+`Get-MpThreatDetection` reported it **from the same unelevated shell**
+that had just returned empty. That proves three things at once — the
+directory is not excluded, real-time protection is live on it, and the
+cmdlets do surface detections without elevation. The empty result on
+the installers is therefore a true negative. Control file deleted
+afterwards; no exclusions were added and no protection was disabled.
+
+**What this does not prove.** One host, one signature version, one
+point in time. `!ml` verdicts are per-file-hash and cloud-scored, and
+they move — the VM hit a real detection on a locally built installer
+with these same characteristics. A clean scan today is not a promise
+about tomorrow's build, and it says nothing about third-party AV. It
+only refutes the specific claim that release assets are protected by a
+signature they do not have.
+
+### What being unsigned costs
+
+Every customer gets "Unknown publisher" on the UAC prompt and a
+SmartScreen block on first download — for a VPN, downloaded by people
+in Iran who are already taking a risk running a binary from a stranger,
+on a product asking for money. That is the actual cost, and it is being
+paid on every install today. AV detection is the second-order risk:
+unproven against the shipped asset, demonstrated against a local build.
+
+Unsigned SmartScreen reputation is not a way out. It accrues per
+certificate, and per file hash absent one — this project has shipped a
+new installer nearly every day for two weeks, so each release starts
+from zero and never reaches the threshold.
+
+Fix path is unchanged and still #91: finish the Azure identity
+validation. Certum OV + SimplySign stays the fallback. Worth noting for
+the driver question on the roadmap — a WFP callout driver cannot be
+covered by any of this. Kernel-mode needs EV plus Microsoft Partner
+Center attestation signing, which is a separate enrolment from
+Authenticode, not an upgrade to it.
+
+### The fix path, costed
+
+Researched against Microsoft's current docs, because two things
+everybody "knows" about this are out of date.
+
+**Eligibility is about where *we* are, not where customers are.** Azure
+Trusted Signing was renamed **Azure Artifact Signing** (docs moved to
+`/azure/artifact-signing/`, CLI is `az artifact-signing`; the resource
+provider is still `Microsoft.CodeSigning`). Public Trust certificates
+are open to organisations in the US, Canada, EU, UK and a handful of
+others — but **individual developers must be in the US or Canada**
+([quickstart prerequisites][ts-qs]). We validate as an individual and
+we are US-based, so the individual path is open. Iran is where the
+users are; it has no bearing on eligibility.
+
+**Option 1 — finish Azure Artifact Signing. $9.99/month, Basic.**
+5,000 signatures/month, far beyond a daily release. No hardware token,
+works from GitHub Actions, which is what the workflow is already built
+against. Requires a Pay-As-You-Go subscription (free/trial/sponsored
+are refused — shared.md already hit that). Individual validation is
+AU10TIX Verified ID: government photo ID, phone, proof of address, then
+a Verified ID card presented back from Microsoft Authenticator. It is
+an interactive same-session flow, minutes rather than the 1–20 business
+days the organisation path quotes.
+
+**Option 2 — a conventional OV certificate.** **$150–300/yr**
+([code-signing-options][cso]), plus a hardware token or cloud HSM:
+since June 2023 the CA/B Forum requires **OV as well as EV** keys to
+live in a FIPS 140-2 Level 2 (or CC EAL4+) module, so there is no "put
+the .pfx in a secret" option any more. Certum + SimplySign, already
+noted in shared.md, is this shape. Microsoft frames OV as the option
+for people who *cannot* use Artifact Signing on geography — which is
+not us.
+Strictly worse than option 1 on both cost and CI ergonomics; it is the
+fallback if Azure sours, not the plan.
+
+**Option 3 — stay unsigned and build reputation. Not viable, and worth
+being definite about.** Microsoft: *"When a file is not signed,
+SmartScreen reputation must build for each new version of your files,
+starting with zero reputation. Reputation cannot transfer from previous
+versions unless both were signed using the same publisher identity"*,
+and it *"can take several weeks and hundreds of clean installs from a
+wide audience"* ([smartscreen-reputation][ss]). We have shipped 25
+installers in twelve days. Every one starts at zero and none will ever
+reach the threshold. There is also **no submission mechanism** for
+consumer SmartScreen — the WDSI portal is an enterprise-admin path
+only. Doing nothing is a permanent choice, not a delay.
+
+### Two things in this repo that are now wrong
+
+**The 460-day figure is misattributed.** The workflow comment (lines
+148–153) and shared.md both tie it to the Azure certificate. It is
+actually the CA/Browser Forum cap on *conventional* code-signing certs
+issued from 2026-03-01. Artifact Signing certificates are **renewed
+daily and valid for 72 hours** ([cert management][ts-cert]). The
+conclusion the comment draws is still right and in fact stronger —
+without `timestamp-rfc3161` a signature dies in three days — but the
+reason is the 72-hour cert, not a 460-day one. Not fixing it here; this
+task is investigation plus this correction.
+
+**"Do not create a second identity validation" may no longer hold.**
+The docs say validation email links **expire in seven days**, and that
+if email verification fails you must start a new request. Ours was
+created 2026-08-11 — twelve days ago. Whoever picks this up should
+check whether the existing link is still live before assuming it can be
+resumed; the shared.md advice was written when it was fresh. Flagging
+rather than asserting — I could not verify the link's state without the
+Azure portal.
+
+### EV buys nothing here, and the driver is a separate purchase
+
+Worth killing an assumption before it costs money. **EV certificates no
+longer bypass SmartScreen** — Microsoft removed that in 2024 and now
+says plainly that *"paying a premium for EV solely to avoid SmartScreen
+warnings is no longer justified"* ([smartscreen-reputation][ss]).
+Nothing gives instant trust except shipping through the Microsoft Store
+(re-signed by Microsoft, no warning at all) — which #94 already
+identified as EXE-viable and blocked on exactly this signing work.
+
+For the prospective WFP callout driver, none of the above helps.
+Artifact Signing **cannot sign kernel drivers and will never issue EV
+certificates**; kernel-mode goes through Partner Center attestation
+signing, which requires a real **EV cert ($400+/yr)** *and* an
+organisation-level registration — you register as a **global
+administrator of an organisation's Entra tenant**, and the EV cert is
+needed to register at all, independently of signing the driver. That is
+company-gated, and the company does not exist yet. Two consequences: the driver cannot be costed as an upgrade to
+whatever we do now, and the current user-mode WFP kill-switch
+(`fwpmu.h`, no driver — only *redirection* needs a callout) is worth
+protecting precisely because it keeps us out of that gate.
+
+**Recommendation: finish option 1.** It is $9.99/month against a
+half-finished enrolment, it is the only option that makes reputation
+accumulate across releases instead of resetting daily, and it is the
+one the workflow is already wired for — six secrets and nothing else.
+It will not stop the SmartScreen warning on day one; nothing will. What
+it changes is that the warning starts decaying instead of resetting,
+and that a customer in Iran deciding whether to trust a VPN binary sees
+a real legal name instead of "Unknown publisher". For this product that
+is the whole point, and it is currently blocked on a phone, an ID
+document and twenty minutes — not on money or engineering.
+
+### Two loose ends, flagged rather than buried
+
+**The Store path does not dodge signing.** #94's EXE route still
+requires the installer to be Authenticode-signed with a certificate
+chaining to a Microsoft Trusted Root Program CA — only *MSIX* gets
+re-signed by Microsoft for free. So the Store is downstream of this
+work, not an alternative to it.
+
+**SignPath Foundation offers free OV-level signing for qualifying
+open-source projects** ([code-signing-options][cso]). This repo is
+public, but Neoxify is commercial, and I have not checked their
+eligibility rules. Worth ten minutes before paying for anything —
+recorded as a lead, not a plan.
+
+**On sourcing.** The dollar figures above are Microsoft's own published
+comparison, not estimates. An earlier draft of this entry carried
+invented ranges for the OV and EV costs; they were wrong in both
+directions and are corrected here. Numbers in this section that are not
+followed by a citation should be treated as unverified.
+
+[ts-qs]: https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart
+[ts-cert]: https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management
+[ss]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation
+[cso]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options
+[csc31]: https://www.digicert.com/blog/understanding-the-new-code-signing-certificate-validity-change
