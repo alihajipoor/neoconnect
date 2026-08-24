@@ -22,3 +22,7 @@ agent/*.json
 go.work.sum
 .vscode/
 .idea/
+
+# Python bytecode from brand/make_store_art.py, imported by
+# website/scripts/make-og-image.py. Generated, never useful in a diff.
+__pycache__/
