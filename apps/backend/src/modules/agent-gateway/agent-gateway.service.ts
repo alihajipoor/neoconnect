@@ -71,6 +71,15 @@ const REASSERT_INTERVAL_MS = 60_000;
  * at the sweep itself for why the two cannot share a schedule. */
 const ROUTE_REASSERT_INTERVAL_MS = 60_000;
 
+/** Command-id prefix for a route's uplink re-assert.
+ *
+ * Synthetic, like the other sweep prefixes -- there is no AgentCommand
+ * row behind it -- but unlike them the ack carries information worth
+ * keeping, so it encodes the route id and handleCommandAck writes the
+ * outcome back onto the Route. Exported for the spec that proves the
+ * restart-then-reassert cycle restores the uplink. */
+export const UPLINK_ACK_PREFIX = "reassert-uplink:";
+
 @Injectable()
 export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AgentGatewayService.name);
@@ -409,7 +418,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       where: { isEnabled: true, exitProtocolConfigId: { not: null }, entryProtocolConfig: { nodeId } },
       include: {
         entryProtocolConfig: true,
-        exitProtocolConfig: { include: { node: { select: { publicIp: true } } } },
+        exitProtocolConfig: { include: { node: { select: { id: true, publicIp: true } } } },
       },
     });
     if (routes.length === 0) return;
@@ -419,6 +428,34 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       const entry = route.entryProtocolConfig;
       const exit = route.exitProtocolConfig;
       const entryIsXray = XRAY_SERVED_ON_NODE.has(entry.protocol);
+
+      // The other half of the route, and the half that was missing.
+      //
+      // A relay route is two hot-added things on two different nodes: the
+      // outbound and rule on the ENTRY (below), and the uplink credential
+      // on the EXIT's inbound. Only the entry half was ever re-asserted.
+      // The uplink was created exactly once, by RoutesService.create, and
+      // has no ProtocolUser row -- so reassertProvisionedUsers, which
+      // reads protocolUser, could never see it either. An Xray restart on
+      // an exit node therefore deleted it permanently.
+      //
+      // That is not hypothetical. france-1 restarted Xray on 2026-08-19
+      // and finland1 on 2026-08-20; on 2026-08-23 both exits held exactly
+      // their direct customers and zero `route:` users, all thirteen
+      // relay routes were dead, and the entry half had been faithfully
+      // re-asserted the whole time -- ir1 held every outbound and rule,
+      // pointed at a credential the exit no longer recognised. france-1's
+      // own access log recorded the result: "rejected
+      // proxy/vless/encoding: invalid request user id".
+      //
+      // Re-asserting it here rather than giving it a ProtocolUser row:
+      // a ProtocolUser requires a subscriptionId, and the uplink belongs
+      // to no subscription -- it is the relay's aggregate identity, which
+      // is the whole point of it. Faking a subscription to make the user
+      // sweep pick it up would put a synthetic customer into quota,
+      // usage and concurrency accounting. The credential already lives on
+      // the Route; this makes the sweep that owns routes assert all of it.
+      await this.assertRouteUplink(route.id, exit, JSON.parse(route.uplinkCredentialsJson) as Record<string, string>);
       const payload = {
         routeId: route.id,
         entryInboundTag: entryIsXray ? defaultInboundTag(entry) : "",
@@ -438,6 +475,56 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       }
     }
     this.logger.log(`Re-asserted ${routes.length} relay route(s) on node ${nodeId}`);
+  }
+
+  /** Re-installs one route's shared uplink credential on its exit node.
+   *
+   * Sent to the EXIT node, which is a different node from the one the
+   * surrounding sweep is walking -- and may not be connected at all, in
+   * which case nothing is claimed. Silence here would be the same bug
+   * this whole change exists to remove, so a route whose exit is
+   * unreachable is recorded as not asserted rather than left showing
+   * whatever it last said.
+   *
+   * `inboundTag` is passed for the same reason every other CREATE_USER
+   * carries it: an exit that runs more than one inbound of a protocol
+   * would otherwise take the uplink onto its default one, where the
+   * relay does not dial. RoutesService.create omits it, which is a latent
+   * bug on any multi-inbound exit; fixed there too.
+   */
+  private async assertRouteUplink(
+    routeId: string,
+    exit: { nodeId: string; protocol: string; transport: string | null; inboundTag: string | null },
+    uplinkCredentials: Record<string, string>,
+  ) {
+    const payload = {
+      protocol: exit.protocol,
+      transport: exit.transport,
+      ...(exit.inboundTag ? { inboundTag: exit.inboundTag } : {}),
+      externalUserId: `route:${routeId}`,
+      credentials: uplinkCredentials,
+    };
+    const sent = this.writeCommand(exit.nodeId, `${UPLINK_ACK_PREFIX}${routeId}`, "CREATE_USER", payload);
+    if (!sent) {
+      await this.recordUplinkResult(routeId, false, `exit node ${exit.nodeId} is not connected`);
+    }
+    // On success the ack decides, not the write: the write only proves the
+    // bytes went onto a socket. handleCommandAck stamps uplinkAssertedAt
+    // when the exit's agent confirms it.
+  }
+
+  /** Records what the exit node actually said about a route's uplink.
+   *
+   * This is the only thing standing between the panel and a green row
+   * over a dead route, so it stores the failure text rather than logging
+   * and dropping it. */
+  private async recordUplinkResult(routeId: string, ok: boolean, error?: string) {
+    await this.prisma.route.updateMany({
+      where: { id: routeId },
+      data: ok
+        ? { uplinkAssertedAt: new Date(), uplinkLastError: null }
+        : { uplinkLastError: (error ?? "unknown error").slice(0, 500) },
+    });
   }
 
   private async reassertProvisionedUsers(nodeId: string, opts: { persist: boolean } = { persist: true }) {
@@ -494,7 +581,26 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * legitimately match nothing. `update` throws on a missing row, which
    * would turn every one of those acks into a stream error. */
   private async handleCommandAck(ack: { commandId: string; success: boolean; error: string }) {
-    if (!ack.success && ack.commandId.startsWith("reassert:")) {
+    // A route's uplink is the one re-assert whose outcome is worth
+    // storing rather than only logging: it is what decides whether the
+    // route can carry anything, and nothing else on the route reports it.
+    if (ack.commandId.startsWith(UPLINK_ACK_PREFIX)) {
+      const routeId = ack.commandId.slice(UPLINK_ACK_PREFIX.length);
+      if (!ack.success) {
+        this.logger.error(`Route ${routeId} uplink re-assert REJECTED by its exit node: ${ack.error}`);
+      }
+      await this.recordUplinkResult(routeId, ack.success, ack.error);
+      return;
+    }
+
+    // Every synthetic re-assert id, not just the user sweep's.
+    //
+    // This test was `startsWith("reassert:")`, which is the user sweep's
+    // prefix alone -- so a failed route re-assert ("reassert-route:")
+    // matched neither this branch nor an AgentCommand row and was
+    // discarded in total silence. A relay whose outbound could not be
+    // rebuilt looked exactly like one that had been rebuilt fine.
+    if (!ack.success && ack.commandId.startsWith("reassert")) {
       this.logger.warn(`Re-assert of ${ack.commandId} failed on the node: ${ack.error}`);
     }
     await this.prisma.agentCommand.updateMany({

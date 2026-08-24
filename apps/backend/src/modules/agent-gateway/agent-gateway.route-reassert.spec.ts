@@ -30,10 +30,13 @@ describe("AgentGatewayService route re-assertion", () => {
         publicParamsJson: {},
       },
       exitProtocolConfig: {
+        nodeId: "exit-node-1",
         protocol: "XRAY_VLESS_REALITY",
+        transport: "TCP",
+        inboundTag: null,
         listenPort: 443,
         publicParamsJson: {},
-        node: { publicIp: "204.168.161.100" },
+        node: { id: "exit-node-1", publicIp: "204.168.161.100" },
       },
       ...over,
     };
@@ -41,7 +44,10 @@ describe("AgentGatewayService route re-assertion", () => {
 
   function build(routes: unknown[], connected: string[] = ["node-1"]) {
     const prisma = {
-      route: { findMany: jest.fn().mockResolvedValue(routes) },
+      route: {
+        findMany: jest.fn().mockResolvedValue(routes),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
       protocolUser: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const registry = { connectedNodeIds: jest.fn().mockReturnValue(connected) };
@@ -65,6 +71,10 @@ describe("AgentGatewayService route re-assertion", () => {
       payload: unknown,
     ) => {
       written.push({ nodeId, type, payload });
+      // Mirrors the real writeCommand's contract: true means "went onto a
+      // live stream". Returning undefined here made every uplink assert
+      // look undeliverable.
+      return connected.includes(nodeId);
     };
 
     return { service, prisma, written };
@@ -83,9 +93,9 @@ describe("AgentGatewayService route re-assertion", () => {
 
     await reassertRoutes(service, "node-1");
 
-    expect(written).toHaveLength(1);
-    expect(written[0].type).toBe("CONFIGURE_ROUTE");
-    expect(written[0].payload).toEqual(
+    const configure = written.filter((w) => w.type === "CONFIGURE_ROUTE");
+    expect(configure).toHaveLength(1);
+    expect(configure[0].payload).toEqual(
       expect.objectContaining({ routeId: "route-1", entryInboundTag: "vless-in" }),
     );
   });
@@ -111,7 +121,8 @@ describe("AgentGatewayService route re-assertion", () => {
 
     await reassertRoutes(service, "node-1");
 
-    expect(written[0].payload).toEqual(expect.objectContaining({ entryInboundTag: "vless-fr-in" }));
+    const configure = written.filter((w) => w.type === "CONFIGURE_ROUTE");
+    expect(configure[0].payload).toEqual(expect.objectContaining({ entryInboundTag: "vless-fr-in" }));
   });
 
   it("asks only for enabled, relayed routes entering this node", async () => {
@@ -166,7 +177,12 @@ describe("AgentGatewayService route re-assertion", () => {
       service as unknown as { reassertRoutesOnConnectedNodes(): Promise<void> }
     ).reassertRoutesOnConnectedNodes();
 
-    expect(written.map((w) => w.type)).toEqual(["CONFIGURE_ROUTE"]);
+    // Both halves of the route, and nothing else: the entry's rule and
+    // the exit's uplink credential.
+    expect(written.map((w) => `${w.nodeId}:${w.type}`).sort()).toEqual([
+      "exit-node-1:CREATE_USER",
+      "node-1:CONFIGURE_ROUTE",
+    ]);
     expect(prisma.protocolUser.findMany).not.toHaveBeenCalled();
   });
 });
