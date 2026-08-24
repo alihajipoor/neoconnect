@@ -75,11 +75,16 @@ server {
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;                      # nginx >= 1.25.1 syntax. On 1.24 (this
-                                   # host) use `listen 443 ssl http2;`
-                                   # above and delete this line.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+                                   # This host runs nginx 1.24.0, where
+                                   # `http2 on;` does not exist and would
+                                   # fail `nginx -t`, blocking the reload.
+                                   # The form above is accepted by 1.24 AND
+                                   # by 1.25+, where it is merely deprecated
+                                   # -- verified with `nginx -t` on 1.28.3.
+                                   # On 1.25.1+ you may instead drop http2
+                                   # from these two lines and add `http2 on;`.
     server_name www.neoxify.net;
 
     # CHECK: leave whatever certbot already wrote for this host. The cert
@@ -95,9 +100,10 @@ server {
 # ---------------------------------------------------------------------
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;                      # see the note above for nginx 1.24
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+                                   # see the note above for the nginx 1.24
+                                   # vs 1.25+ http2 syntax
     server_name neoxify.net;
 
     # CHECK: document root of the unzipped site.
