@@ -8384,3 +8384,229 @@ evidence yet beyond the layer table and the struct definition. The
 ordering question a spike has to answer first: whether a `SocketBind`
 event is reliably queued before the datagram reaches the NETWORK-layer
 handle, since the two handles have independent queues.
+
+---
+
+## 2026-08-24 — 0.9.31 integrated; the repair's WFP sweep was broken, and the rig only half-answered
+
+**Status:** **NOT released.** `claude/integration-0931` is built, merged
+from all three branches, green by every test this repo runs, and carries
+two fixes found by hand and by measurement. Four of the eight rig
+experiments came back with an answer; the other four did not run.
+**Touches:** `apps/desktop-windows/**`, this file.
+
+### What is in the branch
+
+`claude/integration-0931` off `5c60728`, three `--no-ff` merges in
+order: `claude/split-tunnel-latency`, `claude/repair-my-network`,
+`claude/selected-apps-ipv6`. Version bumped to 0.9.31 in the four files
+that carry it. `cargo check --workspace --all-targets` clean, 212 Rust
+tests, `pnpm turbo run lint typecheck build test --force` 16/16 with
+0 cached. (`@neoxify/backend#typecheck` fails in a fresh worktree until
+`pnpm --filter @neoxify/backend prisma:generate` has been run -- CI does
+it as its own step and it is easy to mistake for a real break.)
+
+Git reported conflicts only in this file, plus three in
+`split_tunnel/mod.rs` that were additive on both sides (the watchdog
+from 0.9.30's orphaned-redirect work alongside `ipv6_apps`, and a
+`redirect::start` call whose arity the latency branch had changed).
+
+**The one that merged cleanly and was wrong** is why the audit was done
+by hand. `claude/repair-my-network` made
+`ipv6_block::{PROVIDER_KEY, SUBLAYER_KEY}` `pub(super)` so the repair
+could sweep by them. `claude/selected-apps-ipv6`, on a different branch,
+added a **second** sublayer -- `SPLIT_SUBLAYER_KEY`, for the Custom-mode
+per-app filters -- under the **same** provider. Neither branch could see
+the other. Merged, the repair deleted one sublayer and then tried to
+deregister the provider, which refuses while anything still references
+it: a stuck Custom-mode sublayer would have pinned the provider on every
+future repair and never been removed itself. Fixed by sweeping both.
+
+### The rig, and what it cost
+
+`Neoxify-Test2`, restored from `clean-base`. Three protocols would not
+connect on this guest and this is **not** a finding about the product:
+OpenVPN failed with "tapctl returned nothing", IKEv2 and Xray/REALITY
+both with "powershell did not finish within 15s" -- the service's own
+internal timeouts firing on a CPU-starved guest. **WireGuard connected
+and its exit IP was the node** (38.60.249.229, DE), so every experiment
+below ran over a tunnel proven to carry a selected app's traffic before
+anything was measured.
+
+The guest then wedged repeatedly: two heartbeat flatlines, one guest
+bugcheck (`0x133`, DPC_WATCHDOG_VIOLATION), and long spells where
+`VBoxManage guestcontrol` answered every request with "current status
+is: starting" while the desktop painted normally.
+
+Three things learned about the rig, each of which cost an hour:
+
+- **The guest needs 10-15 minutes undisturbed after boot before
+  `guestcontrol` works**, and **polling it during that window jams the
+  guest-control service for good.** Every readiness loop made it worse.
+  Boot, wait, probe once.
+- **`VBoxManage startvm` can report success and leave the VM powered
+  off.** Killing `VBoxHeadless`, `VirtualBoxVM` and `VBoxSVC` clears it;
+  nothing else did.
+- **The elevated runner dies on its own**, silently, leaving nothing in
+  `runner2-log.txt`. It does not need the Win+R/UAC dance to come back:
+  it registers itself as a logon task at RunLevel Highest, and
+  *starting* an already-registered task is permitted from the filtered
+  token even though *registering* one is not (`Register-ScheduledTask`
+  answers "Access is denied"). `kick.py` on the share does exactly that.
+
+**Defender did flag the unsigned installer, once.** Six installs of the
+same bytes produced nothing; the seventh logged threat `2147731849`
+against `C:\Users\Public\nx31-setup.exe`. The install still finished --
+exit 0, the app reports 0.9.31 -- so what it caught was the copy on
+disk, after the fact. No exclusion was added. It is an ML detection and
+it is not deterministic, which is worth knowing before anyone concludes
+from one clean install that customers will not see it.
+
+### What the rig proved
+
+**The UDP failure counters move, and only when a send really fails.**
+Zero across every interval of two full Custom-mode sessions. Then the
+WireGuard tunnel service was stopped underneath a live 20 Hz flow and
+they went to 45 and then 55, with a named line beside them:
+`relay could not send a datagram to 1.1.1.1:53: The requested address is
+not valid in its context. (os error 10049)`. `udp_reply_failed` and
+`udp_unbound` stayed zero, which is the right answer -- nothing
+exercised those two. Evidence: `L2-v31-split-final.log`,
+`L2-v31b-split-final.log`.
+
+**No head-of-line stall across a reconnect on 0.9.31.** One 20 Hz UDP
+flow, tunnel torn down and brought back 15s in, eight fresh flows
+started into the tentative-address window. 1198 of 1200 datagrams
+answered; largest reply gap 1044 ms, with a 1090 ms gap in the *send*
+column at the same sequence number -- this guest descheduling the probe,
+not the relay stalling. **The undisturbed baseline run was worse** (981
+ms largest reply gap, median RTT 163 ms against 37 ms), which is the
+honest reading: on four vCPUs under a busy host the noise floor is about
+a second, so this instrument cannot resolve the 100 ms threshold. It can
+resolve the 5.83 s the unit test measured, and nothing of that size is
+there. Evidence: `L1-v31-steady.txt`, `L1-v31base-steady.txt`,
+`L1-v31.pcapng`.
+
+**Small writes leave the relay one segment at a time.** Forty 11-byte
+writes, the probe's own Nagle off -- with it on the writes coalesce in
+the *probe's* buffer and the relay never makes a small write at all,
+which is what the first two attempts measured and why they proved
+nothing. On the relay's upstream leg, captured with `pktmon` before
+WireGuard encapsulates it: 32 distinct segments each carrying an 11-byte
+payload, median 0.3 ms apart, max 34.8 ms -- tracking the writes rather
+than the ~180 ms round trip a Nagled socket would impose. Evidence:
+`L2-v31c-tcp.txt`, `L2-v31c.pcapng`.
+
+**A selected app's IPv6 does not reach the wire, and its IPv4 still
+exits at the node.** Custom mode on, `OnlySelected`, one selected app.
+Three readings off one capture, using a different destination address
+per phase so they cannot be confused:
+
+| what | destination | packets on the wire |
+|---|---|---|
+| control -- selected app, Custom mode **off** | `2606:4700:4700::1001` / `2001:4860:4860::8844` | **20 / 4** |
+| the claim -- selected app, Custom mode **on** | `2606:4700:4700::1111` / `2001:4860:4860::8888` | **0 / 0** |
+| unselected app (second copy, different path) | `2620:fe::fe` / `2620:fe::9` | **25 / 0** |
+
+The control is the half that could have failed and did not: the same
+binary, doing the same thing a minute earlier with the block off, put
+its IPv6 on the wire and got answers. The service's own log agrees --
+`installed: 6 filters for 1 app(s) in a dynamic session, provider
+Neoxify, sublayer Neoxify Custom-mode IPv6 block` -- and the redirect
+loop's `blocked_v6` moved from 0 to 5, which is the UDP half the ALE
+filters do not catch being stopped a layer down.
+
+**And the check that catches a missing `::/64` permit passed**: the
+selected app's own IPv4 exit, asked by that executable rather than by
+curl, was `{"ip":"38.60.249.229","country":"DE"}` both while the v6 was
+being refused and again after it. Evidence: `V1-v31.txt`,
+`V1-v31b.pcap`, `V1-v31-ipv6-block-custom.log`,
+`V1-v31-split-tunnel.log`.
+
+**One thing in that table is not explained.** The unselected app's TCP
+v6 went out untouched, 25 packets, which is the answer that matters --
+but its UDP destination shows zero, and the selected app's control UDP
+in the same run shows four. Either something stopped an unselected
+app's UDP v6, which would be a real bug, or that particular Quad9
+address behaved differently on this guest. `blocked_v6` reaching exactly
+5 accounts for the *selected* app's five datagrams and leaves none for
+the unselected one, which argues for the second reading -- but it is an
+argument, not a measurement. One targeted run settles it and it has not
+been done.
+
+### What the rig disproved
+
+**The repair's WFP sweep does not work, and never has.** This is the
+step the branch's own entry flagged as never having executed once. On a
+machine carrying eight of our filters -- `netsh wfp show filters` listed
+them in the same breath -- the repair reported
+
+    [????] Windows Filtering Platform filters -- the filtering platform
+           would not list filters under our provider
+
+and exited **1**, not 0. Every other step passed against residue built
+by connecting and then killing the service: the tunnel torn down, the
+NRPT rule removed **from the GPO registry path the cmdlets do not
+report**, the firewall rule gone, the stranded WireGuard tunnel service
+gone, the DNS cache flushed. The foreign `xray.exe` outside the install
+directory **survived** -- and that only became a control on the second
+attempt, because the first pointed it at a config that does not exist,
+so it exited within seconds and "the repair killed it" and "it was never
+going to survive" looked identical.
+
+Three readings of the source found nothing, because the error code was
+being thrown away. Adding it to the message answered it in one run:
+`FwpmFilterCreateEnumHandle0` returns **`0x80320004`,
+FWP_E_LAYER_NOT_FOUND**. The enumeration passed a template carrying our
+provider key and a zeroed `layerKey`, on the assumption that a NULL GUID
+means "every layer"; `FWP_FILTER_ENUM_FULLY_CONTAINED` needs a real
+layer to be contained *in*. Fixed by enumerating every filter and
+comparing the provider here, which is also the more honest sweep: the
+objects this step exists to find were installed by a *previous* build,
+at whatever layers that build used.
+
+**That fix is still not verified.** Two attempts: the first bugchecked
+the guest, the second got a tunnel up whose exit IP was the machine's
+own address rather than the node, aborted on that assertion as it should
+have, and then the guest wedged. The repair itself never ran against the
+fixed binary.
+
+**Flow affinity is not demonstrated.** A single 300-datagram UDP flow,
+sent under twelve concurrent flows, arrives at the relay's upstream leg
+with 11-15 out-of-order steps per run, reproducibly, across three runs.
+Every datagram was captured exactly twice and the count is identical
+whether ordered by first or last sighting, so it is not a capture
+artefact. What it does not establish is the cause: that leg is the
+relay's own single-threaded send loop, so either the dispatcher handed
+the packets over out of order -- which is what affinity was meant to
+stop -- or Windows reordered them below the socket. **The 0.9.30
+control, the only thing that separates those two, did not run.**
+
+### What did not run at all
+
+- The **0.9.30 control** for head-of-line, TCP_NODELAY and flow
+  affinity. Without it, three of the four latency claims are measured
+  but not attributed.
+- **Re-verification of the WFP fix**, twice attempted.
+- The one unexplained cell in the IPv6 table above.
+
+Everything needed is on the share and scripted: `V1.ps1`, `R1.ps1`
+(which copies an instrumented service over the installed one), `L1.ps1`,
+`L2.ps1`, the probe `nxlat.cs` with modes `udpsteady udpburst tcpsmall
+udporder udpload v6 get4`, `d31.py`/`seq31.py` to drive a phase with a
+NIC capture, `kick.py` to bring the runner back, and `latstat.py` /
+`pcapng31.py` to read the results. Both installers are staged as
+`nx31-setup.exe` and `nx30-setup.exe`.
+
+### Why 0.9.31 was not cut
+
+Two named pass criteria failed on the code as merged -- the repair's
+exit code and its WFP sweep -- and the fix for them has not run on
+hardware. Three of the four latency claims have no control, and one of
+those three (flow affinity) has a measurement pointing the wrong way
+that only the control can attribute. A release now would be a release on
+reasoning, and this product's whole history is findings that only
+appeared under execution.
+
+What is ready to go the moment a rig will stay up: the branch, the
+scripts, and one clean pass of `R1` plus `L1`/`L2` against 0.9.30.
