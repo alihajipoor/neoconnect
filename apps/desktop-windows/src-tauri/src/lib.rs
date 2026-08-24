@@ -125,6 +125,13 @@ pub fn run() {
             vpn::vpn_probe_split_tunnel,
             vpn::vpn_list_running_apps,
             vpn::vpn_status,
+            // "Repair my network", and the two things that go with it:
+            // the snapshot Support pastes, and the elevated command to
+            // print when the service cannot be reached at all -- which
+            // is exactly the case the button cannot serve.
+            vpn::vpn_repair,
+            vpn::vpn_diagnostics,
+            vpn::repair_command_line,
             // Asked from a socket rather than the frontend's fetch: the
             // app's HTTP permission is scoped to *.neoxify.site, so a
             // probe address would be refused by the ACL and the check

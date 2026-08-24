@@ -220,6 +220,49 @@ The updater's signing key is separate from any Authenticode certificate
 and is **not recoverable**: losing it means already-installed clients can
 never be updated again.
 
+### Repairing a customer's networking
+
+Some faults outlive the app. A leftover NRPT DNS rule points the whole
+machine's lookups at a resolver it can no longer reach and survives both
+a reboot and Windows' own network reset; a stranded
+`WireGuardTunnel$neoconnect` service takes the default route on every
+boot; routes stay on an adapter whose engine is gone. Every one of those
+is torn down on the normal paths -- but a service that will not start
+never runs its start-up reconcile, and a wedged one never answers a
+disconnect. That gap is what "I had to reset my network settings and
+uninstall it" in a customer report means.
+
+Two ways out, and they run the same code
+(`service/src/engines/repair.rs`):
+
+- **In the app** -- Settings -> Repair network, and offered directly in
+  the connect-failure message so somebody who cannot connect does not
+  have to go looking. Goes through the running service.
+- **From an administrator command prompt**, when the service is itself
+  the broken thing:
+
+  ```
+  "C:\Program Files\Neoxify\resources\neoconnect-service.exe" repair
+  ```
+
+  Stops the service, performs the whole teardown, starts it again, and
+  prints what it found step by step. Exit code 0 when everything was
+  either already clean or repaired, 1 when something could not be, 2
+  when it was not run elevated. A full record is appended to
+  `C:\ProgramData\Neoxify\cleanup.log`.
+
+Every step is independent and non-fatal, and nothing it does can leave a
+machine more restricted than it found it -- it only ever removes. A step
+that could not be checked reports "couldn't check" rather than borrowing
+a tick from the ones that could.
+
+Support can also ask a customer for the snapshot behind **Support ->
+Send us your details**: adapters present, our routes, NRPT rules,
+firewall rule, orphaned engines, and the tail of `cleanup.log`. It is
+built from named fields only and carries no credentials, keys or
+protocol config, and the customer reads the whole thing before copying
+it.
+
 ## Releasing the Android client
 
 Same shape, own tag prefix. Bump the version in
