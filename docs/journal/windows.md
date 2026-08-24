@@ -8123,3 +8123,62 @@ an owner decision, because it is a live protocol config.
 **The agent still touches no engine.** Confirmed again here: xray's
 `ActiveEnterTimestamp` stayed 2026-08-17, wg-quick and openvpn stayed
 2026-08-14, and established connections were 6 before and 6 after.
+
+---
+
+## 2026-08-24 — The two option-2 traps are now the installer's problem, not the operator's
+
+**Status:** landed on `claude/installer-agent-update-safety`, unpushed,
+**never run against a node**
+**Touches:** `installer/lib/agent.sh` only
+
+The two traps the v0.2.6 rollout entry left standing — no backup of the
+outgoing binary, and release resolution by GitHub's API ordering — are
+fixed in source. Nothing here has touched a production node; the whole
+thing was exercised against a throwaway Linux box with the network
+stubbed.
+
+**What a rollout should actually run first.** This is proved against
+synthetic input, not against a node, so the first real use is still the
+test. On a node, before trusting it:
+
+```
+/usr/local/bin/agentd --version       # before
+# menu option 2
+/usr/local/bin/agentd --version       # must equal the tag it printed
+ls -l /root/agent-rollback/           # the outgoing binary must be there
+cd /root/agent-rollback && sha256sum -c <name>.sha256
+```
+
+If option 2 aborts, the point is that it aborts *before*
+`systemctl restart` — so `systemctl status neoxify-agentd` should show
+an uptime that predates the attempt. That is the half worth watching.
+
+**The failure the version check catches, and why the existing checksum
+does not.** A re-published or mis-tagged release ships its own
+`sha256sums.txt`. The checksum step proves the download was not
+corrupted; it says nothing about whether it is the build that was asked
+for. Fed a release that answers to `v0.2.6` and contains `v0.2.4`, the
+code on main installs it and returns 0 — the caller then restarts the
+service onto a silent downgrade. That is not arithmetic on paper, it is
+what the stubbed run does.
+
+**A window problem worth knowing about.** `per_page` went 50 → 100 (the
+API maximum). The live list is 66 releases and only 8 of them are the
+agent's — desktop ships roughly thirty releases per agent release. At
+per_page=50 the window already stops before `v0.2.1`. It does not fail
+loudly when it stops containing *any* agent release; it just says "could
+not find an agent release" and the operator has no reason to suspect
+paging. 100 buys headroom, not a fix. If the agent goes quiet for
+another hundred desktop releases this needs `per_page` + `page`, or
+`/releases/tags/<tag>` with the tag computed some other way.
+
+**Left alone deliberately:** the menu, the prompt sequence, and every
+engine path. `action_update_agent` still does fetch-then-restart and
+still touches no engine.
+
+**Not verified, and cannot be from here:** that `install -m 755` over a
+*running* agentd behaves on a node the way it does in the test — the
+stand-in binary is not a running service — and that `/root/agent-rollback`
+sits on a partition with room for five ~20MB binaries. Both are one look
+on the first node that takes an update.
