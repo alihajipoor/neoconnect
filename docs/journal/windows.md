@@ -7963,3 +7963,98 @@ followed by a citation should be treated as unverified.
 [ss]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation
 [cso]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options
 [csc31]: https://www.digicert.com/blog/understanding-the-new-code-signing-certificate-validity-change
+
+## 2026-08-23 — The 15 MB APK regression was uncompressed DWARF, not a bigger app
+
+**Status:** fix written, **unverified — needs a CI run to confirm**
+
+The direct-download APK went 125.8 MB (0.2.13, 0.2.14) → 141.2 MB
+(0.2.15) with no repository change beyond version strings. Attributed by
+downloading all three published artifacts and diffing them, not by
+reading the build.
+
+**Where it went.** Every byte is in one file:
+
+| component | 0.2.14 | 0.2.15 | delta |
+|---|---|---|---|
+| `lib/armeabi-v7a/libgojni.so` | 43,836,044 | 59,876,164 | **+16,040,120** |
+| `lib/arm64-v8a/libgojni.so` | 46,137,880 | 46,137,872 | −8 |
+| everything else (dex, res, assets, wg, mobile_lib) | — | — | ±60 KB |
+
+**What actually changed inside it: nothing.** `.text` (14,956,152),
+`.gopclntab` (10,917,198), `.noptrbss`, `.symtab`, `.strtab` and
+`.rel.dyn` are byte-for-byte identical between the two builds. Both
+report `go1.26.5` and `clang/LLD 19.0.1`.
+
+The difference is that in 0.2.14 all twelve `.debug_*` sections carried
+`SHF_COMPRESSED` and in 0.2.15 they do not — same DWARF, stored raw.
+The uncompressed sizes match *exactly* across the two builds
+(`.debug_info` 11,807,810; `.debug_line` 5,505,438; `.debug_loclists`
+4,568,306; `.debug_frame` 1,416,716; `.debug_rnglists` 1,370,235;
+`.debug_addr` 159,320). 24,858,735 raw vs 8,818,508 compressed =
+**16,040,227 bytes**, which is the whole regression to within ~100 bytes
+of section-header churn. arm64 kept compression and is unchanged.
+
+So it is pure toolchain drift in the link line, and the link line is
+gomobile's — which was installed `@latest`, unpinned, *and* skipped
+entirely if any gomobile was already on PATH. The one new string in the
+0.2.15 armv7 binary and not the 0.2.14 one is `ndk/28.2.13676358`,
+consistent with a differently-constructed link.
+
+**Do not chase which gomobile commit flipped the compression bit.** The
+right answer makes it moot: we should never have been shipping DWARF.
+
+**Measured headroom, from 0.2.15's own artifacts:**
+
+- `.debug_*` + `.symtab`/`.strtab` across all native libs: **54,794,330
+  bytes (52.26 MiB)**. Stripping it takes the APK 141.17 → **88.92 MiB**,
+  i.e. 37 MB *below* the pre-regression baseline.
+- `libgojni.so` accounts for 42.3 MB of that; `libmobile_lib.so` (Rust)
+  another 12.5 MB, all of it symbol table — it ships no DWARF because
+  cargo already defaults `debug = false`.
+- `libwg-go.so` has zero of either. The WireGuard AAR arrives already
+  stripped by its vendor, which is the standard we were not meeting.
+
+**What was changed:** `-ldflags="-s -w" -trimpath` on `gomobile bind`;
+gomobile pinned to the same x/mobile pseudo-version go.mod already uses
+for the bind runtime; Go pinned to 1.26.5 with `GOTOOLCHAIN=local` in
+both Android workflows (there was no `setup-go` step in either at all);
+Rust pinned via a new `apps/mobile/src-tauri/rust-toolchain.toml`; a
+`[profile.release]` added to the mobile crate.
+
+**Predicted, not measured: ~89 MB.** Nothing here was built — an Android
+build cannot be produced on this machine. The strip figures are exact
+because they are section sizes read off shipped binaries, but the LTO /
+`opt-level = "s"` effect on `libmobile_lib.so` is a guess and the next
+CI run is what settles it. Compare against 148,031,919 bytes.
+
+**Debuggability, stated rather than buried.** Go tracebacks are
+unaffected: they come from `.gopclntab`, which the runtime requires and
+`-s -w` does not touch. The real loss is Rust-side — `strip = "symbols"`
+means a hard signal crash in `libmobile_lib.so` returns bare addresses.
+Rust panics still carry message and location. If field symbolication
+starts mattering, archive the unstripped `.so` as a CI artifact rather
+than shipping symbols to every user.
+
+**Two things found and deliberately NOT done:**
+
+1. **Native libs are `STORED`, not deflated** — 146.5 MB of the 148.0 MB
+   APK is uncompressed. Deflating them would save a further ~87 MB of
+   download. It is not free: uncompressed is what makes the 16 KB
+   load-segment alignment work and what `check-elf-alignment.py` guards,
+   and flipping it doubles on-device storage. Worth a deliberate
+   decision with a real build behind it, not a drive-by.
+2. **Per-ABI APKs as extra release assets.** armv7 is 73 MB of the 141
+   MB, and the splits are already built and thrown away. But
+   `/updates/installer/android` matches on `.apk$` — publishing
+   `Neoxify-x.y.z-arm64.apk` beside the universal one risks handing a
+   32-bit phone a 64-bit APK. The API matcher has to be fixed first.
+   The universal APK stays the download-page default regardless: a
+   website link cannot ask which chip the phone has.
+
+**Still unpinned, knowingly:** `runs-on: ubuntu-latest`, all `uses:` at
+floating major tags, and `@tauri-apps/cli: "^2"` — which is the big one,
+because the CLI generates the entire uncommitted `gen/android` Gradle
+project (AGP, wrapper, minify, `debugSymbolLevel`, packaging). The
+lockfile holds it at 2.11.4 today, so it is latent rather than active
+drift, but it means those Gradle settings are unreviewable in this repo.

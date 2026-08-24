@@ -36,7 +36,37 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
-      - uses: dtolnay/rust-toolchain@stable
+
+      # Pinned, and it has to be: this Go builds libgojni.so, which is
+      # 70% of the APK. Neither Android workflow had a setup-go step at
+      # all, so the compiler came from whatever the ubuntu-latest image
+      # happened to ship that week -- an input that changes without a
+      # commit and is recorded nowhere.
+      #
+      # GOTOOLCHAIN=local turns the remaining escape hatch off. Without
+      # it, go.mod's `go 1.26.5` line lets the toolchain silently
+      # download and switch to a different compiler mid-build, so pinning
+      # the version here would buy nothing. With it, a mismatch is a
+      # loud error instead of a quiet substitution.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: apps/mobile/plugins/vpn/xray/go.sum
+
+      - name: Refuse a silent toolchain switch
+        run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
+      # Pinned for the same reason as Go. The authority is
+      # apps/mobile/src-tauri/rust-toolchain.toml -- cargo honours that
+      # file whatever this step installs -- so this ref exists to make
+      # the runner install the right toolchain up front instead of
+      # having rustup fetch a second one mid-build. Keep the two in step.
+      #
+      # `@1.97.1` is a branch of that action, not a tag; there are no
+      # version tags, only `v1`. Checked before writing it, because a bad
+      # ref here fails the release at the point where a tag has already
+      # been pushed.
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           # Both, because the release now builds both. Without the armv7
           # target installed the build fails at link time with a message
