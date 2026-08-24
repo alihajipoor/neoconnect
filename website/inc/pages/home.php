@@ -168,7 +168,7 @@ require NX_INC . '/partials/announcement.php';
 
 <!-- ====================== Connection methods ==================== -->
 <section class="section section--band" id="methods">
-  <div class="container container--wide">
+  <div class="container">
     <div class="section-head">
       <span class="eyebrow"><?php echo nx_e('home.protocols.eyebrow'); ?></span>
       <h2><?php echo nx_e('home.protocols.title'); ?></h2>
@@ -188,7 +188,7 @@ require NX_INC . '/partials/announcement.php';
 
 <!-- ========================== Locations ========================= -->
 <section class="section" id="locations">
-  <div class="container container--wide">
+  <div class="container">
     <div class="section-head">
       <span class="eyebrow"><?php echo nx_e('home.locations.eyebrow'); ?></span>
       <h2><?php echo nx_e('home.locations.title'); ?></h2>
@@ -314,7 +314,7 @@ require NX_INC . '/partials/announcement.php';
    section that cannot be pointed at. */
 ?>
 <section class="section section--band section--wash" id="trust">
-  <div class="container container--wide">
+  <div class="container">
     <div class="section-head section-head--center">
       <span class="eyebrow"><?php echo nx_e('home.trust.eyebrow'); ?></span>
       <h2><?php echo nx_e('home.trust.title'); ?></h2>
