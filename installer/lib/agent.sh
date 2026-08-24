@@ -17,6 +17,26 @@ AGENT_REPO="${AGENT_REPO:-alihajipoor/neoconnect}"
 ADMIN_TOKEN_CACHE="${TMPDIR:-/tmp}/neoxify-admin-token.$$"
 trap 'rm -f "$ADMIN_TOKEN_CACHE"' EXIT
 
+# Picks the agent's newest release out of a GitHub /releases response
+# fed on stdin, and prints its tag. See resolve_agent_release_base below
+# for why the tag prefix is the thing that has to be matched.
+#
+# Split out from the curl on purpose: the failure this guards against
+# cannot be reproduced against the live API on demand, so the only way
+# to know the ordering is right is to feed it a releases list that
+# contains the bad shapes.
+select_newest_agent_tag() {
+  jq -r '
+    [ .[]
+      | select(.draft == false and .prerelease == false)
+      | .tag_name // empty
+      | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))
+    ]
+    | sort_by(ltrimstr("v") | split(".") | map(tonumber))
+    | last // empty
+  '
+}
+
 # The newest *agent* release, resolved by tag rather than by asking
 # GitHub for "latest".
 #
@@ -34,27 +54,6 @@ trap 'rm -f "$ADMIN_TOKEN_CACHE"' EXIT
 #
 # Override for a self-hosted or pinned build, e.g.:
 #   AGENT_RELEASE_URL_BASE=https://example.com/releases/v0.1.0 sudo -E ./install.sh
-
-# Picks the agent's newest release out of a GitHub /releases response
-# fed on stdin, and prints its tag.
-#
-# Split out from the curl on purpose: the failure this guards against
-# cannot be reproduced against the live API on demand, so the only way
-# to know the ordering is right is to feed it a releases list that
-# contains the bad shapes. See the header comment above for why the tag
-# prefix is the thing that has to be matched.
-select_newest_agent_tag() {
-  jq -r '
-    [ .[]
-      | select(.draft == false and .prerelease == false)
-      | .tag_name // empty
-      | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))
-    ]
-    | sort_by(ltrimstr("v") | split(".") | map(tonumber))
-    | last // empty
-  '
-}
-
 resolve_agent_release_base() {
   if [[ -n "${AGENT_RELEASE_URL_BASE:-}" ]]; then
     echo "$AGENT_RELEASE_URL_BASE"
@@ -127,7 +126,7 @@ backup_current_agent() {
   # empty reading is expected rather than an error -- hence `|| true`,
   # which pipefail would otherwise turn into an aborted update.
   ver="$( { "$target" --version 2>/dev/null || true; } | awk 'NR==1 {print $2}')"
-  # This ends up in a filename, so it may only be what a version is.
+  # This ends up in a filename, so keep it to what a version can contain.
   ver="${ver//[^A-Za-z0-9._-]/}"
   [[ -n "$ver" ]] || ver="unknown"
 
