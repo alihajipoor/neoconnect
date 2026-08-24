@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/config"
@@ -22,9 +23,11 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
 	"github.com/neoxify/neoxify-hub/agent/internal/relay"
 	"github.com/neoxify/neoxify-hub/agent/internal/shaper"
+	"github.com/neoxify/neoxify-hub/agent/internal/version"
 )
 
 func main() {
+	showVersion := flag.Bool("version", false, "print the agent build version and exit. The same string the agent reports to the control plane as agentVersion, so this is how you confirm a node actually took a rollout without waiting for it to reconnect")
 	enrollInit := flag.Bool("enroll-init", false, "trade a one-time enrollment token for this node's identity, then exit")
 	token := flag.String("token", "", "enrollment token issued by an admin in the panel (required with --enroll-init)")
 	panelURL := flag.String("panel-url", "", "control-plane base URL INCLUDING /api -- nginx only proxies the backend under that prefix, e.g. https://connect.example.com/api (required with --enroll-init)")
@@ -46,6 +49,14 @@ func main() {
 	ikev2Secrets := flag.String("ikev2-secrets", "/etc/swanctl/conf.d/neoxify-users.conf", "swanctl file this agent owns and rewrites as customers come and go (see installer/lib/agent.sh's install_ikev2)")
 	ikev2Swanctl := flag.String("ikev2-swanctl", "swanctl", "path to swanctl, if it is not on PATH")
 	flag.Parse()
+
+	// Before anything that reads config or dials: --version has to work
+	// on a freshly downloaded binary, on a node that is not enrolled,
+	// and without touching a running agent.
+	if *showVersion {
+		fmt.Printf("agentd %s (%s/%s)\n", version.Version, runtime.GOOS, runtime.GOARCH)
+		return
+	}
 
 	if *enrollInit {
 		if err := runEnrollInit(*token, *panelURL, *grpcTarget, *configPath); err != nil {
