@@ -552,19 +552,113 @@ SYNC
   chmod +x /usr/local/bin/neoxify-sync-certs
   /usr/local/bin/neoxify-sync-certs || return 1
 
+  install_verified_xray_restart
+
   # Xray reads its certificate once at startup, so a renewal it is never
   # told about means serving an expired certificate roughly three months
   # from now -- long after anyone would connect the two events. The copy
-  # has to be refreshed first, or the reload just re-reads the old one.
+  # has to be refreshed first, or the restart just re-reads the old one.
   install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
   cat > /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh <<'HOOK'
 #!/bin/sh
+set -e
 /usr/local/bin/neoxify-sync-certs
-# Reload rather than restart: a certificate renewal is no reason to drop
-# every connected customer.
-systemctl reload xray 2>/dev/null || systemctl restart xray
+# This used to read `systemctl reload xray 2>/dev/null || systemctl
+# restart xray`, with a comment saying a renewal was no reason to drop
+# every connected customer. It always dropped them.
+#
+# xray.service ships no ExecReload -- `systemctl show xray -p CanReload`
+# answers `no` on every node in the fleet -- so the reload could never
+# succeed and the `||` swallowed the reason. Every renewal has been a
+# full restart, announced as a reload.
+#
+# Nor can the unit be given one. Xray does not handle SIGHUP: sent to a
+# running instance it terminates the process (measured 2026-08-23), so
+# `ExecReload=/bin/kill -HUP $MAINPID` would be a restart wearing a
+# different name, and `ExecReload=/bin/true` would be worse still -- a
+# renewal that reports success and keeps serving the old certificate
+# until it expires.
+#
+# So it restarts, openly, and then checks that everything came back.
+# That matters because a restart erases every hot-added inbound, user
+# and relay route from the running process; the control plane re-asserts
+# users and routes within about a minute, but nothing re-creates an
+# inbound that exists only in memory.
+/usr/local/bin/neoxify-xray-restart
 HOOK
   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh
+}
+
+# A restart of Xray that reports what it cost.
+#
+# Installed as its own command so anything that has to restart Xray goes
+# through the same check, and so an operator can run it by hand.
+#
+# The failure it exists to catch: france-1's certificate renews around
+# 18 Oct, and until 2026-08-23 that renewal would have restarted Xray
+# through a hook that called it a reload. A restart empties everything
+# hot-added over the gRPC API. Customers and relay routes are re-asserted
+# by the control plane within ~60s, but an inbound that was added at
+# runtime and never written to config.json is gone for good -- and the
+# node would keep reporting itself healthy, because nothing compares what
+# is listening against what should be.
+#
+# Exits non-zero when an inbound does not come back, which is what makes
+# certbot's own output and `systemctl status certbot.timer` show it
+# rather than the whole thing passing in silence.
+install_verified_xray_restart() {
+  cat > /usr/local/bin/neoxify-xray-restart <<'RESTART'
+#!/bin/sh
+set -u
+API="127.0.0.1:10085"
+XRAY="/usr/local/bin/xray"
+MARKER="/var/log/neoxify-xray-restart.log"
+
+tags() {
+  "$XRAY" api lsi -s "$API" 2>/dev/null | sed -n 's/.*"tag": *"\([^"]*\)".*/\1/p' | sort
+}
+
+say() {
+  echo "$(date -Is) $*" >> "$MARKER"
+  logger -t neoxify-xray-restart "$*" 2>/dev/null || true
+  echo "$*"
+}
+
+BEFORE="$(tags)"
+say "restarting xray; inbounds before: $(echo "$BEFORE" | tr '\n' ' ')"
+
+systemctl restart xray || { say "FAILED: systemctl restart xray returned non-zero"; exit 1; }
+
+# The API is not up the instant systemd returns. Poll rather than sleep a
+# guessed amount: too short reports a false loss, too long is dead time on
+# a node that is currently serving nobody.
+i=0
+while [ "$i" -lt 30 ]; do
+  AFTER="$(tags)"
+  [ -n "$AFTER" ] && break
+  i=$((i + 1))
+  sleep 1
+done
+
+if [ -z "${AFTER:-}" ]; then
+  say "FAILED: xray restarted but its API never answered -- the node is serving nothing"
+  exit 1
+fi
+
+TMPB="$(mktemp)"; TMPA="$(mktemp)"
+printf '%s\n' "$BEFORE" > "$TMPB"
+printf '%s\n' "$AFTER" > "$TMPA"
+MISSING="$(comm -23 "$TMPB" "$TMPA")"
+rm -f "$TMPB" "$TMPA"
+if [ -n "$MISSING" ]; then
+  say "FAILED: inbound(s) did not come back after restart: $(echo "$MISSING" | tr '\n' ' ')"
+  say "        these existed only in the running process. Add them to /usr/local/etc/xray/config.json."
+  exit 1
+fi
+
+say "ok: all inbounds back ($(echo "$AFTER" | tr '\n' ' ')). Users and relay routes are re-asserted by the control plane within ~60s."
+RESTART
+  chmod +x /usr/local/bin/neoxify-xray-restart
 }
 
 # Candidate camouflage destinations for REALITY, checked against this
