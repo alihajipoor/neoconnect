@@ -42,6 +42,7 @@ use windows_sys::Win32::Networking::WinSock::setsockopt;
 
 use super::flows::Nat;
 use super::owner::Transport;
+use super::redirect::Stats;
 
 /// `IPPROTO_IP`, the option level `IP_UNICAST_IF` lives at.
 const IPPROTO_IP: i32 = 0;
@@ -715,7 +716,11 @@ impl UdpUpstreams {
 /// because the redirect filter is built from them: a hardcoded port that
 /// something else already holds would fail at the worst moment, on a
 /// customer's machine, with no way to pick another.
-pub fn start(nat: Arc<Nat>, tunnel: Arc<TunnelInterface>) -> io::Result<Relays> {
+pub fn start(
+    nat: Arc<Nat>,
+    tunnel: Arc<TunnelInterface>,
+    stats: Arc<Stats>,
+) -> io::Result<Relays> {
     let tcp = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let tcp_port = tcp.local_addr()?.port();
 
@@ -734,9 +739,9 @@ pub fn start(nat: Arc<Nat>, tunnel: Arc<TunnelInterface>) -> io::Result<Relays> 
         std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own))
     });
     threads.push({
-        let (nat, stop, upstreams, own) =
-            (nat.clone(), stop.clone(), upstreams.clone(), own_sockets.clone());
-        std::thread::spawn(move || serve_udp(udp, nat, tunnel, stop, upstreams, own))
+        let (nat, stop, upstreams, own, stats) =
+            (nat.clone(), stop.clone(), upstreams.clone(), own_sockets.clone(), stats.clone());
+        std::thread::spawn(move || serve_udp(udp, nat, tunnel, stop, upstreams, own, stats))
     });
     threads.push({
         let (stop, upstreams) = (stop.clone(), upstreams.clone());
@@ -855,6 +860,7 @@ fn pump(client: TcpStream, upstream: TcpStream) {
     let _ = outbound.join();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_udp(
     local: UdpSocket,
     nat: Arc<Nat>,
@@ -862,6 +868,7 @@ fn serve_udp(
     stop: Arc<AtomicBool>,
     upstreams: Arc<UdpUpstreams>,
     own: Arc<OwnSockets>,
+    stats: Arc<Stats>,
 ) {
     let local = Arc::new(local);
     let pending = Arc::new(PendingFlows::default());
@@ -885,6 +892,7 @@ fn serve_udp(
             match pending.hold(nat_port, &buffer[..len]) {
                 Hold::Held => continue,
                 Hold::Overflowed => {
+                    stats.udp_unbound.fetch_add(1, Ordering::Relaxed);
                     static OVERFLOWED: Throttle = Throttle::new();
                     if OVERFLOWED.ready() {
                         stats_note(&format!(
@@ -915,6 +923,7 @@ fn serve_udp(
                         &nat,
                         &stop,
                         origin.client,
+                        &stats,
                     ),
                     Err(_) => {
                         // Retried rather than dropped, and this is the
@@ -945,7 +954,7 @@ fn serve_udp(
                         // arrived precisely when the customer was
                         // already looking at it.
                         if pending.begin(nat_port, &buffer[..len]) {
-                            let (tunnel, own, upstreams, local, nat, stop, pending) = (
+                            let (tunnel, own, upstreams, local, nat, stop, pending, stats) = (
                                 tunnel.clone(),
                                 own.clone(),
                                 upstreams.clone(),
@@ -953,10 +962,12 @@ fn serve_udp(
                                 nat.clone(),
                                 stop.clone(),
                                 pending.clone(),
+                                stats.clone(),
                             );
                             std::thread::spawn(move || {
                                 bind_pending(
                                     nat_port, tunnel, own, upstreams, local, nat, stop, pending,
+                                    stats,
                                 )
                             });
                         }
@@ -967,7 +978,35 @@ fn serve_udp(
         };
 
         let target = origin.upstream.unwrap_or_else(|| SocketAddrV4::new(origin.addr, origin.port));
-        let _ = upstream.send_to(&buffer[..len], target);
+        send_upstream(&upstream, &buffer[..len], target, &stats);
+    }
+}
+
+/// Hands one datagram on towards its destination, saying so when it
+/// cannot.
+///
+/// The result of this send used to be discarded outright, which made it
+/// a silent loss point on the exact path voice and gaming depend on --
+/// and an invisible one from every angle, because the redirect loop
+/// counted the datagram `redirected` the moment it handed it over. The
+/// only trace was `returned` staying at zero, and that reads identically
+/// to a tunnel which is not carrying traffic: a different fault with a
+/// different fix, and the one the counters would have sent somebody to
+/// investigate.
+///
+/// The behaviour on failure is deliberately unchanged -- the datagram is
+/// dropped and the next one is served. UDP has no retransmission of its
+/// own to hook into, the application above has whatever it needs, and
+/// retrying here would hand the destination a duplicate of something the
+/// application may already have resent. What was missing was not a
+/// remedy but a record.
+fn send_upstream(upstream: &UdpSocket, datagram: &[u8], target: SocketAddrV4, stats: &Stats) {
+    if let Err(e) = upstream.send_to(datagram, target) {
+        stats.udp_send_failed.fetch_add(1, Ordering::Relaxed);
+        static FAILED: Throttle = Throttle::new();
+        if FAILED.ready() {
+            stats_note(&format!("relay could not send a datagram to {target}: {e}"));
+        }
     }
 }
 
@@ -987,6 +1026,7 @@ fn install_upstream(
     nat: &Arc<Nat>,
     stop: &Arc<AtomicBool>,
     client: Ipv4Addr,
+    stats: &Arc<Stats>,
 ) -> Arc<UdpSocket> {
     let socket = Arc::new(socket);
     match upstreams.insert_if_absent(nat_port, socket.clone(), registration) {
@@ -995,10 +1035,10 @@ fn install_upstream(
         // registration in one step.
         Some(existing) => existing,
         None => {
-            let (reader, back, nat, stop) =
-                (socket.clone(), local.clone(), nat.clone(), stop.clone());
+            let (reader, back, nat, stop, stats) =
+                (socket.clone(), local.clone(), nat.clone(), stop.clone(), stats.clone());
             std::thread::spawn(move || {
-                read_udp_replies(reader, back, nat, stop, nat_port, client)
+                read_udp_replies(reader, back, nat, stop, nat_port, client, stats)
             });
             socket
         }
@@ -1023,6 +1063,7 @@ fn bind_pending(
     nat: Arc<Nat>,
     stop: Arc<AtomicBool>,
     pending: Arc<PendingFlows>,
+    stats: Arc<Stats>,
 ) {
     let (socket, registration) = match bind_upstream_retrying(&tunnel, &own, &stop) {
         Ok(bound) => bound,
@@ -1032,6 +1073,7 @@ fn bind_pending(
             // went with it, or the log understates the loss by however
             // many arrived during the wait.
             let dropped = pending.abandon(nat_port);
+            stats.udp_unbound.fetch_add(dropped as u64, Ordering::Relaxed);
             stats_note(&format!(
                 "upstream bind failed for udp flow {nat_port} after {BIND_RETRY_FOR:?}: {e} \
                  ({dropped} datagram(s) held for it were dropped)"
@@ -1047,14 +1089,16 @@ fn bind_pending(
     let Some(origin) = nat.origin(Transport::Udp, nat_port) else {
         drop((socket, registration));
         let dropped = pending.abandon(nat_port);
+        stats.udp_unbound.fetch_add(dropped as u64, Ordering::Relaxed);
         stats_note(&format!(
             "udp flow {nat_port} was retired while its upstream socket was being bound \
              ({dropped} datagram(s) dropped)"
         ));
         return;
     };
-    let upstream =
-        install_upstream(nat_port, socket, registration, &upstreams, &local, &nat, &stop, origin.client);
+    let upstream = install_upstream(
+        nat_port, socket, registration, &upstreams, &local, &nat, &stop, origin.client, &stats,
+    );
 
     // Drained in a loop, not once: datagrams keep arriving while this
     // runs, and the flow does not stop waiting until a take finds
@@ -1067,6 +1111,7 @@ fn bind_pending(
         // against a drain that is never coming back.
         let Some(origin) = nat.origin(Transport::Udp, nat_port) else {
             let dropped = pending.abandon(nat_port) + batch.len();
+            stats.udp_unbound.fetch_add(dropped as u64, Ordering::Relaxed);
             stats_note(&format!(
                 "udp flow {nat_port} was retired while its held datagrams were being sent \
                  ({dropped} dropped)"
@@ -1075,7 +1120,7 @@ fn bind_pending(
         };
         let target = origin.upstream.unwrap_or_else(|| SocketAddrV4::new(origin.addr, origin.port));
         for datagram in batch {
-            let _ = upstream.send_to(&datagram, target);
+            send_upstream(&upstream, &datagram, target, &stats);
         }
     }
 }
@@ -1088,6 +1133,7 @@ fn bind_pending(
 /// Exits when the flow is retired -- the read timeout is what gives it
 /// the chance to notice, since a datagram that never comes would
 /// otherwise hold the thread forever.
+#[allow(clippy::too_many_arguments)]
 fn read_udp_replies(
     upstream: Arc<UdpSocket>,
     local: Arc<UdpSocket>,
@@ -1095,6 +1141,7 @@ fn read_udp_replies(
     stop: Arc<AtomicBool>,
     nat_port: u16,
     client: Ipv4Addr,
+    stats: Arc<Stats>,
 ) {
     let mut buffer = vec![0u8; 65_535];
     loop {
@@ -1102,7 +1149,20 @@ fn read_udp_replies(
             return;
         }
         let Ok((len, _)) = upstream.recv_from(&mut buffer) else { continue };
-        let _ = local.send_to(&buffer[..len], SocketAddrV4::new(client, nat_port));
+        // The mirror of `send_upstream`, and silent until now for the
+        // same reason. A reply that reaches the relay and does not reach
+        // the application is still counted `returned` by the redirect
+        // loop, because the loop only ever sees the packet carrying it
+        // home -- so this loss looked, from the counters, exactly like
+        // no loss at all.
+        let back = SocketAddrV4::new(client, nat_port);
+        if let Err(e) = local.send_to(&buffer[..len], back) {
+            stats.udp_reply_failed.fetch_add(1, Ordering::Relaxed);
+            static FAILED: Throttle = Throttle::new();
+            if FAILED.ready() {
+                stats_note(&format!("relay could not return a datagram to {back}: {e}"));
+            }
+        }
     }
 }
 
@@ -1122,6 +1182,13 @@ fn expire_flows(nat: Arc<Nat>, stop: Arc<AtomicBool>, upstreams: Arc<UdpUpstream
 mod tests {
     use super::*;
     use crate::split_tunnel::flows::Origin;
+
+    /// A counter table for a relay under test. Production shares one
+    /// with the redirect loop; a test that does not read the numbers
+    /// only needs somewhere for them to go.
+    fn counters() -> Arc<Stats> {
+        Arc::new(Stats::default())
+    }
 
     #[test]
     fn a_zero_interface_means_no_tunnel() {
@@ -1229,7 +1296,7 @@ mod tests {
     fn relays_bind_distinct_ephemeral_ports() {
         // The redirect filter is built from these, so they have to be
         // real and they have to differ.
-        let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()))
+        let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters())
             .expect("relays should bind");
         assert!(relays.tcp_port > 0);
         assert!(relays.udp_port > 0);
@@ -1377,7 +1444,7 @@ mod tests {
         let echo = udp_echo();
         let nat = Arc::new(Nat::new());
         let tunnel = Arc::new(TunnelInterface::default());
-        let relays = start(nat.clone(), tunnel.clone()).expect("relays should bind");
+        let relays = start(nat.clone(), tunnel.clone(), counters()).expect("relays should bind");
         let relay = SocketAddrV4::new(Ipv4Addr::LOCALHOST, relays.udp_port);
 
         // An established flow, bound while there is no tunnel at all --
@@ -1429,7 +1496,7 @@ mod tests {
         let nat = Arc::new(Nat::new());
         // Tentative from the outset: nothing can bind yet.
         let tunnel = Arc::new(TunnelInterface::new(1, UNBINDABLE));
-        let relays = start(nat.clone(), tunnel.clone()).expect("relays should bind");
+        let relays = start(nat.clone(), tunnel.clone(), counters()).expect("relays should bind");
         let relay = SocketAddrV4::new(Ipv4Addr::LOCALHOST, relays.udp_port);
 
         let (_, app) = udp_flow(&nat, echo);
@@ -1453,6 +1520,84 @@ mod tests {
             received.push(buffer[..len].to_vec());
         }
         assert_eq!(received, vec![b"one".to_vec(), b"two".to_vec(), b"six".to_vec()]);
+
+        relays.stop();
+    }
+
+    #[test]
+    fn a_datagram_the_relay_could_not_send_is_counted() {
+        // The loss point this used to have no name for. `send_to`'s
+        // result was discarded, so a datagram that never left the relay
+        // was still counted `redirected` by the loop that handed it
+        // over -- and the only trace was `returned` staying at zero,
+        // which is what a tunnel carrying nothing looks like too.
+        //
+        // 0.0.0.0:9 fails with WSAEADDRNOTAVAIL every time, so the
+        // failure is the test's premise rather than its hope.
+        let unsendable = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 9);
+        let nat = Arc::new(Nat::new());
+        let stats = counters();
+        let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), stats.clone())
+            .expect("relays should bind");
+        let relay = SocketAddrV4::new(Ipv4Addr::LOCALHOST, relays.udp_port);
+
+        let (_, app) = udp_flow(&nat, unsendable);
+        assert_eq!(stats.udp_send_failed.load(Ordering::Relaxed), 0);
+        app.send_to(b"nowhere", relay).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while stats.udp_send_failed.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            stats.udp_send_failed.load(Ordering::Relaxed),
+            1,
+            "a send the OS refused has to be visible somewhere"
+        );
+        // The relay carries on rather than tearing the flow down, which
+        // is the unchanged half of this: UDP has no retransmission to
+        // hook into and the application above has its own.
+        app.send_to(b"nowhere either", relay).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while stats.udp_send_failed.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stats.udp_send_failed.load(Ordering::Relaxed), 2, "the flow still serves");
+
+        relays.stop();
+    }
+
+    #[test]
+    fn a_flow_that_never_binds_reports_how_much_it_lost() {
+        // The other UDP loss point, and the one this change introduced:
+        // datagrams held for a flow whose upstream socket could not be
+        // bound before the retry ran out. The old code dropped a single
+        // datagram per failure and logged that; this holds them, so the
+        // count has to travel with the failure or the log understates
+        // the loss by however many arrived during the six seconds.
+        let echo = udp_echo();
+        let nat = Arc::new(Nat::new());
+        // Tentative forever: this bind is never going to succeed.
+        let tunnel = Arc::new(TunnelInterface::new(1, UNBINDABLE));
+        let stats = counters();
+        let relays = start(nat.clone(), tunnel, stats.clone()).expect("relays should bind");
+        let relay = SocketAddrV4::new(Ipv4Addr::LOCALHOST, relays.udp_port);
+
+        let (_, app) = udp_flow(&nat, echo);
+        for datagram in [b"one", b"two"] {
+            app.send_to(datagram, relay).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let deadline = Instant::now() + BIND_RETRY_FOR + Duration::from_secs(4);
+        while stats.udp_unbound.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            stats.udp_unbound.load(Ordering::Relaxed),
+            2,
+            "both held datagrams were lost, and both have to be counted"
+        );
 
         relays.stop();
     }
@@ -1526,7 +1671,7 @@ mod tests {
         // Nothing else can be done with it: the rewritten packet no
         // longer says where it was going. Carrying on regardless is how
         // a relay ends up connecting somewhere nobody asked for.
-        let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()))
+        let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters())
             .expect("relays should bind");
 
         let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, relays.tcp_port))
@@ -1558,8 +1703,8 @@ mod tests {
         });
 
         let nat = Arc::new(Nat::new());
-        let relays =
-            start(nat.clone(), Arc::new(TunnelInterface::default())).expect("relays should bind");
+        let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), counters())
+            .expect("relays should bind");
 
         // No tunnel is up, so the upstream socket is unpinned -- the
         // fail-open path, which is also the only one testable without a
