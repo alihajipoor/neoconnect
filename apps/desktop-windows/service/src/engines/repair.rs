@@ -62,8 +62,7 @@ use windows_sys::Win32::Foundation::{FWP_E_PROVIDER_NOT_FOUND, FWP_E_SUBLAYER_NO
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterCreateEnumHandle0, FwpmFilterDeleteById0,
     FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0, FwpmProviderDeleteByKey0,
-    FwpmSubLayerDeleteByKey0, FWPM_FILTER0, FWPM_FILTER_ENUM_TEMPLATE0,
-    FWP_FILTER_ENUM_FULLY_CONTAINED,
+    FwpmSubLayerDeleteByKey0, FWPM_FILTER0,
 };
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -395,10 +394,15 @@ fn step_firewall(found: &Survey, report: &mut RepairReport) {
 /// it was found.
 fn step_wfp(found: &Survey, report: &mut RepairReport) {
     let outcome = with_wfp_engine(|engine| {
-        let Some(ids) = our_filter_ids(engine) else {
-            return RepairOutcome::Unknown {
-                detail: "the filtering platform would not list filters under our provider".into(),
-            };
+        let ids = match our_filter_ids_detailed(engine) {
+            Ok(ids) => ids,
+            Err(why) => {
+                return RepairOutcome::Unknown {
+                    detail: format!(
+                        "the filtering platform would not list filters under our provider: {why}"
+                    ),
+                }
+            }
         };
         for id in &ids {
             // SAFETY: `engine` is a live handle from `with_wfp_engine`,
@@ -708,10 +712,14 @@ fn with_wfp_engine<T>(body: impl FnOnce(HANDLE) -> T) -> Option<T> {
     Some(result)
 }
 
-/// How many filters to ask for per enumeration call. Ours are ten at
-/// most, so one call answers in practice; the loop is there because the
-/// API is allowed to return fewer than asked.
-const FILTER_PAGE: u32 = 64;
+/// How many filters to ask for per enumeration call.
+///
+/// This walks every filter on the machine rather than a filtered subset
+/// (see [`our_filter_ids_detailed`] for why), and a stock Windows 11 has
+/// a few thousand, so the page is sized to make that a handful of calls
+/// rather than dozens. The loop is still required: the API is allowed to
+/// return fewer than asked.
+const FILTER_PAGE: u32 = 512;
 
 /// The ids of every filter carrying our provider key.
 ///
@@ -724,21 +732,43 @@ const FILTER_PAGE: u32 = 64;
 /// # Safety
 /// `engine` must be a live handle from [`with_wfp_engine`].
 fn our_filter_ids(engine: HANDLE) -> Option<Vec<u64>> {
-    let mut provider_key: GUID = ipv6_block::PROVIDER_KEY;
-    // SAFETY: zeroed is a valid template; a zero `layerKey` is how a
-    // by-value GUID expresses "every layer", and FULLY_CONTAINED is the
-    // enumeration type that permits it.
-    let mut template: FWPM_FILTER_ENUM_TEMPLATE0 = unsafe { std::mem::zeroed() };
-    template.providerKey = &mut provider_key;
-    template.enumType = FWP_FILTER_ENUM_FULLY_CONTAINED;
-    template.actionMask = u32::MAX;
+    our_filter_ids_detailed(engine).ok()
+}
 
+/// As [`our_filter_ids`], but keeps the error code.
+///
+/// The code matters: "the filtering platform would not list filters" is
+/// the same sentence whether the engine refused the template, refused the
+/// caller, or is not running, and on the rig it was reported without any
+/// way to tell those apart.
+///
+/// # Safety
+/// `engine` must be a live handle from [`with_wfp_engine`].
+fn our_filter_ids_detailed(engine: HANDLE) -> Result<Vec<u64>, String> {
+    // No template at all, and the provider comparison done here instead.
+    //
+    // The obvious version of this -- a template carrying only our
+    // providerKey, with a zeroed `layerKey` meaning "every layer" -- does
+    // not work, and fails in a way no amount of reading catches. Measured
+    // on the rig: `FwpmFilterCreateEnumHandle0` returns 0x80320004,
+    // FWP_E_LAYER_NOT_FOUND. `FWP_FILTER_ENUM_FULLY_CONTAINED` requires a
+    // real layer to be contained *in*, and a NULL GUID is not one. Every
+    // repair therefore reported this step as `Unknown` on a machine that
+    // demonstrably had eight of our filters installed -- `netsh wfp show
+    // filters` listed them in the same breath.
+    //
+    // Enumerating everything and comparing the provider ourselves is also
+    // the more honest sweep: it is not tied to the set of layers the
+    // *current* build installs at, and the objects this step exists to
+    // find were left by some *previous* one.
+    let ours: GUID = ipv6_block::PROVIDER_KEY;
     let mut enum_handle: HANDLE = std::ptr::null_mut();
-    // SAFETY: `engine` is live, the template is fully initialised, and
-    // `enum_handle` is a valid out-pointer.
-    let err = unsafe { FwpmFilterCreateEnumHandle0(engine, &template, &mut enum_handle) };
+    // SAFETY: `engine` is live; a null template is the documented way to
+    // ask for every filter, and `enum_handle` is a valid out-pointer.
+    let err =
+        unsafe { FwpmFilterCreateEnumHandle0(engine, std::ptr::null(), &mut enum_handle) };
     if err != 0 {
-        return None;
+        return Err(format!("FwpmFilterCreateEnumHandle0 returned {err:#010x}"));
     }
 
     let mut ids = Vec::new();
@@ -753,7 +783,7 @@ fn our_filter_ids(engine: HANDLE) -> Option<Vec<u64>> {
         if err != 0 {
             // SAFETY: `enum_handle` came from FwpmFilterCreateEnumHandle0.
             unsafe { FwpmFilterDestroyEnumHandle0(engine, enum_handle) };
-            return None;
+            return Err(format!("FwpmFilterEnum0 returned {err:#010x}"));
         }
         if returned == 0 || entries.is_null() {
             break;
@@ -766,6 +796,23 @@ fn our_filter_ids(engine: HANDLE) -> Option<Vec<u64>> {
                 continue;
             }
             // SAFETY: as above -- a non-null FWPM_FILTER0 from the API.
+            // `providerKey` is an optional pointer: null means the filter
+            // has no provider, which is most of the machine's filters and
+            // is never one of ours.
+            let key = unsafe { (*filter).providerKey };
+            if key.is_null() {
+                continue;
+            }
+            // SAFETY: non-null, and WFP owns it until FwpmFreeMemory0.
+            // Compared field by field: windows-sys' GUID is a plain repr(C)
+            // struct with no PartialEq, and its Data4 is a byte array.
+            let key = unsafe { *key };
+            if (key.data1, key.data2, key.data3, key.data4)
+                != (ours.data1, ours.data2, ours.data3, ours.data4)
+            {
+                continue;
+            }
+            // SAFETY: as above.
             ids.push(unsafe { (*filter).filterId });
         }
         // SAFETY: `entries` is the array WFP allocated for this call,
@@ -780,7 +827,7 @@ fn our_filter_ids(engine: HANDLE) -> Option<Vec<u64>> {
     // SAFETY: `enum_handle` came from FwpmFilterCreateEnumHandle0 and is
     // not used again.
     unsafe { FwpmFilterDestroyEnumHandle0(engine, enum_handle) };
-    Some(ids)
+    Ok(ids)
 }
 
 #[cfg(test)]
