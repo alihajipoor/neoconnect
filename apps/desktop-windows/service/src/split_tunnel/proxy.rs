@@ -434,6 +434,13 @@ pub fn probe(tunnel: &TunnelInterface) -> Result<(), String> {
     Err(format!("the tunnel did not carry a test connection ({last})"))
 }
 
+/// Deliberately does **not** disable Nagle, unlike every relayed
+/// connection. Nagle governs when queued application data is released,
+/// and this socket never writes a byte: it completes a handshake and is
+/// dropped. Setting the option here would cost a syscall inside the
+/// connect ladder -- where `PROBE_TIMEOUT` is deliberately short because
+/// a slow answer costs the customer as much as a wrong one -- and change
+/// nothing observable.
 fn connect_pinned(
     target: Ipv4Addr,
     port: u16,
@@ -594,12 +601,52 @@ fn accept_tcp(
     }
 }
 
+/// Turns Nagle off on both halves of a relayed connection.
+///
+/// Every relayed TCP byte crosses two sockets that this process owns,
+/// and both had Nagle enabled because that is the Windows default and
+/// nothing here ever said otherwise. Two Nagles in series is worse than
+/// one: a small write from the app waits at the app-facing socket for
+/// the previous segment to be acknowledged, is then handed to the
+/// upstream socket, and waits there again. Against a peer using delayed
+/// acknowledgement the wait is up to that peer's delayed-ACK timer --
+/// 200ms on Windows, 40ms on Linux -- and it lands on exactly the
+/// traffic that is all small writes: a game's realm connection, an
+/// interactive SSH session, a chat app's keepalives.
+///
+/// Nagle only ever helps a sender that emits many tiny writes and does
+/// not care when they arrive. A relay is not that sender: it never
+/// originates anything, it forwards what an application already chose
+/// to send, and coalescing here would be second-guessing a decision the
+/// application already made.
+///
+/// Set on both halves, not one. Turning it off only upstream still
+/// leaves the app-facing socket holding the replies coming back, which
+/// is the same stall in the other direction.
+///
+/// A failure is logged and not fatal. This is a latency option; refusing
+/// to carry the connection because it could not be set would turn a
+/// tuning problem into a broken connection, which is a far worse trade.
+fn disable_nagle(stream: &TcpStream, side: &str) {
+    if let Err(e) = stream.set_nodelay(true) {
+        note(&format!("could not disable Nagle on the {side} socket: {e}"));
+    }
+}
+
 /// Copies in both directions until either side closes.
 ///
 /// Two threads rather than one loop because either direction can block
 /// indefinitely, and a TLS handshake talks both ways before either side
 /// has finished saying anything.
 fn pump(client: TcpStream, upstream: TcpStream) {
+    // Here rather than at the accept and the connect because this is the
+    // one place both halves of a relayed connection are in scope
+    // together, and because it is the function that does the forwarding
+    // -- so a future path that reaches the copy loop some other way
+    // cannot arrive with Nagle still on.
+    disable_nagle(&client, "app-facing");
+    disable_nagle(&upstream, "upstream");
+
     let (mut client_read, mut upstream_write) = (client, upstream);
     let (Ok(mut client_write), Ok(mut upstream_read)) =
         (client_read.try_clone(), upstream_write.try_clone())
@@ -856,6 +903,60 @@ mod tests {
         let target = SocketAddr::from((Ipv4Addr::new(1, 1, 1, 1), 443));
         let result = socket.connect_timeout(&target.into(), Duration::from_secs(5));
         assert!(result.is_err(), "a pinned socket must not fall back to the normal route");
+    }
+
+    /// Opens a real connected TCP pair on loopback and hands back both
+    /// ends, so a test can give one end to production code and keep the
+    /// other to inspect.
+    fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    #[test]
+    fn both_halves_of_a_relayed_connection_have_nagle_disabled() {
+        // The sockets are inspected through clones rather than through
+        // the originals, because `pump` takes ownership of those. A
+        // cloned `TcpStream` is a duplicated handle onto the same
+        // socket, so `nodelay()` on the clone reads the option `pump`
+        // set on the original -- which is the point: this asserts on the
+        // production path, not on a helper called in isolation.
+        let (client, client_peer) = connected_pair();
+        let (upstream, upstream_peer) = connected_pair();
+        let client_view = client.try_clone().unwrap();
+        let upstream_view = upstream.try_clone().unwrap();
+
+        // Both start Nagled, which is the Windows default and the state
+        // this whole change is about. Asserted rather than assumed, so
+        // that a future platform where the default flips cannot turn
+        // this test green without the fix.
+        assert!(!client_view.nodelay().unwrap(), "the default is Nagle on");
+        assert!(!upstream_view.nodelay().unwrap(), "the default is Nagle on");
+
+        let pumping = std::thread::spawn(move || pump(client, upstream));
+
+        // Polled rather than read once: `pump` sets the options on its
+        // own thread, so a single read races the spawn. The deadline is
+        // what makes the negative case fail -- without the fix the
+        // options never become true and this runs out.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if client_view.nodelay().unwrap() && upstream_view.nodelay().unwrap() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(client_view.nodelay().unwrap(), "the app-facing socket is still Nagled");
+        assert!(upstream_view.nodelay().unwrap(), "the upstream socket is still Nagled");
+
+        // Closing both peers ends both copies, so `pump` returns and the
+        // test does not leak a thread.
+        drop(client_peer);
+        drop(upstream_peer);
+        pumping.join().unwrap();
     }
 
     #[test]
