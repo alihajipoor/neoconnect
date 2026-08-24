@@ -1,107 +1,269 @@
 # Neoxify website -- nginx server block.
 #
-# WHY THIS FILE EXISTS. The site ships a carefully written .htaccess:
-# security headers, a deny rule over data/, ErrorDocument 404, and the
-# /r/CODE voucher rewrite. neoxify.net is served by **nginx**, which
-# never reads .htaccess, so on the live host every one of those is
-# inert. Measured on 2026-08-14 against https://neoxify.net, not
-# inferred:
+# ============================================================================
+# READ THIS FIRST. THIS FILE IS NOT DEPLOYED AND THE SITE IS BROKEN WITHOUT IT.
+# ============================================================================
 #
-#   - `fetch('/account/')` response headers carry NO
-#     Content-Security-Policy, X-Frame-Options, X-Content-Type-Options,
-#     Referrer-Policy or Permissions-Policy. `server: nginx/1.24.0
-#     (Ubuntu)`.
-#   - `GET /r/ABCD2345` returns 200 and the marketing page, not a 302 to
-#     /account/?voucher=ABCD2345. The voucher short links resellers hand
-#     out do not work.
-#   - `GET /nonexistent-page-xyz` returns 200 and the home page, so
-#     404.php never runs and every mistyped URL is indexable.
+# The site ships a carefully written .htaccess: security headers, a deny
+# rule over data/, ErrorDocument 404, and the /r/CODE voucher rewrite.
+# neoxify.net is served by **nginx**, which never reads .htaccess, so on
+# the live host every one of those is inert.
+#
+# That was measured on 2026-08-14, this file was written, and it was
+# **still not deployed on 2026-08-24** -- re-measured against the live
+# site, with the response bodies and headers saved. What that costs today:
+#
+#   1. NO 404 HANDLER AT ALL. Thirteen probed unknown paths -- including
+#      /terms, /plans, /faq/ and /refund/ -- every one returned **200**
+#      with a byte-identical copy of the home page (36,161 bytes, same
+#      md5). Every nonexistent URL on this domain is a soft-404 duplicate
+#      of the home page. This is the single worst SEO defect the site has:
+#      it manufactures unlimited duplicate content and wastes the entire
+#      crawl budget of a domain that has very little authority to spend.
+#
+#   2. /sitemap.xml RETURNS THE HOME PAGE. Status 200, Content-Type
+#      text/html. Only /sitemap.php emits real XML. The conventional path
+#      every crawler tries first gets a marketing page.
+#
+#   3. NO SECURITY HEADERS. The live response carries no
+#      Content-Security-Policy, X-Frame-Options, X-Content-Type-Options,
+#      Referrer-Policy or Permissions-Policy.
+#
+#   4. NO COMPRESSION OR CACHING HEADERS, and the site is served over
+#      HTTP/1.1. For an audience on slow mobile connections in Iran this
+#      is the most expensive of the four in practice.
+#
+#   5. VOUCHER SHORT LINKS DO NOT WORK. GET /r/ABCD2345 returns the
+#      marketing page rather than redirecting to /account/?voucher=... So
+#      the links resellers hand out silently do nothing.
+#
+#   6. www.neoxify.net SERVES A COMPLETE DUPLICATE SITE on 200, and
+#      http://www. redirects to https://www. rather than to the apex. The
+#      only thing keeping the duplicate out of the index is an in-body
+#      canonical tag, which is a hint rather than an instruction.
 #
 # The .htaccess stays: it is correct, and it is what a shared Apache or
-# LiteSpeed host would use. This is the same posture for the host the
-# site actually runs on.
+# LiteSpeed host would use. This is the same posture for the host the site
+# actually runs on.
 #
-# Not deployed by anything in this repo -- copy it onto the web host by
-# hand, adjust the paths and the php-fpm socket, `nginx -t`, reload.
+# TO DEPLOY: copy onto the web host, fix the two paths marked CHECK below,
+# `nginx -t`, then `systemctl reload nginx`. Nothing in this repo deploys
+# it -- that is deliberate, but it is also why it has not happened.
+
+# ---------------------------------------------------------------------
+# 1. Canonical host: everything 301s to https://neoxify.net
+# ---------------------------------------------------------------------
+# One redirect, permanent, straight to the final URL. The live site
+# currently sends http://www. -> https://www. and then stops, leaving two
+# fully working hosts. Chaining redirects also wastes a round trip on
+# exactly the connections that can least afford one.
 
 server {
-    listen 443 ssl http2;
+    listen 80;
+    listen [::]:80;
     server_name neoxify.net www.neoxify.net;
 
+    # ACME renewals must not be redirected or certbot's HTTP-01 challenge
+    # fails and the certificate quietly stops renewing.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://neoxify.net$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;                      # nginx >= 1.25.1 syntax. On 1.24 (this
+                                   # host) use `listen 443 ssl http2;`
+                                   # above and delete this line.
+    server_name www.neoxify.net;
+
+    # CHECK: leave whatever certbot already wrote for this host. The cert
+    # must cover www as well as the apex, or this block cannot answer.
+    # ssl_certificate     /etc/letsencrypt/live/neoxify.net/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/neoxify.net/privkey.pem;
+
+    return 301 https://neoxify.net$request_uri;
+}
+
+# ---------------------------------------------------------------------
+# 2. The site
+# ---------------------------------------------------------------------
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;                      # see the note above for nginx 1.24
+    server_name neoxify.net;
+
+    # CHECK: document root of the unzipped site.
     root /var/www/neoxify.net;
     index index.php;
 
-    # ssl_certificate / ssl_certificate_key: leave whatever certbot
-    # already wrote for this host. Nothing here changes TLS.
+    # CHECK: ssl_certificate / ssl_certificate_key -- leave certbot's.
+
+    charset utf-8;
 
     # ------------------------------------------------------------------
-    # Security headers -- the .htaccess set, verbatim
+    # Security headers
     # ------------------------------------------------------------------
+    # nginx REPLACES inherited add_header directives in any block that
+    # adds one of its own. Every location below that sets a header must
+    # therefore repeat the whole set, or silently serve without them.
+    # That is why the asset block further down repeats these.
+
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()" always;
 
+    # HSTS. Two years, subdomains included.
+    #
+    # Deliberately WITHOUT `preload`. Preloading is close to irreversible
+    # -- removal takes months to reach shipped browsers -- and this domain
+    # may need to do awkward things at short notice if it is blocked.
+    # includeSubDomains is safe here because every neoxify.net name is
+    # HTTPS already; confirm that is still true before reloading.
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+
     # connect-src is wider than 'self' on purpose: /account/ is the
     # customer portal and every call it makes goes to another origin --
     # connect.neoxify.site first, then the node mirrors on their VPN
     # ports, then mirrors derived at runtime from the customer's own
-    # credentials, which cannot be enumerated here. All are
-    # neoxify.site names on nonstandard ports by design. See the same
-    # header in .htaccess for the full reasoning.
+    # credentials, which cannot be enumerated here. All are neoxify.site
+    # names on nonstandard ports by design. See the same header in
+    # .htaccess for the full reasoning.
+    #
+    # No 'unsafe-inline' anywhere. The JSON-LD block in the page head is
+    # NOT affected: a <script> whose type is not a JavaScript MIME type is
+    # never prepared for execution, so CSP does not apply to it.
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'" always;
 
-    # nginx REPLACES inherited add_header directives in any block that
-    # adds one of its own. Every location below that needs headers must
-    # therefore repeat them, or silently serve without.
+    # ------------------------------------------------------------------
+    # Compression
+    # ------------------------------------------------------------------
+    # The single biggest win available here. The home page is ~36 KB of
+    # HTML and the stylesheet is ~75 KB; both are highly compressible text
+    # and both are currently served raw. On a slow mobile connection in
+    # Iran that is the difference between a page that appears and a page
+    # someone gives up on.
+    #
+    # gzip_types deliberately does not list text/html -- nginx always
+    # compresses that and listing it emits a duplicate-MIME warning.
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 6;
+    gzip_min_length 512;
+    gzip_proxied any;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        application/xml
+        application/xml+rss
+        application/json
+        application/ld+json
+        application/javascript
+        image/svg+xml;
+
+    # If ngx_brotli is available, this is better again for text and costs
+    # nothing at runtime for pre-compressed static files. Safe to leave
+    # commented out -- gzip above already covers every client.
+    # brotli on;
+    # brotli_comp_level 5;
+    # brotli_types text/plain text/css application/json application/javascript application/ld+json image/svg+xml application/xml;
 
     # ------------------------------------------------------------------
-    # Form submissions and the CSRF secret
+    # Not pages
     # ------------------------------------------------------------------
     # Second layer only: every file written into data/ begins with
-    # `<?php exit; ?>` (NX_FILE_GUARD in inc/security.php). This is the
-    # first layer that .htaccess was supposed to be providing and was
-    # not.
+    # `<?php exit; ?>` (NX_FILE_GUARD in inc/security.php), and every file
+    # under inc/ begins with `defined('NX') || exit;`. This is the first
+    # layer that .htaccess was supposed to provide and does not.
     location ^~ /data/ {
         deny all;
         return 404;
     }
 
-    # Nothing under inc/ is a page. Its files all begin with
-    # `defined('NX') || exit;`, which is why a direct request currently
-    # returns 200 with an empty body rather than source -- but relying
-    # on that in every future file is a rule someone eventually breaks.
     location ^~ /inc/ {
         deny all;
         return 404;
     }
 
+    location ^~ /scripts/ {
+        deny all;
+        return 404;
+    }
+
+    # Dotfiles: .htaccess, .gitignore, and anything else that should never
+    # be readable over HTTP.
     location ~ /\. {
         deny all;
         return 404;
     }
 
     # ------------------------------------------------------------------
-    # Voucher short links: /r/ABCD2345 -> r/index.php?c=ABCD2345
+    # Static assets
     # ------------------------------------------------------------------
-    # The code alphabet is A-Z and 2-9; r/index.php re-validates against
-    # ^[A-Z0-9]{1,32}$ and redirects to /account/?voucher=... Without
-    # this rule the link lands on the home page with nothing prefilled,
-    # which is what the live site does today.
-    location ~ "^/r/([A-Za-z0-9-]{1,32})/?$" {
-        rewrite ^ /r/index.php?c=$1 last;
+    # Safe to cache for a year because every asset URL carries a ?v=
+    # stamp derived from the file's own mtime (nx_asset() in
+    # inc/bootstrap.php), so a redeploy changes the URL and no visitor can
+    # be stuck on a stale stylesheet.
+    #
+    # The font is the exception that proves the rule: it is referenced
+    # WITHOUT a stamp, deliberately, so that the preload in the page head
+    # and the @font-face in the stylesheet request byte-identical URLs and
+    # the browser does not download it twice. immutable is still correct --
+    # if the typeface is ever replaced, replace the filename.
+    location ~* \.(css|js|woff2|svg|png|jpg|jpeg|webp|avif|ico)$ {
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+
+        # Repeated because this block sets a header of its own -- see the
+        # note at the top of the security header section.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+
+        access_log off;
+        try_files $uri =404;
     }
 
+    # HTML is generated per request and depends on the visitor's language
+    # cookie. It must never be cached by a shared proxy.
+    location ~* \.php$ {
+        add_header Cache-Control "no-cache, must-revalidate" always;
+    }
+
+    # ------------------------------------------------------------------
+    # Rewrites
+    # ------------------------------------------------------------------
+
+    # Search engines look for /sitemap.xml by convention. Without this the
+    # request falls through to the try_files below and lands on the home
+    # page -- which is exactly what the live site does today.
     location = /sitemap.xml {
         rewrite ^ /sitemap.php last;
+    }
+
+    # Voucher short links: /r/ABCD2345 -> r/index.php?c=ABCD2345
+    # The code alphabet is A-Z and 2-9; r/index.php re-validates against
+    # ^[A-Z0-9]{1,32}$ and redirects to /account/?voucher=...
+    location ~ "^/r/([A-Za-z0-9-]{1,32})/?$" {
+        rewrite ^ /r/index.php?c=$1 last;
     }
 
     # ------------------------------------------------------------------
     # Pages
     # ------------------------------------------------------------------
     # A missing page must be a real 404 rendered by 404.php, not a 200
-    # showing the home page -- which is what happens now, and puts every
-    # mistyped URL in the index.
+    # showing the home page. Without the =404 on try_files, nginx falls
+    # back to index.php for everything and every mistyped URL becomes an
+    # indexable duplicate of the home page.
     error_page 404 /404.php;
 
     location / {
@@ -116,6 +278,7 @@ server {
         # rewrite at all -- r/index.php reads it as a fallback.
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         fastcgi_param PATH_INFO $fastcgi_path_info;
+        # CHECK: the php-fpm socket path for the installed PHP version.
         fastcgi_pass unix:/run/php/php-fpm.sock;
     }
 }

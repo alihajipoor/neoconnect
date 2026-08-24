@@ -7,6 +7,7 @@
 defined('NX') || exit;
 
 $nx_telegram = trim((string) nx_cfg('telegram_url', ''));
+$nx_portal_url = trim((string) nx_cfg('customer_portal_url', ''));
 ?>
 </main>
 
@@ -22,21 +23,37 @@ $nx_telegram = trim((string) nx_cfg('telegram_url', ''));
         <p><?php echo nx_e('footer.note'); ?></p>
       </div>
 
+      <?php
+      /* Four columns now rather than three, because Features, Pricing and
+         the FAQ became real pages and a footer is where a crawler picks up
+         the ones the top bar could not fit. Every internal link on the site
+         is reachable from here. */
+      ?>
       <div>
         <h4><?php echo nx_e('footer.product'); ?></h4>
         <ul>
+          <li><a href="<?php echo nx_esc(nx_url('features')); ?>"><?php echo nx_e('nav.features'); ?></a></li>
+          <li><a href="<?php echo nx_esc(nx_url('pricing')); ?>"><?php echo nx_e('nav.pricing'); ?></a></li>
           <li><a href="<?php echo nx_esc(nx_url('download')); ?>"><?php echo nx_e('nav.download'); ?></a></li>
-          <li><a href="<?php echo nx_esc(nx_url('home')); ?>#pricing"><?php echo nx_e('nav.pricing'); ?></a></li>
-          <li><a href="<?php echo nx_esc(nx_url('home')); ?>#features"><?php echo nx_e('nav.features'); ?></a></li>
+        </ul>
+      </div>
+
+      <div>
+        <h4><?php echo nx_e('footer.resources'); ?></h4>
+        <ul>
+          <li><a href="<?php echo nx_esc(nx_url('faq')); ?>"><?php echo nx_e('nav.faq'); ?></a></li>
+          <li><a href="<?php echo nx_esc(nx_url('contact')); ?>"><?php echo nx_e('nav.contact'); ?></a></li>
+          <li><a href="<?php echo nx_esc(nx_url('reseller')); ?>"><?php echo nx_e('nav.reseller'); ?></a></li>
         </ul>
       </div>
 
       <div>
         <h4><?php echo nx_e('footer.company'); ?></h4>
         <ul>
-          <li><a href="<?php echo nx_esc(nx_url('reseller')); ?>"><?php echo nx_e('nav.reseller'); ?></a></li>
-          <li><a href="<?php echo nx_esc(nx_url('contact')); ?>"><?php echo nx_e('nav.contact'); ?></a></li>
           <li><a href="<?php echo nx_esc(nx_url('privacy')); ?>"><?php echo nx_e('nav.privacy'); ?></a></li>
+          <?php if ($nx_portal_url !== ''): ?>
+            <li><a href="<?php echo nx_esc($nx_portal_url); ?>"><?php echo nx_e('nav.signin'); ?></a></li>
+          <?php endif; ?>
           <?php if ($nx_telegram !== ''): ?>
             <li><a href="<?php echo nx_esc($nx_telegram); ?>" rel="noopener">Telegram</a></li>
           <?php endif; ?>

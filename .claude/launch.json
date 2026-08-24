@@ -2,17 +2,14 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "web-portal",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["vite", "preview", "--port", "4173", "--strictPort"],
-      "cwd": "apps/web-portal",
-      "port": 4173
-    },
-    {
-      "name": "mobile",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--dir", "apps/mobile", "dev"],
-      "port": 1420
+      "name": "website",
+      "runtimeExecutable": "C:/Users/aliha/AppData/Local/Microsoft/WinGet/Packages/PHP.PHP.8.2_Microsoft.Winget.Source_8wekyb3d8bbwe/php.exe",
+      "runtimeArgs": [
+        "-S", "127.0.0.1:8791",
+        "-t", "C:/nxweb/website",
+        "C:/Users/aliha/AppData/Local/Temp/claude/C--Users-aliha-Desktop-neoxify-hub/4c412f71-0823-42f8-863e-af8f7f90c2c8/scratchpad/router.php"
+      ],
+      "port": 8791
     }
   ]
 }

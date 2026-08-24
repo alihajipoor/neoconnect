@@ -2,22 +2,38 @@
 /**
  * Home page template, shared by /index.php and /fa/index.php.
  *
- * Everything visible here comes from inc/lang/*.php, inc/content/plans.php
- * and inc/content/faq.php -- no copy is hardcoded in this file, so the
- * Persian page is a genuine translation rather than a second layout.
+ * Rebuilt 2026-08 to be wide rather than narrow, and to answer the
+ * questions a VPN buyer actually arrives with. The order below is
+ * deliberate and worth keeping:
+ *
+ *   hero -> what it is
+ *   stats -> is it substantial (counted, never typed)
+ *   methods -> the one genuinely distinctive thing, named
+ *   locations -> where does my traffic come out
+ *   no-config -> why this is not the config link you usually buy
+ *   local sites -> the problem people in Iran actually search for
+ *   security -> what "encrypted" honestly means
+ *   trust -> what we will and will not claim
+ *   pricing -> what it costs
+ *   faq -> the objections
+ *   cta
+ *
+ * The reference site the design borrows from has no pricing, no FAQ and no
+ * comparison anywhere -- which is fine for request-based B2B and would be
+ * fatal here. The visual language is borrowed; the content model is not.
+ *
+ * Everything visible comes from inc/lang/*.php and the content files, so
+ * the Persian page is a genuine translation rather than a second layout.
  */
 
 defined('NX') || exit;
 
 $nx_plans = nx_content('plans');
-$nx_faq = nx_content('faq');
 $nx_has_windows = nx_windows_available();
 
 require NX_INC . '/partials/head.php';
 
-// Above the hero, in the flow. Home page only: it never covers the contact or
-// reseller form, because it is not on those pages and never covers anything
-// anywhere.
+// Above the hero, in the flow. Home page only.
 require NX_INC . '/partials/announcement.php';
 ?>
 
@@ -40,7 +56,7 @@ require NX_INC . '/partials/announcement.php';
               ? nx_e('home.hero.cta_primary')
               : nx_e('home.hero.cta_primary_soon'); ?>
         </a>
-        <a class="btn btn--ghost btn--lg" href="#pricing">
+        <a class="btn btn--ghost btn--lg" href="<?php echo nx_esc(nx_url('pricing')); ?>">
           <?php echo nx_e('home.hero.cta_secondary'); ?>
         </a>
       </div>
@@ -56,11 +72,13 @@ require NX_INC . '/partials/announcement.php';
     </div>
 
     <!--
-      The app, drawn in CSS from the real desktop UI. The macOS window and
-      the phone are badged "Soon" on purpose: those clients do not exist yet
-      and the download page says so, so the hero must not suggest otherwise.
+      The app, drawn in CSS from the real desktop UI. No screenshot exists
+      and none is faked. The macOS window and the phone were both badged
+      "Soon" here; the phone no longer is, because Android shipped -- the
+      macOS frame keeps its badge because that client genuinely does not
+      exist.
 
-      One text alternative on the wrapper, everything inside aria-hidden --
+      One text alternative on the wrapper, everything inside aria-hidden:
       it is an illustration, and reading out two dozen mock UI labels would
       help nobody.
     -->
@@ -85,13 +103,9 @@ require NX_INC . '/partials/announcement.php';
         <div class="app">
           <div class="app__head">
             <span class="app__brand">
-              <?php /* Mirrors the app's own mark. Update this if the app's
-                       logo ever diverges from the site's. */ ?>
               <span class="app__mark"><?php echo nx_logo_mark(); ?></span>
               <?php echo nx_e('brand.name'); ?>
             </span>
-            <?php /* Two control pills, matching the settings + sign-out pair
-                     the real Dashboard header now carries. */ ?>
             <span class="app__head-actions" aria-hidden="true"><i></i><i></i></span>
           </div>
 
@@ -121,84 +135,112 @@ require NX_INC . '/partials/announcement.php';
         <div class="phone__screen">
           <div class="app__orb app__orb--sm"><?php echo nx_e('home.mockup.connected'); ?></div>
         </div>
-        <span class="device__soon"><?php echo nx_e('home.mockup.soon'); ?></span>
       </div>
 
     </div>
   </div>
 </section>
 
-<!-- ======================== Assurance strip ===================== -->
-<div class="assurance">
-  <div class="container assurance__inner">
-    <?php
-    $nx_assurances = array(
-        'encrypted' => 'lock',
-        'stable'    => 'activity',
-        'noconfig'  => 'file-off',
-        'switch'    => 'map-pin',
-    );
-    foreach ($nx_assurances as $nx_key => $nx_glyph): ?>
-      <span class="assurance__item">
-        <?php echo nx_icon($nx_glyph); ?>
-        <?php echo nx_e('home.assure.' . $nx_key); ?>
-      </span>
-    <?php endforeach; ?>
-  </div>
-</div>
-
-<!-- ========================== Features ========================== -->
-<section class="section" id="features">
+<!-- ========================== Stat strip ======================== -->
+<section class="section section--tight u-flush-top">
   <div class="container">
-    <div class="section-head">
-      <span class="eyebrow"><?php echo nx_e('home.features.eyebrow'); ?></span>
-      <h2><?php echo nx_e('home.features.title'); ?></h2>
-    </div>
-
-    <div class="grid grid--3">
-      <?php
-      // Three, deliberately. Nine cards read as a specification sheet and
-      // nobody finishes them; the three below are the questions a buyer
-      // actually has -- is it private, will it survive my network, and what
-      // control do I get.
-      //
-      // The strings for the others (access, locations, hotupdate, updates,
-      // support, usage) are still in inc/lang/*.php, so swapping one in is a
-      // one-line change here rather than a rewrite. Several are already said
-      // elsewhere anyway: self-updating on the download page, location
-      // switching and stability in the assurance strip above.
-      $nx_features = array(
-          'encryption' => 'lock',
-          'stealth'    => 'shield',
-          'custom'     => 'layers',
-      );
-      foreach ($nx_features as $nx_key => $nx_glyph): ?>
-        <article class="card reveal">
-          <div class="card__icon"><?php echo nx_icon($nx_glyph); ?></div>
-          <h3><?php echo nx_e('home.features.' . $nx_key . '.title'); ?></h3>
-          <p><?php echo nx_e('home.features.' . $nx_key . '.body'); ?></p>
-        </article>
-      <?php endforeach; ?>
+    <?php
+    /* Counted from the data files at render time. If a node is added or a
+       protocol is dropped, these move by themselves -- which is the entire
+       reason they are not typed into a translation string. */
+    ?>
+    <div class="stat-row reveal">
+      <div class="stat">
+        <span class="stat__value"><?php echo nx_num(nx_protocol_count()); ?></span>
+        <span class="stat__label"><?php echo nx_e('home.stats.protocols'); ?></span>
+      </div>
+      <div class="stat">
+        <span class="stat__value"><?php echo nx_num(nx_location_count()); ?></span>
+        <span class="stat__label"><?php echo nx_e('home.stats.locations'); ?></span>
+      </div>
+      <div class="stat">
+        <span class="stat__value"><?php echo nx_e('home.stats.platforms_value'); ?></span>
+        <span class="stat__label"><?php echo nx_e('home.stats.platforms'); ?></span>
+      </div>
     </div>
   </div>
 </section>
 
-<!-- ========================== How it works ====================== -->
-<section class="section section--tight">
-  <div class="container">
-    <div class="section-head section-head--center">
-      <span class="eyebrow"><?php echo nx_e('home.steps.eyebrow'); ?></span>
-      <h2><?php echo nx_e('home.steps.title'); ?></h2>
+<!-- ====================== Connection methods ==================== -->
+<section class="section section--band" id="methods">
+  <div class="container container--wide">
+    <div class="section-head">
+      <span class="eyebrow"><?php echo nx_e('home.protocols.eyebrow'); ?></span>
+      <h2><?php echo nx_e('home.protocols.title'); ?></h2>
+      <p><?php echo nx_e('home.protocols.body'); ?></p>
     </div>
 
-    <div class="grid grid--3 steps-grid">
-      <?php for ($nx_i = 1; $nx_i <= 3; $nx_i++): ?>
-        <div class="step reveal">
-          <div class="step__num"><?php echo $nx_i; ?></div>
-          <h3><?php echo nx_e('home.steps.' . $nx_i . '.title'); ?></h3>
-          <p><?php echo nx_e('home.steps.' . $nx_i . '.body'); ?></p>
+    <div class="reveal">
+      <?php require NX_INC . '/partials/protocol-table.php'; ?>
+    </div>
+
+    <a class="section-link" href="<?php echo nx_esc(nx_url('features')); ?>#protocols">
+      <?php echo nx_e('home.protocols.link'); ?>
+      <?php echo nx_icon('arrow-right'); ?>
+    </a>
+  </div>
+</section>
+
+<!-- ========================== Locations ========================= -->
+<section class="section" id="locations">
+  <div class="container container--wide">
+    <div class="section-head">
+      <span class="eyebrow"><?php echo nx_e('home.locations.eyebrow'); ?></span>
+      <h2><?php echo nx_e('home.locations.title'); ?></h2>
+      <p><?php echo nx_e('home.locations.body'); ?></p>
+    </div>
+
+    <div class="reveal">
+      <?php require NX_INC . '/partials/locations-grid.php'; ?>
+    </div>
+
+    <div class="callout callout--info u-mt-lg">
+      <?php echo nx_icon('route'); ?>
+      <div>
+        <p><?php echo nx_e('home.locations.relay_note'); ?></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== No config files ======================== -->
+<section class="section section--band">
+  <div class="container">
+    <div class="split">
+      <div class="split__body reveal">
+        <span class="eyebrow"><?php echo nx_e('home.config.eyebrow'); ?></span>
+        <h2><?php echo nx_e('home.config.title'); ?></h2>
+        <p><?php echo nx_e('home.config.body'); ?></p>
+
+        <ul class="checklist">
+          <?php foreach (array('point1', 'point2', 'point3') as $nx_p): ?>
+            <li>
+              <?php echo nx_icon('check'); ?>
+              <span><?php echo nx_e('home.config.' . $nx_p); ?></span>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+      </div>
+
+      <div class="split__media reveal">
+        <div class="bento">
+          <div class="bento__cell bento__cell--wide">
+            <span class="bento__icon"><?php echo nx_icon('layers'); ?></span>
+            <h3><?php echo nx_e('features.split.example.bank.title'); ?></h3>
+            <p><?php echo nx_e('features.split.example.bank.body'); ?></p>
+          </div>
+          <div class="bento__cell">
+            <span class="bento__icon"><?php echo nx_icon('refresh'); ?></span>
+            <h3><?php echo nx_e('features.usage.title'); ?></h3>
+            <p><?php echo nx_e('features.usage.body'); ?></p>
+          </div>
         </div>
-      <?php endfor; ?>
+      </div>
     </div>
   </div>
 </section>
@@ -262,6 +304,42 @@ require NX_INC . '/partials/announcement.php';
   </div>
 </section>
 
+<!-- ============================ Trust =========================== -->
+<?php
+/* The section that would normally hold invented badges: "audited",
+   "no logs", "10 million users". None of those are true here, so this
+   states what IS true instead, including the unflattering parts. Being
+   the VPN that does not overclaim is a real position, and it is the only
+   one this product can currently defend. Do not add a trust badge to this
+   section that cannot be pointed at. */
+?>
+<section class="section section--band section--wash" id="trust">
+  <div class="container container--wide">
+    <div class="section-head section-head--center">
+      <span class="eyebrow"><?php echo nx_e('home.trust.eyebrow'); ?></span>
+      <h2><?php echo nx_e('home.trust.title'); ?></h2>
+      <p><?php echo nx_e('home.trust.body'); ?></p>
+    </div>
+
+    <div class="grid grid--4">
+      <?php
+      $nx_trust = array(
+          'state'  => 'shield-check',
+          'logs'   => 'file-off',
+          'beta'   => 'activity',
+          'honest' => 'route',
+      );
+      foreach ($nx_trust as $nx_key => $nx_glyph): ?>
+        <article class="pillar reveal">
+          <span class="pillar__icon"><?php echo nx_icon($nx_glyph); ?></span>
+          <h3><?php echo nx_e('home.trust.' . $nx_key . '.title'); ?></h3>
+          <p><?php echo nx_e('home.trust.' . $nx_key . '.body'); ?></p>
+        </article>
+      <?php endforeach; ?>
+    </div>
+  </div>
+</section>
+
 <!-- =========================== Pricing ========================== -->
 <section class="section" id="pricing">
   <div class="container">
@@ -298,8 +376,6 @@ require NX_INC . '/partials/announcement.php';
               <li>
                 <?php echo nx_icon('check'); ?>
                 <span><?php
-                  // A null cap means an unlimited plan, matching the backend's
-                  // nullable dataCapBytes -- not a missing value.
                   if (!isset($nx_plan['data_gb']) || $nx_plan['data_gb'] === null) {
                       echo nx_e('home.pricing.data_unlimited');
                   } else {
@@ -312,15 +388,7 @@ require NX_INC . '/partials/announcement.php';
                 ?></span>
               </li>
 
-              <?php
-              /* Three distinct cases, which empty() cannot tell apart:
-                 the key absent (say nothing), the key present but null
-                 (no device limit -- mirrors the backend's nullable
-                 maxConcurrentConnections), and a real number.
-                 The previous `!empty()` treated null as "say nothing", so
-                 the unlimited-devices plan advertised no device line at
-                 all -- and a count of 1 rendered as "1 devices". */
-              if (array_key_exists('connections', $nx_plan)):
+              <?php if (array_key_exists('connections', $nx_plan)):
                   $nx_conn = $nx_plan['connections'];
                   if ($nx_conn === null) {
                       $nx_conn_text = nx_e('home.pricing.connections_unlimited');
@@ -338,39 +406,10 @@ require NX_INC . '/partials/announcement.php';
               <?php endif; ?>
 
               <?php
-              // Speed is a throttle in the panel, not a headline number, and
-              // it is optional per plan -- so this line appears only when a
-              // cap is genuinely configured. See inc/content/plans.php.
-              $nx_down = !empty($nx_plan['down_mbps']) ? (int) $nx_plan['down_mbps'] : 0;
-              $nx_up = !empty($nx_plan['up_mbps']) ? (int) $nx_plan['up_mbps'] : 0;
-              if ($nx_down || $nx_up): ?>
-                <li>
-                  <?php echo nx_icon('check'); ?>
-                  <span><?php
-                    if ($nx_down && $nx_up) {
-                        echo nx_e('home.pricing.speed_both',
-                            array('down' => $nx_down, 'up' => $nx_up));
-                    } elseif ($nx_down) {
-                        echo nx_e('home.pricing.speed_down', array('down' => $nx_down));
-                    } else {
-                        echo nx_e('home.pricing.speed_up', array('up' => $nx_up));
-                    }
-                  ?></span>
-                </li>
-              <?php endif; ?>
-
-              <?php
-              /* Perks are per plan, with the standard set as the default.
-                 They used to be one hardcoded list for every card, which
-                 made the relay-only plan advertise "Every connection
-                 option included" and "Every server location" -- both the
-                 opposite of what it is. A plan can now state its own; see
-                 'perks' in inc/content/plans.php. */
               $nx_perks = isset($nx_plan['perks']) && is_array($nx_plan['perks'])
                   ? $nx_plan['perks']
                   : array('all_modes', 'all_locations', 'relay_routes', 'support');
-              ?>
-              <?php foreach ($nx_perks as $nx_perk): ?>
+              foreach ($nx_perks as $nx_perk): ?>
                 <li>
                   <?php echo nx_icon('check'); ?>
                   <span><?php echo nx_e('home.pricing.' . $nx_perk); ?></span>
@@ -379,24 +418,11 @@ require NX_INC . '/partials/announcement.php';
             </ul>
 
             <?php if (!empty($nx_plan['coming_soon'])): ?>
-              <?php
-              /* A plan we cannot deliver yet is shown but not sold. A
-                 disabled button rather than a link, and a <button> rather
-                 than a styled <a>, so that keyboard and screen-reader
-                 users get the same "not available" that sighted users
-                 get instead of following a link to a purchase that would
-                 fail. */
-              ?>
               <button class="btn btn--ghost btn--block" type="button" disabled
                       aria-disabled="true">
                 <?php echo nx_e('home.pricing.coming_soon'); ?>
               </button>
             <?php else: ?>
-              <?php
-              /* Goes to the customer area with this plan preselected, and
-                 only falls back to the download page when no portal is
-                 configured. See nx_buy_url(). */
-              ?>
               <a class="btn <?php echo !empty($nx_plan['highlight']) ? 'btn--primary' : 'btn--ghost'; ?> btn--block"
                  href="<?php echo nx_esc(nx_buy_url(isset($nx_plan['id']) ? $nx_plan['id'] : '')); ?>">
                 <?php echo nx_e('home.pricing.cta'); ?>
@@ -414,13 +440,18 @@ require NX_INC . '/partials/announcement.php';
       </p>
     <?php endif; ?>
 
-    <p class="pricing-note"><?php echo nx_e('home.pricing.note'); ?></p>
+    <p class="u-center">
+      <a class="section-link" href="<?php echo nx_esc(nx_url('pricing')); ?>">
+        <?php echo nx_e('home.pricing.link'); ?>
+        <?php echo nx_icon('arrow-right'); ?>
+      </a>
+    </p>
   </div>
 </section>
 
 <!-- ============================= FAQ ============================ -->
 <section class="section section--tight">
-  <div class="container">
+  <div class="container container--prose">
     <div class="section-head section-head--center">
       <span class="eyebrow"><?php echo nx_e('home.faq.eyebrow'); ?></span>
       <h2><?php echo nx_e('home.faq.title'); ?></h2>
@@ -428,29 +459,23 @@ require NX_INC . '/partials/announcement.php';
 
     <div class="faq">
       <?php
-      // Entries can declare a requirement so the site never advertises
-      // something that is switched off in the panel -- see inc/content/faq.php.
-      $nx_switches = array(
-          'free_trial' => nx_free_trial_enabled(),
-          'referrals'  => nx_referrals_enabled(),
-      );
-      foreach ($nx_faq as $nx_item):
-        if (isset($nx_item['requires'])) {
-            $nx_req = $nx_item['requires'];
-            // An unknown requirement hides the entry rather than showing it:
-            // failing closed is the safe direction when the claim might not
-            // be true.
-            if (empty($nx_switches[$nx_req])) {
-                continue;
-            }
-        }
-        ?>
+      /* Five here, the rest on the FAQ page. The full list used to be
+         inline, which made the home page long and left the FAQ page with
+         nothing exclusive to offer a crawler. */
+      foreach (array_slice(nx_visible_faq(), 0, 5) as $nx_item): ?>
         <details>
           <summary><?php echo nx_esc(nx_pick($nx_item['q'])); ?></summary>
           <div class="faq__answer"><?php echo nx_esc(nx_pick($nx_item['a'])); ?></div>
         </details>
       <?php endforeach; ?>
     </div>
+
+    <p class="u-center u-mt-lg">
+      <a class="section-link" href="<?php echo nx_esc(nx_url('faq')); ?>">
+        <?php echo nx_e('home.faq.link'); ?>
+        <?php echo nx_icon('arrow-right'); ?>
+      </a>
+    </p>
   </div>
 </section>
 
