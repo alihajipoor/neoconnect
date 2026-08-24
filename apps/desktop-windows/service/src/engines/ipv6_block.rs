@@ -638,7 +638,14 @@ pub fn needed_for(profile: &neoconnect_ipc::ConnectProfile) -> bool {
 /// reading `netsh wfp show filters` on a customer's machine should be
 /// able to tell from the sublayer name which of the two they are looking
 /// at. The provider is shared: there is one Neoxify.
-const SPLIT_SUBLAYER_KEY: GUID = GUID::from_u128(0xc3a3b1e4_8d9f_4b6c_9e55_4f7dab9c63f2);
+///
+/// `pub(super)` for the same reason [`SUBLAYER_KEY`] is: `repair` has to
+/// delete *both* sublayers before the shared provider can be
+/// deregistered, because a provider with objects still referencing it
+/// refuses rather than cascading. Sweeping only one of the two would
+/// leave the other pinning the provider forever.
+pub(super) const SPLIT_SUBLAYER_KEY: GUID =
+    GUID::from_u128(0xc3a3b1e4_8d9f_4b6c_9e55_4f7dab9c63f2);
 
 const SPLIT_SUBLAYER_NAME: &str = "Neoxify Custom-mode IPv6 block";
 
