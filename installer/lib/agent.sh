@@ -17,6 +17,26 @@ AGENT_REPO="${AGENT_REPO:-alihajipoor/neoconnect}"
 ADMIN_TOKEN_CACHE="${TMPDIR:-/tmp}/neoxify-admin-token.$$"
 trap 'rm -f "$ADMIN_TOKEN_CACHE"' EXIT
 
+# Picks the agent's newest release out of a GitHub /releases response
+# fed on stdin, and prints its tag. See resolve_agent_release_base below
+# for why the tag prefix is the thing that has to be matched.
+#
+# Split out from the curl on purpose: the failure this guards against
+# cannot be reproduced against the live API on demand, so the only way
+# to know the ordering is right is to feed it a releases list that
+# contains the bad shapes.
+select_newest_agent_tag() {
+  jq -r '
+    [ .[]
+      | select(.draft == false and .prerelease == false)
+      | .tag_name // empty
+      | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))
+    ]
+    | sort_by(ltrimstr("v") | split(".") | map(tonumber))
+    | last // empty
+  '
+}
+
 # The newest *agent* release, resolved by tag rather than by asking
 # GitHub for "latest".
 #
@@ -40,12 +60,21 @@ resolve_agent_release_base() {
     return 0
   fi
 
-  local tag
-  # Newest non-draft, non-prerelease tag that looks like v1.2.3 -- the
-  # agent's own scheme. `desktop-v*` does not match, which is the point.
-  tag="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=50" 2>/dev/null     | jq -r '[.[] | select(.draft==false and .prerelease==false)
-              | select(.tag_name | test("^v[0-9]+[.][0-9]+[.][0-9]+$"))]
-             | first | .tag_name // empty')"
+  local releases tag
+  # per_page is at the API maximum rather than 50 because this list is
+  # shared with desktop-v* and android-v*, which both ship far more
+  # often than the agent does. A window too small does not fail loudly;
+  # it just stops containing any agent release.
+  releases="$(curl -fsSL "https://api.github.com/repos/$AGENT_REPO/releases?per_page=100" 2>/dev/null || true)"
+
+  # `| first` used to be here, which is GitHub's own ordering --
+  # created_at descending. That is not the newest *version*: a release
+  # that is re-published, back-dated, or promoted from a draft sorts to
+  # the front while being an older build, and every downstream step
+  # (checksum, install, restart) would have succeeded on the wrong
+  # binary without a word. Ordering by the version the tag actually
+  # states is the only thing that cannot drift.
+  tag="$(printf '%s' "$releases" | select_newest_agent_tag 2>/dev/null || true)"
 
   if [[ -z "$tag" ]]; then
     echo "ERROR: could not find an agent release (tag vX.Y.Z) in $AGENT_REPO." >&2
@@ -57,10 +86,113 @@ resolve_agent_release_base() {
   echo "https://github.com/$AGENT_REPO/releases/download/$tag"
 }
 
+# Where the binary being replaced is kept, so a bad build has something
+# to go back to.
+#
+# The v0.2.3 and v0.2.6 rollouts both did this by hand -- the operator
+# copied /usr/local/bin/agentd aside before running menu option 2 --
+# and the journal entry for each said afterwards that it was worth
+# having kept. A step that is only ever remembered is a step that gets
+# skipped on the one node where it mattered, so it is the installer's
+# job now. Path matches what the v0.2.6 rollout used by hand, so the
+# binaries already sitting on ir1 are in the right place.
+AGENT_ROLLBACK_DIR="${AGENT_ROLLBACK_DIR:-/root/agent-rollback}"
+# Deliberately small. These are ~20MB apiece and the useful window is
+# "the release before this one", not the node's whole history.
+AGENT_ROLLBACK_KEEP="${AGENT_ROLLBACK_KEEP:-5}"
+# Set by backup_current_agent so fetch_agent_binary can put the old
+# binary back without re-deriving the name.
+AGENT_ROLLBACK_LAST=""
+
+# Copies the installed agentd aside before it is overwritten, recording
+# its sha256 alongside.
+#
+# Named `agentd-<version>-<first 12 of sha256>` because neither half is
+# enough on its own: every release before v0.2.6 reports `dev` (no -X
+# stamp -- see release-agent.yml), so the version cannot tell two of
+# them apart, and a bare hash cannot be read.
+backup_current_agent() {
+  local target="/usr/local/bin/agentd"
+  AGENT_ROLLBACK_LAST=""
+  # A fresh install has nothing to keep, and that is not a problem.
+  [[ -f "$target" ]] || return 0
+
+  local sum short ver name
+  sum="$(sha256sum "$target" | awk '{print $1}')"
+  short="${sum:0:12}"
+
+  # The outgoing binary's own idea of what it is. Anything before
+  # v0.2.6 has no --version flag at all and exits non-zero on it, so an
+  # empty reading is expected rather than an error -- hence `|| true`,
+  # which pipefail would otherwise turn into an aborted update.
+  ver="$( { "$target" --version 2>/dev/null || true; } | awk 'NR==1 {print $2}')"
+  # This ends up in a filename, so keep it to what a version can contain.
+  ver="${ver//[^A-Za-z0-9._-]/}"
+  [[ -n "$ver" ]] || ver="unknown"
+
+  name="agentd-${ver}-${short}"
+  install -d -m 700 "$AGENT_ROLLBACK_DIR"
+  install -m 755 "$target" "$AGENT_ROLLBACK_DIR/$name"
+  # Written in sha256sum's own format, so checking a rollback candidate
+  # is `sha256sum -c agentd-v0.2.5-8cc30b52.sha256` rather than
+  # eyeballing hex.
+  echo "$sum  $name" > "$AGENT_ROLLBACK_DIR/$name.sha256"
+  AGENT_ROLLBACK_LAST="$AGENT_ROLLBACK_DIR/$name"
+  echo "Backed up the current agent to $AGENT_ROLLBACK_LAST"
+
+  # Bounded, or a node that updates weekly grows a 20MB file a week
+  # forever on the same disk the engines log to.
+  local stale entry
+  mapfile -t stale < <(find "$AGENT_ROLLBACK_DIR" -maxdepth 1 -type f -name 'agentd-*' ! -name '*.sha256' -printf '%T@ %p\n' 2>/dev/null | sort -rn | tail -n "+$((AGENT_ROLLBACK_KEEP + 1))" | cut -d' ' -f2-)
+  for entry in ${stale[@]+"${stale[@]}"}; do
+    [[ -n "$entry" ]] || continue
+    rm -f "$entry" "$entry.sha256"
+  done
+}
+
+# Confirms the binary now on disk is the release that was just asked
+# for, before anything restarts the service.
+#
+# This is the check six nodes needed and did not have: until v0.2.6
+# stamped the tag in, every node reported agentVersion=dev, so a rollout
+# that silently no-op'd looked exactly like one that worked and the only
+# way to tell them apart was sha256 on each box. `--version` exists to
+# make that assertable (agent/cmd/agentd/main.go handles it before it
+# reads any config), so assert it.
+check_agentd_version() {
+  local want="$1" reported
+  reported="$( { /usr/local/bin/agentd --version 2>/dev/null || true; } | head -n 1)"
+
+  # Nothing printed means a pre-v0.2.6 binary, which has no --version
+  # flag and exits on it. Pinning an old release deliberately is a real
+  # thing to do, so this is the unverifiable case, not the wrong one --
+  # said out loud rather than passed silently.
+  if [[ -z "$reported" ]]; then
+    echo "WARNING: the installed binary does not support --version, so it is a" >&2
+    echo "         pre-v0.2.6 build and $want could not be confirmed. Check it with" >&2
+    echo "         sha256sum /usr/local/bin/agentd against the release's sha256sums.txt." >&2
+    return 0
+  fi
+
+  # Exactly the string release-agent.yml asserts on the artefact at
+  # build time, so the two cannot drift apart:  agentd v0.2.6 (linux/amd64)
+  if [[ "$reported" == "agentd $want (linux/$AGENT_ARCH)" ]]; then
+    echo "Verified: $reported"
+    return 0
+  fi
+
+  echo "ERROR: $want was requested but the installed binary reports:" >&2
+  echo "         $reported" >&2
+  return 1
+}
+
 fetch_agent_binary() {
   local asset_name="agentd-linux-$AGENT_ARCH"
-  local base
+  local base tag
   base="$(resolve_agent_release_base)" || exit 1
+  # The last path segment of a release download base is its tag, for the
+  # resolved URL and for a pinned AGENT_RELEASE_URL_BASE alike.
+  tag="${base##*/}"
 
   echo "Downloading agent binary for linux/$AGENT_ARCH from ${base##*/}..."
   # Saved under the same name sha256sums.txt references (not a generic
@@ -75,8 +207,26 @@ fetch_agent_binary() {
     exit 1
   fi
 
+  backup_current_agent
   install -m 755 "/tmp/$asset_name" /usr/local/bin/agentd
   rm -f "/tmp/$asset_name" /tmp/sha256sums.txt
+
+  # Only when the tag is a version we can compare against. A self-hosted
+  # AGENT_RELEASE_URL_BASE need not end in one, and refusing to install
+  # from it would be inventing a restriction that was never there.
+  if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if ! check_agentd_version "$tag"; then
+      if [[ -n "$AGENT_ROLLBACK_LAST" && -f "$AGENT_ROLLBACK_LAST" ]]; then
+        install -m 755 "$AGENT_ROLLBACK_LAST" /usr/local/bin/agentd
+        echo "Put the previous binary back from $AGENT_ROLLBACK_LAST." >&2
+      else
+        rm -f /usr/local/bin/agentd
+        echo "Removed it -- there was no previous binary to restore." >&2
+      fi
+      echo "The service was NOT restarted, so this node is still running what it was." >&2
+      exit 1
+    fi
+  fi
 }
 
 action_install_agent() {
@@ -2943,9 +3093,24 @@ action_update_agent() {
   detect_os
   echo "Updating agent binary only (protocol engines are left running so"
   echo "active sessions on this node are not disrupted)..."
+  # fetch_agent_binary keeps the outgoing binary and refuses to hand back
+  # a build that does not report the release it was asked for, so by the
+  # time this returns the restart is on something checked. Anything it
+  # rejects exits before here rather than restarting the service.
   fetch_agent_binary
   systemctl restart neoxify-agentd
   echo "Agent updated and restarted."
+  echo
+  echo "If this build misbehaves, roll back to one of these:"
+  local kept
+  mapfile -t kept < <(find "$AGENT_ROLLBACK_DIR" -maxdepth 1 -type f -name 'agentd-*' ! -name '*.sha256' -printf '  %f\n' 2>/dev/null | sort)
+  if [[ ${#kept[@]} -gt 0 ]]; then
+    printf '%s\n' "${kept[@]}"
+  else
+    echo "  (none -- this node had no previous binary to keep)"
+  fi
+  echo "  install -m 755 $AGENT_ROLLBACK_DIR/<one of the above> /usr/local/bin/agentd"
+  echo "  systemctl restart neoxify-agentd"
 }
 
 action_status_agent() {
