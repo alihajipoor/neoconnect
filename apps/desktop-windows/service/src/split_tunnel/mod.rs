@@ -65,6 +65,7 @@ use std::time::Instant;
 use neoconnect_ipc::SplitTunnelMode;
 
 use crate::adapters;
+use crate::engines::ipv6_block;
 use crate::engines::routing::{self, InstalledRoutes};
 
 pub use owner::{running_apps, Selection, SharedSelection};
@@ -135,6 +136,14 @@ struct Active {
     /// looks live and is not. Nothing in this product reports a state
     /// it has not verified, and "still intercepting" is such a state.
     watchdog_tripped: Arc<std::sync::atomic::AtomicBool>,
+    /// The per-app IPv6 block, when one could be installed.
+    ///
+    /// `None` is normal and not a fault: "everything except these" does
+    /// not want one, and a machine where the filtering engine refuses
+    /// still gets the redirect loop's own IPv6 block. See
+    /// `engines::ipv6_block::SelectedAppsIpv6Block` for what it adds
+    /// over that, and for why the same idea is unsound for IPv4.
+    ipv6_apps: Option<ipv6_block::SelectedAppsIpv6Block>,
     log_path: PathBuf,
     /// When interception began, so a warm-up is not mistaken
     /// for a fault. See redirect::WARMUP.
@@ -828,6 +837,25 @@ impl SplitTunnel {
     pub fn set_selection(&mut self, enabled: bool, apps: Vec<String>, mode: SplitTunnelMode) {
         self.enabled = enabled;
         *self.selection.write().unwrap_or_else(|e| e.into_inner()) = Selection::new(apps, mode);
+
+        // The redirect loop reads the selection per decision and so
+        // needs nothing here. The WFP filters are a fixed set installed
+        // once, and that difference matters in one direction far more
+        // than the other: a program the customer has just *deselected*
+        // would otherwise keep losing its IPv6 until the next
+        // reconnect, which is a setting that visibly does not take
+        // effect. Rebuilt rather than patched, because the whole set is
+        // six filters per application and a partial edit is a way to
+        // get out of step with the list.
+        let Some(active) = self.active.as_mut() else { return };
+        let log_dir = active.log_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // Dropped first, and deliberately: two overlapping sets would
+        // both be live, and the old one names applications that are no
+        // longer selected. The gap is microseconds and the redirect
+        // loop covers it, which is the same fail-open trade the rest of
+        // this module makes.
+        active.ipv6_apps = None;
+        active.ipv6_apps = install_ipv6_app_block(&self.selection, &log_dir, &active.log_path);
     }
 
     /// Whether Custom mode should shape how the next tunnel is brought
@@ -1045,6 +1073,13 @@ impl SplitTunnel {
         // about to close is one the tunnel is already carrying.
         let reset_nat = nat.clone();
 
+        // Before the redirect starts, so there is no instant in which
+        // Custom mode is on and nothing is refusing a selected app's
+        // IPv6. Held in a local until the session is assembled: if
+        // `redirect::start` fails below, this is dropped on the way out
+        // and the filters go with it.
+        let ipv6_apps = install_ipv6_app_block(&self.selection, log_dir, &log_path);
+
         match redirect::start(redirect, nat, self.selection.clone(), stats) {
             Ok(running) => {
                 let logger =
@@ -1115,6 +1150,7 @@ impl SplitTunnel {
                     convergence,
                     watchdog,
                     watchdog_tripped,
+                    ipv6_apps,
                     log_path,
                     started: Instant::now(),
                 });
@@ -1244,6 +1280,86 @@ impl SplitTunnel {
         active.logger.stop();
         let mut route = active.route;
         route.remove();
+        // Last, so that at no point is Custom mode still intercepting
+        // while a selected app's IPv6 has already been let out again.
+        // Both blocks come off together as far as the customer is
+        // concerned; the order only decides which way the overlap falls,
+        // and the safe way is for the WFP one to outlast the loop.
+        if let Some(mut block) = active.ipv6_apps {
+            block.remove();
+        }
+    }
+}
+
+/// Installs the per-app IPv6 block for the current selection, or
+/// explains in the log why it did not.
+///
+/// # Why a failure here is written down and not returned
+///
+/// Custom mode's job is to carry a selected application's **IPv4**
+/// through the tunnel, and it does that whether or not these filters
+/// exist. Refusing to start the feature because the filtering engine
+/// would not take a filter would leave a customer in Iran with no
+/// tunnel at all in exchange for closing a narrow IPv6 gap that
+/// `redirect::handle_ipv6` still covers for every packet it can
+/// attribute. That trade is the wrong way round, so this returns
+/// `None` and says so on disk.
+///
+/// # Why "everything except these" gets nothing
+///
+/// In that mode the redirect loop's answer for a packet whose owner it
+/// cannot see is already *block* --
+/// `Selection::tunnel_when_owner_unknown` is true there -- so the hole
+/// these filters close does not exist. The WFP shape for that mode
+/// would be a machine-wide block with a hole per excluded application,
+/// which is a much larger blast radius bought for nothing measured.
+/// Stated rather than silently skipped.
+fn install_ipv6_app_block(
+    selection: &SharedSelection,
+    log_dir: &Path,
+    log_path: &Path,
+) -> Option<ipv6_block::SelectedAppsIpv6Block> {
+    let (mode, paths) = {
+        let selection = selection.read().unwrap_or_else(|e| e.into_inner());
+        (selection.mode(), selection.paths().to_vec())
+    };
+
+    if !matches!(mode, SplitTunnelMode::OnlySelected) {
+        append(
+            log_path,
+            "IPv6: no per-app filters in this mode -- the redirect loop already blocks IPv6 \
+             whose owner it cannot see when everything except the named apps is tunnelled",
+        );
+        return None;
+    }
+    if paths.is_empty() {
+        return None;
+    }
+
+    match ipv6_block::SelectedAppsIpv6Block::install(&paths, log_dir) {
+        Ok(block) => {
+            append(
+                log_path,
+                &format!(
+                    "IPv6: {} app(s) blocked at ALE_AUTH_CONNECT_V6 as well as in the loop",
+                    paths.len()
+                ),
+            );
+            Some(block)
+        }
+        Err(e) => {
+            // Named as a reduction rather than as a failure, because
+            // that is what it is: the loop still blocks everything it
+            // can attribute.
+            append(
+                log_path,
+                &format!(
+                    "IPv6: per-app filters unavailable ({e}); the redirect loop is the only \
+                     block this session has"
+                ),
+            );
+            None
+        }
     }
 }
 
