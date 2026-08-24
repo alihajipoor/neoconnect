@@ -159,7 +159,7 @@ require NX_INC . '/partials/announcement.php';
         <span class="stat__label"><?php echo nx_e('home.stats.locations'); ?></span>
       </div>
       <div class="stat">
-        <span class="stat__value"><?php echo nx_e('home.stats.platforms_value'); ?></span>
+        <span class="stat__value stat__value--text"><?php echo nx_e('home.stats.platforms_value'); ?></span>
         <span class="stat__label"><?php echo nx_e('home.stats.platforms'); ?></span>
       </div>
     </div>

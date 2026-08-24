@@ -225,7 +225,7 @@ return array(
     'home.mockup.windows' => 'Windows',
     'home.mockup.mobile' => 'Mobile',
     'home.mockup.macos' => 'macOS',
-    'home.mockup.soon' => 'Soon',
+    'home.mockup.soon' => 'Not yet',
     'home.mockup.subscription' => 'Subscription',
     'home.mockup.status' => 'Active',
     'home.mockup.expires' => 'Renews in 24 days',
@@ -687,6 +687,7 @@ return array(
 
     'pricing.compare.title' => 'Compare the plans',
     'pricing.compare.feature' => 'What you get',
+    'pricing.compare.hint' => 'Scroll the table sideways to see every plan.',
     'pricing.compare.data' => 'Data',
     'pricing.compare.devices' => 'Devices at once',
     'pricing.compare.routes' => 'Routes',
