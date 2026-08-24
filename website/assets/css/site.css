@@ -304,6 +304,17 @@ p {
   max-width: 46ch;
 }
 
+/* .lead caps its measure at 46ch, which is right, but in a centred head
+   that box then sits against the start edge while the h1 above it is
+   centred -- so the paragraph hung ~170px to the left of the heading on
+   /faq/ and /pricing/, and to the right of it in Persian. The text-align
+   centred the lines inside the box and hid what was actually wrong. */
+.page-hero--center .lead,
+.section-head--center .lead,
+.section-head--center p {
+  margin-inline: auto;
+}
+
 .gradient-text {
   background: linear-gradient(100deg, var(--primary-soft), var(--highlight));
   -webkit-background-clip: text;
