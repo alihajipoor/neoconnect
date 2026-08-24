@@ -1622,14 +1622,22 @@ html[lang="fa"] .brand__beta {
   background: rgba(245, 158, 11, 0.07);
 }
 
+/* h2 or h3 depending on what precedes the box: on /download/ and
+   /reseller/ this notice is the first heading after the h1, so an h3 there
+   was a level skip. Matched on both levels rather than pinned to one. */
+.notice h2,
 .notice h3 {
   font-size: 1rem;
+  font-weight: 650;
+  line-height: 1.4;
+  margin-block-start: 0;
   margin-block-end: 0.5rem;
   display: flex;
   align-items: center;
   gap: 0.5rem;
 }
 
+.notice h2 svg,
 .notice h3 svg {
   width: 1.05rem;
   height: 1.05rem;
@@ -2007,15 +2015,22 @@ html[lang="fa"] .brand__beta {
   }
 }
 
-.site-footer h4 {
+/* These are h2 elements, not h4: an h4 straight after the page's last h2
+   was a heading-level skip on every page of the site, and the footer's
+   groups are top-level sections of the footer landmark. Every size,
+   weight and spacing value the heading needs is set here, because the
+   element now inherits the document's h2 styling instead of h4's. */
+.site-footer__title {
   font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.4;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--fg-subtle);
-  margin-block-end: 0.9rem;
+  margin-block: 0 0.9rem;
 }
 
-html[lang="fa"] .site-footer h4 {
+html[lang="fa"] .site-footer__title {
   text-transform: none;
   letter-spacing: 0;
 }

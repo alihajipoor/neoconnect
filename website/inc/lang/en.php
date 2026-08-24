@@ -21,6 +21,12 @@ return array(
     'brand.name' => 'Neoxify',
     'brand.tagline' => 'Hard to block. Eight ways through.',
 
+    // Units. Separated from the number so nx_format_data() can put the
+    // amount through nx_num() and still name the unit in the reader's own
+    // language -- "30 GB" in a Persian sentence came out as "GB 30".
+    'unit.gb' => 'GB',
+    'unit.tb' => 'TB',
+
     'nav.home' => 'Home',
     'nav.features' => 'Features',
     'nav.pricing' => 'Plans',
@@ -28,6 +34,7 @@ return array(
     'nav.contact' => 'Contact',
     'nav.reseller' => 'Resellers',
     'nav.privacy' => 'Privacy',
+    'nav.delete_account' => 'Delete account',
     'nav.signin' => 'Sign in',
     'nav.cta' => 'Get the app',
     'nav.menu' => 'Menu',
@@ -55,14 +62,14 @@ return array(
     'meta.home.title' => 'Neoxify — a VPN with eight ways through a filtered network',
     'meta.home.description' => 'WireGuard, OpenVPN, Shadowsocks, VLESS REALITY and four more in one app. Servers in five countries, an Iran relay path, and nothing to import.',
 
-    'meta.download.title' => 'Download — Neoxify',
+    'meta.download.title' => 'Download Neoxify for Windows and Android — direct installer and APK',
     'meta.download.description' => 'Get the Neoxify app for Windows or Android. Direct download, always the current release. No macOS or iOS app yet.',
 
-    'meta.contact.title' => 'Contact — Neoxify',
-    'meta.contact.description' => 'Questions about Neoxify? Send us a message and we will get back to you.',
+    'meta.contact.title' => 'Contact Neoxify — questions before you buy, and support',
+    'meta.contact.description' => 'Ask about plans, payment, or whether a connection method will work on your network. Write to us and a person answers. Existing customers get faster help in the app.',
 
-    'meta.privacy.title' => 'Privacy — Neoxify',
-    'meta.privacy.description' => 'What Neoxify collects, why we have it, and how to ask us to remove it.',
+    'meta.privacy.title' => 'Privacy — what Neoxify records, and what it does not',
+    'meta.privacy.description' => 'What we hold for your account, what our servers log, what payment providers see, how long it is kept and how to have it deleted. We make no no-logs claim.',
 
     'delete.title' => "Delete your account",
     'delete.subtitle' => "Remove your Neoxify account and everything on it.",
@@ -91,8 +98,8 @@ return array(
     'privacy.contact.title' => 'Contact',
     'privacy.contact.body' => 'Questions about any of this, or a request about your own data, go to :email. Write from the address on your account and we will deal with it.',
 
-    'meta.reseller.title' => 'Become a reseller — Neoxify',
-    'meta.reseller.description' => 'Apply to resell Neoxify. Terms are agreed individually with every partner.',
+    'meta.reseller.title' => 'Become a Neoxify reseller — sell VPN accounts to your own audience',
+    'meta.reseller.description' => 'For Telegram channels, gaming communities, local shops and network admins. Terms are agreed individually with every partner, not from a published price list.',
 
     // -----------------------------------------------------------------
     // Home — hero
@@ -115,7 +122,7 @@ return array(
     // tunnel and is not evidence of a client. "Not yet" is the true
     // statement; a date would be a guess.
     'home.hero.note_available' => 'Windows and Android apps out now. There is no macOS or iOS app yet.',
-    'home.hero.note_soon' => 'Windows app releasing soon. macOS and iOS are in development.',
+    'home.hero.note_soon' => 'Windows app releasing soon. There is no macOS or iOS app yet.',
 
     'beta.badge' => 'Beta',
     'beta.hero' => 'In beta — early, and moving fast.',
@@ -214,7 +221,7 @@ return array(
     'home.assure.noconfig' => 'No config files',
     'home.assure.switch' => 'Switch location anytime',
 
-    'home.mockup.alt' => 'The Neoxify app running on Windows, with mobile and macOS versions still in development.',
+    'home.mockup.alt' => 'The Neoxify app running on Windows, beside the Android app and a macOS window marked as not yet available.',
     'home.mockup.windows' => 'Windows',
     'home.mockup.mobile' => 'Mobile',
     'home.mockup.macos' => 'macOS',

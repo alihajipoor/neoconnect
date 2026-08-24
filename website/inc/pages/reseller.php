@@ -28,7 +28,7 @@ require NX_INC . '/partials/form-fields.php';
     </div>
 
     <div class="notice u-mb-lg">
-      <h3><?php echo nx_e('reseller.about.title'); ?></h3>
+      <h2><?php echo nx_e('reseller.about.title'); ?></h2>
       <p><?php echo nx_e('reseller.about.body'); ?></p>
     </div>
 

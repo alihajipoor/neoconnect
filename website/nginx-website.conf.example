@@ -233,12 +233,6 @@ server {
         try_files $uri =404;
     }
 
-    # HTML is generated per request and depends on the visitor's language
-    # cookie. It must never be cached by a shared proxy.
-    location ~* \.php$ {
-        add_header Cache-Control "no-cache, must-revalidate" always;
-    }
-
     # ------------------------------------------------------------------
     # Rewrites
     # ------------------------------------------------------------------
@@ -272,6 +266,26 @@ server {
 
     location ~ \.php$ {
         try_files $uri =404;
+
+        # This has to live in the same block that runs PHP, not in a
+        # `location ~* \.php$` of its own further up. nginx tries regex
+        # locations in file order and stops at the first match, so a
+        # separate earlier block for the same extension wins -- and because
+        # that block has no fastcgi_pass, nginx would fall back to serving
+        # the file from disk. Every page would come out as PHP source text.
+        # HTML here is generated per request and varies on the visitor's
+        # language cookie, so it must never sit in a shared cache.
+        add_header Cache-Control "no-cache, must-revalidate" always;
+
+        # add_header REPLACES the inherited set, so the server-level
+        # security headers have to be repeated here too.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()" always;
+        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.neoxify.site:*; form-action 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'" always;
+
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         # PATH_INFO is what lets /r/index.php/CODE work on a host with no

@@ -55,7 +55,7 @@ require NX_INC . '/partials/head.php';
               <span class="plan__period">
                 <?php echo $nx_monthly
                     ? nx_e('home.pricing.per_month')
-                    : nx_e('home.pricing.per_days', array('days' => $nx_days)); ?>
+                    : nx_e('home.pricing.per_days', array('days' => nx_num($nx_days))); ?>
               </span>
             </div>
 
@@ -72,7 +72,7 @@ require NX_INC . '/partials/head.php';
                       echo $nx_monthly
                           ? nx_e('home.pricing.data', array('amount' => $nx_amount))
                           : nx_e('home.pricing.data_period', array(
-                                'amount' => $nx_amount, 'days' => $nx_days));
+                                'amount' => $nx_amount, 'days' => nx_num($nx_days)));
                   }
                 ?></span>
               </li>
@@ -195,7 +195,7 @@ require NX_INC . '/partials/head.php';
                         . ' <span class="plan__period">'
                         . ($days === 30
                             ? nx_e('home.pricing.per_month')
-                            : nx_e('home.pricing.per_days', array('days' => $days)))
+                            : nx_e('home.pricing.per_days', array('days' => nx_num($days))))
                         . '</span>';
                 },
                 'pricing.compare.data' => function ($p) {

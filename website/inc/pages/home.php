@@ -368,7 +368,7 @@ require NX_INC . '/partials/announcement.php';
               <span class="plan__period">
                 <?php echo $nx_monthly
                     ? nx_e('home.pricing.per_month')
-                    : nx_e('home.pricing.per_days', array('days' => $nx_days)); ?>
+                    : nx_e('home.pricing.per_days', array('days' => nx_num($nx_days))); ?>
               </span>
             </div>
 
@@ -383,7 +383,7 @@ require NX_INC . '/partials/announcement.php';
                       echo $nx_monthly
                           ? nx_e('home.pricing.data', array('amount' => $nx_amount))
                           : nx_e('home.pricing.data_period', array(
-                                'amount' => $nx_amount, 'days' => $nx_days));
+                                'amount' => $nx_amount, 'days' => nx_num($nx_days)));
                   }
                 ?></span>
               </li>
@@ -436,7 +436,7 @@ require NX_INC . '/partials/announcement.php';
     <?php if (nx_free_trial_enabled()): ?>
       <p class="trial-banner">
         <?php echo nx_e('home.pricing.trial', array(
-            'days' => (int) nx_cfg('free_trial_days', 30))); ?>
+            'days' => nx_num((int) nx_cfg('free_trial_days', 30)))); ?>
       </p>
     <?php endif; ?>
 

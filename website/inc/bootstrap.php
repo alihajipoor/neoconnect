@@ -651,6 +651,15 @@ function nx_referrals_enabled()
 /**
  * Render a data allowance. Whole multiples of 1024 GB read better as TB.
  *
+ * The unit is a translated word and the number goes through nx_num(),
+ * because "30 GB" dropped into a Persian sentence does not survive the
+ * bidirectional algorithm: the digits are neutral, the Latin unit is
+ * left-to-right, and the run gets reordered so the plan card rendered
+ * "GB 30" -- read right to left, the unit arrives before the amount. It
+ * was on the Persian home page, the Persian pricing cards and the Persian
+ * comparison table. Persian digits and a Persian unit have no direction
+ * to disagree about, and they match every other number on those pages.
+ *
  * @param int $gb
  * @return string
  */
@@ -658,9 +667,9 @@ function nx_format_data($gb)
 {
     $gb = (int) $gb;
     if ($gb >= 1024 && $gb % 1024 === 0) {
-        return ($gb / 1024) . ' TB';
+        return nx_num($gb / 1024) . ' ' . nx_t('unit.tb');
     }
-    return $gb . ' GB';
+    return nx_num($gb) . ' ' . nx_t('unit.gb');
 }
 
 /**
