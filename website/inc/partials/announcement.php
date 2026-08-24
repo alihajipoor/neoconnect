@@ -42,7 +42,7 @@ $nx_key = 'nx-announce-' . nx_cfg('announcement_version', '1');
     <div class="banner__text">
       <p class="banner__title">
         <span class="banner__pill">
-          <?php echo nx_e('announce.' . $nx_variant . '.pill', array('days' => $nx_days)); ?>
+          <?php echo nx_e('announce.' . $nx_variant . '.pill', array('days' => nx_num($nx_days))); ?>
         </span>
         <span><?php echo nx_e('announce.' . $nx_variant . '.headline'); ?></span>
       </p>

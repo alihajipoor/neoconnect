@@ -30,7 +30,7 @@ $nx_portal_url = trim((string) nx_cfg('customer_portal_url', ''));
          is reachable from here. */
       ?>
       <div>
-        <h4><?php echo nx_e('footer.product'); ?></h4>
+        <h2 class="site-footer__title"><?php echo nx_e('footer.product'); ?></h2>
         <ul>
           <li><a href="<?php echo nx_esc(nx_url('features')); ?>"><?php echo nx_e('nav.features'); ?></a></li>
           <li><a href="<?php echo nx_esc(nx_url('pricing')); ?>"><?php echo nx_e('nav.pricing'); ?></a></li>
@@ -39,7 +39,7 @@ $nx_portal_url = trim((string) nx_cfg('customer_portal_url', ''));
       </div>
 
       <div>
-        <h4><?php echo nx_e('footer.resources'); ?></h4>
+        <h2 class="site-footer__title"><?php echo nx_e('footer.resources'); ?></h2>
         <ul>
           <li><a href="<?php echo nx_esc(nx_url('faq')); ?>"><?php echo nx_e('nav.faq'); ?></a></li>
           <li><a href="<?php echo nx_esc(nx_url('contact')); ?>"><?php echo nx_e('nav.contact'); ?></a></li>
@@ -48,9 +48,10 @@ $nx_portal_url = trim((string) nx_cfg('customer_portal_url', ''));
       </div>
 
       <div>
-        <h4><?php echo nx_e('footer.company'); ?></h4>
+        <h2 class="site-footer__title"><?php echo nx_e('footer.company'); ?></h2>
         <ul>
           <li><a href="<?php echo nx_esc(nx_url('privacy')); ?>"><?php echo nx_e('nav.privacy'); ?></a></li>
+          <li><a href="<?php echo nx_esc(nx_url('delete-account')); ?>"><?php echo nx_e('nav.delete_account'); ?></a></li>
           <?php if ($nx_portal_url !== ''): ?>
             <li><a href="<?php echo nx_esc($nx_portal_url); ?>"><?php echo nx_e('nav.signin'); ?></a></li>
           <?php endif; ?>
