@@ -544,6 +544,28 @@ model Route {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
+  /// When the EXIT node last confirmed this route's uplink credential is
+  /// installed on its inbound, i.e. the last successful ack of the
+  /// re-asserted `route:<id>` CREATE_USER.
+  ///
+  /// Exists because a relay route had no health signal at all: the panel
+  /// and the client both read the ENTRY node's heartbeat, which says
+  /// nothing about the exit. On 2026-08-23 all thirteen relay routes
+  /// were dead -- their uplink credentials had been wiped by an Xray
+  /// restart on france-1 and finland1 and nothing re-created them -- and
+  /// every one of them still reported ONLINE.
+  ///
+  /// Says what it measures and no more: the credential is installed on
+  /// the exit. It is not proof that traffic flows. A stale value is
+  /// nevertheless proof that it does NOT, which is the direction that
+  /// matters.
+  uplinkAssertedAt DateTime?
+  /// The last error the exit node returned for that assert, cleared on
+  /// success. Without it a failed re-assert was discarded silently --
+  /// the ack handler only logged failures whose command id began
+  /// `reassert:`, so route and uplink asserts fell through it.
+  uplinkLastError  String?
+
   entryProtocolConfig ProtocolConfig      @relation("RouteEntry", fields: [entryProtocolConfigId], references: [id])
   exitProtocolConfig  ProtocolConfig?     @relation("RouteExit", fields: [exitProtocolConfigId], references: [id])
   protocolUsers       ProtocolUser[]

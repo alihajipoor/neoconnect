@@ -6865,3 +6865,160 @@ lands.**
   from the platform's documented behaviour, not from a device in hand.
 - **The panel dialog has not been opened in a browser.** It typechecks
   and builds.
+
+---
+
+## 2026-08-24 — every relay route was dead, for two independent reasons
+
+**Status:** fixed and proven on the fleet. All thirteen relay routes now
+reach the internet at their exit node's address.
+**Branch:** `claude/relay-uplink-reassert`, with `main` merged in so it
+carries 0.9.29
+**Touches:** `apps/backend` (schema + migration + agent-gateway +
+routes), `agent/internal/relay`, `installer/lib/agent.sh`
+
+### What was actually broken, and what it was not
+
+**An outage, not a leak.** This matters more than the fix. The
+deanonymisation case — a relay customer egressing at ir1, in Iran — is
+the one this system is built to prevent, and it did not happen. ir1's
+routing rules and its blackhole default were intact throughout: the
+relay's onward connection was refused at the exit, so the customer's
+connection failed. Proven, not reasoned — france-1's own access log reads
+`rejected proxy/vless/encoding: invalid request user id`, and a probe
+driven through ir1's live outbound died at the client's TLS handshake
+rather than returning a page from ir1's egress address (31.171.x.x).
+
+**Thirteen routes, not five. One customer, not five.** The five
+`-> France` routes were the visible half; the eight exiting at finland1
+were dead too. All thirteen belong to a single Ultimate (relay-only)
+subscription — one paying customer, who had no working server at all.
+
+**Duration floor:** the France routes dead since france-1's Xray restart,
+2026-08-19 04:00:23 UTC. Total blackout since finland1's, 2026-08-20
+02:21:37 UTC — three days twenty-one hours. That customer's last measured
+usage on ir1 is 2026-08-15 15:52, which suggests it was already failing
+earlier for a reason not established here; both exits' journals have
+rotated past it.
+
+### Cause one: only half a route was ever re-asserted
+
+A relay route is two hot-added things on two different nodes. The entry
+holds the outbound and the routing rule; the exit holds one shared
+credential, `route:<id>`, on its inbound. Both live only in the running
+Xray process.
+
+Only the entry half was re-asserted. The uplink is created once, by
+`RoutesService.create`, and has no `ProtocolUser` row, so the user sweep
+could not see it either. An Xray restart on an exit deleted it forever.
+On 2026-08-23 both exits held exactly their 29 direct customers and zero
+`route:` users, while ir1 held every outbound and rule, faithfully
+re-asserted every 60s, aimed at a credential neither exit recognised.
+
+Fixed by having the route sweep assert all of a route. Not by giving the
+uplink a `ProtocolUser` row: that model requires a `subscriptionId`, and
+the uplink belongs to no subscription — faking one would put a synthetic
+customer into quota, usage and concurrency accounting.
+
+### Cause two: a changed route never converged
+
+Restoring the uplink fixed the five France routes and **not** the eight
+finland1 ones. That is where the second bug was.
+
+Xray's `AddOutbound` refuses a duplicate tag and has no update operation,
+so "already applied" and "applied with different contents" arrive as the
+same error. The agent swallowed both as success. finland1's REALITY
+`serverName` is `www.shatel.ir`, the backend had been sending that in
+every `CONFIGURE_ROUTE` — thirteen of them ACKED at 00:12:08 that
+morning — and ir1's eight finland1 outbounds still carried
+`cloudflare.com` from whenever they were first built.
+
+Isolated by A/B on one route with everything else held constant: same
+credential, same shortId; `cloudflare.com` → curl exit 35,
+`www.shatel.ir` → exit IP 204.168.161.100.
+
+The agent now fingerprints the exit parameters it last installed per
+route. A matching duplicate is the genuine no-op; a differing one is
+removed and re-added. Not an unconditional rebuild — the sweep runs every
+60s, so that would drop every relay session once a minute.
+
+### The instruments, and the two that lied first
+
+- **The probe reported total failure on all thirteen routes before it
+  worked at all.** Two harness bugs in sequence: `xray api lso` returns
+  the internal protobuf form, not client-config JSON, so the first
+  version produced `CONFIG-INVALID` everywhere; then the fixed script was
+  never re-uploaded, so a positive control ran against the stale copy and
+  "failed" with a credential that was fine. A harness reporting total
+  failure is still the likeliest thing to be broken.
+- **The positive control is what made the negatives mean anything.** A
+  throwaway user added to france-1's `vless-in` and removed straight
+  after: exit IP 104.105.205.233, and france-1's log naming it. Without
+  that, thirteen FAILs prove nothing.
+- **Credentials never left the nodes.** The probe reads the live
+  outbound, builds its client config and curls, all on ir1; only the exit
+  IP comes back.
+
+### Health reporting: a relay route can now say it is down
+
+`nodeStatus` was the entry node's heartbeat, which says nothing about the
+exit. ir1 was up and heartbeating the entire time. `Route` now carries
+`uplinkAssertedAt` / `uplinkLastError`, stamped from the exit's own ack,
+and a relayed route with no confirmation inside three sweeps reports
+OFFLINE. Never-asserted counts as unhealthy, not unknown.
+
+`handleCommandAck` also tested `startsWith("reassert:")` — the user
+sweep's prefix alone — so a failed *route* re-assert matched neither that
+branch nor an `AgentCommand` row and vanished silently.
+
+### The certificate time bomb, and the measurement that changed the fix
+
+The certbot deploy hook ran `systemctl reload xray || systemctl restart
+xray`. `CanReload=no` on every node, so the reload could never succeed
+and the `||` hid it: every renewal was a restart. france-1 renews around
+18 Oct.
+
+The first fix was an honest, verified restart. Then the measurement came
+in: **Xray re-reads `certificateFile`/`keyFile` from disk by itself,
+hourly** — swapped at 00:06:16 on a throwaway loopback instance, new
+certificate served between +55 and +60 min, no signal, no restart. So the
+hook now syncs and stops. The five-second version of that same test
+showed no reload and would have sent this the other way.
+
+Also measured: **Xray does not handle SIGHUP — it terminates.** So
+`ExecReload=/bin/kill -HUP $MAINPID` would have been a restart under
+another name, and `ExecReload=/bin/true` worse: a renewal reporting
+success while serving the old certificate to expiry.
+
+`neoxify-xray-restart` stays for restarts that are genuinely unavoidable.
+It snapshots the live inbound tags, restarts, waits for the API and
+compares, exiting non-zero on anything that did not come back. Its
+detection was exercised on ir1 with `systemctl` stubbed to a no-op: clean
+run exit 0; one tag hidden from the post-restart listing → named, exit 1.
+
+### Also done
+
+france-1's `vless-reality-free-in` on port 2083 is gone, from the running
+process (`xray api rmi`, no restart) and from `config.json` (validated
+with `xray run -test` first, backup kept). Zero users, no database row,
+and the only traffic it ever carried was `e2e-probe@neoxify.test` on
+2026-08-23 — a leftover from another session's probe. An unmanaged open
+port is a fingerprint on a product whose value is not looking like a VPN.
+
+### What is NOT proven
+
+- **The agent fix is not deployed.** `agent/internal/relay` is committed
+  and unit-tested but needs an agent rollout. Until then the convergence
+  bug is live on every node: any change to an exit's REALITY parameters
+  will silently fail to reach the relays again. The eight stale outbounds
+  were cleared by hand (`xray api rmo`; the sweep re-added them in ~40s).
+- **The backend fix is deployed from an unmerged branch.**
+  `claude/relay-uplink-reassert` is checked out on the panel and built,
+  so `/root/neoconnect` is no longer on `main`. It needs a PR and a
+  re-deploy from main.
+- **The customer has not been contacted**, and nobody has confirmed the
+  route works from an actual client in Iran. The proof here is from ir1
+  outward.
+- **Why usage stopped on 2026-08-15**, four days before the earliest
+  restart that explains anything, is unexplained.
+- The installer changes are source-only; no node has been re-installed.
