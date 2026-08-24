@@ -3,6 +3,7 @@ import { Protocol, type Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { CreateProtocolConfigDto } from "./dto/create-protocol-config.dto";
 import { UpdateProtocolConfigDto } from "./dto/update-protocol-config.dto";
+import { assertInboundTagUsable } from "./inbound-tags";
 import { generateCa, signCert } from "./openvpn-pki";
 import { decryptCredentials, encryptCredentials } from "../protocol-users/credentials-crypto";
 
@@ -126,6 +127,18 @@ export class ProtocolConfigsService {
 
     assertRequiredPublicParams(dto.protocol, dto.publicParamsJson);
 
+    // The field was already accepted here and never checked, which made
+    // create() the one path that could quietly put two configs on one
+    // inbound -- the failure that has a relay's second exit country
+    // egressing through the first one's node.
+    if (dto.inboundTag) {
+      await this.assertInboundTagFree(dto.nodeId, {
+        protocol: dto.protocol,
+        transport,
+        inboundTag: dto.inboundTag,
+      });
+    }
+
     const publicParamsJson = dto.publicParamsJson;
 
     // OpenVPN needs a CA + server cert to exist before any client cert
@@ -228,11 +241,29 @@ export class ProtocolConfigsService {
       }
     }
 
+    // Absent leaves it alone; null clears it back to the node default.
+    // The two have to stay distinguishable, which is why this is `in`
+    // and not a truthiness check.
+    const tagChanging =
+      dto.inboundTag !== undefined && (dto.inboundTag ?? null) !== (existing.inboundTag ?? null);
+
+    if (tagChanging) {
+      if (dto.inboundTag) {
+        await this.assertInboundTagFree(
+          existing.nodeId,
+          { protocol: existing.protocol, transport: existing.transport, inboundTag: dto.inboundTag },
+          id,
+        );
+      }
+      await this.assertReprovisionAcknowledged(id, existing.inboundTag, dto.inboundTag ?? null, dto.confirmReprovision);
+    }
+
     const updated = await this.prisma.protocolConfig.update({
       where: { id },
       data: {
         ...(dto.listenPort !== undefined ? { listenPort: dto.listenPort } : {}),
         ...(dto.isEnabled !== undefined ? { isEnabled: dto.isEnabled } : {}),
+        ...(tagChanging ? { inboundTag: dto.inboundTag ?? null } : {}),
         ...(dto.publicParamsJson ? { publicParamsJson: publicParamsJson as Prisma.InputJsonValue } : {}),
       },
     });
@@ -243,6 +274,73 @@ export class ProtocolConfigsService {
     // on exactly which columns the write happened to echo back.
     await this.rewriteIssuedEndpoints(id, existing.protocol, publicParamsJson);
     return updated;
+  }
+
+  /** Everything the backend can check about an inbound tag without
+   * being able to ask the node.
+   *
+   * The reading is done here and the deciding in `inbound-tags.ts`, so
+   * the rules can be exercised as a pure function rather than only
+   * through a database.
+   *
+   * What this cannot do is the thing it would most like to do: confirm
+   * the tag exists in the node's Xray config. There is no agent RPC for
+   * it -- see the header of `inbound-tags.ts` -- so a tag naming a
+   * listener that was never created is accepted here and fails on the
+   * node when a customer dials it. That gap is real and is why the
+   * panel's copy says the tag must already exist on the node.
+   */
+  private async assertInboundTagFree(
+    nodeId: string,
+    target: { protocol: string; transport: string | null; inboundTag: string },
+    excludeConfigId?: string,
+  ) {
+    const siblings = await this.prisma.protocolConfig.findMany({
+      where: { nodeId },
+      select: { id: true, protocol: true, transport: true, inboundTag: true },
+    });
+    assertInboundTagUsable({ ...target, id: excludeConfigId }, siblings);
+  }
+
+  /** Refuses a tag change that would strand customers who are already
+   * provisioned, unless the caller has said they know.
+   *
+   * This is the interlock, and it is here rather than in the panel
+   * because the panel is not the only caller. A ProtocolUser's
+   * credentials were created on the inbound the config named at the
+   * time; moving the tag does not move them. From the moment the row is
+   * written, every one of those customers is dialling a listener that
+   * has never heard of them, and what they see is "invalid request user
+   * id" -- an error that points at the credential and says nothing about
+   * the config that broke it. Measured on ir1 on 2026-08-14, from the
+   * other direction: an Xray restart re-asserted five France routes onto
+   * the default inbounds and all five failed exactly that way while
+   * Finland kept working.
+   *
+   * There is a repair path, and the message names it: re-provisioning
+   * re-sends CREATE_USER with the config's current tag. What there is
+   * not is a way to make the change invisible, so the operator is made
+   * to choose it rather than discover it.
+   */
+  private async assertReprovisionAcknowledged(
+    configId: string,
+    from: string | null,
+    to: string | null,
+    acknowledged: boolean | undefined,
+  ) {
+    if (acknowledged) return;
+    const affected = await this.prisma.protocolUser.count({
+      where: { protocolConfigId: configId, status: "ACTIVE" },
+    });
+    if (affected === 0) return;
+
+    throw new BadRequestException(
+      `Changing this config's inbound from ${from ?? "the node default"} to ${to ?? "the node default"} would strand ` +
+        `${affected} customer(s) who are already provisioned: their credentials live on the old inbound, and moving the ` +
+        "config does not move them. They will get \"invalid request user id\" until they are re-provisioned -- which " +
+        "happens when they switch server, or when the node reconnects and the control plane re-asserts every user on " +
+        "this config's current tag. Send confirmReprovision: true once you have arranged for that.",
+    );
   }
 
   /**

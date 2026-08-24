@@ -6730,3 +6730,138 @@ prove nothing about a tunnel.** On the rebuilt VM:
    exit-IP chip still appears.
 5. Confirm the `unverified` copy renders correctly in `fa` (RTL) — it is
    the longest new string on the screen.
+
+---
+
+## 2026-08-23 — The two things blocking a REALITY decoy change, and what each fix can actually promise
+
+**Status:** built on `claude/config-refresh-and-inbound-tag`, unpushed,
+**not verified against a node or a real tunnel**
+
+france-1's REALITY decoy is `cloudflare.com` — the weakest disguise
+available, since the decoy *is* the CDN. Changing it was blocked by two
+separate things, both fixable in source, and both now fixed. Neither fix
+has been exercised against a live node, and the rig VM is still gone, so
+what follows is what the code does and what it is entitled to claim.
+
+### Blocker 1 — clients held a stale SNI forever
+
+`getProtocolUsers()` had exactly one call site: the dashboard's initial
+load, plus retry and server-switch. No poll, no TTL, no expiry on the
+disk cache. On Windows the window ends when the window closes; **on
+Android it does not end at all** — the WebView survives backgrounding,
+the screen adopts the running tunnel on open, `loadAll` never runs a
+second time, and toggling the VPN off and on re-dials the values already
+in memory. Nothing short of a force-stop refetched.
+
+Now: `refreshConnectionConfig` in `apps/desktop-windows/src/lib/` (which
+mobile aliases as `@shared`), called at the top of both clients'
+`runLadder`, plus a `useRefreshOnResume` hook for the Android case.
+
+The parts worth not re-deriving:
+
+- **The refresh runs *above* the teardown, on purpose.** Run from the
+  health poll there is still a tunnel up, and on a filtered network that
+  tunnel is the likeliest way to reach the control plane at all. Tearing
+  it down first throws away the route to the answer.
+- **The TTL is a freshness horizon, not an expiry.** Ten minutes.
+  Nothing ever discards a snapshot for age and `loadSnapshot` still hands
+  back a week-old one; the TTL only decides whether the connect path owes
+  the server a question. A cache that expired itself would reintroduce
+  the exact outage it was written to end (panel filtered in Iran, product
+  dead for everyone there on every protocol).
+- **The refresh has its own six-second budget, not the API's.**
+  `apiRequest` walks every endpoint at up to 8s each; paying that on the
+  connect path would add tens of seconds of nothing-happening before the
+  first tunnel packet. The in-flight request is not cancelled, only
+  stopped being waited for, so a late answer still writes the cache and
+  the next connect is already paid for.
+- **A failed refresh never blocks connecting.** It falls back to the
+  held credentials and dials. It reports `CONTROL_PLANE_UNREACHABLE` with
+  the cache's age in minutes and warns to the console, so a stale-config
+  connect is visible rather than silent. Existing enum members,
+  deliberately — a new `ClientAttemptKind` would need a schema migration
+  to record one line of context.
+- **A live session is not reconnected when the config moves.** A VPN
+  that drops itself unasked is indistinguishable, from inside Iran, from
+  one that has been blocked. The next connect picks up the new values,
+  which bounds the stale window at one connect instead of one reinstall.
+
+### Blocker 2 — `inboundTag` could not be set through the API
+
+`UpdateProtocolConfigDto` carried only `listenPort`, `publicParamsJson`
+and `isEnabled`, and the app-wide pipe runs `whitelist` +
+`forbidNonWhitelisted` — so a PATCH naming `inboundTag` came back 400.
+Correcting one meant SQL, because `remove()` refuses while any customer
+or route references the config.
+
+**What the validation can guarantee:** shape; the reserved relay tun
+inbound; another protocol's default tag; and uniqueness across the node
+by *effective* tag — so a sibling reaching the same inbound through its
+node default counts as a clash even though its column is null. That last
+one is the case a column-level unique check misses entirely, and it is
+the one that has a relay's second exit country silently egressing
+through the first's.
+
+**What it cannot guarantee, and this is the important half:** that the
+tag names an inbound the node actually has. There is no agent RPC for it
+— `packages/proto/agent.proto` has `Hello`, `Heartbeat`, `StatsBatch`,
+`CommandAck`, `StateSnapshot` and a user/route command set, and nothing
+that enumerates inbounds. The agent does not know either: it is started
+with one tag per protocol as a flag (`--xray-inbound-tag` and friends)
+and never reads Xray's config. So a tag naming a listener that was never
+created is accepted by the API and fails on the node at connect time, as
+"invalid request user id". Closing that gap means an agent change, which
+was deliberately not attempted here — `agent/` and the route-reassert
+path were being worked on concurrently for a live relay outage.
+
+**The interlock nobody should remove:** changing the tag on a config with
+provisioned customers is refused unless the caller sends
+`confirmReprovision`, and the refusal names the count. Their credentials
+live on the old inbound and moving the config does not move them. This
+is a warning made into a gate on purpose, because a warning is what the
+panel already had.
+
+### The third copy of the default-tag table
+
+`defaultInboundTagFor` in `protocol-configs/inbound-tags.ts` is now a
+*third* copy of the same protocol→tag mapping — `entryInboundTag` in
+`RoutesService` and `defaultInboundTag` in `AgentGatewayService` are the
+other two, and neither is exported. Consolidating means editing both of
+those files, which are where the concurrent relay work is; that merges
+cleanly and fails at runtime, which is the failure mode `CLAUDE.md`
+warns about. `defaults match the installer's templates` in
+`inbound-tag.spec.ts` pins the copy so a divergence is a red test rather
+than a wrongly-matched route. **Worth consolidating once the relay work
+lands.**
+
+### What is proven
+
+- The backend and panel jobs CI runs (`turbo run lint typecheck build
+  test`) pass, from a short path outside `.claude/worktrees` because the
+  panel still cannot build inside one (MAX_PATH).
+- Every assertion was run against a deliberately broken control. The
+  client suite: seven of its cases fail with `refreshConnectionConfig`
+  reduced to "return what is held". The backend suite: six fail with the
+  service's tag write and both guards removed, and two more fail with
+  `inboundTag`'s decorators stripped from the DTO — that second one runs
+  the real `ValidationPipe` rather than bare `validate()`, because
+  `whitelist` is the mechanism that was dropping the field and a plain
+  `validate()` call would pass either way and prove nothing.
+
+### What is not proven
+
+- **Nothing has touched a node.** No config was changed, no decoy was
+  moved, no client dialled anything. The refresh path has never run
+  against a real API, and the inbound-tag validation has never rejected
+  or accepted a real operator's change.
+- **Whether a six-second budget is right on a censored network.** The
+  number is reasoned, not measured. If beta users report the Connect
+  button feeling slower, that is the first thing to look at, and it is
+  one constant.
+- **The resume refetch has not been seen on Android hardware.** It is
+  three DOM event listeners and a staleness check; the claim that
+  Android's WebView raises `visibilitychange` around backgrounding comes
+  from the platform's documented behaviour, not from a device in hand.
+- **The panel dialog has not been opened in a browser.** It typechecks
+  and builds.

@@ -28,6 +28,8 @@ import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from
 import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
 import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
+import { refreshConnectionConfig } from "../lib/connection-config";
+import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
@@ -694,6 +696,27 @@ export function Dashboard({
     })();
   }, []);
 
+  // A window restored from the tray after a week is holding a week-old
+  // answer, and nothing before this ever asked for a newer one.
+  //
+  // The credentials only, not `loadAll`. Two reasons: `loadAll` raises
+  // the loading screen, and putting a spinner over the dashboard every
+  // time somebody alt-tabs back would be a worse product than the stale
+  // SNI this is fixing; and the connection parameters are the whole of
+  // what goes stale dangerously -- a day-old usage figure is wrong in a
+  // way nobody acts on.
+  //
+  // `force` because the hook has already done the staleness check; it
+  // does not call this at all inside the horizon.
+  useRefreshOnResume(async () => {
+    const refreshed = await refreshConnectionConfig({ held: protocolUsers, force: true });
+    if (refreshed.source !== "network") return;
+    setProtocolUsers(refreshed.protocolUsers);
+    setProtocolUser(
+      (current) => refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current,
+    );
+  });
+
   // Ticks for as long as the screen is mounted, not just while connected.
   // Two reasons: the days-remaining badge would otherwise freeze at
   // whatever it was when the screen loaded, and gating the interval on
@@ -1214,6 +1237,23 @@ export function Dashboard({
       publishObserved(intent, "connecting");
       setFailedOverTo(null);
 
+      // One small question to the control plane before anything is
+      // dialled: are these still the right servers?
+      //
+      // Deliberately here, above the teardown. Run from the health poll
+      // there is still a tunnel up, and on a filtered network that
+      // tunnel is by far the most likely way to reach the control plane
+      // at all -- tearing it down first would throw away the only route
+      // to the answer.
+      //
+      // It cannot block the connect. `refreshConnectionConfig` never
+      // throws, gives up after its own short budget, and falls back to
+      // the credentials already in hand; see the note there about why a
+      // failed refresh must never cost somebody in Iran their VPN.
+      const refreshed = await refreshConnectionConfig({ held: protocolUsers });
+      if (refreshed.source === "network") setProtocolUsers(refreshed.protocolUsers);
+      const dialable = refreshed.protocolUsers.length > 0 ? refreshed.protocolUsers : [protocolUser];
+
       // Whatever is up comes down first, and this is not a formality.
       // Run from the health poll, the tunnel that just stopped working
       // is still installed and still holding the default route, so every
@@ -1250,7 +1290,7 @@ export function Dashboard({
       // needs no server contact -- which is the point, since on a
       // filtered network the control plane is a plausible thing to lose
       // first.
-      const candidates = orderCandidates(protocolUsers.length > 0 ? protocolUsers : [protocolUser], {
+      const candidates = orderCandidates(dialable, {
         pinnedRouteId: chosenRouteId,
         lastGoodRouteId: lastGoodFor(lastGood, networkId),
         preferredRouteId: null,
