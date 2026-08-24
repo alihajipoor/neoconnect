@@ -418,8 +418,17 @@ fn step_wfp(found: &Survey, report: &mut RepairReport) {
         // rather than cascading. Best-effort by design: the copies made
         // by a dynamic session went with the process that made them, so
         // there is usually nothing here to remove.
+        //
+        // There are *two* sublayers under the one provider -- the
+        // full-tunnel block's and Custom mode's per-app block's -- and
+        // both have to go before the provider will. Deleting only the
+        // first would leave the second pinning the provider on every
+        // future repair.
         // SAFETY: `engine` is live; both keys are 'static constants.
         let sublayer = unsafe { FwpmSubLayerDeleteByKey0(engine, &ipv6_block::SUBLAYER_KEY) };
+        // SAFETY: as above.
+        let split_sublayer =
+            unsafe { FwpmSubLayerDeleteByKey0(engine, &ipv6_block::SPLIT_SUBLAYER_KEY) };
         // SAFETY: as above.
         let provider = unsafe { FwpmProviderDeleteByKey0(engine, &ipv6_block::PROVIDER_KEY) };
 
@@ -432,6 +441,7 @@ fn step_wfp(found: &Survey, report: &mut RepairReport) {
         let remaining = our_filter_ids(engine);
         let registration_left: Vec<&str> = [
             (sublayer, FWP_E_SUBLAYER_NOT_FOUND as u32, "sublayer"),
+            (split_sublayer, FWP_E_SUBLAYER_NOT_FOUND as u32, "Custom-mode sublayer"),
             (provider, FWP_E_PROVIDER_NOT_FOUND as u32, "provider"),
         ]
         .iter()
