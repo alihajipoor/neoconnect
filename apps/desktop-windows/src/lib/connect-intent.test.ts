@@ -168,6 +168,10 @@ describe("the control cannot promise one thing and do another", () => {
     connecting: { label: "Connecting...", expects: "down" },
     verifying: { label: "Checking connection...", expects: "down" },
     connected: { label: "Connected", expects: "down" },
+    // A tunnel is up, so the press takes it down exactly as it does from
+    // "connected". The label is what has to differ: the word "Connected"
+    // on this button would make the claim the state exists to withhold.
+    unverified: { label: "Not confirmed", expects: "down" },
     degraded: { label: "Not carrying traffic", expects: "down" },
     disconnecting: { label: "Disconnecting...", expects: "down" },
   };
@@ -236,9 +240,14 @@ describe("the wiring the pure functions cannot check", () => {
     // "has this been overtaken" question is asked, or a press that
     // landed mid-callback gets overwritten by an answer older than
     // itself.
-    const end = source.indexOf("}, HEALTH_POLL_MS);");
-    expect(end).toBeGreaterThan(0);
-    const poll = source.slice(source.lastIndexOf("const id = setInterval(async () => {", end), end);
+    // The callback is now a named `check`, invoked both on a leading
+    // edge and on the interval, so the slice is taken from its
+    // declaration rather than from an inline `setInterval`.
+    const start = source.indexOf("const check = async () => {");
+    expect(start).toBeGreaterThan(0);
+    const end = source.indexOf("const id = setInterval(() => void check(), HEALTH_POLL_MS);", start);
+    expect(end).toBeGreaterThan(start);
+    const poll = source.slice(start, end);
 
     expect(poll).toContain("const generation = intentRef.current.generation;");
     expect(poll).not.toContain("setConnectionState(");

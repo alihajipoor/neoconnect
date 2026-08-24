@@ -6619,6 +6619,255 @@ The parts worth carrying forward, none of which git records:
 
 ---
 
+## 2026-08-23 — "Connected" now means verified, and the Custom-mode probe can finally fail
+
+**Status:** landed on branch `claude/honest-connected-0930`, **not
+released, not proven on hardware**
+**Touches:** `apps/desktop-windows/src/**`,
+`apps/desktop-windows/service/src/split_tunnel/{proxy,mod}.rs`
+
+### The defect
+
+Custom mode on an Xray protocol showed a green "Connected" indefinitely
+with nothing flowing. Three abstentions rendered as proof, and they
+compound:
+
+1. `Engines::status` reports `TunnelHealth::Unknown` for Xray, OpenVPN
+   and IKEv2 for as long as the process has not exited
+   (`engines/mod.rs`, `Active::Child` / `Active::Ikev2`). Honest — there
+   is no cheap handshake to read. `stateFromStatus` swallowed it into
+   "connected" via a `default:` arm.
+2. The health poll's Custom-mode branch computed the probe result and
+   **discarded it** whenever the engine reported up. The one instrument
+   that could catch this was skipped exactly when it was the only one.
+3. The full-tunnel branch counted `indeterminate` egress — "no
+   comparison was possible" — as carrying traffic. Reopening the app
+   over a service-kept tunnel takes no baseline, so that session is
+   `indeterminate` forever.
+
+### The probe could false-positive, not only false-negative
+
+The false negatives were already documented. The other direction was
+not. `proxy::probe` was a bare TCP `connect()` — no payload, no read —
+and **Xray on Windows runs its own `tun` inbound**, a userspace TCP
+stack inside xray.exe. The SYN is answered by that stack, not by
+1.1.1.1. It completes as soon as xray.exe is up with a live Wintun
+adapter, regardless of whether the VLESS session exists. Nothing was
+sent afterwards, so the outbound was never asked to carry anything.
+
+Second false-positive path, on every protocol: **REALITY proxies an
+unknown SNI to its decoy site rather than refusing it.** A stale
+`serverName` against a changed `dest` hands the customer to a
+third-party website while the outer TLS keeps looking perfectly healthy.
+
+Also worth keeping: the probe only shares the *tunnel-attachment leg*
+with a selected app's path. It skips WinDivert, the NAT table and the
+local relay entirely, so a redirect capturing nothing is invisible to
+it. The doc comment claiming "the exact path a selected app's traffic
+takes" was wrong and has been corrected in place.
+
+### What changed
+
+- Rules moved to `src/lib/connection-evidence.ts`, pure and tested. The
+  dashboard needs Tauri + service + network, so these had only ever been
+  checked by reading them.
+- New `unverified` state — "Connected, not confirmed", brand cyan.
+  Deliberately **not** `degraded`: a false "not protected" gets someone
+  in Iran to disconnect. A failed split-tunnel probe still never causes
+  a failover; it just no longer produces green.
+- Poll gained a leading-edge run, throttled to one check per 5s, so
+  `unverified` resolves in ~1s rather than 15.
+- `verifyEgress` now records **which endpoint answered** and refuses to
+  compare a CDN reading against a mirror reading. This is HANDOVER §6
+  item 4 turned into code: turkey-1's mirror answers with the node's own
+  address, which is what a working tunnel looks like.
+- **Service-side, flagged:** `proxy::prove_carries` sends a real TLS
+  ClientHello and requires a TLS record header back.
+  `split_tunnel::probe` calls it; **route selection still uses the old
+  `proxy::probe`** deliberately — it asks a different question and
+  making it stricter risks breaking route installation on a path nobody
+  can test right now.
+
+### What this still cannot prove
+
+- **Custom mode**: `prove_carries` proves *a socket pinned to the
+  tunnel* reached a real TLS server. It does **not** prove the chosen
+  apps' packets are being redirected — that is the WinDivert/NAT leg,
+  which the probe skips. The service's own packet counters
+  (`splitTunnelProblem`) remain the only signal measured on the real
+  path, and they need 12s of warm-up and 20 redirected packets before
+  they say anything.
+- **Full tunnel with no baseline** (app reopened over a live tunnel)
+  stays `unverified` for the session. There is no honest comparison
+  available. The obvious follow-up — persisting an exit IP once proven
+  through a baseline and matching against it later — was scoped out, not
+  rejected.
+- The mirror-XFF hazard is *guarded*, not fixed. If both readings come
+  through the same broken mirror the addresses match and it reads as a
+  leak. The real fix is a certificate for `origin.neoxify.site`
+  (HANDOVER §6 item 4), which is backend work.
+
+### The rig experiment this needs (rig is being rebuilt — do it later)
+
+The unit tests prove the decision rules and the reply check. **They
+prove nothing about a tunnel.** On the rebuilt VM:
+
+1. Custom mode + `XRAY_VLESS_REALITY`, one app selected. Connect,
+   confirm green and that the selected app's exit IP is the node's while
+   an unselected app's is not.
+2. **Break the far end without touching a live node** — ask before
+   changing anything on production. Simplest safe version: edit the
+   client's stored `serverName` to a name the node does not serve, so
+   REALITY hands the session to the decoy. Expect: the orb goes to
+   "Connected, not confirmed", the split-tunnel log records
+   `probe FAILED: the tunnel completed a connection but carried no reply
+   from …`, and **no failover is triggered**.
+3. Control, and this is the one that matters: build with `prove_carries`
+   swapped back to `probe` and repeat step 2. The old build must show
+   green. Without that the test proves nothing.
+4. Regression: WireGuard and OpenVPN full tunnel, connect and confirm
+   the orb still reaches green (not stuck on "not confirmed") and the
+   exit-IP chip still appears.
+5. Confirm the `unverified` copy renders correctly in `fa` (RTL) — it is
+   the longest new string on the screen.
+
+---
+
+## 2026-08-23 — The two things blocking a REALITY decoy change, and what each fix can actually promise
+
+**Status:** built on `claude/config-refresh-and-inbound-tag`, unpushed,
+**not verified against a node or a real tunnel**
+
+france-1's REALITY decoy is `cloudflare.com` — the weakest disguise
+available, since the decoy *is* the CDN. Changing it was blocked by two
+separate things, both fixable in source, and both now fixed. Neither fix
+has been exercised against a live node, and the rig VM is still gone, so
+what follows is what the code does and what it is entitled to claim.
+
+### Blocker 1 — clients held a stale SNI forever
+
+`getProtocolUsers()` had exactly one call site: the dashboard's initial
+load, plus retry and server-switch. No poll, no TTL, no expiry on the
+disk cache. On Windows the window ends when the window closes; **on
+Android it does not end at all** — the WebView survives backgrounding,
+the screen adopts the running tunnel on open, `loadAll` never runs a
+second time, and toggling the VPN off and on re-dials the values already
+in memory. Nothing short of a force-stop refetched.
+
+Now: `refreshConnectionConfig` in `apps/desktop-windows/src/lib/` (which
+mobile aliases as `@shared`), called at the top of both clients'
+`runLadder`, plus a `useRefreshOnResume` hook for the Android case.
+
+The parts worth not re-deriving:
+
+- **The refresh runs *above* the teardown, on purpose.** Run from the
+  health poll there is still a tunnel up, and on a filtered network that
+  tunnel is the likeliest way to reach the control plane at all. Tearing
+  it down first throws away the route to the answer.
+- **The TTL is a freshness horizon, not an expiry.** Ten minutes.
+  Nothing ever discards a snapshot for age and `loadSnapshot` still hands
+  back a week-old one; the TTL only decides whether the connect path owes
+  the server a question. A cache that expired itself would reintroduce
+  the exact outage it was written to end (panel filtered in Iran, product
+  dead for everyone there on every protocol).
+- **The refresh has its own six-second budget, not the API's.**
+  `apiRequest` walks every endpoint at up to 8s each; paying that on the
+  connect path would add tens of seconds of nothing-happening before the
+  first tunnel packet. The in-flight request is not cancelled, only
+  stopped being waited for, so a late answer still writes the cache and
+  the next connect is already paid for.
+- **A failed refresh never blocks connecting.** It falls back to the
+  held credentials and dials. It reports `CONTROL_PLANE_UNREACHABLE` with
+  the cache's age in minutes and warns to the console, so a stale-config
+  connect is visible rather than silent. Existing enum members,
+  deliberately — a new `ClientAttemptKind` would need a schema migration
+  to record one line of context.
+- **A live session is not reconnected when the config moves.** A VPN
+  that drops itself unasked is indistinguishable, from inside Iran, from
+  one that has been blocked. The next connect picks up the new values,
+  which bounds the stale window at one connect instead of one reinstall.
+
+### Blocker 2 — `inboundTag` could not be set through the API
+
+`UpdateProtocolConfigDto` carried only `listenPort`, `publicParamsJson`
+and `isEnabled`, and the app-wide pipe runs `whitelist` +
+`forbidNonWhitelisted` — so a PATCH naming `inboundTag` came back 400.
+Correcting one meant SQL, because `remove()` refuses while any customer
+or route references the config.
+
+**What the validation can guarantee:** shape; the reserved relay tun
+inbound; another protocol's default tag; and uniqueness across the node
+by *effective* tag — so a sibling reaching the same inbound through its
+node default counts as a clash even though its column is null. That last
+one is the case a column-level unique check misses entirely, and it is
+the one that has a relay's second exit country silently egressing
+through the first's.
+
+**What it cannot guarantee, and this is the important half:** that the
+tag names an inbound the node actually has. There is no agent RPC for it
+— `packages/proto/agent.proto` has `Hello`, `Heartbeat`, `StatsBatch`,
+`CommandAck`, `StateSnapshot` and a user/route command set, and nothing
+that enumerates inbounds. The agent does not know either: it is started
+with one tag per protocol as a flag (`--xray-inbound-tag` and friends)
+and never reads Xray's config. So a tag naming a listener that was never
+created is accepted by the API and fails on the node at connect time, as
+"invalid request user id". Closing that gap means an agent change, which
+was deliberately not attempted here — `agent/` and the route-reassert
+path were being worked on concurrently for a live relay outage.
+
+**The interlock nobody should remove:** changing the tag on a config with
+provisioned customers is refused unless the caller sends
+`confirmReprovision`, and the refusal names the count. Their credentials
+live on the old inbound and moving the config does not move them. This
+is a warning made into a gate on purpose, because a warning is what the
+panel already had.
+
+### The third copy of the default-tag table
+
+`defaultInboundTagFor` in `protocol-configs/inbound-tags.ts` is now a
+*third* copy of the same protocol→tag mapping — `entryInboundTag` in
+`RoutesService` and `defaultInboundTag` in `AgentGatewayService` are the
+other two, and neither is exported. Consolidating means editing both of
+those files, which are where the concurrent relay work is; that merges
+cleanly and fails at runtime, which is the failure mode `CLAUDE.md`
+warns about. `defaults match the installer's templates` in
+`inbound-tag.spec.ts` pins the copy so a divergence is a red test rather
+than a wrongly-matched route. **Worth consolidating once the relay work
+lands.**
+
+### What is proven
+
+- The backend and panel jobs CI runs (`turbo run lint typecheck build
+  test`) pass, from a short path outside `.claude/worktrees` because the
+  panel still cannot build inside one (MAX_PATH).
+- Every assertion was run against a deliberately broken control. The
+  client suite: seven of its cases fail with `refreshConnectionConfig`
+  reduced to "return what is held". The backend suite: six fail with the
+  service's tag write and both guards removed, and two more fail with
+  `inboundTag`'s decorators stripped from the DTO — that second one runs
+  the real `ValidationPipe` rather than bare `validate()`, because
+  `whitelist` is the mechanism that was dropping the field and a plain
+  `validate()` call would pass either way and prove nothing.
+
+### What is not proven
+
+- **Nothing has touched a node.** No config was changed, no decoy was
+  moved, no client dialled anything. The refresh path has never run
+  against a real API, and the inbound-tag validation has never rejected
+  or accepted a real operator's change.
+- **Whether a six-second budget is right on a censored network.** The
+  number is reasoned, not measured. If beta users report the Connect
+  button feeling slower, that is the first thing to look at, and it is
+  one constant.
+- **The resume refetch has not been seen on Android hardware.** It is
+  three DOM event listeners and a staleness check; the claim that
+  Android's WebView raises `visibilitychange` around backgrounding comes
+  from the platform's documented behaviour, not from a device in hand.
+- **The panel dialog has not been opened in a browser.** It typechecks
+  and builds.
+
+---
+
 ## 2026-08-24 — every relay route was dead, for two independent reasons
 
 **Status:** fixed and proven on the fleet. All thirteen relay routes now

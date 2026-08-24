@@ -9,6 +9,9 @@ export async function createProtocolConfig(input: {
   protocol: Protocol;
   listenPort: number;
   publicParamsJson: Record<string, unknown>;
+  /** Which Xray inbound serves this config. Omitted, not null, when the
+   * node default is wanted -- the create DTO has no null branch. */
+  inboundTag?: string;
   isEnabled?: boolean;
 }): Promise<MutationResult<ProtocolConfig>> {
   const result = await apiMutate<ProtocolConfig>("/protocol-configs", {
@@ -21,7 +24,20 @@ export async function createProtocolConfig(input: {
 
 export async function updateProtocolConfig(
   id: string,
-  input: { listenPort?: number; publicParamsJson?: Record<string, unknown>; isEnabled?: boolean },
+  input: {
+    listenPort?: number;
+    publicParamsJson?: Record<string, unknown>;
+    /** `null` clears the tag back to the node default; leaving the key
+     * out leaves it alone. The two are different requests and the
+     * backend treats them as such, so this must not collapse to
+     * `undefined` on the way through. */
+    inboundTag?: string | null;
+    /** Acknowledges that a tag change strands customers already
+     * provisioned. The backend refuses the change without it and says
+     * how many. */
+    confirmReprovision?: boolean;
+    isEnabled?: boolean;
+  },
 ): Promise<MutationResult<ProtocolConfig>> {
   const result = await apiMutate<ProtocolConfig>(`/protocol-configs/${id}`, {
     method: "PATCH",

@@ -283,6 +283,28 @@ const en = {
   "dash.notProtectedHint": "Connect to encrypt your traffic and hide your IP.",
   "dash.degraded": "Not carrying traffic",
   "dash.degradedHint": "The tunnel is up but the server isn't responding. Your traffic is NOT protected. Try reconnecting or pick another server.",
+  // The third answer, and the one the screen had no words for.
+  //
+  // For Xray, OpenVPN and IKEv2 the helper service reports "unknown"
+  // health for as long as the engine process is alive, which is a
+  // condition that holds whether or not a single packet is moving. The
+  // app used to render that as "You're protected". It is not the
+  // opposite either -- nothing came back negative -- and saying "you're
+  // not protected" to someone whose tunnel is fine is the mistake that
+  // gets a customer in Iran to disconnect and expose themselves.
+  //
+  // So the copy states exactly what is and is not known, and the
+  // suggested action is reconnecting rather than anything alarming.
+  "dash.unverified": "Connected, not confirmed",
+  // The orb's own label, which has room for two or three words.
+  "dash.unverifiedShort": "Not confirmed",
+  "dash.unverifiedHint":
+    "The tunnel is up and nothing says it's broken — but Neoxify hasn't been able to confirm your traffic is going through it. Reconnect if you need to be sure.",
+  // Custom mode is a narrower claim and gets a narrower sentence: the
+  // question there is not whether this machine is tunnelled but whether
+  // the apps you chose are, and those are genuinely different facts.
+  "dash.unverifiedCustomHint":
+    "Custom mode is running and the tunnel is up, but Neoxify couldn't confirm your chosen apps' traffic is reaching the server. Reconnect if you need to be sure.",
   "dash.verifying": "Checking connection...",
   "dash.verifyingHint": "Setting up your tunnel — trying each protocol until one works. Click to stop.",
   // Said when the helper service cannot be reached, which is a different
@@ -605,6 +627,12 @@ const fa: Record<TranslationKey, string> = {
   "dash.notProtectedHint": "برای رمزگذاری ترافیک و پنهان‌کردن آی‌پی خود متصل شوید.",
   "dash.degraded": "ترافیک عبور نمی‌کند",
   "dash.degradedHint": "تونل برقرار است اما سرور پاسخ نمی‌دهد. ترافیک شما محافظت نمی‌شود. دوباره وصل شوید یا سرور دیگری انتخاب کنید.",
+  "dash.unverified": "متصل، اما تأیید نشده",
+  "dash.unverifiedShort": "تأیید نشده",
+  "dash.unverifiedHint":
+    "تونل برقرار است و نشانه‌ای از خرابی دیده نمی‌شود — اما نئوکسیفای نتوانسته تأیید کند که ترافیک شما واقعاً از آن عبور می‌کند. اگر می‌خواهید مطمئن شوید، دوباره وصل شوید.",
+  "dash.unverifiedCustomHint":
+    "حالت سفارشی در حال اجراست و تونل برقرار است، اما نئوکسیفای نتوانست تأیید کند که ترافیک برنامه‌های انتخابی شما به سرور می‌رسد. اگر می‌خواهید مطمئن شوید، دوباره وصل شوید.",
   "dash.verifying": "در حال بررسی اتصال...",
   "dash.verifyingHint": "در حال برقراری تونل — هر پروتکل امتحان می‌شود. برای توقف کلیک کنید.",
   "dash.unknown": "در حال حاضر مشخص نیست",
