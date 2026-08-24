@@ -562,29 +562,35 @@ SYNC
   cat > /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh <<'HOOK'
 #!/bin/sh
 set -e
-/usr/local/bin/neoxify-sync-certs
+# Copy the renewed certificate where Xray can read it, and stop there.
+#
 # This used to read `systemctl reload xray 2>/dev/null || systemctl
 # restart xray`, with a comment saying a renewal was no reason to drop
-# every connected customer. It always dropped them.
+# every connected customer. It always dropped them: xray.service ships no
+# ExecReload -- `systemctl show xray -p CanReload` answers `no` on every
+# node in the fleet -- so the reload could never succeed and the `||`
+# swallowed the reason. Every renewal was a full restart, announced as a
+# reload, and a restart erases every hot-added inbound, user and relay
+# route from the running process.
 #
-# xray.service ships no ExecReload -- `systemctl show xray -p CanReload`
-# answers `no` on every node in the fleet -- so the reload could never
-# succeed and the `||` swallowed the reason. Every renewal has been a
-# full restart, announced as a reload.
+# Nothing needs to be signalled at all. Xray re-reads certificateFile and
+# keyFile from disk by itself, on roughly an hourly cycle: measured
+# 2026-08-24 on a throwaway loopback instance, files swapped at 00:06:16
+# and the new certificate served between +55min and +60min, with no
+# signal and no restart. certbot renews with thirty days to spare, so an
+# hour of lag costs nothing.
 #
-# Nor can the unit be given one. Xray does not handle SIGHUP: sent to a
-# running instance it terminates the process (measured 2026-08-23), so
+# The unit could not have been given a working ExecReload in any case.
+# Xray does not handle SIGHUP: sent to a running instance it terminates
+# the process (measured the same day), so
 # `ExecReload=/bin/kill -HUP $MAINPID` would be a restart wearing a
 # different name, and `ExecReload=/bin/true` would be worse still -- a
-# renewal that reports success and keeps serving the old certificate
-# until it expires.
+# renewal reporting success while the old certificate is served until it
+# expires.
 #
-# So it restarts, openly, and then checks that everything came back.
-# That matters because a restart erases every hot-added inbound, user
-# and relay route from the running process; the control plane re-asserts
-# users and routes within about a minute, but nothing re-creates an
-# inbound that exists only in memory.
-/usr/local/bin/neoxify-xray-restart
+# If a restart is ever genuinely needed, use neoxify-xray-restart, which
+# checks that everything came back.
+/usr/local/bin/neoxify-sync-certs
 HOOK
   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh
 }
@@ -594,10 +600,13 @@ HOOK
 # Installed as its own command so anything that has to restart Xray goes
 # through the same check, and so an operator can run it by hand.
 #
-# The failure it exists to catch: france-1's certificate renews around
-# 18 Oct, and until 2026-08-23 that renewal would have restarted Xray
-# through a hook that called it a reload. A restart empties everything
-# hot-added over the gRPC API. Customers and relay routes are re-asserted
+# Not wired into certificate renewal any more -- that path no longer
+# restarts anything, because Xray reloads certificate files on its own.
+# This is for the cases where a restart is genuinely unavoidable, such as
+# a config.json change.
+#
+# The failure it exists to catch: a restart empties everything hot-added
+# over the gRPC API. Customers and relay routes are re-asserted
 # by the control plane within ~60s, but an inbound that was added at
 # runtime and never written to config.json is gone for good -- and the
 # node would keep reporting itself healthy, because nothing compares what
