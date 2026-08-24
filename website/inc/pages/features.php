@@ -31,7 +31,7 @@ require NX_INC . '/partials/head.php';
 
 <!-- ====================== Connection methods ==================== -->
 <section class="section" id="protocols">
-  <div class="container container--wide">
+  <div class="container">
     <div class="section-head">
       <h2><?php echo nx_e('features.protocols.title'); ?></h2>
       <p><?php echo nx_e('features.protocols.body'); ?></p>
@@ -139,7 +139,7 @@ require NX_INC . '/partials/head.php';
 
 <!-- ========================== Locations ========================= -->
 <section class="section section--band" id="locations">
-  <div class="container container--wide">
+  <div class="container">
     <div class="section-head">
       <h2><?php echo nx_e('features.locations.title'); ?></h2>
       <p><?php echo nx_e('features.locations.body'); ?></p>
@@ -197,7 +197,7 @@ require NX_INC . '/partials/head.php';
 
 <!-- ===================== Everything else ======================== -->
 <section class="section section--band">
-  <div class="container container--wide">
+  <div class="container">
     <div class="section-head">
       <h2><?php echo nx_e('features.more.title'); ?></h2>
     </div>
