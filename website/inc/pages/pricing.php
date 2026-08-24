@@ -256,7 +256,7 @@ require NX_INC . '/partials/head.php';
 
 <!-- ==================== Trial, payment, vouchers ================ -->
 <section class="section">
-  <div class="container container--wide">
+  <div class="container">
     <div class="grid grid--3">
 
       <?php if (nx_free_trial_enabled()): ?>
