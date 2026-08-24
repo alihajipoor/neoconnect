@@ -149,6 +149,56 @@ costs a few seconds and is within budget.
 
 ---
 
+<<<<<<< HEAD
+## 2026-08-23 — Mobile Rust is now pinned, and the pin is shared
+
+**Status:** decided — **Mac: this changes your build, nothing else**
+
+Two files under `apps/mobile/src-tauri` now affect iOS as well as
+Android. Both were needed to fix a 15 MB size regression in the direct
+APK (detail in `windows.md`); neither changes any interface.
+
+**1. New `apps/mobile/src-tauri/rust-toolchain.toml`, channel
+`1.97.1`.** It is next to the crate rather than at the repo root so the
+desktop client keeps its own compiler. But cargo honours it from
+whichever machine runs in that directory, so **the iOS build now
+compiles on 1.97.1 instead of whatever `stable` was that day.**
+
+`aarch64-apple-ios-sim` is listed in its `targets` deliberately —
+without it the pin would have installed a compiler with no iOS target
+and broken `ci-ios.yml`. rustup installs everything named there on first
+use, so nothing should need changing on your side.
+
+**Adding a target is additive; do it freely** — `aarch64-apple-ios` when
+there is a Network Extension to build. **Changing `channel` is not** —
+that moves both platforms at once, so agree it here first.
+
+**2. `[profile.release]` added to `apps/mobile/src-tauri/Cargo.toml`**
+(`strip = "symbols"`, `lto = true`, `codegen-units = 1`,
+`opt-level = "s"`). There was none, so both platforms were on stock
+cargo defaults. No signatures, no dependencies, no features touched.
+
+Two consequences for iOS specifically:
+
+- **`strip = "symbols"` will strip your binary too.** Measured on
+  Android, this is 12.5 MB of symbol table. If iOS crash symbolication
+  needs those, say so here and it can be narrowed to a
+  target-conditional rather than reverted.
+- **It may help the extension memory spike.** `docs/journal/macos.md`
+  flags the ~50 MB Network Extension cap as the thing that could change
+  the architecture. `lto` + `codegen-units = 1` + `opt-level = "s"`
+  shrink the Rust core; that is on-disk size, not necessarily resident
+  memory, so treat it as possibly-helpful, not as a fix. The xray
+  geo-file hypothesis in your entry is still the one to test.
+
+`panic = "abort"` was considered and rejected — Tauri uses
+`catch_unwind`, and killing the process on a recoverable panic is a bad
+trade in the app whose job is honest connection state.
+
+None of this is verified by a build. Android cannot be built on the
+Windows machine and iOS cannot be built there at all; the next run of
+each workflow is what confirms it.
+=======
 ## 2026-08-23 — Two new shared client modules, and one line added to mobile's connect path
 
 **Status:** landed on `claude/config-refresh-and-inbound-tag` (Windows),
@@ -186,3 +236,4 @@ around suspension, that is a real gap for iOS and the fix belongs in
 
 Nothing here touches `plugins/vpn/src/*.rs`, the plugin command surface,
 or the mobile version.
+>>>>>>> origin/main
