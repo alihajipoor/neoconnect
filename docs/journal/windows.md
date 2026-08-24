@@ -6882,13 +6882,37 @@ What the release needs, established from the files rather than assumed:
 
 **The one real cost, and it is on ir1:** `appliedProxy` is in-process, so
 a freshly started agent knows nothing about what is already installed.
-The first sweep after the restart therefore treats all 13 outbounds as
-changed and rebuilds each one (`RemoveOutbound` + `AddOutbound`). Relay
-sessions on ir1 drop once and reconnect, inside ~60s. That is the
-designed trade in the code comment — convergence is the safe direction —
-but it is a real, if brief, interruption for the one relay customer, and
-it is the reason this is an owner decision and not a quiet maintenance
-task.
+Xray keeps running across an agent restart, so all 13 outbound tags are
+still taken — and none of them match a fingerprint the new process has.
+Every one is therefore treated as changed and rebuilt
+(`RemoveOutbound` + `AddOutbound`).
+
+This happens **at reconnect, within seconds**, not on the 60s sweep:
+`handleHello` calls `replayQueuedCommands` → `reassertProvisionedUsers`
+→ `reassertConfiguredRoutes` straight after the Ed25519 check. So the
+relay customer's sessions drop once, quickly, and re-establish. That is
+the designed trade in the code comment — convergence is the safe
+direction — but it is a real interruption for the one customer this
+whole fix exists for, and it is why this is an owner decision rather
+than quiet maintenance.
+
+For context on how mild an agent restart otherwise is: measured across
+finland1's, **166 established customer connections before, 168 after.**
+The agent holds the control stream, not the tunnels.
+
+Two things option 2 will *not* do for you:
+
+- **It keeps no backup of the outgoing binary.** `fetch_agent_binary`
+  ends in `install -m 755` straight over `/usr/local/bin/agentd`. The
+  v0.2.3 rollout saved `/root/agentd.backup-dev-*` by hand and the entry
+  called that worth having kept. Copy it aside first.
+- **It resolves the release by GitHub's API ordering, not semver** —
+  `jq '... | first'` over `/releases?per_page=50`. A re-cut or
+  out-of-order tag can win. For a controlled rollout, pin it:
+  `AGENT_RELEASE_URL_BASE=https://github.com/alihajipoor/neoconnect/releases/download/v0.2.6`.
+
+And the installer is interactive (`read -r -p`, `set -euo pipefail`), so
+this is one hands-on SSH session per node, not a scripted loop.
 
 **Gap found while checking:** `agent/Makefile`'s release targets build
 with `-ldflags="-s -w"` and never set
@@ -6896,4 +6920,12 @@ with `-ldflags="-s -w"` and never set
 `dev` — which is why all six nodes show `agentVersion=dev` and why the
 panel cannot tell a v0.2.6 node from a v0.2.5 one. Worth fixing in the
 same release, otherwise there is no way to confirm the rollout landed
-except by checking the binary's mtime on each box.
+except by checking the binary's sha256 on each box — which is what the
+v0.2.3 rollout had to do, for the same reason.
+
+Also worth correcting while here: an older entry says "users are still on
+the ten-minute sweep, so after any Xray restart the node authenticates
+nobody for up to ten minutes." **The code no longer matches that** —
+`REASSERT_INTERVAL_MS` and `ROUTE_REASSERT_INTERVAL_MS` are both 60_000,
+and the connect-time re-assert usually beats them. Worst case is ~60s.
+Trust the constants.
