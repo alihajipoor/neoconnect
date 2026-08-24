@@ -7,7 +7,7 @@ import { formatBytes } from "@shared/lib/utils";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
-import { captureBaselineIp, verifyEgress } from "@shared/lib/egress";
+import { captureBaselineIp, verifyEgress, type BaselineIp } from "@shared/lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "@shared/lib/connection-errors";
 import { orderCandidates } from "@shared/lib/failover";
 import { Button, Card, Stat } from "@shared/components/ui";
@@ -72,7 +72,12 @@ const HANDSHAKE_STALE_SECS = 180;
  * Returns as soon as there is proof, so a working connection stays fast.
  */
 async function confirmEgress(
-  baselineIp: string | null,
+  // A `BaselineIp`, not a bare address. `verifyEgress` refuses to
+  // compare two readings that came from different endpoints -- a node
+  // mirror answers `/health/ip` with the node's own address, which is
+  // indistinguishable from a working tunnel -- so the endpoint that
+  // gave the reading has to travel with it. See `egress.ts`.
+  baseline: BaselineIp | null,
   cancelled: () => boolean = () => false,
 ): Promise<boolean> {
   const deadline = Date.now() + VERIFY_TIMEOUT_MS;
@@ -81,7 +86,7 @@ async function confirmEgress(
     // time a hanging protocol spends in "checking connection", so a
     // cancel that is not honoured here is a button that does nothing.
     if (cancelled()) return false;
-    const verdict = await verifyEgress(baselineIp);
+    const verdict = await verifyEgress(baseline);
     if (verdict.state === "throughTunnel") return true;
     // No baseline to compare against means the check cannot answer the
     // question. Falling back to handshake evidence beats inventing a
@@ -233,7 +238,7 @@ export function Dashboard({
 
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
-  const [baselineIp, setBaselineIp] = useState<string | null>(null);
+  const [baselineIp, setBaselineIp] = useState<BaselineIp | null>(null);
   /** Names the protocol actually in use when it is not the one the
    * customer asked for.
    *
