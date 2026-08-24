@@ -6616,3 +6616,103 @@ The parts worth carrying forward, none of which git records:
   is blocked with Microsoft support. The release workflow says so in an
   annotation on every run, so a green release is not evidence signing
   came back.
+
+## 2026-08-24 — the website branch was rendered for the first time, and six faults fell out
+
+`claude/website-redesign` is pushed and **open as a PR, not merged**. The
+site is a PHP site under `website/` and stays one; nothing about this
+touches the desktop client, the agent or the installer.
+
+**The thing worth carrying forward is the method, not the diff.** The
+branch had been written, committed and never loaded in a browser. It
+passed `scripts/check-site.php` — which renders all eighteen pages
+through the real include path and catches missing translation keys,
+duplicate titles and over-long descriptions — cleanly, first try, before
+any of the fixes below. Every one of them was invisible to it, because
+it renders markup and does not lay anything out. **Rendering is a
+separate check from templating, and this repo now has evidence of how
+much only the second one sees.**
+
+What only a browser showed:
+
+- **The mobile drawer never closed.** `.mobile-nav` sets `display: grid`,
+  which outranks the UA stylesheet's `[hidden] { display: none }`, so
+  `site.js` setting `drawer.hidden = true` did nothing. Every page below
+  56rem shipped with the whole navigation expanded under the header.
+  Measured at 375px: `hidden === true`, computed display still `grid`,
+  456px tall. The JS was right; the author rule silently won.
+- **`30 GB` in a Persian sentence rendered as `GB 30`.** Neutral digits
+  plus a Latin unit inside an RTL paragraph, reordered by the bidi
+  algorithm — unit first, read right to left. It was on the Persian home
+  page, the plan cards and the comparison table. Fixed by not mixing
+  scripts at all: `nx_format_data()` puts the amount through `nx_num()`
+  and names the unit from the catalogue, so Persian gets
+  `۳۰ گیگابایت`. **Same class of bug as the Custom-mode toggle that once
+  showed "on" where a Persian reader reads "off".** Any Latin token
+  dropped into Persian copy needs checking in a browser, not in a diff.
+- A `.bento` nested inside `.split__media` resolved to three columns
+  inside a half-width container, because grid media queries ask the
+  viewport and know nothing about the box they are in. One cell came out
+  170px wide, one word per line.
+- `.lead` caps its measure at 46ch with no auto inline margins, so under
+  a centred `h1` it sat against the start edge — 170px off, and mirrored
+  in Persian. `text-align: center` centred the lines inside the box,
+  which is why it looked almost right.
+
+Two content faults of the honesty kind, also only visible side by side
+on screen:
+
+- The hero mockup badged macOS **"Soon"** while `/download/` says, in as
+  many words, that an app which does not exist is not "coming soon".
+- The Persian download page still said macOS and iOS were **در حال
+  توسعه** — in development — months after the English had been corrected
+  to "not built yet, and we are not putting a date on either". The
+  softer claim was the one facing the audience most likely to act on it.
+  **Assume the Persian catalogue lags the English one** whenever a claim
+  changes; nothing links the two.
+
+**A deploy-blocking bug in `nginx-website.conf.example`.** It carried a
+`location ~* \.php$` block holding only a `Cache-Control` header, above
+the block that calls `fastcgi_pass`. nginx tries regex locations in file
+order and stops at the first match, and that block has no
+`fastcgi_pass`, so nginx falls back to serving the file from disk —
+every page of the site, plus `404.php` and `sitemap.php`, as PHP source
+text. Fixed. **It has not been through `nginx -t`**: there is no nginx on
+this machine and Docker Desktop would not come up. Run `nginx -t` before
+reloading, and treat that as a real gate rather than a formality — this
+same file has now had one fault that would have taken the site down and
+was found by reading.
+
+### Environment, for whoever renders this next
+
+- The site serves locally with `php -S 127.0.0.1:8123 -t website
+  <router>`; the router in the scratchpad emulates the two things the
+  server does that the built-in one does not — the `/sitemap.xml`
+  rewrite and `ErrorDocument 404 -> /404.php`. Without it every unknown
+  path 200s, which is the exact production defect being fixed, so a
+  local check without the router will report the bug as absent.
+- **Ports 8615-8714, 8747-8946, 9196-9395 and 9460-9863 are reserved by
+  Hyper-V on this box** and `bind()` fails on them with a permissions
+  error that reads like a sandbox denial and is not. `netsh interface
+  ipv4 show excludedportrange protocol=tcp` lists them. `.claude/
+  launch.json` in the worktree points at **8791, which is inside one of
+  those ranges** and cannot bind — pick something outside them.
+- Screenshots were driven over CDP against headless Chrome. **Capturing
+  a full page with `captureBeyondViewport` on an RTL document is not
+  faithful** — it produced a page shifted ~300px with the right-hand
+  side clipped, on a document whose `scrollWidth` equalled the viewport.
+  It looks exactly like a broken RTL layout and is not one; it cost a
+  real detour. Capture viewport-sized strips and stitch them instead.
+
+### Open, and needing the owner rather than more work
+
+- **Persian still has not had a native review.** `fa.php` says so in its
+  own header and that caveat stands. Missing keys fall back to English,
+  so any line that reads badly can be deleted rather than patched.
+- **Ultimate Max is `isActive = false` and `isPurchasable = true`** — on
+  sale at $50 while not usable. It is deliberately absent from the site.
+  Activate it or stop offering it; the website cannot decide that.
+- The site publishes no server count and no uptime figure, and makes no
+  no-logs, kill-switch, auto-connect, refund or signed-installer claim.
+  That is deliberate and load-bearing. `website/README.md` now lists it
+  as a convention so the next pass does not "improve" it back.
