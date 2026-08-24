@@ -149,6 +149,7 @@ costs a few seconds and is within budget.
 
 ---
 
+<<<<<<< HEAD
 ## 2026-08-23 — Mobile Rust is now pinned, and the pin is shared
 
 **Status:** decided — **Mac: this changes your build, nothing else**
@@ -197,3 +198,42 @@ trade in the app whose job is honest connection state.
 None of this is verified by a build. Android cannot be built on the
 Windows machine and iOS cannot be built there at all; the next run of
 each workflow is what confirms it.
+=======
+## 2026-08-23 — Two new shared client modules, and one line added to mobile's connect path
+
+**Status:** landed on `claude/config-refresh-and-inbound-tag` (Windows),
+unpushed — **Mac read this before the next iOS build of the shared UI**
+
+Windows added a pre-connect config refresh. It is additive, but it lives
+in `apps/desktop-windows/src/lib/`, which mobile aliases as `@shared`, so
+iOS compiles it too.
+
+**New files (nothing renamed, nothing re-signatured):**
+
+- `@shared/lib/connection-config.ts` — `refreshConnectionConfig()`,
+  `describeConfigDrift()`.
+- `@shared/lib/resume.ts` — `useRefreshOnResume()`, a hook over
+  `visibilitychange` / `focus` / `online`.
+- `@shared/lib/credential-cache.ts` gained `SNAPSHOT_TTL_MS`,
+  `isSnapshotStale()` and `updateSnapshotProtocolUsers()`. Existing
+  exports are unchanged; `loadSnapshot()` still returns a snapshot of any
+  age, which is deliberate and load-bearing.
+
+**In `apps/mobile/src/screens/Dashboard.tsx`** (the shared file): a
+`useRefreshOnResume` call and, at the top of `runLadder`, a
+`refreshConnectionConfig` call whose result feeds the candidate list.
+Roughly fifteen lines, no signature moved.
+
+**Why iOS should care rather than just merging it.** The whole point of
+the resume hook is the case where a mobile OS keeps the WebView alive
+across backgrounding while the tunnel keeps running — which is Android
+today and will be iOS the moment a Network Extension exists. The three
+DOM events it listens on are the portable way to notice a resume from
+inside a WebView, but **this has been verified on neither platform's
+hardware.** If the iOS WebView turns out not to raise `visibilitychange`
+around suspension, that is a real gap for iOS and the fix belongs in
+`resume.ts` as an added listener, not as a per-platform fork of the hook.
+
+Nothing here touches `plugins/vpn/src/*.rs`, the plugin command surface,
+or the mobile version.
+>>>>>>> origin/main

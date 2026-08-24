@@ -7,7 +7,7 @@ import { formatBytes } from "@shared/lib/utils";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
-import { captureBaselineIp, verifyEgress } from "@shared/lib/egress";
+import { captureBaselineIp, verifyEgress, type BaselineIp } from "@shared/lib/egress";
 import { classifyConnectionError, type ClassifiedError } from "@shared/lib/connection-errors";
 import { orderCandidates } from "@shared/lib/failover";
 import { Button, Card, Stat } from "@shared/components/ui";
@@ -18,6 +18,8 @@ import { LocationPicker } from "@shared/components/LocationPicker";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "@shared/lib/credential-cache";
+import { refreshConnectionConfig } from "@shared/lib/connection-config";
+import { useRefreshOnResume } from "@shared/lib/resume";
 import { outcomeFromError, reportAttempt, rungsFrom } from "@shared/lib/attempts";
 import { loadAllowedApps } from "../lib/per-app";
 import {
@@ -70,7 +72,12 @@ const HANDSHAKE_STALE_SECS = 180;
  * Returns as soon as there is proof, so a working connection stays fast.
  */
 async function confirmEgress(
-  baselineIp: string | null,
+  // A `BaselineIp`, not a bare address. `verifyEgress` refuses to
+  // compare two readings that came from different endpoints -- a node
+  // mirror answers `/health/ip` with the node's own address, which is
+  // indistinguishable from a working tunnel -- so the endpoint that
+  // gave the reading has to travel with it. See `egress.ts`.
+  baseline: BaselineIp | null,
   cancelled: () => boolean = () => false,
 ): Promise<boolean> {
   const deadline = Date.now() + VERIFY_TIMEOUT_MS;
@@ -79,7 +86,7 @@ async function confirmEgress(
     // time a hanging protocol spends in "checking connection", so a
     // cancel that is not honoured here is a button that does nothing.
     if (cancelled()) return false;
-    const verdict = await verifyEgress(baselineIp);
+    const verdict = await verifyEgress(baseline);
     if (verdict.state === "throughTunnel") return true;
     // No baseline to compare against means the check cannot answer the
     // question. Falling back to handshake evidence beats inventing a
@@ -231,7 +238,7 @@ export function Dashboard({
 
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
-  const [baselineIp, setBaselineIp] = useState<string | null>(null);
+  const [baselineIp, setBaselineIp] = useState<BaselineIp | null>(null);
   /** Names the protocol actually in use when it is not the one the
    * customer asked for.
    *
@@ -265,6 +272,21 @@ export function Dashboard({
       await loadAll(remembered ?? undefined);
     })();
   }, []);
+
+  // The case that made the stale-config window unbounded rather than
+  // merely long. Android keeps this WebView across backgrounding, so
+  // re-opening the app restores the same React tree and `loadAll` --
+  // which only runs on mount -- never runs again. A customer who has not
+  // force-stopped the app since install is dialling install-day values.
+  //
+  // Credentials only, and only when the cache is past its horizon. See
+  // useRefreshOnResume for why this is not a poll.
+  useRefreshOnResume(async () => {
+    const refreshed = await refreshConnectionConfig({ held: protocolUsers, force: true });
+    if (refreshed.source !== "network") return;
+    setProtocolUsers(refreshed.protocolUsers);
+    setProtocolUser((current) => refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current);
+  });
 
   useEffect(() => {
     setNow(Date.now());
@@ -484,7 +506,20 @@ export function Dashboard({
     setUnsupportedChoice(null);
     cancelRef.current = false;
 
-    const all = protocolUsers.length > 0 ? protocolUsers : [protocolUser!];
+    // One small question before dialling: are these still the right
+    // servers? It cannot block the connect -- `refreshConnectionConfig`
+    // never throws, gives up on its own short budget, and hands back
+    // what is already held. A refresh that failed must never be the
+    // reason somebody on a censored network cannot connect.
+    const refreshed = await refreshConnectionConfig({
+      held: protocolUsers.length > 0 ? protocolUsers : [protocolUser!],
+    });
+    if (refreshed.source === "network") {
+      setProtocolUsers(refreshed.protocolUsers);
+      setProtocolUser((current) => refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current);
+    }
+
+    const all = refreshed.protocolUsers.length > 0 ? refreshed.protocolUsers : [protocolUser!];
     const usable = all.filter((u) => SUPPORTED.has(u.protocol));
 
     // Said before the attempt rather than discovered after it. A customer
