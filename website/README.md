@@ -20,7 +20,8 @@ say the wrong thing until they are done.
 
 | What | Where | Why |
 |---|---|---|
-| **Real prices** | `inc/content/plans.php` | The numbers in there are placeholder structure, not your pricing. They must match the plans in the admin panel, which is what actually bills people. |
+| **The nginx config** | `nginx-website.conf.example` | Not optional and not deployed. Without it there is no 404 handler, `/sitemap.xml` serves the home page, the voucher short links do nothing and `www.` serves a duplicate site. See the deploy note below. |
+| **Real prices** | `inc/content/plans.php` | Reconciled against the panel's `subscription_plans` table on 2026-08-24 — Ultimate was live at the wrong price with a dead button. Nothing enforces the match, so change this file in the same sitting you change a plan in the panel. |
 | **Persian review** | `inc/lang/fa.php` | The translation was drafted, not written by a native speaker. Any line you delete falls back to English automatically, so it is safe to remove one you don't like. |
 | **Send a real test message** | — | Submit the contact form once on the live host and confirm it reaches `info@neoxify.com` — including checking the spam folder. See the domain-split note below for why this needs verifying rather than assuming. |
 | **Feature switches** | `inc/config.php` | `free_trial_enabled` and `referrals_enabled` both default to **off**, because their panel settings do too. Turn each on here only once it is genuinely running in the panel. |
@@ -209,32 +210,75 @@ are stored only as salted hashes.
 ## Structure
 
 ```
-index.php  download/  contact/  reseller/     English pages
-fa/                                           Persian mirror of all four
-inc/bootstrap.php                             config, locale, helpers
-inc/config.php                                the file you edit
-inc/lang/{en,fa}.php                          every string on the site
-inc/content/{plans,faq}.php                   pricing and FAQ copy
-inc/pages/                                    page templates, shared by locale
-inc/partials/                                 head, header, footer, form fields
-inc/{form,security}.php                       validate → store → mail
-assets/                                       css, js, favicon
-data/                                         runtime only, never committed
+index.php  features/  pricing/  faq/  download/
+contact/  reseller/  privacy/  delete-account/    English pages
+fa/                                               Persian mirror of all nine
+404.php                                           real 404, needs the server config
+sitemap.php  robots.txt                           /sitemap.xml rewrites to the first
+inc/bootstrap.php                                 config, locale, helpers
+inc/config.php                                    the file you edit
+inc/lang/{en,fa}.php                              every string on the site
+inc/content/plans.php                             prices — must match the panel
+inc/content/{faq,locations,protocols}.php         the rest of the data-shaped copy
+inc/pages/                                        page templates, shared by locale
+inc/partials/                                     head, header, footer, form fields,
+                                                  locations-grid, protocol-table, schema
+inc/{form,security}.php                           validate → store → mail
+assets/                                           css, js, fonts, favicon, OG card
+scripts/check-site.php                            pre-deploy check, run it
+scripts/make-og-image.py                          regenerates the social card
+data/                                             runtime only, never committed
 ```
 
 Pages are thin: each declares its locale and page key, then includes a shared
 template. Adding a language means adding `inc/lang/xx.php` and a directory of
 four-line page files — no layout is duplicated.
 
+Features, Pricing and the FAQ became real pages in the 2026-08 rebuild. They
+were `#pricing` and `#faq` anchors on the home page, which meant the two most
+commercially important destinations on the site could not carry a title, a
+description, a canonical or structured data of their own.
+
+### Check it before you ship it
+
+```bash
+php scripts/check-site.php
+```
+
+Renders all eighteen pages through the same include path a real request takes
+and fails on anything that should never reach a visitor — a missing
+translation key rendering as `⟪key⟫`, a duplicate title, an over-long meta
+description. It exists because `<title>⟪meta.delete-account.title⟫` was served
+on two pages in both languages for months: nothing was ever looking at a
+rendered page. Exit code 0 or 1, so it can gate a deploy.
+
+That check renders; it does not lay out. Anything about spacing, wrapping or
+direction needs a browser, and the whole site should be walked at 1280, 768
+and 375 in **both** languages after any layout change. Three faults shipped
+into this branch that only a real render could show: a mobile drawer that
+never closed, a nested grid resolving to a 170px column, and "30 GB" arriving
+in a Persian sentence as "GB 30".
+
 ## Conventions worth keeping
 
-- **Never name the protocols.** The site describes what the service does for
-  the reader — encrypted, stable, hard to block — and never says which VPN
-  protocols or engines are behind it. This is a deliberate product decision,
-  not an oversight, and it is why the pricing string key is `all_modes` rather
-  than `all_protocols` and why the footer has no "source on GitHub" link.
-  (The repo itself is public, so the stack is still discoverable by anyone who
-  looks — making it private again is the only real fix if that matters.)
+- **Name the protocols — this reversed in 2026-08.** The site used to refuse
+  to say which engines were behind it, and described everything as "several
+  ways to connect". A word-boundary grep of the whole live site for
+  `wireguard|openvpn|ikev2|vless|shadowsocks|trojan|reality` returned zero
+  hits, and so did one for every country name. Those are the terms a
+  technical buyer filters on and the ones they search for, and refusing to
+  print them cost the site that entire audience while protecting nothing the
+  public repo does not already reveal. `inc/content/protocols.php` now carries
+  all eight with their customer-facing labels, and `locations.php` the six
+  locations. **VMess is not one of them** — it is in the backend enum but the
+  installer does not build it and no node runs it, so it must never appear.
+  The footer still has no "source on GitHub" link; that part stands.
+- **Every claim has to be traceable to something that exists.** No no-logs
+  policy (the shipped Xray config writes an access log), no kill switch, no
+  auto-connect, no refund guarantee, no company name or jurisdiction, no
+  server count, no uptime figure, no signed installer, and no promise about
+  iOS. The download page says an app that does not exist is not "coming
+  soon"; anything else on the site that implies otherwise is a bug.
 - **No external requests.** No CDN, no Google Fonts, no analytics. Everything
   is local, including the typeface. The audience is largely on networks where
   a third-party request is slow at best and blocked at worst, and a blocked
