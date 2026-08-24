@@ -6773,3 +6773,127 @@ port is a fingerprint on a product whose value is not looking like a VPN.
 - **Why usage stopped on 2026-08-15**, four days before the earliest
   restart that explains anything, is unexplained.
 - The installer changes are source-only; no node has been re-installed.
+
+---
+
+## 2026-08-24 — the relay fix is merged and the panel is back on `main`
+
+**Status:** done for the backend; **the agent half is still unrolled.**
+**PR:** #38, merge commit `85bfaa9`
+**Supersedes:** the previous entry's "the backend fix is deployed from an
+unmerged branch" and "it needs a PR and a re-deploy from main". Both are
+now false. What is still true is everything under *the agent fix is not
+deployed*.
+
+### What the panel was, and is
+
+It was checked out on `claude/relay-uplink-reassert` at `cbf52fe` —
+a feature branch, built and running in production, which is the thing
+this was cleaning up. It is now `main` at `85bfaa9`, clean tree.
+
+Captured before touching it, in case a roll back was needed:
+
+| | |
+|---|---|
+| branch | `claude/relay-uplink-reassert` |
+| commit | `cbf52fe1cbe482ac40f911abe89dfdbc72cd3345` |
+| tree | clean |
+| backend image | built 2026-08-24T00:11:50Z |
+| `/health` | 200 |
+| DB backup | `/var/backups/neoxify/neoxify-backup-20260824-041951.tar.gz` |
+
+Rolling back never became necessary.
+
+### The deploy
+
+`main` merged into the branch first (only conflict was this file), then
+the documented runbook: `git checkout main`, `git pull --ff-only`,
+`docker compose -f infra/docker-compose.prod.yml --env-file infra/.env
+up -d --build backend`. Build runs before the recreate, so the API was
+down for the container swap only — **healthy again 5s after compose
+returned**. Backend only; nothing this PR touched is in `apps/panel`.
+
+**The migration was already applied.** `20260823_route_uplink_health`
+recorded `finished_at = 2026-08-24 00:12:03`, `rolled_back_at` null, from
+when the branch was deployed by hand. So `migrate deploy` on this rollout
+was a no-op and the schema never moved. Both columns confirmed present,
+nullable. There is **no down migration** — reversing it is
+`ALTER TABLE "routes" DROP COLUMN "uplinkAssertedAt", DROP COLUMN
+"uplinkLastError";` by hand. Rolling the *code* back needs no schema
+change: nothing outside those two fields reads them.
+
+### Verified after
+
+- `https://connect.neoxify.site/api/health` → 200. (Note for next time:
+  the public `/health` is the *panel's* Next.js 404, not the API. The API
+  is behind `/api/` — nginx strips the prefix.)
+- All **13/13** enabled relay routes fresh, age 27s, `uplinkLastError`
+  null on every one. Zero never-asserted.
+- Deployed commit is the merge commit, both parents as expected.
+
+### CI
+
+All four jobs green on #38: TypeScript 1m52s, Go agent 33s, Shellcheck
+9s, Desktop 3m21s. Locally beforehand: 41 suites / 382 tests, shellcheck
+clean at warning severity over all 8 installer scripts, both drift checks
+pass. Green means it compiles and the units pass — it is not evidence a
+tunnel works.
+
+### The gotcha worth keeping
+
+`git worktree add` refuses a branch that is already checked out
+elsewhere, and this repo has ~12 live worktrees. Parking the main
+checkout on `main` first is the cheap way through.
+
+Also: **the fleet is six nodes, not five** — finland1, france-1,
+germany-1, ir1, singapore-1, turkey-1, all ONLINE and heartbeating inside
+7s. And every one of them reports `agentVersion=dev`, so the panel cannot
+tell you which commit any node's agent is running. That matters for the
+rollout below: there is no version to compare against, only the binary's
+mtime on each box.
+
+### The agent rollout — NOT done, needs the owner
+
+The Go convergence fix is merged but **runs nowhere**. Until it ships,
+any change to an exit's REALITY parameters will again be acked as
+applied and silently ignored by the relay. Today's fleet is correct by
+hand (`xray api rmo` on the eight stale outbounds), not by code.
+
+What the release needs, established from the files rather than assumed:
+
+- **`agent/` on `main` differs from the last agent release `v0.2.5`
+  (2026-08-17) by exactly this fix and nothing else** — 2 files,
+  `provisioner.go` + its test. A `v0.2.6` tag is a single-purpose
+  release with no unrelated cargo.
+- `release-agent.yml` triggers on `v*`, builds linux amd64+arm64 via
+  `make build-linux-{amd64,arm64}`, writes `sha256sums.txt` and attaches
+  all three to a GitHub release. That is exactly what the installer's
+  `fetch_agent_binary` downloads and checksum-verifies.
+- **Only ir1 needs it.** It is the sole relay entry node — all 13 routes
+  hang off it. The relay provisioner does not run on an exit. The other
+  five nodes can take the update whenever; they do not fix anything.
+- Per node the operation is installer menu option **2**
+  (`action_update_agent`): `fetch_agent_binary` then
+  `systemctl restart neoxify-agentd`. It explicitly does not touch the
+  engines, and the code agrees — the agent shells out only to `ip`,
+  `wg`, `swanctl` and `tc`, and never to `systemctl`. **No engine
+  restarts, so no inbound/user/route is wiped and direct customer
+  tunnels are untouched.**
+
+**The one real cost, and it is on ir1:** `appliedProxy` is in-process, so
+a freshly started agent knows nothing about what is already installed.
+The first sweep after the restart therefore treats all 13 outbounds as
+changed and rebuilds each one (`RemoveOutbound` + `AddOutbound`). Relay
+sessions on ir1 drop once and reconnect, inside ~60s. That is the
+designed trade in the code comment — convergence is the safe direction —
+but it is a real, if brief, interruption for the one relay customer, and
+it is the reason this is an owner decision and not a quiet maintenance
+task.
+
+**Gap found while checking:** `agent/Makefile`'s release targets build
+with `-ldflags="-s -w"` and never set
+`-X .../internal/version.Version`, so a released binary still reports
+`dev` — which is why all six nodes show `agentVersion=dev` and why the
+panel cannot tell a v0.2.6 node from a v0.2.5 one. Worth fixing in the
+same release, otherwise there is no way to confirm the rollout landed
+except by checking the binary's mtime on each box.
