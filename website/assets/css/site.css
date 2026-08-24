@@ -92,19 +92,20 @@
 
      Three widths now, because "wide" is not one number:
 
-       --container       80rem / 1280px. The default. Wide enough
-                         to run a four-column grid without the
-                         cards turning into stamps.
-       --container-wide  90rem / 1440px. Showcase rows only --
-                         the locations grid, the protocol table --
-                         where more columns genuinely help.
-       --container-prose 44rem / 704px. Body copy. Going WIDER for
+       --container       80rem / 1280px. Everything. One width,
+                         so every section on a page shares a left
+                         edge -- a second, wider container was tried
+                         and removed: the hero at 80rem above a
+                         table at 90rem reads as a misalignment,
+                         which costs more than the width gains.
+       --container-prose 44rem / 704px. Body copy, CENTRED inside
+                         the above, so it introduces no competing
+                         left edge. Going WIDER for
                          everything would have been the naive read
                          of "make it wide": prose at 1280px is 150
                          characters per line and unreadable. The
                          privacy policy and FAQ answers use this. */
   --container: 80rem;
-  --container-wide: 90rem;
   --container-prose: 44rem;
   --gutter: clamp(1.25rem, 4vw, 2.5rem);
   --section-y: clamp(4.5rem, 10vw, 8rem);
@@ -363,13 +364,6 @@ html[lang="fa"] .eyebrow {
   padding-inline: var(--gutter);
   position: relative;
   z-index: 1;
-}
-
-/* Showcase rows that earn the extra width -- the locations grid and the
-   protocol table, both of which are genuinely tabular and get easier to
-   read with more columns rather than harder. */
-.container--wide {
-  max-width: var(--container-wide);
 }
 
 /* Body copy. Deliberately much narrower than the page: the privacy policy
