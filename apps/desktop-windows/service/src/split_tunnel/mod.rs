@@ -1172,7 +1172,19 @@ impl SplitTunnel {
             return Err(problem);
         }
 
-        let outcome = proxy::probe(&active.tunnel);
+        // `prove_carries`, not `probe`. The two ask different questions
+        // and only one of them is fit to be turned into "You're
+        // protected" on a customer's screen: `probe` completes a TCP
+        // handshake, which under Xray's own `tun` inbound is answered by
+        // xray.exe's userspace stack without a packet leaving the
+        // machine, and which a REALITY server quietly proxying to its
+        // decoy site satisfies just as readily as a working one.
+        //
+        // `prove_carries` requires a reply the destination had to send.
+        // Route selection still uses `probe`: it is asking whether a
+        // route shape can be attached to at all, which is exactly what a
+        // handshake settles.
+        let outcome = proxy::prove_carries(&active.tunnel);
 
         // Written down because this verdict is what decides whether the
         // ladder keeps this protocol or moves to the next one. Without
