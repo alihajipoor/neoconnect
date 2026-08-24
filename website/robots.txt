@@ -34,4 +34,11 @@ Disallow: /*?setlang=
 # server for it to work: measured 2026-08-24, /sitemap.xml was returning
 # the home page as text/html because the rewrite existed only in a
 # .htaccess that nginx never reads.
+# Both, deliberately. /sitemap.xml is the conventional path and the one a
+# crawler reaches for first, but it only exists because of a rewrite in the
+# server config -- and that config sat undeployed for ten days once already.
+# /sitemap.php is the file itself and works with no server configuration at
+# all. Listing both means a missed deploy costs the conventional path, not
+# the sitemap.
 Sitemap: https://neoxify.net/sitemap.xml
+Sitemap: https://neoxify.net/sitemap.php
