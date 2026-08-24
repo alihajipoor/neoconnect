@@ -8058,3 +8058,68 @@ because the CLI generates the entire uncommitted `gen/android` Gradle
 project (AGP, wrapper, minify, `debugSymbolLevel`, packaging). The
 lockfile holds it at 2.11.4 today, so it is latent rather than active
 drift, but it means those Gradle settings are unreviewable in this repo.
+
+## 2026-08-24 — agent v0.2.6 is on ir1, and the fleet can finally be read
+
+**The relay convergence fix is live on ir1 and no longer needs a human.**
+ir1 runs `v0.2.6` (sha256 `f3a6215f…`); the other five nodes are
+untouched on v0.2.5 and do not need it — ir1 is the sole relay entry for
+all 13 relay routes, and the relay provisioner never runs on an exit
+node. The eight stale outbounds that were cleared by hand with
+`xray api rmo` stay cleared, but the reason they could accumulate is gone:
+a changed `CONFIGURE_ROUTE` now converges instead of being acked.
+
+**agentVersion is no longer a lie, and this is the useful part.** Every
+release up to v0.2.5 linked with `-s -w` and never set
+`-X …/version.Version`, so all six nodes reported `agentVersion=dev` and
+the only way to tell one build from another was sha256 per node. The
+Makefile stamps it now, `release-agent.yml` passes `github.ref_name`
+rather than trusting `git describe` in a shallow checkout, and there is
+an `agentd --version` flag. **The panel currently shows ir1 as `v0.2.6`
+and the other five as `dev` — that is the honest state, not a bug.** They
+will keep saying `dev` until each one is rolled forward, because the
+string is baked in at link time.
+
+Use `--version`: it works on a downloaded binary before it is installed
+and on a node that is not enrolled, which is how the ir1 rollout was
+checked before anything was overwritten. The release workflow now runs
+it on the amd64 artefact and fails the release if it does not report the
+tag.
+
+**Two installer traps, still there, still worth knowing.** Menu option 2
+(`action_update_agent` → `fetch_agent_binary`) does `install -m 755`
+straight over `/usr/local/bin/agentd` and keeps **no backup** — copy the
+outgoing binary aside yourself first. And `resolve_agent_release_base`
+picks the release with `jq '… | first'`, which is GitHub's API ordering
+(created_at desc), not semver: it happens to be right today, but a
+re-published or back-dated release would quietly hand a node the wrong
+build. Pin `AGENT_RELEASE_URL_BASE` for anything deliberate. The v0.2.5
+binary from ir1 is at `/root/agent-rollback/agentd-v0.2.5-8cc30b52` on
+that box.
+
+**What the rollout proved, and what it did not.** Restarting the agent
+reconnects with an empty `appliedProxy`, so all 13 outbound tags are
+taken by an Xray that never restarted and none match a fingerprint the
+new process holds: 13 rebuild lines at 14:02:09, 13 distinct route tags,
+then every 60 s sweep after it produced **zero**. That is both halves of
+the contract observed on production — the refusal is surfaced instead of
+swallowed, and an unchanged route is still left alone, which is what
+stops the sweep dropping a session a minute. All 13 routes came back
+with fresh `uplinkAssertedAt` and no `uplinkLastError`.
+
+**Not proven on production: a backend-originated parameter change.**
+Every field of `ExitParams` is load-bearing — address, port, protocol,
+the REALITY `publicParams`, the uplink credential — so there is no field
+that can be altered on a live route as a test without changing a real
+exit's config or rotating the relay customer's uplink. The empty-map
+case after restart exercises the same branch, and
+`TestConfigureRouteRebuildsAStaleOutbound` covers the literal
+cloudflare.com → www.shatel.ir change, but if you want it end-to-end on
+production the test is: change one exit's REALITY `serverName` in the
+panel, watch for one `rebuilding it` line naming that route's tag, then
+confirm the exit IP through it still matches the exit node. That needs
+an owner decision, because it is a live protocol config.
+
+**The agent still touches no engine.** Confirmed again here: xray's
+`ActiveEnterTimestamp` stayed 2026-08-17, wg-quick and openvpn stayed
+2026-08-14, and established connections were 6 before and 6 after.
