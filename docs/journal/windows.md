@@ -6616,3 +6616,117 @@ The parts worth carrying forward, none of which git records:
   is blocked with Microsoft support. The release workflow says so in an
   annotation on every run, so a green release is not evidence signing
   came back.
+
+---
+
+## 2026-08-23 — "Connected" now means verified, and the Custom-mode probe can finally fail
+
+**Status:** landed on branch `claude/honest-connected-0930`, **not
+released, not proven on hardware**
+**Touches:** `apps/desktop-windows/src/**`,
+`apps/desktop-windows/service/src/split_tunnel/{proxy,mod}.rs`
+
+### The defect
+
+Custom mode on an Xray protocol showed a green "Connected" indefinitely
+with nothing flowing. Three abstentions rendered as proof, and they
+compound:
+
+1. `Engines::status` reports `TunnelHealth::Unknown` for Xray, OpenVPN
+   and IKEv2 for as long as the process has not exited
+   (`engines/mod.rs`, `Active::Child` / `Active::Ikev2`). Honest — there
+   is no cheap handshake to read. `stateFromStatus` swallowed it into
+   "connected" via a `default:` arm.
+2. The health poll's Custom-mode branch computed the probe result and
+   **discarded it** whenever the engine reported up. The one instrument
+   that could catch this was skipped exactly when it was the only one.
+3. The full-tunnel branch counted `indeterminate` egress — "no
+   comparison was possible" — as carrying traffic. Reopening the app
+   over a service-kept tunnel takes no baseline, so that session is
+   `indeterminate` forever.
+
+### The probe could false-positive, not only false-negative
+
+The false negatives were already documented. The other direction was
+not. `proxy::probe` was a bare TCP `connect()` — no payload, no read —
+and **Xray on Windows runs its own `tun` inbound**, a userspace TCP
+stack inside xray.exe. The SYN is answered by that stack, not by
+1.1.1.1. It completes as soon as xray.exe is up with a live Wintun
+adapter, regardless of whether the VLESS session exists. Nothing was
+sent afterwards, so the outbound was never asked to carry anything.
+
+Second false-positive path, on every protocol: **REALITY proxies an
+unknown SNI to its decoy site rather than refusing it.** A stale
+`serverName` against a changed `dest` hands the customer to a
+third-party website while the outer TLS keeps looking perfectly healthy.
+
+Also worth keeping: the probe only shares the *tunnel-attachment leg*
+with a selected app's path. It skips WinDivert, the NAT table and the
+local relay entirely, so a redirect capturing nothing is invisible to
+it. The doc comment claiming "the exact path a selected app's traffic
+takes" was wrong and has been corrected in place.
+
+### What changed
+
+- Rules moved to `src/lib/connection-evidence.ts`, pure and tested. The
+  dashboard needs Tauri + service + network, so these had only ever been
+  checked by reading them.
+- New `unverified` state — "Connected, not confirmed", brand cyan.
+  Deliberately **not** `degraded`: a false "not protected" gets someone
+  in Iran to disconnect. A failed split-tunnel probe still never causes
+  a failover; it just no longer produces green.
+- Poll gained a leading-edge run, throttled to one check per 5s, so
+  `unverified` resolves in ~1s rather than 15.
+- `verifyEgress` now records **which endpoint answered** and refuses to
+  compare a CDN reading against a mirror reading. This is HANDOVER §6
+  item 4 turned into code: turkey-1's mirror answers with the node's own
+  address, which is what a working tunnel looks like.
+- **Service-side, flagged:** `proxy::prove_carries` sends a real TLS
+  ClientHello and requires a TLS record header back.
+  `split_tunnel::probe` calls it; **route selection still uses the old
+  `proxy::probe`** deliberately — it asks a different question and
+  making it stricter risks breaking route installation on a path nobody
+  can test right now.
+
+### What this still cannot prove
+
+- **Custom mode**: `prove_carries` proves *a socket pinned to the
+  tunnel* reached a real TLS server. It does **not** prove the chosen
+  apps' packets are being redirected — that is the WinDivert/NAT leg,
+  which the probe skips. The service's own packet counters
+  (`splitTunnelProblem`) remain the only signal measured on the real
+  path, and they need 12s of warm-up and 20 redirected packets before
+  they say anything.
+- **Full tunnel with no baseline** (app reopened over a live tunnel)
+  stays `unverified` for the session. There is no honest comparison
+  available. The obvious follow-up — persisting an exit IP once proven
+  through a baseline and matching against it later — was scoped out, not
+  rejected.
+- The mirror-XFF hazard is *guarded*, not fixed. If both readings come
+  through the same broken mirror the addresses match and it reads as a
+  leak. The real fix is a certificate for `origin.neoxify.site`
+  (HANDOVER §6 item 4), which is backend work.
+
+### The rig experiment this needs (rig is being rebuilt — do it later)
+
+The unit tests prove the decision rules and the reply check. **They
+prove nothing about a tunnel.** On the rebuilt VM:
+
+1. Custom mode + `XRAY_VLESS_REALITY`, one app selected. Connect,
+   confirm green and that the selected app's exit IP is the node's while
+   an unselected app's is not.
+2. **Break the far end without touching a live node** — ask before
+   changing anything on production. Simplest safe version: edit the
+   client's stored `serverName` to a name the node does not serve, so
+   REALITY hands the session to the decoy. Expect: the orb goes to
+   "Connected, not confirmed", the split-tunnel log records
+   `probe FAILED: the tunnel completed a connection but carried no reply
+   from …`, and **no failover is triggered**.
+3. Control, and this is the one that matters: build with `prove_carries`
+   swapped back to `probe` and repeat step 2. The old build must show
+   green. Without that the test proves nothing.
+4. Regression: WireGuard and OpenVPN full tunnel, connect and confirm
+   the orb still reaches green (not stuck on "not confirmed") and the
+   exit-IP chip still appears.
+5. Confirm the `unverified` copy renders correctly in `fa` (RTL) — it is
+   the longest new string on the screen.
