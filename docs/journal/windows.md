@@ -7179,6 +7179,96 @@ nobody for up to ten minutes." **The code no longer matches that** —
 and the connect-time re-assert usually beats them. Worst case is ~60s.
 Trust the constants.
 
+---
+
+## 2026-08-24 — 0.9.30 is out; two traps it walked into on the way
+
+**Status:** released (`desktop-v0.9.30`, PR #39, merge `33adc28`).
+Unsigned, like every build since 0.9.24.
+
+Contents are described in the two entries above — the honest-connected
+work and the config-refresh/inboundTag work — so this is only what the
+integration itself turned up.
+
+### The turbo cache produced a false pass, and CI caught it
+
+A local `pnpm turbo run lint typecheck build test` reported **16/16
+green** while `@neoxify/mobile#build` was served from cache and never
+actually ran. CI failed on the same tree. Re-run with `--force` and it
+failed locally too.
+
+Another variant of the class this repo keeps hitting: local ≠ CI, and
+green ≠ ran. **Before quoting a turbo run as evidence, pass `--force`**,
+or read the `Cached: N/16` line and believe it — `16 successful` beside
+`13 cached` means three tasks actually ran.
+
+### A shared TypeScript module broke the other platform
+
+Exactly the case CLAUDE.md's coordination section warns about, and it is
+worth recording that it was a *type* break rather than a plugin
+signature.
+
+`src/lib/egress.ts` lives under `apps/desktop-windows` but is aliased
+into the mobile app as `@shared`. The honest-connected work changed
+`captureBaselineIp` to return an `IpReading` — the address **plus the
+endpoint that reported it**, so `verifyEgress` can refuse to compare two
+readings that measured different things — and
+`apps/mobile/src/screens/Dashboard.tsx` still typed the baseline as
+`string`. Desktop CI and **`ci-ios.yml` failed with the identical five
+TS2345 errors**.
+
+Worth noting *which* guard caught it. The iOS simulator build cannot run
+a tunnel and proves nothing about one, but it does compile the shared
+React tree — and that is precisely what it caught. It is the cheap half
+of the coordination CLAUDE.md asks for, and it worked.
+
+Fixed by threading `BaselineIp` through mobile rather than widening the
+shared signature back to `string`. Mobile is exposed to the same
+node-mirror hazard (a node's API mirror answers `/health/ip` with the
+node's own address, which is indistinguishable from a working tunnel),
+so keeping a bare-string entry point alive for one caller would have
+left the false positive a way back in.
+
+**Mobile runtime behaviour is unchanged** — its poll still treats
+`indeterminate` as carrying, and it has no `unverified` state. Bringing
+the honest third state to Android and iOS is real, unstarted work on a
+file the Mac session shares, and it should be agreed across both
+sessions before either starts it.
+
+### Still not proven, and this is the part that matters
+
+Nothing in 0.9.30 has been verified against a real tunnel. The rig VM is
+still being rebuilt. The unit suites establish the decision rules and the
+TLS reply check; they establish nothing about a tunnel. A green release
+means the code compiles and bundles.
+
+The experiment that gives the probe change its meaning is still the
+control described in the entry above: build with `prove_carries` swapped
+back to `probe`, break the far end, and confirm the **old** build shows
+green where the new one does not. Until that runs, "the probe can now
+fail" is reasoned, not demonstrated.
+
+Held back from this release for the same reason — both built, neither
+exercised on hardware:
+
+- `claude/selected-apps-ipv6`
+- `claude/repair-my-network`, whose elevated steps have never run at
+  all; the WFP sweep has not executed once.
+
+### Rig checklist for 0.9.30, when the VM exists
+
+In addition to the five steps in the honest-connected entry:
+
+1. Connect on a stale config. Change a node's REALITY `serverName`
+   server-side (**ask first — live users**), confirm a client already
+   holding the old value refetches on the next Connect and dials the new
+   one, and that a client with the control plane blocked still connects
+   on the held value and reports the stale-config connect.
+2. Confirm a config change does **not** drop a live session.
+3. Android: background the app for longer than the ten-minute freshness
+   horizon, foreground it, and confirm the resume refetch fires. This has
+   never run on a device.
+
 ## 2026-08-23 — The releases are not signed either
 
 **Status:** done (correction) / blocked (the signing itself)
