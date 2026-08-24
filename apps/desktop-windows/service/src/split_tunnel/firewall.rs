@@ -82,13 +82,20 @@ impl Drop for Allowance {
 
 /// Every address a redirected packet can arrive from.
 ///
-/// More than one, and the second is not optional. Which source a
-/// rewritten packet carries depends on where the application's traffic
-/// was headed before it was intercepted: with a passive tunnel it is
-/// the machine's address on the physical link, but with a full one --
-/// which is what "everything except these" builds -- the route to the
-/// internet is the tunnel, so the socket's source is the *tunnel's*
-/// address instead.
+/// More than one, and the second is not optional. Two different packets
+/// arrive at these ports from two different places: the redirected
+/// packet itself, whose source is still the application's own -- the
+/// machine's address on the physical link -- and the return leg from the
+/// relay's upstream socket, which is bound to the *tunnel's* address
+/// because that is what pins it to the tunnel. Allow one and the other
+/// is dropped.
+///
+/// This used to be explained as a difference between the two Custom
+/// modes, on the belief that "everything except these" built a full
+/// tunnel whose route to the internet was the tunnel adapter. It does
+/// not -- both modes build a passive tunnel and redirect into it, see
+/// `split_tunnel::SplitTunnel::wants_interception` -- so both addresses
+/// are needed in both modes, which is what the code has always passed.
 ///
 /// Allowing only the first is a silent failure of exactly the kind this
 /// module exists to prevent: the packets are rewritten and sent, the

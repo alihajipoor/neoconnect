@@ -60,10 +60,91 @@ enum Active {
     },
 }
 
+/// The live engine, in a box that cannot be emptied quietly.
+///
+/// This exists because of a field report on 2026-08-23, and it is the
+/// only part of that fix that the next person cannot accidentally undo.
+///
+/// A customer in Custom mode had their WireGuard tunnel die on its own.
+/// [`Engines::status`] noticed, wrote `self.active = None`, and reported
+/// "disconnected" -- correctly, as far as it went. What it did not do
+/// was stop the split tunnel, so the WinDivert redirect loop stayed up
+/// with the dead adapter's interface index still pinned in it. Custom
+/// mode carries *every* process's DNS, not just the selected ones, so
+/// from that moment nothing on the machine could resolve a name: each
+/// lookup was redirected into a relay whose upstream socket could no
+/// longer bind. Disconnecting did nothing (the app already believed it
+/// was disconnected), closing the app did nothing, and connecting a
+/// different VPN did nothing either, because we were taking the packets
+/// underneath it. Ending the service's process in Task Manager fixed it
+/// instantly -- that is what closing the last WinDivert handle does.
+///
+/// The bug was one missing call. A second missing call is one `self
+/// .active = None` away, in whichever engine arm somebody adds next, and
+/// a comment asking them to remember is not a mechanism. So the field is
+/// private to this module and there is no setter that empties it: the
+/// only way out is [`Slot::end`], which takes the [`SplitTunnel`] by
+/// `&mut` and stops it. Ending a session and stopping interception are
+/// one operation because they cannot be allowed to be two.
+mod session {
+    use super::{Active, SplitTunnel};
+
+    pub(super) struct Slot(Option<Active>);
+
+    impl Slot {
+        pub(super) fn empty() -> Self {
+            Self(None)
+        }
+
+        pub(super) fn is_empty(&self) -> bool {
+            self.0.is_none()
+        }
+
+        /// Installs the engine a fresh session was built on.
+        ///
+        /// Every caller reaches this having just torn the previous
+        /// session down -- `connect_inner` opens with `disconnect()` --
+        /// so overwriting a live engine would be a leaked process rather
+        /// than a merely untidy state. Asserted rather than handled,
+        /// because there is no sensible handling: the `Child` is already
+        /// gone from our hands by the time we could look at it.
+        pub(super) fn fill(&mut self, active: Active) {
+            debug_assert!(self.0.is_none(), "a session was installed over a live one");
+            self.0 = Some(active);
+        }
+
+        /// Looks at the engine without being able to remove it.
+        pub(super) fn peek_mut(&mut self) -> Option<&mut Active> {
+            self.0.as_mut()
+        }
+
+        /// Ends the session: stops interception, then hands back
+        /// whatever engine was running so the caller can tear it down.
+        ///
+        /// The `SplitTunnel` argument is the whole design. It is not
+        /// needed to empty an `Option`; it is there so that emptying the
+        /// slot is impossible without it.
+        ///
+        /// Interception is stopped **before** the engine goes, because
+        /// the reverse order rewrites packets towards a relay whose
+        /// upstream has just lost its tunnel. It is also stopped when
+        /// the slot is already empty, which is not redundant: that is
+        /// precisely the state the field bug left behind -- no engine
+        /// tracked, a redirect loop still running -- and it is the state
+        /// a Disconnect arriving after the fact has to be able to fix.
+        pub(super) fn end(&mut self, split_tunnel: &mut SplitTunnel) -> Option<Active> {
+            split_tunnel.stop();
+            self.0.take()
+        }
+    }
+}
+
+use session::Slot;
+
 pub struct Engines {
     exe_dir: PathBuf,
     config_dir: PathBuf,
-    active: Option<Active>,
+    active: Slot,
     /// Custom mode. Owned here because this is the only component that
     /// knows which protocol is live, and the split tunnel has to follow
     /// it -- an implementation bound to one adapter would stop working
@@ -91,7 +172,7 @@ impl Engines {
         Self {
             exe_dir,
             config_dir,
-            active: None,
+            active: Slot::empty(),
             split_tunnel: SplitTunnel::new(),
             ipv6_block: None,
             last_profile: None,
@@ -136,7 +217,18 @@ impl Engines {
         let now_intercepting = self.split_tunnel.wants_interception();
         let now_mode = self.split_tunnel.mode();
 
-        if self.active.is_none() {
+        if self.active.is_empty() {
+            // No tunnel, so there is no shape to change and the choice
+            // just waits for the next connect.
+            //
+            // It does not follow that there is nothing to do. A session
+            // whose engine died leaves this slot empty while the
+            // redirect loop is still up, and that is the state the
+            // 2026-08-23 field bug produced -- in which the customer's
+            // most obvious move, turning Custom mode off, returned
+            // success here and changed nothing at all. Stopping is
+            // cheap and it is a no-op when nothing is running.
+            self.split_tunnel.stop();
             return Ok(());
         }
 
@@ -282,7 +374,7 @@ impl Engines {
         match profile {
             ConnectProfile::Wireguard(p) => {
                 wireguard::connect(self, p, passive)?;
-                self.active = Some(Active::WireguardTunnel);
+                self.active.fill(Active::WireguardTunnel);
             }
             // Nothing is spawned: Windows brings the interface up and
             // routes it. Custom mode works here too now -- the entry is
@@ -291,7 +383,7 @@ impl Engines {
             // interface like it pins to any other adapter.
             ConnectProfile::Ikev2(p) => {
                 ikev2::connect(p, passive)?;
-                self.active = Some(Active::Ikev2);
+                self.active.fill(Active::Ikev2);
             }
             // Both Xray protocols take the same path: one engine, one
             // adapter, one set of routes -- only the outbound differs.
@@ -335,7 +427,7 @@ impl Engines {
                         return Err(e);
                     }
                 };
-                self.active = Some(Active::Child {
+                self.active.fill(Active::Child {
                     protocol,
                     child,
                     routes,
@@ -343,7 +435,7 @@ impl Engines {
             }
             ConnectProfile::Openvpn(p) => {
                 let child = openvpn::connect(self, p, passive)?;
-                self.active = Some(Active::Child {
+                self.active.fill(Active::Child {
                     protocol: "OPENVPN",
                     child,
                     routes: InstalledRoutes::none(),
@@ -433,30 +525,41 @@ impl Engines {
         Ok(())
     }
 
-    pub fn disconnect(&mut self) -> Result<(), String> {
-        // Before the engine, so no packet is ever rewritten towards a
-        // proxy whose upstream has just lost its tunnel. Stopping the
-        // redirect also restores ordinary routing for the selected apps,
-        // which is the state they should be left in.
-        self.split_tunnel.stop();
-        // Before the engine too, and unconditionally. Dropping the
-        // handle ends the dynamic WFP session, which is what removes the
-        // filters -- `Ipv6Block::remove` runs from `Drop`, so taking the
-        // Option is the removal and doing it twice is a no-op.
-        //
-        // The same property is what makes a crash safe: the session
-        // belongs to this process, so the kernel tears it down when the
-        // process dies whether or not any of this code ran. There is
-        // deliberately no boot-time or persistent filter that could
-        // survive to strand a customer's networking.
+    /// Ends the session and hands back the engine that was running.
+    ///
+    /// The single funnel every teardown goes through -- an explicit
+    /// Disconnect, a connect that starts by clearing the decks, and the
+    /// status poll noticing an engine died on its own. Stopping Custom
+    /// mode happens here, once, inside [`Slot::end`], rather than at
+    /// each of those call sites where one of them can be forgotten. It
+    /// was, and the customer's whole machine lost DNS for it.
+    fn end_session(&mut self) -> Option<Active> {
+        // Dropped with the tunnel: a Custom-mode toggle after a
+        // disconnect must not resurrect a connection the customer ended,
+        // and after an engine died there is nothing to rebuild towards.
+        self.last_profile = None;
+        self.active.end(&mut self.split_tunnel)
+    }
+
+    /// Takes the machine-wide IPv6 block down.
+    ///
+    /// Dropping the handle ends the dynamic WFP session, which is what
+    /// removes the filters -- `Ipv6Block::remove` runs from `Drop`, so
+    /// taking the Option is the removal and doing it twice is a no-op.
+    ///
+    /// The same property is what makes a crash safe: the session belongs
+    /// to this process, so the kernel tears it down when the process
+    /// dies whether or not any of this code ran. There is deliberately
+    /// no boot-time or persistent filter that could survive to strand a
+    /// customer's networking.
+    fn unblock_ipv6(&mut self) {
         if let Some(mut block) = self.ipv6_block.take() {
             block.remove();
         }
-        // Dropped with the tunnel: a Custom-mode toggle after a disconnect
-        // must not resurrect a connection the customer ended.
-        self.last_profile = None;
+    }
 
-        let result = match self.active.take() {
+    pub fn disconnect(&mut self) -> Result<(), String> {
+        let result = match self.end_session() {
             None => {
                 // Still ask wireguard.exe to remove the tunnel service:
                 // it outlives this process, so a service restart (or a
@@ -533,6 +636,22 @@ impl Engines {
         // at all" long after the VPN is gone. Cheap, and safe when
         // there is nothing to remove.
         dns::clear();
+        // After the engine, not before, and unconditionally.
+        //
+        // It used to run first, which left a window with the tunnel
+        // still up and IPv6 already unblocked -- on WireGuard's
+        // `/uninstalltunnelservice` that window is seconds, and every
+        // one of them is a customer who is told they are connected
+        // while their IPv6 goes out in the clear. Removing it last
+        // inverts the failure: the block outlives the tunnel by a
+        // moment instead of the tunnel outliving the block, and a
+        // moment of no IPv6 is not a leak.
+        //
+        // Outside the `result` match on purpose. An engine teardown
+        // that fails must not leave a machine-wide filter behind --
+        // that is the case where the customer has the least working
+        // and can do the least about it.
+        self.unblock_ipv6();
         self.wipe_generated_configs();
         result
     }
@@ -585,7 +704,17 @@ impl Engines {
     /// engine is necessary but nowhere near sufficient -- see
     /// [`wireguard::handshake_health`].
     pub fn status(&mut self) -> (bool, Option<String>, TunnelHealth) {
-        match &mut self.active {
+        // Decided first, acted on second.
+        //
+        // Ending a session needs the split tunnel as well as the engine
+        // slot, and the borrow checker will not lend out both while a
+        // match on the slot is live. That is `session::Slot` doing its
+        // job rather than an inconvenience it puts in the way: the arms
+        // below that discover a dead engine can no longer quietly write
+        // `None` into the slot, which is exactly what two of them used
+        // to do, so they fall out to the one place that tears a session
+        // down properly.
+        let verdict = match self.active.peek_mut() {
             // Nothing tracked is NOT the same as nothing running, and
             // treating them as the same stranded customers.
             //
@@ -610,11 +739,17 @@ impl Engines {
             // arm already knows how to tear exactly this down.
             None => {
                 if wireguard::tunnel_is_running() {
-                    (true, Some("WIREGUARD".to_string()), TunnelHealth::Unknown)
+                    Verdict::Reported(true, Some("WIREGUARD".to_string()), TunnelHealth::Unknown)
                 } else if ikev2::is_connected() {
-                    (true, Some("IKEV2".to_string()), TunnelHealth::Unknown)
+                    Verdict::Reported(true, Some("IKEV2".to_string()), TunnelHealth::Unknown)
                 } else {
-                    (false, None, TunnelHealth::Down)
+                    // Nothing tracked and nothing running. Still routed
+                    // through `Dead` rather than answered here, because
+                    // an untracked slot is exactly the shape the field
+                    // bug left behind, and a redirect loop may well be
+                    // running underneath it. Stopping one that is not
+                    // there costs nothing.
+                    Verdict::Dead
                 }
             }
             Some(Active::Ikev2) => {
@@ -623,35 +758,23 @@ impl Engines {
                 // WireGuard has, so health stays Unknown and the app's
                 // egress check is what actually proves traffic flows --
                 // the same position the Xray protocols are in.
-                let up = ikev2::is_connected();
-                (
-                    up,
-                    Some("IKEV2".to_string()),
-                    if up {
-                        TunnelHealth::Unknown
-                    } else {
-                        TunnelHealth::Down
-                    },
-                )
+                if ikev2::is_connected() {
+                    Verdict::Reported(true, Some("IKEV2".to_string()), TunnelHealth::Unknown)
+                } else {
+                    // This arm used to report Down and leave the session
+                    // sitting in the slot, so a dropped IKEv2 tunnel
+                    // kept Custom mode intercepting indefinitely.
+                    Verdict::Dead
+                }
             }
             Some(Active::WireguardTunnel) => {
                 if wireguard::tunnel_is_running() {
-                    let health = match wireguard::handshake_health(self) {
-                        wireguard::HandshakeHealth::Alive { age_secs } => {
-                            TunnelHealth::Alive { age_secs }
-                        }
-                        wireguard::HandshakeHealth::Stale { age_secs } => {
-                            TunnelHealth::Stale { age_secs }
-                        }
-                        wireguard::HandshakeHealth::NeverHandshaked => {
-                            TunnelHealth::NeverHandshaked
-                        }
-                        wireguard::HandshakeHealth::Unknown => TunnelHealth::Unknown,
-                    };
-                    (true, Some("WIREGUARD".into()), health)
+                    // The handshake age needs `&self`, which cannot be
+                    // taken while the slot is borrowed above, so it is
+                    // read once the match has ended.
+                    Verdict::WireguardUp
                 } else {
-                    self.active = None;
-                    (false, None, TunnelHealth::Down)
+                    Verdict::Dead
                 }
             }
             Some(Active::Child {
@@ -665,23 +788,67 @@ impl Engines {
                     // behind pointing at an adapter that no longer
                     // exists, which black-holes traffic. Clean up as soon
                     // as we notice, not only on an explicit disconnect.
+                    // Done inside the arm because it needs the routes
+                    // out of the slot, which is what this borrow is for.
                     routes.remove();
-                    self.active = None;
-                    // The tunnel this was pinned to has gone. Selected
-                    // apps fall back to the ordinary route rather than
-                    // failing, which is the decided behaviour -- and the
-                    // UI is responsible for saying so.
-                    self.split_tunnel.detach_tunnel();
-                    (false, None, TunnelHealth::Down)
+                    Verdict::Dead
                 }
                 // Xray and OpenVPN have no equivalent of WireGuard's
                 // handshake timestamp available this cheaply, so this
                 // reports Unknown rather than implying evidence that was
                 // never gathered. The app's egress check covers them.
-                Ok(None) => (true, Some((*protocol).to_string()), TunnelHealth::Unknown),
+                Ok(None) => {
+                    Verdict::Reported(true, Some((*protocol).to_string()), TunnelHealth::Unknown)
+                }
             },
+        };
+
+        match verdict {
+            Verdict::Reported(up, protocol, health) => (up, protocol, health),
+            Verdict::WireguardUp => {
+                let health = match wireguard::handshake_health(self) {
+                    wireguard::HandshakeHealth::Alive { age_secs } => {
+                        TunnelHealth::Alive { age_secs }
+                    }
+                    wireguard::HandshakeHealth::Stale { age_secs } => {
+                        TunnelHealth::Stale { age_secs }
+                    }
+                    wireguard::HandshakeHealth::NeverHandshaked => TunnelHealth::NeverHandshaked,
+                    wireguard::HandshakeHealth::Unknown => TunnelHealth::Unknown,
+                };
+                (true, Some("WIREGUARD".into()), health)
+            }
+            // Whatever this session was built on is gone. Everything
+            // that outlived it comes down here -- including Custom mode,
+            // which is the entire reason this goes through end_session()
+            // instead of clearing the slot where it noticed.
+            //
+            // Fail open, deliberately. A customer with no tunnel gets
+            // ordinary networking back, not a machine still held by a
+            // redirect that has nowhere to send anything.
+            Verdict::Dead => {
+                if let Some(Active::Ikev2) = self.end_session() {
+                    // The phonebook entry outlives the tunnel, and
+                    // somebody who is no longer connected must not be
+                    // left with "Neoxify" in their Windows VPN list.
+                    let _ = ikev2::disconnect();
+                }
+                self.unblock_ipv6();
+                (false, None, TunnelHealth::Down)
+            }
         }
     }
+}
+
+/// What one look at the engine slot concluded, before anything was done
+/// about it. See [`Engines::status`] for why those are two steps.
+enum Verdict {
+    Reported(bool, Option<String>, TunnelHealth),
+    /// The WireGuard tunnel service is up; its handshake age still has
+    /// to be read, and that needs a borrow the slot was holding.
+    WireguardUp,
+    /// Whatever this session was built on is no longer running.
+    Dead,
 }
 
 /// What the operating system says is tunnelling right now, asked
@@ -1151,6 +1318,53 @@ mod helper_tests {
             started.elapsed() < Duration::from_secs(5),
             "gave up after {:?}, which is not a bound at all",
             started.elapsed()
+        );
+    }
+
+    /// Ending a session must stop Custom mode, and this is the test
+    /// that can say so.
+    ///
+    /// Asserting on `split_tunnel.is_running()` would not: it is false
+    /// before and after, because nothing here can start a real redirect
+    /// loop without the WinDivert driver and a live tunnel. A test built
+    /// that way passes whether or not the stop ever happens, which is
+    /// the shape of test that let the 2026-08-23 bug through. So the
+    /// call itself is counted -- see `SplitTunnel::stop_calls`.
+    ///
+    /// Revert `Slot::end` to a bare `self.0.take()` and this fails.
+    #[test]
+    fn ending_a_session_stops_the_split_tunnel() {
+        let mut slot = Slot::empty();
+        let mut split = SplitTunnel::new();
+        slot.fill(Active::WireguardTunnel);
+
+        assert_eq!(split.stop_calls(), 0, "nothing should have been stopped yet");
+        assert!(slot.end(&mut split).is_some(), "the engine should come back out");
+        assert_eq!(
+            split.stop_calls(),
+            1,
+            "ending a session left the redirect loop running -- this is the field bug"
+        );
+        assert!(slot.is_empty());
+    }
+
+    /// The same, for the state the field bug actually left behind.
+    ///
+    /// `status()` had already emptied the slot when the customer's
+    /// Disconnect arrived, so a teardown that only stopped Custom mode
+    /// "when there was a session" would have skipped it precisely when
+    /// it was needed. Every route out of the slot stops the redirect,
+    /// including the one where there is no engine left to take.
+    #[test]
+    fn ending_an_already_empty_session_still_stops_the_split_tunnel() {
+        let mut slot = Slot::empty();
+        let mut split = SplitTunnel::new();
+
+        assert!(slot.end(&mut split).is_none());
+        assert_eq!(
+            split.stop_calls(),
+            1,
+            "an untracked engine is exactly when an orphaned redirect needs stopping"
         );
     }
 
