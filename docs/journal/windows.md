@@ -7269,6 +7269,701 @@ In addition to the five steps in the honest-connected entry:
    horizon, foreground it, and confirm the resume refetch fires. This has
    never run on a device.
 
+## 2026-08-23 — Two fingerprints nobody chose: rotted REALITY decoys, and the default nginx page
+
+**Status:** installer fixed and proven; **the live fleet is not fixed —
+five items below need an owner decision**
+**Touches:** `installer/lib/agent.sh`, `installer/lib/deps.sh`,
+`installer/maintenance/**`, `docs/detection-resistance.md`. No node was
+changed. Everything below marked "measured" is read-only: DNS, TLS
+handshakes, HTTP GETs, and `ssh` commands that only print.
+
+Branch `fix/reality-dest-ownership-and-port-80`, commits `70d909b`
+(REALITY probe) and `9134f7d` (port 80).
+
+### The decoy probe was testing the wrong thing, and now is not
+
+`probe_reality_dest` checked TLS 1.3, ALPN h2, X25519 and "the
+certificate verifies". Every one of those passes for a CDN-fronted
+decoy, which is why `www.asus.com` and `www.leboncoin.fr` went on being
+offered as the installer's defaults long after they moved into
+CloudFront. `Verify return code: 0 (ok)` was also doing less than it
+looked: it says the chain is trusted, never that the name on it is the
+name we are about to claim.
+
+The probe now resolves the name, connects to *that* address, and asks
+who announces it — Team Cymru over DNS for the origin AS, the CNAME
+chain, and the edge headers in the site's own replies. Three signals
+because each is evadable alone, and because two of them survive on a
+node with no `dig`. When the DNS half cannot run it prints
+"criterion 1 is UNVERIFIED" rather than passing quietly, which is the
+behaviour the old probe should have had.
+
+Two more checks came out of upstream's own docs rather than from us:
+`-verify_hostname`, and a chain-size ceiling — REALITY's server side
+abandons the handshake above 8192 bytes and the customer sees a bare
+reset (XTLS/Xray-core#6356).
+
+**Proven, not inferred.** `installer/maintenance/reality-dest-audit.sh
+--self-test` is the control case, committed so it can be re-run:
+`www.torob.com` (AS215708 Mobin Arvand) passes, `www.asus.com`
+(AS16509 AMAZON-02, `x-amz-cf-pop`) does not. Both passed identically
+before. The degraded path was tested too, by shadowing `dig` with a
+stub: CloudFront is still caught on the header signal, and `torob`
+comes back flagged UNVERIFIED instead of clean.
+
+**Three outcomes now, not two.** Usable / weak disguise / will not work.
+Only a clean result is ever a default; a weak one has to be typed and
+confirmed. That is deliberate — refusing a weak dest outright would drop
+REALITY on a node with no clean option, and taking a transport away from
+Iranian customers to win an argument about tidiness is the wrong trade.
+The hardcoded `www.speedtest.net` fallback is gone; it has been
+Cloudflare for over a year, so the one path that fired when everything
+else failed was guaranteed to produce the exact mismatch the rest of the
+function exists to prevent.
+
+### What the fleet is actually wearing
+
+Measured from this machine on 2026-08-23, so **the CDN verdicts are
+durable and the specific addresses are not** — DNS answers depend on
+where you ask. Re-run the audit on the node before acting.
+
+| node | dest | verdict |
+|---|---|---|
+| finland1 | `www.shatel.ir` | sound — AS31549 Aria Shatel, IR |
+| france-1 | **`cloudflare.com`** | worst case: AS13335, `server: cloudflare` |
+| germany-1 | `www.shatel.ir` | works, but an Iranian ISP's name on a German address — **and the same dest as finland1** |
+| singapore-1 | `www.shopee.sg` | sound — AS138341 Shopee Singapore |
+| turkey-1 | `www.donanimhaber.com` | sound — AS6205 HizliNet, TR |
+
+france-1's dest was read from `/usr/local/etc/xray/config.json` over
+SSH. germany-1 refuses every key we hold, so its dest was recovered from
+*outside* instead: open a plain TLS connection to `:443` with an SNI
+REALITY will not authenticate, and it proxies you to the dest, which
+hands back the dest's own certificate. Useful trick, and worth knowing
+it works against us too.
+
+Replacements measured clean the same day, per region:
+`www.helsinki.fi` (FI, AS1741 FUNET), `www.heise.de` (DE, AS12306
+Plus.line), `www.web.de`/`www.gmx.net` (DE, AS8560 IONOS), `www.free.fr`
+(FR, AS12322 Proxad). The rejections are recorded in
+`docs/detection-resistance.md` so nobody re-proposes them.
+
+**Changing a live node's dest is not a client-side change.** The SNI
+comes from the panel's Protocol Config; both ends move together or every
+customer on that node fails exactly the way an intercepted domain does.
+Owner decision, with a window.
+
+### "Welcome to nginx!" — and it is four nodes, not three
+
+The handover said singapore-1, turkey-1 and germany-1. **france-1 has it
+too.** All four return the same 615 bytes with
+`Server: nginx/1.24.0 (Ubuntu)` on it, so the version and the distro are
+being volunteered as well. finland1 refuses the connection outright —
+`ECONNREFUSED`, not a timeout, so nothing is listening rather than a
+firewall dropping it.
+
+**Why finland1 escaped:** `/etc/nginx/sites-available/default` is still
+on the box; only the `sites-enabled` symlink is missing. Somebody removed
+it there by hand and it never landed in the installer. `panel.sh` has
+done `rm -f /etc/nginx/sites-enabled/default` since forever; `agent.sh`
+never did. This is the "a hotfix on a live box is not done until a fresh
+install is correct" rule, in the wild.
+
+**Port 80 has to stay open, and this nearly went the other way.**
+Renewal, not issue, is what needs it: certbot replays the authenticator
+recorded per certificate. Read off the nodes —
+
+| node | authenticator | consequence |
+|---|---|---|
+| france-1 | `webroot /var/www/html` | renews *through the default vhost being removed* |
+| turkey-1 | `webroot /var/www/html` | same |
+| finland1 | `standalone` | fine today; port 80 is free there |
+| singapore-1 | `standalone` | **already broken** — nginx holds 0.0.0.0:80, so nothing can bind it |
+
+So closing 80 breaks france-1 and turkey-1 immediately, and the failure
+would not surface for ninety days, at which point Xray refuses a config
+whose certificate it cannot read and the node loses *every* TLS inbound
+at once. Redirecting to https is wrong for a different reason: 443 is
+REALITY, so a 301 walks the scanner into a handshake returning a
+certificate for somebody else's domain — louder than the page we are
+removing.
+
+`ensure_port80_site` therefore serves a deliberate page: the same dull
+per-node text as the loopback fallback, `server_tokens off`, and an ACME
+location out of `/var/www/html`. Proven on a throwaway Ubuntu with
+nginx, from the "Welcome to nginx!" state to:
+
+```
+GET /                                   200, Server: nginx  (no version)
+GET /.well-known/acme-challenge/probe   200, text/plain, exact token
+GET a missing challenge                 404
+```
+
+and on the rollback path — a second vhost also claiming `default_server`
+— it returns 1, says why, and puts the old link back, because a port 80
+answering *nothing* is worse than one answering badly.
+
+The `standalone` → `webroot` migration was proven by certbot's own
+parser: after the rewrite it reads back
+`'authenticator': 'webroot', 'webroot_path': ['/var/www/html'],
+'webroot_map': {...}`. **What is NOT proven is a real renewal** — the rig
+had no live certificate. `certbot renew --dry-run` is the ground truth
+and the script tells the operator to run it rather than claiming it
+works.
+
+### Still to do, per node, and none of it done
+
+Nothing on any node was touched. In the order I would do it:
+
+1. **france-1's dest is `cloudflare.com`.** Worst case in the fleet and
+   the one the code comments have argued against for months. Needs a
+   panel Protocol Config change and a node change together.
+   `www.free.fr` measured clean for it.
+2. **germany-1 and finland1 share `www.shatel.ir`.** One dest across two
+   nodes is one signature across two nodes. `www.heise.de` or
+   `www.web.de` for germany-1. Blocked on germany-1's SSH key either
+   way — `ovh_neo`, `azs_vps` and `neo_tr1` were all refused again
+   today, so that key is now blocking two open items.
+3. **`fix-node-port-80.sh --apply` on france-1, germany-1, singapore-1
+   and turkey-1.** Run it without `--apply` first; the report tells you
+   which of the two renewal states that node is in. Then
+   `certbot renew --dry-run`, then `curl -sI http://<ip>/` from off the
+   node.
+4. **singapore-1's certificate renewal is already broken** and item 3
+   fixes it as a side effect. Worth doing on its own schedule if item 3
+   slips.
+5. **finland1 needs nothing for the fingerprint** — but if anything ever
+   puts nginx on its port 80, its `standalone` renewal breaks the same
+   way singapore-1's did. `ensure_port80_site` migrates it if the
+   installer is ever re-run there, which is the safe outcome, but it is
+   worth knowing before that happens rather than after.
+
+## 2026-08-23 — Port 80 taken back on three live nodes, and the probe that failed everything
+
+Applied `fix-node-port-80.sh --apply` to the live fleet. france-1,
+singapore-1 and turkey-1 are done and verified from outside.
+**germany-1 was not touched — `ovh_neo`, `azs_vps` and `neo_tr1` were all
+refused again.** That key now blocks three items: the 502 mirror, its
+shared `www.shatel.ir` dest, and now this.
+
+| node | pre-apply state | after | `certbot renew --dry-run` |
+|---|---|---|---|
+| france-1 | default vhost, `webroot /var/www/html` | `Server: nginx`, 188-byte page | **success** |
+| singapore-1 | default vhost, `standalone` | `Server: nginx`, 188-byte page | **failed before, success after** |
+| turkey-1 | default vhost, `webroot /var/www/html` | `Server: nginx`, 203-byte page | **success** |
+| germany-1 | default vhost | untouched | not run — no SSH |
+| finland1 | nothing on 80 at all | untouched | not run |
+
+`certbot renew --dry-run` had never been run against a real renewal
+before today. It passes on all three. The `standalone` → `webroot`
+migration is now proven end to end and not just by certbot's parser.
+
+**singapore-1's renewal was already broken, and now it is proven both
+ways.** Before the change: `Could not bind TCP port 80 because it is
+already in use`. After: `all simulated renewals succeeded`. The
+certificate expires 2026-11-09, so this was a real outage due in about
+eleven weeks — every TLS inbound on the node at once — not a theoretical
+one.
+
+finland1 was confirmed rather than assumed: nginx *is* installed there,
+but only `neoxify-fallback` is enabled, nothing binds 80, and the port
+refuses from outside. Its `standalone` renewal works *because* 80 is
+free, which is the same coin singapore-1 landed on tails.
+
+Nothing was restarted anywhere. Every engine's `ActiveEnterTimestamp`
+still predates the change, and `agentd` on all three was seen executing
+`reassert:… (CREATE_USER)` from the panel within a minute of it.
+
+### The probe rejected every dest on every node
+
+`reality-dest-audit.sh --self-test` **failed its own control case** the
+first time it was run on a node — `www.torob.com`, the name the test
+exists to accept, came back `BAD  negotiated , and REALITY requires TLS
+1.3`. So did `cloudflare.com`, which had just completed a TLS 1.3
+handshake from this machine.
+
+Note the empty version in that message. `probe_reality_dest` read the
+version out of the `SSL-Session:` summary block (`Protocol  : TLSv1.3`),
+and Ubuntu's OpenSSL 3.0.13 **does not print that block** when the peer
+closes first — which is every probe it makes, because stdin is
+`/dev/null`. Only `New, TLSv1.3, Cipher is …` is reliably there. The
+check therefore failed for *everything*, on the exact platform every
+node runs.
+
+This never showed up locally because the dev machine's openssl does
+print the block. It would have shipped as: the installer offers no clean
+candidate on any node, and the operator either types a weak dest past
+the warning or drops REALITY there — the precise outcome commit
+`70d909b` was written to prevent. Fixed by reading whichever of the two
+lines exists. After the fix, on france-1: `www.torob.com` OK,
+`www.asus.com` WEAK, self-test passes.
+
+A harness reporting total failure is more likely broken than the thing
+it measures. That is now twice this month.
+
+**Second gotcha, smaller:** the `== Proof, from this node ==` block
+inside `--apply` prints `Server: nginx/1.24.0 (Ubuntu)` even on a
+successful run. It is racing its own `systemctl reload` — an old worker
+still holding the listening socket answers it, and serves the *new*
+index.html because the file on disk already changed, so the output looks
+like a half-applied change and is not one. From outside, seconds later,
+it is `Server: nginx`. Do not debug that line; check from off the node.
+
+The ACME path was also proven from outside, through whatever firewall
+each provider has in front: a token written into
+`/var/www/html/.well-known/acme-challenge/` comes back byte-exact over
+both the IP and the FQDN on all three nodes, and a nonexistent token
+returns 404 rather than the index page.
+
+### france-1's decoy: measured, and NOT applied
+
+`www.free.fr` re-verified **from france-1 itself** with the repaired
+probe: `212.27.48.10 is AS12322 PROXAD - Free SAS in FR`. Clean, and it
+agrees with the earlier reading from this machine. `cloudflare.com`
+confirmed WEAK from the node: AS13335, `server: cloudflare`.
+
+The change was **not made**, because measuring the blast radius turned up
+two things that are worse than "customers briefly reconnect":
+
+1. **france-1's REALITY config is the exit for five ir1 relay routes** —
+   Trojan, Shadowsocks, VLESS+REALITY, VLESS+TLS and VLESS+WS, each with
+   its own `inboundTag`. The relay's uplink outbound is built from the
+   *exit's* `publicParamsJson` (`agent-gateway.service.ts:430` →
+   `relay/provisioner.go:213`). So this is not a france-1 REALITY change;
+   it is a change to five protocols on a node in Iran. Routes reassert
+   every 60s and should self-heal, but the failure mode while they do not
+   is the one already in the journal: unmatched relay traffic egresses
+   **at the relay**, in Iran.
+2. **Mobile clients never refetch.** `getProtocolUsers()` has exactly one
+   call site — `loadAll`, on mount / retry / server-switch. No poll, no
+   TTL, no refetch on resume, and `credential-cache.json` has no expiry
+   (`savedAt` is read only to render a label). Android keeps the WebView
+   alive across backgrounding and adopts a running tunnel on open, so a
+   stale `serverName` survives until the app is restarted. Toggling the
+   VPN off and on inside the same session re-dials with the same dead
+   SNI.
+
+Add the desktop split-tunnel case: `Dashboard.tsx:933` short-circuits the
+egress check to `connected` whenever `fromStatus === "connected"`, and
+Xray's status is *always* `connected` (`engines/mod.rs:681` returns
+`Unknown`). A Custom-mode user with a mismatched dest sees a green orb
+over dead traffic, indefinitely. REALITY does not refuse an unknown SNI —
+it proxies the customer to the decoy, so the handshake keeps succeeding.
+
+Desktop full-tunnel is the only well-behaved path: two strikes, ~30s,
+then the ladder moves them to another protocol — but `runLadder` re-reads
+the same stale `protocolUsers`, so REALITY specifically stays dead until
+a `loadAll`.
+
+29 protocol_users hold a france-1 REALITY credential; the route is on
+Trial, Starter, Pro and Ultimate Max.
+
+**Sequencing, when it is approved.** Node first, panel second, and the
+gap is what costs: node-side is `dest` + `serverNames` in
+`/usr/local/etc/xray/config.json` and takes effect only on an Xray
+restart, which is the one thing that cannot be done casually here. Panel
+side is one PATCH to `protocol_configs.publicParamsJson` (the whole blob
+is replaced; `dest` and `serverName` move together atomically). Ordering
+node-then-panel keeps the disagreement to the seconds between them for
+*new* connections, but that is not the number that matters — the number
+that matters is how long a mobile customer keeps the old SNI, and that is
+unbounded.
+
+The honest options are (a) do it and accept mobile users are broken until
+they restart the app, (b) ship a client that refetches before connecting
+first, or (c) stand up the new dest on a second REALITY inbound on
+another port, move the panel row, and retire the old one once nobody is
+on it. (c) costs a port and no customer.
+
+
+## 2026-08-23 — france-1's second REALITY inbound is up and proven; the panel row did NOT move
+
+Option (c) from the previous entry: stand the new decoy up beside the old
+one rather than swapping under live customers. The node half is done and
+proven. **The panel half is not, and must not be done as specified** —
+see "why it stopped" below.
+
+### What is live on france-1 now
+
+A second REALITY inbound, `vless-reality-free-in`, on **2083**,
+`dest`/`serverNames` = `www.free.fr`. It reuses the *existing* keypair and
+shortId deliberately, so `realityPublicKey` and `shortIds` in the panel
+row stay byte-identical — the panel's stored public key hashes to the same
+12 hex chars as the one derived from the live private key. Only
+`serverName` and `port` would ever change client-side.
+
+No restart. `xray api adi` over the local API at 127.0.0.1:10085
+(`HandlerService` was already enabled). `xray` still reports
+`ActiveEnterTimestamp` of 2026-08-19 04:00:23 UTC throughout, and all
+eight protocols stayed up.
+
+Rehearsed before doing it: `adi` a dokodemo-door on 127.0.0.1:19999,
+confirm the socket, `rmi` it, confirm it is gone, confirm the six
+production inbounds are still listed. `rmi <tag>` is the rollback and it
+is proven, not assumed.
+
+**Port 2083, and the warning that came with it.** Free on this node (TCP
+in use: 22, 53, 80, 443, 2053, 7505, 8080, 8081, 8443, 10085, 10086,
+37651), a conventional HTTPS-alt port, and consistent with what this node
+already looks like from outside — it already answers TLS on 2053 and
+8443, so 2083 adds one more port to a cluster a scanner already reads as
+"host with several HTTPS endpoints" rather than a new *kind* of signal.
+
+But Xray itself said, on the way in:
+
+```
+[Warning] infra/conf: REALITY: Listening on non-443 ports may get your IP blocked by the GFW
+```
+
+That is upstream's own warning and it cuts against the entire point of
+the change. `www.free.fr` does not serve its site on 2083, so the decoy
+is now port-inconsistent in a way `cloudflare.com:443` at least was not.
+**There is no way around it on this node:** one global IPv4
+(104.105.205.233), and xray's existing inbound binds `*:443`, which
+covers v6 too — measured, not assumed. A second REALITY on 443 here is
+impossible. So the honest framing of option (c) is *better decoy
+identity, worse port*, and whether that trade is worth taking is the
+owner's call, not mine.
+
+### Proven end to end, from a vantage that could have said no
+
+A real client, not a handshake:
+
+| check | result |
+|---|---|
+| TLS from outside, SNI `www.free.fr` | `CN=free.fr`, Sectigo — byte-identical issuer/subject to the real site |
+| wrong SNI (`example.org`) to 2083 | still `CN=free.fr` — prober gets the decoy, not a reset |
+| **exit IP through the tunnel** | **104.105.205.233** |
+| the client host's own IP | 172.236.143.200 |
+| 1 MB payload | 1048576 bytes in 1555 ms |
+| HTTPS to a third host | `example.com` → HTTP 200 |
+
+Run from **singapore-1**, deliberately: a client on france-1 would report
+france-1's address whether or not the tunnel carried anything. Separate
+`xray run` process, loopback socks, killed afterwards; neither node's
+xray service was touched. Test user removed after — the new inbound now
+has **zero** users.
+
+**Persisted.** `xray api adi` does not write to `config.json`, and nothing
+in this repo re-adds an inbound after a restart — the 60s sweeps restore
+*users* and *routes*, never *inbounds*. So the inbound was merged into
+`/usr/local/etc/xray/config.json`, `xray run -test` first (it refused a
+bad candidate once and left the live file untouched, which is the guard
+working). Runtime and file now list the same seven tags.
+
+That mattered more than it looks: **`xray.service` has no `ExecReload`**,
+and `/etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh` ends in
+`systemctl reload xray 2>/dev/null || systemctl restart xray`. So a
+certificate renewal *restarts* Xray on every node. fr1 expires
+2026-11-17, i.e. renews around 18 October. A hot-added inbound would have
+silently vanished then, with customers pointed at a dead port.
+
+### Why the panel row did not move
+
+Three things, any one of which is enough.
+
+**1. It would break all 29 direct REALITY customers.** The new inbound
+has a new tag. `protocol_configs.inboundTag` for france-1 is empty, and
+with it empty the backend omits the key
+(`protocol-users.service.ts:454-456`) and `agentd` falls back to its
+`--xray-inbound-tag` default of `vless-in`
+(`agent/cmd/agentd/main.go:34`; the unit passes no flags). So the 60s
+reassert would keep writing all 29 users onto the **old** inbound while
+their clients dialled 2083. Setting that column is the fix — but
+`UpdateProtocolConfigDto` accepts only `listenPort`, `publicParamsJson`
+and `isEnabled`, so `inboundTag` **cannot be set through the API at
+all**. It needs direct SQL, which is a bigger decision than "move the
+panel row".
+
+**2. The five ir1 relay routes would not follow, and would say they
+had.** The uplink outbound tag is `route-<routeId>-out`, derived from the
+route id alone — it encodes nothing about the exit
+(`relay/provisioner.go:80-82`). Xray's `AddOutbound` rejects a duplicate
+tag rather than replacing it, and the agent swallows exactly that error
+as success (`relay/provisioner.go:93-104`). So the sweep would send the
+new port every 60s, ir1 would ack five healthy routes, and every one of
+them would still be dialling 2083's predecessor. A green panel over an
+unchanged reality — the exact failure mode this journal keeps recording.
+
+**3. Retirement is off the table anyway.** 29 users sit on the old
+inbound right now. It stays.
+
+### A live problem found on the way: the relay uplinks are already gone
+
+Looking for the uplink credentials turned up none. On france-1's
+`vless-in`: **29 users, zero whose email starts with `route:`** — the
+29 are exactly the 29 direct `protocol_users`.
+
+The five `-> France` relay routes were created **2026-08-13**. france-1's
+xray restarted **2026-08-19 04:00 UTC**. The uplink user is created
+*once*, at route creation (`routes.service.ts:268-277`), has no
+`ProtocolUser` row, and `reassertProvisionedUsers` reads only
+`protocolUser` — so **nothing re-asserts it, ever**. The restart wiped
+all five and they have not come back.
+
+Each of those five routes has 1 ACTIVE customer, and they are Iran-relay
+customers. This predates today's work by five days and I did not cause
+it, but it is almost certainly a live outage. **Not yet confirmed from
+ir1's side** — I have no key for ir1 and did not go looking for one. That
+confirmation is the first thing to do next.
+
+It also explains something that would otherwise be puzzling later: even a
+*correct* panel move would not have restored these, because the code path
+that creates them never runs again.
+
+### Gotchas worth the next session's minutes
+
+- `xray api adu` needs `port` and `listen` on the inbound stanza you hand
+  it, or it fails with `Listen on AnyIP but no Port(s) set in
+  InboundDetour` and cheerfully reports `Added 0 user(s)`.
+- `xray api rmu` takes `-tag=<tag>` plus bare emails — it does **not**
+  take the same JSON file `adu` does, and given one it says `inbound tag
+  not specified`.
+- `xray run -test -config <file>` needs the filename to **end in
+  `.json`**, otherwise `Failed to get format` — which looks exactly like
+  a malformed config and is not.
+- `xray x25519 -i` wants the key as an argument; `-i /dev/stdin` silently
+  yields nothing.
+
+
+## 2026-08-23 — The releases are not signed either
+
+**Status:** done (correction) / blocked (the signing itself)
+**Touches:** `docs/journal/windows.md` only
+
+Correcting the previous entry. It said Defender's
+`Trojan:Win32/Bearfoos.B!ml` hit "affects the locally built, unsigned
+installer" and that "CI-signed releases are not affected". The second
+half is wrong, and wrong in the direction that matters: **there are no
+CI-signed releases.** Every published installer is unsigned, including
+the one on the download page right now.
+
+### Signing has never run once
+
+Not "since 0.9.24" — never. The steps went in with 74ccf1a on
+2026-08-11, and the first release after that, `desktop-v0.9.4`, already
+skipped them. So has every release since. Checked all 25 release runs
+from 0.9.4 to 0.9.28, individually: each one emitted
+
+> AZURE_CLIENT_ID is not set, so this build is NOT Authenticode-signed.
+
+The whole block is gated on one expression at line 39 of
+`release-desktop-windows.yml`:
+
+    SIGNING_ENABLED: ${{ secrets.AZURE_CLIENT_ID != '' }}
+
+and `Azure login`, `Sign the installer`, `Re-sign the updater payload`,
+`Sign the bootstrapper` and `Verify both binaries are signed and
+timestamped` are each `if: env.SIGNING_ENABLED == 'true'`. `gh secret
+list` returns four secrets — the two `TAURI_SIGNING_*`, the two
+`ANDROID_KEYSTORE_*`. No `AZURE_*` anything, and no repo variables at
+all. All six Azure secrets the workflow reads (`AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_SIGNING_ENDPOINT`,
+`AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`) have never existed.
+
+The degrade-instead-of-fail behaviour is deliberate and documented in
+the file, and the `Verify` step does guard against a signing step that
+silently no-ops. But that guard is itself gated on `SIGNING_ENABLED`,
+so with no credentials there is nothing asserting anything — the
+release goes out green and unsigned, which is exactly what has happened
+twenty-five times.
+
+**Why:** shared.md's 2026-08-11 entry has it. The Azure Artifact
+Signing account exists (`neoxify-signing`, West US 2), but identity
+validation stalled at credentials.microsoft.com with "No access" and
+was never resumed. It is still Action Required, not failed. Nothing is
+wrong with the workflow; the enrolment was never finished, so the
+secrets were never created. Resume via the existing validation's
+"complete your verification" link — **do not start a second one.**
+
+### Defender does not flag the published 0.9.28 assets
+
+Measured, not assumed, on the host (Win11, real-time protection on,
+signatures 1.457.304.0 from 2026-08-22). Downloaded both assets from
+the release, verified against `sha256sums.txt` (both OK), then:
+
+- `Get-MpThreat` / `Get-MpThreatDetection` — nothing.
+- `Start-MpScan -ScanType CustomScan` over the directory — clean.
+- `MpCmdRun.exe -Scan -ScanType 3` per file — "found no threats",
+  exit 0, both.
+- Both files still on disk afterwards with unchanged hashes. Nothing
+  was quarantined.
+
+`Get-AuthenticodeSignature` on both: `Status: NotSigned`,
+`SignerCertificate: <null>`. So the released `Neoxify-Setup.exe` and
+`Neoxify_0.9.28_x64-setup.exe` are in exactly the state the Bearfoos
+entry assumed they were not.
+
+**The scan was a real negative, not a false pass.** A 40 MB custom
+scan returning in one second is the shape of a result this repo has
+been burned by before, so it got a control: an EICAR test file written
+into the same scratch directory was caught in seconds as
+`Virus:DOS/EICAR_Test_File` (2147519003), and both `Get-MpThreat` and
+`Get-MpThreatDetection` reported it **from the same unelevated shell**
+that had just returned empty. That proves three things at once — the
+directory is not excluded, real-time protection is live on it, and the
+cmdlets do surface detections without elevation. The empty result on
+the installers is therefore a true negative. Control file deleted
+afterwards; no exclusions were added and no protection was disabled.
+
+**What this does not prove.** One host, one signature version, one
+point in time. `!ml` verdicts are per-file-hash and cloud-scored, and
+they move — the VM hit a real detection on a locally built installer
+with these same characteristics. A clean scan today is not a promise
+about tomorrow's build, and it says nothing about third-party AV. It
+only refutes the specific claim that release assets are protected by a
+signature they do not have.
+
+### What being unsigned costs
+
+Every customer gets "Unknown publisher" on the UAC prompt and a
+SmartScreen block on first download — for a VPN, downloaded by people
+in Iran who are already taking a risk running a binary from a stranger,
+on a product asking for money. That is the actual cost, and it is being
+paid on every install today. AV detection is the second-order risk:
+unproven against the shipped asset, demonstrated against a local build.
+
+Unsigned SmartScreen reputation is not a way out. It accrues per
+certificate, and per file hash absent one — this project has shipped a
+new installer nearly every day for two weeks, so each release starts
+from zero and never reaches the threshold.
+
+Fix path is unchanged and still #91: finish the Azure identity
+validation. Certum OV + SimplySign stays the fallback. Worth noting for
+the driver question on the roadmap — a WFP callout driver cannot be
+covered by any of this. Kernel-mode needs EV plus Microsoft Partner
+Center attestation signing, which is a separate enrolment from
+Authenticode, not an upgrade to it.
+
+### The fix path, costed
+
+Researched against Microsoft's current docs, because two things
+everybody "knows" about this are out of date.
+
+**Eligibility is about where *we* are, not where customers are.** Azure
+Trusted Signing was renamed **Azure Artifact Signing** (docs moved to
+`/azure/artifact-signing/`, CLI is `az artifact-signing`; the resource
+provider is still `Microsoft.CodeSigning`). Public Trust certificates
+are open to organisations in the US, Canada, EU, UK and a handful of
+others — but **individual developers must be in the US or Canada**
+([quickstart prerequisites][ts-qs]). We validate as an individual and
+we are US-based, so the individual path is open. Iran is where the
+users are; it has no bearing on eligibility.
+
+**Option 1 — finish Azure Artifact Signing. $9.99/month, Basic.**
+5,000 signatures/month, far beyond a daily release. No hardware token,
+works from GitHub Actions, which is what the workflow is already built
+against. Requires a Pay-As-You-Go subscription (free/trial/sponsored
+are refused — shared.md already hit that). Individual validation is
+AU10TIX Verified ID: government photo ID, phone, proof of address, then
+a Verified ID card presented back from Microsoft Authenticator. It is
+an interactive same-session flow, minutes rather than the 1–20 business
+days the organisation path quotes.
+
+**Option 2 — a conventional OV certificate.** **$150–300/yr**
+([code-signing-options][cso]), plus a hardware token or cloud HSM:
+since June 2023 the CA/B Forum requires **OV as well as EV** keys to
+live in a FIPS 140-2 Level 2 (or CC EAL4+) module, so there is no "put
+the .pfx in a secret" option any more. Certum + SimplySign, already
+noted in shared.md, is this shape. Microsoft frames OV as the option
+for people who *cannot* use Artifact Signing on geography — which is
+not us.
+Strictly worse than option 1 on both cost and CI ergonomics; it is the
+fallback if Azure sours, not the plan.
+
+**Option 3 — stay unsigned and build reputation. Not viable, and worth
+being definite about.** Microsoft: *"When a file is not signed,
+SmartScreen reputation must build for each new version of your files,
+starting with zero reputation. Reputation cannot transfer from previous
+versions unless both were signed using the same publisher identity"*,
+and it *"can take several weeks and hundreds of clean installs from a
+wide audience"* ([smartscreen-reputation][ss]). We have shipped 25
+installers in twelve days. Every one starts at zero and none will ever
+reach the threshold. There is also **no submission mechanism** for
+consumer SmartScreen — the WDSI portal is an enterprise-admin path
+only. Doing nothing is a permanent choice, not a delay.
+
+### Two things in this repo that are now wrong
+
+**The 460-day figure is misattributed.** The workflow comment (lines
+148–153) and shared.md both tie it to the Azure certificate. It is
+actually the CA/Browser Forum cap on *conventional* code-signing certs
+issued from 2026-03-01. Artifact Signing certificates are **renewed
+daily and valid for 72 hours** ([cert management][ts-cert]). The
+conclusion the comment draws is still right and in fact stronger —
+without `timestamp-rfc3161` a signature dies in three days — but the
+reason is the 72-hour cert, not a 460-day one. Not fixing it here; this
+task is investigation plus this correction.
+
+**"Do not create a second identity validation" may no longer hold.**
+The docs say validation email links **expire in seven days**, and that
+if email verification fails you must start a new request. Ours was
+created 2026-08-11 — twelve days ago. Whoever picks this up should
+check whether the existing link is still live before assuming it can be
+resumed; the shared.md advice was written when it was fresh. Flagging
+rather than asserting — I could not verify the link's state without the
+Azure portal.
+
+### EV buys nothing here, and the driver is a separate purchase
+
+Worth killing an assumption before it costs money. **EV certificates no
+longer bypass SmartScreen** — Microsoft removed that in 2024 and now
+says plainly that *"paying a premium for EV solely to avoid SmartScreen
+warnings is no longer justified"* ([smartscreen-reputation][ss]).
+Nothing gives instant trust except shipping through the Microsoft Store
+(re-signed by Microsoft, no warning at all) — which #94 already
+identified as EXE-viable and blocked on exactly this signing work.
+
+For the prospective WFP callout driver, none of the above helps.
+Artifact Signing **cannot sign kernel drivers and will never issue EV
+certificates**; kernel-mode goes through Partner Center attestation
+signing, which requires a real **EV cert ($400+/yr)** *and* an
+organisation-level registration — you register as a **global
+administrator of an organisation's Entra tenant**, and the EV cert is
+needed to register at all, independently of signing the driver. That is
+company-gated, and the company does not exist yet. Two consequences: the driver cannot be costed as an upgrade to
+whatever we do now, and the current user-mode WFP kill-switch
+(`fwpmu.h`, no driver — only *redirection* needs a callout) is worth
+protecting precisely because it keeps us out of that gate.
+
+**Recommendation: finish option 1.** It is $9.99/month against a
+half-finished enrolment, it is the only option that makes reputation
+accumulate across releases instead of resetting daily, and it is the
+one the workflow is already wired for — six secrets and nothing else.
+It will not stop the SmartScreen warning on day one; nothing will. What
+it changes is that the warning starts decaying instead of resetting,
+and that a customer in Iran deciding whether to trust a VPN binary sees
+a real legal name instead of "Unknown publisher". For this product that
+is the whole point, and it is currently blocked on a phone, an ID
+document and twenty minutes — not on money or engineering.
+
+### Two loose ends, flagged rather than buried
+
+**The Store path does not dodge signing.** #94's EXE route still
+requires the installer to be Authenticode-signed with a certificate
+chaining to a Microsoft Trusted Root Program CA — only *MSIX* gets
+re-signed by Microsoft for free. So the Store is downstream of this
+work, not an alternative to it.
+
+**SignPath Foundation offers free OV-level signing for qualifying
+open-source projects** ([code-signing-options][cso]). This repo is
+public, but Neoxify is commercial, and I have not checked their
+eligibility rules. Worth ten minutes before paying for anything —
+recorded as a lead, not a plan.
+
+**On sourcing.** The dollar figures above are Microsoft's own published
+comparison, not estimates. An earlier draft of this entry carried
+invented ranges for the OV and EV costs; they were wrong in both
+directions and are corrected here. Numbers in this section that are not
+followed by a citation should be treated as unverified.
+
+[ts-qs]: https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart
+[ts-cert]: https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management
+[ss]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation
+[cso]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options
+[csc31]: https://www.digicert.com/blog/understanding-the-new-code-signing-certificate-validity-change
+
 ## 2026-08-23 — The 15 MB APK regression was uncompressed DWARF, not a bigger app
 
 **Status:** fix written, **unverified — needs a CI run to confirm**

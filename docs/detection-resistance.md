@@ -66,11 +66,11 @@ Four criteria, in the order a bad answer gets caught:
    also a bad *local* testing choice on this project's dev machine for
    exactly the same reason -- the failure looks like a broken node.
 4. **TLS 1.3, HTTP/2, X25519.** The installer no longer assumes this:
-   `probe_reality_dest` opens a real TLS 1.3 connection with `-alpn h2`,
-   checks the negotiated ALPN, checks the certificate verifies, and
-   reports X25519 as advisory. Candidates are probed *from the node*
-   before any of them is offered, so the list can never promise
-   something that box cannot reach.
+   `probe_reality_dest` opens a real TLS connection with `-alpn h2`,
+   checks the negotiated version and ALPN, checks the certificate
+   verifies, and reports X25519 as advisory. Candidates are probed *from
+   the node* before any of them is offered, so the list can never
+   promise something that box cannot reach.
 
 The old default was `cloudflare.com:443` for every node, which loses on
 criterion 1 and additionally makes all our nodes match each other.
@@ -79,6 +79,113 @@ the default is whichever candidate passed the probe first.
 
 **Diversity matters as much as the individual choice.** One `dest`
 across the fleet is one signature across the fleet.
+
+Upstream's own minimum for a dest is narrower than the four criteria
+above: "websites out of China's GFW, support TLSv1.3 and H2, the domain
+name is not used for redirection", with "target website IP reside closer
+to proxy IP" listed as a bonus
+([XTLS/REALITY README](https://github.com/XTLS/REALITY/blob/main/README.en.md)).
+For a censored network that bonus is criterion 1 and it is not optional,
+because it is the only one a filter can check without inspecting
+anything.
+
+### Criterion 1 is now enforced, not just written down
+
+A decoy rots. `www.asus.com` and `www.leboncoin.fr` were both sound when
+they were chosen and both had moved into AWS CloudFront by the time
+anyone looked, and they went on passing `probe_reality_dest` the whole
+time -- TLS 1.3, h2, X25519, certificate verified -- because that probe
+tested the handshake and nothing tested **who owns the address**. So did
+`www.speedtest.net`, which was the hardcoded fallback default for a node
+where nothing else worked.
+
+Picking fresh names would rot the same way. The probe now checks
+ownership on every run, three independent ways, because each can be
+evaded alone:
+
+- **The origin AS.** Team Cymru's DNS interface
+  (`<reversed-ip>.origin.asn.cymru.com`) gives the AS that announces the
+  route and its name; a match against a CDN or hyperscaler is a
+  rejection, and the AS is printed either way so the operator can judge
+  the country themselves. Needs `dig` -- `bind9-dnsutils` is now a base
+  dependency for exactly this, and when it is missing the probe says the
+  check did not run rather than passing silently.
+- **The CNAME chain**, which stays visible when a name is joined to a
+  CDN by delegation even if the edge address is announced elsewhere.
+- **The response headers** the edge stamps on its own replies:
+  `cf-ray`, `x-amz-cf-id`, `x-iinfo`, `server: akamaighost` and
+  friends. This one needs no DNS tooling at all, which is why it still
+  catches CloudFront on a node with no `dig`.
+
+Two further checks came out of upstream's own documentation:
+
+- **The certificate must carry the name we are about to claim.**
+  `Verify return code: 0 (ok)` says the chain is trusted and nothing
+  about whose name is on it. `-verify_hostname` is now passed, and a
+  mismatch is reported with the names the host actually serves.
+- **The chain must fit in 8192 bytes.** REALITY's server side abandons
+  the handshake above that and the customer sees a bare connection
+  reset, with nothing anywhere naming a certificate
+  ([Xray-core#6356](https://github.com/XTLS/Xray-core/issues/6356)).
+
+The probe returns three outcomes rather than two: usable, "works but the
+disguise is weak" (fronted, published range, redirector), and "will not
+work at all". Only a clean result is ever offered as a default. A weak
+one has to be typed in and confirmed -- it is kept selectable because
+losing REALITY entirely on a node with no clean option would take a
+transport away from the people with fewest alternatives, and that is a
+trade to make out loud rather than by accident.
+
+`installer/maintenance/reality-dest-audit.sh` runs the same probe on
+demand, with `--self-test` asserting that a self-hosted dest passes and
+a CloudFront-fronted one does not.
+
+### Fleet audit, 2026-08-23
+
+Measured with the new probe. **DNS answers depend on where you ask
+from**, and these were taken from one machine, not from each node, so
+treat the CDN verdicts as durable and the specific addresses as
+indicative. Re-run the audit on the node before acting on a
+recommendation.
+
+| node | dest in use | verdict |
+|---|---|---|
+| finland1 | `www.shatel.ir` | sound (AS31549 Aria Shatel, IR) but see below |
+| france-1 | `cloudflare.com` | **rotted, worst case** -- AS13335, `server: cloudflare` |
+| germany-1 | `www.shatel.ir` | works, but an Iranian ISP's name on a German address, and identical to finland1's |
+| singapore-1 | `www.shopee.sg` | sound (AS138341 Shopee Singapore) |
+| turkey-1 | `www.donanimhaber.com` | sound (AS6205 HizliNet, TR) |
+
+`finland1` and `germany-1` sharing one dest is its own problem: one
+`dest` across two nodes is one signature across two nodes, and it is the
+thing this section says not to do.
+
+Candidates measured clean on the same day, per region:
+
+| region | name | announcing AS |
+|---|---|---|
+| FI | `www.helsinki.fi` | AS1741 FUNET |
+| DE | `www.heise.de` | AS12306 Plus.line AG |
+| DE | `www.web.de` / `www.gmx.net` | AS8560 IONOS SE |
+| FR | `www.free.fr` | AS12322 Proxad / Free SAS |
+| TR | `www.donanimhaber.com` | AS6205 HizliNet |
+| SG | `www.shopee.sg` | AS138341 Shopee Singapore |
+| IR | `www.torob.com` | AS215708 Mobin Arvand |
+
+Rejected while looking, and worth recording so nobody re-proposes them:
+`www.is.fi`, `www.hs.fi`, `www.yle.fi`, `www.rtl.de` and
+`www.straitstimes.com` are CloudFront; `www.chip.de` and
+`www.hepsiburada.com` are Akamai; `www.sahibinden.com` is Cloudflare;
+`www.starhub.com`, `www.singtel.com` and `www.nus.edu.sg` are Imperva;
+`www.lemonde.fr` is Fastly; `www.laposte.net` is Google Cloud;
+`www.zoomit.ir` is Sotoon. `www.elisa.fi`, `www.telia.fi` and
+`www.lemonde.fr` offer no TLS 1.3 and `www.strato.de` and
+`www.orange.fr` no h2.
+
+Changing a live node's dest is **not** a client-side change: the SNI
+comes from the panel's Protocol Config and both ends must move together,
+or every customer on that node fails exactly the way an intercepted
+domain does. It needs an owner decision and a maintenance window.
 
 ## VLESS+TLS, Trojan, and the fallback site
 
@@ -98,6 +205,38 @@ someone opening it in a browser.
   dull and impersonal on purpose: a page claiming to be a real
   organisation would be a lie told to whoever looks, and a page
   mentioning VPN would undo the point.
+- **Port 80 is now something we chose.** Installing nginx for the
+  loopback fallback also enabled Ubuntu's stock default vhost, and that
+  one listens on `0.0.0.0:80`. Four of five live nodes were serving
+  `Welcome to nginx!` -- 615 bytes, byte-identical, with
+  `Server: nginx/1.24.0 (Ubuntu)` attached -- which is the same
+  fleet-wide fingerprint the fallback page was varied to avoid, on a
+  port nobody was thinking about. `ensure_port80_site` replaces it with
+  the same dull per-node page, `server_tokens off`, and an ACME
+  location.
+
+  **Port 80 stays open, and this is the part to get right.** Let's
+  Encrypt's HTTP-01 challenge needs inbound TCP 80 at every renewal, not
+  only at issue, and certbot replays whichever authenticator is recorded
+  in `/etc/letsencrypt/renewal/*.conf`. On the live fleet that is
+  `webroot` with `/var/www/html` on france-1 and turkey-1 -- served by
+  the very default vhost being removed -- and `standalone` on finland1
+  and singapore-1. Closing 80 breaks the first pair at once and the
+  second pair the moment anything takes the port; the certificate
+  expires, Xray refuses a config whose certificate it cannot read, and
+  the node loses every TLS inbound about ninety days after the change
+  that caused it.
+
+  Redirecting 80 to HTTPS is also wrong *for a node*: 443 is REALITY,
+  impersonating somebody else's site, so a 301 walks the scanner into a
+  handshake returning a certificate for an unrelated domain -- a louder
+  mismatch than the page being removed.
+
+  `installer/maintenance/fix-node-port-80.sh` applies the same function
+  to a node that is already live, reporting first and changing nothing
+  without `--apply`. It also migrates `standalone` renewals to `webroot`,
+  because a certificate that renews by binding port 80 cannot do that
+  once nginx holds it -- singapore-1 is in exactly that state now.
 - **ALPN is `["h2", "http/1.1"]` on both ends, including for the
   WebSocket transport, and that is deliberate.** The ClientHello's ALPN
   list is plaintext, so it must match what a Chrome-fingerprinted hello
