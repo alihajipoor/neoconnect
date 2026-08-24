@@ -110,6 +110,7 @@ export class RoutesService {
         id: true,
         name: true,
         exitProtocolConfigId: true,
+        uplinkAssertedAt: true,
         entryProtocolConfig: {
           select: {
             protocol: true,
@@ -127,7 +128,7 @@ export class RoutesService {
       orderBy: { name: "asc" },
     });
 
-    return routes.map(({ exitProtocolConfigId, entryProtocolConfig, ...route }) => ({
+    return routes.map(({ exitProtocolConfigId, uplinkAssertedAt, entryProtocolConfig, ...route }) => ({
       ...route,
       protocol: entryProtocolConfig.protocol,
       transport: entryProtocolConfig.transport,
@@ -146,7 +147,18 @@ export class RoutesService {
       // M2). Answers a different question from latency -- "is it up" vs
       // "is it fast for me" -- and a node that is down should be marked
       // so before the client wastes time probing it.
-      nodeStatus: entryProtocolConfig.node.status,
+      //
+      // For a relayed route the entry node's heartbeat is only half the
+      // answer, and it was the whole answer here until 2026-08-23, when
+      // thirteen relay routes with no working exit reported ONLINE for
+      // days. ir1 was up, heartbeating, and holding every outbound and
+      // rule; the exits had lost the uplink credential and rejected every
+      // connection. So a relay route whose exit has not recently
+      // confirmed the uplink is reported OFFLINE, which is what it is.
+      nodeStatus:
+        exitProtocolConfigId !== null && !uplinkIsFresh(uplinkAssertedAt)
+          ? "OFFLINE"
+          : entryProtocolConfig.node.status,
     }));
   }
 
@@ -272,6 +284,16 @@ export class RoutesService {
       // does -- an exit offered over WebSocket would otherwise get its
       // uplink built on the wrong listener.
       transport: exitProtocolConfig.transport,
+      // Omitted when null so the payload stays byte-identical to what
+      // exits without their own tag already receive.
+      //
+      // Every other CREATE_USER path carries this and only the uplink's
+      // did not, which is a silent misdelivery waiting on the first exit
+      // that runs two inbounds of one protocol: the uplink would be
+      // installed on the exit's default inbound while the relay dials the
+      // other one, and the route would fail with "invalid request user
+      // id" against a credential that demonstrably exists.
+      ...(exitProtocolConfig.inboundTag ? { inboundTag: exitProtocolConfig.inboundTag } : {}),
       externalUserId: `route:${route.id}`,
       credentials: uplinkCredentials,
     });
@@ -332,6 +354,27 @@ export class RoutesService {
 
     await this.prisma.route.delete({ where: { id } });
   }
+}
+
+/** How stale a route's last confirmed uplink may be before the route is
+ * reported down.
+ *
+ * The re-assert sweep runs every 60s (ROUTE_REASSERT_INTERVAL_MS), so
+ * this allows three consecutive sweeps to be missed. Tighter would flap
+ * on one slow ack; looser would be a window in which a customer is told
+ * a dead route is up, which is the thing this exists to stop.
+ *
+ * Exported for its own spec: the boundary is the whole behaviour. */
+export const UPLINK_FRESH_MS = 180_000;
+
+/** Never-asserted is unhealthy, not unknown.
+ *
+ * Every existing route is NULL here until the sweep first runs, and
+ * treating NULL as "probably fine" would reproduce exactly the failure
+ * being fixed -- a route reporting up because nothing has checked it. */
+export function uplinkIsFresh(assertedAt: Date | null, now: number = Date.now()): boolean {
+  if (!assertedAt) return false;
+  return now - assertedAt.getTime() <= UPLINK_FRESH_MS;
 }
 
 /** Which Xray inbound on the relay this route's rule should match.
