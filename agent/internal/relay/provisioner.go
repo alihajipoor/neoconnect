@@ -11,10 +11,14 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"google.golang.org/grpc"
 
@@ -58,6 +62,33 @@ type Provisioner struct {
 	routingConn      rcommand.RoutingServiceClient
 	tunInboundTag    string
 	tunInterfaceName string
+
+	// Fingerprint of the outbound last successfully installed for each
+	// route, so a re-sent CONFIGURE_ROUTE can tell "already applied" from
+	// "applied, but with different contents".
+	//
+	// Xray's AddOutbound refuses a duplicate tag and has no update
+	// operation, so without this the two are indistinguishable and the
+	// second was treated as the first: the command was acked as success
+	// and the running outbound kept whatever it was built with the first
+	// time, for as long as the process lived.
+	//
+	// Measured on ir1, 2026-08-24. finland1's REALITY serverName is
+	// www.shatel.ir; the backend had been sending that in every
+	// CONFIGURE_ROUTE, and every one was acked ACKED -- while ir1's eight
+	// finland1 outbounds still carried "cloudflare.com" from whenever
+	// they were first built. The REALITY handshake was rejected, so all
+	// eight routes were dead, and the panel and the outbox both said
+	// they were fine. Proven by A/B on one route: identical credential
+	// and shortId, serverName cloudflare.com -> curl 35, serverName
+	// www.shatel.ir -> exit IP 204.168.161.100.
+	//
+	// In-process only. An agent restart empties it, so the next
+	// re-assert rebuilds each outbound once -- one brief drop per agent
+	// restart, against a config that would otherwise be wrong forever.
+	// Convergence is the safe direction to err in.
+	mu           sync.Mutex
+	appliedProxy map[string]string
 }
 
 // New wraps the given connection -- callers should pass the same
@@ -74,11 +105,32 @@ func New(conn *grpc.ClientConn, tunInboundTag, tunInterfaceName string) *Provisi
 		routingConn:      rcommand.NewRoutingServiceClient(conn),
 		tunInboundTag:    tunInboundTag,
 		tunInterfaceName: tunInterfaceName,
+		appliedProxy:     map[string]string{},
 	}
 }
 
 func outboundTag(routeID string) string {
 	return "route-" + routeID + "-out"
+}
+
+// fingerprint of everything that shapes the outbound: where it dials, how
+// it authenticates, and the REALITY parameters it presents. Anything that
+// changes here means the running outbound is stale and has to be rebuilt.
+//
+// Hashed rather than compared field by field so that a field added to
+// ExitParams later is covered without anyone remembering to add it here.
+// The uplink credential is inside the hash and never leaves it -- the
+// digest is what is stored and logged, never the payload.
+func exitFingerprint(exit ExitParams) string {
+	blob, err := json.Marshal(exit)
+	if err != nil {
+		// Unhashable means "assume changed": rebuilding an outbound that
+		// did not need it costs one reconnect; skipping one that did is
+		// the bug above.
+		return ""
+	}
+	sum := sha256.Sum256(blob)
+	return hex.EncodeToString(sum[:])
 }
 
 func (p *Provisioner) ConfigureRoute(ctx context.Context, payload ConfigureRoutePayload) error {
@@ -90,6 +142,9 @@ func (p *Provisioner) ConfigureRoute(ctx context.Context, payload ConfigureRoute
 	if err != nil {
 		return fmt.Errorf("build outbound: %w", err)
 	}
+	tag := outboundTag(payload.RouteID)
+	want := exitFingerprint(payload.Exit)
+
 	if _, err := p.handlerConn.AddOutbound(ctx, &hcommand.AddOutboundRequest{Outbound: outboundCfg}); err != nil {
 		// Resending an already-applied CONFIGURE_ROUTE (e.g. after a lost
 		// ack) must be a no-op, not a failure -- same idempotency
@@ -101,8 +156,43 @@ func (p *Provisioner) ConfigureRoute(ctx context.Context, payload ConfigureRoute
 		if !strings.Contains(err.Error(), "existing tag found") {
 			return fmt.Errorf("AddOutbound: %w", err)
 		}
+
+		// The tag is taken. That is only a no-op if what is installed
+		// under it matches what was asked for, and until 2026-08-24 this
+		// never checked -- so a CONFIGURE_ROUTE whose exit parameters had
+		// changed was acked as applied while the running outbound kept
+		// the old ones indefinitely. Xray has no update operation for an
+		// outbound, so converging means removing it and adding it again.
+		if p.lastApplied(tag) == want && want != "" {
+			return p.finishRoute(ctx, payload)
+		}
+
+		log.Printf("relay: outbound %s exists with different exit parameters; rebuilding it", tag)
+		if _, err := p.handlerConn.RemoveOutbound(ctx, &hcommand.RemoveOutboundRequest{Tag: tag}); err != nil {
+			return fmt.Errorf("RemoveOutbound (stale %s): %w", tag, err)
+		}
+		if _, err := p.handlerConn.AddOutbound(ctx, &hcommand.AddOutboundRequest{Outbound: outboundCfg}); err != nil {
+			// Removed and could not re-add: the route now has a rule
+			// pointing at nothing. Reported rather than swallowed --
+			// the next re-assert is 60s away and this must not look
+			// like success in the meantime.
+			p.forgetApplied(tag)
+			return fmt.Errorf("AddOutbound (rebuilding %s): %w", tag, err)
+		}
 	}
 
+	p.recordApplied(tag, want)
+
+	return p.finishRoute(ctx, payload)
+}
+
+// finishRoute installs the half of a route that is safe to re-apply
+// unconditionally: the routing rule, and the OS-level bridge a
+// WireGuard/OpenVPN entry needs. Split out so the "outbound is already
+// exactly right" path still asserts them -- the rule can be missing while
+// the outbound is present, e.g. if a previous command failed between the
+// two.
+func (p *Provisioner) finishRoute(ctx context.Context, payload ConfigureRoutePayload) error {
 	rule, err := buildRoutingRule(payload, p.tunInboundTag)
 	if err != nil {
 		return fmt.Errorf("build routing rule: %w", err)
@@ -139,6 +229,27 @@ func (p *Provisioner) ConfigureRoute(ctx context.Context, payload ConfigureRoute
 	}
 
 	return nil
+}
+
+func (p *Provisioner) lastApplied(tag string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.appliedProxy[tag]
+}
+
+func (p *Provisioner) recordApplied(tag, fingerprint string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.appliedProxy == nil {
+		p.appliedProxy = map[string]string{}
+	}
+	p.appliedProxy[tag] = fingerprint
+}
+
+func (p *Provisioner) forgetApplied(tag string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.appliedProxy, tag)
 }
 
 // RemoveRoute reverses ConfigureRoute's Xray-side wiring. Xray's own
