@@ -16,6 +16,13 @@ import { apiEndpoints } from "./api-endpoints";
  * via somewhere else. If it sees the same one, traffic is bypassing the
  * tunnel no matter how healthy the interface looks.
  *
+ * That argument holds only while both readings came from the same
+ * endpoint, which this file did not used to check. `/health/ip` reports
+ * the last untrusted hop before the backend, and the node mirrors in the
+ * fallback list report a different one from the CDN -- so two readings
+ * taken through different endpoints can differ with nothing having
+ * changed about the route. See `IpReading` and `verifyEgress`.
+ *
  * It closes that hole for **IPv4 and nothing else**, which this file
  * used to claim was no hole at all. The comparison is done over
  * whichever family reached `/health/ip`, and on every node that is
@@ -29,7 +36,29 @@ import { apiEndpoints } from "./api-endpoints";
  * server that will not answer quickly has already failed the check. */
 const EGRESS_TIMEOUT_MS = 6000;
 
-async function publicIp(): Promise<string | null> {
+/** One answer to "what address does the world see", together with who
+ * gave it.
+ *
+ * The `from` half is not bookkeeping. `/health/ip` does not report the
+ * caller's egress address; it reports **the last untrusted hop before
+ * the backend**, and which hop that is depends on which endpoint
+ * answered. Some nodes run an API mirror that proxies to the
+ * Cloudflare-fronted panel, and Cloudflare then overwrites
+ * `cf-connecting-ip` with the *node's* address -- so those mirrors
+ * return the node's own IP, which is exactly what a working tunnel looks
+ * like (HANDOVER-2026-08-22 §6 item 4; measured, turkey-1 answering
+ * `130.94.0.27` where finland1 answered the real client address).
+ *
+ * `publicIp` used to discard this, and the comparison at the heart of
+ * the whole file was therefore between two numbers that were not
+ * necessarily measuring the same thing. A baseline taken via the CDN and
+ * an after-reading taken via a node mirror differ with no routing change
+ * whatsoever -- a fabricated "throughTunnel" out of two honest answers
+ * to two different questions.
+ */
+type IpReading = { ip: string; from: string };
+
+async function publicIp(): Promise<IpReading | null> {
   // The same endpoint list the rest of the app uses, and for a sharper
   // reason here: this check decides whether the customer is told they
   // are protected. Pinned to one address, a blocked control plane would
@@ -47,7 +76,7 @@ async function publicIp(): Promise<string | null> {
       clearTimeout(timer);
       if (!res.ok) continue;
       const body = (await res.json()) as { ip?: string };
-      if (body.ip) return body.ip;
+      if (body.ip) return { ip: body.ip, from: base };
     } catch {
       // Try the next one. Exhausting the list returns null, which the
       // caller already treats as "no evidence" rather than as failure.
@@ -56,12 +85,13 @@ async function publicIp(): Promise<string | null> {
   return null;
 }
 
-/** The address the world saw before connecting, for later comparison.
+/** The address the world saw before connecting, and who reported it.
  *
  * Null means we could not establish a baseline. That is not a failure to
  * report to anyone -- it just means the after-check has nothing to
  * compare against and must not claim the tunnel is broken.
  */
+export type BaselineIp = IpReading;
 export const captureBaselineIp = publicIp;
 
 export type EgressVerdict =
@@ -73,18 +103,42 @@ export type EgressVerdict =
   /** Nothing answered. Either the tunnel is black-holing traffic or the
    * connection is genuinely down; both mean the customer is not working. */
   | { state: "unreachable" }
-  /** No baseline, so no comparison is possible. Reported rather than
-   * guessed, so the UI can stay quiet instead of alarming. */
+  /** No comparison was possible: either there is no baseline at all, or
+   * the two readings did not come from the same endpoint and so are not
+   * measuring the same thing. Reported rather than guessed, so the UI
+   * can withhold a verdict instead of inventing one in either
+   * direction. */
   | { state: "indeterminate"; exitIp: string | null };
 
-export async function verifyEgress(baselineIp: string | null): Promise<EgressVerdict> {
-  const exitIp = await publicIp();
+/** Compares the address the world sees now against the one it saw before
+ * connecting.
+ *
+ * Two readings only mean something together when they were taken through
+ * the same endpoint. `/health/ip` answers "what is the last untrusted hop
+ * before the backend", and the node mirrors in the fallback list answer
+ * it differently from the CDN -- see `IpReading`. A pair that straddles
+ * two endpoints is therefore not a before-and-after at all, and the
+ * difference between them says nothing about where packets went.
+ *
+ * That mismatch is reported as `indeterminate` rather than as either
+ * verdict. Calling it `throughTunnel` was the false positive that made
+ * this guard necessary; calling it `bypassingTunnel` would be a false
+ * accusation built on the same non-comparison.
+ *
+ * In practice the endpoints match on essentially every check -- the list
+ * is tried in a fixed order and the first entry answers -- so the guard
+ * costs nothing until the fallback actually shifts, which is exactly the
+ * moment the comparison stops being valid.
+ */
+export async function verifyEgress(baseline: BaselineIp | null): Promise<EgressVerdict> {
+  const reading = await publicIp();
 
-  if (exitIp === null) return { state: "unreachable" };
-  if (baselineIp === null) return { state: "indeterminate", exitIp };
-  return exitIp === baselineIp
-    ? { state: "bypassingTunnel", exitIp }
-    : { state: "throughTunnel", exitIp };
+  if (reading === null) return { state: "unreachable" };
+  if (baseline === null) return { state: "indeterminate", exitIp: reading.ip };
+  if (reading.from !== baseline.from) return { state: "indeterminate", exitIp: reading.ip };
+  return reading.ip === baseline.ip
+    ? { state: "bypassingTunnel", exitIp: reading.ip }
+    : { state: "throughTunnel", exitIp: reading.ip };
 }
 
 /* ------------------------------------------------------------------ *

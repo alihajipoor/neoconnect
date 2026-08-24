@@ -6617,6 +6617,1571 @@ The parts worth carrying forward, none of which git records:
   annotation on every run, so a green release is not evidence signing
   came back.
 
+---
+
+## 2026-08-23 — "Connected" now means verified, and the Custom-mode probe can finally fail
+
+**Status:** landed on branch `claude/honest-connected-0930`, **not
+released, not proven on hardware**
+**Touches:** `apps/desktop-windows/src/**`,
+`apps/desktop-windows/service/src/split_tunnel/{proxy,mod}.rs`
+
+### The defect
+
+Custom mode on an Xray protocol showed a green "Connected" indefinitely
+with nothing flowing. Three abstentions rendered as proof, and they
+compound:
+
+1. `Engines::status` reports `TunnelHealth::Unknown` for Xray, OpenVPN
+   and IKEv2 for as long as the process has not exited
+   (`engines/mod.rs`, `Active::Child` / `Active::Ikev2`). Honest — there
+   is no cheap handshake to read. `stateFromStatus` swallowed it into
+   "connected" via a `default:` arm.
+2. The health poll's Custom-mode branch computed the probe result and
+   **discarded it** whenever the engine reported up. The one instrument
+   that could catch this was skipped exactly when it was the only one.
+3. The full-tunnel branch counted `indeterminate` egress — "no
+   comparison was possible" — as carrying traffic. Reopening the app
+   over a service-kept tunnel takes no baseline, so that session is
+   `indeterminate` forever.
+
+### The probe could false-positive, not only false-negative
+
+The false negatives were already documented. The other direction was
+not. `proxy::probe` was a bare TCP `connect()` — no payload, no read —
+and **Xray on Windows runs its own `tun` inbound**, a userspace TCP
+stack inside xray.exe. The SYN is answered by that stack, not by
+1.1.1.1. It completes as soon as xray.exe is up with a live Wintun
+adapter, regardless of whether the VLESS session exists. Nothing was
+sent afterwards, so the outbound was never asked to carry anything.
+
+Second false-positive path, on every protocol: **REALITY proxies an
+unknown SNI to its decoy site rather than refusing it.** A stale
+`serverName` against a changed `dest` hands the customer to a
+third-party website while the outer TLS keeps looking perfectly healthy.
+
+Also worth keeping: the probe only shares the *tunnel-attachment leg*
+with a selected app's path. It skips WinDivert, the NAT table and the
+local relay entirely, so a redirect capturing nothing is invisible to
+it. The doc comment claiming "the exact path a selected app's traffic
+takes" was wrong and has been corrected in place.
+
+### What changed
+
+- Rules moved to `src/lib/connection-evidence.ts`, pure and tested. The
+  dashboard needs Tauri + service + network, so these had only ever been
+  checked by reading them.
+- New `unverified` state — "Connected, not confirmed", brand cyan.
+  Deliberately **not** `degraded`: a false "not protected" gets someone
+  in Iran to disconnect. A failed split-tunnel probe still never causes
+  a failover; it just no longer produces green.
+- Poll gained a leading-edge run, throttled to one check per 5s, so
+  `unverified` resolves in ~1s rather than 15.
+- `verifyEgress` now records **which endpoint answered** and refuses to
+  compare a CDN reading against a mirror reading. This is HANDOVER §6
+  item 4 turned into code: turkey-1's mirror answers with the node's own
+  address, which is what a working tunnel looks like.
+- **Service-side, flagged:** `proxy::prove_carries` sends a real TLS
+  ClientHello and requires a TLS record header back.
+  `split_tunnel::probe` calls it; **route selection still uses the old
+  `proxy::probe`** deliberately — it asks a different question and
+  making it stricter risks breaking route installation on a path nobody
+  can test right now.
+
+### What this still cannot prove
+
+- **Custom mode**: `prove_carries` proves *a socket pinned to the
+  tunnel* reached a real TLS server. It does **not** prove the chosen
+  apps' packets are being redirected — that is the WinDivert/NAT leg,
+  which the probe skips. The service's own packet counters
+  (`splitTunnelProblem`) remain the only signal measured on the real
+  path, and they need 12s of warm-up and 20 redirected packets before
+  they say anything.
+- **Full tunnel with no baseline** (app reopened over a live tunnel)
+  stays `unverified` for the session. There is no honest comparison
+  available. The obvious follow-up — persisting an exit IP once proven
+  through a baseline and matching against it later — was scoped out, not
+  rejected.
+- The mirror-XFF hazard is *guarded*, not fixed. If both readings come
+  through the same broken mirror the addresses match and it reads as a
+  leak. The real fix is a certificate for `origin.neoxify.site`
+  (HANDOVER §6 item 4), which is backend work.
+
+### The rig experiment this needs (rig is being rebuilt — do it later)
+
+The unit tests prove the decision rules and the reply check. **They
+prove nothing about a tunnel.** On the rebuilt VM:
+
+1. Custom mode + `XRAY_VLESS_REALITY`, one app selected. Connect,
+   confirm green and that the selected app's exit IP is the node's while
+   an unselected app's is not.
+2. **Break the far end without touching a live node** — ask before
+   changing anything on production. Simplest safe version: edit the
+   client's stored `serverName` to a name the node does not serve, so
+   REALITY hands the session to the decoy. Expect: the orb goes to
+   "Connected, not confirmed", the split-tunnel log records
+   `probe FAILED: the tunnel completed a connection but carried no reply
+   from …`, and **no failover is triggered**.
+3. Control, and this is the one that matters: build with `prove_carries`
+   swapped back to `probe` and repeat step 2. The old build must show
+   green. Without that the test proves nothing.
+4. Regression: WireGuard and OpenVPN full tunnel, connect and confirm
+   the orb still reaches green (not stuck on "not confirmed") and the
+   exit-IP chip still appears.
+5. Confirm the `unverified` copy renders correctly in `fa` (RTL) — it is
+   the longest new string on the screen.
+
+---
+
+## 2026-08-23 — The two things blocking a REALITY decoy change, and what each fix can actually promise
+
+**Status:** built on `claude/config-refresh-and-inbound-tag`, unpushed,
+**not verified against a node or a real tunnel**
+
+france-1's REALITY decoy is `cloudflare.com` — the weakest disguise
+available, since the decoy *is* the CDN. Changing it was blocked by two
+separate things, both fixable in source, and both now fixed. Neither fix
+has been exercised against a live node, and the rig VM is still gone, so
+what follows is what the code does and what it is entitled to claim.
+
+### Blocker 1 — clients held a stale SNI forever
+
+`getProtocolUsers()` had exactly one call site: the dashboard's initial
+load, plus retry and server-switch. No poll, no TTL, no expiry on the
+disk cache. On Windows the window ends when the window closes; **on
+Android it does not end at all** — the WebView survives backgrounding,
+the screen adopts the running tunnel on open, `loadAll` never runs a
+second time, and toggling the VPN off and on re-dials the values already
+in memory. Nothing short of a force-stop refetched.
+
+Now: `refreshConnectionConfig` in `apps/desktop-windows/src/lib/` (which
+mobile aliases as `@shared`), called at the top of both clients'
+`runLadder`, plus a `useRefreshOnResume` hook for the Android case.
+
+The parts worth not re-deriving:
+
+- **The refresh runs *above* the teardown, on purpose.** Run from the
+  health poll there is still a tunnel up, and on a filtered network that
+  tunnel is the likeliest way to reach the control plane at all. Tearing
+  it down first throws away the route to the answer.
+- **The TTL is a freshness horizon, not an expiry.** Ten minutes.
+  Nothing ever discards a snapshot for age and `loadSnapshot` still hands
+  back a week-old one; the TTL only decides whether the connect path owes
+  the server a question. A cache that expired itself would reintroduce
+  the exact outage it was written to end (panel filtered in Iran, product
+  dead for everyone there on every protocol).
+- **The refresh has its own six-second budget, not the API's.**
+  `apiRequest` walks every endpoint at up to 8s each; paying that on the
+  connect path would add tens of seconds of nothing-happening before the
+  first tunnel packet. The in-flight request is not cancelled, only
+  stopped being waited for, so a late answer still writes the cache and
+  the next connect is already paid for.
+- **A failed refresh never blocks connecting.** It falls back to the
+  held credentials and dials. It reports `CONTROL_PLANE_UNREACHABLE` with
+  the cache's age in minutes and warns to the console, so a stale-config
+  connect is visible rather than silent. Existing enum members,
+  deliberately — a new `ClientAttemptKind` would need a schema migration
+  to record one line of context.
+- **A live session is not reconnected when the config moves.** A VPN
+  that drops itself unasked is indistinguishable, from inside Iran, from
+  one that has been blocked. The next connect picks up the new values,
+  which bounds the stale window at one connect instead of one reinstall.
+
+### Blocker 2 — `inboundTag` could not be set through the API
+
+`UpdateProtocolConfigDto` carried only `listenPort`, `publicParamsJson`
+and `isEnabled`, and the app-wide pipe runs `whitelist` +
+`forbidNonWhitelisted` — so a PATCH naming `inboundTag` came back 400.
+Correcting one meant SQL, because `remove()` refuses while any customer
+or route references the config.
+
+**What the validation can guarantee:** shape; the reserved relay tun
+inbound; another protocol's default tag; and uniqueness across the node
+by *effective* tag — so a sibling reaching the same inbound through its
+node default counts as a clash even though its column is null. That last
+one is the case a column-level unique check misses entirely, and it is
+the one that has a relay's second exit country silently egressing
+through the first's.
+
+**What it cannot guarantee, and this is the important half:** that the
+tag names an inbound the node actually has. There is no agent RPC for it
+— `packages/proto/agent.proto` has `Hello`, `Heartbeat`, `StatsBatch`,
+`CommandAck`, `StateSnapshot` and a user/route command set, and nothing
+that enumerates inbounds. The agent does not know either: it is started
+with one tag per protocol as a flag (`--xray-inbound-tag` and friends)
+and never reads Xray's config. So a tag naming a listener that was never
+created is accepted by the API and fails on the node at connect time, as
+"invalid request user id". Closing that gap means an agent change, which
+was deliberately not attempted here — `agent/` and the route-reassert
+path were being worked on concurrently for a live relay outage.
+
+**The interlock nobody should remove:** changing the tag on a config with
+provisioned customers is refused unless the caller sends
+`confirmReprovision`, and the refusal names the count. Their credentials
+live on the old inbound and moving the config does not move them. This
+is a warning made into a gate on purpose, because a warning is what the
+panel already had.
+
+### The third copy of the default-tag table
+
+`defaultInboundTagFor` in `protocol-configs/inbound-tags.ts` is now a
+*third* copy of the same protocol→tag mapping — `entryInboundTag` in
+`RoutesService` and `defaultInboundTag` in `AgentGatewayService` are the
+other two, and neither is exported. Consolidating means editing both of
+those files, which are where the concurrent relay work is; that merges
+cleanly and fails at runtime, which is the failure mode `CLAUDE.md`
+warns about. `defaults match the installer's templates` in
+`inbound-tag.spec.ts` pins the copy so a divergence is a red test rather
+than a wrongly-matched route. **Worth consolidating once the relay work
+lands.**
+
+### What is proven
+
+- The backend and panel jobs CI runs (`turbo run lint typecheck build
+  test`) pass, from a short path outside `.claude/worktrees` because the
+  panel still cannot build inside one (MAX_PATH).
+- Every assertion was run against a deliberately broken control. The
+  client suite: seven of its cases fail with `refreshConnectionConfig`
+  reduced to "return what is held". The backend suite: six fail with the
+  service's tag write and both guards removed, and two more fail with
+  `inboundTag`'s decorators stripped from the DTO — that second one runs
+  the real `ValidationPipe` rather than bare `validate()`, because
+  `whitelist` is the mechanism that was dropping the field and a plain
+  `validate()` call would pass either way and prove nothing.
+
+### What is not proven
+
+- **Nothing has touched a node.** No config was changed, no decoy was
+  moved, no client dialled anything. The refresh path has never run
+  against a real API, and the inbound-tag validation has never rejected
+  or accepted a real operator's change.
+- **Whether a six-second budget is right on a censored network.** The
+  number is reasoned, not measured. If beta users report the Connect
+  button feeling slower, that is the first thing to look at, and it is
+  one constant.
+- **The resume refetch has not been seen on Android hardware.** It is
+  three DOM event listeners and a staleness check; the claim that
+  Android's WebView raises `visibilitychange` around backgrounding comes
+  from the platform's documented behaviour, not from a device in hand.
+- **The panel dialog has not been opened in a browser.** It typechecks
+  and builds.
+
+---
+
+## 2026-08-24 — every relay route was dead, for two independent reasons
+
+**Status:** fixed and proven on the fleet. All thirteen relay routes now
+reach the internet at their exit node's address.
+**Branch:** `claude/relay-uplink-reassert`, with `main` merged in so it
+carries 0.9.29
+**Touches:** `apps/backend` (schema + migration + agent-gateway +
+routes), `agent/internal/relay`, `installer/lib/agent.sh`
+
+### What was actually broken, and what it was not
+
+**An outage, not a leak.** This matters more than the fix. The
+deanonymisation case — a relay customer egressing at ir1, in Iran — is
+the one this system is built to prevent, and it did not happen. ir1's
+routing rules and its blackhole default were intact throughout: the
+relay's onward connection was refused at the exit, so the customer's
+connection failed. Proven, not reasoned — france-1's own access log reads
+`rejected proxy/vless/encoding: invalid request user id`, and a probe
+driven through ir1's live outbound died at the client's TLS handshake
+rather than returning a page from ir1's egress address (31.171.x.x).
+
+**Thirteen routes, not five. One customer, not five.** The five
+`-> France` routes were the visible half; the eight exiting at finland1
+were dead too. All thirteen belong to a single Ultimate (relay-only)
+subscription — one paying customer, who had no working server at all.
+
+**Duration floor:** the France routes dead since france-1's Xray restart,
+2026-08-19 04:00:23 UTC. Total blackout since finland1's, 2026-08-20
+02:21:37 UTC — three days twenty-one hours. That customer's last measured
+usage on ir1 is 2026-08-15 15:52, which suggests it was already failing
+earlier for a reason not established here; both exits' journals have
+rotated past it.
+
+### Cause one: only half a route was ever re-asserted
+
+A relay route is two hot-added things on two different nodes. The entry
+holds the outbound and the routing rule; the exit holds one shared
+credential, `route:<id>`, on its inbound. Both live only in the running
+Xray process.
+
+Only the entry half was re-asserted. The uplink is created once, by
+`RoutesService.create`, and has no `ProtocolUser` row, so the user sweep
+could not see it either. An Xray restart on an exit deleted it forever.
+On 2026-08-23 both exits held exactly their 29 direct customers and zero
+`route:` users, while ir1 held every outbound and rule, faithfully
+re-asserted every 60s, aimed at a credential neither exit recognised.
+
+Fixed by having the route sweep assert all of a route. Not by giving the
+uplink a `ProtocolUser` row: that model requires a `subscriptionId`, and
+the uplink belongs to no subscription — faking one would put a synthetic
+customer into quota, usage and concurrency accounting.
+
+### Cause two: a changed route never converged
+
+Restoring the uplink fixed the five France routes and **not** the eight
+finland1 ones. That is where the second bug was.
+
+Xray's `AddOutbound` refuses a duplicate tag and has no update operation,
+so "already applied" and "applied with different contents" arrive as the
+same error. The agent swallowed both as success. finland1's REALITY
+`serverName` is `www.shatel.ir`, the backend had been sending that in
+every `CONFIGURE_ROUTE` — thirteen of them ACKED at 00:12:08 that
+morning — and ir1's eight finland1 outbounds still carried
+`cloudflare.com` from whenever they were first built.
+
+Isolated by A/B on one route with everything else held constant: same
+credential, same shortId; `cloudflare.com` → curl exit 35,
+`www.shatel.ir` → exit IP 204.168.161.100.
+
+The agent now fingerprints the exit parameters it last installed per
+route. A matching duplicate is the genuine no-op; a differing one is
+removed and re-added. Not an unconditional rebuild — the sweep runs every
+60s, so that would drop every relay session once a minute.
+
+### The instruments, and the two that lied first
+
+- **The probe reported total failure on all thirteen routes before it
+  worked at all.** Two harness bugs in sequence: `xray api lso` returns
+  the internal protobuf form, not client-config JSON, so the first
+  version produced `CONFIG-INVALID` everywhere; then the fixed script was
+  never re-uploaded, so a positive control ran against the stale copy and
+  "failed" with a credential that was fine. A harness reporting total
+  failure is still the likeliest thing to be broken.
+- **The positive control is what made the negatives mean anything.** A
+  throwaway user added to france-1's `vless-in` and removed straight
+  after: exit IP 104.105.205.233, and france-1's log naming it. Without
+  that, thirteen FAILs prove nothing.
+- **Credentials never left the nodes.** The probe reads the live
+  outbound, builds its client config and curls, all on ir1; only the exit
+  IP comes back.
+
+### Health reporting: a relay route can now say it is down
+
+`nodeStatus` was the entry node's heartbeat, which says nothing about the
+exit. ir1 was up and heartbeating the entire time. `Route` now carries
+`uplinkAssertedAt` / `uplinkLastError`, stamped from the exit's own ack,
+and a relayed route with no confirmation inside three sweeps reports
+OFFLINE. Never-asserted counts as unhealthy, not unknown.
+
+`handleCommandAck` also tested `startsWith("reassert:")` — the user
+sweep's prefix alone — so a failed *route* re-assert matched neither that
+branch nor an `AgentCommand` row and vanished silently.
+
+### The certificate time bomb, and the measurement that changed the fix
+
+The certbot deploy hook ran `systemctl reload xray || systemctl restart
+xray`. `CanReload=no` on every node, so the reload could never succeed
+and the `||` hid it: every renewal was a restart. france-1 renews around
+18 Oct.
+
+The first fix was an honest, verified restart. Then the measurement came
+in: **Xray re-reads `certificateFile`/`keyFile` from disk by itself,
+hourly** — swapped at 00:06:16 on a throwaway loopback instance, new
+certificate served between +55 and +60 min, no signal, no restart. So the
+hook now syncs and stops. The five-second version of that same test
+showed no reload and would have sent this the other way.
+
+Also measured: **Xray does not handle SIGHUP — it terminates.** So
+`ExecReload=/bin/kill -HUP $MAINPID` would have been a restart under
+another name, and `ExecReload=/bin/true` worse: a renewal reporting
+success while serving the old certificate to expiry.
+
+`neoxify-xray-restart` stays for restarts that are genuinely unavoidable.
+It snapshots the live inbound tags, restarts, waits for the API and
+compares, exiting non-zero on anything that did not come back. Its
+detection was exercised on ir1 with `systemctl` stubbed to a no-op: clean
+run exit 0; one tag hidden from the post-restart listing → named, exit 1.
+
+### Also done
+
+france-1's `vless-reality-free-in` on port 2083 is gone, from the running
+process (`xray api rmi`, no restart) and from `config.json` (validated
+with `xray run -test` first, backup kept). Zero users, no database row,
+and the only traffic it ever carried was `e2e-probe@neoxify.test` on
+2026-08-23 — a leftover from another session's probe. An unmanaged open
+port is a fingerprint on a product whose value is not looking like a VPN.
+
+### What is NOT proven
+
+- **The agent fix is not deployed.** `agent/internal/relay` is committed
+  and unit-tested but needs an agent rollout. Until then the convergence
+  bug is live on every node: any change to an exit's REALITY parameters
+  will silently fail to reach the relays again. The eight stale outbounds
+  were cleared by hand (`xray api rmo`; the sweep re-added them in ~40s).
+- **The backend fix is deployed from an unmerged branch.**
+  `claude/relay-uplink-reassert` is checked out on the panel and built,
+  so `/root/neoconnect` is no longer on `main`. It needs a PR and a
+  re-deploy from main.
+- **The customer has not been contacted**, and nobody has confirmed the
+  route works from an actual client in Iran. The proof here is from ir1
+  outward.
+- **Why usage stopped on 2026-08-15**, four days before the earliest
+  restart that explains anything, is unexplained.
+- The installer changes are source-only; no node has been re-installed.
+
+---
+
+## 2026-08-24 — the relay fix is merged and the panel is back on `main`
+
+**Status:** done for the backend; **the agent half is still unrolled.**
+**PR:** #38, merge commit `85bfaa9`
+**Supersedes:** the previous entry's "the backend fix is deployed from an
+unmerged branch" and "it needs a PR and a re-deploy from main". Both are
+now false. What is still true is everything under *the agent fix is not
+deployed*.
+
+### What the panel was, and is
+
+It was checked out on `claude/relay-uplink-reassert` at `cbf52fe` —
+a feature branch, built and running in production, which is the thing
+this was cleaning up. It is now `main` at `85bfaa9`, clean tree.
+
+Captured before touching it, in case a roll back was needed:
+
+| | |
+|---|---|
+| branch | `claude/relay-uplink-reassert` |
+| commit | `cbf52fe1cbe482ac40f911abe89dfdbc72cd3345` |
+| tree | clean |
+| backend image | built 2026-08-24T00:11:50Z |
+| `/health` | 200 |
+| DB backup | `/var/backups/neoxify/neoxify-backup-20260824-041951.tar.gz` |
+
+Rolling back never became necessary.
+
+### The deploy
+
+`main` merged into the branch first (only conflict was this file), then
+the documented runbook: `git checkout main`, `git pull --ff-only`,
+`docker compose -f infra/docker-compose.prod.yml --env-file infra/.env
+up -d --build backend`. Build runs before the recreate, so the API was
+down for the container swap only — **healthy again 5s after compose
+returned**. Backend only; nothing this PR touched is in `apps/panel`.
+
+**The migration was already applied.** `20260823_route_uplink_health`
+recorded `finished_at = 2026-08-24 00:12:03`, `rolled_back_at` null, from
+when the branch was deployed by hand. So `migrate deploy` on this rollout
+was a no-op and the schema never moved. Both columns confirmed present,
+nullable. There is **no down migration** — reversing it is
+`ALTER TABLE "routes" DROP COLUMN "uplinkAssertedAt", DROP COLUMN
+"uplinkLastError";` by hand. Rolling the *code* back needs no schema
+change: nothing outside those two fields reads them.
+
+### Verified after
+
+- `https://connect.neoxify.site/api/health` → 200. (Note for next time:
+  the public `/health` is the *panel's* Next.js 404, not the API. The API
+  is behind `/api/` — nginx strips the prefix.)
+- All **13/13** enabled relay routes fresh, age 27s, `uplinkLastError`
+  null on every one. Zero never-asserted.
+- Deployed commit is the merge commit, both parents as expected.
+
+### CI
+
+All four jobs green on #38: TypeScript 1m52s, Go agent 33s, Shellcheck
+9s, Desktop 3m21s. Locally beforehand: 41 suites / 382 tests, shellcheck
+clean at warning severity over all 8 installer scripts, both drift checks
+pass. Green means it compiles and the units pass — it is not evidence a
+tunnel works.
+
+### The gotcha worth keeping
+
+`git worktree add` refuses a branch that is already checked out
+elsewhere, and this repo has ~12 live worktrees. Parking the main
+checkout on `main` first is the cheap way through.
+
+Also: **the fleet is six nodes, not five** — finland1, france-1,
+germany-1, ir1, singapore-1, turkey-1, all ONLINE and heartbeating inside
+7s. And every one of them reports `agentVersion=dev`, so the panel cannot
+tell you which commit any node's agent is running. That matters for the
+rollout below: there is no version to compare against, only the binary's
+mtime on each box.
+
+### The agent rollout — NOT done, needs the owner
+
+The Go convergence fix is merged but **runs nowhere**. Until it ships,
+any change to an exit's REALITY parameters will again be acked as
+applied and silently ignored by the relay. Today's fleet is correct by
+hand (`xray api rmo` on the eight stale outbounds), not by code.
+
+What the release needs, established from the files rather than assumed:
+
+- **`agent/` on `main` differs from the last agent release `v0.2.5`
+  (2026-08-17) by exactly this fix and nothing else** — 2 files,
+  `provisioner.go` + its test. A `v0.2.6` tag is a single-purpose
+  release with no unrelated cargo.
+- `release-agent.yml` triggers on `v*`, builds linux amd64+arm64 via
+  `make build-linux-{amd64,arm64}`, writes `sha256sums.txt` and attaches
+  all three to a GitHub release. That is exactly what the installer's
+  `fetch_agent_binary` downloads and checksum-verifies.
+- **Only ir1 needs it.** It is the sole relay entry node — all 13 routes
+  hang off it. The relay provisioner does not run on an exit. The other
+  five nodes can take the update whenever; they do not fix anything.
+- Per node the operation is installer menu option **2**
+  (`action_update_agent`): `fetch_agent_binary` then
+  `systemctl restart neoxify-agentd`. It explicitly does not touch the
+  engines, and the code agrees — the agent shells out only to `ip`,
+  `wg`, `swanctl` and `tc`, and never to `systemctl`. **No engine
+  restarts, so no inbound/user/route is wiped and direct customer
+  tunnels are untouched.**
+
+**The one real cost, and it is on ir1:** `appliedProxy` is in-process, so
+a freshly started agent knows nothing about what is already installed.
+Xray keeps running across an agent restart, so all 13 outbound tags are
+still taken — and none of them match a fingerprint the new process has.
+Every one is therefore treated as changed and rebuilt
+(`RemoveOutbound` + `AddOutbound`).
+
+This happens **at reconnect, within seconds**, not on the 60s sweep:
+`handleHello` calls `replayQueuedCommands` → `reassertProvisionedUsers`
+→ `reassertConfiguredRoutes` straight after the Ed25519 check. So the
+relay customer's sessions drop once, quickly, and re-establish. That is
+the designed trade in the code comment — convergence is the safe
+direction — but it is a real interruption for the one customer this
+whole fix exists for, and it is why this is an owner decision rather
+than quiet maintenance.
+
+For context on how mild an agent restart otherwise is: measured across
+finland1's, **166 established customer connections before, 168 after.**
+The agent holds the control stream, not the tunnels.
+
+Two things option 2 will *not* do for you:
+
+- **It keeps no backup of the outgoing binary.** `fetch_agent_binary`
+  ends in `install -m 755` straight over `/usr/local/bin/agentd`. The
+  v0.2.3 rollout saved `/root/agentd.backup-dev-*` by hand and the entry
+  called that worth having kept. Copy it aside first.
+- **It resolves the release by GitHub's API ordering, not semver** —
+  `jq '... | first'` over `/releases?per_page=50`. A re-cut or
+  out-of-order tag can win. For a controlled rollout, pin it:
+  `AGENT_RELEASE_URL_BASE=https://github.com/alihajipoor/neoconnect/releases/download/v0.2.6`.
+
+And the installer is interactive (`read -r -p`, `set -euo pipefail`), so
+this is one hands-on SSH session per node, not a scripted loop.
+
+**Gap found while checking:** `agent/Makefile`'s release targets build
+with `-ldflags="-s -w"` and never set
+`-X .../internal/version.Version`, so a released binary still reports
+`dev` — which is why all six nodes show `agentVersion=dev` and why the
+panel cannot tell a v0.2.6 node from a v0.2.5 one. Worth fixing in the
+same release, otherwise there is no way to confirm the rollout landed
+except by checking the binary's sha256 on each box — which is what the
+v0.2.3 rollout had to do, for the same reason.
+
+Also worth correcting while here: an older entry says "users are still on
+the ten-minute sweep, so after any Xray restart the node authenticates
+nobody for up to ten minutes." **The code no longer matches that** —
+`REASSERT_INTERVAL_MS` and `ROUTE_REASSERT_INTERVAL_MS` are both 60_000,
+and the connect-time re-assert usually beats them. Worst case is ~60s.
+Trust the constants.
+
+---
+
+## 2026-08-24 — 0.9.30 is out; two traps it walked into on the way
+
+**Status:** released (`desktop-v0.9.30`, PR #39, merge `33adc28`).
+Unsigned, like every build since 0.9.24.
+
+Contents are described in the two entries above — the honest-connected
+work and the config-refresh/inboundTag work — so this is only what the
+integration itself turned up.
+
+### The turbo cache produced a false pass, and CI caught it
+
+A local `pnpm turbo run lint typecheck build test` reported **16/16
+green** while `@neoxify/mobile#build` was served from cache and never
+actually ran. CI failed on the same tree. Re-run with `--force` and it
+failed locally too.
+
+Another variant of the class this repo keeps hitting: local ≠ CI, and
+green ≠ ran. **Before quoting a turbo run as evidence, pass `--force`**,
+or read the `Cached: N/16` line and believe it — `16 successful` beside
+`13 cached` means three tasks actually ran.
+
+### A shared TypeScript module broke the other platform
+
+Exactly the case CLAUDE.md's coordination section warns about, and it is
+worth recording that it was a *type* break rather than a plugin
+signature.
+
+`src/lib/egress.ts` lives under `apps/desktop-windows` but is aliased
+into the mobile app as `@shared`. The honest-connected work changed
+`captureBaselineIp` to return an `IpReading` — the address **plus the
+endpoint that reported it**, so `verifyEgress` can refuse to compare two
+readings that measured different things — and
+`apps/mobile/src/screens/Dashboard.tsx` still typed the baseline as
+`string`. Desktop CI and **`ci-ios.yml` failed with the identical five
+TS2345 errors**.
+
+Worth noting *which* guard caught it. The iOS simulator build cannot run
+a tunnel and proves nothing about one, but it does compile the shared
+React tree — and that is precisely what it caught. It is the cheap half
+of the coordination CLAUDE.md asks for, and it worked.
+
+Fixed by threading `BaselineIp` through mobile rather than widening the
+shared signature back to `string`. Mobile is exposed to the same
+node-mirror hazard (a node's API mirror answers `/health/ip` with the
+node's own address, which is indistinguishable from a working tunnel),
+so keeping a bare-string entry point alive for one caller would have
+left the false positive a way back in.
+
+**Mobile runtime behaviour is unchanged** — its poll still treats
+`indeterminate` as carrying, and it has no `unverified` state. Bringing
+the honest third state to Android and iOS is real, unstarted work on a
+file the Mac session shares, and it should be agreed across both
+sessions before either starts it.
+
+### Still not proven, and this is the part that matters
+
+Nothing in 0.9.30 has been verified against a real tunnel. The rig VM is
+still being rebuilt. The unit suites establish the decision rules and the
+TLS reply check; they establish nothing about a tunnel. A green release
+means the code compiles and bundles.
+
+The experiment that gives the probe change its meaning is still the
+control described in the entry above: build with `prove_carries` swapped
+back to `probe`, break the far end, and confirm the **old** build shows
+green where the new one does not. Until that runs, "the probe can now
+fail" is reasoned, not demonstrated.
+
+Held back from this release for the same reason — both built, neither
+exercised on hardware:
+
+- `claude/selected-apps-ipv6`
+- `claude/repair-my-network`, whose elevated steps have never run at
+  all; the WFP sweep has not executed once.
+
+### Rig checklist for 0.9.30, when the VM exists
+
+In addition to the five steps in the honest-connected entry:
+
+1. Connect on a stale config. Change a node's REALITY `serverName`
+   server-side (**ask first — live users**), confirm a client already
+   holding the old value refetches on the next Connect and dials the new
+   one, and that a client with the control plane blocked still connects
+   on the held value and reports the stale-config connect.
+2. Confirm a config change does **not** drop a live session.
+3. Android: background the app for longer than the ten-minute freshness
+   horizon, foreground it, and confirm the resume refetch fires. This has
+   never run on a device.
+
+## 2026-08-23 — Two fingerprints nobody chose: rotted REALITY decoys, and the default nginx page
+
+**Status:** installer fixed and proven; **the live fleet is not fixed —
+five items below need an owner decision**
+**Touches:** `installer/lib/agent.sh`, `installer/lib/deps.sh`,
+`installer/maintenance/**`, `docs/detection-resistance.md`. No node was
+changed. Everything below marked "measured" is read-only: DNS, TLS
+handshakes, HTTP GETs, and `ssh` commands that only print.
+
+Branch `fix/reality-dest-ownership-and-port-80`, commits `70d909b`
+(REALITY probe) and `9134f7d` (port 80).
+
+### The decoy probe was testing the wrong thing, and now is not
+
+`probe_reality_dest` checked TLS 1.3, ALPN h2, X25519 and "the
+certificate verifies". Every one of those passes for a CDN-fronted
+decoy, which is why `www.asus.com` and `www.leboncoin.fr` went on being
+offered as the installer's defaults long after they moved into
+CloudFront. `Verify return code: 0 (ok)` was also doing less than it
+looked: it says the chain is trusted, never that the name on it is the
+name we are about to claim.
+
+The probe now resolves the name, connects to *that* address, and asks
+who announces it — Team Cymru over DNS for the origin AS, the CNAME
+chain, and the edge headers in the site's own replies. Three signals
+because each is evadable alone, and because two of them survive on a
+node with no `dig`. When the DNS half cannot run it prints
+"criterion 1 is UNVERIFIED" rather than passing quietly, which is the
+behaviour the old probe should have had.
+
+Two more checks came out of upstream's own docs rather than from us:
+`-verify_hostname`, and a chain-size ceiling — REALITY's server side
+abandons the handshake above 8192 bytes and the customer sees a bare
+reset (XTLS/Xray-core#6356).
+
+**Proven, not inferred.** `installer/maintenance/reality-dest-audit.sh
+--self-test` is the control case, committed so it can be re-run:
+`www.torob.com` (AS215708 Mobin Arvand) passes, `www.asus.com`
+(AS16509 AMAZON-02, `x-amz-cf-pop`) does not. Both passed identically
+before. The degraded path was tested too, by shadowing `dig` with a
+stub: CloudFront is still caught on the header signal, and `torob`
+comes back flagged UNVERIFIED instead of clean.
+
+**Three outcomes now, not two.** Usable / weak disguise / will not work.
+Only a clean result is ever a default; a weak one has to be typed and
+confirmed. That is deliberate — refusing a weak dest outright would drop
+REALITY on a node with no clean option, and taking a transport away from
+Iranian customers to win an argument about tidiness is the wrong trade.
+The hardcoded `www.speedtest.net` fallback is gone; it has been
+Cloudflare for over a year, so the one path that fired when everything
+else failed was guaranteed to produce the exact mismatch the rest of the
+function exists to prevent.
+
+### What the fleet is actually wearing
+
+Measured from this machine on 2026-08-23, so **the CDN verdicts are
+durable and the specific addresses are not** — DNS answers depend on
+where you ask. Re-run the audit on the node before acting.
+
+| node | dest | verdict |
+|---|---|---|
+| finland1 | `www.shatel.ir` | sound — AS31549 Aria Shatel, IR |
+| france-1 | **`cloudflare.com`** | worst case: AS13335, `server: cloudflare` |
+| germany-1 | `www.shatel.ir` | works, but an Iranian ISP's name on a German address — **and the same dest as finland1** |
+| singapore-1 | `www.shopee.sg` | sound — AS138341 Shopee Singapore |
+| turkey-1 | `www.donanimhaber.com` | sound — AS6205 HizliNet, TR |
+
+france-1's dest was read from `/usr/local/etc/xray/config.json` over
+SSH. germany-1 refuses every key we hold, so its dest was recovered from
+*outside* instead: open a plain TLS connection to `:443` with an SNI
+REALITY will not authenticate, and it proxies you to the dest, which
+hands back the dest's own certificate. Useful trick, and worth knowing
+it works against us too.
+
+Replacements measured clean the same day, per region:
+`www.helsinki.fi` (FI, AS1741 FUNET), `www.heise.de` (DE, AS12306
+Plus.line), `www.web.de`/`www.gmx.net` (DE, AS8560 IONOS), `www.free.fr`
+(FR, AS12322 Proxad). The rejections are recorded in
+`docs/detection-resistance.md` so nobody re-proposes them.
+
+**Changing a live node's dest is not a client-side change.** The SNI
+comes from the panel's Protocol Config; both ends move together or every
+customer on that node fails exactly the way an intercepted domain does.
+Owner decision, with a window.
+
+### "Welcome to nginx!" — and it is four nodes, not three
+
+The handover said singapore-1, turkey-1 and germany-1. **france-1 has it
+too.** All four return the same 615 bytes with
+`Server: nginx/1.24.0 (Ubuntu)` on it, so the version and the distro are
+being volunteered as well. finland1 refuses the connection outright —
+`ECONNREFUSED`, not a timeout, so nothing is listening rather than a
+firewall dropping it.
+
+**Why finland1 escaped:** `/etc/nginx/sites-available/default` is still
+on the box; only the `sites-enabled` symlink is missing. Somebody removed
+it there by hand and it never landed in the installer. `panel.sh` has
+done `rm -f /etc/nginx/sites-enabled/default` since forever; `agent.sh`
+never did. This is the "a hotfix on a live box is not done until a fresh
+install is correct" rule, in the wild.
+
+**Port 80 has to stay open, and this nearly went the other way.**
+Renewal, not issue, is what needs it: certbot replays the authenticator
+recorded per certificate. Read off the nodes —
+
+| node | authenticator | consequence |
+|---|---|---|
+| france-1 | `webroot /var/www/html` | renews *through the default vhost being removed* |
+| turkey-1 | `webroot /var/www/html` | same |
+| finland1 | `standalone` | fine today; port 80 is free there |
+| singapore-1 | `standalone` | **already broken** — nginx holds 0.0.0.0:80, so nothing can bind it |
+
+So closing 80 breaks france-1 and turkey-1 immediately, and the failure
+would not surface for ninety days, at which point Xray refuses a config
+whose certificate it cannot read and the node loses *every* TLS inbound
+at once. Redirecting to https is wrong for a different reason: 443 is
+REALITY, so a 301 walks the scanner into a handshake returning a
+certificate for somebody else's domain — louder than the page we are
+removing.
+
+`ensure_port80_site` therefore serves a deliberate page: the same dull
+per-node text as the loopback fallback, `server_tokens off`, and an ACME
+location out of `/var/www/html`. Proven on a throwaway Ubuntu with
+nginx, from the "Welcome to nginx!" state to:
+
+```
+GET /                                   200, Server: nginx  (no version)
+GET /.well-known/acme-challenge/probe   200, text/plain, exact token
+GET a missing challenge                 404
+```
+
+and on the rollback path — a second vhost also claiming `default_server`
+— it returns 1, says why, and puts the old link back, because a port 80
+answering *nothing* is worse than one answering badly.
+
+The `standalone` → `webroot` migration was proven by certbot's own
+parser: after the rewrite it reads back
+`'authenticator': 'webroot', 'webroot_path': ['/var/www/html'],
+'webroot_map': {...}`. **What is NOT proven is a real renewal** — the rig
+had no live certificate. `certbot renew --dry-run` is the ground truth
+and the script tells the operator to run it rather than claiming it
+works.
+
+### Still to do, per node, and none of it done
+
+Nothing on any node was touched. In the order I would do it:
+
+1. **france-1's dest is `cloudflare.com`.** Worst case in the fleet and
+   the one the code comments have argued against for months. Needs a
+   panel Protocol Config change and a node change together.
+   `www.free.fr` measured clean for it.
+2. **germany-1 and finland1 share `www.shatel.ir`.** One dest across two
+   nodes is one signature across two nodes. `www.heise.de` or
+   `www.web.de` for germany-1. Blocked on germany-1's SSH key either
+   way — `ovh_neo`, `azs_vps` and `neo_tr1` were all refused again
+   today, so that key is now blocking two open items.
+3. **`fix-node-port-80.sh --apply` on france-1, germany-1, singapore-1
+   and turkey-1.** Run it without `--apply` first; the report tells you
+   which of the two renewal states that node is in. Then
+   `certbot renew --dry-run`, then `curl -sI http://<ip>/` from off the
+   node.
+4. **singapore-1's certificate renewal is already broken** and item 3
+   fixes it as a side effect. Worth doing on its own schedule if item 3
+   slips.
+5. **finland1 needs nothing for the fingerprint** — but if anything ever
+   puts nginx on its port 80, its `standalone` renewal breaks the same
+   way singapore-1's did. `ensure_port80_site` migrates it if the
+   installer is ever re-run there, which is the safe outcome, but it is
+   worth knowing before that happens rather than after.
+
+## 2026-08-23 — Port 80 taken back on three live nodes, and the probe that failed everything
+
+Applied `fix-node-port-80.sh --apply` to the live fleet. france-1,
+singapore-1 and turkey-1 are done and verified from outside.
+**germany-1 was not touched — `ovh_neo`, `azs_vps` and `neo_tr1` were all
+refused again.** That key now blocks three items: the 502 mirror, its
+shared `www.shatel.ir` dest, and now this.
+
+| node | pre-apply state | after | `certbot renew --dry-run` |
+|---|---|---|---|
+| france-1 | default vhost, `webroot /var/www/html` | `Server: nginx`, 188-byte page | **success** |
+| singapore-1 | default vhost, `standalone` | `Server: nginx`, 188-byte page | **failed before, success after** |
+| turkey-1 | default vhost, `webroot /var/www/html` | `Server: nginx`, 203-byte page | **success** |
+| germany-1 | default vhost | untouched | not run — no SSH |
+| finland1 | nothing on 80 at all | untouched | not run |
+
+`certbot renew --dry-run` had never been run against a real renewal
+before today. It passes on all three. The `standalone` → `webroot`
+migration is now proven end to end and not just by certbot's parser.
+
+**singapore-1's renewal was already broken, and now it is proven both
+ways.** Before the change: `Could not bind TCP port 80 because it is
+already in use`. After: `all simulated renewals succeeded`. The
+certificate expires 2026-11-09, so this was a real outage due in about
+eleven weeks — every TLS inbound on the node at once — not a theoretical
+one.
+
+finland1 was confirmed rather than assumed: nginx *is* installed there,
+but only `neoxify-fallback` is enabled, nothing binds 80, and the port
+refuses from outside. Its `standalone` renewal works *because* 80 is
+free, which is the same coin singapore-1 landed on tails.
+
+Nothing was restarted anywhere. Every engine's `ActiveEnterTimestamp`
+still predates the change, and `agentd` on all three was seen executing
+`reassert:… (CREATE_USER)` from the panel within a minute of it.
+
+### The probe rejected every dest on every node
+
+`reality-dest-audit.sh --self-test` **failed its own control case** the
+first time it was run on a node — `www.torob.com`, the name the test
+exists to accept, came back `BAD  negotiated , and REALITY requires TLS
+1.3`. So did `cloudflare.com`, which had just completed a TLS 1.3
+handshake from this machine.
+
+Note the empty version in that message. `probe_reality_dest` read the
+version out of the `SSL-Session:` summary block (`Protocol  : TLSv1.3`),
+and Ubuntu's OpenSSL 3.0.13 **does not print that block** when the peer
+closes first — which is every probe it makes, because stdin is
+`/dev/null`. Only `New, TLSv1.3, Cipher is …` is reliably there. The
+check therefore failed for *everything*, on the exact platform every
+node runs.
+
+This never showed up locally because the dev machine's openssl does
+print the block. It would have shipped as: the installer offers no clean
+candidate on any node, and the operator either types a weak dest past
+the warning or drops REALITY there — the precise outcome commit
+`70d909b` was written to prevent. Fixed by reading whichever of the two
+lines exists. After the fix, on france-1: `www.torob.com` OK,
+`www.asus.com` WEAK, self-test passes.
+
+A harness reporting total failure is more likely broken than the thing
+it measures. That is now twice this month.
+
+**Second gotcha, smaller:** the `== Proof, from this node ==` block
+inside `--apply` prints `Server: nginx/1.24.0 (Ubuntu)` even on a
+successful run. It is racing its own `systemctl reload` — an old worker
+still holding the listening socket answers it, and serves the *new*
+index.html because the file on disk already changed, so the output looks
+like a half-applied change and is not one. From outside, seconds later,
+it is `Server: nginx`. Do not debug that line; check from off the node.
+
+The ACME path was also proven from outside, through whatever firewall
+each provider has in front: a token written into
+`/var/www/html/.well-known/acme-challenge/` comes back byte-exact over
+both the IP and the FQDN on all three nodes, and a nonexistent token
+returns 404 rather than the index page.
+
+### france-1's decoy: measured, and NOT applied
+
+`www.free.fr` re-verified **from france-1 itself** with the repaired
+probe: `212.27.48.10 is AS12322 PROXAD - Free SAS in FR`. Clean, and it
+agrees with the earlier reading from this machine. `cloudflare.com`
+confirmed WEAK from the node: AS13335, `server: cloudflare`.
+
+The change was **not made**, because measuring the blast radius turned up
+two things that are worse than "customers briefly reconnect":
+
+1. **france-1's REALITY config is the exit for five ir1 relay routes** —
+   Trojan, Shadowsocks, VLESS+REALITY, VLESS+TLS and VLESS+WS, each with
+   its own `inboundTag`. The relay's uplink outbound is built from the
+   *exit's* `publicParamsJson` (`agent-gateway.service.ts:430` →
+   `relay/provisioner.go:213`). So this is not a france-1 REALITY change;
+   it is a change to five protocols on a node in Iran. Routes reassert
+   every 60s and should self-heal, but the failure mode while they do not
+   is the one already in the journal: unmatched relay traffic egresses
+   **at the relay**, in Iran.
+2. **Mobile clients never refetch.** `getProtocolUsers()` has exactly one
+   call site — `loadAll`, on mount / retry / server-switch. No poll, no
+   TTL, no refetch on resume, and `credential-cache.json` has no expiry
+   (`savedAt` is read only to render a label). Android keeps the WebView
+   alive across backgrounding and adopts a running tunnel on open, so a
+   stale `serverName` survives until the app is restarted. Toggling the
+   VPN off and on inside the same session re-dials with the same dead
+   SNI.
+
+Add the desktop split-tunnel case: `Dashboard.tsx:933` short-circuits the
+egress check to `connected` whenever `fromStatus === "connected"`, and
+Xray's status is *always* `connected` (`engines/mod.rs:681` returns
+`Unknown`). A Custom-mode user with a mismatched dest sees a green orb
+over dead traffic, indefinitely. REALITY does not refuse an unknown SNI —
+it proxies the customer to the decoy, so the handshake keeps succeeding.
+
+Desktop full-tunnel is the only well-behaved path: two strikes, ~30s,
+then the ladder moves them to another protocol — but `runLadder` re-reads
+the same stale `protocolUsers`, so REALITY specifically stays dead until
+a `loadAll`.
+
+29 protocol_users hold a france-1 REALITY credential; the route is on
+Trial, Starter, Pro and Ultimate Max.
+
+**Sequencing, when it is approved.** Node first, panel second, and the
+gap is what costs: node-side is `dest` + `serverNames` in
+`/usr/local/etc/xray/config.json` and takes effect only on an Xray
+restart, which is the one thing that cannot be done casually here. Panel
+side is one PATCH to `protocol_configs.publicParamsJson` (the whole blob
+is replaced; `dest` and `serverName` move together atomically). Ordering
+node-then-panel keeps the disagreement to the seconds between them for
+*new* connections, but that is not the number that matters — the number
+that matters is how long a mobile customer keeps the old SNI, and that is
+unbounded.
+
+The honest options are (a) do it and accept mobile users are broken until
+they restart the app, (b) ship a client that refetches before connecting
+first, or (c) stand up the new dest on a second REALITY inbound on
+another port, move the panel row, and retire the old one once nobody is
+on it. (c) costs a port and no customer.
+
+
+## 2026-08-23 — france-1's second REALITY inbound is up and proven; the panel row did NOT move
+
+Option (c) from the previous entry: stand the new decoy up beside the old
+one rather than swapping under live customers. The node half is done and
+proven. **The panel half is not, and must not be done as specified** —
+see "why it stopped" below.
+
+### What is live on france-1 now
+
+A second REALITY inbound, `vless-reality-free-in`, on **2083**,
+`dest`/`serverNames` = `www.free.fr`. It reuses the *existing* keypair and
+shortId deliberately, so `realityPublicKey` and `shortIds` in the panel
+row stay byte-identical — the panel's stored public key hashes to the same
+12 hex chars as the one derived from the live private key. Only
+`serverName` and `port` would ever change client-side.
+
+No restart. `xray api adi` over the local API at 127.0.0.1:10085
+(`HandlerService` was already enabled). `xray` still reports
+`ActiveEnterTimestamp` of 2026-08-19 04:00:23 UTC throughout, and all
+eight protocols stayed up.
+
+Rehearsed before doing it: `adi` a dokodemo-door on 127.0.0.1:19999,
+confirm the socket, `rmi` it, confirm it is gone, confirm the six
+production inbounds are still listed. `rmi <tag>` is the rollback and it
+is proven, not assumed.
+
+**Port 2083, and the warning that came with it.** Free on this node (TCP
+in use: 22, 53, 80, 443, 2053, 7505, 8080, 8081, 8443, 10085, 10086,
+37651), a conventional HTTPS-alt port, and consistent with what this node
+already looks like from outside — it already answers TLS on 2053 and
+8443, so 2083 adds one more port to a cluster a scanner already reads as
+"host with several HTTPS endpoints" rather than a new *kind* of signal.
+
+But Xray itself said, on the way in:
+
+```
+[Warning] infra/conf: REALITY: Listening on non-443 ports may get your IP blocked by the GFW
+```
+
+That is upstream's own warning and it cuts against the entire point of
+the change. `www.free.fr` does not serve its site on 2083, so the decoy
+is now port-inconsistent in a way `cloudflare.com:443` at least was not.
+**There is no way around it on this node:** one global IPv4
+(104.105.205.233), and xray's existing inbound binds `*:443`, which
+covers v6 too — measured, not assumed. A second REALITY on 443 here is
+impossible. So the honest framing of option (c) is *better decoy
+identity, worse port*, and whether that trade is worth taking is the
+owner's call, not mine.
+
+### Proven end to end, from a vantage that could have said no
+
+A real client, not a handshake:
+
+| check | result |
+|---|---|
+| TLS from outside, SNI `www.free.fr` | `CN=free.fr`, Sectigo — byte-identical issuer/subject to the real site |
+| wrong SNI (`example.org`) to 2083 | still `CN=free.fr` — prober gets the decoy, not a reset |
+| **exit IP through the tunnel** | **104.105.205.233** |
+| the client host's own IP | 172.236.143.200 |
+| 1 MB payload | 1048576 bytes in 1555 ms |
+| HTTPS to a third host | `example.com` → HTTP 200 |
+
+Run from **singapore-1**, deliberately: a client on france-1 would report
+france-1's address whether or not the tunnel carried anything. Separate
+`xray run` process, loopback socks, killed afterwards; neither node's
+xray service was touched. Test user removed after — the new inbound now
+has **zero** users.
+
+**Persisted.** `xray api adi` does not write to `config.json`, and nothing
+in this repo re-adds an inbound after a restart — the 60s sweeps restore
+*users* and *routes*, never *inbounds*. So the inbound was merged into
+`/usr/local/etc/xray/config.json`, `xray run -test` first (it refused a
+bad candidate once and left the live file untouched, which is the guard
+working). Runtime and file now list the same seven tags.
+
+That mattered more than it looks: **`xray.service` has no `ExecReload`**,
+and `/etc/letsencrypt/renewal-hooks/deploy/reload-xray.sh` ends in
+`systemctl reload xray 2>/dev/null || systemctl restart xray`. So a
+certificate renewal *restarts* Xray on every node. fr1 expires
+2026-11-17, i.e. renews around 18 October. A hot-added inbound would have
+silently vanished then, with customers pointed at a dead port.
+
+### Why the panel row did not move
+
+Three things, any one of which is enough.
+
+**1. It would break all 29 direct REALITY customers.** The new inbound
+has a new tag. `protocol_configs.inboundTag` for france-1 is empty, and
+with it empty the backend omits the key
+(`protocol-users.service.ts:454-456`) and `agentd` falls back to its
+`--xray-inbound-tag` default of `vless-in`
+(`agent/cmd/agentd/main.go:34`; the unit passes no flags). So the 60s
+reassert would keep writing all 29 users onto the **old** inbound while
+their clients dialled 2083. Setting that column is the fix — but
+`UpdateProtocolConfigDto` accepts only `listenPort`, `publicParamsJson`
+and `isEnabled`, so `inboundTag` **cannot be set through the API at
+all**. It needs direct SQL, which is a bigger decision than "move the
+panel row".
+
+**2. The five ir1 relay routes would not follow, and would say they
+had.** The uplink outbound tag is `route-<routeId>-out`, derived from the
+route id alone — it encodes nothing about the exit
+(`relay/provisioner.go:80-82`). Xray's `AddOutbound` rejects a duplicate
+tag rather than replacing it, and the agent swallows exactly that error
+as success (`relay/provisioner.go:93-104`). So the sweep would send the
+new port every 60s, ir1 would ack five healthy routes, and every one of
+them would still be dialling 2083's predecessor. A green panel over an
+unchanged reality — the exact failure mode this journal keeps recording.
+
+**3. Retirement is off the table anyway.** 29 users sit on the old
+inbound right now. It stays.
+
+### A live problem found on the way: the relay uplinks are already gone
+
+Looking for the uplink credentials turned up none. On france-1's
+`vless-in`: **29 users, zero whose email starts with `route:`** — the
+29 are exactly the 29 direct `protocol_users`.
+
+The five `-> France` relay routes were created **2026-08-13**. france-1's
+xray restarted **2026-08-19 04:00 UTC**. The uplink user is created
+*once*, at route creation (`routes.service.ts:268-277`), has no
+`ProtocolUser` row, and `reassertProvisionedUsers` reads only
+`protocolUser` — so **nothing re-asserts it, ever**. The restart wiped
+all five and they have not come back.
+
+Each of those five routes has 1 ACTIVE customer, and they are Iran-relay
+customers. This predates today's work by five days and I did not cause
+it, but it is almost certainly a live outage. **Not yet confirmed from
+ir1's side** — I have no key for ir1 and did not go looking for one. That
+confirmation is the first thing to do next.
+
+It also explains something that would otherwise be puzzling later: even a
+*correct* panel move would not have restored these, because the code path
+that creates them never runs again.
+
+### Gotchas worth the next session's minutes
+
+- `xray api adu` needs `port` and `listen` on the inbound stanza you hand
+  it, or it fails with `Listen on AnyIP but no Port(s) set in
+  InboundDetour` and cheerfully reports `Added 0 user(s)`.
+- `xray api rmu` takes `-tag=<tag>` plus bare emails — it does **not**
+  take the same JSON file `adu` does, and given one it says `inbound tag
+  not specified`.
+- `xray run -test -config <file>` needs the filename to **end in
+  `.json`**, otherwise `Failed to get format` — which looks exactly like
+  a malformed config and is not.
+- `xray x25519 -i` wants the key as an argument; `-i /dev/stdin` silently
+  yields nothing.
+
+
+## 2026-08-23 — The releases are not signed either
+
+**Status:** done (correction) / blocked (the signing itself)
+**Touches:** `docs/journal/windows.md` only
+
+Correcting the previous entry. It said Defender's
+`Trojan:Win32/Bearfoos.B!ml` hit "affects the locally built, unsigned
+installer" and that "CI-signed releases are not affected". The second
+half is wrong, and wrong in the direction that matters: **there are no
+CI-signed releases.** Every published installer is unsigned, including
+the one on the download page right now.
+
+### Signing has never run once
+
+Not "since 0.9.24" — never. The steps went in with 74ccf1a on
+2026-08-11, and the first release after that, `desktop-v0.9.4`, already
+skipped them. So has every release since. Checked all 25 release runs
+from 0.9.4 to 0.9.28, individually: each one emitted
+
+> AZURE_CLIENT_ID is not set, so this build is NOT Authenticode-signed.
+
+The whole block is gated on one expression at line 39 of
+`release-desktop-windows.yml`:
+
+    SIGNING_ENABLED: ${{ secrets.AZURE_CLIENT_ID != '' }}
+
+and `Azure login`, `Sign the installer`, `Re-sign the updater payload`,
+`Sign the bootstrapper` and `Verify both binaries are signed and
+timestamped` are each `if: env.SIGNING_ENABLED == 'true'`. `gh secret
+list` returns four secrets — the two `TAURI_SIGNING_*`, the two
+`ANDROID_KEYSTORE_*`. No `AZURE_*` anything, and no repo variables at
+all. All six Azure secrets the workflow reads (`AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_SIGNING_ENDPOINT`,
+`AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`) have never existed.
+
+The degrade-instead-of-fail behaviour is deliberate and documented in
+the file, and the `Verify` step does guard against a signing step that
+silently no-ops. But that guard is itself gated on `SIGNING_ENABLED`,
+so with no credentials there is nothing asserting anything — the
+release goes out green and unsigned, which is exactly what has happened
+twenty-five times.
+
+**Why:** shared.md's 2026-08-11 entry has it. The Azure Artifact
+Signing account exists (`neoxify-signing`, West US 2), but identity
+validation stalled at credentials.microsoft.com with "No access" and
+was never resumed. It is still Action Required, not failed. Nothing is
+wrong with the workflow; the enrolment was never finished, so the
+secrets were never created. Resume via the existing validation's
+"complete your verification" link — **do not start a second one.**
+
+### Defender does not flag the published 0.9.28 assets
+
+Measured, not assumed, on the host (Win11, real-time protection on,
+signatures 1.457.304.0 from 2026-08-22). Downloaded both assets from
+the release, verified against `sha256sums.txt` (both OK), then:
+
+- `Get-MpThreat` / `Get-MpThreatDetection` — nothing.
+- `Start-MpScan -ScanType CustomScan` over the directory — clean.
+- `MpCmdRun.exe -Scan -ScanType 3` per file — "found no threats",
+  exit 0, both.
+- Both files still on disk afterwards with unchanged hashes. Nothing
+  was quarantined.
+
+`Get-AuthenticodeSignature` on both: `Status: NotSigned`,
+`SignerCertificate: <null>`. So the released `Neoxify-Setup.exe` and
+`Neoxify_0.9.28_x64-setup.exe` are in exactly the state the Bearfoos
+entry assumed they were not.
+
+**The scan was a real negative, not a false pass.** A 40 MB custom
+scan returning in one second is the shape of a result this repo has
+been burned by before, so it got a control: an EICAR test file written
+into the same scratch directory was caught in seconds as
+`Virus:DOS/EICAR_Test_File` (2147519003), and both `Get-MpThreat` and
+`Get-MpThreatDetection` reported it **from the same unelevated shell**
+that had just returned empty. That proves three things at once — the
+directory is not excluded, real-time protection is live on it, and the
+cmdlets do surface detections without elevation. The empty result on
+the installers is therefore a true negative. Control file deleted
+afterwards; no exclusions were added and no protection was disabled.
+
+**What this does not prove.** One host, one signature version, one
+point in time. `!ml` verdicts are per-file-hash and cloud-scored, and
+they move — the VM hit a real detection on a locally built installer
+with these same characteristics. A clean scan today is not a promise
+about tomorrow's build, and it says nothing about third-party AV. It
+only refutes the specific claim that release assets are protected by a
+signature they do not have.
+
+### What being unsigned costs
+
+Every customer gets "Unknown publisher" on the UAC prompt and a
+SmartScreen block on first download — for a VPN, downloaded by people
+in Iran who are already taking a risk running a binary from a stranger,
+on a product asking for money. That is the actual cost, and it is being
+paid on every install today. AV detection is the second-order risk:
+unproven against the shipped asset, demonstrated against a local build.
+
+Unsigned SmartScreen reputation is not a way out. It accrues per
+certificate, and per file hash absent one — this project has shipped a
+new installer nearly every day for two weeks, so each release starts
+from zero and never reaches the threshold.
+
+Fix path is unchanged and still #91: finish the Azure identity
+validation. Certum OV + SimplySign stays the fallback. Worth noting for
+the driver question on the roadmap — a WFP callout driver cannot be
+covered by any of this. Kernel-mode needs EV plus Microsoft Partner
+Center attestation signing, which is a separate enrolment from
+Authenticode, not an upgrade to it.
+
+### The fix path, costed
+
+Researched against Microsoft's current docs, because two things
+everybody "knows" about this are out of date.
+
+**Eligibility is about where *we* are, not where customers are.** Azure
+Trusted Signing was renamed **Azure Artifact Signing** (docs moved to
+`/azure/artifact-signing/`, CLI is `az artifact-signing`; the resource
+provider is still `Microsoft.CodeSigning`). Public Trust certificates
+are open to organisations in the US, Canada, EU, UK and a handful of
+others — but **individual developers must be in the US or Canada**
+([quickstart prerequisites][ts-qs]). We validate as an individual and
+we are US-based, so the individual path is open. Iran is where the
+users are; it has no bearing on eligibility.
+
+**Option 1 — finish Azure Artifact Signing. $9.99/month, Basic.**
+5,000 signatures/month, far beyond a daily release. No hardware token,
+works from GitHub Actions, which is what the workflow is already built
+against. Requires a Pay-As-You-Go subscription (free/trial/sponsored
+are refused — shared.md already hit that). Individual validation is
+AU10TIX Verified ID: government photo ID, phone, proof of address, then
+a Verified ID card presented back from Microsoft Authenticator. It is
+an interactive same-session flow, minutes rather than the 1–20 business
+days the organisation path quotes.
+
+**Option 2 — a conventional OV certificate.** **$150–300/yr**
+([code-signing-options][cso]), plus a hardware token or cloud HSM:
+since June 2023 the CA/B Forum requires **OV as well as EV** keys to
+live in a FIPS 140-2 Level 2 (or CC EAL4+) module, so there is no "put
+the .pfx in a secret" option any more. Certum + SimplySign, already
+noted in shared.md, is this shape. Microsoft frames OV as the option
+for people who *cannot* use Artifact Signing on geography — which is
+not us.
+Strictly worse than option 1 on both cost and CI ergonomics; it is the
+fallback if Azure sours, not the plan.
+
+**Option 3 — stay unsigned and build reputation. Not viable, and worth
+being definite about.** Microsoft: *"When a file is not signed,
+SmartScreen reputation must build for each new version of your files,
+starting with zero reputation. Reputation cannot transfer from previous
+versions unless both were signed using the same publisher identity"*,
+and it *"can take several weeks and hundreds of clean installs from a
+wide audience"* ([smartscreen-reputation][ss]). We have shipped 25
+installers in twelve days. Every one starts at zero and none will ever
+reach the threshold. There is also **no submission mechanism** for
+consumer SmartScreen — the WDSI portal is an enterprise-admin path
+only. Doing nothing is a permanent choice, not a delay.
+
+### Two things in this repo that are now wrong
+
+**The 460-day figure is misattributed.** The workflow comment (lines
+148–153) and shared.md both tie it to the Azure certificate. It is
+actually the CA/Browser Forum cap on *conventional* code-signing certs
+issued from 2026-03-01. Artifact Signing certificates are **renewed
+daily and valid for 72 hours** ([cert management][ts-cert]). The
+conclusion the comment draws is still right and in fact stronger —
+without `timestamp-rfc3161` a signature dies in three days — but the
+reason is the 72-hour cert, not a 460-day one. Not fixing it here; this
+task is investigation plus this correction.
+
+**"Do not create a second identity validation" may no longer hold.**
+The docs say validation email links **expire in seven days**, and that
+if email verification fails you must start a new request. Ours was
+created 2026-08-11 — twelve days ago. Whoever picks this up should
+check whether the existing link is still live before assuming it can be
+resumed; the shared.md advice was written when it was fresh. Flagging
+rather than asserting — I could not verify the link's state without the
+Azure portal.
+
+### EV buys nothing here, and the driver is a separate purchase
+
+Worth killing an assumption before it costs money. **EV certificates no
+longer bypass SmartScreen** — Microsoft removed that in 2024 and now
+says plainly that *"paying a premium for EV solely to avoid SmartScreen
+warnings is no longer justified"* ([smartscreen-reputation][ss]).
+Nothing gives instant trust except shipping through the Microsoft Store
+(re-signed by Microsoft, no warning at all) — which #94 already
+identified as EXE-viable and blocked on exactly this signing work.
+
+For the prospective WFP callout driver, none of the above helps.
+Artifact Signing **cannot sign kernel drivers and will never issue EV
+certificates**; kernel-mode goes through Partner Center attestation
+signing, which requires a real **EV cert ($400+/yr)** *and* an
+organisation-level registration — you register as a **global
+administrator of an organisation's Entra tenant**, and the EV cert is
+needed to register at all, independently of signing the driver. That is
+company-gated, and the company does not exist yet. Two consequences: the driver cannot be costed as an upgrade to
+whatever we do now, and the current user-mode WFP kill-switch
+(`fwpmu.h`, no driver — only *redirection* needs a callout) is worth
+protecting precisely because it keeps us out of that gate.
+
+**Recommendation: finish option 1.** It is $9.99/month against a
+half-finished enrolment, it is the only option that makes reputation
+accumulate across releases instead of resetting daily, and it is the
+one the workflow is already wired for — six secrets and nothing else.
+It will not stop the SmartScreen warning on day one; nothing will. What
+it changes is that the warning starts decaying instead of resetting,
+and that a customer in Iran deciding whether to trust a VPN binary sees
+a real legal name instead of "Unknown publisher". For this product that
+is the whole point, and it is currently blocked on a phone, an ID
+document and twenty minutes — not on money or engineering.
+
+### Two loose ends, flagged rather than buried
+
+**The Store path does not dodge signing.** #94's EXE route still
+requires the installer to be Authenticode-signed with a certificate
+chaining to a Microsoft Trusted Root Program CA — only *MSIX* gets
+re-signed by Microsoft for free. So the Store is downstream of this
+work, not an alternative to it.
+
+**SignPath Foundation offers free OV-level signing for qualifying
+open-source projects** ([code-signing-options][cso]). This repo is
+public, but Neoxify is commercial, and I have not checked their
+eligibility rules. Worth ten minutes before paying for anything —
+recorded as a lead, not a plan.
+
+**On sourcing.** The dollar figures above are Microsoft's own published
+comparison, not estimates. An earlier draft of this entry carried
+invented ranges for the OV and EV costs; they were wrong in both
+directions and are corrected here. Numbers in this section that are not
+followed by a citation should be treated as unverified.
+
+[ts-qs]: https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart
+[ts-cert]: https://learn.microsoft.com/en-us/azure/artifact-signing/concept-certificate-management
+[ss]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation
+[cso]: https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options
+[csc31]: https://www.digicert.com/blog/understanding-the-new-code-signing-certificate-validity-change
+
+## 2026-08-23 — The 15 MB APK regression was uncompressed DWARF, not a bigger app
+
+**Status:** fix written, **unverified — needs a CI run to confirm**
+
+The direct-download APK went 125.8 MB (0.2.13, 0.2.14) → 141.2 MB
+(0.2.15) with no repository change beyond version strings. Attributed by
+downloading all three published artifacts and diffing them, not by
+reading the build.
+
+**Where it went.** Every byte is in one file:
+
+| component | 0.2.14 | 0.2.15 | delta |
+|---|---|---|---|
+| `lib/armeabi-v7a/libgojni.so` | 43,836,044 | 59,876,164 | **+16,040,120** |
+| `lib/arm64-v8a/libgojni.so` | 46,137,880 | 46,137,872 | −8 |
+| everything else (dex, res, assets, wg, mobile_lib) | — | — | ±60 KB |
+
+**What actually changed inside it: nothing.** `.text` (14,956,152),
+`.gopclntab` (10,917,198), `.noptrbss`, `.symtab`, `.strtab` and
+`.rel.dyn` are byte-for-byte identical between the two builds. Both
+report `go1.26.5` and `clang/LLD 19.0.1`.
+
+The difference is that in 0.2.14 all twelve `.debug_*` sections carried
+`SHF_COMPRESSED` and in 0.2.15 they do not — same DWARF, stored raw.
+The uncompressed sizes match *exactly* across the two builds
+(`.debug_info` 11,807,810; `.debug_line` 5,505,438; `.debug_loclists`
+4,568,306; `.debug_frame` 1,416,716; `.debug_rnglists` 1,370,235;
+`.debug_addr` 159,320). 24,858,735 raw vs 8,818,508 compressed =
+**16,040,227 bytes**, which is the whole regression to within ~100 bytes
+of section-header churn. arm64 kept compression and is unchanged.
+
+So it is pure toolchain drift in the link line, and the link line is
+gomobile's — which was installed `@latest`, unpinned, *and* skipped
+entirely if any gomobile was already on PATH. The one new string in the
+0.2.15 armv7 binary and not the 0.2.14 one is `ndk/28.2.13676358`,
+consistent with a differently-constructed link.
+
+**Do not chase which gomobile commit flipped the compression bit.** The
+right answer makes it moot: we should never have been shipping DWARF.
+
+**Measured headroom, from 0.2.15's own artifacts:**
+
+- `.debug_*` + `.symtab`/`.strtab` across all native libs: **54,794,330
+  bytes (52.26 MiB)**. Stripping it takes the APK 141.17 → **88.92 MiB**,
+  i.e. 37 MB *below* the pre-regression baseline.
+- `libgojni.so` accounts for 42.3 MB of that; `libmobile_lib.so` (Rust)
+  another 12.5 MB, all of it symbol table — it ships no DWARF because
+  cargo already defaults `debug = false`.
+- `libwg-go.so` has zero of either. The WireGuard AAR arrives already
+  stripped by its vendor, which is the standard we were not meeting.
+
+**What was changed:** `-ldflags="-s -w" -trimpath` on `gomobile bind`;
+gomobile pinned to the same x/mobile pseudo-version go.mod already uses
+for the bind runtime; Go pinned to 1.26.5 with `GOTOOLCHAIN=local` in
+both Android workflows (there was no `setup-go` step in either at all);
+Rust pinned via a new `apps/mobile/src-tauri/rust-toolchain.toml`; a
+`[profile.release]` added to the mobile crate.
+
+**Predicted, not measured: ~89 MB.** Nothing here was built — an Android
+build cannot be produced on this machine. The strip figures are exact
+because they are section sizes read off shipped binaries, but the LTO /
+`opt-level = "s"` effect on `libmobile_lib.so` is a guess and the next
+CI run is what settles it. Compare against 148,031,919 bytes.
+
+**Debuggability, stated rather than buried.** Go tracebacks are
+unaffected: they come from `.gopclntab`, which the runtime requires and
+`-s -w` does not touch. The real loss is Rust-side — `strip = "symbols"`
+means a hard signal crash in `libmobile_lib.so` returns bare addresses.
+Rust panics still carry message and location. If field symbolication
+starts mattering, archive the unstripped `.so` as a CI artifact rather
+than shipping symbols to every user.
+
+**Two things found and deliberately NOT done:**
+
+1. **Native libs are `STORED`, not deflated** — 146.5 MB of the 148.0 MB
+   APK is uncompressed. Deflating them would save a further ~87 MB of
+   download. It is not free: uncompressed is what makes the 16 KB
+   load-segment alignment work and what `check-elf-alignment.py` guards,
+   and flipping it doubles on-device storage. Worth a deliberate
+   decision with a real build behind it, not a drive-by.
+2. **Per-ABI APKs as extra release assets.** armv7 is 73 MB of the 141
+   MB, and the splits are already built and thrown away. But
+   `/updates/installer/android` matches on `.apk$` — publishing
+   `Neoxify-x.y.z-arm64.apk` beside the universal one risks handing a
+   32-bit phone a 64-bit APK. The API matcher has to be fixed first.
+   The universal APK stays the download-page default regardless: a
+   website link cannot ask which chip the phone has.
+
+**Still unpinned, knowingly:** `runs-on: ubuntu-latest`, all `uses:` at
+floating major tags, and `@tauri-apps/cli: "^2"` — which is the big one,
+because the CLI generates the entire uncommitted `gen/android` Gradle
+project (AGP, wrapper, minify, `debugSymbolLevel`, packaging). The
+lockfile holds it at 2.11.4 today, so it is latent rather than active
+drift, but it means those Gradle settings are unreviewable in this repo.
+
+## 2026-08-24 — agent v0.2.6 is on ir1, and the fleet can finally be read
+
+**The relay convergence fix is live on ir1 and no longer needs a human.**
+ir1 runs `v0.2.6` (sha256 `f3a6215f…`); the other five nodes are
+untouched on v0.2.5 and do not need it — ir1 is the sole relay entry for
+all 13 relay routes, and the relay provisioner never runs on an exit
+node. The eight stale outbounds that were cleared by hand with
+`xray api rmo` stay cleared, but the reason they could accumulate is gone:
+a changed `CONFIGURE_ROUTE` now converges instead of being acked.
+
+**agentVersion is no longer a lie, and this is the useful part.** Every
+release up to v0.2.5 linked with `-s -w` and never set
+`-X …/version.Version`, so all six nodes reported `agentVersion=dev` and
+the only way to tell one build from another was sha256 per node. The
+Makefile stamps it now, `release-agent.yml` passes `github.ref_name`
+rather than trusting `git describe` in a shallow checkout, and there is
+an `agentd --version` flag. **The panel currently shows ir1 as `v0.2.6`
+and the other five as `dev` — that is the honest state, not a bug.** They
+will keep saying `dev` until each one is rolled forward, because the
+string is baked in at link time.
+
+Use `--version`: it works on a downloaded binary before it is installed
+and on a node that is not enrolled, which is how the ir1 rollout was
+checked before anything was overwritten. The release workflow now runs
+it on the amd64 artefact and fails the release if it does not report the
+tag.
+
+**Two installer traps, still there, still worth knowing.** Menu option 2
+(`action_update_agent` → `fetch_agent_binary`) does `install -m 755`
+straight over `/usr/local/bin/agentd` and keeps **no backup** — copy the
+outgoing binary aside yourself first. And `resolve_agent_release_base`
+picks the release with `jq '… | first'`, which is GitHub's API ordering
+(created_at desc), not semver: it happens to be right today, but a
+re-published or back-dated release would quietly hand a node the wrong
+build. Pin `AGENT_RELEASE_URL_BASE` for anything deliberate. The v0.2.5
+binary from ir1 is at `/root/agent-rollback/agentd-v0.2.5-8cc30b52` on
+that box.
+
+**What the rollout proved, and what it did not.** Restarting the agent
+reconnects with an empty `appliedProxy`, so all 13 outbound tags are
+taken by an Xray that never restarted and none match a fingerprint the
+new process holds: 13 rebuild lines at 14:02:09, 13 distinct route tags,
+then every 60 s sweep after it produced **zero**. That is both halves of
+the contract observed on production — the refusal is surfaced instead of
+swallowed, and an unchanged route is still left alone, which is what
+stops the sweep dropping a session a minute. All 13 routes came back
+with fresh `uplinkAssertedAt` and no `uplinkLastError`.
+
+**Not proven on production: a backend-originated parameter change.**
+Every field of `ExitParams` is load-bearing — address, port, protocol,
+the REALITY `publicParams`, the uplink credential — so there is no field
+that can be altered on a live route as a test without changing a real
+exit's config or rotating the relay customer's uplink. The empty-map
+case after restart exercises the same branch, and
+`TestConfigureRouteRebuildsAStaleOutbound` covers the literal
+cloudflare.com → www.shatel.ir change, but if you want it end-to-end on
+production the test is: change one exit's REALITY `serverName` in the
+panel, watch for one `rebuilding it` line naming that route's tag, then
+confirm the exit IP through it still matches the exit node. That needs
+an owner decision, because it is a live protocol config.
+
+**The agent still touches no engine.** Confirmed again here: xray's
+`ActiveEnterTimestamp` stayed 2026-08-17, wg-quick and openvpn stayed
+2026-08-14, and established connections were 6 before and 6 after.
+
+---
+
+## 2026-08-24 — The two option-2 traps are now the installer's problem, not the operator's
+
+**Status:** landed on `claude/installer-agent-update-safety`, unpushed,
+**never run against a node**
+**Touches:** `installer/lib/agent.sh` only
+
+The two traps the v0.2.6 rollout entry left standing — no backup of the
+outgoing binary, and release resolution by GitHub's API ordering — are
+fixed in source. Nothing here has touched a production node; the whole
+thing was exercised against a throwaway Linux box with the network
+stubbed.
+
+**What a rollout should actually run first.** This is proved against
+synthetic input, not against a node, so the first real use is still the
+test. On a node, before trusting it:
+
+```
+/usr/local/bin/agentd --version       # before
+# menu option 2
+/usr/local/bin/agentd --version       # must equal the tag it printed
+ls -l /root/agent-rollback/           # the outgoing binary must be there
+cd /root/agent-rollback && sha256sum -c <name>.sha256
+```
+
+If option 2 aborts, the point is that it aborts *before*
+`systemctl restart` — so `systemctl status neoxify-agentd` should show
+an uptime that predates the attempt. That is the half worth watching.
+
+**The failure the version check catches, and why the existing checksum
+does not.** A re-published or mis-tagged release ships its own
+`sha256sums.txt`. The checksum step proves the download was not
+corrupted; it says nothing about whether it is the build that was asked
+for. Fed a release that answers to `v0.2.6` and contains `v0.2.4`, the
+code on main installs it and returns 0 — the caller then restarts the
+service onto a silent downgrade. That is not arithmetic on paper, it is
+what the stubbed run does.
+
+**A window problem worth knowing about.** `per_page` went 50 → 100 (the
+API maximum). The live list is 66 releases and only 8 of them are the
+agent's — desktop ships roughly thirty releases per agent release. At
+per_page=50 the window already stops before `v0.2.1`. It does not fail
+loudly when it stops containing *any* agent release; it just says "could
+not find an agent release" and the operator has no reason to suspect
+paging. 100 buys headroom, not a fix. If the agent goes quiet for
+another hundred desktop releases this needs `per_page` + `page`, or
+`/releases/tags/<tag>` with the tag computed some other way.
+
+**Left alone deliberately:** the menu, the prompt sequence, and every
+engine path. `action_update_agent` still does fetch-then-restart and
+still touches no engine.
+
+**Not verified, and cannot be from here:** that `install -m 755` over a
+*running* agentd behaves on a node the way it does in the test — the
+stand-in binary is not a running service — and that `/root/agent-rollback`
+sits on a partition with room for five ~20MB binaries. Both are one look
+on the first node that takes an update.
 ## 2026-08-24 — the website branch was rendered for the first time, and six faults fell out
 
 `claude/website-redesign` is pushed and **open as a PR, not merged**. The
