@@ -9979,3 +9979,172 @@ nothing in them is integration-created, and installing the whole
 monorepo to prove that was not worth the time. CI will say. Nothing in
 Gaming Mode has run on a rig either, and the entry above it already says
 what is missing at the node end.
+
+## 2026-08-25 — PUA protection on: 0.9.31 is still clean, and the control now covers PUA
+
+**Status:** done (measured on the rig, PUA in block mode)
+**Touches:** nothing in the tree — a finding about released artifacts
+
+Yesterday's Defender run named its own hole: `PUAProtection` was `0`, so
+nothing it proved said anything about a customer with PUA protection on.
+Xray, OpenVPN and WireGuard are exactly the class that lands in
+`PUA:Win32/*` rather than the malware bucket. **That hole is now closed.
+With PUA protection in block mode, nothing in 0.9.31 is flagged** — not
+the installers, not the installed tree, not the engines at runtime.
+
+### The evidence is the absence of events, not the presence of files
+
+This matters, because **remediation is broken on this snapshot**. Both
+control files were detected *and blocked* and yet stayed on disk. So
+"the binary is still there" proves nothing on this rig, and any future
+run that reasons from survival alone will produce a false pass.
+
+What is load-bearing is the detection log. Three detections happened in
+the guest, all session, and here they are in full:
+
+| when | threat | path |
+|---|---|---|
+| 11:28:04 | `PUA:Win32/EICAR_Test_File` (224688) | `C:\nx\PotentiallyUnwanted.exe` |
+| 11:30:44 | `PUA:Win32/EICAR_Test_File` (224688) | `Downloads\PotentiallyUnwanted.exe` |
+| 12:51:06 | `Virus:DOS/EICAR_Test_File` (2147519003) | `C:\nx\eicar.com` |
+
+Both control detections also produced a **`1117` with `Action: Block`**,
+so PUA block mode was genuinely enforcing and not merely set. **No
+Neoxify file appears anywhere in that log** — not once, at any step.
+
+### Two controls, because EICAR alone does not cover PUA
+
+A clean PUA scan is worthless unless PUA detection was demonstrably live,
+and EICAR only exercises the malware path. So this run added a
+PUA-specific control: the AMTSO/EICAR `PotentiallyUnwanted.exe`
+(`http://amtso.eicar.org/PotentiallyUnwanted.exe`, sha256 `42d6581d…`).
+It fired in the guest on explicit scan (`found 1 threats`) and again on
+the mark-of-the-web copy in `Downloads`, and it fired on the host too.
+
+**The PUA event ID depends on the mode, and this is worth not
+rediscovering.** In the guest at `PUAProtection=1` (block) it came
+through as **`1116`/`1117`** and `1160` was empty. On the host at
+`PUAProtection=2` (audit) the same file logged as **`1160`** with
+Category *Potentially Unwanted Software*. Query all three or a PUA
+detection will be invisible in whichever mode you did not expect.
+
+### What was actually on
+
+| | guest (rig) | host (cross-check) |
+|---|---|---|
+| `PUAProtection` | **1 = block** | 2 = audit |
+| definitions | `1.457.318.0` (23 Aug) | `1.457.335.0` (25 Aug) |
+| engine | `1.1.26070.7` | `1.1.26070.7` |
+| RTP / MAPS | on / `MAPS=2` | on |
+| exclusions | none | none for Neoxify |
+
+`Set-MpPreference -PUAProtection Enabled` stuck first try **even with
+Tamper Protection on**, so the policy-key fallback was not needed.
+
+**Guest definitions are two days stale and would not update** —
+`Update-MpSignature` hangs at `0/1 completed` (9 minutes before it was
+killed), which is worse than the documented `0x80070102` failure because
+nothing errors. That is why the host cross-check matters, and it is a
+real one: **all twelve vendored binaries are byte-identical between the
+guest's fresh 0.9.31 install and the host copies**, which were scanned at
+current definitions with PUA audit on and came back clean. Only
+`neoconnect-service.exe` and `neoconnect-desktop.exe` differ, because the
+host carries an older build.
+
+The host is also independent evidence in its own right: 37 detection
+events in its Defender log across its lifetime, including real PUA
+verdicts (`PUABundler:Win32/FileZilla_BundleInstaller`), and **not one
+of them is a Neoxify binary**.
+
+### Per-file, by name, PUA block on
+
+Both released assets verified against `sha256sums.txt` and re-hashed
+inside the guest to the same values (`e8c05dc5…e015cee0`,
+`ea29caad…61c4e990`), so what was installed is byte-for-byte the release.
+
+All 15 installed binaries scanned individually: **CLEAN**, plus
+`[WHOLE TREE] CLEAN` over `C:\Program Files\Neoxify`. Both installers
+clean on explicit scan and clean again as mark-of-the-web copies in
+`Downloads` — the shape a real download has, and the shape PUA
+protection has historically keyed on.
+
+`xray.exe` is the one to watch, and it is clean: **unsigned**, 34 MB, a
+proxy engine — comfortably the strongest PUA candidate in the bundle.
+`openvpn.exe` (CN=OpenVPN Inc.), `wireguard.exe` (CN=WireGuard LLC) and
+`WinDivert64.sys` carry valid vendor signatures. Both installers and both
+Neoxify-built binaries are `NotSigned`, which is the known signing gap
+rather than a new finding.
+
+### It runs, too
+
+PUA verdicts often arrive on execution rather than at install.
+`NeoxifyService` came up **Running / Automatic** and was still
+`Running` at the end; `neoconnect-desktop` and `neoconnect-service`
+stayed alive; and every engine was launched directly — `xray.exe` ran
+(killed at 12s, it serves rather than printing a version),
+`wireguard.exe` and `wg.exe` exited 0, `openvpn.exe` and `tapctl.exe`
+exited 1 with no config, as expected. None was blocked, and none
+produced a detection event.
+
+No tunnel was established and no production node was touched.
+
+### What this does not prove
+
+One machine, one engine version, one moment. **PUA classification is a
+reputation call and it moves** — an unsigned proxy engine that is clean
+today can be reclassified tomorrow with nothing in our tree changing.
+This is a snapshot, not a settled property of 0.9.31.
+
+- 0.9.31's own `neoconnect-service.exe` and `neoconnect-desktop.exe` were
+  only ever scanned at `1.457.318.0`. The current-definitions coverage is
+  for the twelve vendored binaries.
+- **Neither a full scan nor a quick scan completed.** `MpCmdRun -Scan` is
+  pathologically slow on this VM — the full scan ran 50 minutes and the
+  quick scan 18, both without finishing, and both were abandoned. The
+  scheduled-scan path is therefore *not* covered. Per-file, whole-tree,
+  download-path and live-execution scans are.
+- Nothing was tested against a managed configuration, where PUA is often
+  forced on at a stricter `CloudBlockLevel` than the `0` here.
+- The bootstrapper was scanned but **not installed** — its `Install`
+  button is still mouse-only on this rig. What it installs is the same
+  NSIS package that was installed here, so the gap is its UI path, not
+  the payload.
+
+### No exclusion, no repack, no submission
+
+- **An exclusion should not be shipped.** Telling customers to exclude
+  `C:\Program Files\Neoxify` trains exactly the habit that gets people in
+  Iran compromised, and it would mask a real detection later.
+- **A repack fixes nothing** — there is nothing being flagged.
+- **Nothing was submitted to Microsoft and nothing should be.** There is
+  no false positive to report, and WDSI takes malware/PUA submissions,
+  not "please pre-approve my unsigned installer". It would also spend the
+  owner's identity, which is his call.
+
+The lever that matters is unchanged and still stalled: **finish the Azure
+Trusted Signing enrolment so `AZURE_CLIENT_ID` exists.** Signing grants
+no instant reputation, but it is what lets reputation accrue to a
+publisher instead of to each new file — and an unsigned `xray.exe` is the
+single most likely place a future PUA verdict lands on us.
+
+### Rig traps corrected
+
+- **`guestcontrol` cannot be used on this rig at all.** The account
+  auto-logs in with a blank password and Windows blocks the secondary
+  logon, so every call returns "user was not able to logon" regardless of
+  the password passed. Use `sharedfolder add --transient --automount
+  --auto-mount-point Y:` and drive the Run dialog.
+- **UAC *does* render into VirtualBox screenshots** — yesterday's entry
+  says it does not. `No` has default focus; Left-arrow then Enter works.
+  The earlier "Alt+Y did nothing" was timing: the prompt takes ~10s and
+  the keystroke was arriving first.
+- **The mapped share IS visible to the elevated token here** (`Y:` worked
+  from the Administrator shell), which is not the usual Windows
+  behaviour.
+- **`Update-MpSignature` hangs rather than failing.** `Ctrl+C` does break
+  it, but only once the cmdlet yields — send it and wait rather than
+  concluding it was ignored.
+- Screenshots lag the guest by several seconds. Verify the Run-dialog
+  contents after a pause, never immediately — and the `RunMRU` prefill is
+  real: the field came up pre-populated with a stale command from a
+  previous session every single time.
