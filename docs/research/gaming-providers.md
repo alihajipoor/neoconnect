@@ -120,13 +120,27 @@ names the experiment that would settle it.
    exit; the full tunnel's IPv6 leak is measured closed. **The unbuilt
    resolver and SNI proxy add nothing to any of it, and are strictly weaker,
    because DNS cannot reach a game that receives its server as a literal.**
-10. **The remaining hard case is address reputation, not routing.** All five
-   node addresses are datacenter-labelled ASN-wide, two of the five share one
-   ASN, and rotating within those ASNs is already known to buy nothing. If the
-   game refuses Neoxify's exit as well as the player's own address, that is a
-   procurement problem and a separate programme — and no competitor has solved
-   it either.
-11. **The whole question turns on one hour of measurement that has never been
+10. **And publishers do block datacenter ranges — Blizzard at the network
+    edge.** A player on a self-hosted VPN in Linode New Jersey could not reach
+    Battle.net at all; the traceroute died at Blizzard's own edge router, and
+    **Linode support confirmed Blizzard was blocking the range** before
+    getting it lifted. Riot officially announced cutting *"the highest volume
+    VPN services"* by range. So the exit address is not a detail — for this
+    product it may be the whole thing.
+11. **And that label cannot be bought off — this was measured, not assumed.**
+    **Mullvad** owns its own ASN (AS216025) and announces its own `45.92.0.0/24`,
+    and it *does* move one label: IPinfo types its AS as **`isp`**, not
+    `hosting`. It does **not** move the other: ipapi.is still returns
+    **`is_datacenter: true, is_vpn: true`**. Two independent labels, and the
+    one that governs here responds to *behaviour*, not paperwork. The own-ASN
+    route costs roughly €1,000 setup, €1,850/year and $64–141/month for a
+    leased /24 — and buys the label that does not matter. The only mechanism
+    that defeats the other is residential proxy pools, which hCaptcha puts at
+    30–95% blackhat, which the FBI has issued an alert about, and which are
+    **disqualifying for a product whose users are in Iran.** Mudfish's 634
+    published nodes are Google, Azure, Vultr, AWS, Linode — **and LightNode,
+    Neoxify's own provider.** Nobody in this market has solved it.
+12. **The whole question turns on one hour of measurement that has never been
     taken**: a real account, on a real Iranian home connection, trying to log
     in and connect — direct, then through germany-1, then direct again. Every
     outcome of that test, including "nothing is blocked", changes the decision.
@@ -783,18 +797,135 @@ What is already known, and it is bad:
   `204.168.161.100` is **AS24940 Hetzner**. Hetzner and Linode are among the
   most heavily VPN-flagged hosting ASNs in existence. And two of the five
   nodes share one ASN, so they share one reputation.
-- **The competitors have exactly the same problem and have not solved it.**
-  No ASN or prefix under any of these brands exists; Mudfish publishes its
-  fleet and it is AWS, Google, Azure, DigitalOcean, Vultr, Linode, OVH,
-  Hetzner and LeaseWeb — the same feeds, the same labels. Nobody in this
-  market has bought their way out of it.
+### Publishers do block datacenter ranges, and here is the mechanism at three
+### different layers
 
-The practical consequence for the recommendation: **if the beta test shows
-that Neoxify's exit is refused where the Iranian address was also refused,
-that is not a Gaming Mode problem and no amount of node software fixes it.**
-It is an address-space procurement problem, it must be priced against new
-providers **vetted against the feeds before purchase**, and it should be
-scoped as its own piece of work rather than smuggled into a feature.
+- **At the network edge, by Blizzard, verified.** A player on a self-hosted
+  WireGuard VPN in **Linode New Jersey** could not reach Battle.net at all;
+  the traceroute died at `pr01-eqfr5.blizzardonline`. **Linode support
+  confirmed Blizzard was blocking their traffic**, contacted Blizzard, and the
+  block was lifted hours later. That is packets dropped at Blizzard's edge on
+  the basis of the source range — not a login check, not a fraud score.
+- **At connect time, on a commercial reputation score.** The clearest proof
+  available anywhere is an open-source game, Space Station 14, whose rejection
+  string is *"You are connecting through a datacenter or VPN"* and whose
+  config names the provider outright: `game.ipintel_baseurl =
+  "https://check.getipintel.net"`, `game.ipintel_bad_rating = 0.95`,
+  `game.ipintel_reject_bad = true`. Big publishers do not publish their
+  vendors, and no evidence was found that any of them licenses a named feed —
+  but the pattern is demonstrably in production.
+- **By named provider, by Riot, officially.** Riot's own announcement
+  (6 Nov 2020) says they *"cut VPN access from a few of the highest volume VPN
+  services"*, declined to name them, and said they would keep adding. Note the
+  shape: **named VPN providers' ranges, not datacenter space wholesale.**
+
+By contrast, the widely repeated claims that Roblox, Steam and Supercell block
+datacenter ranges **did not survive checking** — the one Roblox thread read in
+full was diagnosed by a moderator as regional server overload.
+
+### Can the label be bought off? Measured — and the answer is half yes, half no
+
+The natural experiment is **Mullvad**, the one VPN company that owns and
+announces its own address space.
+
+| | value |
+|---|---|
+| ASN | **AS216025**, Mullvad VPN AB, allocated 2023-11-07 |
+| Announced | `45.92.0.0/24`, `2a10:7402::/32` |
+| **IPinfo ASN type** | **`isp`** — not `hosting` |
+| **ipapi.is on `45.92.0.10`** | **`is_datacenter: true`, `is_vpn: true`** |
+
+Controls: a real Argentine eyeball ISP reads `is_datacenter: false,
+is_vpn: false`; M247 (AS9009, the hosting AS behind much of ExpressVPN) reads
+type `hosting`.
+
+**There are two independent labels and they respond to different things.**
+
+1. **ASN type (`hosting` vs `isp`) *is* movable.** Mullvad's two-year-old /24
+   under its own ASN reads `isp`. A hobbyist ASN announced out of BuyVM reads
+   `isp`. A **$4/month VPS on a real Argentine eyeball ISP** measured clean
+   across IPinfo, ipregistry, ipapi, IP2Location, IPQS, Scamalytics, ipdata
+   and DB-IP — at 10 Mbps and 1 TB, which is the catch.
+2. **`is_vpn` / `is_datacenter` is *not* movable by address-space
+   engineering.** Mullvad owns the ASN and the prefix and still measures
+   `is_datacenter: true, is_vpn: true`, because those flags track *who you are
+   and how the range behaves*. A provider on LowEndTalk watched **non-anonymous
+   L2TP tunnels get proxy-flagged within a month.**
+
+The methodology confirms why. ipapi.is publishes its algorithm: parse the
+WHOIS `OrgName`, derive the registrant's domain, **crawl that website and
+keyword-classify it for hosting terminology.** IPinfo classifies **per range
+first and aggregates upward**, explicitly criticising ASN-only binary
+labelling. Cloudflare's residential-proxy detection deliberately ignores ASN
+altogether in favour of per-request latency and burstiness. So the feeds that
+matter are not all ASN-aggregating, and the ones that are not cannot be
+gamed by paperwork.
+
+**Cost of the own-AS route in Europe, for the record:** RIPE LIR sign-up
+**€1,000** one-off, **€1,800/year** membership, **€50 per ASN** (primary
+source), plus an IPv4 /24 lease at a broker-published **$0.25–$0.55 per IP
+per month** — roughly **$64–141/month** — plus transit, for which no primary
+European price sheet could be found. **That buys an `isp` ASN type and
+nothing else.**
+
+### The industry's only working answer is one Neoxify must not take
+
+Residential proxy pools do defeat the second label, and their sourcing is
+documented and getting worse: hCaptcha estimates **30–95%** of residential
+proxy traffic is blackhat or greyhat and finds dozens of brands reselling
+four underlying pools; Spur found residential-proxy SDKs in nearly half of LG
+smart-TV apps, prompting LG to ban them; Google disrupted IPIDEA as *"the
+largest residential proxy network"* and the FBI issued a public alert;
+IPinfo and AbuseIPDB across 260M addresses found **53% of actively abusive
+IPs are VPN or residential proxy**, with a third of residential-proxy IPv4
+lasting a single day.
+
+**Routing an Iranian customer's traffic through infrastructure that is
+frequently non-consensual, short-lived and 53%-abusive by baseline is a worse
+trust posture than a clean datacenter address, not a better one.** For a
+product whose users are in Iran, it is not a dependency to take at any price.
+
+And the leasing market actively launders reputation: brokers publish
+falsified RFC 8805 geofeeds so that *"a cheap datacenter IP is sold to you as
+a 'Premium New York Residential Proxy'"*. Self-published geofeeds correct
+**location**, never connection type.
+
+### The competitors have not solved this either, and one detail should sting
+
+Mudfish's published fleet was tallied node by node — **634 nodes**: Google 49,
+Azure 44, Vultr 38, TinMok 34, SakuraNet 34, AWS 31, Psychz 29, RansomIT 28,
+G-Core 24, OneProvider 21, Linode 20, **LightNode 17**, HostUS 16, Aliyun 13,
+DigitalOcean 14, RamNode 8, HostHatch 8, OVH 7, LeaseWeb 5, Tencent 5,
+Hetzner 3, Oracle 2, Huawei 2, and a long tail of small VPS shops. **Exactly
+two of 634 are not hosting**: one SK Broadband node and one on Starry, a US
+fixed-wireless ISP.
+
+**LightNode is Neoxify's own provider for germany-1 and turkey-1.** The
+market leader in this category runs on the same address class, at 634 nodes,
+and has not solved the labelling problem — it has not tried.
+
+And the "official partnerships" that appear to buy publisher legitimacy do
+not, on inspection. GearUP's Escape from Tarkov partnership is, in the press
+release's own words, *"free network acceleration … from August 4 through
+August 11"*; its Discord partnership is a month of Nitro. **No technical
+whitelisting by any publisher for any of these products was found.**
+
+### The practical consequence
+
+**If the beta test shows Neoxify's exit is refused where the player's own
+Iranian address was also refused, no amount of node software or address-space
+spending fixes it.** The `is_vpn` flag is not purchasable away, the one
+mechanism that defeats it is ethically disqualifying here, and the market
+leader has not solved it either.
+
+What that leaves, if that branch comes true, is narrower and honest: a
+**low-density exit** — few accounts per address, which is what turns "Account
+Sharing" penalties on and off — at a **new provider vetted against the feeds
+before purchase**, accepting that it will still read as a VPN and competing
+only on not being *shared*. That is a procurement decision with a measurable
+success criterion (accounts per exit IP per hour, from the node's own
+connection log), and it should be scoped as its own piece of work rather than
+smuggled into a feature.
 
 ---
 
@@ -1237,18 +1368,30 @@ cannot keep domestic traffic off the tunnel. State it; do not hide it.
 |---|---|---|
 | Outbound blocking of the game path | Nothing. Ship the catalogue and guidance | **Cheap** |
 | Inbound geo-block, Neoxify's exit accepted | The catalogue plus split-tunnel reliability | **Cheap — already planned work** |
-| Inbound geo-block, Neoxify's exit **refused** | **Address space**, not routing | **Expensive, and a separate programme** |
+| Inbound geo-block, Neoxify's exit **refused** | **Address behaviour**, and it is not purchasable | **Not solvable by spending — see below** |
 | Nothing blocked on that ISP | Nothing — do not build | **Zero** |
 
-The third row is the one to be honest about in advance. All five node
-addresses are datacenter-labelled ASN-wide; two of the five share one ASN;
-Hetzner and Linode are among the most heavily VPN-flagged hosting networks
-there are; and **rotating addresses within those ASNs has been shown to buy
-nothing.** No competitor has solved this either — Mudfish's published fleet is
-the same hyperscalers and the same labels. If the exit is refused, that is an
-IP-reputation procurement problem, it must be priced against **new** providers
-vetted against the feeds **before** purchase, and it should be scoped
-separately rather than smuggled into a feature.
+The third row is the one to be honest about **before** the test runs, because
+the instinct will be to treat it as a budget problem and it is not one.
+
+Rotating within the current ASNs buys nothing — already established. Buying an
+ASN and a /24 buys the `hosting`→`isp` label and **not** the `is_vpn` one:
+Mullvad owns both and still measures `is_datacenter: true, is_vpn: true`, and
+a provider watched non-anonymous L2TP tunnels get proxy-flagged within a
+month. The only technique that defeats the second label is residential proxy
+pools, and their sourcing — 30–95% blackhat by hCaptcha's estimate, SDKs in
+consumer smart TVs, an FBI alert, a Google takedown — makes them **a worse
+trust posture than a clean datacenter IP** for users in Iran. That is a
+refusal on principle, and it should be recorded as one rather than
+re-litigated later.
+
+What remains available is narrower: a **low-density exit** at a **new
+provider vetted against the feeds before purchase** — competing not on being
+un-labelled but on **not being shared**, since the penalties players actually
+receive carry "Account Sharing" labels. It has a measurable success
+criterion: distinct accounts egressing per exit IP per hour, from the node's
+own connection log. Everything else in this row is spending that the
+measurement says will not work.
 
 ### 4. What must never be claimed
 
@@ -1333,10 +1476,16 @@ not re-derive the same dead ends.
   exposed to the UDP filter than the game it is carrying.
 - **Whether a block sits behind authentication.** No unauthenticated probe can
   see it, and it is the most likely place for a real sanctions block to live.
-- **Whether announcing your own leased address space escapes the
-  datacenter/VPN label**, and what an ASN plus a /24 plus transit actually
-  costs. Unpriced. This decides whether the expensive branch of the
-  recommendation is affordable at all.
+- **Whether any *major* publisher licenses a named commercial reputation
+  feed.** The only code-level proof found is an indie open-source game using
+  getipintel. Big publishers do not disclose, and it should not be inferred.
+- **The exit address space of ExitLag, WTFast, GearUP, NoPing, LagoFast and
+  Haste.** No public node list, no CT records for node hostnames. Only Mudfish
+  is fully enumerable, and one vendor is one vendor.
+- **European transit pricing from any primary source.** Every transit figure
+  in this document is a forum anecdote, mostly US.
+- **Whether Roblox, Steam or Supercell block datacenter ranges at all.** The
+  community claims did not survive checking.
 - **Whether domestic WireGuard works** — an Iranian customer to the Iranian
   relay — already recorded as open in `docs/detection-resistance.md`.
 
@@ -1382,6 +1531,17 @@ quoted, not because they are evidence.
 - ExitLag process-name matching, exploited in the open — `snoww/loa-logs`, `src-tauri/src/constants.rs` (`NINEVEH_COMPAT_EXE_NAME = "LOSTARK.exe"`)
 - Netch process mode on `netfilter2.sys` — <https://github.com/NetchX/Netch/blob/main/Netch/Controllers/NFController.cs>; NetFilter SDK — <https://www.netfiltersdk.com/help/nfsdk2/nfapi_index.html>
 - EZ Connect terms of service — <https://ezconnect.ir/policies/terms-of-service>; usage flow — <https://ezconnect.ir/how-to-use>; Telegram channel naming foreign routes — <https://t.me/ezconnect_ir>
+
+**Exit-address reputation**
+
+- Blizzard dropping a Linode range at its edge, with Linode support confirming — <https://us.forums.blizzard.com/en/blizzard/t/cant-login-to-bnet-when-using-vpn/509>
+- Riot, *Changes to Cross-Region VPN Access* (6 Nov 2020) — <https://www.riotgames.com/en/news/changes-to-cross-region-vpn-access>
+- Space Station 14 connect-time VPN refusal, provider named in config — <https://forum.spacestation14.com/t/loobage-you-are-connecting-through-a-datacenter-or-vpn/19332>
+- Feed methodologies: MaxMind Anonymous IP <https://dev.maxmind.com/geoip/docs/databases/anonymous-ip/>; IP2Proxy <https://www.ip2location.com/database/ip2proxy>; IPQualityScore <https://www.ipqualityscore.com/documentation/proxy-detection-api/overview>; ipapi.is published algorithm <https://ipapi.is/blog/detecting-hosting-providers.html>; IPinfo per-range classification <https://community.ipinfo.io/t/hosting-vs-isp-how-we-decide-the-ip-connection-types/5521>; Cloudflare residential-proxy ML <https://blog.cloudflare.com/residential-proxy-bot-detection-using-machine-learning>
+- Mullvad's own ASN — <https://ipinfo.io/AS216025>; measurements via `api.ipapi.is`
+- RIPE NCC fees (primary) — <https://www.ripe.net/membership/payment/>
+- Residential proxy sourcing: hCaptcha <https://www.hcaptcha.com/report-are-all-residential-proxy-services-criminal-organizations>; Spur on smart-TV SDKs <https://spur.us/blog/smart-tv-apps-residential-proxy-sdks>; Google disrupting IPIDEA <https://cloud.google.com/blog/topics/threat-intelligence/disrupting-largest-residential-proxy-network>; FBI alert <https://www.fbi.gov/investigate/cyber/alerts/2026/evading-residential-proxy-networks-protecting-your-devices-from-becoming-a-tool-for-criminals>; IPinfo/AbuseIPDB 260M-IP study <https://ipinfo.io/blog/vpns-residential-proxies-abuse-findings-rsac-2026>
+- GearUP "partnership" substance — <https://www.prnewswire.com/apac/news-releases/gearup-and-escape-from-tarkov-partner-to-enhance-online-gaming-experience-for-the-new-season-302846623.html>, <https://www.gearupbooster.com/blog/gearup-discord-official-partner-perk.html>
 
 **Industry context**
 
