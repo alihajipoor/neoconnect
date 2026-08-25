@@ -3,9 +3,10 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Check, Copy, Loader2, Minus, ShieldAlert, TriangleAlert, Wrench } from "lucide-react";
 import {
   anythingFixed,
+  failedSteps,
+  indeterminateSteps,
   repairCommandLine,
   repairNetwork,
-  unresolvedSteps,
   type RepairReport,
   type RepairStep,
 } from "../lib/repair";
@@ -201,22 +202,34 @@ export function RepairNetwork({
  */
 function Result({ report }: { report: RepairReport }) {
   const { t } = useI18n();
-  const unresolved = unresolvedSteps(report);
+  const failed = failedSteps(report);
+  const indeterminate = indeterminateSteps(report);
+  // Three outcomes, not two. A step that could not be checked is not a
+  // step that failed, and painting it in the destructive colour told
+  // customers their repair had not worked when nothing established
+  // that -- see `indeterminateSteps`. Only a determined failure is bad
+  // news; an unfinished check is a caveat on good news.
   const summaryKey: TranslationKey =
-    unresolved.length > 0
+    failed.length > 0
       ? "repair.resultProblems"
-      : anythingFixed(report)
-        ? "repair.resultFixed"
-        : "repair.resultClean";
+      : indeterminate.length > 0
+        ? "repair.resultUnverified"
+        : anythingFixed(report)
+          ? "repair.resultFixed"
+          : "repair.resultClean";
 
   return (
     <div className="flex flex-col gap-2">
       <p
         className={cn(
           "rounded-lg border px-3 py-2 text-xs",
-          unresolved.length > 0
+          failed.length > 0
             ? "border-destructive/30 bg-destructive/10 text-destructive"
-            : "border-success/30 bg-success/10 text-success",
+            : indeterminate.length > 0
+              ? // The same tone the per-step "Couldn't check" already
+                // uses, so the summary and the row it refers to agree.
+                "border-highlight/30 bg-highlight/10 text-highlight"
+              : "border-success/30 bg-success/10 text-success",
         )}
       >
         {t(summaryKey)}

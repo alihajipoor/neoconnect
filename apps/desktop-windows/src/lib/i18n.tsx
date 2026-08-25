@@ -373,6 +373,12 @@ const en = {
   "repair.runAgain": "Repair again",
   "repair.resultClean": "Nothing was left behind — your network settings are as Windows had them.",
   "repair.resultFixed": "Repaired. Try connecting again.",
+  // Good news with a caveat, not bad news. Every check that finished
+  // succeeded; one could not finish, which says nothing either way.
+  // Worded so it never claims the repair failed -- that is a state
+  // nothing here verified. See `indeterminateSteps` in lib/repair.ts.
+  "repair.resultUnverified":
+    "Repaired, but one check couldn't finish, so it can't be confirmed. This usually just means a slow machine. Try connecting again; if it still doesn't work, run the command below as an administrator and send us what it prints.",
   "repair.resultProblems":
     "Some of it could not be repaired. Restarting Windows usually clears the rest; if it doesn't, run the command below as an administrator and send us what it prints.",
   "repair.failed": "The repair could not be run.",
@@ -818,6 +824,8 @@ const fa: Record<TranslationKey, string> = {
   "repair.runAgain": "ترمیم دوباره",
   "repair.resultClean": "چیزی جا نمانده بود — تنظیمات شبکهٔ شما همان است که ویندوز داشت.",
   "repair.resultFixed": "ترمیم انجام شد. دوباره برای اتصال تلاش کنید.",
+  "repair.resultUnverified":
+    "ترمیم انجام شد، اما یک بررسی کامل نشد و نمی‌توان آن را تأیید کرد. معمولاً فقط به‌دلیل کندی دستگاه است. دوباره برای اتصال تلاش کنید؛ اگر باز هم کار نکرد، دستور زیر را با دسترسی مدیر اجرا کنید و خروجی آن را برای ما بفرستید.",
   "repair.resultProblems":
     "بخشی از آن ترمیم نشد. معمولاً راه‌اندازی دوبارهٔ ویندوز باقی را پاک می‌کند؛ اگر نشد، دستور زیر را با دسترسی مدیر اجرا کنید و خروجی آن را برای ما بفرستید.",
   "repair.failed": "ترمیم انجام نشد.",
