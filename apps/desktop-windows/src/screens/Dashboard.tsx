@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronRight, Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
+import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -27,6 +27,7 @@ import { classifyConnectionError, type ClassifiedError } from "../lib/connection
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
 import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
+import { gamingDisarm, loadGaming, saveGaming, type AppMode } from "../lib/gaming";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
 import { refreshConnectionConfig } from "../lib/connection-config";
 import { useRefreshOnResume } from "../lib/resume";
@@ -46,6 +47,7 @@ import {
 } from "../lib/connect-intent";
 import { Button, Card, Stat } from "../components/ui";
 import { ConnectOrb, type ConnectionState } from "../components/ConnectOrb";
+import { GamingStatusPanel } from "../components/GamingStatusPanel";
 import { Logo } from "../components/Logo";
 import { Flag } from "../components/Flag";
 import { LocationPicker } from "../components/LocationPicker";
@@ -499,6 +501,14 @@ export function Dashboard({
    * machine is. */
   const [splitTunnelActive, setSplitTunnelActive] = useState(false);
   const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
+  /** VPN mode or gaming mode.
+   *
+   * Read before anything else on the screen, because it changes what
+   * every element below it means: in gaming mode there is no tunnel and
+   * no adapter, so "Connected" has nothing it could stand for and the
+   * exit-IP pill would be describing an address the product did not
+   * change. */
+  const [appMode, setAppMode] = useState<AppMode>("vpn");
   /** Whether the service says IPv6 is blocked for this session. */
   const [ipv6Blocked, setIpv6Blocked] = useState(false);
   /** Whether this machine could reach public IPv6 *before* connecting.
@@ -695,6 +705,47 @@ export function Dashboard({
       await loadAll(saved ?? undefined);
     })();
   }, []);
+
+  // Which mode the app was left in. Persisted rather than reset, because
+  // starting in VPN mode somebody who chose gaming mode would quietly
+  // offer to tunnel a machine whose owner had asked for the opposite.
+  useEffect(() => {
+    let cancelled = false;
+    void loadGaming().then((loaded) => {
+      if (!cancelled) setAppMode(loaded.mode);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** Switches mode, and leaves nothing behind from the one being left.
+   *
+   * Going back to VPN tears the gaming rules down. Leaving them installed
+   * under a screen that no longer mentions them is exactly the kind of
+   * state this app is not allowed to have: DNS for the customer's games
+   * would still be pointed at the node while nothing on screen said so.
+   *
+   * Refused outright while a tunnel is up -- the same rule the location
+   * picker follows, and for the same reason the Dashboard already gives:
+   * turning a mode on mid-session cannot retrofit onto a live tunnel.
+   */
+  async function changeMode(next: AppMode) {
+    if (next === appMode) return;
+    if (connectionState !== "disconnected") return;
+    setAppMode(next);
+    const current = await loadGaming();
+    await saveGaming({ ...current, mode: next });
+    if (next === "vpn") {
+      try {
+        await gamingDisarm();
+      } catch {
+        // The service may be stopped. Nothing on screen claims the rules
+        // are gone: the gaming panel reads the service on every poll and
+        // is the only thing that reports what is installed.
+      }
+    }
+  }
 
   // A window restored from the tray after a week is holding a week-old
   // answer, and nothing before this ever asked for a newer one.
@@ -1743,6 +1794,58 @@ export function Dashboard({
             </div>
           ) : null}
 
+          {/* The mode selector, above everything it changes the meaning
+              of. Two segments and no sliding marker: the chosen half is
+              carried by its own background, which is the one thing on
+              this control that must never be misread. A marker positioned
+              physically is how the Custom toggle's knob came to sit under
+              "off" in Persian while the mode was on -- if one is ever
+              added here it animates `inset-inline-start`, never `left`.
+
+              Refused while a tunnel is up, the same way the location
+              picker is: a mode cannot be retrofitted onto a live
+              session, and a control that silently did nothing would be
+              worse than one that says why. */}
+          <div className="animate-rise flex flex-col gap-1">
+            <div className="flex gap-1 rounded-lg border border-white/8 bg-white/[0.025] p-1">
+              {(
+                [
+                  ["vpn", t("dash.modeVpn"), Shield],
+                  ["gaming", t("dash.modeGaming"), Gamepad2],
+                ] as [AppMode, string, typeof Shield][]
+              ).map(([value, label, Icon]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={appMode === value}
+                  disabled={connectionState !== "disconnected"}
+                  title={
+                    connectionState !== "disconnected" ? t("dash.disconnectToChange") : undefined
+                  }
+                  onClick={() => void changeMode(value)}
+                  className={[
+                    "press flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
+                    "inline-flex items-center justify-center gap-1.5",
+                    "disabled:pointer-events-none disabled:opacity-50",
+                    appMode === value
+                      ? "bg-[linear-gradient(120deg,var(--primary),var(--highlight))] text-white shadow-[0_2px_10px_-4px_var(--primary)]"
+                      : "text-muted-foreground hover:bg-white/8 hover:text-foreground",
+                  ].join(" ")}
+                >
+                  <Icon className="size-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+            {/* One sentence saying what the chosen half actually does.
+                The gaming line names the limit rather than the promise:
+                only the services you chose are carried, and the game
+                itself is left on the direct path. */}
+            <p className="text-[11px] text-muted-foreground">
+              {appMode === "gaming" ? t("dash.modeGamingHint") : t("dash.modeVpnHint")}
+            </p>
+          </div>
+
           <div className="animate-rise flex items-center gap-2 text-xs text-muted-foreground">
             <span
               className={
@@ -1769,6 +1872,15 @@ export function Dashboard({
 
           {subscription ? (
             <>
+              {appMode === "gaming" ? (
+                /* Its own hero, not a re-labelled version of the tunnel
+                   one. Gaming mode installs DNS rules and brings up no
+                   tunnel and no adapter, so it has its own five-value
+                   state, its own words, and no exit-IP pill -- the
+                   machine's address is unchanged by design and showing
+                   one would be a plain lie about what the product did. */
+                <GamingStatusPanel onOpenSettings={onOpenSettings} />
+              ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-4">
                 {!protocolUser ? (
                   <Card className="w-full text-center">
@@ -1974,6 +2086,7 @@ export function Dashboard({
                   </>
                 )}
               </div>
+              )}
 
               {/* What the connection actually is. These three answer the
                   questions a customer asks while looking at the orb. */}
@@ -1994,6 +2107,12 @@ export function Dashboard({
                   ) : null}
                 </Card>
               ) : null}
+              {/* Server, protocol and session length are facts about a
+                  tunnel. In gaming mode there is none, so rather than
+                  show three tiles describing something that is not
+                  running, the gaming panel shows the two facts that are
+                  true there. */}
+              {appMode === "gaming" ? null : (
               <div className="animate-rise grid grid-cols-3 gap-2">
                 {/* Both open the same picker, because a customer asking
                     to "change the protocol" and one asking to "change the
@@ -2039,6 +2158,7 @@ export function Dashboard({
                   }
                 />
               </div>
+              )}
 
               <Card className="animate-rise flex flex-col gap-2.5 py-3">
                 <div className="flex items-baseline justify-between gap-2">
@@ -2125,6 +2245,12 @@ export function Dashboard({
                   of it. The tile is now the control; this stays only as
                   the plainly-worded way in, and says what it does rather
                   than what is currently set. */}
+              {/* Hidden in gaming mode: there is no location in use to
+                  change. The resolver's region is named on the gaming
+                  panel instead, where it is a fact rather than a
+                  control. */}
+              {appMode === "gaming" ? null : (
+              <>
               <Button
                 variant="outline"
                 onClick={() => setShowLocationPicker(true)}
@@ -2144,6 +2270,8 @@ export function Dashboard({
                   {t("dash.disconnectToChange")}
                 </p>
               ) : null}
+              </>
+              )}
             </>
           ) : (
             // Previously a dead end: a customer with no subscription --

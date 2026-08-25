@@ -365,6 +365,85 @@ const en = {
   "plans.browserFailed": "We could not open your browser. Use the button below to try again.",
   "plans.copyAddress": "Copy address",
 
+  // --- Gaming mode ------------------------------------------------
+  //
+  // Read the whole block as one thing: it is written so that no string
+  // in it can be true while the machine is not in the state it names.
+  //
+  // Gaming mode installs DNS rules for named game services. It brings up
+  // no tunnel and no adapter, and the machine's exit address is
+  // unchanged. So "Connected" never appears here, no string promises a
+  // lower ping or names a millisecond figure -- our best node measured
+  // 72.8ms against 72.0ms direct, so a ping claim is one we cannot make
+  // -- and `gaming.ipUnchanged` is on screen the entire time the mode is
+  // selected. That last line is the anti-lie the whole feature hangs on.
+  "dash.modeVpn": "VPN",
+  "dash.modeGaming": "Gaming",
+  "dash.modeVpnHint": "Everything on this computer goes through Neoxify.",
+  "dash.modeGamingHint":
+    "Only the game services you choose go through Neoxify. The game itself connects directly, on the shortest path.",
+
+  "gaming.off": "Gaming mode is off",
+  "gaming.offHint":
+    "Nothing is being redirected right now. Turn it on to send the game services you chose through Neoxify.",
+  "gaming.arming": "Setting up...",
+  "gaming.armingHint": "Installing the rules for the games you chose.",
+  "gaming.active": "Gaming mode is on",
+  "gaming.activeHint":
+    "The launcher, login and updates for the games you chose go through Neoxify. The game itself connects directly.",
+  "gaming.partial": "Gaming mode is on, but not confirmed",
+  // The exact sentence from the design, and it is not to be softened.
+  // Rules present with a failed canary means the redirection may not be
+  // happening at all, and a customer who is told it is "on" and nothing
+  // else has been given a false pass.
+  "gaming.partialHint":
+    "Gaming mode is on, but Neoxify could not confirm your game traffic is reaching it.",
+  "gaming.unknown": "Can't tell right now",
+  "gaming.unknownHint":
+    "Neoxify could not ask the helper service what it has installed, so it cannot say whether gaming mode is on.",
+  // Replaces the exit-IP pill, which must not render in this mode: the
+  // address is unchanged by design and showing one would be a plain lie.
+  "gaming.pathDirect": "Game path: direct",
+  "gaming.ipUnchanged": "Your computer's IP address does not change in this mode.",
+  "gaming.turnOn": "Turn on",
+  "gaming.turnOff": "Turn off",
+  // On with nothing chosen is a reachable state and it does nothing at
+  // all, so it says so in the warning chrome rather than sitting there
+  // looking enabled -- the same defect class as the Custom-mode empty
+  // state.
+  "gaming.noGames": "No games chosen, so gaming mode does nothing. Add one below.",
+  "gaming.noGamesDash": "No games chosen, so gaming mode does nothing. Pick one in Settings first.",
+  "gaming.armFailed": "Gaming mode could not be turned on.",
+  // The server's reasons, stated as the server gave them. Nothing here
+  // claims a server was unreachable -- that would be a claim about a
+  // dial that never happened.
+  "gaming.needsPlan": "Gaming mode needs an active plan.",
+  "gaming.notInPlan": "Your plan does not include gaming mode.",
+  "gaming.noResolver": "Gaming mode is not available on your server yet.",
+  "gaming.profileFailed": "Neoxify could not load the game list.",
+  "gaming.retry": "Try again",
+  "gaming.loading": "Loading games...",
+
+  "settings.gaming": "Gaming",
+  "gaming.title": "Gaming mode",
+  "gaming.hint":
+    "Send a game's launcher, login and updates through Neoxify, and leave the game itself on the direct path.",
+  "gaming.chosen": "Games you've chosen",
+  "gaming.addGame": "Add a game",
+  "gaming.remove": "Remove",
+  // What one row buys, said on the row. One row is one game: the
+  // launcher and the game are not two things for the customer to find.
+  "gaming.redirects": "Launcher, login and updates",
+  "gaming.applies": "Changes take effect straight away while gaming mode is on.",
+  "gaming.pickerTitle": "Choose a game",
+  "gaming.search": "Search games",
+  "gaming.searchEmpty": "No game matches that.",
+  "gaming.listEmpty": "No games are on the list yet.",
+  "gaming.cancel": "Cancel",
+  "gaming.tooMany": "You can choose up to {max} games.",
+  "gaming.games": "Games",
+  "gaming.resolver": "Resolver",
+
   "common.loading": "Loading...",
 
   // The prominent disclosure shown once, before sign-in, on store
@@ -673,6 +752,62 @@ const fa: Record<TranslationKey, string> = {
   "plans.copied": "کپی شد",
   "plans.browserFailed": "مرورگر باز نشد. با دکمه زیر دوباره تلاش کنید.",
   "plans.copyAddress": "کپی آدرس",
+
+  // Gaming mode. The Persian carries the honest wording too, not a
+  // softened translation -- «شما محافظت می‌شوید» must never appear on a
+  // screen where nothing is tunnelled, and nothing here says it.
+  "dash.modeVpn": "وی‌پی‌ان",
+  "dash.modeGaming": "بازی",
+  "dash.modeVpnHint": "همه‌ی ترافیک این رایانه از نئوکسیفای عبور می‌کند.",
+  "dash.modeGamingHint":
+    "فقط سرویس‌های بازی‌ای که انتخاب می‌کنید از نئوکسیفای عبور می‌کنند. خود بازی مستقیم و از کوتاه‌ترین مسیر وصل می‌شود.",
+
+  "gaming.off": "حالت بازی خاموش است",
+  "gaming.offHint":
+    "در حال حاضر هیچ ترافیکی هدایت نمی‌شود. برای عبور دادن سرویس‌های بازی‌ای که انتخاب کرده‌اید، آن را روشن کنید.",
+  "gaming.arming": "در حال آماده‌سازی...",
+  "gaming.armingHint": "قواعد بازی‌هایی که انتخاب کرده‌اید در حال نصب است.",
+  "gaming.active": "حالت بازی روشن است",
+  "gaming.activeHint":
+    "لانچر، ورود و به‌روزرسانی بازی‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کند. خود بازی مستقیم وصل می‌شود.",
+  "gaming.partial": "حالت بازی روشن است، اما تأیید نشده",
+  "gaming.partialHint":
+    "حالت بازی روشن است، اما نئوکسیفای نتوانست تأیید کند که ترافیک بازی شما به آن می‌رسد.",
+  "gaming.unknown": "الان نمی‌توان گفت",
+  "gaming.unknownHint":
+    "نئوکسیفای نتوانست از سرویس کمکی بپرسد چه چیزی نصب شده است، پس نمی‌تواند بگوید حالت بازی روشن است یا نه.",
+  "gaming.pathDirect": "مسیر بازی: مستقیم",
+  "gaming.ipUnchanged": "در این حالت نشانی آی‌پی رایانه‌ی شما تغییر نمی‌کند.",
+  "gaming.turnOn": "روشن کردن",
+  "gaming.turnOff": "خاموش کردن",
+  "gaming.noGames": "هیچ بازی‌ای انتخاب نشده است، پس حالت بازی هیچ کاری نمی‌کند. از پایین یکی اضافه کنید.",
+  "gaming.noGamesDash":
+    "هیچ بازی‌ای انتخاب نشده است، پس حالت بازی هیچ کاری نمی‌کند. ابتدا در تنظیمات یک بازی انتخاب کنید.",
+  "gaming.armFailed": "حالت بازی روشن نشد.",
+  "gaming.needsPlan": "حالت بازی به یک اشتراک فعال نیاز دارد.",
+  "gaming.notInPlan": "اشتراک شما شامل حالت بازی نمی‌شود.",
+  "gaming.noResolver": "حالت بازی هنوز روی سرور شما در دسترس نیست.",
+  "gaming.profileFailed": "نئوکسیفای نتوانست فهرست بازی‌ها را بارگیری کند.",
+  "gaming.retry": "تلاش دوباره",
+  "gaming.loading": "در حال بارگذاری بازی‌ها...",
+
+  "settings.gaming": "بازی",
+  "gaming.title": "حالت بازی",
+  "gaming.hint":
+    "لانچر، ورود و به‌روزرسانی یک بازی را از نئوکسیفای عبور دهید و خود بازی را روی مسیر مستقیم بگذارید.",
+  "gaming.chosen": "بازی‌هایی که انتخاب کرده‌اید",
+  "gaming.addGame": "افزودن بازی",
+  "gaming.remove": "حذف",
+  "gaming.redirects": "لانچر، ورود و به‌روزرسانی‌ها",
+  "gaming.applies": "تا وقتی حالت بازی روشن است، تغییرات بلافاصله اعمال می‌شود.",
+  "gaming.pickerTitle": "انتخاب بازی",
+  "gaming.search": "جست‌وجوی بازی",
+  "gaming.searchEmpty": "هیچ بازی‌ای با این عبارت پیدا نشد.",
+  "gaming.listEmpty": "هنوز هیچ بازی‌ای در فهرست نیست.",
+  "gaming.cancel": "انصراف",
+  "gaming.tooMany": "حداکثر {max} بازی می‌توانید انتخاب کنید.",
+  "gaming.games": "بازی‌ها",
+  "gaming.resolver": "سرور نام",
 
   "common.loading": "در حال بارگذاری...",
 

@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Check,
   ChevronRight,
+  Gamepad2,
   Gift,
   KeyRound,
   Languages,
@@ -28,7 +29,7 @@ import { cn } from "../lib/utils";
  * the same reason -- and worth keeping the two consistent, since they
  * are the same product.
  */
-type SectionId = "custom" | "general" | "account";
+type SectionId = "gaming" | "custom" | "general" | "account";
 
 export function Settings({
   onBack,
@@ -36,6 +37,7 @@ export function Settings({
   onOpenSupport,
   onLoggedOut,
   customSection,
+  gamingSection,
 }: {
   onBack: () => void;
   onOpenReferrals: () => void;
@@ -55,13 +57,35 @@ export function Settings({
    * from the installed-app list. Same feature, nothing shared but the
    * slot it sits in. */
   customSection: ReactNode;
+  /** Gaming mode's pane, and optional on purpose.
+   *
+   * This screen is compiled by the mobile app as well as by Windows, and
+   * gaming mode is a Windows feature today: it installs namespace-scoped
+   * DNS rules through the helper service, which has no counterpart on
+   * Android or iOS. Optional rather than required means the mobile app
+   * needs no edit at all to keep building, and the rail row simply does
+   * not appear where there is nothing behind it -- which is better than
+   * a section that opens onto an apology.
+   *
+   * That is a platform gap and worth stating plainly rather than
+   * quietly: the mode is not offered on mobile yet. */
+  gamingSection?: ReactNode;
 }) {
   const { t } = useI18n();
+  // Custom stays the landing pane. Gaming sits above it in the rail
+  // because it is the coarser choice, but moving where this screen opens
+  // is a change to a habit people already have.
   const [section, setSection] = useState<SectionId>("custom");
 
   const sections: { id: SectionId; label: string; icon: typeof AppWindow }[] = [
-    // Custom mode leads: it is the only one that changes how the VPN
-    // behaves, and the only one anybody opens this screen twice for.
+    // Gaming above Custom: it is the coarser choice of the two -- it
+    // decides what the whole app is doing, where Custom refines how one
+    // tunnel behaves.
+    ...(gamingSection
+      ? [{ id: "gaming" as const, label: t("settings.gaming"), icon: Gamepad2 }]
+      : []),
+    // Custom mode leads the rest: it is the only one that changes how the
+    // VPN behaves, and the only one anybody opens this screen twice for.
     { id: "custom", label: t("settings.custom"), icon: AppWindow },
     { id: "general", label: t("settings.general"), icon: Languages },
     { id: "account", label: t("settings.account"), icon: KeyRound },
@@ -147,6 +171,7 @@ export function Settings({
         {/* Only the pane scrolls, and only when its own content is tall
             -- which in practice is Custom mode with a long app list. */}
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+          {section === "gaming" ? gamingSection : null}
           {section === "custom" ? customSection : null}
           {section === "general" ? <LanguageSection /> : null}
           {section === "account" ? (

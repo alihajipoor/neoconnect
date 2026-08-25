@@ -14,6 +14,7 @@ import { Settings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
 import { Support } from "./screens/Support";
 import { CustomModeCard } from "./components/CustomModeCard";
+import { GamingModeCard } from "./components/GamingModeCard";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { applyStagedUpdate, startUpdateChecks, type UpdateState } from "./lib/updates";
 
@@ -244,6 +245,11 @@ export default function App() {
         onOpenSupport={() => setScreen("support")}
         onLoggedOut={() => setScreen("login")}
         customSection={<CustomModeCard />}
+        // Supplied here rather than imported by the screen, the same way
+        // Custom mode is: gaming mode drives the Windows helper service
+        // and has no counterpart on the mobile build that shares this
+        // screen. Passing it is what makes the rail row exist.
+        gamingSection={<GamingModeCard />}
       />
     );
   }
