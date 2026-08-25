@@ -8767,3 +8767,118 @@ wrong way that only the control can explain.
 
 Item 1 is now a fifteen-minute test that needs no tunnel, provided a rig
 will stay up long enough to run it.
+
+---
+
+## 2026-08-24 (later still) — the WFP sweep enumerated, removed, and was cross-checked on real hardware
+
+**Status:** `claude/repair-wfp-sweep-0931` at `8fe55e9`. **Touches:** this
+file only. **The sweep is now hardware-verified.** Item 1 of the previous
+entry's block list is closed.
+
+### What ran, and where
+
+Two independent runs, both elevated, both against real WFP:
+
+- **Host, read-only.** A purpose-built read-only probe (the `residue`/
+  `clean` mutators physically deleted from the binary, verified by
+  `grep` of the Fwpm*Add/Delete symbols — none present) run elevated on
+  the Windows 11 host. This settled phase 0 only; it never wrote WFP
+  state and left nothing behind.
+- **Guest, full end-to-end.** `Neoxify-Test2`, restored to `clean-base`,
+  ran the whole of `W1b` elevated: the three enumeration forms, install
+  persistent residue, enumerate again, `netsh` cross-check, the *actual
+  service `repair`*, enumerate again, `netsh` again, and a safety-valve
+  clean. Powered off and snapshot-restored afterwards; nothing stranded.
+
+### Phase 0, the single-variable control — verbatim, both machines agree
+
+    A  provider + ZEROED layerKey (the shipped bug): FwpmFilterCreateEnumHandle0 -> 0x80320004  FAILED
+    C  provider + REAL layerKey (ALE_AUTH_CONNECT_V6): OK  handle=0  filters_seen=0  ours=0
+    B  no template at all (the fix): OK  handle=0  filters_seen=547  ours=0
+
+A fails with `FWP_E_LAYER_NOT_FOUND`; C, byte-identical but with a real
+`layerKey`, succeeds. **The diagnosis in this file is confirmed, not
+refuted.** The zeroed layer key is the whole cause. On the host the same
+three lines held with `filters_seen=262` — the count is machine-specific,
+the verdict is not.
+
+### The fix does what the per-layer template cannot
+
+With three persistent filters installed under our provider across two
+layers (CONNECT_V6, RECV_ACCEPT_V6):
+
+    C  provider + REAL layerKey (ALE_AUTH_CONNECT_V6): ... filters_seen=2  ours=2
+    B  no template at all (the fix): ... filters_seen=550  ours=3
+
+The real-layer template C sees only the **two** filters that live at the
+one layer it names and misses the inbound one entirely; the fix's
+no-template sweep finds all **three**. This is the reason the sweep is
+written to enumerate everything and compare the provider itself, stated
+now as a measurement rather than an argument.
+
+### The service's own `repair` — verbatim, the line that matters
+
+    [FIXED] Windows Filtering Platform filters -- removed 3 leftover filter(s)
+
+Post-repair: form B `ours=0`, and the independent `netsh wfp show filters`
+count of `Neoxify` went `5 -> 0`. The teardown also removed the sublayers
+and provider (the safety-valve clean that followed got
+`FWP_E_SUBLAYER_NOT_FOUND`/`FWP_E_PROVIDER_NOT_FOUND` — already gone).
+
+**Honest caveat on the exit code:** the run exited `1`, not `0`. Not the
+WFP step — that is `[FIXED]`. The non-zero came from the NRPT tunnel-DNS
+item, whose PowerShell removal timed out at 15s in the constrained guest
+and fell back to the registry, which held no rules of ours. That is an
+unrelated teardown item and a guest-performance artifact, not a WFP
+result. The WFP-specific pass criteria (removed N filters; phase 5
+`ours=0`; netsh 0) are all met.
+
+### Rig traps paid for this time, for the next session
+
+- **The staged binaries were stale and the built binaries would not
+  launch.** `nxsvc-wfpfix.exe`/`wfpprobe.exe` on the share were built
+  from `c5213d6`, before `a03b0e3`'s `guid_eq` and zero-page free — the
+  strings prove it. Rebuilt both from tip. Then they failed on the clean
+  guest with `0xC0000135` (STATUS_DLL_NOT_FOUND): a stock Windows 11 has
+  the UCRT but **not** `VCRUNTIME140.dll`, and the service **also**
+  imports `WinDivert.dll` at load time even for the WFP-only `repair`
+  path. Fix: build the rig binaries with `-C target-feature=+crt-static`,
+  and drop `WinDivert.dll` beside the service. Both are now in `W1b.ps1`.
+- **The wedged guest from the prior session could not be cleared with
+  `taskkill`, even elevated** — the hung `guestcontrol` process sat in a
+  kernel wait on the VBox driver. Killing `VBoxHeadless` did not free it
+  either; only killing `VBoxSVC.exe` (the COM server, which respawns on
+  demand) reaped it. That is the recovery when a guest session jams and
+  the machine lock will not release.
+- **Guest-control tokens are medium-IL**, so `schtasks /ru SYSTEM /rl
+  highest` is `Access denied` from them — the no-UAC scheduled-task idea
+  does not work cold. The path that *did* work is the documented one:
+  `boot2.ps1` via an interactive Win+R, `Start-Process -Verb RunAs`, and
+  the UAC consent accepted by injected keystrokes. **Scancode injection
+  does reach the secure desktop on 7.2.10** (Left to move No->Yes, then
+  Enter, both confirmed by screenshot) — the previous "Failed to send a
+  scancode" was not a hard ceiling. `keyboardputstring`, however, is the
+  reliable one for text; a bare Win+R still sometimes lands nowhere, so
+  launching `boot2.ps1` straight from `guestcontrol start` and only
+  injecting the UAC accept is cleaner than driving Run by keyboard.
+- **A screenshot beats `bringup.py`'s readiness test.** Headless, the
+  guest reports 1024x768 for ever and `wait_desktop`'s `(1920,955)` gate
+  never trips though the desktop is plainly up. Confirm boot with
+  `controlvm screenshotpng`, not the resolution.
+
+### What still blocks 0.9.31
+
+1. ~~The repair's WFP sweep has never enumerated on hardware.~~ **Done.**
+2. The 0.9.30 latency control still has not run. Not attempted here: it
+   needs a real client-to-node connection to measure, and the standing
+   rule is not to lean on production nodes for tests. What it needs is a
+   node that can be driven without disturbing live users (a throwaway
+   exit, or explicit sign-off), then `L1.ps1` against the 0.9.30 client
+   exactly as the 0.9.31 run was done. Until then head-of-line,
+   TCP_NODELAY and flow affinity stay measured-but-unattributed.
+3. The one unexplained cell in the IPv6 table.
+4. Unrelated but seen in passing: the `repair` NRPT step's 15s PowerShell
+   timeout fires readily on a slow machine and pushes the exit code to 1
+   even when nothing of ours was present. Worth a look before release —
+   a clean machine should not report a partial repair.
