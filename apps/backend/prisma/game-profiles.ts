@@ -103,6 +103,127 @@ export async function seedGameProfiles(prisma: PrismaClient) {
       notes:
         "Hostnames verified reachable from four Iranian datacenter networks on 2026-08-24 with German/Turkish/Finnish controls; every status matched its control. Consumer-ISP behaviour is UNMEASURED (design doc instrument #1) and is the gate on selling this.",
     },
+    /* The two Riot rows exist for Custom mode, not for DNS mode, and that
+     * is why they carry no hostnames at all.
+     *
+     * `hostnames` in this file means "names the node's SNI proxy will be
+     * asked to forward", and the standard for putting one here is that it
+     * was probed from Iranian networks against controls. No Riot name has
+     * been. Worse, a resolution sweep on 2026-08-25 put Riot's login,
+     * entitlements, client-config and the whole VALORANT control plane
+     * (`auth.riotgames.com`, `entitlements.auth.riotgames.com`,
+     * `clientconfig.rpg.riotgames.com`, `pd.*.a.pvp.net`,
+     * `glz-*.a.pvp.net`) behind Cloudflare rather than on Riot's own
+     * AS6507 -- and a community report of a Riot login still failing
+     * *after* a successful split tunnel is exactly what a Cloudflare
+     * refusal of datacenter address space looks like. Redirecting those
+     * names before that is measured would be guessing.
+     *
+     * What these rows do carry is `processNames`, which needs no node at
+     * all: the desktop client resolves them against running processes and
+     * puts the real full paths into the split tunnel. */
+    {
+      slug: "valorant",
+      displayName: "VALORANT",
+      publisher: "Riot Games",
+      iconKey: "valorant",
+
+      hostnames: [] as string[],
+      excludeHostnames: [] as string[],
+
+      /* Taken from Riot's own "Configure your Firewall" support article,
+       * which lists the paths Riot says a VALORANT install needs open,
+       * plus `UnrealCEFSubProcess.exe` from their "Your Firewall VS.
+       * VALORANT" article.
+       *
+       * Deliberately NOT the seven-executable list circulating in the
+       * community and repeated in docs/research/gaming-providers.md. That
+       * list drops `vgc.exe` and `vgm.exe` -- Vanguard's own two
+       * network-facing user-mode binaries -- in favour of two crash
+       * reporters. If the premise is that Vanguard must share the game's
+       * path, omitting Vanguard is the one thing that cannot be omitted.
+       *
+       * `vgk.sys` is not here and cannot be: it is a kernel driver, not a
+       * process with an image path, and nothing in the split tunnel can
+       * match it. */
+      processNames: [
+        "VALORANT.exe",
+        "VALORANT-Win64-Shipping.exe",
+        "UnrealCEFSubProcess.exe",
+        "RiotClientServices.exe",
+        "vgc.exe",
+        "vgm.exe",
+      ],
+
+      /* Empty on purpose, exactly as the World of Warcraft row above is,
+       * and for a sharper reason.
+       *
+       * Riot's AS6507 announces 36 IPv4 prefixes plus `2a04:82c0::/29`,
+       * and that list is easy to fetch. It is also provably NOT the whole
+       * of Riot: the per-region trace targets Riot itself publishes
+       * include AWS Global Accelerator addresses (AS16509) for EU East,
+       * Bahrain and Mumbai, and the login surface is on Cloudflare
+       * (AS13335). So an AS6507 prefix list is precisely the plausible
+       * subset the schema warns about -- a filter that would route some
+       * of a session and not the rest. `prefixComplete` stays false, and
+       * the client refuses to route by destination while it is. */
+      destinationAsn: "AS6507",
+      destinationCidrs: [] as string[],
+      prefixComplete: false,
+
+      canaryHostname: null as string | null,
+
+      sortOrder: 20,
+      isActive: true,
+      notes:
+        "Executables from Riot's first-party 'Configure your Firewall' + 'Your Firewall VS. VALORANT' articles, read 2026-08-25. NOT from the community error-68 list. UNPROVEN: no Riot title has been run behind this split tunnel, and Riot's own VAN 68 page never mentions VPNs -- do not let support claim this fixes error 68. Riot's stated position is to turn VPNs off. Login is Cloudflare-fronted, so a working split tunnel may still meet a refusal at auth.riotgames.com; that is the first thing to measure.",
+    },
+    {
+      slug: "league-of-legends",
+      displayName: "League of Legends",
+      publisher: "Riot Games",
+      iconKey: "league-of-legends",
+
+      hostnames: [] as string[],
+      excludeHostnames: [] as string[],
+
+      /* Riot's own firewall article lists exactly seven paths for League.
+       * That is almost certainly where the "seven executables" figure in
+       * circulation came from -- it is a firewall exception list, not a
+       * VPN remedy, and Riot never presents it as one.
+       *
+       * Eight names rather than seven because Riot's own pages disagree
+       * with themselves on one file: the current firewall article says
+       * `LeagueClientUxRenderer.exe`, their older connections
+       * troubleshooting guide says `LeagueClientUxRender.exe`, and every
+       * third-party file database says the shorter one. Only one of the
+       * two exists on any given machine. Both are listed because the
+       * client resolves names against processes that are actually
+       * running: the spelling that does not exist simply never matches
+       * and is reported as not found, whereas guessing wrong would leave
+       * the renderer outside the tunnel with nothing said. */
+      processNames: [
+        "LeagueClient.exe",
+        "LeagueClientUx.exe",
+        "LeagueClientUxRender.exe",
+        "LeagueClientUxRenderer.exe",
+        "League of Legends.exe",
+        "RiotClientServices.exe",
+        "vgc.exe",
+        "vgm.exe",
+      ],
+
+      destinationAsn: "AS6507",
+      destinationCidrs: [] as string[],
+      prefixComplete: false,
+
+      canaryHostname: null as string | null,
+
+      sortOrder: 30,
+      isActive: true,
+      notes:
+        "Executables from Riot's first-party 'Configure your Firewall' article, read 2026-08-25. Two spellings of the LCU renderer are listed because Riot's own pages disagree; exactly one will ever resolve. UNPROVEN on a real install -- see the valorant row.",
+    },
   ];
 
   for (const profile of profiles) {
@@ -116,6 +237,13 @@ export async function seedGameProfiles(prisma: PrismaClient) {
         excludeHostnames: profile.excludeHostnames,
         processNames: profile.processNames,
         destinationAsn: profile.destinationAsn,
+        // Refreshed together, and they have to be: the pair is one
+        // safety statement. Re-seeding a corrected prefix list while
+        // leaving a stale `prefixComplete` behind would either strand a
+        // complete list as unusable or, far worse, leave a partial one
+        // marked whole.
+        destinationCidrs: profile.destinationCidrs,
+        prefixComplete: profile.prefixComplete,
         canaryHostname: profile.canaryHostname,
       },
       create: profile,

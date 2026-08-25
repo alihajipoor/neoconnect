@@ -77,6 +77,28 @@ export interface GameProfileSummary {
   hostnames: string[];
   excludeHostnames: string[];
   canaryHostname: string | null;
+  /** Executable names covering the game AND everything it launches
+   * beside itself -- launcher, patcher, anti-cheat.
+   *
+   * This is the half of gaming mode that needs no node: these go into
+   * the split tunnel, which already exists and already works. Optional
+   * on the wire because a client can be newer than its server, and a
+   * missing list must read as "this server has nothing to offer" rather
+   * than throw. */
+  processNames?: string[];
+  /** Publisher address space, usable only when `prefixComplete` is
+   * true. See that field. */
+  destinationCidrs?: string[];
+  /** Whether `destinationCidrs` covers the publisher's whole announced
+   * space.
+   *
+   * Routing a game by a PARTIAL prefix list is worse than not routing it
+   * at all: a game that holds two connections at once (WoW's Home and
+   * World) would get one address for each, and one account showing two
+   * source addresses at the same instant is the account-sharing
+   * signature. So a false here means destination routing is refused, not
+   * approximated. */
+  prefixComplete?: boolean;
 }
 
 /** What this customer may use gaming mode for, and on which server.

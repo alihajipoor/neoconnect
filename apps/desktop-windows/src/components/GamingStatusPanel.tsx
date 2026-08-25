@@ -25,10 +25,12 @@ import { Stat } from "./ui";
  *
  * * The word "Connected" does not appear, in either language. There is
  *   nothing it could truthfully mean.
- * * The exit-IP pill is not rendered. The machine's exit address is
- *   unchanged by design, and showing one would be a plain lie about what
- *   the product did. Its place is taken by a neutral path chip -- not
- *   the success green, which from across a room *is* the claim.
+ * * The exit-IP pill is not rendered. There is no single exit address
+ *   in this mode -- the redirected services are reached from the node
+ *   and nothing else is -- so any one address in that pill would be a
+ *   plain lie about half the traffic. Its place is taken by a neutral
+ *   path chip, not the success green, which from across a room *is* the
+ *   claim.
  * * `gaming.ipUnchanged` is on screen the whole time the mode is
  *   selected, whatever the state. It is the anti-lie the feature hangs
  *   on and it is not conditional on anything.
@@ -206,15 +208,20 @@ export function GamingStatusPanel({ onOpenSettings }: { onOpenSettings: () => vo
         <p className="mt-1 text-xs text-pretty text-muted-foreground">{t(HINT[phase])}</p>
 
         {/* Where the exit-IP pill sits in VPN mode -- same chrome, and
-            deliberately neutral rather than success-green. The address
-            did not change, so nothing here may read as a win. */}
+            deliberately neutral rather than success-green. There is no
+            single exit address in this mode to put in a pill: the
+            redirected services are reached from the node and everything
+            else is not. So it states the one fact a pill can carry
+            here, and nothing reads as a win. */}
         <p className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.04] px-2.5 py-1 text-[11px] text-muted-foreground">
           <Route className="size-3" />
           {t("gaming.pathDirect")}
         </p>
 
-        {/* The whole anti-lie, always present. */}
+        {/* The whole anti-lie, always present: what changes address,
+            and the fact that none of this is a speed claim. */}
         <p className="mt-1 text-xs text-highlight">{t("gaming.ipUnchanged")}</p>
+        <p className="mt-1 text-[11px] text-muted-foreground">{t("gaming.noSpeedClaim")}</p>
 
         {/* On with nothing chosen does nothing at all, and the warning
             chrome is how that gets said instead of the screen sitting
