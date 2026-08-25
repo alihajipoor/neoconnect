@@ -88,6 +88,26 @@ pub enum Request {
     /// credentials, and a diagnostics blob that a customer pastes into a
     /// ticket is the last place any of that should appear.
     Diagnostics,
+    /// Turns Gaming DNS mode on: start the loopback DoH stub and point
+    /// namespace-scoped NRPT rules at it.
+    ///
+    /// Deliberately not a `Connect` variant. Gaming mode brings up no
+    /// adapter, no tunnel and no route -- the machine's exit IP is
+    /// unchanged by design -- so nothing about it fits the
+    /// connect/disconnect vocabulary, and reusing that vocabulary is
+    /// how a UI ends up saying "Connected" about something that
+    /// carries no traffic.
+    ArmGaming {
+        config: GamingConfig,
+    },
+    /// Removes the NRPT rules and stops the stub. Safe when nothing is
+    /// armed, and called on every path that could otherwise strand a
+    /// rule -- a stranded NRPT rule takes the whole machine's DNS with
+    /// it, which is the network-corruption complaint class already on
+    /// record.
+    DisarmGaming,
+    /// The three checks of design §8.3, answered honestly.
+    GamingStatus,
 }
 
 /// What one repair step did.
@@ -226,6 +246,153 @@ pub struct Diagnostics {
 pub struct AdapterPresence {
     pub name: String,
     pub present: bool,
+}
+
+
+/// Gaming DNS mode, as the app asks for it.
+///
+/// Every field here is chosen by the backend's game profile, not by the
+/// customer, and every one of them is checked by [`GamingConfig::validate`]
+/// before the service acts on it -- `namespaces` most of all, because
+/// those are interpolated into a PowerShell command run as SYSTEM.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GamingConfig {
+    /// Full DoH endpoint URL including the per-customer path token.
+    ///
+    /// DoH rather than plain 53 to the node, for the reason design
+    /// §4.5 gives: plain 53 to a foreign address is the most tampered
+    /// with path there is in Iran, and an answer the ISP can forge is
+    /// worse than no answer at all.
+    pub doh_url: String,
+    /// Address the resolver is expected to answer with for a redirected
+    /// hostname. The canary must observe exactly this.
+    pub proxy_ip: String,
+    pub proxy_port: u16,
+    /// DNS suffixes to scope NRPT rules to. Must never contain ".".
+    pub namespaces: Vec<String>,
+    #[serde(default)]
+    pub exclude_hostnames: Vec<String>,
+    #[serde(default)]
+    pub canary_hostname: Option<String>,
+}
+
+/// The most namespaces one game profile can scope rules to.
+///
+/// Each one is a separate NRPT rule and a separate registry key, and
+/// the table is read on every name Windows resolves. A bound rather
+/// than a technical limit -- sixteen hostnames is what design §2.1
+/// instrumented a whole game against.
+const MAX_NAMESPACES: usize = 64;
+
+/// The most hostnames a profile can exclude. Same reasoning; these are
+/// matched in the stub per query rather than written to the registry.
+const MAX_EXCLUDES: usize = 256;
+
+impl GamingConfig {
+    /// Checks the profile before the service installs anything.
+    ///
+    /// This is the injection defence, not a sanity check. `namespaces`
+    /// reach `Add-DnsClientNrptRule -Namespace '<value>'` in a
+    /// PowerShell process running as SYSTEM, so the alphabet is
+    /// restricted to what a DNS suffix can actually contain -- see the
+    /// reasoning on [`check_hostname`]. The quoting on the far side is
+    /// the second line of defence, not the first.
+    pub fn validate(&self) -> Checked {
+        // Not `check_endpoint`: this is a URL, and the only shape the
+        // stub will POST to. Plain HTTP is refused outright -- the
+        // whole reason for DoH here is that the ISP must be unable to
+        // read or forge the answers, and http:// gives that away
+        // silently.
+        check_single_line("dohUrl", &self.doh_url, 2000)?;
+        if !self.doh_url.starts_with("https://") {
+            return Err(reject("dohUrl", "must be an https:// URL"));
+        }
+        // No credentials-in-URL form: it would put the token somewhere
+        // it can be logged, and no endpoint of ours uses one.
+        if self.doh_url[8..].contains('@') || self.doh_url.contains('\\') {
+            return Err(reject("dohUrl", "is not a plain https:// URL"));
+        }
+
+        // IPv4 specifically. Every node is IPv4-only, the canary
+        // compares A records, and a v6 answer has previously faked a
+        // total failure in exactly this kind of assertion.
+        if self.proxy_ip.parse::<std::net::Ipv4Addr>().is_err() {
+            return Err(reject("proxyIp", "must be an IPv4 address"));
+        }
+        if self.proxy_port == 0 {
+            return Err(reject("proxyPort", "must not be zero"));
+        }
+
+        // An empty list is not "scope it to nothing", it is a profile
+        // that would install no rules and then be reported as active.
+        if self.namespaces.is_empty() {
+            return Err(reject("namespaces", "must name at least one DNS suffix"));
+        }
+        if self.namespaces.len() > MAX_NAMESPACES {
+            return Err(reject("namespaces", "names too many DNS suffixes"));
+        }
+        for namespace in &self.namespaces {
+            // A leading dot is the documented NRPT suffix form
+            // (".blizzard.com" means the domain and everything under
+            // it), so it is accepted and checked on the bare name.
+            let bare = namespace.strip_prefix('.').unwrap_or(namespace);
+            // The one rejection that has to be explicit and has to say
+            // why. `-Namespace '.'` matches *every* name on the
+            // machine, which is what full-tunnel DNS deliberately
+            // installs -- and a gaming profile that installed it would
+            // route the entire machine's lookups through a stub built
+            // for a game's hostnames. A rule like that surviving a
+            // crash is the "installing the VPN broke my network"
+            // report, and it must not be reachable from a config the
+            // service is handed.
+            if bare.is_empty() || namespace == "." {
+                return Err(reject(
+                    "namespaces",
+                    "must not contain \".\": a \".\" rule captures every name on the machine, not just the game's",
+                ));
+            }
+            check_hostname("namespaces", bare)?;
+        }
+
+        if self.exclude_hostnames.len() > MAX_EXCLUDES {
+            return Err(reject("excludeHostnames", "excludes too many hostnames"));
+        }
+        for excluded in &self.exclude_hostnames {
+            let bare = excluded.strip_prefix('.').unwrap_or(excluded);
+            if bare.is_empty() {
+                return Err(reject("excludeHostnames", "contains an empty entry"));
+            }
+            check_hostname("excludeHostnames", bare)?;
+        }
+
+        if let Some(canary) = &self.canary_hostname {
+            check_hostname("canaryHostname", canary)?;
+        }
+        Ok(())
+    }
+}
+
+/// Gaming mode's own state set, deliberately not [`TunnelHealth`] and
+/// deliberately not a connection state.
+///
+/// There is no tunnel in this mode, so there is nothing "Connected"
+/// could truthfully mean -- design §8.3. `Unknown` is its own state and
+/// is never folded into `Off`: "the service did not answer" and "the
+/// service says nothing is armed" are opposite facts, and collapsing
+/// them tells a customer their rules are gone when they may not be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum GamingPhase {
+    #[default]
+    Off,
+    Arming,
+    /// Claimable only when all three checks of §8.3 pass.
+    Active,
+    /// Rules are installed but at least one check failed. `detail`
+    /// names which.
+    Partial,
+    Unknown,
 }
 
 /// One running application, as the picker shows it.
@@ -432,6 +599,34 @@ pub enum Response {
     },
     Diagnostics {
         diagnostics: Box<Diagnostics>,
+    },
+    /// Gaming DNS mode's honest state, and the evidence behind it.
+    ///
+    /// The three booleans are reported alongside `state` rather than
+    /// folded into it because the customer is shown *which* check
+    /// failed, not just that something did -- and because a caller that
+    /// only trusts `state` still cannot be told "active" without all
+    /// three being true. See design §8.3.
+    Gaming {
+        state: GamingPhase,
+        /// Names the failing check when `state` is not `Active`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        /// Every NRPT rule the service installed is present in the
+        /// registry right now. Re-read, not remembered.
+        #[serde(default)]
+        rules_present: bool,
+        /// The canary hostname resolved to `proxyIp` and not to its
+        /// real address.
+        #[serde(default)]
+        canary_ok: bool,
+        /// A TCP connect to `proxyIp:proxyPort` succeeded.
+        #[serde(default)]
+        proxy_reachable: bool,
+        /// The suffixes that are actually scoped right now, so the app
+        /// shows what is installed rather than what it last asked for.
+        #[serde(default)]
+        namespaces: Vec<String>,
     },
     Error {
         message: String,
@@ -1310,6 +1505,147 @@ mod tests {
             server_name: "example.com".into(),
         });
         assert!(profile.validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod gaming_validation {
+    use super::*;
+
+    fn config(mutate: impl FnOnce(&mut GamingConfig)) -> GamingConfig {
+        let mut c = GamingConfig {
+            doh_url: "https://fi1.neoxify.site/dns-query/abcd1234".into(),
+            proxy_ip: "172.236.143.200".into(),
+            proxy_port: 443,
+            namespaces: vec!["blizzard.com".into(), ".battle.net".into()],
+            exclude_hostnames: vec!["blzddist1-a.akamaihd.net".into()],
+            canary_hostname: Some("us.actual.battle.net".into()),
+        };
+        mutate(&mut c);
+        c
+    }
+
+    #[test]
+    fn accepts_a_real_game_profile() {
+        assert!(config(|_| {}).validate().is_ok(), "{:?}", config(|_| {}).validate());
+    }
+
+    /// The rejection this validator most exists for.
+    ///
+    /// `Add-DnsClientNrptRule -Namespace '.'` captures every name the
+    /// machine resolves, which is what full-tunnel DNS installs on
+    /// purpose. A gaming profile that installed it would put the whole
+    /// machine's lookups through a stub scoped to one game's hostnames,
+    /// and a rule like that surviving a crash is the
+    /// "installing the VPN broke my network" report.
+    #[test]
+    fn refuses_the_root_namespace_and_says_why() {
+        let err = config(|c| c.namespaces = vec![".".into()])
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("every name on the machine"), "{err}");
+    }
+
+    /// `namespaces` is interpolated into a PowerShell command run as
+    /// SYSTEM. Nothing that could end the string early or start a
+    /// second statement may survive this.
+    #[test]
+    fn refuses_shell_metacharacters_in_a_namespace() {
+        for hostile in [
+            "blizzard.com'; calc; #",
+            "blizzard.com`n calc",
+            "blizzard.com | calc",
+            "blizzard.com$(calc)",
+            "blizzard.com\ncalc",
+            "blizzard.com\"",
+        ] {
+            assert!(
+                config(|c| c.namespaces = vec![hostile.into()]).validate().is_err(),
+                "{hostile:?} reached the command line"
+            );
+        }
+    }
+
+    /// A profile with nothing scoped would install no rules at all and
+    /// then be reported as armed, which is a state that claims a
+    /// protection nothing is providing.
+    #[test]
+    fn refuses_an_empty_namespace_list() {
+        assert!(config(|c| c.namespaces = Vec::new()).validate().is_err());
+        assert!(config(|c| c.namespaces = vec![String::new()]).validate().is_err());
+        assert!(config(|c| c.namespaces = vec![".".repeat(1)]).validate().is_err());
+    }
+
+    #[test]
+    fn refuses_a_url_the_isp_could_read() {
+        assert!(config(|c| c.doh_url = "http://fi1.neoxify.site/dns-query".into())
+            .validate()
+            .is_err());
+        assert!(config(|c| c.doh_url = String::new()).validate().is_err());
+    }
+
+    /// The nodes have IPv6 and a v6 answer has previously faked a total
+    /// failure in an assertion shaped exactly like the canary check.
+    #[test]
+    fn refuses_a_proxy_address_that_is_not_ipv4() {
+        assert!(config(|c| c.proxy_ip = "2606:4700:4700::1111".into())
+            .validate()
+            .is_err());
+        assert!(config(|c| c.proxy_ip = "fi1.neoxify.site".into())
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn refuses_a_hostile_exclusion_or_canary() {
+        assert!(config(|c| c.exclude_hostnames = vec!["a.com'; calc; #".into()])
+            .validate()
+            .is_err());
+        assert!(config(|c| c.canary_hostname = Some("a.com; calc".into()))
+            .validate()
+            .is_err());
+    }
+
+    /// An older app sends no `excludeHostnames` and no `canaryHostname`
+    /// at all, and must still parse.
+    #[test]
+    fn an_older_app_that_omits_the_optional_fields_still_parses() {
+        let parsed: GamingConfig = serde_json::from_str(
+            r#"{"dohUrl":"https://fi1.neoxify.site/dns-query","proxyIp":"1.2.3.4","proxyPort":443,"namespaces":["blizzard.com"]}"#,
+        )
+        .expect("the optional fields must default");
+        assert!(parsed.exclude_hostnames.is_empty());
+        assert!(parsed.canary_hostname.is_none());
+        assert!(parsed.validate().is_ok());
+    }
+
+    /// `unknown` must never arrive as `off`: they are opposite facts.
+    #[test]
+    fn the_phase_spellings_are_the_ones_the_app_is_written_against() {
+        for (phase, spelling) in [
+            (GamingPhase::Off, "\"off\""),
+            (GamingPhase::Arming, "\"arming\""),
+            (GamingPhase::Active, "\"active\""),
+            (GamingPhase::Partial, "\"partial\""),
+            (GamingPhase::Unknown, "\"unknown\""),
+        ] {
+            assert_eq!(serde_json::to_string(&phase).unwrap(), spelling);
+        }
+    }
+
+    #[test]
+    fn the_request_tags_are_the_ones_the_app_is_written_against() {
+        let armed = serde_json::to_string(&Request::ArmGaming { config: config(|_| {}) }).unwrap();
+        assert!(armed.starts_with(r#"{"type":"armGaming","config":{"dohUrl":"#), "{armed}");
+        assert_eq!(
+            serde_json::to_string(&Request::DisarmGaming).unwrap(),
+            r#"{"type":"disarmGaming"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::GamingStatus).unwrap(),
+            r#"{"type":"gamingStatus"}"#
+        );
     }
 }
 

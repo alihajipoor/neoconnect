@@ -5,10 +5,18 @@
 // Usage: SEED_ADMIN_EMAIL=you@example.com SEED_ADMIN_PASSWORD=... pnpm --filter @neoxify/backend prisma:seed
 import { PrismaClient } from "@prisma/client";
 import * as argon2 from "argon2";
+import { seedGameProfiles } from "./game-profiles";
 
 const prisma = new PrismaClient();
 
 async function main() {
+  // The game catalogue is reference data, not an account, so it is seeded
+  // before the credential check below and on every run. Upserted by slug, so
+  // re-running is safe. Doing it first also means a redeploy refreshes the
+  // hostname lists even when nobody is bootstrapping an admin.
+  const games = await seedGameProfiles(prisma);
+  console.log(`Seeded ${games} game profile(s)`);
+
   const email = process.env.SEED_ADMIN_EMAIL;
   const password = process.env.SEED_ADMIN_PASSWORD;
 

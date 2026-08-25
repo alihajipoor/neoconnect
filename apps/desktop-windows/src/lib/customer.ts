@@ -62,6 +62,41 @@ export const startPayment = (subscriptionId: string, provider: PaymentProvider) 
     body: JSON.stringify({ subscriptionId, provider }),
   });
 
+/** One game the operator has curated, with the exact set of names that
+ * would be redirected if it were chosen.
+ *
+ * The hostnames come from the server and are never guessed here: a
+ * client-side guess at what belongs to a game is how you end up
+ * redirecting something that should have been left alone, and the
+ * customer has no way to tell that happened. */
+export interface GameProfileSummary {
+  slug: string;
+  displayName: string;
+  iconKey: string | null;
+  publisher: string | null;
+  hostnames: string[];
+  excludeHostnames: string[];
+  canaryHostname: string | null;
+}
+
+/** What this customer may use gaming mode for, and on which server.
+ *
+ * `unavailableReason` is the server's own answer and the client states
+ * it verbatim. There is no branch here that invents one: "not available
+ * on your server yet" is a different fact from "your plan does not
+ * include it", and guessing between them is the kind of small lie this
+ * app is built to refuse. */
+export interface GamingProfileResponse {
+  version: 1;
+  entitled: boolean;
+  unavailableReason: "noSubscription" | "notEntitled" | "noResolver" | null;
+  resolver: { dohUrl: string; proxyIp: string; proxyPort: number; nodeRegion: string } | null;
+  games: GameProfileSummary[];
+}
+
+export const getGamingProfile = () =>
+  apiRequest<GamingProfileResponse>("/customer/gaming-profile");
+
 /** Whether support is open, plus this customer's own conversations. */
 export const getSupportOverview = () => apiRequest<SupportOverview>("/customer/support");
 
