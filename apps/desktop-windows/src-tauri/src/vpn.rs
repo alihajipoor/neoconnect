@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, Diagnostics, GamingConfig, GamingPhase, Ikev2Profile, OpenvpnProfile,
+    AppScope, ConnectProfile, Diagnostics, GamingConfig, GamingPhase, Ikev2Profile, OpenvpnProfile,
     RepairReport, Request, Response,
     ShadowsocksProfile, RunningApp, SplitTunnelConfig, SplitTunnelMode, TrojanProfile,
     TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile,
@@ -494,9 +494,20 @@ pub async fn vpn_set_split_tunnel(
     enabled: bool,
     apps: Vec<String>,
     mode: SplitTunnelMode,
+    // Defaulted so the command keeps its old shape for any caller that
+    // does not send it, which is every caller that predates destination
+    // scoping. An app and a service are updated separately here -- the
+    // service is a Windows service with its own lifetime -- so both
+    // directions of version skew have to be uneventful.
+    #[allow(clippy::default_trait_access)] scopes: Option<Vec<AppScope>>,
 ) -> Result<(), String> {
     call_expecting_ok(&Request::SetSplitTunnel {
-        config: SplitTunnelConfig { enabled, apps, mode },
+        config: SplitTunnelConfig {
+            enabled,
+            apps,
+            mode,
+            scopes: scopes.unwrap_or_default(),
+        },
     })
     .await
 }

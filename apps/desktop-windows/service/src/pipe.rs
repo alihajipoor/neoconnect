@@ -505,7 +505,7 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             Ok(()) => {
                 let mut engines = engines.lock().await;
                 crate::engines::begin_operation();
-                match engines.set_split_tunnel(config.enabled, config.apps, config.mode) {
+                match engines.set_split_tunnel(config) {
                     Ok(()) => Response::Ok,
                     Err(message) => Response::Error { message },
                 }
