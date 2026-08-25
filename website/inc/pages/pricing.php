@@ -33,130 +33,15 @@ require NX_INC . '/partials/head.php';
   </div>
 </section>
 
-<!-- ============================ Cards =========================== -->
+<!-- ============================ Cards ===========================
+     Rendered by inc/partials/plan-cards.php, shared with the home page.
+     The two pages used to carry near-identical copies of this markup, which
+     is exactly how a price ends up correct on one page and stale on the
+     other. Every number comes from inc/content/plans.php. -->
 <section class="section section--tight">
+  <?php require NX_INC . '/partials/plan-cards.php'; ?>
+
   <div class="container">
-    <div class="grid grid--3">
-      <?php foreach ($nx_list as $nx_plan):
-        $nx_days = (int) $nx_plan['duration_days'];
-        $nx_monthly = $nx_days === 30;
-        ?>
-        <div class="plan-wrap reveal">
-          <?php if (!empty($nx_plan['highlight'])): ?>
-            <span class="plan__badge"><?php echo nx_e('home.pricing.popular'); ?></span>
-          <?php endif; ?>
-
-          <article class="plan<?php echo !empty($nx_plan['highlight']) ? ' plan--featured' : ''; ?>">
-            <div class="plan__name"><?php echo nx_esc(nx_pick($nx_plan['name'])); ?></div>
-            <p class="plan__tagline"><?php echo nx_esc(nx_pick($nx_plan['tagline'])); ?></p>
-
-            <div class="plan__price">
-              <span class="plan__amount"><?php echo nx_esc(nx_price($nx_plan['price'])); ?></span>
-              <span class="plan__period">
-                <?php echo $nx_monthly
-                    ? nx_e('home.pricing.per_month')
-                    : nx_e('home.pricing.per_days', array('days' => nx_num($nx_days))); ?>
-              </span>
-            </div>
-
-            <ul class="plan__features">
-              <li>
-                <?php echo nx_icon('check'); ?>
-                <span><?php
-                  // A null cap is an unlimited plan, matching the backend's
-                  // nullable dataCapBytes -- not a missing value.
-                  if (!isset($nx_plan['data_gb']) || $nx_plan['data_gb'] === null) {
-                      echo nx_e('home.pricing.data_unlimited');
-                  } else {
-                      $nx_amount = nx_format_data($nx_plan['data_gb']);
-                      echo $nx_monthly
-                          ? nx_e('home.pricing.data', array('amount' => $nx_amount))
-                          : nx_e('home.pricing.data_period', array(
-                                'amount' => $nx_amount, 'days' => nx_num($nx_days)));
-                  }
-                ?></span>
-              </li>
-
-              <?php
-              /* Three distinct cases that empty() cannot tell apart: key
-                 absent (say nothing), key present but null (no device
-                 limit -- mirrors the nullable maxConcurrentConnections),
-                 and a real number. An earlier !empty() treated null as
-                 "say nothing", so the unlimited-devices plan advertised no
-                 device line at all, and a count of 1 rendered as
-                 "1 devices". */
-              if (array_key_exists('connections', $nx_plan)):
-                  $nx_conn = $nx_plan['connections'];
-                  if ($nx_conn === null) {
-                      $nx_conn_text = nx_e('home.pricing.connections_unlimited');
-                  } elseif ((int) $nx_conn === 1) {
-                      $nx_conn_text = nx_e('home.pricing.connections_one');
-                  } else {
-                      $nx_conn_text = nx_e('home.pricing.connections',
-                          array('count' => nx_num((int) $nx_conn)));
-                  }
-              ?>
-                <li>
-                  <?php echo nx_icon('check'); ?>
-                  <span><?php echo $nx_conn_text; ?></span>
-                </li>
-              <?php endif; ?>
-
-              <?php
-              // Only rendered when a cap is genuinely configured. Every
-              // current plan leaves these null, so no speed line appears.
-              $nx_down = !empty($nx_plan['down_mbps']) ? (int) $nx_plan['down_mbps'] : 0;
-              $nx_up = !empty($nx_plan['up_mbps']) ? (int) $nx_plan['up_mbps'] : 0;
-              if ($nx_down || $nx_up): ?>
-                <li>
-                  <?php echo nx_icon('check'); ?>
-                  <span><?php
-                    if ($nx_down && $nx_up) {
-                        echo nx_e('home.pricing.speed_both',
-                            array('down' => $nx_down, 'up' => $nx_up));
-                    } elseif ($nx_down) {
-                        echo nx_e('home.pricing.speed_down', array('down' => $nx_down));
-                    } else {
-                        echo nx_e('home.pricing.speed_up', array('up' => $nx_up));
-                    }
-                  ?></span>
-                </li>
-              <?php endif; ?>
-
-              <?php
-              $nx_perks = isset($nx_plan['perks']) && is_array($nx_plan['perks'])
-                  ? $nx_plan['perks']
-                  : array('all_modes', 'all_locations', 'relay_routes', 'support');
-              foreach ($nx_perks as $nx_perk): ?>
-                <li>
-                  <?php echo nx_icon('check'); ?>
-                  <span><?php echo nx_e('home.pricing.' . $nx_perk); ?></span>
-                </li>
-              <?php endforeach; ?>
-            </ul>
-
-            <?php if (!empty($nx_plan['coming_soon'])): ?>
-              <?php /* No current plan sets this, but the branch stays: a
-                       plan whose infrastructure is not live must be shown
-                       and not sold. A <button disabled> rather than a
-                       styled link, so keyboard and screen-reader users get
-                       the same "not available" as sighted ones instead of
-                       following a link to a purchase that would fail. */ ?>
-              <button class="btn btn--ghost btn--block" type="button" disabled
-                      aria-disabled="true">
-                <?php echo nx_e('home.pricing.coming_soon'); ?>
-              </button>
-            <?php else: ?>
-              <a class="btn <?php echo !empty($nx_plan['highlight']) ? 'btn--primary' : 'btn--ghost'; ?> btn--block"
-                 href="<?php echo nx_esc(nx_buy_url(isset($nx_plan['id']) ? $nx_plan['id'] : '')); ?>">
-                <?php echo nx_e('home.pricing.cta'); ?>
-              </a>
-            <?php endif; ?>
-          </article>
-        </div>
-      <?php endforeach; ?>
-    </div>
-
     <p class="pricing-note"><?php echo nx_e('home.pricing.note'); ?></p>
   </div>
 </section>

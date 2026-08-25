@@ -33,7 +33,9 @@ $nx_noindex = !empty($NX_NOINDEX);
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?php echo nx_esc($nx_title); ?></title>
 <meta name="description" content="<?php echo nx_esc($nx_description); ?>">
-<meta name="theme-color" content="#0a0a10">
+<?php // Matches --paper in site.css. The site is light-only: there is no
+      // dark mode, no toggle, and no prefers-color-scheme block anywhere. ?>
+<meta name="theme-color" content="#F2F1F6">
 
 <?php if ($nx_noindex): ?>
 <meta name="robots" content="noindex, follow">
@@ -134,6 +136,36 @@ if (!$nx_noindex) {
 <body>
 
 <a class="skip-link" href="#main"><?php echo nx_e('skip_to_content'); ?></a>
+
+<?php
+// ---------------------------------------------------------------------
+// The frame.
+//
+// Two fixed hairline rails down the edges and twelve column lines behind
+// everything. This is what lets the content run genuinely edge to edge and
+// still read as a deliberate layout rather than a missing max-width.
+//
+// Entirely decorative, so all of it is aria-hidden and none of it is in the
+// tab order. Both are display:none below 70rem, where there is no room for
+// a frame and the page uses the full width instead.
+// ---------------------------------------------------------------------
+?>
+<?php // Gradient definitions every decorative SVG below refers to.
+      // Emitted once, here, so url(#nx-beam) resolves document-wide
+      // rather than depending on whichever component renders first. ?>
+<?php echo nx_svg_defs(); ?>
+
+<div class="grid-lines" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+
+<aside class="rail rail--start" aria-hidden="true">
+  <span class="rail__text"><?php echo nx_e('rail.tagline'); ?></span>
+</aside>
+<aside class="rail rail--end" aria-hidden="true">
+  <?php // Height is set by site.js as the visitor scrolls; it starts at zero
+        // and simply stays there if the script never runs. ?>
+  <span class="rail__prog" data-rail-progress></span>
+  <span class="rail__text" data-ltr>neoxify.net</span>
+</aside>
 
 <?php require NX_INC . '/partials/header.php'; ?>
 

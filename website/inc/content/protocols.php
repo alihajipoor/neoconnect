@@ -54,6 +54,45 @@
  *   hint      one line of "when would I pick this", per locale
  *   windows   supported by the Windows client
  *   android   supported by the Android client
+ *
+ * ---------------------------------------------------------------------------
+ * THE FOLLOWING FIELDS DRIVE THE HOME PAGE'S INTERACTIVE PANEL ONLY.
+ *
+ *   try_order  the order the client works down on an OPEN network. This is
+ *              the client's own preference order -- most direct first, with
+ *              the heavily-obfuscated transports held back because they are
+ *              not needed when nothing is blocking. It is NOT a speed
+ *              ranking and NOT a quality ranking, and no page presents it
+ *              as either; the interactive panel simply lists the methods in
+ *              this order so that switching on a condition shows the client
+ *              stepping down the list, which is what it really does.
+ *   transport  the wire-level shape, as a Latin token (e.g. "TCP / 443").
+ *              Factual, not sensitive: a port number is not a route. Shown
+ *              instead of a latency figure -- see below.
+ *   kind       which waveform the decorative signal trace draws. Purely
+ *              visual: pulse | tls | noise | regular.
+ *   blocked_by ids from inc/content/conditions.php that stop this method.
+ *
+ * NO LATENCY, THROUGHPUT OR SPEED NUMBER APPEARS HERE, DELIBERATELY.
+ *
+ * The design this was built from carried a per-protocol "ms" column. It was
+ * illustrative -- invented numbers, chosen to look plausible -- and it was
+ * dropped rather than shipped, for the same reason down_mbps/up_mbps are
+ * left null in plans.php: a number printed beside a protocol name reads as a
+ * measurement, and this site does not publish measurements it has not taken.
+ * A visitor comparing "86 ms" against "149 ms" would be comparing two pieces
+ * of fiction, and the real figure depends entirely on their network, their
+ * ISP and which exit they land on.
+ *
+ * If real per-protocol measurements ever exist, they belong here with the
+ * date and the method they were measured by, or not at all.
+ *
+ * The blocked_by mapping IS traceable, which is why it stays: these are
+ * properties of how each transport looks on the wire, not performance
+ * claims. UDP blocking stops WireGuard and IKEv2 because both are UDP. SNI
+ * filtering stops plain TLS because the hostname travels in clear text.
+ * REALITY survives both because that is precisely what it was built for.
+ * ---------------------------------------------------------------------------
  */
 
 defined('NX') || exit;
@@ -62,6 +101,7 @@ return array(
 
     array(
         'id' => 'stealth',
+        'try_order' => 8,
         'label' => array('en' => 'Stealth', 'fa' => 'مخفی'),
         'tech' => 'VLESS + REALITY',
         'hint' => array(
@@ -70,10 +110,15 @@ return array(
         ),
         'windows' => true,
         'android' => true,
+        'transport' => 'TCP / 443',
+        'kind' => 'tls',
+        'blocked_by' => array(),
+
     ),
 
     array(
         'id' => 'stealth-https',
+        'try_order' => 4,
         'label' => array('en' => 'Stealth HTTPS', 'fa' => 'مخفی HTTPS'),
         'tech' => 'VLESS + TLS',
         'hint' => array(
@@ -82,10 +127,15 @@ return array(
         ),
         'windows' => true,
         'android' => true,
+        'transport' => 'TCP / 443',
+        'kind' => 'tls',
+        'blocked_by' => array('sni'),
+
     ),
 
     array(
         'id' => 'stealth-web',
+        'try_order' => 5,
         'label' => array('en' => 'Stealth Web', 'fa' => 'مخفی وب'),
         'tech' => 'VLESS + TLS over WebSocket',
         'hint' => array(
@@ -94,10 +144,15 @@ return array(
         ),
         'windows' => true,
         'android' => true,
+        'transport' => 'TCP / 443',
+        'kind' => 'tls',
+        'blocked_by' => array('sni', 'ja3'),
+
     ),
 
     array(
         'id' => 'stealth-lite',
+        'try_order' => 6,
         'label' => array('en' => 'Stealth Lite', 'fa' => 'مخفی سبک'),
         'tech' => 'Trojan + TLS',
         'hint' => array(
@@ -106,10 +161,15 @@ return array(
         ),
         'windows' => true,
         'android' => true,
+        'transport' => 'TCP / 443',
+        'kind' => 'tls',
+        'blocked_by' => array('sni', 'ja3'),
+
     ),
 
     array(
         'id' => 'shadowsocks',
+        'try_order' => 3,
         'label' => array('en' => 'Shadowsocks', 'fa' => 'شدوساکس'),
         'tech' => 'Shadowsocks 2022',
         'hint' => array(
@@ -118,10 +178,15 @@ return array(
         ),
         'windows' => true,
         'android' => true,
+        'transport' => 'TCP / 8388',
+        'kind' => 'noise',
+        'blocked_by' => array('port'),
+
     ),
 
     array(
         'id' => 'fast',
+        'try_order' => 1,
         'label' => array('en' => 'Fast', 'fa' => 'سریع'),
         'tech' => 'WireGuard',
         'hint' => array(
@@ -130,10 +195,15 @@ return array(
         ),
         'windows' => true,
         'android' => true,
+        'transport' => 'UDP / 51820',
+        'kind' => 'pulse',
+        'blocked_by' => array('dpi', 'udp', 'port'),
+
     ),
 
     array(
         'id' => 'compatible',
+        'try_order' => 7,
         'label' => array('en' => 'Compatible', 'fa' => 'سازگار'),
         'tech' => 'OpenVPN',
         'hint' => array(
@@ -145,10 +215,15 @@ return array(
            is the whole point of having a per-platform column: a customer on
            a phone should not read this row and expect it to be there. */
         'android' => false,
+        'transport' => 'UDP / TCP 1194',
+        'kind' => 'regular',
+        'blocked_by' => array('dpi', 'port'),
+
     ),
 
     array(
         'id' => 'built-in',
+        'try_order' => 2,
         'label' => array('en' => 'Built-in', 'fa' => 'داخلی'),
         'tech' => 'IKEv2 / IPsec',
         'hint' => array(
@@ -157,5 +232,9 @@ return array(
         ),
         'windows' => true,
         'android' => true,
+        'transport' => 'UDP / 500 - 4500',
+        'kind' => 'pulse',
+        'blocked_by' => array('dpi', 'udp', 'port'),
+
     ),
 );
