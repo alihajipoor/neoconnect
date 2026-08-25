@@ -10704,3 +10704,77 @@ compare** (the counters), and **one is untested and cannot be tested by the
 experiment written for it** (head-of-line). None is contradicted. Nothing
 regressed: every 0.9.30-versus-0.9.31 number is level or better, and the
 two that moved, moved the right way.
+
+---
+
+## 2026-08-25 — the three research branches are on main, redacted; and a grep for IPs does not find IPs
+
+**Status:** done. `claude/gaming-ip-reputation`,
+`claude/gaming-providers-research` and `claude/latency-control-v30` are
+merged.
+**Touches:** `docs/**` only. No product code changed.
+
+The warning a few entries up — that `gaming-ip-reputation.md` tabulated
+every node address with provider and ASN and had to be redacted before it
+merged — is discharged. All three branches were redacted **on the branch**
+first, so branch and `main` agree and the merges were trivial.
+
+### The gotcha, and it cost the most time here: addresses hide in PTR names
+
+A grep for the eight known addresses finds most sites and **misses a whole
+class**. Reverse-DNS strings spell the address out in a different shape,
+and the reputation tables quoted them verbatim:
+
+- Linode/Akamai dashes it: `{france-1-dashed}.ip.linodeusercontent.com`
+- Hetzner **reverses the octets**:
+  `static.{finland1-reversed}.clients.your-server.de`
+- and a reproduction command queried
+  `{germany-1-reversed}.in-addr.arpa`
+
+None of those match a plain dotted-quad grep for the address. Four were live in
+that one file. **When redacting, grep the dashed and reversed forms too**,
+and the `in-addr.arpa` shape.
+
+Second class, subtler: a *control* address that is not ours but is
+described as `a different address in germany-1's /24`. The address belongs
+to LightNode so the rule does not cover it, but the sentence around it
+narrows our node to 256 candidates, which is the thing the rule exists to
+prevent. Three of those were in the reputation tables, and one was already
+on `main` in `node-enumerability-remediation.md` — redacted now as
+`{germany-1-neighbour}`. The finding survives placeholders completely;
+naming the neighbour is what carries it, not its digits.
+
+### What was deliberately kept
+
+Third-party addresses — Mudfish, ExitLag, NoPing, Mullvad, NordVPN,
+Voxility, Vultr, Blizzard's `37.244.62.99`, Iran's `10.10.34.0/24` block
+page, EZ Connect's ArvanCloud front. They are other companies' public
+infrastructure and they *are* the evidence. The two decisive same-provider
+pairs only mean anything if both halves are visible, so Mudfish
+`38.60.202.189` flagged still sits beside `{germany-1}` clean.
+
+Placeholders are per-node and stable across all of `docs/`, which is what
+keeps that readable: identity and difference both survive.
+
+### State
+
+`docs/**` is now clean of node addresses in every form checked — plain,
+dashed PTR, reversed PTR, `in-addr.arpa`, `/24` neighbour and `/20`
+prefix. Zero hits.
+
+**Still carrying real addresses, unchanged and still owed by their
+owners** — the same list `docs/node-address-hygiene.md` already has:
+`apps/backend/src/modules/{agent-gateway,health,protocol-configs,protocol-users,routes}/**`
+(backend session) and `apps/desktop-windows/{ipc/src/lib.rs,
+service/src/gaming/mod.rs, src-tauri/src/vpn.rs}` (Gaming Mode session).
+Verified byte-for-byte that these merges added no address anywhere in the
+tree: the tree-wide hit list is identical to `main` at `38f5ccd`.
+
+`config.ts`'s two API mirrors stay, per point 3 of the hygiene doc.
+
+And the standing caveat, restated because it is easy to forget what this
+buys: **it un-publishes nothing.** Every value is still in git history and
+this repository is public. It shrinks the future scraping surface, and
+certificate transparency still carries the node hostnames regardless —
+`docs/node-enumerability-remediation.md` is the runbook for that, still
+unexecuted.
