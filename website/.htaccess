@@ -7,7 +7,21 @@
 # already exist in PHP (see inc/security.php's file guard).
 
 Options -Indexes
-DirectoryIndex index.php
+
+# index.html is in this list because of ONE directory: /account/.
+#
+# The customer portal is a compiled React SPA whose entry point is
+# account/index.html -- there is no index.php anywhere under it. With the
+# bare `DirectoryIndex index.php` that used to be here, a request for
+# /account/ found no index file and Apache returned 403 (or a directory
+# listing, if Options -Indexes were ever removed). The hashed JS and CSS
+# under /account/assets/ resolved perfectly the whole time, which is what
+# made it look fine: the bundle was reachable, the page that loads it was
+# not.
+#
+# Order matters. index.php stays first, so every marketing page is still
+# served by PHP and a stray index.html could never shadow one.
+DirectoryIndex index.php index.html
 AddDefaultCharset UTF-8
 
 ErrorDocument 404 /404.php
