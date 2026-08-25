@@ -149,7 +149,6 @@ costs a few seconds and is within budget.
 
 ---
 
-<<<<<<< HEAD
 ## 2026-08-23 — Mobile Rust is now pinned, and the pin is shared
 
 **Status:** decided — **Mac: this changes your build, nothing else**
@@ -198,7 +197,8 @@ trade in the app whose job is honest connection state.
 None of this is verified by a build. Android cannot be built on the
 Windows machine and iOS cannot be built there at all; the next run of
 each workflow is what confirms it.
-=======
+---
+
 ## 2026-08-23 — Two new shared client modules, and one line added to mobile's connect path
 
 **Status:** landed on `claude/config-refresh-and-inbound-tag` (Windows),
@@ -236,4 +236,3 @@ around suspension, that is a real gap for iOS and the fix belongs in
 
 Nothing here touches `plugins/vpn/src/*.rs`, the plugin command surface,
 or the mobile version.
->>>>>>> origin/main
