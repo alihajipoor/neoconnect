@@ -203,11 +203,36 @@
 //! the selected application's UDP, including the 219-to-0 case that
 //! already works.
 //!
+//! The layer order is the whole of it, and Microsoft documents it: a
+//! client open is classified `ALE_AUTH_CONNECT` ->
+//! `OUTBOUND_TRANSPORT` -> `OUTBOUND_IPPACKET`, and WinDivert
+//! registers its callout at `FWPM_LAYER_OUTBOUND_IPPACKET_V4`. ALE is
+//! handed the address the *application* asked for, before any packet
+//! exists; this loop rewrites that address two layers further down.
+//! For UDP the classification happens at the first `sendto` to a new
+//! remote endpoint -- which is precisely the send that used to leak,
+//! and at that instant it is the same event as the send that is about
+//! to be carried correctly.
+//!
 //! Nor can it be narrowed. Every field ALE can condition on -- app id,
 //! protocol, remote address, local interface -- is identical for the
 //! two, because the difference between them is not a property of the
 //! send. It is whether a *later* lookup will find the socket still
 //! open. Nothing at connect time knows that.
+//!
+//! Nor is there another layer to try. Application identity exists only
+//! at the ALE layers -- `ALE_APP_ID` is not a condition at
+//! `OUTBOUND_TRANSPORT` or `OUTBOUND_IPPACKET`, and process id is not
+//! a filtering condition anywhere -- and every ALE layer runs before
+//! the rewrite. Mullvad and Windscribe both get out of this, and both
+//! the same way: a signed kernel callout at `ALE_BIND_REDIRECT` /
+//! `ALE_CONNECT_REDIRECT` rewrites the **local** address at connect
+//! time, so their block filters key on local address or local
+//! interface rather than on the remote one. This loop leaves the
+//! source address alone by design -- see above -- so even that
+//! discriminator does not exist here. Matching them means shipping a
+//! signed callout driver of our own, which is a different project
+//! from this one.
 //!
 //! What user-mode WFP could not do here, the callout driver this
 //! service already loads can: WinDivert sees the datagram after the
@@ -220,12 +245,22 @@
 //! bought nothing and risked the leftover-block failure customers
 //! already report as a broken network.
 //!
-//! `engines/ipv6_block.rs` remains the right shape for what it does:
-//! it blocks a whole family for a full tunnel, where there is no
-//! redirect downstream to starve.
+//! `engines/ipv6_block.rs` keeps both of its shapes, and neither of
+//! them is this one. `Ipv6Block` blocks a whole family for a full
+//! tunnel, where there is no redirect downstream to starve.
+//! `SelectedAppsIpv6Block` blocks a *selected* application's IPv6 at
+//! ALE during Custom mode, and that one survives the analysis above
+//! for the reason the IPv4 half does not: no IPv6 is ever redirected
+//! here, so there is no correctly-carried flow for an ALE block to be
+//! confused with -- blocking is the entire intent. It sits above this
+//! loop rather than in place of it. What it does not cover --
+//! connections already open when it installed, and applications its
+//! filters could not be installed for -- still arrives here and is
+//! decided by `handle_ipv6`, refusal of the unattributable included.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -242,13 +277,31 @@ use super::proxy::OwnSockets;
 /// The largest packet WinDivert will hand over.
 const MAX_PACKET: usize = 65_575;
 
-/// How many threads share the handle.
+/// How many threads forward packets.
 ///
 /// More than one because this sits on the path of all outbound traffic
 /// and a single thread would cap throughput at whatever one core can
-/// forward; only a few, because packets are reordered across threads and
-/// a latency-sensitive audience is the reason this feature exists.
+/// forward; only a few, because a thread here is not free and two cover
+/// the case this is on the path of.
+///
+/// They no longer share the handle. Both used to receive from it
+/// directly, and nothing tied a flow to a thread -- so two packets of
+/// one connection could be picked up by two threads and injected in
+/// whichever order the two finished, which for UDP is jitter and for
+/// some protocols is indistinguishable from loss. One thread now
+/// receives, and hands each packet to the worker that owns its flow;
+/// see [`Fanout`].
 const WORKERS: usize = 2;
+
+/// How many packets may be waiting for one worker.
+///
+/// Deep enough to absorb a burst that arrives while a worker is inside
+/// an owner lookup, shallow enough that a worker which has genuinely
+/// fallen behind produces backpressure rather than seconds of queued
+/// latency. Five hundred and twelve packets is roughly a tenth of what
+/// the driver's own queue holds (see `divert::Handle::open`), so the
+/// driver remains the buffer of record and this is only a hand-off.
+const QUEUE_DEPTH: usize = 512;
 
 /// How long after activation a selected app's pre-existing TCP
 /// connections are refused rather than exempted.
@@ -334,6 +387,17 @@ pub struct Stats {
     /// says only that nothing tried. Before this was written it read
     /// zero because there was nothing to count -- the packets were
     /// leaving unexamined.
+    ///
+    /// **It now reads lower than it used to, and that is not a
+    /// regression.** `engines::ipv6_block::SelectedAppsIpv6Block`
+    /// refuses a selected application's IPv6 at `connect()`, before a
+    /// packet is built, so a session where those filters installed
+    /// cleanly produces nothing here for a selected app's new TCP
+    /// connections at all -- the refusal happened a layer up. What
+    /// still lands here is what that block does not cover: connections
+    /// that were already open, and applications the filters could not
+    /// be installed for. Read the two together, from
+    /// `ipv6-block-custom.log` and this line, or read neither.
     pub blocked_v6: AtomicU64,
     /// Connections found living outside the tunnel that should be
     /// inside it -- see `owner::escaped_connections`.
@@ -415,6 +479,39 @@ pub struct Stats {
     /// permanently, and this project has already decided a warning that
     /// is always on is one nobody reads when it matters.
     pub refused_unattributed: AtomicU64,
+    /// Datagrams the relay could not hand on towards their destination.
+    ///
+    /// The relay used to discard the result of that send entirely
+    /// (`let _ = upstream.send_to(..)`), which made it a silent loss
+    /// point on the exact path voice and gaming depend on -- and an
+    /// invisible one from every angle, because a datagram that never
+    /// leaves the relay is still counted `redirected` by the loop that
+    /// handed it over. `returned` staying at zero was the only trace,
+    /// and that reads identically to a tunnel that is not carrying
+    /// traffic, which is a different fault with a different fix.
+    ///
+    /// The behaviour on failure is unchanged -- the datagram is dropped
+    /// and the next one is served. UDP has no retransmission to hook
+    /// into and the application above has its own; retrying here would
+    /// duplicate a datagram the application may already have resent.
+    pub udp_send_failed: AtomicU64,
+    /// Replies the relay could not hand back to the application.
+    ///
+    /// Counted apart from `udp_send_failed` because the two point at
+    /// opposite halves of the machine. A failure sending upstream says
+    /// something about the tunnel; a failure sending back to the
+    /// application over loopback says something about this host. Folded
+    /// together they would be one number that cannot answer either
+    /// question.
+    pub udp_reply_failed: AtomicU64,
+    /// Datagrams dropped because their flow never got an upstream
+    /// socket -- see `proxy::PendingFlows`.
+    ///
+    /// Either the bind was still failing after the full retry, or the
+    /// flow held its cap of datagrams while it waited. Both are the
+    /// tentative-address window of 0.9.20 outlasting the patience the
+    /// relay has for it, and both used to be a `continue`.
+    pub udp_unbound: AtomicU64,
 }
 
 /// How many packets must have gone out before silence means anything.
@@ -440,7 +537,9 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} grace_dropped={} reset_v6={} refused_unattributed={}",
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} \
+             grace_dropped={} reset_v6={} refused_unattributed={} udp_send_failed={} \
+             udp_reply_failed={} udp_unbound={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
@@ -451,6 +550,9 @@ impl Stats {
             self.grace_dropped.load(Ordering::Relaxed),
             self.reset_v6.load(Ordering::Relaxed),
             self.refused_unattributed.load(Ordering::Relaxed),
+            self.udp_send_failed.load(Ordering::Relaxed),
+            self.udp_reply_failed.load(Ordering::Relaxed),
+            self.udp_unbound.load(Ordering::Relaxed),
         )
     }
 
@@ -484,6 +586,14 @@ impl Stats {
     /// Custom mode always, not of this session, so it is stated in the
     /// Custom-mode line on the dashboard (`dash.customActive`) where it
     /// sits beside "on" instead of pretending to be news.
+    ///
+    /// The three `udp_*` counters are not consulted here either, for the
+    /// reason `escaped` is not: they have never been read against a
+    /// packet capture. They exist so that a loss which used to leave no
+    /// trace at all shows up in the log the moment somebody looks; what
+    /// threshold on them means "tell the customer something is wrong" is
+    /// a question the rig has to answer first. Until it has, this
+    /// function does not speak on their behalf.
     pub fn complaint(&self, session_age: Duration) -> Option<String> {
         // Nothing is wrong yet, by definition: the redirect has not
         // had time to be wrong. See WARMUP.
@@ -700,6 +810,15 @@ const DNS_PORT: u16 = 53;
 ///
 /// Nothing excludes the node here: no node this client talks to has an
 /// IPv6 address, so the tunnel itself can never appear in this half.
+///
+/// **The two IPv6 bounds below are mirrored in
+/// `engines::ipv6_block::SPLIT_PERMITTED`**, which expresses the same
+/// boundary as WFP prefixes for the per-app block that now sits above
+/// this loop. Changing one without the other gives a selected
+/// application two different answers about what counts as the LAN,
+/// which is a class of bug nobody would think to look for. The test
+/// `the_permits_are_exactly_what_the_loop_leaves_alone` holds them
+/// together.
 pub fn filter_for(redirect: &Redirect) -> String {
     format!(
         "(outbound and ip and (tcp or udp) and not loopback \
@@ -778,10 +897,15 @@ impl Stopper {
     }
 }
 
+/// `stats` is passed in rather than created here because the relay
+/// counts into the same table -- see `Stats::udp_send_failed` -- and the
+/// relay is started first, before the firewall allowance and the
+/// reachability wait that sit between the two.
 pub fn start(
     mut redirect: Redirect,
     nat: Arc<Nat>,
     selection: SharedSelection,
+    stats: Arc<Stats>,
 ) -> Result<Running, String> {
     // Stamped here rather than trusted from the caller: the window has
     // to start when packets start arriving. Between the caller building
@@ -804,23 +928,200 @@ pub fn start(
     let handle = Arc::new(handle);
     let redirect = Arc::new(redirect);
     let stop = Arc::new(AtomicBool::new(false));
-    let stats = Arc::new(Stats::default());
 
-    let threads = (0..WORKERS)
-        .map(|_| {
-            let (handle, redirect, nat, selection, stop, stats) = (
-                handle.clone(),
-                redirect.clone(),
-                nat.clone(),
-                selection.clone(),
-                stop.clone(),
-                stats.clone(),
-            );
-            std::thread::spawn(move || worker(handle, redirect, nat, selection, stop, stats))
-        })
-        .collect();
+    let mut threads = Vec::with_capacity(WORKERS + 1);
+    let mut queues = Vec::with_capacity(WORKERS);
+    for _ in 0..WORKERS {
+        let (sender, receiver) = sync_channel(QUEUE_DEPTH);
+        queues.push(sender);
+        let (handle, redirect, nat, selection, stop, stats) = (
+            handle.clone(),
+            redirect.clone(),
+            nat.clone(),
+            selection.clone(),
+            stop.clone(),
+            stats.clone(),
+        );
+        threads.push(std::thread::spawn(move || {
+            worker(receiver, handle, redirect, nat, selection, stop, stats)
+        }));
+    }
+
+    // At the front, because `Running::stop` joins in order and a worker
+    // ends only when the dispatcher drops its end of the queue. Joined
+    // the other way round, the teardown would wait on a worker that is
+    // still waiting on a thread nobody has joined yet.
+    threads.insert(0, {
+        let (handle, stop, stats) = (handle.clone(), stop.clone(), stats.clone());
+        let fanout = Fanout { queues };
+        std::thread::spawn(move || dispatch(handle, fanout, stop, stats))
+    });
 
     Ok(Running { handle, stop, stats, threads })
+}
+
+/// One packet on its way to the worker that owns its flow.
+struct Job {
+    packet: Vec<u8>,
+    length: u32,
+    address: WINDIVERT_ADDRESS,
+}
+
+// SAFETY: `WINDIVERT_ADDRESS` is a plain `repr(C)` record of integers and
+// bitfields describing where a packet came from. It owns no pointer and
+// no handle -- the packet's bytes travel separately, in `packet` -- so
+// moving one between threads copies data and nothing else. It is already
+// moved across threads today, in the sense that each worker fills its
+// own from a handle several threads share.
+unsafe impl Send for Job {}
+
+/// Sends each packet to exactly one worker, chosen by its flow.
+///
+/// This is the whole of the ordering fix. Both workers used to receive
+/// from the handle themselves, so a flow's packets were split across
+/// them by nothing more than which thread happened to be free, and came
+/// out in whichever order the two finished. Within a TCP connection that
+/// is work for the receiver's reassembly; within a UDP flow it is
+/// jitter, and for a protocol that treats out-of-order as lost -- which
+/// several real-time ones do -- it is loss.
+///
+/// A single receiver is what makes the order exist in the first place:
+/// it takes packets off the driver's queue in the order the driver
+/// queued them. The hash then keeps a flow on one thread from end to
+/// end, so nothing downstream can reshuffle it either.
+///
+/// The expensive part of forwarding is not the receive. It is the owner
+/// lookup, the checksum recalculation and the injection, and all three
+/// stay on the workers -- so both threads still work in parallel across
+/// flows, which is what having two of them was for.
+struct Fanout {
+    queues: Vec<SyncSender<Job>>,
+}
+
+impl Fanout {
+    /// Hands a packet to its worker, returning false once that worker
+    /// has gone.
+    fn hand_over(&self, packet: &[u8], length: u32, address: WINDIVERT_ADDRESS) -> bool {
+        let slot = affinity(packet, self.queues.len());
+        // A full queue blocks rather than drops. A worker cannot be
+        // behind for long without the driver's own queue -- thirty times
+        // deeper -- absorbing it, and this file's whole position is that
+        // a packet which disappears without a counter moving is the
+        // failure that cannot be argued about afterwards. Blocking is
+        // visible as latency; dropping is visible as nothing.
+        self.queues[slot].send(Job { packet: packet.to_vec(), length, address }).is_ok()
+    }
+}
+
+/// splitmix64's finaliser.
+///
+/// Chosen over a plain fold because the worker is picked with `%`, which
+/// reads the low bits and nothing else -- and the low bits are exactly
+/// where two flows from one application differ, since Windows hands out
+/// consecutive source ports. An unmixed key would put a browser's whole
+/// burst of connections on one worker and leave the other idle.
+fn mix(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn fold(key: u64, word: u64) -> u64 {
+    key.wrapping_mul(0x0000_0100_0000_01b3).wrapping_add(word)
+}
+
+/// Which worker owns this packet's flow.
+///
+/// Direction is part of the key rather than normalised out of it. What
+/// has to stay ordered is a stream of packets travelling one way; the
+/// two directions of a conversation are independent, and pairing them
+/// would only halve the number of distinct keys.
+///
+/// A packet whose 5-tuple cannot be read goes to worker zero. That is a
+/// choice about balance, not about correctness: any fixed answer keeps
+/// like packets together, and these are the packets the loop already
+/// refuses to make decisions about -- a truncated header, an IPv6
+/// fragment after the first, an extension header chain this does not
+/// follow. There are not enough of them to unbalance anything.
+fn affinity(packet: &[u8], workers: usize) -> usize {
+    if workers <= 1 {
+        return 0;
+    }
+    let key = match packet.first().map(|byte| byte >> 4) {
+        Some(4) => parse(packet).map(|parsed| {
+            let mut key = fold(0, u32::from(parsed.source) as u64);
+            key = fold(key, u32::from(parsed.destination) as u64);
+            key = fold(key, ((parsed.source_port as u64) << 16) | parsed.destination_port as u64);
+            fold(key, parsed.transport as u64)
+        }),
+        // The addresses are at a fixed offset even when the transport
+        // header is not, so a packet whose extension chain cannot be
+        // walked still lands consistently -- with the rest of the
+        // traffic between the same two hosts, which is more than enough
+        // to keep it in order.
+        Some(6) if packet.len() >= IPV6_HEADER => {
+            let mut key = 0u64;
+            for chunk in packet[8..IPV6_HEADER].chunks_exact(4) {
+                key = fold(key, u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64);
+            }
+            if let Some(parsed) = parse_v6(packet) {
+                key = fold(
+                    key,
+                    ((parsed.source_port as u64) << 16) | parsed.destination_port as u64,
+                );
+            }
+            Some(key)
+        }
+        _ => None,
+    };
+    match key {
+        Some(key) => (mix(key) % workers as u64) as usize,
+        None => 0,
+    }
+}
+
+/// Takes packets off the machine, in order, and hands each to its
+/// worker.
+///
+/// Everything this thread does is cheap on purpose -- a receive, a hash,
+/// a copy and a hand-off -- because it is the one part of the path that
+/// is not parallel any more. What it buys is that the order packets
+/// leave the driver in is an order that exists at all; two threads
+/// receiving concurrently never had one.
+fn dispatch(handle: Arc<Handle>, fanout: Fanout, stop: Arc<AtomicBool>, stats: Arc<Stats>) {
+    let mut packet = vec![0u8; MAX_PACKET];
+
+    while !stop.load(Ordering::SeqCst) {
+        let (len, address) = match handle.recv(&mut packet) {
+            Ok(Some(received)) => received,
+            // Shut down cleanly, or the driver gave up on us. Either way
+            // there is nothing further to read.
+            Ok(None) => return,
+            // Said out loud rather than swallowed. A dispatcher that
+            // exits here stops intercepting silently, and the only
+            // visible symptom is `seen=0` in the counters while the
+            // customer's selected app quietly goes direct -- which is
+            // exactly the kind of quiet failure this file exists to
+            // avoid.
+            Err(e) => {
+                note(&format!("redirect dispatcher stopped: {e}"));
+                return;
+            }
+        };
+
+        // Counted here, where the driver hands the packet over, rather
+        // than on the worker. `seen` means "the filter gave us this",
+        // and it has to keep meaning that even if a packet is later lost
+        // between the two.
+        stats.seen.fetch_add(1, Ordering::Relaxed);
+
+        if !fanout.hand_over(&packet[..len as usize], len, address) {
+            note("redirect worker is gone; the dispatcher is stopping too");
+            return;
+        }
+    }
 }
 
 /// Appends a line to the split-tunnel log, beside the counters.
@@ -837,7 +1138,20 @@ fn note(line: &str) {
     }
 }
 
+/// Forwards the packets of the flows it owns, in the order they arrived.
+///
+/// Receives from a queue rather than from the handle. Every packet of
+/// one flow reaches the same worker -- see [`Fanout`] -- so this thread
+/// is the only one that will ever touch that flow, and the order it
+/// takes them out of the queue is the order the driver had them in.
+///
+/// Ends when the dispatcher drops its end of the queue, after draining
+/// what is left. Draining rather than discarding because these packets
+/// have already been taken off the machine: one this thread does not
+/// re-inject is one that never reaches the network.
+#[allow(clippy::too_many_arguments)]
 fn worker(
+    queue: Receiver<Job>,
     handle: Arc<Handle>,
     redirect: Arc<Redirect>,
     nat: Arc<Nat>,
@@ -849,26 +1163,10 @@ fn worker(
     // the connection tables, and a lock around it would put every
     // decision behind every other one.
     let mut owner = OwnerLookup::new();
-    let mut packet = vec![0u8; MAX_PACKET];
 
-    while !stop.load(Ordering::SeqCst) {
-        let (len, mut address) = match handle.recv(&mut packet) {
-            Ok(Some(received)) => received,
-            // Shut down cleanly, or the driver gave up on us. Either way
-            // there is nothing further to read.
-            Ok(None) => return,
-            // Said out loud rather than swallowed. A worker that exits
-            // here stops intercepting silently, and the only visible
-            // symptom is `seen=0` in the counters while the customer's
-            // selected app quietly goes direct -- which is exactly the
-            // kind of quiet failure this file exists to avoid.
-            Err(e) => {
-                note(&format!("redirect worker stopped: {e}"));
-                return;
-            }
-        };
+    while let Ok(job) = queue.recv() {
+        let Job { mut packet, length: len, mut address } = job;
 
-        stats.seen.fetch_add(1, Ordering::Relaxed);
         // Read per packet, not captured once at startup. Editing the
         // chosen applications while Custom mode stays on does not
         // rebuild anything, so a copy taken here would be the customer's
@@ -917,6 +1215,15 @@ fn worker(
 
         // Counted here rather than at the rewrite, so the numbers say
         // what was delivered rather than what was intended.
+        //
+        // Not counted at all once the session is stopping. Teardown shuts
+        // the handle down while a worker may still be draining what it
+        // was handed, and every one of those sends fails -- which would
+        // put a burst into `rejected` and make a clean disconnect read
+        // like the driver refusing our packets.
+        if stop.load(Ordering::SeqCst) {
+            continue;
+        }
         match (rewrote, sent) {
             (Some(Leg::Outbound), true) => stats.redirected.fetch_add(1, Ordering::Relaxed),
             (Some(Leg::Return), true) => stats.returned.fetch_add(1, Ordering::Relaxed),
@@ -1625,6 +1932,18 @@ fn decide(
     };
     let selected = match owner_image {
         Some(image) => !is_own && selection.should_tunnel(image),
+        // A port with no owner this loop can see. In `OnlySelected`
+        // that used to mean "leave it alone", and leaving it alone was
+        // the leak: 15 datagrams from 15 short-lived sockets, 13 out in
+        // the clear on one rig run and 14 on the next, from a selected
+        // application, with the app reporting Custom mode on. The
+        // module header carries the mechanism, why a WFP
+        // `ALE_APP_ID` filter cannot take this job instead, and what
+        // the refusal costs.
+        //
+        // Only `Carry` means "into the tunnel". `Refuse` is deliberately
+        // not acted on here -- see where `unattributed` is worked out
+        // above for why it has to wait for the DNS branch.
         None => matches!(unattributed, Some(Unattributed::Carry)),
     };
 
@@ -1858,7 +2177,43 @@ mod tests {
             grace_dropped: AtomicU64::new(0),
             reset_v6: AtomicU64::new(0),
             refused_unattributed: AtomicU64::new(0),
+            udp_send_failed: AtomicU64::new(0),
+            udp_reply_failed: AtomicU64::new(0),
+            udp_unbound: AtomicU64::new(0),
         }
+    }
+
+    #[test]
+    fn the_relays_own_udp_losses_reach_the_log() {
+        // The counters are only worth adding if somebody reads them, and
+        // the only place anybody reads them is this line. A number that
+        // is incremented and never printed is the same silence it was
+        // meant to end.
+        let counters = stats(1, 1, 1, 1, 0);
+        counters.udp_send_failed.store(4, Ordering::Relaxed);
+        counters.udp_reply_failed.store(5, Ordering::Relaxed);
+        counters.udp_unbound.store(6, Ordering::Relaxed);
+
+        let summary = counters.summary();
+        assert!(summary.contains("udp_send_failed=4"), "got {summary}");
+        assert!(summary.contains("udp_reply_failed=5"), "got {summary}");
+        assert!(summary.contains("udp_unbound=6"), "got {summary}");
+    }
+
+    #[test]
+    fn the_relays_udp_losses_do_not_speak_to_the_customer_yet() {
+        // Deliberate, and the same decision `escaped` carries: these
+        // numbers have never been read against a packet capture, and
+        // this project does not let the app tell somebody their VPN is
+        // broken on the strength of a number nobody has checked against
+        // the wire. They belong in the log until the rig says what a
+        // healthy value looks like.
+        let counters = stats(1000, 900, 800, 700, 0);
+        counters.udp_send_failed.store(5000, Ordering::Relaxed);
+        counters.udp_reply_failed.store(5000, Ordering::Relaxed);
+        counters.udp_unbound.store(5000, Ordering::Relaxed);
+
+        assert_eq!(counters.complaint(WARMUP * 2), None);
     }
 
     #[test]
@@ -2444,6 +2799,192 @@ mod tests {
     }
 
     #[test]
+    fn a_flow_always_lands_on_the_same_worker() {
+        // The property the whole fan-out rests on. Without it a flow's
+        // packets are split across threads and emerge in whichever order
+        // the threads finish -- jitter inside a UDP flow, and for the
+        // real-time protocols that treat out-of-order as lost, loss.
+        let app = Ipv4Addr::new(192, 168, 1, 20);
+        let peer = Ipv4Addr::new(203, 0, 113, 9);
+
+        let first = udp_packet(app, peer, 51234, 27015);
+        let second = udp_packet(app, peer, 51234, 27015);
+        assert_eq!(
+            affinity(&first, WORKERS),
+            affinity(&second, WORKERS),
+            "two packets of one flow must go to one worker"
+        );
+
+        // And the return leg is its own stream. Pairing the directions
+        // would only halve the number of distinct keys; what has to stay
+        // in order is packets travelling one way.
+        let ports_only = udp_packet(app, peer, 51235, 27015);
+        let protocol_only = tcp_packet(app, peer, 51234, 27015, 0);
+        assert_eq!(affinity(&first, 1), 0, "one worker owns everything");
+        assert!(affinity(&first, WORKERS) < WORKERS);
+        assert!(affinity(&ports_only, WORKERS) < WORKERS);
+        assert!(affinity(&protocol_only, WORKERS) < WORKERS);
+    }
+
+    #[test]
+    fn consecutive_source_ports_do_not_all_land_on_one_worker() {
+        // Windows hands out source ports consecutively, so a browser
+        // opening a page produces a run of flows differing only in the
+        // low bits of one field -- and the worker is picked with `%`,
+        // which reads the low bits and nothing else. An unmixed key
+        // would put that whole burst on one thread and leave the other
+        // idle, which is the throughput half of having two.
+        let app = Ipv4Addr::new(192, 168, 1, 20);
+        let peer = Ipv4Addr::new(203, 0, 113, 9);
+        let mut on_each = vec![0usize; WORKERS];
+        for port in 51234..51334u16 {
+            on_each[affinity(&tcp_packet(app, peer, port, 443, 0), WORKERS)] += 1;
+        }
+        for count in &on_each {
+            assert!(*count >= 25, "one worker took almost everything: {on_each:?}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_packet_still_gets_a_worker_rather_than_a_panic() {
+        // Truncated headers, IPv6 fragments after the first, extension
+        // chains this does not walk. The loop already refuses to decide
+        // anything about these; the fan-out still has to put them
+        // somewhere, and any fixed answer keeps like with like.
+        assert_eq!(affinity(&[], WORKERS), 0);
+        assert_eq!(affinity(&[0x45, 0x00], WORKERS), 0);
+        assert_eq!(affinity(&[0x60, 0x00, 0x00], WORKERS), 0);
+    }
+
+    #[test]
+    fn an_ipv6_packet_is_keyed_on_its_addresses_even_when_the_chain_is_not_walked() {
+        // The addresses sit at a fixed offset even when the transport
+        // header does not, so a packet whose extension chain cannot be
+        // followed still lands with the rest of the traffic between the
+        // same two hosts -- which keeps it in order with them.
+        let mut packet = vec![0u8; IPV6_HEADER];
+        packet[0] = 0x60;
+        // An extension header this does not know, so `parse_v6` gives up
+        // and only the addresses are available.
+        packet[6] = 200;
+        packet[8..24].copy_from_slice(&[0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        packet[24..40]
+            .copy_from_slice(&[0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+
+        assert!(parse_v6(&packet).is_none(), "the premise: the chain is not walked");
+        assert_eq!(affinity(&packet, WORKERS), affinity(&packet.clone(), WORKERS));
+
+        // And the addresses have to be what decides it. If the branch
+        // gave up and answered zero, every IPv6 flow on the machine
+        // would queue behind one worker.
+        let mut on_each = vec![0usize; WORKERS];
+        for peer in 1..=100u8 {
+            let mut other = packet.clone();
+            other[39] = peer;
+            on_each[affinity(&other, WORKERS)] += 1;
+        }
+        for count in &on_each {
+            assert!(*count >= 25, "IPv6 is not being keyed on its addresses: {on_each:?}");
+        }
+    }
+
+    #[test]
+    fn every_packet_of_a_flow_reaches_one_worker_in_the_order_it_arrived() {
+        // The fan-out itself, over the real channels, with three flows
+        // interleaved the way a machine actually produces them. Each
+        // flow's packets have to come out of exactly one queue, in the
+        // order they went in -- which is the guarantee two threads
+        // receiving from the handle never gave.
+        let app = Ipv4Addr::new(192, 168, 1, 20);
+        let flows = [
+            (Ipv4Addr::new(203, 0, 113, 9), 51234u16, 27015u16),
+            (Ipv4Addr::new(203, 0, 113, 10), 51235, 443),
+            (Ipv4Addr::new(198, 51, 100, 4), 51236, 53),
+        ];
+
+        let mut queues = Vec::new();
+        let mut receivers = Vec::new();
+        for _ in 0..WORKERS {
+            let (sender, receiver) = sync_channel(QUEUE_DEPTH);
+            queues.push(sender);
+            receivers.push(receiver);
+        }
+        let fanout = Fanout { queues };
+
+        // Interleaved round-robin across the flows, so a fan-out that
+        // ignored the flow would scatter each one across both queues.
+        // The payload byte is the sequence number within its flow.
+        for sequence in 0..20u8 {
+            for (peer, source_port, destination_port) in flows {
+                let mut packet = udp_packet(app, peer, source_port, destination_port);
+                let last = packet.len() - 1;
+                packet[last] = sequence;
+                let length = packet.len() as u32;
+                assert!(fanout.hand_over(&packet, length, WINDIVERT_ADDRESS::default()));
+            }
+        }
+        drop(fanout);
+
+        // Which queue each flow was sent to, and what came out of it.
+        let mut delivered: Vec<Vec<Vec<u8>>> = Vec::new();
+        for receiver in &receivers {
+            delivered.push(receiver.try_iter().map(|job| job.packet).collect());
+        }
+
+        for (peer, source_port, destination_port) in flows {
+            let key = udp_packet(app, peer, source_port, destination_port);
+            let mut seen_in = Vec::new();
+            for (slot, packets) in delivered.iter().enumerate() {
+                let sequence: Vec<u8> = packets
+                    .iter()
+                    .filter(|packet| packet[..packet.len() - 1] == key[..key.len() - 1])
+                    .map(|packet| packet[packet.len() - 1])
+                    .collect();
+                if !sequence.is_empty() {
+                    assert_eq!(
+                        sequence,
+                        (0..20u8).collect::<Vec<_>>(),
+                        "flow {peer}:{destination_port} came out of worker {slot} reordered"
+                    );
+                    seen_in.push(slot);
+                }
+            }
+            assert_eq!(
+                seen_in.len(),
+                1,
+                "flow {peer}:{destination_port} was split across workers {seen_in:?}"
+            );
+        }
+
+        // And both workers were given something, or the split has bought
+        // ordering by giving up the parallelism it was there for.
+        assert!(delivered.iter().all(|packets| !packets.is_empty()), "one worker got nothing");
+    }
+
+    #[test]
+    fn the_dispatcher_stops_when_a_worker_is_gone() {
+        // A worker that has died takes interception down rather than
+        // leaving the fan-out delivering half the flows into a queue
+        // nobody serves. Interception stopping is the fail-open
+        // direction -- traffic takes the ordinary route -- and it is
+        // logged; packets vanishing into a dead worker's queue would not
+        // be either.
+        let (sender, receiver) = sync_channel(QUEUE_DEPTH);
+        let fanout = Fanout { queues: vec![sender] };
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            51234,
+            27015,
+        );
+        let length = packet.len() as u32;
+        assert!(fanout.hand_over(&packet, length, WINDIVERT_ADDRESS::default()));
+
+        drop(receiver);
+        assert!(!fanout.hand_over(&packet, length, WINDIVERT_ADDRESS::default()));
+    }
+
+    #[test]
     fn parses_a_plain_tcp_packet() {
         let packet = tcp_packet(
             Ipv4Addr::new(192, 168, 1, 20),
@@ -3021,7 +3562,12 @@ mod tests {
         // Index zero is the fail-open signal, so this is a relay with no
         // tunnel under it rather than one pointed at a broken tunnel.
         let tunnel = Arc::new(proxy::TunnelInterface::new(0, Ipv4Addr::UNSPECIFIED));
-        let relays = proxy::start(nat.clone(), tunnel).expect("relays must start");
+        // One table for both halves, as production wires it: the relay
+        // counts its own UDP losses into the same counters the loop
+        // fills.
+        let stats = Arc::new(Stats::default());
+        let relays =
+            proxy::start(nat.clone(), tunnel, stats.clone()).expect("relays must start");
         let mut allowance =
             firewall::Allowance::install(&[local_addr], relays.tcp_port, relays.udp_port)
                 .expect("the inbound allowance must install");
@@ -3056,6 +3602,7 @@ mod tests {
             },
             nat,
             selection,
+            stats,
         )
         .expect("the redirect loop must start");
 

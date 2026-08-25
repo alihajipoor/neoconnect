@@ -8564,3 +8564,813 @@ but **verify `git branch --show-current` immediately before every commit
 in this repo**, or work in a `git worktree`. This is the same class as
 the journal-conflict note: two sessions on one machine, not two
 machines.
+
+## 2026-08-24 — Four latency defects in the split-tunnel relay, fixed but unproven
+
+**Status:** landed on `claude/split-tunnel-latency`, **nothing verified
+on the wire** — the rig VM was being rebuilt
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/{proxy.rs,redirect.rs,mod.rs}`
+
+Found by a research pass framed around gamers; all four hit every user.
+Each was located in source, none is speculative. One commit per item.
+
+1. **No `TCP_NODELAY` anywhere.** Zero hits for `nodelay` across the
+   service, agent and tauri source, so both sockets a relayed connection
+   crosses ran Nagled. Two Nagles in series against a peer using delayed
+   ACK is up to 200ms on Windows, 40ms on Linux, on exactly the traffic
+   made of small writes. Set in `pump`, both halves. The probe socket is
+   deliberately left alone — it writes zero bytes, so the option would
+   change nothing.
+2. **UDP head-of-line blocking.** `serve_udp` called
+   `bind_upstream_retrying` inline, so one new flow that could not bind
+   froze *every* UDP flow on the machine for up to six seconds — and the
+   condition that makes a bind fail is a tentative tunnel address, i.e.
+   the seconds after a connect or a failover. The freeze landed exactly
+   when the customer was already watching. Measured 5.83s in a test with
+   the retry put back on the loop. Now: one inline bind attempt, then a
+   per-flow setup thread. 0.9.20 is intact — datagrams are held, not
+   dropped, and sent in the order they arrived.
+3. **Packet reordering by design.** Both workers received from the
+   shared handle with no flow affinity, which the WORKERS comment
+   admitted. Now one dispatcher receives, in driver order, and hashes
+   the 5-tuple to a worker.
+4. **Silent UDP send failures.** `let _ = upstream.send_to(..)`. Now
+   three counters — `udp_send_failed`, `udp_reply_failed`,
+   `udp_unbound` — in `Stats`, logged and rate limited. Behaviour on
+   failure is unchanged; only the silence is.
+
+`Stats` is now created in `mod.rs` and shared by the relay and the
+redirect loop, because the relay starts first — the firewall allowance
+and the reachability wait sit between the two.
+
+### The rig experiments these need
+
+Nothing below has been run. `cargo test --workspace` passing means the
+logic holds against loopback and synthetic packets; none of it says a
+packet went anywhere.
+
+- **Nagle.** A selected app talking to a listener on the node that
+  echoes small writes. Capture on the node. Compare the inter-arrival
+  gaps of a request/response ping-pong at 10/s, before and after. Fixed
+  looks like the 40ms/200ms mode disappearing from the histogram, not
+  like a lower mean.
+- **UDP freeze (the important one).** Hold a UDP flow live — `iperf3 -u`
+  at a low rate, or a game sitting in a match — then **force the
+  tentative-address window**: connect, or trigger a failover by stopping
+  the active engine while Custom mode is on. Both bring up a fresh TUN
+  whose address is under duplicate address detection, which is the only
+  thing that makes the bind fail. Measure the *established* flow's
+  datagram gap across that moment, from a capture at the node rather
+  than from the client. Fixed = no gap above ~100ms. Broken = a gap of
+  up to 6s. "Nobody complained" is not the measurement.
+- **Ordering.** `iperf3 -u` through a selected app and read the
+  receiver's out-of-order count at the node. Worth also capturing a real
+  game's UDP flow and checking its sequence numbers arrive monotonic.
+- **Throughput cost of the dispatcher.** The one thing this change could
+  plausibly make *worse*: one thread now receives every packet, and each
+  packet gets a copy and a channel hop. Measure with a saturating TCP
+  transfer through a selected app, before and after, watching `seen` per
+  second. If the dispatcher turns out to be the ceiling, the answer is a
+  buffer pool and a deeper queue — not going back to two receivers,
+  which is what reordered packets in the first place.
+- **The counters.** Read `udp_send_failed` / `udp_reply_failed` /
+  `udp_unbound` against a capture before letting `Stats::complaint` ever
+  speak on their behalf. They are deliberately not consulted by it yet,
+  for the same reason `escaped` is not.
+
+### Gotchas worth keeping
+
+- Two tests binding the same synthetic port collided under the parallel
+  test runner, because every `Nat` starts allocating from the same
+  number. With `SO_REUSEADDR` both binds succeed and Windows delivers
+  replies to whichever socket it likes — a test that passes or fails on
+  the scheduler. `udp_flow` now binds exclusively and takes another flow
+  if the port is already held.
+- `0.0.0.0:9` fails `sendto` with WSAEADDRNOTAVAIL every time, and an
+  address in `203.0.113.0/24` fails `bind` the same way. Both are good
+  deterministic stand-ins for failures that otherwise need a live
+  tunnel — the second reproduces the tentative-address condition without
+  a driver, a tunnel or elevation.
+- The dispatcher is joined **before** the workers: a worker ends only
+  when the dispatcher drops its end of the queue, so the other order
+  would hang the teardown.
+## 2026-08-23 — "Repair my network", on branch `claude/repair-my-network`
+
+**Status:** built and compiling; the elevated behaviour is UNVERIFIED
+**Touches:** `apps/desktop-windows/**` only. Not merged, not pushed.
+
+The in-product escape hatch every mature competitor has and we did not.
+Windscribe has `-firewall_off` out of band, Mullvad has
+`mullvad-setup.exe reset-firewall`, GearUP has literal "Reset local
+network" buttons. Ours is `service/src/engines/repair.rs`, reached two
+ways that run the same code:
+
+- **`neoconnect-service.exe repair`** from an elevated prompt. Stops the
+  service, does the whole teardown, starts it again, prints per step.
+  Exit 0 clean-or-fixed, 1 naming what is not, 2 not elevated.
+- **Settings → Repair network**, and a collapsed line in the
+  connect-failure message on the dashboard.
+
+Nine steps: tunnel + Custom-mode redirect, orphaned engines, NRPT, our
+routes, the split-tunnel firewall rule, WFP filters under our provider,
+the WireGuard tunnel service, the RAS entry, DNS cache.
+
+### What is actually proven, and what is not
+
+Proven here: it compiles, `cargo test --workspace` and the desktop
+`tsc` / `vite build` / `vitest` are green, and the unelevated run prints
+the elevation message and exits 2. **That is all.** Every step's real
+behaviour needs elevation, so none of it has been run against a machine
+that actually had residue on it. Do not describe this as working.
+
+### The rig test, per step
+
+Take a snapshot first. Then, for each, create the residue and run
+`repair`:
+
+- **NRPT** — connect, kill the service with Task Manager (not stop),
+  confirm the rule via `Get-DnsClientNrptRule` *and* under
+  `HKLM\SYSTEM\...\Dnscache\Parameters\DnsPolicyConfig`. Repair. Both
+  must be empty and a name must resolve.
+- **Group Policy NRPT** — write a rule of ours by hand under
+  `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig`
+  with `Comment = Neoxify tunnel DNS`. `Get-DnsClientNrptRule` will not
+  show it; the sweep must still remove it. **Control: put a second key
+  there with a different Comment and check it survives.**
+- **Orphaned engines** — kill the service while Xray is up, confirm
+  `xray.exe` is still running from our resources directory. **Control:
+  start a copy of `xray.exe` from somewhere else first and check it
+  lives.**
+- **Routes** — after the same kill, `Get-NetRoute -InterfaceIndex` on
+  `neoconnect0`. Repair, re-check. **Control: the physical adapter's
+  default route must still be there** — deleting a destination
+  machine-wide is a fault this could cause.
+- **WireGuard tunnel service** — `/installtunnelservice`, kill the
+  service, confirm `WireGuardTunnel$neoconnect` in `sc query`. Repair.
+  Then the harder one: get it into RUNNING-marked-for-delete (install,
+  then uninstall immediately) and check `force_remove_tunnel_service`
+  reports honestly rather than claiming success.
+- **WFP** — this one has never executed. `our_filter_ids` enumerates
+  with `providerKey` set, a zeroed `layerKey` and
+  `FWP_FILTER_ENUM_FULLY_CONTAINED`; if Windows refuses that
+  combination the step reports Unknown, which is honest but useless.
+  Check `netsh wfp show filters` for the Neoxify provider before and
+  after, and confirm the enumerate call returns 0.
+- **RAS entry** — connect over IKEv2, kill the service, confirm
+  "Neoxify" is in the Windows VPN list. Repair.
+- **Service stop/start** — run `repair` with the service running and
+  confirm it comes back (`sc query NeoxifyService`), and again with the
+  service already stopped and confirm it is left stopped.
+
+### The one that cannot be tested this way
+
+The split-tunnel redirect loop outliving its tunnel is undone only by
+the service process ending or by `disconnect()` running. The
+command-line form covers it by stopping the service; the button covers
+it because `step_tunnel` calls `disconnect()` first. Neither reaches the
+case where the service is wedged *and* refuses to stop — that is still
+"restart Windows", and the command says so rather than claiming
+otherwise.
+
+### Files another session should know about
+
+`engines/mod.rs` gained exactly one line (`pub(crate) mod repair;`) and
+`split_tunnel/firewall.rs` one word (`pub(crate)` on `RULE`). Everything
+else is a new module or an additive return value on an existing
+teardown. `dns::clear`, `janitor::reconcile` and
+`routing::purge_interface` behave exactly as they did.
+## 2026-08-23 — B2 is dead; its IPv6 half is not
+
+**Status:** finding recorded + one change landed, unverified on the wire
+**Touches:** `apps/desktop-windows/service/src/engines/ipv6_block.rs`,
+`split_tunnel/{mod,owner,redirect}.rs`
+
+### B2, as written on the roadmap, cannot work
+
+The proposal was: while Custom mode is on, add user-mode WFP BLOCK
+filters keyed on `FWPM_CONDITION_ALE_APP_ID` for each selected app,
+refusing their outbound traffic to everything except loopback, LAN and
+the relay path — so a flow the WinDivert loop fails to attribute is
+**refused instead of leaked**. It would have flipped the failure
+direction on the worst outcome this product has.
+
+It is unsound, and structurally rather than fixably so.
+
+`ALE_AUTH_CONNECT_V4` classifies at `connect()` — MS states plainly that
+for TCP there is **no packet** at that layer — and for UDP at the first
+`sendto` to each new remote tuple. The redirect rewrites the destination
+at `FWPM_LAYER_OUTBOUND_IPPACKET_V4`, which is where WinDivert's NETWORK
+layer actually registers (there is no `FWPM_LAYER_OUTBOUND_NETWORK_V4`;
+that name does not exist in `Fwpmu.h`). MS's documented client-open
+order is `ALE_AUTH_CONNECT` → `OUTBOUND_TRANSPORT` → `OUTBOUND_IPPACKET`.
+So at ALE, the connection that will be carried and the connection that
+will escape are **the same event**: selected app, public destination.
+
+And there is nowhere else to look. `ALE_APP_ID` is a filtering
+condition only at the ALE layers; `FWPS_METADATA_FIELD_PROCESS_ID` is
+callout metadata, never a `FWPM_CONDITION_*`, so **user mode cannot key
+on PID at any layer at all**; `OUTBOUND_TRANSPORT` has neither. Every
+layer that knows *who* runs before the rewrite; every layer that sees
+the rewrite has forgotten who. `ALE_FLOW_ESTABLISHED` has both
+`ALE_APP_ID` and `IP_REMOTE_ADDRESS` and is the tease — MS says a filter
+there "should not return Block or Permit".
+
+**Mullvad and Windscribe confirm it from the other side.** Both redirect
+at `ALE_BIND_REDIRECT` / `ALE_CONNECT_REDIRECT` with a signed kernel
+callout that rewrites the **local** address, which is why their block
+filters can key on local address (Mullvad, `IP_LOCAL_ADDRESS == tunnel
+IP`) or local interface LUID (Windscribe) and never on the remote one.
+Neither ships user-mode-only per-app splitting; both hard-fail the
+feature if their driver is not running. Our loop deliberately leaves the
+source address alone — the module header says why — so we do not even
+have the discriminator they built the design around.
+
+Two variants died with it. **(a) activation-window blocking** is worse
+than redundant: 0.9.28's grace drop already covers *mid-connection*
+packets only, and new connections in that window are exactly what
+`image_for_new_connection` gets right — an ALE block there would refuse
+the flows the loop is handling correctly. **(b) fail-closed on detach**
+is technically expressible (nothing is being carried at that point, so
+nothing is confusable) but it is a reversal of the stated fail-open
+policy, not an engineering question. Left for a product decision.
+
+Worth knowing while that decision is open: `detach_tunnel()` is called
+only when a *child* engine process exits. The WireGuard arm of
+`Engines::status` clears `self.active` without it, so a WireGuard tunnel
+that dies leaves Custom mode still pinning to an interface index that no
+longer exists. Neither behaviour has been measured; both should be,
+together, if (b) is ever picked up.
+
+### The IPv6 half survives, and it is now in
+
+`SelectedAppsIpv6Block` in `engines/ipv6_block.rs`. Sound for exactly
+one reason: **no IPv6 is ever redirected**, so a block has nothing to be
+confused with.
+
+What it closes is the v6 form of the gap the 0928 entry called *not
+fixable by asking harder*: the loop's v6 block still has to attribute a
+packet through the endpoint tables, and in `OnlySelected` an unknown
+owner means *leave alone*. A socket closed microseconds after its send,
+or younger than the 20ms snapshot, therefore leaks v6 in clear text with
+every counter reading healthy. ALE has no lookup to lose — the kernel
+classifies in the calling thread, inside the sending process.
+
+Shape, and each clause is deliberate:
+
+- `ALE_AUTH_CONNECT_V6` only. Outbound only, because the loop is.
+- `OnlySelected` only. In `AllExcept` the loop already answers *block*
+  for an unknown owner, so the hole does not exist, and the WFP shape
+  there would be machine-wide-with-holes.
+- Every filter carries an `ALE_APP_ID` condition, permits included, so
+  the sublayer says nothing about any other program.
+- **`::/64` is permitted and that is load-bearing.** A dual-stack
+  socket's IPv4 classifies at the *V6* layer with an IPv4-mapped address
+  (`::ffff:a.b.c.d`). Without that permit this refuses a selected app's
+  IPv4 — i.e. breaks Custom mode outright, only on machines that have
+  IPv6.
+- Rebuilt on `set_selection`, because the list is editable live and the
+  loop reads it per packet while filters do not. Deselecting an app must
+  give it its IPv6 back without a reconnect.
+
+Reuses 0.9.28's dynamic session, provider and one-transaction install,
+so the crash guarantee is the same one already proven by `taskkill /F`.
+
+`blocked_v6` in the redirect log **will read lower** on a session where
+these installed. That is the refusal happening a layer up, not a
+regression; the counter's doc comment now says so.
+
+### What has NOT been proven
+
+Nothing here has touched a wire. Specifically:
+
+1. The `FwpmFilterAdd0` acceptance test —
+   `wfp_accepts_the_per_app_filter_set_then_it_is_aborted` — **skipped**
+   on the dev box: `FwpmTransactionBegin0` returns `0x5`, needs admin.
+   It has never once run. Run it elevated before believing any of this:
+   `cargo test -p neoconnect-service --bin neoconnect-service ipv6_block`
+   from an Administrator shell, and check the output does not say
+   "skipped".
+2. The wire test, on `Neoxify-Test2` from `pre-verify3`, host-side pcap:
+   select `curl.exe`, Custom mode on, dual-stack guest. (i) a selected
+   app's v6 to a public address produces **zero** clear-text packets and
+   `connect()` fails immediately rather than hanging; (ii) a *second,
+   unselected* copy of the same binary at another path still reaches the
+   same v6 address — the scope control, the same one the 0.9.27 v6 work
+   used; (iii) **the IPv4-mapped case**: the selected app's ordinary
+   IPv4 still exits at the node. That third one is what catches a
+   missing `::/64` and it must not be skipped. (iv) `netsh wfp show
+   filters` shows the `Neoxify Custom-mode IPv6 block` sublayer appear
+   on activation and go on `taskkill /F`. (v) deselect the app while
+   connected and confirm its IPv6 comes back without a reconnect.
+3. Whether the fire-and-forget shape leaks over v6 at all was never
+   measured — it was measured over v4 (13–14 of 15) and inferred here.
+   The fix is right either way, but do not quote a v6 number nobody took.
+
+### What this means for B1
+
+It strengthens the case, and it is now the *only* case for the v4 gap.
+That gap has **no user-mode-reachable fix** — established now rather
+than suspected — and a kernel callout at `ALE_CONNECT_REDIRECT` is what
+buys the two things missing: attribution in the sending process at
+connect time, and the local-address rewrite that makes fail-closed
+filters expressible at all. EV cert plus Partner Center attestation
+signing is the price of the whole category, not of one bug.
+
+**Before paying it, one cheaper thing is worth a spike.** WinDivert's
+`WINDIVERT_LAYER_SOCKET` — already in the driver we ship, already in
+`windivert-sys` 0.9.3 — delivers `SocketBind` / `SocketConnect` /
+`SocketClose` events carrying **`process_id`, local port and protocol**,
+and WinDivert implements that layer on `ALE_RESOURCE_ASSIGNMENT` /
+`ALE_AUTH_CONNECT`. That is the fact the endpoint-table lookup cannot
+get, delivered at socket creation rather than inferred afterwards. A
+second handle feeding a port→PID map that `owner.rs` consults ahead of
+the tables would sidestep the race with no driver of ours. It does not
+give the *rewrite* — only B1 does — but attribution is where every
+measured leak in this feature has actually come from. Not started; no
+evidence yet beyond the layer table and the struct definition. The
+ordering question a spike has to answer first: whether a `SocketBind`
+event is reliably queued before the datagram reaches the NETWORK-layer
+handle, since the two handles have independent queues.
+
+---
+
+## 2026-08-24 — 0.9.31 integrated; the repair's WFP sweep was broken, and the rig only half-answered
+
+**Status:** **NOT released.** `claude/integration-0931` is built, merged
+from all three branches, green by every test this repo runs, and carries
+two fixes found by hand and by measurement. Four of the eight rig
+experiments came back with an answer; the other four did not run.
+**Touches:** `apps/desktop-windows/**`, this file.
+
+### What is in the branch
+
+`claude/integration-0931` off `5c60728`, three `--no-ff` merges in
+order: `claude/split-tunnel-latency`, `claude/repair-my-network`,
+`claude/selected-apps-ipv6`. Version bumped to 0.9.31 in the four files
+that carry it. `cargo check --workspace --all-targets` clean, 212 Rust
+tests, `pnpm turbo run lint typecheck build test --force` 16/16 with
+0 cached. (`@neoxify/backend#typecheck` fails in a fresh worktree until
+`pnpm --filter @neoxify/backend prisma:generate` has been run -- CI does
+it as its own step and it is easy to mistake for a real break.)
+
+Git reported conflicts only in this file, plus three in
+`split_tunnel/mod.rs` that were additive on both sides (the watchdog
+from 0.9.30's orphaned-redirect work alongside `ipv6_apps`, and a
+`redirect::start` call whose arity the latency branch had changed).
+
+**The one that merged cleanly and was wrong** is why the audit was done
+by hand. `claude/repair-my-network` made
+`ipv6_block::{PROVIDER_KEY, SUBLAYER_KEY}` `pub(super)` so the repair
+could sweep by them. `claude/selected-apps-ipv6`, on a different branch,
+added a **second** sublayer -- `SPLIT_SUBLAYER_KEY`, for the Custom-mode
+per-app filters -- under the **same** provider. Neither branch could see
+the other. Merged, the repair deleted one sublayer and then tried to
+deregister the provider, which refuses while anything still references
+it: a stuck Custom-mode sublayer would have pinned the provider on every
+future repair and never been removed itself. Fixed by sweeping both.
+
+### The rig, and what it cost
+
+`Neoxify-Test2`, restored from `clean-base`. Three protocols would not
+connect on this guest and this is **not** a finding about the product:
+OpenVPN failed with "tapctl returned nothing", IKEv2 and Xray/REALITY
+both with "powershell did not finish within 15s" -- the service's own
+internal timeouts firing on a CPU-starved guest. **WireGuard connected
+and its exit IP was the node** (38.60.249.229, DE), so every experiment
+below ran over a tunnel proven to carry a selected app's traffic before
+anything was measured.
+
+The guest then wedged repeatedly: two heartbeat flatlines, one guest
+bugcheck (`0x133`, DPC_WATCHDOG_VIOLATION), and long spells where
+`VBoxManage guestcontrol` answered every request with "current status
+is: starting" while the desktop painted normally.
+
+Three things learned about the rig, each of which cost an hour:
+
+- **The guest needs 10-15 minutes undisturbed after boot before
+  `guestcontrol` works**, and **polling it during that window jams the
+  guest-control service for good.** Every readiness loop made it worse.
+  Boot, wait, probe once.
+- **`VBoxManage startvm` can report success and leave the VM powered
+  off.** Killing `VBoxHeadless`, `VirtualBoxVM` and `VBoxSVC` clears it;
+  nothing else did.
+- **The elevated runner dies on its own**, silently, leaving nothing in
+  `runner2-log.txt`. It does not need the Win+R/UAC dance to come back:
+  it registers itself as a logon task at RunLevel Highest, and
+  *starting* an already-registered task is permitted from the filtered
+  token even though *registering* one is not (`Register-ScheduledTask`
+  answers "Access is denied"). `kick.py` on the share does exactly that.
+
+**Defender did flag the unsigned installer, once.** Six installs of the
+same bytes produced nothing; the seventh logged threat `2147731849`
+against `C:\Users\Public\nx31-setup.exe`. The install still finished --
+exit 0, the app reports 0.9.31 -- so what it caught was the copy on
+disk, after the fact. No exclusion was added. It is an ML detection and
+it is not deterministic, which is worth knowing before anyone concludes
+from one clean install that customers will not see it.
+
+### What the rig proved
+
+**The UDP failure counters move, and only when a send really fails.**
+Zero across every interval of two full Custom-mode sessions. Then the
+WireGuard tunnel service was stopped underneath a live 20 Hz flow and
+they went to 45 and then 55, with a named line beside them:
+`relay could not send a datagram to 1.1.1.1:53: The requested address is
+not valid in its context. (os error 10049)`. `udp_reply_failed` and
+`udp_unbound` stayed zero, which is the right answer -- nothing
+exercised those two. Evidence: `L2-v31-split-final.log`,
+`L2-v31b-split-final.log`.
+
+**No head-of-line stall across a reconnect on 0.9.31.** One 20 Hz UDP
+flow, tunnel torn down and brought back 15s in, eight fresh flows
+started into the tentative-address window. 1198 of 1200 datagrams
+answered; largest reply gap 1044 ms, with a 1090 ms gap in the *send*
+column at the same sequence number -- this guest descheduling the probe,
+not the relay stalling. **The undisturbed baseline run was worse** (981
+ms largest reply gap, median RTT 163 ms against 37 ms), which is the
+honest reading: on four vCPUs under a busy host the noise floor is about
+a second, so this instrument cannot resolve the 100 ms threshold. It can
+resolve the 5.83 s the unit test measured, and nothing of that size is
+there. Evidence: `L1-v31-steady.txt`, `L1-v31base-steady.txt`,
+`L1-v31.pcapng`.
+
+**Small writes leave the relay one segment at a time.** Forty 11-byte
+writes, the probe's own Nagle off -- with it on the writes coalesce in
+the *probe's* buffer and the relay never makes a small write at all,
+which is what the first two attempts measured and why they proved
+nothing. On the relay's upstream leg, captured with `pktmon` before
+WireGuard encapsulates it: 32 distinct segments each carrying an 11-byte
+payload, median 0.3 ms apart, max 34.8 ms -- tracking the writes rather
+than the ~180 ms round trip a Nagled socket would impose. Evidence:
+`L2-v31c-tcp.txt`, `L2-v31c.pcapng`.
+
+**A selected app's IPv6 does not reach the wire, and its IPv4 still
+exits at the node.** Custom mode on, `OnlySelected`, one selected app.
+Three readings off one capture, using a different destination address
+per phase so they cannot be confused:
+
+| what | destination | packets on the wire |
+|---|---|---|
+| control -- selected app, Custom mode **off** | `2606:4700:4700::1001` / `2001:4860:4860::8844` | **20 / 4** |
+| the claim -- selected app, Custom mode **on** | `2606:4700:4700::1111` / `2001:4860:4860::8888` | **0 / 0** |
+| unselected app (second copy, different path) | `2620:fe::fe` / `2620:fe::9` | **25 / 0** |
+
+The control is the half that could have failed and did not: the same
+binary, doing the same thing a minute earlier with the block off, put
+its IPv6 on the wire and got answers. The service's own log agrees --
+`installed: 6 filters for 1 app(s) in a dynamic session, provider
+Neoxify, sublayer Neoxify Custom-mode IPv6 block` -- and the redirect
+loop's `blocked_v6` moved from 0 to 5, which is the UDP half the ALE
+filters do not catch being stopped a layer down.
+
+**And the check that catches a missing `::/64` permit passed**: the
+selected app's own IPv4 exit, asked by that executable rather than by
+curl, was `{"ip":"38.60.249.229","country":"DE"}` both while the v6 was
+being refused and again after it. Evidence: `V1-v31.txt`,
+`V1-v31b.pcap`, `V1-v31-ipv6-block-custom.log`,
+`V1-v31-split-tunnel.log`.
+
+**One thing in that table is not explained.** The unselected app's TCP
+v6 went out untouched, 25 packets, which is the answer that matters --
+but its UDP destination shows zero, and the selected app's control UDP
+in the same run shows four. Either something stopped an unselected
+app's UDP v6, which would be a real bug, or that particular Quad9
+address behaved differently on this guest. `blocked_v6` reaching exactly
+5 accounts for the *selected* app's five datagrams and leaves none for
+the unselected one, which argues for the second reading -- but it is an
+argument, not a measurement. One targeted run settles it and it has not
+been done.
+
+### What the rig disproved
+
+**The repair's WFP sweep does not work, and never has.** This is the
+step the branch's own entry flagged as never having executed once. On a
+machine carrying eight of our filters -- `netsh wfp show filters` listed
+them in the same breath -- the repair reported
+
+    [????] Windows Filtering Platform filters -- the filtering platform
+           would not list filters under our provider
+
+and exited **1**, not 0. Every other step passed against residue built
+by connecting and then killing the service: the tunnel torn down, the
+NRPT rule removed **from the GPO registry path the cmdlets do not
+report**, the firewall rule gone, the stranded WireGuard tunnel service
+gone, the DNS cache flushed. The foreign `xray.exe` outside the install
+directory **survived** -- and that only became a control on the second
+attempt, because the first pointed it at a config that does not exist,
+so it exited within seconds and "the repair killed it" and "it was never
+going to survive" looked identical.
+
+Three readings of the source found nothing, because the error code was
+being thrown away. Adding it to the message answered it in one run:
+`FwpmFilterCreateEnumHandle0` returns **`0x80320004`,
+FWP_E_LAYER_NOT_FOUND**. The enumeration passed a template carrying our
+provider key and a zeroed `layerKey`, on the assumption that a NULL GUID
+means "every layer"; `FWP_FILTER_ENUM_FULLY_CONTAINED` needs a real
+layer to be contained *in*. Fixed by enumerating every filter and
+comparing the provider here, which is also the more honest sweep: the
+objects this step exists to find were installed by a *previous* build,
+at whatever layers that build used.
+
+**That fix is still not verified.** Two attempts: the first bugchecked
+the guest, the second got a tunnel up whose exit IP was the machine's
+own address rather than the node, aborted on that assertion as it should
+have, and then the guest wedged. The repair itself never ran against the
+fixed binary.
+
+**Flow affinity is not demonstrated.** A single 300-datagram UDP flow,
+sent under twelve concurrent flows, arrives at the relay's upstream leg
+with 11-15 out-of-order steps per run, reproducibly, across three runs.
+Every datagram was captured exactly twice and the count is identical
+whether ordered by first or last sighting, so it is not a capture
+artefact. What it does not establish is the cause: that leg is the
+relay's own single-threaded send loop, so either the dispatcher handed
+the packets over out of order -- which is what affinity was meant to
+stop -- or Windows reordered them below the socket. **The 0.9.30
+control, the only thing that separates those two, did not run.**
+
+### What did not run at all
+
+- The **0.9.30 control** for head-of-line, TCP_NODELAY and flow
+  affinity. Without it, three of the four latency claims are measured
+  but not attributed.
+- **Re-verification of the WFP fix**, twice attempted.
+- The one unexplained cell in the IPv6 table above.
+
+Everything needed is on the share and scripted: `V1.ps1`, `R1.ps1`
+(which copies an instrumented service over the installed one), `L1.ps1`,
+`L2.ps1`, the probe `nxlat.cs` with modes `udpsteady udpburst tcpsmall
+udporder udpload v6 get4`, `d31.py`/`seq31.py` to drive a phase with a
+NIC capture, `kick.py` to bring the runner back, and `latstat.py` /
+`pcapng31.py` to read the results. Both installers are staged as
+`nx31-setup.exe` and `nx30-setup.exe`.
+
+### Why 0.9.31 was not cut
+
+Two named pass criteria failed on the code as merged -- the repair's
+exit code and its WFP sweep -- and the fix for them has not run on
+hardware. Three of the four latency claims have no control, and one of
+those three (flow affinity) has a measurement pointing the wrong way
+that only the control can attribute. A release now would be a release on
+reasoning, and this product's whole history is findings that only
+appeared under execution.
+
+What is ready to go the moment a rig will stay up: the branch, the
+scripts, and one clean pass of `R1` plus `L1`/`L2` against 0.9.30.
+
+---
+
+## 2026-08-24 (later) — the WFP sweep's root cause named; the elevated run still did not happen
+
+**Status:** `claude/repair-wfp-sweep-0931`, off `claude/integration-0931`
+at `71c672d`, pushed. **0.9.31 still not cut.** **Touches:**
+`apps/desktop-windows/service/src/engines/repair.rs`, this file.
+
+### The zeroed `layerKey`, stated properly
+
+The previous entry recorded *that* a zeroed `layerKey` makes
+`FwpmFilterCreateEnumHandle0` answer `FWP_E_LAYER_NOT_FOUND`, and the fix
+that followed is right. What it did not record is **why the mistake was
+available to make**, which is the part that will otherwise be made again.
+
+It is not that a field was forgotten. In `FWPM_FILTER_ENUM_TEMPLATE0` two
+fields sit one line apart, look alike, and are not alike:
+
+    providerKey: *mut GUID   <- a pointer. NULL is "any provider".
+    layerKey:    GUID        <- by value. There is no "absent".
+
+A nullable pointer can encode "unspecified"; a by-value GUID cannot. The
+all-zero `layerKey` that `mem::zeroed()` leaves is therefore not a
+wildcard but a *specific* GUID naming no layer on the machine — hence
+LAYER_NOT_FOUND rather than a match-everything. The original code
+generalised the pointer field's rule to the value field directly below
+it, and nothing about that is visible at the call site.
+
+This is the same shape as the RAS struct traps already in this file: the
+type checks, the size is right, the meaning is wrong. **Read the binding,
+not the field name.** Checked against `windows-sys` 0.59, which is what
+the service builds with.
+
+### What is proven, and what is not
+
+**Proven, off-machine only:** `cargo check --workspace --all-targets`
+clean and `cargo test --workspace` at **213 passed / 0 failed** (212
+before; the new one is mine). The provider comparison is now a named
+`guid_eq` with a test that was **checked by mutation** — dropping `data4`
+from `guid_eq` makes it fail. A test that has never been seen to fail is
+not yet a test.
+
+**Not proven, and this is the whole point:** *nothing here has run
+elevated on Windows.* The sweep has still never been observed to
+enumerate a single filter. A green build is not evidence a WFP
+enumeration works, and this file already says exit codes and "no error
+was thrown" have produced false passes here.
+
+### The rig, again, and what it cost
+
+`Neoxify-Test2` was booted, wedged, power-cycled, and wedged again. It is
+now powered off. In order:
+
+- **I polled `guestcontrol` during the boot window and jammed it
+  permanently** — the trap the previous entry documents in so many words.
+  Every later call answered `Error starting guest session (current status
+  is: starting)`. **`kick.py` cannot recover this**, because it *needs*
+  guest control to start the task. Only a power-cycle clears it.
+- After the power-cycle, **keyboard injection worked** — a Win key press
+  opened Start, `launch.py` opened the Run box and typed `boot2.ps1`
+  correctly (screenshot `_typed.png`). Then, mid-UAC,
+  `keyboardputscancode` began answering **`Failed to send a scancode`**
+  and the guest stopped taking input at all.
+- **`bringup.py` cannot work on a headless guest.** Its `wait_desktop`
+  requires `size == (1920, 955)`, which is what the guest reports only
+  when the VM runs with a GUI window; booted `--type headless` it sits at
+  1024x768 for ever and the function times out on a desktop that is
+  plainly up. `VBoxManage controlvm <vm> setvideomodehint 1920 955 32`
+  does eventually fix the size, but not until the Guest Additions
+  graphics service is up, so it is not a boot-time fix. Either boot the
+  VM `--type gui` or use a readiness test that is not resolution-bound.
+- **A visible elevated PowerShell window is not evidence the channel is
+  up.** On the first boot the logon task's window appeared and
+  `runner2-log.txt` was never rewritten: the task started before the
+  `\\VBOXSVR` redirector was usable, and `runner2.ps1` swallows that and
+  then heartbeats into nothing. **Only a fresh `heartbeat2.txt` counts.**
+
+### A fresh worktree cannot build the service
+
+Worth its own note, because it looks like a code break and is not.
+`src-tauri/resources/` holds gitignored fetched binaries. Without them:
+
+- `cargo build` fails at `LNK1181: cannot open input file 'WinDivert.lib'`
+- `cargo check --workspace --all-targets` fails at
+  `resource path 'resources\xray.exe' doesn't exist`
+
+Copy the directory from a working checkout or run
+`scripts/fetch-binaries.ps1` first. After supplying `WinDivert.lib` you
+must also **delete `target/debug/build/windivert-sys-*`**, or the cached
+build script keeps its empty `OUT_DIR` and the link fails again with the
+same message. Note `cargo check` alone does not link, which is why the
+previous entry's "clean" and this failure are both true statements.
+
+### How to finish the verification — everything is staged
+
+On the share, ready to run: **`wfpprobe.exe`** (and `wfpprobe.rs`, its
+source — a rig tool, deliberately not committed, because `residue` mode
+installs *persistent* IPv6 blocks and that is not a thing to ship in a
+public repo), **`W1.ps1`**, and **`nxsvc-wfpfix.exe`**, which is the
+service built from this branch.
+
+`W1.ps1` runs seven phases into `W1-<tag>.txt` and needs an elevated
+shell and nothing else — **no tunnel, no connection, no node**. That is
+the point: the WFP sweep can be tested in isolation.
+
+    0  the three enumeration forms on a clean machine
+    1  install PERSISTENT provider/sublayer/filters under our GUIDs
+    2  the same three forms, with our objects present
+    3  netsh cross-check (independent of our code)
+    4  neoconnect-service.exe repair -- stdout and EXIT CODE
+    5  the three forms again -- "ours" must be 0
+    6  netsh cross-check again
+
+The three forms in phase 0 are the experiment that settles the diagnosis,
+and they are built as a **single-variable control**:
+
+    A  providerKey + ZEROED layerKey   <- what shipped. Expect 0x80320004.
+    C  providerKey + REAL  layerKey    <- byte-for-byte A, one field changed.
+    B  no template at all              <- the fix.
+
+A and C differ **only** in `layerKey`. If A fails and C succeeds, the
+zeroed layer key is the cause and nothing else is. If A *succeeds*, the
+diagnosis in this file is wrong and the fix needs revisiting.
+
+Pass criteria for phases 4 and 5: exit code **0**, the `wfp` step
+reporting `removed N leftover filter(s)` rather than `Unknown`, and phase
+5 reporting `ours=0`.
+
+To drive it once a runner is alive: `echo "W1 a" > job2.txt` on the
+share, then read `W1-a.txt`. If the guest is fresh, bring the runner up
+with the keyboard path (`bringup.start_runner()`), **not** `kick.py`, and
+**do not touch `guestcontrol` until the desktop has been up for a while**.
+Safety valve if a repair ever fails mid-run: `wfpprobe.exe clean` removes
+the residue directly.
+
+### The 0.9.30 latency control: still has not run
+
+Checked rather than assumed. The share has `L1-v30.pcap` at **41 KB** and
+`L1-v30.txt` at **162 bytes**, and the whole of the latter is a start
+line, `client: 0.9.30`, the route, and `disconnect: {"status":"ok"}`.
+There is no `L1-v30-steady.txt` and no v30 pcapng — against 52 MB and
+52 KB for the 0.9.31 run. The v30 install and connect happened; **no
+measurement did.** So the previous entry's position stands, unchanged:
+head-of-line, TCP_NODELAY and flow affinity are measured on 0.9.31 and
+**unattributed**, and flow affinity still has a measurement pointing the
+wrong way that only the control can explain.
+
+### What still blocks 0.9.31
+
+1. The repair's WFP sweep has **still never enumerated on hardware**.
+2. The 0.9.30 latency control.
+3. The one unexplained cell in the IPv6 table (the unselected app's UDP
+   v6 showing zero).
+
+Item 1 is now a fifteen-minute test that needs no tunnel, provided a rig
+will stay up long enough to run it.
+
+## 2026-08-24 — The integration branch, and the one semantic conflict in it
+
+**Status:** `claude/integration-all` now carries four of the five queued
+branches. Compiles and tests green; **nothing in it has run on a rig.**
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/redirect.rs`,
+`apps/desktop-windows/service/src/engines/ipv6_block.rs`
+
+Merged in order: `fix-shared-journal-conflict`,
+`split-tunnel-direct-cache-destination`, `fix-udp-fire-and-forget-leak`
+(all clean), then `repair-wfp-sweep-0931` (five conflicts in
+`redirect.rs`, one in this file). `claude/gaming-mode` re-checked clean
+against the result and is **not** merged — it is the owner's to take.
+
+### Four of the five conflicts were counters, and that is the trap
+
+The leak fix and 0931 each added their own fields to `Stats`. Both sets
+survive — `refused_unattributed` from the leak fix, `udp_send_failed` /
+`udp_reply_failed` / `udp_unbound` from 0931 — in the struct, the
+`format!` string, the `.load()` list and the test initialiser. The one
+that can go wrong silently is `summary()`: git offers two whole
+`format!` strings and taking either wins the merge while dropping three
+counters or one, and the placeholder count and the argument order have
+to be reconciled by hand. Thirteen placeholders, thirteen arguments,
+`refused_unattributed` before the three `udp_*`. The 0931 test
+`the_relays_own_udp_losses_reach_the_log` only checks its own three, so
+it would not have caught the other direction.
+
+### The fifth was a real decision: the leak fix's arm wins
+
+Both branches rewrote the same `None =>` arm of `decide`. 0931 kept
+`selection.tunnel_when_owner_unknown()` and hung a long comment on it —
+*"# The measured gap this arm cannot close"* — while the leak fix
+**replaced** the arm with `matches!(unattributed, Some(Carry))`. Taking
+0931's side would have reverted the leak fix's whole point while leaving
+its tests, its counter and its module header in place: a merge that
+compiles, passes nothing that notices, and puts the measured 13-of-15
+leak back. So the leak fix's arm is what is in the tree.
+
+**The 0931 comment was not deleted, because most of it is still true.**
+What was stale is only its framing — it described the gap as open and
+pointed at a mechanism as unbuilt. What was *not* stale, and what a rig
+day paid for, was the structural reasoning about why the B2 filter
+cannot be that mechanism, and that has been folded into `redirect.rs`'s
+module header beside the section the leak fix already wrote there:
+
+* the documented layer order (`ALE_AUTH_CONNECT` -> `OUTBOUND_TRANSPORT`
+  -> `OUTBOUND_IPPACKET`, WinDivert's callout at the last of them);
+* that there is no other layer to try — `ALE_APP_ID` is a condition only
+  at the ALE layers and process id is not a filtering condition
+  anywhere;
+* that Mullvad and Windscribe get out of it with a **signed kernel
+  callout** at `ALE_BIND_REDIRECT` / `ALE_CONNECT_REDIRECT` rewriting the
+  *local* address, which this loop cannot copy because it leaves the
+  source address alone by design.
+
+### A stale claim the textual merge would have left standing
+
+`SelectedAppsIpv6Block`'s doc comment (0931) said an unattributable v6
+packet is "**left alone**, which for IPv6 means it goes out in clear
+text". After the leak fix that is no longer true for the case it cited:
+`verdict_for_unattributed` refuses unattributable UDP to public
+destinations on both families. Git merged those two files without a
+conflict, and the wrong sentence would simply have survived. Rewritten
+to say what the type is still for once the loop refuses — TCP (a v6 SYN
+that escapes is answered, and the connection establishes in the clear),
+and acting at `connect()` before a packet exists at all. The `mod.rs`
+note about `AllExcept` was checked and is still correct: that mode still
+returns `Carry`, which for v6 still means block.
+
+### What is proven and what is not
+
+`cargo check --workspace --all-targets` clean. `cargo test --workspace`
+226 passed, 0 failed, 4 ignored — 184 in the service crate. No test from
+either parent branch is missing: the merged tree's test-name set is a
+strict superset of the union of both.
+
+**That proves the merge composes, and nothing else.** Neither underlying
+fix has run on a machine. The UDP refusal has never been read against a
+packet capture, its IPv6 half was reasoned rather than measured on the
+branch it came from, and 0931's WFP sweep still has never enumerated on
+hardware. The rig procedures for both are already written up above and
+are unchanged by this merge.
+
+**Open question for the owner, stated rather than decided:** the leak
+fix's refusal and 0931's `SelectedAppsIpv6Block` now both act on a
+selected app's unattributable IPv6, from opposite ends. Nothing here
+double-counts — the ALE block prevents the packet, so the loop never
+sees it — but the interaction has only been reasoned about, and the one
+unexplained cell in the 0931 IPv6 table (an unselected app's UDP v6
+showing zero) sits exactly where the two overlap. Whichever rig run
+settles that table should be read with both in mind.
+
+**Build note for the next worktree:** a fresh worktree cannot link the
+service — `src-tauri/resources/` is gitignored and its absence gives
+`LNK1181: cannot open input file 'WinDivert.lib'`, and the tauri build
+script fails earlier still on `libpkcs11-helper-1.dll`. `cargo check`
+does not link, so it passes regardless and proves less than it looks
+like. Copy `resources/` in from a tree that has it, then delete
+`target/debug/build/windivert-sys-*` so the cached build script re-runs.
