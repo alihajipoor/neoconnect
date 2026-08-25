@@ -9979,3 +9979,114 @@ nothing in them is integration-created, and installing the whole
 monorepo to prove that was not worth the time. CI will say. Nothing in
 Gaming Mode has run on a rig either, and the entry above it already says
 what is missing at the node end.
+
+---
+
+## 2026-08-25 — Gaming mode does something now, and its copy stopped lying
+
+**Status:** landed on `claude/gaming-mode-usable`, not merged, nothing
+released. **No game has been tested and none of this has been on the
+rig.**
+**Touches:** `apps/backend/src/modules/gaming/**`,
+`apps/backend/prisma/game-profiles.ts`, `apps/desktop-windows/src/**`
+
+### The serializer bug was real, and worse than "a field is missing"
+
+`GameProfile` has carried `processNames` and `destinationCidrs` since the
+feature shipped. The panel writes them. `profileForCustomer` selected
+neither, so the curated catalogue reached the desktop app with the only
+part of it that works without a node stripped out.
+
+Nothing could have caught it: a missing key in a Prisma `select` is not a
+type error, and `GamingProfilePayload` did not name the fields either, so
+the two omissions agreed with each other. Naming them on the payload type
+is what makes it structural — dropping `processNames: true` now fails
+`tsc` in three places. Worth copying wherever else a hand-written
+projection feeds a hand-written payload type.
+
+`prefixComplete` travels too. It is not decoration: the schema's rule is
+that a partial prefix list is refused rather than approximated, and a
+client cannot honour a rule whose input never arrives.
+
+### The research changed what this feature is, and the copy hadn't caught up
+
+Gaming mode was designed as a latency product. Measurement killed that
+(72.0 ms Tehran→Blizzard EU direct, 72.8 ms through our best node), and
+the goal is now access. The shipped strings still sold the old thing —
+"Your computer's IP address does not change in this mode", "the game
+itself connects directly, on the shortest path".
+
+The first one was wrong on its own terms, latency product or not. The
+mechanism *is* that redirected services are reached from the node, so
+those services do see a different address. It now says which traffic
+changes address and which does not.
+
+Added, because the product had neither: a line saying outright that ping
+is not measured and not promised, and the account-safety warning. The
+risk that costs people accounts is not detection — it is disclosure. A
+player lost seven years of Riot progress after describing where he was in
+a support ticket.
+
+### Riot: the seven-executable list in the research doc is the wrong seven
+
+`docs/research/gaming-providers.md` sources it to one Reddit thread. It
+drops `vgc.exe` and `vgm.exe` — Vanguard's two network-facing user-mode
+binaries — in favour of two crash reporters. If the premise is that
+Vanguard must share the game's network path, Vanguard is the one thing
+that cannot be omitted.
+
+The seeded rows come from Riot's own *Configure your Firewall* article
+instead. That article lists exactly seven paths for League, which is
+almost certainly where the number in circulation came from — and it is a
+firewall exception list, not a VPN remedy.
+
+**Do not let anyone tell a customer this fixes error 68.** Riot's own VAN
+68 page never mentions VPNs, and Riot's stated position is to turn them
+off. It is in the row's `notes` for that reason.
+
+**The lead worth chasing:** Riot's login, entitlements, client-config and
+the whole VALORANT control plane resolve into **Cloudflare**, not Riot's
+AS6507. A community report of a Riot login still failing *after* a
+successful split tunnel is exactly what that predicts — the split tunnel
+worked and Cloudflare refused the datacenter address. Measure that before
+anyone sells a Riot profile. If it holds, the executable list is
+necessary and not sufficient, and the missing half is exit-IP reputation,
+not routing.
+
+### Gotcha: filenames cannot be pushed to the split tunnel
+
+The catalogue carries filenames; `SplitTunnelConfig::validate` requires
+an absolute path ending in `.exe` and **rejects the whole
+`SetSplitTunnel` request** on one bad entry. Pushing a raw catalogue
+entry would have wiped the customer's existing selection. `game-apps.ts`
+mirrors that validation client-side; if the two ever diverge, that is the
+failure mode.
+
+Names are resolved against **running processes**, which keeps the
+full-path match (ExitLag matches on filename alone — it is why a DPS
+meter proxies itself by renaming its binary to `LOSTARK.exe`). The cost:
+a program that is not running cannot be found, and Vanguard in particular
+runs as a windowless service that `vpn_list_running_apps` filters out. So
+the card reports "added 3 of 6" and names the misses rather than adding a
+fraction quietly.
+
+### Still not done
+
+- `destinationCidrs` reaches the client and **has no consumer**. The
+  split tunnel matches on process only; there is no destination-based
+  routing anywhere in it. Building one means new fields in `ipc/` and new
+  match arms in `service/src/split_tunnel/`.
+- No Riot title has been launched behind this. Not on the rig, not
+  anywhere.
+- Gaming mode's DNS half is still inert — no node serves a resolver, so
+  `noResolver` is what every customer gets. The UI now says so plainly
+  instead of implying the switch would do something.
+
+### Rig gotcha for whoever runs this next
+
+A fresh worktree cannot `cargo test` — `src-tauri/resources/*.sys|dll|lib`
+are gitignored, and `windivert-sys` resolves `WinDivert.lib` at **build**
+time via `WINDIVERT_PATH`. Copy the resources in from another worktree
+*before* the first cargo invocation: the build script's output is cached,
+so supplying them afterwards needs `cargo clean -p windivert-sys` or the
+link keeps failing with LNK1181.
