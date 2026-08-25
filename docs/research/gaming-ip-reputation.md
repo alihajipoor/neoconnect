@@ -5,6 +5,8 @@ free, public reputation feeds. This is not a literature review; the raw
 per-IP results are in the tables, and the exact commands that produced them
 are in "Reproducing this" at the end.
 
+Neoxify's own addresses in this file are redacted: `{germany-1}`, `{finland1}`, `{panel}` and the like stand in for real node addresses, including where they appear inside a PTR name or a reverse-DNS query. Third-party addresses -- Mudfish, ExitLag, NoPing, Mullvad, NordVPN, Voxility, Vultr -- are kept exactly as measured, because they are the evidence. Each placeholder is stable, so same-provider comparisons still read: `{germany-1}` and Mudfish's `38.60.202.189` are still visibly two different addresses at one provider with opposite verdicts. Node addresses are never committed -- see `docs/node-address-hygiene.md`.
+
 Companion to `docs/research/gaming-providers.md` (branch
 `claude/gaming-providers-research`). **It corrects that document's headline
 conclusion on this subject -- see "Correction to the record" below.**
@@ -129,13 +131,13 @@ proxycheck = `proxy / type / risk`; **`Scam. VPN`** = Scamalytics
 
 | IP | Who | ASN / owner | dc | **vpn** | abuser | hosting | **proxy** | proxycheck | Scam. score | **Scam. VPN** | X4B VPN | X4B DC | rDNS |
 |---|---|---|:--:|:--:|:--:|:--:|:--:|---|--:|:--:|:--:|:--:|---|
-| `38.60.249.229` | Neoxify germany-1 | AS154177 LIGHT NODE LIMITED | yes | no | yes | yes | no | no / Business / 0 | 0 | no | no | no | — |
-| `130.94.0.27` | Neoxify turkey-1 | AS154177 LIGHT NODE LIMITED | yes | no | yes | no | no | no / Business / 0 | 20 | no | no | no | — |
-| `104.105.205.233` | Neoxify france-1 | AS63949 Akamai Technologies, Inc. | yes | no | no | yes | no | yes / VPN / 66 | 26 | no | no | yes | 104-105-205-233.ip.linodeusercontent.com |
-| `204.168.161.100` | Neoxify finland1 | AS24940 Hetzner Online GmbH | yes | no | no | yes | no | yes / VPN / 66 | 6 | no | no | yes | static.100.161.168.204.clients.your-server.de |
-| `172.236.143.200` | Neoxify singapore-1 | AS63949 Akamai Technologies, Inc. | yes | no | no | yes | no | yes / VPN / 66 | 26 | no | no | yes | 172-236-143-200.ip.linodeusercontent.com |
-| `185.222.28.186` | Neoxify ir1 relay entry | AS210814 VUNIFY LTD | yes | no | no | no | no | no / Business / 0 | 0 | no | no | no | — |
-| `167.233.65.166` | Neoxify panel/API (never a VPN endpoint) | AS24940 Hetzner Online GmbH | yes | no | no | yes | no | yes / VPN / 66 | 6 | no | no | yes | static.166.65.233.167.clients.your-server.de |
+| `{germany-1}` | Neoxify germany-1 | AS154177 LIGHT NODE LIMITED | yes | no | yes | yes | no | no / Business / 0 | 0 | no | no | no | — |
+| `{turkey-1}` | Neoxify turkey-1 | AS154177 LIGHT NODE LIMITED | yes | no | yes | no | no | no / Business / 0 | 20 | no | no | no | — |
+| `{france-1}` | Neoxify france-1 | AS63949 Akamai Technologies, Inc. | yes | no | no | yes | no | yes / VPN / 66 | 26 | no | no | yes | {france-1}.ip.linodeusercontent.com |
+| `{finland1}` | Neoxify finland1 | AS24940 Hetzner Online GmbH | yes | no | no | yes | no | yes / VPN / 66 | 6 | no | no | yes | static.{finland1}.clients.your-server.de |
+| `{singapore-1}` | Neoxify singapore-1 | AS63949 Akamai Technologies, Inc. | yes | no | no | yes | no | yes / VPN / 66 | 26 | no | no | yes | {singapore-1}.ip.linodeusercontent.com |
+| `{ir1}` | Neoxify ir1 relay entry | AS210814 VUNIFY LTD | yes | no | no | no | no | no / Business / 0 | 0 | no | no | no | — |
+| `{panel}` | Neoxify panel/API (never a VPN endpoint) | AS24940 Hetzner Online GmbH | yes | no | no | yes | no | yes / VPN / 66 | 6 | no | no | yes | static.{panel}.clients.your-server.de |
 
 The last row is the control that matters most: the panel/API host is a
 Hetzner VPS that has **never** carried a tunnel -- and it measures
@@ -212,11 +214,11 @@ announces what it is in DNS.
 | `193.32.127.117` | Mullvad relay ch-zrh (31173 Services) | AS39351 31173 Services AB | yes | **yes** | no | yes | **yes** | yes / VPN / 73 | 17 | **yes** | yes | yes | — |
 | `146.70.116.130` | Mullvad relay at-vie (M247) | AS9009 M247 Europe SRL | yes | **yes** | no | yes | **yes** | yes / VPN / 73 | 11 | **yes** | yes | yes | — |
 | `187.15.96.88` | NordVPN us13587 | AS147049 PacketHub S.A. | yes | **yes** | no | no | **yes** | yes / VPN / 73 | 40 | **yes** | no | yes | — |
-| `50.34.35.x` | Residential consumer line (US, beta tester) | AS20055 Wholesail networks LLC | no | no | no | no | no | no / Residential / 0 | 10 | no | no | no | — |
+| `{tester-home}` | Residential consumer line (US, beta tester) | AS20055 Wholesail networks LLC | no | no | no | no | no | no / Residential / 0 | 10 | no | no | no | — |
 | `5.254.100.1` | Voxility space, not ExitLag | AS3223 Voxility LLP | yes | no | no | yes | no | yes / VPN / 66 | 0 | no | no | yes | buc-ir1-28sw.voxility.net |
-| `38.60.249.1` | LightNode same /24 as germany-1 | AS154177 LIGHT NODE LIMITED | yes | no | yes | yes | no | no / Business / 0 | 0 | no | no | no | — |
-| `172.236.143.1` | Linode/Akamai same /24 as singapore-1 | AS63949 Akamai Technologies, Inc. | yes | no | no | yes | no | yes / VPN / 66 | 26 | no | no | yes | — |
-| `204.168.161.1` | Hetzner same /24 as finland1 | AS24940 Hetzner Online GmbH | yes | no | no | yes | no | yes / VPN / 66 | 6 | no | no | yes | static.1.161.168.204.clients.your-server.de |
+| `{germany-1-neighbour}` | LightNode same /24 as germany-1 | AS154177 LIGHT NODE LIMITED | yes | no | yes | yes | no | no / Business / 0 | 0 | no | no | no | — |
+| `{singapore-1-neighbour}` | Linode/Akamai same /24 as singapore-1 | AS63949 Akamai Technologies, Inc. | yes | no | no | yes | no | yes / VPN / 66 | 26 | no | no | yes | — |
+| `{finland1-neighbour}` | Hetzner same /24 as finland1 | AS24940 Hetzner Online GmbH | yes | no | no | yes | no | yes / VPN / 66 | 6 | no | no | yes | static.{finland1-neighbour}.clients.your-server.de |
 
 ---
 
@@ -228,7 +230,7 @@ publishes its exit list and one who does not, and compare.
 
 | | Published operator | Unpublished operator | Same infrastructure? |
 |---|---|---|---|
-| **LightNode / Kaopu Cloud** | Mudfish `38.60.202.189` -- `proxy: yes`, Scamalytics VPN **yes** | Neoxify germany-1 `38.60.249.229` -- `proxy: no`, Scamalytics VPN **no** | Yes. Both `38.60.x`, both Kaopu Cloud HK Limited, LightNode's operating org |
+| **LightNode / Kaopu Cloud** | Mudfish `38.60.202.189` -- `proxy: yes`, Scamalytics VPN **yes** | Neoxify germany-1 `{germany-1}` -- `proxy: no`, Scamalytics VPN **no** | Yes. Both `38.60.x`, both Kaopu Cloud HK Limited, LightNode's operating org |
 | **Vultr / The Constant Company (AS20473)** | Mudfish `45.77.48.63` -- `proxy: yes`, Scamalytics VPN **yes**, score 42 | ExitLag `216.238.115.26` -- `proxy: no`, Scamalytics VPN **no**, score 30 | Yes. Same ASN, same provider, same `vultrusercontent.com` rDNS family |
 
 Same ASN. Same hosting company. **Opposite VPN verdicts.** The label is
@@ -289,8 +291,8 @@ mechanism and it cannot be separated from the first with the data here.
 | Address | rDNS | Reads as |
 |---|---|---|
 | Mudfish `146.185.214.48` | `mudsyd.mudfish.net` | the brand, in DNS |
-| Neoxify france-1 | `104-105-205-233.ip.linodeusercontent.com` | generic cloud VPS |
-| Neoxify finland1 | `static.100.161.168.204.clients.your-server.de` | generic cloud VPS |
+| Neoxify france-1 | `{france-1}.ip.linodeusercontent.com` | generic cloud VPS |
+| Neoxify finland1 | `static.{finland1}.clients.your-server.de` | generic cloud VPS |
 | ExitLag Voxility /30s | *(none)* | nothing |
 | ExitLag Vultr hosts | `216-238-115-26.constant.com` | generic cloud VPS |
 
@@ -306,7 +308,7 @@ datacenter list at all.**
 
 **Things that turned out not to matter:**
 
-- **Address-space age.** finland1's range `204.168.160.0/20` (`CLOUD-HEL1`)
+- **Address-space age.** finland1's range `{finland1-prefix}/20` (`CLOUD-HEL1`)
   was **created 2026-03-17** -- five months old -- and is on the datacenter
   list. ExitLag's `5.254.56.0/24` dates to 2018 and is equally on it. Neither
   carries a VPN flag. Age moves nothing either way.
@@ -341,8 +343,9 @@ Ordered by value per unit of cost. The honest headline first:
    no node address in a public repository, issue, changelog or support
    article. **This repository is public** -- every node IP already committed
    to `docs/` is a permanent contribution to the very enumeration this
-   document is about. Worth an audit. (This file adds none that were not
-   already there.)
+   document is about. Worth an audit. **That audit has since happened**
+   -- see `docs/node-address-hygiene.md`; the Neoxify addresses in this
+   file are redacted, and this file adds none.
 2. **Keep rDNS neutral or empty.** Free. Never let a PTR contain "neoxify",
    "vpn", "node", "exit" or a region code. `mudsyd.mudfish.net` is the
    anti-pattern; ExitLag's blank PTRs are the pattern. Note this cuts against
@@ -502,7 +505,7 @@ architectural.
   third-party service was out of scope for this pass. **This is a one-line
   follow-up the owner can run himself**, and it is the highest-value single
   measurement left:
-  `curl "https://check.getipintel.net/check.php?ip=38.60.249.229&contact=YOUR_EMAIL"`
+  `curl "https://check.getipintel.net/check.php?ip={germany-1}&contact=YOUR_EMAIL"`
   -- a result above 0.95 is what Space Station 14 rejects on.
 - **Paid feeds were not measured**: MaxMind Anonymous IP, IP2Proxy,
   IPQualityScore, Spur, AbuseIPDB. All require a key or a signup. These are
@@ -538,13 +541,13 @@ The measurement script was throwaway and is not committed; every call is a
 single request.
 
 ```bash
-IP=38.60.249.229
+IP={germany-1}
 curl -s "https://api.ipapi.is/?q=$IP"
 curl -s "http://ip-api.com/json/$IP?fields=status,isp,org,as,asname,mobile,proxy,hosting,query"
 curl -s "https://proxycheck.io/v2/$IP?vpn=1&asn=1&risk=1"
 curl -s -A Mozilla/5.0 "https://scamalytics.com/ip/$IP" | grep -o 'Fraud Score: [0-9]*'
 curl -s "https://stat.ripe.net/data/whois/data.json?resource=$IP"
-curl -s "https://dns.google/resolve?name=229.249.60.38.in-addr.arpa&type=PTR"
+curl -s "https://dns.google/resolve?name={germany-1-reversed}.in-addr.arpa&type=PTR"
 
 # blocklist membership
 curl -sO https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt
