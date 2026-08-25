@@ -9982,6 +9982,129 @@ monorepo to prove that was not worth the time. CI will say. Nothing in
 Gaming Mode has run on a rig either, and the entry above it already says
 what is missing at the node end.
 
+## 2026-08-25 — Defender does not flag 0.9.31; SmartScreen withholds it, once
+
+**Status:** done (measured on the rig)
+**Touches:** nothing in the tree — this is a finding about released artifacts
+
+The question was whether the released 0.9.31 installers are blocked by
+Defender or SmartScreen on a clean Windows 11 machine. **Defender: no,
+on every path tested. SmartScreen: it does not block either, but Edge
+withholds the download until the user clicks `Keep`.** That one click is
+the entire anomalous friction, and **0.9.30 behaves identically**, so
+none of this is a regression.
+
+### What was tested, against the real assets
+
+Both assets downloaded from the release (not built locally) and verified
+against `sha256sums.txt` — `Neoxify-Setup.exe`
+`e8c05dc5…e015cee0`, `Neoxify_0.9.31_x64-setup.exe` `ea29caad…61c4e990`,
+both `OK`. The copies that ended up in the guest's `Downloads` hashed to
+the same values, so what was executed is byte-for-byte the release.
+
+| step | bootstrapper | NSIS installer |
+|---|---|---|
+| Edge download | "isn't commonly downloaded", `Keep`/`Delete` | same wording |
+| on-access scan | not touched | not touched |
+| `MpCmdRun -Scan -ScanType 3` | "found no threats", exit 0 | "found no threats", exit 0 |
+| execution | no SmartScreen dialog | no SmartScreen dialog; straight to UAC |
+| install | (UI is mouse-only, see below) | completed; service Running |
+
+Post-install, `MpCmdRun -Scan -ScanType 3 -File "C:\Program
+Files\Neoxify"` returned **"found no threats", exit 0** over the whole
+tree — `WinDivert64.sys`, `xray.exe`, `openvpn.exe`, `wireguard.exe`,
+`neoconnect-service.exe`, all of it. `NeoxifyService` is `Running` /
+`AutoStart` / `LocalSystem`. Nothing was quarantined at any point.
+
+### The withheld download is the real friction
+
+This is the part worth knowing. Edge does not merely warn — it finishes
+the transfer and then **refuses to name the file**. It sat as
+`Unconfirmed 792627.crdownload`, full 21,678,592 bytes, for more than
+four minutes across two probes. It only became `Neoxify-Setup.exe` after
+`Keep` was clicked, and `Keep` is on the download item, not on a dialog
+that comes to you. A user who dismisses the flyout has a complete
+download they cannot find under its own name.
+
+After `Keep` there was **no second confirmation**, and on execution **no
+"Windows protected your PC" at all** — `smartscreen.exe` respawned at
+the moment of launch, so it did evaluate the file and allowed it, and
+the `Zone.Identifier` was consumed by that first run. So the customer
+cost is: one `Keep`, then the ordinary UAC prompt (which will say
+unknown publisher, because both binaries are `NotSigned` — that part is
+inferred from the signature state, not seen, since the secure desktop
+does not render into VirtualBox screenshots).
+
+### `2147731849` was never about a released build
+
+Settled, because the earlier entry in this file left it ambiguous. It is
+a genuine Defender threat ID — `Trojan:Win32/Bearfoos.B!ml` — not an
+HRESULT. It fired on a **locally built** installer. Every released asset
+checked since (0.9.28 then, 0.9.31 now) is clean, so the `!ml` verdict
+tracked something about the local build, not the shipped artifact. Do
+not quote it as evidence that releases are flagged.
+
+### The control, because a fast clean scan is not evidence here
+
+A 40 MB scan returning instantly is a shape this repo has been burned
+by, so detection was proven live in the same session: an EICAR file
+written to `C:\nx` was detected twice by real-time protection
+(`2147519003`, `Virus:DOS/EICAR_Test_File`), raised a "Threats found"
+toast, and produced `1116`/`1117` in the Defender operational log. Those
+three events at 10:01–10:03 are the **only** detections in the log —
+nothing at download, execution or install.
+
+Its remediation *failed* (`0x80508032`), which is why the EICAR file
+stayed on disk. Detection is what the control needed to prove; note the
+snapshot cannot clean.
+
+### Two traps for the next run
+
+- **`MpCmdRun -SignatureUpdate` fails on this guest** with
+  `hr=0x80070102` (a timeout), leaving definitions at whatever the
+  snapshot had — here `1.457.318.0`, two days stale. It reports
+  `SignatureUpdateExit=2`, so it is loud, but **check the AFTER version
+  rather than the exit code**. The guest scans in this run therefore
+  used two-day-old definitions. The gap is covered because the same
+  four files were scanned on the host at `1.457.335.0` (same day, real-
+  time protection on) and were equally clean — but a guest-only result
+  would have been the false pass the whole exercise was trying to avoid.
+- **`schtasks /RU SYSTEM` is denied from the interactive session.** The
+  older note saying it elevates without prompting is wrong: `neoxify`
+  has `BUILTIN\Administrators` as *"Group used for deny only"*, so the
+  call returns `ERROR: Access is denied.` What does work is Run dialog →
+  **Ctrl+Shift+Enter** → **Alt+Y**, which yields `elevated=True`.
+
+Also, in passing: **the bootstrapper's `Install` button cannot be
+reached from the keyboard.** Enter, Space and Tab all do nothing — it is
+a `tiny-skia` framebuffer with no focusable controls. Harmless for
+customers with a mouse, but it makes the bootstrapper undrivable on this
+rig, and it is a real accessibility gap.
+
+### Open, and not mine to close
+
+- **VirusTotal was not queried.** A hash lookup needs an API key; the
+  key is not in the environment and signing up would use the owner's
+  identity. Both hashes are above if someone with an account wants to
+  paste them.
+- **No false-positive report is warranted right now** — there is no
+  false positive to report. The SmartScreen warning is not a detection
+  and Microsoft's own guidance is explicit that reputation accrues per
+  file and cannot be short-cut; the WDSI portal takes malware
+  submissions, not "please trust my unsigned installer". The lever that
+  actually moves this is the one already known and stalled: finish the
+  Azure Trusted Signing enrolment so `AZURE_CLIENT_ID` exists and the
+  workflow's signing steps stop being skipped. Signing will not remove
+  the first-download warning on day one, but it is what lets reputation
+  accumulate against a publisher instead of against each new file.
+
+**PUA protection is off on the rig** (`PUAProtection=0`). Xray and the
+other bundled engines are exactly the sort of thing that lands in the
+PUA bucket rather than the malware one, so a customer whose PUA
+protection is on could still see something this run could not. That is
+the one gap in the "clean" claim, and it is cheap to close next time by
+setting it and rescanning.
+
 ---
 
 ## 2026-08-25 — Gaming mode does something now, and its copy stopped lying
