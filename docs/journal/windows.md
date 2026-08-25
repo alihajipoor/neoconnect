@@ -8610,3 +8610,160 @@ appeared under execution.
 
 What is ready to go the moment a rig will stay up: the branch, the
 scripts, and one clean pass of `R1` plus `L1`/`L2` against 0.9.30.
+
+---
+
+## 2026-08-24 (later) — the WFP sweep's root cause named; the elevated run still did not happen
+
+**Status:** `claude/repair-wfp-sweep-0931`, off `claude/integration-0931`
+at `71c672d`, pushed. **0.9.31 still not cut.** **Touches:**
+`apps/desktop-windows/service/src/engines/repair.rs`, this file.
+
+### The zeroed `layerKey`, stated properly
+
+The previous entry recorded *that* a zeroed `layerKey` makes
+`FwpmFilterCreateEnumHandle0` answer `FWP_E_LAYER_NOT_FOUND`, and the fix
+that followed is right. What it did not record is **why the mistake was
+available to make**, which is the part that will otherwise be made again.
+
+It is not that a field was forgotten. In `FWPM_FILTER_ENUM_TEMPLATE0` two
+fields sit one line apart, look alike, and are not alike:
+
+    providerKey: *mut GUID   <- a pointer. NULL is "any provider".
+    layerKey:    GUID        <- by value. There is no "absent".
+
+A nullable pointer can encode "unspecified"; a by-value GUID cannot. The
+all-zero `layerKey` that `mem::zeroed()` leaves is therefore not a
+wildcard but a *specific* GUID naming no layer on the machine — hence
+LAYER_NOT_FOUND rather than a match-everything. The original code
+generalised the pointer field's rule to the value field directly below
+it, and nothing about that is visible at the call site.
+
+This is the same shape as the RAS struct traps already in this file: the
+type checks, the size is right, the meaning is wrong. **Read the binding,
+not the field name.** Checked against `windows-sys` 0.59, which is what
+the service builds with.
+
+### What is proven, and what is not
+
+**Proven, off-machine only:** `cargo check --workspace --all-targets`
+clean and `cargo test --workspace` at **213 passed / 0 failed** (212
+before; the new one is mine). The provider comparison is now a named
+`guid_eq` with a test that was **checked by mutation** — dropping `data4`
+from `guid_eq` makes it fail. A test that has never been seen to fail is
+not yet a test.
+
+**Not proven, and this is the whole point:** *nothing here has run
+elevated on Windows.* The sweep has still never been observed to
+enumerate a single filter. A green build is not evidence a WFP
+enumeration works, and this file already says exit codes and "no error
+was thrown" have produced false passes here.
+
+### The rig, again, and what it cost
+
+`Neoxify-Test2` was booted, wedged, power-cycled, and wedged again. It is
+now powered off. In order:
+
+- **I polled `guestcontrol` during the boot window and jammed it
+  permanently** — the trap the previous entry documents in so many words.
+  Every later call answered `Error starting guest session (current status
+  is: starting)`. **`kick.py` cannot recover this**, because it *needs*
+  guest control to start the task. Only a power-cycle clears it.
+- After the power-cycle, **keyboard injection worked** — a Win key press
+  opened Start, `launch.py` opened the Run box and typed `boot2.ps1`
+  correctly (screenshot `_typed.png`). Then, mid-UAC,
+  `keyboardputscancode` began answering **`Failed to send a scancode`**
+  and the guest stopped taking input at all.
+- **`bringup.py` cannot work on a headless guest.** Its `wait_desktop`
+  requires `size == (1920, 955)`, which is what the guest reports only
+  when the VM runs with a GUI window; booted `--type headless` it sits at
+  1024x768 for ever and the function times out on a desktop that is
+  plainly up. `VBoxManage controlvm <vm> setvideomodehint 1920 955 32`
+  does eventually fix the size, but not until the Guest Additions
+  graphics service is up, so it is not a boot-time fix. Either boot the
+  VM `--type gui` or use a readiness test that is not resolution-bound.
+- **A visible elevated PowerShell window is not evidence the channel is
+  up.** On the first boot the logon task's window appeared and
+  `runner2-log.txt` was never rewritten: the task started before the
+  `\\VBOXSVR` redirector was usable, and `runner2.ps1` swallows that and
+  then heartbeats into nothing. **Only a fresh `heartbeat2.txt` counts.**
+
+### A fresh worktree cannot build the service
+
+Worth its own note, because it looks like a code break and is not.
+`src-tauri/resources/` holds gitignored fetched binaries. Without them:
+
+- `cargo build` fails at `LNK1181: cannot open input file 'WinDivert.lib'`
+- `cargo check --workspace --all-targets` fails at
+  `resource path 'resources\xray.exe' doesn't exist`
+
+Copy the directory from a working checkout or run
+`scripts/fetch-binaries.ps1` first. After supplying `WinDivert.lib` you
+must also **delete `target/debug/build/windivert-sys-*`**, or the cached
+build script keeps its empty `OUT_DIR` and the link fails again with the
+same message. Note `cargo check` alone does not link, which is why the
+previous entry's "clean" and this failure are both true statements.
+
+### How to finish the verification — everything is staged
+
+On the share, ready to run: **`wfpprobe.exe`** (and `wfpprobe.rs`, its
+source — a rig tool, deliberately not committed, because `residue` mode
+installs *persistent* IPv6 blocks and that is not a thing to ship in a
+public repo), **`W1.ps1`**, and **`nxsvc-wfpfix.exe`**, which is the
+service built from this branch.
+
+`W1.ps1` runs seven phases into `W1-<tag>.txt` and needs an elevated
+shell and nothing else — **no tunnel, no connection, no node**. That is
+the point: the WFP sweep can be tested in isolation.
+
+    0  the three enumeration forms on a clean machine
+    1  install PERSISTENT provider/sublayer/filters under our GUIDs
+    2  the same three forms, with our objects present
+    3  netsh cross-check (independent of our code)
+    4  neoconnect-service.exe repair -- stdout and EXIT CODE
+    5  the three forms again -- "ours" must be 0
+    6  netsh cross-check again
+
+The three forms in phase 0 are the experiment that settles the diagnosis,
+and they are built as a **single-variable control**:
+
+    A  providerKey + ZEROED layerKey   <- what shipped. Expect 0x80320004.
+    C  providerKey + REAL  layerKey    <- byte-for-byte A, one field changed.
+    B  no template at all              <- the fix.
+
+A and C differ **only** in `layerKey`. If A fails and C succeeds, the
+zeroed layer key is the cause and nothing else is. If A *succeeds*, the
+diagnosis in this file is wrong and the fix needs revisiting.
+
+Pass criteria for phases 4 and 5: exit code **0**, the `wfp` step
+reporting `removed N leftover filter(s)` rather than `Unknown`, and phase
+5 reporting `ours=0`.
+
+To drive it once a runner is alive: `echo "W1 a" > job2.txt` on the
+share, then read `W1-a.txt`. If the guest is fresh, bring the runner up
+with the keyboard path (`bringup.start_runner()`), **not** `kick.py`, and
+**do not touch `guestcontrol` until the desktop has been up for a while**.
+Safety valve if a repair ever fails mid-run: `wfpprobe.exe clean` removes
+the residue directly.
+
+### The 0.9.30 latency control: still has not run
+
+Checked rather than assumed. The share has `L1-v30.pcap` at **41 KB** and
+`L1-v30.txt` at **162 bytes**, and the whole of the latter is a start
+line, `client: 0.9.30`, the route, and `disconnect: {"status":"ok"}`.
+There is no `L1-v30-steady.txt` and no v30 pcapng — against 52 MB and
+52 KB for the 0.9.31 run. The v30 install and connect happened; **no
+measurement did.** So the previous entry's position stands, unchanged:
+head-of-line, TCP_NODELAY and flow affinity are measured on 0.9.31 and
+**unattributed**, and flow affinity still has a measurement pointing the
+wrong way that only the control can explain.
+
+### What still blocks 0.9.31
+
+1. The repair's WFP sweep has **still never enumerated on hardware**.
+2. The 0.9.30 latency control.
+3. The one unexplained cell in the IPv6 table (the unselected app's UDP
+   v6 showing zero).
+
+Item 1 is now a fifteen-minute test that needs no tunnel, provided a rig
+will stay up long enough to run it.
