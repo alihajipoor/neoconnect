@@ -81,13 +81,35 @@ const UDP_IDLE: Duration = Duration::from_secs(60);
 /// How long a "leave this alone" verdict is trusted before the owning
 /// process is checked again.
 ///
-/// Deliberately *not* refreshed by use. A verdict is keyed on the source
-/// port, Windows reuses ports, and a selected app inheriting one from a
-/// browser would otherwise keep going out in the clear for as long as it
-/// kept the port busy -- the longer it played, the longer the leak. Five
-/// seconds bounds that, and costs no more than a hash lookup per port
-/// per interval, because the connection tables underneath are cached.
+/// Deliberately *not* refreshed by use. Windows reuses ports, and a
+/// selected app inheriting one from a browser would otherwise keep going
+/// out in the clear for as long as it kept the port busy -- the longer
+/// it played, the longer the leak. Five seconds bounds that, and costs
+/// no more than a hash lookup per flow per interval, because the
+/// connection tables underneath are cached.
+///
+/// It bounds a narrower window than it used to. A verdict keyed on the
+/// source port alone had to survive every destination that port reached;
+/// keyed on the flow, an inherited port only carries the stale verdict
+/// where the new owner happens to talk to the same peer on the same
+/// port as the old one. Five seconds is still the bound, but there is
+/// far less inside it.
 const DIRECT_VERDICT_TTL: Duration = Duration::from_secs(5);
+
+/// How many leave-alone verdicts are kept at once.
+///
+/// A port-keyed cache could not grow past the port space. A flow-keyed
+/// one can, and one chatty UDP socket -- a torrent client, a peer
+/// discovery beacon -- reaches thousands of destinations well inside the
+/// five seconds a verdict lives. This is what stops "remember every
+/// decision" from meaning "remember every peer in the swarm".
+///
+/// Overflowing costs a re-decision, never a leak. A forgotten verdict
+/// reads as [`Verdict::Unknown`], which sends the caller back to the
+/// owner lookup -- where the answer came from in the first place, and
+/// which for a socket that is still open is a hash lookup in a snapshot
+/// the loop already holds rather than a walk of the connection tables.
+const DIRECT_MAX_ENTRIES: usize = 8_192;
 
 /// Identifies one flow on the way out, before anything is rewritten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,11 +132,26 @@ struct Tables {
     forward: HashMap<FlowKey, u16>,
     /// Synthetic port -> everything needed to undo the rewrite.
     reverse: HashMap<(Transport, u16), Redirected>,
-    /// Source ports belonging to applications the customer did not
-    /// select, and when that was decided -- so their packets cost one
-    /// lookup rather than a walk of the connection tables, without the
-    /// verdict outliving the process it was made about.
-    direct: HashMap<(Transport, u16), Instant>,
+    /// Flows belonging to applications the customer did not select, and
+    /// when that was decided -- so their packets cost one lookup rather
+    /// than a walk of the connection tables, without the verdict
+    /// outliving the process it was made about.
+    ///
+    /// Keyed on the whole flow, not on the source port. Keying it on the
+    /// port was the same mistake `forward` above exists to avoid, and it
+    /// failed the same way: one UDP socket talks to several peers, so
+    /// "leave this port alone" answered for destinations nobody had ever
+    /// decided about.
+    ///
+    /// TCP hid it. A SYN is how a TCP port changes destination and a SYN
+    /// re-decides from scratch, so a stale verdict never got to answer
+    /// for a new peer. UDP has no SYN, so a verdict recorded against one
+    /// peer covered every other peer that port reached until the TTL
+    /// lapsed -- including a name lookup, which `redirect::decide`
+    /// carries through the tunnel whoever makes it, and which this cache
+    /// was answering *before* that rule was ever consulted. A datagram
+    /// answered from here never reaches the DNS branch at all.
+    direct: HashMap<FlowKey, Instant>,
     next_port: u16,
 }
 
@@ -164,8 +201,9 @@ impl Nat {
             return Verdict::Redirect { nat_port };
         }
 
+        let key = FlowKey { transport, client_port, destination, destination_port };
         let tables = self.tables.lock().unwrap();
-        match tables.direct.get(&(transport, client_port)) {
+        match tables.direct.get(&key) {
             Some(decided) if decided.elapsed() < DIRECT_VERDICT_TTL => Verdict::Direct,
             _ => Verdict::Unknown,
         }
@@ -234,11 +272,39 @@ impl Nat {
         }
     }
 
-    /// Records that a port belongs to an application that was not
-    /// selected, as of now.
-    pub fn record_direct(&self, transport: Transport, client_port: u16) {
+    /// Records that a flow belongs to an application that was not
+    /// selected -- or could not be carried -- as of now.
+    ///
+    /// Per flow rather than per port; see `Tables::direct` for what the
+    /// port-keyed version answered that nobody had asked. Every caller
+    /// already holds the destination, so carrying it costs nothing at
+    /// the call site.
+    pub fn record_direct(
+        &self,
+        transport: Transport,
+        client_port: u16,
+        destination: Ipv4Addr,
+        destination_port: u16,
+    ) {
+        let key = FlowKey { transport, client_port, destination, destination_port };
         let mut tables = self.tables.lock().unwrap();
-        tables.direct.insert((transport, client_port), Instant::now());
+        if tables.direct.len() >= DIRECT_MAX_ENTRIES {
+            let now = Instant::now();
+            tables.direct.retain(|_, decided| now.duration_since(*decided) < DIRECT_VERDICT_TTL);
+            // If the sweep barely freed anything, the table is full of
+            // live verdicts and the next datagram would sweep it again
+            // -- a walk of the whole table on the packet path, which is
+            // the cost this cache exists to avoid. Drop the lot instead,
+            // so every walk is paid off by at least a quarter of the
+            // cap's worth of plain inserts before another can happen.
+            //
+            // Throwing away verdicts is safe in a way that keeping stale
+            // ones is not: what is lost is the shortcut, not the answer.
+            if tables.direct.len() > DIRECT_MAX_ENTRIES * 3 / 4 {
+                tables.direct.clear();
+            }
+        }
+        tables.direct.insert(key, Instant::now());
     }
 
     /// Starts redirecting a flow, assigning it a synthetic source port.
@@ -261,10 +327,13 @@ impl Nat {
         tables
             .reverse
             .insert((transport, nat_port), Redirected { origin, nat_port, last_seen: Instant::now() });
-        // A port cannot be both left alone and redirected. A TCP SYN
+        // A flow cannot be both left alone and redirected. A TCP SYN
         // re-decides from scratch, so this is how a stale verdict from
-        // the port's previous owner is cleared.
-        tables.direct.remove(&(transport, origin.client_port));
+        // the port's previous owner is cleared. With the verdict keyed
+        // on the flow there is usually nothing here to clear -- a
+        // previous owner talking to somewhere else left no entry that
+        // could have answered for this one.
+        tables.direct.remove(&key);
         Some(nat_port)
     }
 
@@ -372,7 +441,7 @@ mod tests {
         // two different applications -- one keyed table would let a
         // game's UDP verdict decide a browser's TCP traffic.
         let nat = Nat::new();
-        nat.record_direct(Transport::Tcp, 5200);
+        nat.record_direct(Transport::Tcp, 5200, Ipv4Addr::new(1, 1, 1, 1), 443);
         assert_eq!(
             nat.lookup(Transport::Tcp, 5200, Ipv4Addr::new(1, 1, 1, 1), 443),
             Verdict::Direct
@@ -389,7 +458,7 @@ mod tests {
         // selected app inheriting the port would keep going out in the
         // clear while the UI claimed it was tunnelled.
         let nat = Nat::new();
-        nat.record_direct(Transport::Tcp, 5300);
+        nat.record_direct(Transport::Tcp, 5300, Ipv4Addr::new(1, 1, 1, 1), 443);
         let origin = origin_to(Ipv4Addr::new(1, 1, 1, 1), 443, 5300);
         let nat_port = nat.redirect(Transport::Tcp, origin).unwrap();
 
@@ -406,7 +475,7 @@ mod tests {
         // for as long as it kept the port busy -- the busier it was, the
         // longer Custom mode silently did not apply to it.
         let nat = Nat::new();
-        nat.record_direct(Transport::Udp, 5350);
+        nat.record_direct(Transport::Udp, 5350, Ipv4Addr::new(1, 1, 1, 1), 53);
         assert_eq!(
             nat.lookup(Transport::Udp, 5350, Ipv4Addr::new(1, 1, 1, 1), 53),
             Verdict::Direct
@@ -414,7 +483,13 @@ mod tests {
 
         {
             let mut tables = nat.tables.lock().unwrap();
-            let decided = tables.direct.get_mut(&(Transport::Udp, 5350)).unwrap();
+            let key = FlowKey {
+                transport: Transport::Udp,
+                client_port: 5350,
+                destination: Ipv4Addr::new(1, 1, 1, 1),
+                destination_port: 53,
+            };
+            let decided = tables.direct.get_mut(&key).unwrap();
             *decided = Instant::now() - DIRECT_VERDICT_TTL * 2;
         }
         assert_eq!(
@@ -508,5 +583,115 @@ mod tests {
         assert_eq!(first, NAT_PORT_LAST);
         assert_eq!(second, NAT_PORT_FIRST);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn a_leave_alone_verdict_does_not_answer_for_another_peer() {
+        // The leak this key change exists for. One UDP socket routinely
+        // talks to several peers -- which is why `forward` is keyed on
+        // the whole flow -- and a verdict recorded about one of them
+        // used to answer for all of them. There is no SYN in UDP to
+        // re-decide, so a selected app that inherited a port, or one
+        // whose flow was left alone once because the table was full,
+        // kept egressing in the clear to peers nobody had ever looked
+        // at.
+        let nat = Nat::new();
+        nat.record_direct(Transport::Udp, 5700, Ipv4Addr::new(203, 0, 113, 9), 443);
+
+        assert_eq!(
+            nat.lookup(Transport::Udp, 5700, Ipv4Addr::new(203, 0, 113, 9), 443),
+            Verdict::Direct,
+            "the flow that was decided about must still be remembered"
+        );
+        assert_eq!(
+            nat.lookup(Transport::Udp, 5700, Ipv4Addr::new(198, 51, 100, 4), 443),
+            Verdict::Unknown,
+            "a peer nobody decided about must be decided about, not assumed"
+        );
+    }
+
+    #[test]
+    fn a_leave_alone_verdict_does_not_answer_for_a_name_lookup() {
+        // The same bug where it costs the most. `redirect::decide`
+        // carries a DNS query through the tunnel whoever makes it, and
+        // it drops one it cannot carry rather than handing it to the
+        // resolver the network supplied -- for somebody in Iran, their
+        // ISP. None of that ran if this cache answered first, and keyed
+        // on the port it did: any port left alone in the previous five
+        // seconds short-circuited the whole rule.
+        let nat = Nat::new();
+        nat.record_direct(Transport::Udp, 5750, Ipv4Addr::new(203, 0, 113, 9), 443);
+
+        assert_eq!(
+            nat.lookup(Transport::Udp, 5750, Ipv4Addr::new(8, 8, 8, 8), 53),
+            Verdict::Unknown,
+            "a lookup must reach the branch that decides about lookups"
+        );
+    }
+
+    #[test]
+    fn a_tcp_verdict_still_covers_the_connection_it_was_made_about() {
+        // The narrower key must not cost the thing the cache is for. A
+        // mid-connection TCP packet is decided once and then answered
+        // from here for every packet after it, which is the difference
+        // between one hash lookup and a walk of the connection tables
+        // per packet.
+        let nat = Nat::new();
+        nat.record_direct(Transport::Tcp, 5800, Ipv4Addr::new(203, 0, 113, 9), 443);
+
+        for _ in 0..3 {
+            assert_eq!(
+                nat.lookup(Transport::Tcp, 5800, Ipv4Addr::new(203, 0, 113, 9), 443),
+                Verdict::Direct
+            );
+        }
+    }
+
+    #[test]
+    fn the_leave_alone_cache_cannot_grow_without_bound() {
+        // A port-keyed table could not outgrow the port space; a
+        // flow-keyed one can. A peer-to-peer client reaches thousands of
+        // destinations from one socket well inside the five seconds a
+        // verdict lives, and this table is walked under a lock on the
+        // packet path.
+        let nat = Nat::new();
+        for i in 0..(DIRECT_MAX_ENTRIES * 2) {
+            let octets = (i as u32).to_be_bytes();
+            nat.record_direct(
+                Transport::Udp,
+                5900,
+                Ipv4Addr::new(203, octets[1], octets[2], octets[3]),
+                443,
+            );
+        }
+
+        let held = nat.tables.lock().unwrap().direct.len();
+        assert!(
+            held <= DIRECT_MAX_ENTRIES,
+            "the leave-alone cache grew to {held}, past its cap of {DIRECT_MAX_ENTRIES}"
+        );
+    }
+
+    #[test]
+    fn expiry_still_reclaims_leave_alone_verdicts() {
+        // `expire_idle` is the only thing that retires these on a quiet
+        // machine -- the cap above only ever fires on a busy one. If it
+        // stopped reclaiming them, a session that saw one burst would
+        // carry the table for as long as Custom mode stayed on.
+        let nat = Nat::new();
+        nat.record_direct(Transport::Udp, 5950, Ipv4Addr::new(203, 0, 113, 9), 443);
+
+        {
+            let mut tables = nat.tables.lock().unwrap();
+            for decided in tables.direct.values_mut() {
+                *decided = Instant::now() - DIRECT_VERDICT_TTL * 2;
+            }
+        }
+
+        nat.expire_idle();
+        assert!(
+            nat.tables.lock().unwrap().direct.is_empty(),
+            "an expired verdict must be reclaimed, not merely ignored"
+        );
     }
 }
