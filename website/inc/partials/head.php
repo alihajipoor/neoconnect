@@ -111,15 +111,40 @@ $nx_og_image_abs = rtrim(nx_cfg('site_url', ''), '/') . $nx_og_image;
 <link rel="apple-touch-icon" href="<?php echo nx_esc(nx_asset('img/apple-touch-icon.png')); ?>">
 
 <?php
-// Preloaded because the whole page is set in it, so discovering it only
-// after the stylesheet parses costs a visible reflow.
+// ---------------------------------------------------------------------
+// Font preloads. PER LOCALE, and at most two.
 //
-// Deliberately NOT nx_asset(): that appends a ?v= cache-busting stamp, and
-// the URL here has to match what the stylesheet's @font-face requests
-// character for character, or the browser downloads the font twice.
-$nx_font = nx_cfg('base_path', '/') . 'assets/fonts/vazirmatn-variable.woff2';
+// A font discovered only after the stylesheet parses costs a visible
+// reflow, so the faces that set the top of the page are preloaded. But
+// preloading everything is worse than preloading nothing: it competes
+// with the stylesheet for the first round trip, on connections where the
+// first round trip is the expensive one.
+//
+// So each locale preloads only what it actually paints above the fold:
+//
+//   English  Bricolage Grotesque (the hero headline) and Instrument Sans
+//            (the lede and every button). Vazirmatn is NOT preloaded --
+//            an English page never renders a Persian glyph, and it is the
+//            largest file of the four.
+//   Persian  Vazirmatn only. It sets the entire page: html[lang="fa"]
+//            swaps --display and --sans to it.
+//
+// Martian Mono is deliberately NOT preloaded in either locale. It draws
+// small tracked labels -- the eyebrow, the readouts -- where a swap is
+// barely perceptible and not worth a preload slot.
+//
+// Deliberately NOT nx_asset(): that appends a ?v= cache-busting stamp,
+// and these URLs have to match what the stylesheet's @font-face requests
+// character for character, or the browser downloads each font twice.
+$nx_base = nx_cfg('base_path', '/') . 'assets/fonts/';
+
+$nx_preload_fonts = nx_locale() === 'fa'
+    ? array('vazirmatn-variable.woff2')
+    : array('bricolage-grotesque-variable.woff2', 'instrument-sans-variable.woff2');
 ?>
-<link rel="preload" href="<?php echo nx_esc($nx_font); ?>" as="font" type="font/woff2" crossorigin>
+<?php foreach ($nx_preload_fonts as $nx_f): ?>
+<link rel="preload" href="<?php echo nx_esc($nx_base . $nx_f); ?>" as="font" type="font/woff2" crossorigin>
+<?php endforeach; ?>
 <link rel="stylesheet" href="<?php echo nx_esc(nx_asset('css/site.css')); ?>">
 <?php
 // Structured data, last in the head so it can read anything set above it.

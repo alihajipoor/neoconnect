@@ -13,12 +13,11 @@
       at best and blocked at worst, and a blocked font is a visibly broken
       page. Every byte this stylesheet references is served from this host.
 
-      The design was drawn with Bricolage Grotesque / Instrument Sans /
-      Martian Mono. Those are Google-hosted and are NOT vendored here, so
-      the families below fall back to Vazirmatn (already self-hosted, and
-      the only face the site ships) plus the platform UI and mono stacks.
-      See the note above --display for how to adopt them properly if the
-      owner wants them.
+      All four typefaces are SELF-HOSTED in assets/fonts/ — Vazirmatn for
+      Persian, and Bricolage Grotesque / Instrument Sans / Martian Mono
+      for Latin, subset to the characters this site renders. Every one is
+      SIL OFL 1.1 and its licence ships beside it. There is no
+      fonts.googleapis.com link anywhere and there must never be one.
 
    2. NO DARK MODE. Light only, no toggle, no prefers-color-scheme block.
       Asked for twice and settled.
@@ -35,26 +34,115 @@
    ═══════════════════════════════════════════════════════════════════════ */
 
 
-/* ── the typeface ───────────────────────────────────────────────────────
-   Vazirmatn, variable, one file, weights 100–900, covering Latin AND
-   Persian. SIL OFL — the licence ships beside it in assets/fonts/ and must
-   stay there.
+/* ── the typefaces ──────────────────────────────────────────────────────
+   FOUR faces, ALL SELF-HOSTED. The site makes no third-party request of
+   any kind — no CDN, no fonts.googleapis.com, no fonts.gstatic.com. The
+   audience is largely on networks where a third-party request is slow at
+   best and blocked at worst, and a blocked font is a visibly broken page.
+   Do not "optimise" any of these back to a CDN.
 
-   font-display:swap: text is readable in a fallback face immediately and
-   reflows when the real one lands. On a throttled Iranian connection the
-   alternative (block) is a blank page for up to three seconds.
+   Every one is SIL OFL 1.1. The licences ship beside the files in
+   assets/fonts/ and must stay there; see the README there for the
+   subsetting method and the per-font copyright notices.
 
-   The URL carries no ?v= stamp so it matches head.php's <link rel=preload>
-   character for character. If they differ the font downloads twice. */
+   The three Latin faces are subset to the 241 codepoints this site
+   actually renders and carry NO Persian glyphs — that is deliberate.
+   html[lang="fa"] swaps --display and --sans to Vazirmatn wholesale, and
+   the mono stack keeps Martian first only so that Latin tokens and
+   figures inside a Persian sentence stay in it.
+
+   font-display:swap everywhere: text is readable in a fallback face
+   immediately and reflows when the real one lands. On a throttled
+   connection the alternative (block) is a blank page for up to 3s.
+
+   The URLs carry no ?v= stamp so they match head.php's <link rel=preload>
+   character for character. If they differ, the font downloads twice. */
+
 @font-face {
   font-family: "Vazirmatn";
-  src: url("../fonts/vazirmatn-variable.woff2") format("woff2-variations"),
-       url("../fonts/vazirmatn-variable.woff2") format("woff2");
+  src: url("../fonts/vazirmatn-variable.woff2") format("woff2");
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
 }
 
+/* opsz AND wdth are kept variable: display sizes get a wider, tighter cut
+   than the small ones, which is the entire reason the design chose this
+   face. wght is narrowed to 600–800 because nothing here asks for less. */
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("../fonts/bricolage-grotesque-variable.woff2") format("woff2");
+  font-weight: 600 800;
+  font-stretch: 86% 100%;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("../fonts/instrument-sans-variable.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── metric-matched fallbacks ──────────────────────────────────────────
+   These load NO file. Each aliases a font already on the device and bends
+   its metrics to match the web font, so the swap from fallback to real
+   face barely moves anything.
+
+   Without them the jump is large and measured, not theoretical: on the
+   English home page the hero headline laid out 84px taller in the platform
+   face and pushed everything below it down 70px, because Bricolage at
+   wdth 92 is about 13% narrower than Segoe UI and the headline wrapped to
+   an extra line. Document height differed by 173px.
+
+   The percentages come from measuring the same string in each face on a
+   canvas, not from taste:
+
+     display  Bricolage 800 is 3179px where Segoe UI is 3548px -> 89.6%,
+              and .d-xl narrows further to wdth 92, so 87% is the closer
+              match for the headline that dominates the shift.
+     sans     Instrument 400 is 3256px where Segoe UI is 3145px -> 103.5%.
+
+   ascent/descent come from each font's own hhea table (93/27 and 97/25
+   against system-ui's 108/25), which is what stops the line boxes
+   changing height as well as width.
+
+   NOT done for the mono face, deliberately. Martian is ~27% wider than
+   Consolas, so a matched fallback would have to scale the local font up by
+   that much -- and mono here is only small tracked labels, where the swap
+   is barely visible but an over-scaled fallback could overflow a lane or a
+   readout before the real font lands. Not worth the risk it introduces.
+
+   Safari before 16.4 ignores size-adjust and simply gets today's
+   behaviour, which is a jump, not a break. */
+@font-face {
+  font-family: "NX Display Fallback";
+  src: local("Segoe UI Bold"), local("Segoe UI"), local("Roboto"),
+       local("Helvetica Neue"), local("Arial");
+  size-adjust: 87%;
+  ascent-override: 93%;
+  descent-override: 27%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "NX Sans Fallback";
+  src: local("Segoe UI"), local("Roboto"), local("Helvetica Neue"), local("Arial");
+  size-adjust: 103.5%;
+  ascent-override: 97%;
+  descent-override: 25%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "Martian Mono";
+  src: url("../fonts/martian-mono-variable.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   /* ── ground ───────────────────────────────────────────────────────────
@@ -110,13 +198,15 @@
   --a-line: rgba(255, 255, 255, .08);
 
   /* ── families ─────────────────────────────────────────────────────────
-     To adopt the drawn faces properly: download the woff2 files, put them
-     in assets/fonts/, add @font-face blocks beside Vazirmatn's above, and
-     put the family name first in these three stacks. Do NOT link them from
-     fonts.googleapis.com — see rule 1 at the top of this file. */
-  --display: "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --sans:    "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono:    ui-monospace, "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+     Every one of these is self-hosted; see the @font-face block above.
+     The platform fallbacks after each are real and deliberate — if a woff2
+     ever fails to load, the text must still be readable rather than
+     invisible, which is also why font-display is swap and not block. */
+  --display: "Bricolage Grotesque", "NX Display Fallback", "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sans:    "Instrument Sans", "NX Sans Fallback", "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Vazirmatn sits after Martian so that Persian glyphs, which Martian has
+     none of, fall through to it rather than to a platform mono. */
+  --mono:    "Martian Mono", "Vazirmatn", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
 
   --rail: 3.5rem;                        /* the fixed frame down each edge */
   --gut: clamp(1.15rem, 3.2vw, 3.5rem);  /* page gutter inside the frame   */
@@ -321,29 +411,39 @@ body::after {
    opens back up as the size drops. That is the difference between a type
    scale and a list of font-sizes. */
 
+/* Bricolage is variable on optical size AND width, so the scale is not
+   just "bigger": display sizes get a wider, tighter cut than the small
+   ones. That is the difference between a type scale and a font-size, and
+   it is most of why this face was chosen. Persian clears these below —
+   Vazirmatn has neither axis, so the settings would be inherited and
+   silently ignored. */
 .d-xl {
   font-size: clamp(2.6rem, 7.4vw, 7.4rem);
-  line-height: .92;
+  line-height: .88;
   letter-spacing: -.042em;
   font-weight: 800;
+  font-variation-settings: "opsz" 96, "wdth" 92;
 }
 .d-lg {
   font-size: clamp(2rem, 4.5vw, 4.2rem);
-  line-height: 1;
+  line-height: .98;
   letter-spacing: -.038em;
   font-weight: 800;
+  font-variation-settings: "opsz" 72, "wdth" 94;
 }
 .d-md {
   font-size: clamp(1.5rem, 2.5vw, 2.35rem);
-  line-height: 1.1;
+  line-height: 1.08;
   letter-spacing: -.03em;
   font-weight: 700;
+  font-variation-settings: "opsz" 40, "wdth" 96;
 }
 .d-sm, .h-sm {
   font-size: clamp(1.02rem, 1.35vw, 1.25rem);
-  line-height: 1.25;
+  line-height: 1.24;
   letter-spacing: -.02em;
   font-weight: 700;
+  font-variation-settings: "opsz" 20, "wdth" 100;
 }
 
 .lede, .lead {
@@ -351,7 +451,14 @@ body::after {
   line-height: 1.55;
   color: var(--ink-2);
   font-weight: 400;
-  max-width: 46ch;
+  /* rem, not ch, and only here. The ch unit is the advance of "0" in the
+     CURRENT font, so a measure written in ch changes the moment the web
+     font swaps in -- the line box gets wider or narrower, the text rewraps,
+     and the whole page below it moves. That is invisible on a cached load
+     and a 26px jump on a cold one. Everything below the fold keeps its ch
+     measure, which is better typography; this one element sits above it
+     and buys stability instead. */
+  max-width: 33rem;
   text-wrap: pretty;
 }
 .body {
@@ -589,6 +696,7 @@ body::after {
   font-size: 1.06rem;
   font-weight: 800;
   letter-spacing: -.035em;
+  font-variation-settings: "opsz" 20, "wdth" 100;
 }
 .brand__mark { display: block; flex: none; }
 .brand__mark svg { width: 1.7rem; height: 1.7rem; display: block; }
@@ -686,6 +794,18 @@ body::after {
   box-shadow: var(--lift-1);
 }
 .lang-switch__opt[lang="fa"] { font-size: .8rem; }
+
+/* «فا» in the switcher is the ONLY Persian on an English page, and left in
+   the Vazirmatn stack it pulls the entire 111 KB Persian face down for two
+   glyphs -- about 40% of that page's font weight, measured in the network
+   panel, not guessed. Every platform this site runs on has an Arabic-capable
+   UI font that draws two isolated letters perfectly well, so the English
+   page uses that instead and never requests Vazirmatn at all.
+   On the Persian page the font is already loaded, so the stack stands. */
+html[lang="en"] .lang-switch__opt[lang="fa"] {
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Naskh Arabic",
+               "Geeza Pro", "Tahoma", sans-serif;
+}
 
 .nav-toggle {
   display: none;
@@ -1163,6 +1283,7 @@ body::after {
   letter-spacing: -.035em;
   padding-inline: .85rem;
   white-space: nowrap;
+  font-variation-settings: "opsz" 72, "wdth" 86;
   color: transparent;
   -webkit-text-stroke: 1px rgba(18, 17, 26, .32);
 }
@@ -1529,7 +1650,8 @@ body::after {
 .spec .no { font-family: var(--mono); font-size: .615rem; letter-spacing: .16em; color: var(--ink-3); }
 .spec .wave { height: 3.2rem; margin-block: -.15rem; }
 .spec .wave svg { width: 100%; height: 100%; display: block; overflow: visible; }
-.spec h3 { font-size: 1.18rem; letter-spacing: -.03em; line-height: 1.15; }
+.spec h3 { font-size: 1.18rem; letter-spacing: -.03em; line-height: 1.15;
+  font-variation-settings: "opsz" 24, "wdth" 100; }
 .spec .tech { font-family: var(--mono); font-size: .615rem; letter-spacing: .06em; color: var(--violet); }
 .spec .note { font-size: .83rem; color: var(--ink-2); line-height: 1.55; flex: 1; }
 .spec .verdict-tag {
@@ -1573,11 +1695,15 @@ body::after {
   transition: background-color .3s, transform .35s var(--ease), box-shadow .35s;
 }
 .exit:hover, .loc:hover { background: var(--white); transform: translateY(-2px); box-shadow: var(--lift-2); }
-.exit .fl, .loc__flag {
+/* .fl is the class nx_flag_svg() puts on the inline <svg>. .loc__flag is
+   kept for the old emoji span, which no longer renders but costs nothing
+   to leave matched. */
+.exit .fl, .loc .fl, .loc__flag {
   width: 2.2rem; height: 1.5rem; border-radius: 3px;
   overflow: hidden; box-shadow: var(--lift-1); display: block;
 }
-.exit b, .loc__name { font-family: var(--display); font-size: 1.05rem; font-weight: 800; letter-spacing: -.028em; }
+.exit b, .loc__name { font-family: var(--display); font-size: 1.05rem; font-weight: 800;
+  letter-spacing: -.028em; font-variation-settings: "opsz" 18, "wdth" 100; }
 .exit i, .loc__meta {
   font-style: normal; font-family: var(--mono); font-size: .615rem;
   letter-spacing: .11em; text-transform: uppercase; color: var(--ink-3);
@@ -1614,6 +1740,7 @@ body::after {
   position: relative;
   display: inline-block;
   color: var(--ink);
+  font-variation-settings: "opsz" 60, "wdth" 94;
 }
 .ans .claim .strike {
   position: absolute;
@@ -1682,6 +1809,7 @@ body::after {
   letter-spacing: -.05em;
   line-height: .95;
   font-variant-numeric: tabular-nums;
+  font-variation-settings: "opsz" 72, "wdth" 92;
 }
 .plan__period {
   font-style: normal; font-family: var(--mono); font-size: .65rem;
@@ -1908,7 +2036,8 @@ table .hi, table.cmp .hi { background: rgba(109, 58, 232, .05); }
   border-bottom: 1px solid var(--rule);
 }
 .page-hero__inner { display: grid; gap: 1rem; max-width: 62rem; }
-.page-hero h1 { font-size: clamp(2rem, 4.4vw, 4rem); line-height: 1.02; letter-spacing: -.038em; }
+.page-hero h1 { font-size: clamp(2rem, 4.4vw, 4rem); line-height: 1; letter-spacing: -.038em;
+  font-variation-settings: "opsz" 72, "wdth" 94; }
 .page-hero--center .page-hero__inner { justify-items: center; text-align: center; margin-inline: auto; }
 .page-hero--center .lead { margin-inline: auto; }
 
@@ -1936,7 +2065,8 @@ table .hi, table.cmp .hi { background: rgba(109, 58, 232, .05); }
 .platform-tile--soon { background: var(--paper-2); }
 .platform-tile__glyph { width: 2.6rem; height: 2.6rem; display: block; color: var(--ink); }
 .platform-tile--soon .platform-tile__glyph { color: var(--ink-3); }
-.platform-tile__name { font-size: 1.5rem; letter-spacing: -.03em; }
+.platform-tile__name { font-size: 1.5rem; letter-spacing: -.03em;
+  font-variation-settings: "opsz" 32, "wdth" 100; }
 .platform-tile__meta {
   font-family: var(--mono); font-size: .615rem; letter-spacing: .1em;
   color: var(--ink-3); text-transform: uppercase;
@@ -2385,7 +2515,8 @@ html[lang="fa"] .notice > h3, html[lang="fa"] .callout > h3 { letter-spacing: 0;
 
 /* ═══ PROSE (privacy, legal) ═════════════════════════════════════════════ */
 .prose { max-width: 46rem; display: grid; gap: 1.05rem; }
-.prose h2 { font-size: clamp(1.15rem, 1.9vw, 1.6rem); letter-spacing: -.025em; margin-top: 1.4rem; }
+.prose h2 { font-size: clamp(1.15rem, 1.9vw, 1.6rem); letter-spacing: -.025em; margin-top: 1.4rem;
+  font-variation-settings: "opsz" 28, "wdth" 100; }
 .prose h3 { font-size: 1.05rem; letter-spacing: -.02em; margin-top: .8rem; }
 .prose p, .prose li { color: var(--ink-2); line-height: 1.8; }
 .prose ul, .prose ol { display: grid; gap: .5rem; padding-inline-start: 1.2rem; }
@@ -2496,6 +2627,49 @@ html[lang="fa"] .notice > h3, html[lang="fa"] .callout > h3 { letter-spacing: 0;
 [dir="rtl"] .mirror { transform: scaleX(-1); }
 [dir="rtl"] .select-wrap::after { transform: rotate(45deg); }
 
+/* ── Persian: the families change wholesale ────────────────────────────
+   Bricolage and Martian carry no Persian glyphs at all -- they are subset
+   to Latin on purpose -- so --display and --sans are swapped rather than
+   left to fall through. Falling through would work, but it would mean
+   every Persian run pays a failed lookup in a face that can never match.
+
+   --mono deliberately does NOT swap: it keeps Martian first so that
+   digits, ports and protocol names inside a Persian sentence stay in the
+   mono face, and only the Persian glyphs drop through to Vazirmatn. */
+html[lang="fa"] {
+  --display: "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sans: "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* Vazirmatn is not variable on optical size or width, so an inherited
+   font-variation-settings would be carried around and silently ignored.
+   Cleared explicitly, for the next person reading this. */
+html[lang="fa"] .d-xl, html[lang="fa"] .d-lg, html[lang="fa"] .d-md,
+html[lang="fa"] .d-sm, html[lang="fa"] .h-sm, html[lang="fa"] .spec h3,
+html[lang="fa"] .exit b, html[lang="fa"] .loc__name,
+html[lang="fa"] .page-hero h1, html[lang="fa"] .prose h2,
+html[lang="fa"] .platform-tile__name, html[lang="fa"] .ans .claim {
+  font-variation-settings: normal;
+}
+
+/* A PERSIAN PAGE DOES NOT LOAD BRICOLAGE AT ALL, and that is a deliberate
+   trade rather than an oversight.
+ *
+ * The concept kept prices and the marquee in the Latin display face --
+ * they are figures and proper nouns with no Persian form, so it reads
+ * well. Measured, though, it costs 110 KB on every Persian page for a
+ * decorative aria-hidden marquee and the figures in three price cards.
+ * That is most of the page's font budget, spent on the audience least
+ * able to afford it, for the least important text on the page.
+ *
+ * So Persian renders those in Vazirmatn too, which carries Latin figures
+ * and capitals perfectly well and is already loaded. Persian pages fetch
+ * 125 KB of font in total; forcing the display face would make it 235 KB.
+ *
+ * The wordmark also must NOT be pinned to Bricolage here: brand.name is
+ * «نئوکسیفای» in Persian, and a face with no Persian glyphs would drop it
+ * through to whatever the platform happened to pick. */
+
 /* ── Persian typography ────────────────────────────────────────────────
    Arabic script is cursive: letter-spacing pulls joined letters apart and
    is ALWAYS wrong. Every tracked style is reset, and the tracked mono
@@ -2558,7 +2732,7 @@ html[lang="fa"] .d-lg { font-size: clamp(1.6rem, 3.3vw, 3.1rem); line-height: 1.
 html[lang="fa"] .d-md { font-size: clamp(1.3rem, 2.1vw, 2rem);   line-height: 1.52; font-weight: 700; }
 html[lang="fa"] .d-sm, html[lang="fa"] .h-sm { font-size: 1.02rem; line-height: 1.62; font-weight: 700; }
 html[lang="fa"] .page-hero h1 { font-size: clamp(1.65rem, 3.2vw, 2.9rem); line-height: 1.45; }
-html[lang="fa"] .lede, html[lang="fa"] .lead { line-height: 2.05; max-width: 44ch; }
+html[lang="fa"] .lede, html[lang="fa"] .lead { line-height: 2.05; max-width: 31rem; }
 html[lang="fa"] .spec h3 { font-size: 1.14rem; line-height: 1.5; }
 html[lang="fa"] .exit b, html[lang="fa"] .loc__name { font-size: 1.02rem; }
 html[lang="fa"] .platform-tile__name { font-size: 1.3rem; }
