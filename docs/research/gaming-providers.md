@@ -97,7 +97,21 @@ names the experiment that would settle it.
    100% blocked since June 2025 and never came back**, DNS-over-UDP drops sit
    at 89%, IPv6 is reported disabled on all ISPs, and the DPI now inspects SNI
    on **all TCP ports** with full TCP reassembly.
-7. **So for Blizzard the likely answer is that the blocking is the
+7. **And the publishers really do block Iran — Epic, Riot, Discord,
+   Microsoft, Supercell and Sony all verifiably, at layers from the store to
+   the game servers.** Epic names Iran in two live support articles, one of
+   which restricts *server access* rather than purchases. Riot's ToS §19.9
+   plus a published error string. Discord names Iran in its ToS. Steam, by
+   contrast, shows **no IP geofence** — its enforcement is account and payment
+   — and **Roblox appears not to block Iran at all**, the community reports
+   tracing to Iran's side instead.
+   **But US sanctions have explicitly authorised "e-gaming" to Iran since
+   2022** — OFAC General License D-2, codified at 31 CFR § 560.540(a)(1),
+   which names e-gaming and *user authentication services*. So most of these
+   blocks are **over-compliance, not law**. Payments genuinely are different,
+   and that split shows up in the behaviour: Supercell's login is IP-gated and
+   a VPN defeats it while the store is account-gated and a VPN does not.
+8. **So for Blizzard the likely answer is that the blocking is the
    publisher's, not Iran's** — which is the opposite direction and needs an
    exit address the *publisher* accepts, not censorship circumvention. But
    `battle.net`, `riotgames.com`, `valorant.com` and `steamcommunity.com` are
@@ -105,7 +119,7 @@ names the experiment that would settle it.
    measured them, and **no measurement anywhere has ever looked at real game
    protocol traffic from Iran.** That is a void in the literature, not a
    negative result.
-8. **For access, Neoxify is not the challenger in this comparison — it is
+9. **For access, Neoxify is not the challenger in this comparison — it is
    ahead.** Eight transports with an automatic ladder, REALITY and
    TLS-in-WebSocket obfuscation, per-network memory of what worked, Iranian
    relay entry nodes, and `uot: true` so game UDP survives a network that
@@ -114,20 +128,20 @@ names the experiment that would settle it.
    ports, which is precisely what Iranian DPI handles best. Measured here on
    Neoxify's own wire: a *valid* WireGuard handshake into Iran is dropped
    while a malformed one of identical size passes.
-9. **And the access product needs no node software.** Custom mode already
+10. **And the access product needs no node software.** Custom mode already
    routes chosen executables by absolute path through an existing protocol to
    an existing exit; relay routes already chain an Iranian entry to a foreign
    exit; the full tunnel's IPv6 leak is measured closed. **The unbuilt
    resolver and SNI proxy add nothing to any of it, and are strictly weaker,
    because DNS cannot reach a game that receives its server as a literal.**
-10. **And publishers do block datacenter ranges — Blizzard at the network
+11. **And publishers do block datacenter ranges — Blizzard at the network
     edge.** A player on a self-hosted VPN in Linode New Jersey could not reach
     Battle.net at all; the traceroute died at Blizzard's own edge router, and
     **Linode support confirmed Blizzard was blocking the range** before
     getting it lifted. Riot officially announced cutting *"the highest volume
     VPN services"* by range. So the exit address is not a detail — for this
     product it may be the whole thing.
-11. **And that label cannot be bought off — this was measured, not assumed.**
+12. **And that label cannot be bought off — this was measured, not assumed.**
     **Mullvad** owns its own ASN (AS216025) and announces its own `45.92.0.0/24`,
     and it *does* move one label: IPinfo types its AS as **`isp`**, not
     `hosting`. It does **not** move the other: ipapi.is still returns
@@ -140,7 +154,24 @@ names the experiment that would settle it.
     **disqualifying for a product whose users are in Iran.** Mudfish's 634
     published nodes are Google, Azure, Vultr, AWS, Linode — **and LightNode,
     Neoxify's own provider.** Nobody in this market has solved it.
-12. **The whole question turns on one hour of measurement that has never been
+13. **There is already a shipped-today use case that needs nothing built.**
+    Riot's Vanguard throws error 68 whenever a VPN adapter is up, and the
+    community fix is to split-tunnel **seven named Riot executables** — a
+    per-executable, multi-binary, exclude-mode split tunnel, which is exactly
+    what Custom mode is. Meanwhile the Iranian Fortnite report — **lobby entry
+    works, matchmaking fails** — is empirical proof that carrying login while
+    leaving the game direct produces a player who can sign in and cannot play.
+    **That is the failure mode Gaming Mode as designed would ship.**
+14. **And the real danger to a customer's account is not detection.** A Syrian
+    player used a VPN successfully for *years*, then opened a support ticket
+    asking for a region transfer — volunteering his location — and Riot
+    permanently destroyed seven years of progress across four titles. Steam's
+    Iranian account locks follow the same shape: Valve asked for residency
+    documents and locked when they were not supplied. **The leak paths are
+    support tickets, payment metadata and tournament registration, not
+    packets.** No VPN defends against any of them, and this belongs in the
+    customer-facing copy before the sale.
+15. **The whole question turns on one hour of measurement that has never been
     taken**: a real account, on a real Iranian home connection, trying to log
     in and connect — direct, then through germany-1, then direct again. Every
     outcome of that test, including "nothing is blocked", changes the decision.
@@ -728,15 +759,72 @@ blocking its store. The OONI numbers are consistent with exactly this —
 `www.blizzard.com` shows **zero** confirmed Iranian blocks because **Iran is
 not the one blocking it.**
 
-Those specific reports date to 2019 and current status is **not established**,
-which is precisely what the experiment below has to settle. But the mechanism
-is structural rather than incidental, and it points the whole product a
-different way: **a player whose problem is publisher geo-blocking needs an
-exit address the *publisher* accepts, and is entirely unaffected by anything
-Iran does or by any amount of censorship circumvention.**
+**This is the case in which Neoxify's existing transports — its strongest
+asset — are irrelevant, and its exit IP reputation is the entire product.**
 
-That is the case in which Neoxify's existing transports — its strongest asset
-— are irrelevant, and its exit IP reputation is the entire product.
+### The legal fact that reframes all of it, and is almost never reported
+
+**US sanctions have explicitly authorised "e-gaming" services to Iran since
+2022.** OFAC issued Iran General License D-2 on 2022-09-23 and **folded it
+into the regulations on 2024-05-17**. The binding text today, 31 CFR
+§ 560.540(a)(1), authorises export to Iran of
+
+> "services incident to the exchange of communications over the internet,
+> such as instant messaging, chat and email, social networking, … **e-gaming**,
+> e-learning platforms, automated translation, web maps, and **user
+> authentication services**, as well as cloud-based services in support of the
+> foregoing."
+
+The carve-outs in § 560.540(b) are the Government of Iran, blocked/SDN
+persons, and *commercial-grade* connectivity. **An ordinary Iranian civilian
+playing a game is not excluded, and the authorisation is not limited to
+no-cost services.**
+
+Two consequences, and they point in opposite directions:
+
+1. **Most publisher blocks on Iranian gameplay today are over-compliance and
+   de-risking, not a legal prohibition.** Blizzard's own EULA even carries the
+   escape hatch — you warrant you are not resident in a sanctioned region
+   *"unless your use of the Platform in such country or region is authorized
+   by U.S. law"* — and § 560.540 arguably authorises exactly that.
+2. **Payments are genuinely different.** There is no lawful retail payment
+   rail into Iran, so store and purchase blocking rests on much firmer ground
+   than gameplay blocking. This split is visible in the observed behaviour:
+   Supercell's login is IP-gated and a VPN defeats it, while the store is
+   account-region-gated and a VPN does not.
+
+**Volatility flagged:** the sanctions picture moved twice in 2026 — General
+License X in June, and a new sanctions campaign announced in August. Neither
+touched the communications/e-gaming authorisation, but **§ 560.540 should be
+re-read rather than this paragraph trusted** before anything customer-facing
+is written.
+
+### Who actually blocks Iran, and at which layer
+
+| Platform | Blocked? | Layer | What the player sees | Official? |
+|---|---|---|---|---|
+| **Epic** (Fortnite, Rocket League) | **Yes** | Store **and server access** | Region restriction | **Yes** — Iran named in two live support articles; Rocket League's says *server access* is restricted |
+| **Riot** (LoL, Valorant, TFT, Wild Rift) | **Yes** | IP **and account termination** | *"Due to US laws and regulations, players in your country cannot access League of Legends…"* | **Yes** — ToS §19.9 plus published error text |
+| **Discord** | **Yes, both directions** | Service-wide | — | **Yes** — Iran named explicitly in the ToS |
+| **Microsoft / Minecraft** | **Yes** | Login, including already-purchased copies | *"This app or game isn't available in your country"* | **Semi** — a Microsoft support specialist, 2024 and again 2026 |
+| **Blizzard** | **Yes, per reports** | Battle.net services | Login failure / "world server down" | **2012 statement only**; nothing current |
+| **Supercell** | **Yes** | **Login IP-gated, store account-gated** | *"login from my location isn't supported"* | 2020 statement; current is community |
+| **Sony / PSN** | **Yes, by non-operation** | No country option exists | Cannot create or use an account | **Yes** — Iran is absent from Sony's own country selector |
+| **Activision / CoD Mobile** | **Yes** (2021) | Game client | *"we are not yet ready to release the game in your area"* | **No** — never explained |
+| **Valve / Steam** | **Account and payment only** | No IP geofence found | Account lock, *"sanctioned regions"* support reply | ToS clauses only |
+| **EA** | **Unclear** | Login + game servers | "Access Denied" (Myanmar precedent); login failure (Iran) | Generic ToS; **sources conflict** on whether Apex was unblocked |
+| **Xbox** | Probably | ? | Game Pass and MS Store cut | **Not established** |
+| **Roblox** | **Probably not** | — | — | Iran is absent from every Roblox block list; Iranian outages trace to Iran's side |
+| **Nintendo, PUBG Mobile, Free Fire, Rockstar** | **Not established** | — | — | — |
+
+Worth noting how far the pattern extends beyond the big names: Capcom blocked
+Iranian accounts from Street Fighter 6 in 2023 (*"resolved by having a VPN"*);
+Bandai Namco's Tekken 8 blocked Iranian IPs **on Steam**, which the series
+director attributed to the PlayStation-hosted authentication backend the game
+uses on every platform — **a geofence reaching players who never touched a
+PlayStation**; and Funcom's Conan Exiles returns a hard "Connection Refused"
+to Iranian addresses where the player reports *"tons of VPNs and DNS, no
+luck."*
 
 ### What is established
 
@@ -767,6 +855,70 @@ That is the case in which Neoxify's existing transports — its strongest asset
   games", which is only possible if the game sees the exit node's address.
   Gameforge banned SoulWorker accounts for exactly that. Both halves matter:
   the mechanism works, and publishers do act on it.
+
+### Does a VPN fix it? Four distinct outcomes, and they must not be conflated
+
+This is the question the product lives or dies on, and the honest answer is
+that all four of these happen:
+
+**(a) The VPN works.** Capcom/SF6 — *"resolved by having a VPN"*. Clash of
+Clans — *"login from my location isn't supported, with a vpn it loads"*.
+Minecraft — the April 2024 player got in via VPN, after roughly fifteen
+connection attempts.
+
+**(b) The VPN does not help at all**, and these are the cases that matter
+most to a tunnel vendor. Conan Exiles: *"tons of VPNs and DNS, no luck."*
+WoW, Dec 2022: "world server down" **with and without VPN**. Battle.net,
+Feb 2026 Persian reporting: does not connect *"even with ping-reduction
+tools."* And the Persian survey's own summary — *"most of the common DNS
+services previously used for sanction-bypass have been unable to circumvent
+the new restrictions."*
+
+**(c) The tunnel covers the wrong half.** Fortnite, Feb 2026 from Iran:
+**lobby entry succeeds and matchmaking fails.** That is the exact signature
+of a tunnel that carries the launcher and auth path but not the game path.
+It is an independent, empirical confirmation of what §"Smart DNS" argues
+structurally: **carrying login and leaving the game direct produces a player
+who can sign in and cannot play.** It is worth stating plainly that this is
+the failure mode the currently-designed Gaming Mode would ship.
+
+**(d) The anti-cheat breaks on the client, which is not a block at all.**
+Riot's Vanguard throws **error 68, "Vanguard is unable to initialize"**,
+whenever a VPN adapter is active, and the community fix is to
+**split-tunnel every Riot executable** — `LeagueClient.exe`,
+`LeagueClientUx.exe`, `LeagueClientUxRender.exe`, `LeagueCrashHandler64.exe`,
+`RiotClientServices.exe`, `RiotClientCrashHandler.exe` and
+`League of Legends.exe`. **That is a per-executable, multi-binary, exclude-mode
+split tunnel — precisely what Custom mode already does, including its
+"All except these" variant.** It is the most concrete product use case this
+research surfaced, and it needs no node work whatsoever.
+
+The same report adds a caveat worth carrying: `auth.riotgames.com` remained
+unreachable **even after split-tunnelling**, which the reporter attributes to
+Cloudflare refusing Mullvad's ranges. One uncorroborated community report,
+but it names the most plausible chokepoint in the whole system, and it is
+measurable rather than arguable.
+
+### The risk that is not about detection at all
+
+**The durable danger to a customer's account is not that the VPN is spotted.
+It is that the publisher learns their real country some other way and then
+terminates.**
+
+The proof is a Syrian player who used a VPN successfully for **years**, then
+opened a support ticket asking for a region transfer so he could enter an EU
+tournament — **volunteering his location.** Riot did not deny the transfer. It
+permanently suspended the account and destroyed roughly seven years of
+progress across League, TFT, Legends of Runeterra and Wild Rift. Iranian
+players report the same outcome. Steam's 2025 and 2026 Iranian account locks
+have the same shape: Valve asked for residency documentation and locked the
+account when it was not supplied.
+
+**The observed leak paths are support tickets, payment metadata and tournament
+registration — not packets.** No VPN protects against any of them, and a
+product sold to this audience has an obligation to say so before the sale.
+This belongs in the customer-facing copy alongside the existing sanctions
+warning, and it is more actionable than anything about anti-cheat.
 
 ### The one measurement that would decide it, and has never been taken
 
@@ -1338,10 +1490,26 @@ profiles, false everywhere else, with the UI saying which is in force.
 row per game covering launcher *and* game — and heed WTFast's documented
 mistake: the process running during play is often not the one you launch.
 
-**Step 4 — rewrite the client copy for access.** Every string listed above
-must change. And the honesty bar does not move: the client must not say
-"Connected" or "protected" for a game until it has verified the game's
-traffic is actually leaving through the node.
+**Step 4 — rewrite the client copy for access, and add the warning that is
+missing.** Every string listed above must change. The honesty bar does not
+move: the client must not say "Connected" or "protected" for a game until it
+has verified the game's traffic is actually leaving through the node.
+
+And one warning that is not in the product today and should be, because it is
+the risk that actually costs customers their accounts: **a VPN does not
+protect you from telling a publisher where you live.** The observed
+account-destruction cases were triggered by support tickets, payment metadata
+and tournament registration — never by packet inspection. A player who opens
+a support ticket, or enters a regional tournament, or pays with a card that
+reveals their country, can lose years of progress no matter how good the
+tunnel is. That belongs beside the existing sanctions-residence warning, in
+both languages, before the sale.
+
+**Step 4a — the Riot profile, which is shippable now.** Vanguard's error 68
+fires whenever a VPN adapter is up, and the fix is a split tunnel covering
+seven named Riot executables. That is a `GameProfile` row and nothing else —
+no node work, no new mechanism, and a real problem that real players have
+today whether or not they are in Iran.
 
 **Step 5 — Android, which is probably the larger market and has the better
 evidence.** Per-app routing already works there for both the Xray/TUN and
@@ -1461,13 +1629,23 @@ not re-derive the same dead ends.
 
 **About Iran and the games**
 
-- **Which specific games and platforms refuse Iranian addresses *today*, and
-  by what mechanism** — IP-level, account-level or payment-level. The
-  publisher geo-blocking reports for Blizzard, Riot and Epic date to **2019**
-  and current status is unverified. Two research threads — one on the
-  per-publisher blocking picture, one on obtaining address space that is not
-  labelled datacenter — were still running when this document was assembled
-  and their results are **not** included. Treat both as **open**.
+- **Whether Blizzard ever officially unblocked Iran after the JCPOA**, and
+  what the current Battle.net error string is. The "Blizzard unblocked Iran"
+  claim circulates widely on forums with **no** Blizzard statement, support
+  article or press confirmation behind it. Treat it as unverified.
+- **Whether EA currently geofences Apex Legends.** Sources conflict: one
+  outlet reports it was unblocked after Iranian fan appeals, while EA's own
+  forums keep carrying Iranian "not available for players from IRAN" threads.
+- **Xbox and Nintendo.** No Microsoft country-availability document naming
+  Iran could be retrieved (the pages are JS-rendered), and nothing at all was
+  found for Nintendo. Also unestablished: PUBG Mobile, Free Fire, Rockstar.
+- **The freshest per-game Persian evidence is confounded.** The February 2026
+  Zoomg table is the best current picture, but it describes the aftermath of
+  the January 2026 shutdown and does not separate publisher geofencing from
+  Iran-side damage. Iranian users make the distinction well — *"if the
+  government blocked it the site just wouldn't load; a 'login not supported'
+  message is the company"* — but the table does not apply that test per row.
+  **Strong evidence of symptoms, weak evidence of cause.**
 - **Whether UDP specifically is degraded for a game's own traffic** on
   Iranian consumer ISPs. The evidence that Iran's UDP filter is keyed on
   destination IP means a game server has no obvious reason to be on the
@@ -1531,6 +1709,23 @@ quoted, not because they are evidence.
 - ExitLag process-name matching, exploited in the open — `snoww/loa-logs`, `src-tauri/src/constants.rs` (`NINEVEH_COMPAT_EXE_NAME = "LOSTARK.exe"`)
 - Netch process mode on `netfilter2.sys` — <https://github.com/NetchX/Netch/blob/main/Netch/Controllers/NFController.cs>; NetFilter SDK — <https://www.netfiltersdk.com/help/nfsdk2/nfapi_index.html>
 - EZ Connect terms of service — <https://ezconnect.ir/policies/terms-of-service>; usage flow — <https://ezconnect.ir/how-to-use>; Telegram channel naming foreign routes — <https://t.me/ezconnect_ir>
+
+**Sanctions law and publisher geo-blocking**
+
+- **31 CFR § 560.540 (current, binding)** — the e-gaming and user-authentication authorisation — <https://www.ecfr.gov/current/title-31/subtitle-B/chapter-V/part-560/subpart-E/section-560.540>; GL D-2 publication <https://www.federalregister.gov/documents/2022/10/13/2022-22233/publication-of-iranian-transactions-and-sanctions-regulations-web-general-license-d-2>; codification <https://www.federalregister.gov/documents/2024/05/17/2024-10721/iranian-transactions-and-sanctions-regulations>
+- Epic naming Iran, purchases — <https://www.epicgames.com/help/en-US/c-Category_BillingSupport/c-GeneralSupport/what-regions-are-permitted-to-make-purchases-with-epic-games-a000084832>; **server access** for Rocket League — <https://www.epicgames.com/help/c-202300000001622/c-202300000001682/what-are-the-regional-restrictions-for-rocket-league-a202300000018016>
+- Riot Terms of Service §19.9 — <https://www.riotgames.com/en/terms-of-service>; the 2019 block <https://www.pcgamer.com/league-of-legends-blocked-in-iran-and-syria/>
+- Discord ToS naming Iran — <https://discord.com/terms>
+- Microsoft support specialist on Minecraft and Iran (2024) — <https://learn.microsoft.com/en-us/answers/questions/4042255/why-microsoft-banned-iran-from-minecraft>; again 2026 <https://learn.microsoft.com/en-in/answers/questions/5905663/hi-microsoft-can-you-please-unban-iran-from-minecr>
+- Blizzard's 2012 statement — <https://www.pcgamer.com/blizzard-battle-net-being-blocked-in-iran-is-due-to-us-sanctions-not-government-censorship/>; live EULA <https://www.blizzard.com/en-us/legal/fba4d00f-c7e4-4883-b8b9-1b4500a402ea/blizzard-end-user-license-agreement>; 2025 unanswered reopen request <https://us.forums.blizzard.com/en/blizzard/t/request-to-reopen-access-for-iranian/55358>
+- Supercell ending Cafe Bazaar — <https://www.aljazeera.com/economy/2020/10/6/locked-out-iran-based-gamers-banned-from-clash-of-clans>
+- Steam Subscriber Agreement §3.A (no IP proxying) — <https://store.steampowered.com/subscriber_agreement/>
+- Sony country selector, Iran absent — <https://www.playstation.com/country-selector/index.html>
+- Tekken 8 Iranian IP block traced to the PlayStation backend — <https://www.reddit.com/r/Tekken/comments/1ahfgoi/bandai_namco_tekken_project_banned_iranian_gamers/>
+- Conan Exiles "Connection Refused", VPNs ineffective — <https://forums.funcom.com/t/connection-refused-iranian-players-unsolved-problem/269286>
+- Riot account termination after a player disclosed residency — <https://www.reddit.com/r/LegendsOfRuneterra/comments/o1x9qh/10_years_of_playing_lost_because_i_live_in_syria/>
+- Vanguard error 68 with a VPN, and the seven-executable split-tunnel fix — <https://www.reddit.com/r/LeagueofTechSupport/comments/1dkohpc/vanguard_error_68_when_using_vpn/>
+- Per-game Iranian symptom table, Feb 2026 (Persian; confounded by the January 2026 shutdown) — <https://www.zoomg.ir/game-articles/413645-online-game-problems-iran-1404/>
 
 **Exit-address reputation**
 
