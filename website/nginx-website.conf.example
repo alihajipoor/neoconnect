@@ -108,7 +108,16 @@ server {
 
     # CHECK: document root of the unzipped site.
     root /var/www/neoxify.net;
-    index index.php;
+    # index.html is in this list for ONE directory: /account/.
+    #
+    # The customer portal is a compiled React SPA whose entry point is
+    # account/index.html, with no index.php under it anywhere. With a bare
+    # `index index.php;` a request for /account/ finds no index file and
+    # returns 403, while /account/assets/*.js and *.css resolve normally --
+    # which is exactly what makes the fault hard to spot.
+    #
+    # index.php stays first so no stray index.html can shadow a PHP page.
+    index index.php index.html;
 
     # CHECK: ssl_certificate / ssl_certificate_key -- leave certbot's.
 

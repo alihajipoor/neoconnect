@@ -61,8 +61,18 @@ if (preg_match('#^/(data|inc|scripts)/#', $path) || preg_match('#/\.#', $path)) 
 $file = $root . $path;
 
 // try_files $uri $uri/ -- let the built-in server handle anything real.
-if (is_dir($file) && is_file(rtrim($file, '/') . '/index.php')) {
-    return false;
+//
+// index.html as well as index.php, and for one reason: /account/ is the
+// compiled customer portal, an SPA with no index.php under it. Checking
+// only for index.php made /account/ 404 here while every file inside it
+// served fine, so the portal could not be walked locally at all -- and the
+// same gap existed in the real server configs, where it was a live fault
+// rather than a testing one. Mirrors `index index.php index.html;` in
+// nginx-website.conf.example.
+foreach (array('index.php', 'index.html') as $indexFile) {
+    if (is_dir($file) && is_file(rtrim($file, '/') . '/' . $indexFile)) {
+        return false;
+    }
 }
 if (is_file($file)) {
     return false;
