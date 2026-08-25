@@ -149,8 +149,82 @@
 //! out. A LAN neighbour on a `2000::/3` address is indistinguishable
 //! here from the internet, and a selected app will lose IPv6 to it. It
 //! keeps IPv4.
+//!
+//! # The datagram nobody can be shown to have sent
+//!
+//! Everything above assumes the loop can find out who sent a packet.
+//! For one shape it cannot, and until 0.9.32 that shape leaked.
+//!
+//! A UDP socket closed microseconds after its send is already out of
+//! the Windows UDP endpoint table by the time this loop is handed the
+//! datagram. `OwnerLookup` rebuilds and finds no row, because there is
+//! no row -- the fact is gone, not late. With `OnlySelected` an unknown
+//! owner used to mean "leave it alone", so a *selected* application's
+//! datagram went out in clear text from the customer's own address with
+//! the app reporting Custom mode on. Measured on the rig twice: 15
+//! datagrams from 15 short-lived sockets, 13 unredirected in one run
+//! and 14 in the next.
+//!
+//! It is deliberately not the browser case. A real QUIC client holds
+//! its socket open, so it is attributable from the second datagram and
+//! the first is caught by `image_for_new_connection` -- Chrome went
+//! from 219 plaintext UDP/443 datagrams before activation to 0 after.
+//! What is left is fire-and-forget senders: a beacon, a one-shot
+//! resolver, a telemetry ping.
+//!
+//! The answer is [`super::owner::Selection::verdict_for_unattributed`],
+//! which refuses such a datagram instead of passing it through. That
+//! inverts this feature's usual trade -- everywhere else an
+//! unanswerable question fails open, because unprotected traffic beats
+//! a stalled application. Here failing open **is** the leak, so this
+//! one arm fails closed. The scoping that keeps it from being an
+//! outage is documented on that function.
+//!
+//! ## Why not the WFP `ALE_APP_ID` filter the roadmap proposed
+//!
+//! The recorded direction for this ("B2") was a user-mode WFP BLOCK at
+//! `FWPM_LAYER_ALE_AUTH_CONNECT_V4` keyed on
+//! `FWPM_CONDITION_ALE_APP_ID`, on the reasoning that the kernel
+//! classifies there inside the sending process, where the owner is the
+//! caller rather than a lookup. The reasoning about attribution is
+//! right. The filter is still not buildable, for a reason about
+//! ordering rather than about attribution, and it is written down here
+//! so nobody spends the week finding it again.
+//!
+//! `ALE_AUTH_CONNECT_V4` is classified when the flow is established --
+//! *before* the packet reaches the network layer where WinDivert's
+//! callout sits and where this loop rewrites it. A BLOCK there does not
+//! give this loop a datagram it can refuse; it means `sendto` fails and
+//! **no packet is produced at all**. And WFP cannot tell the leaking
+//! datagram from the working one: at that layer a selected app's
+//! fire-and-forget send and its QUIC handshake are the same app, the
+//! same protocol and the same kind of destination. So the filter would
+//! have to block both -- turning a partial leak into a total outage of
+//! the selected application's UDP, including the 219-to-0 case that
+//! already works.
+//!
+//! Nor can it be narrowed. Every field ALE can condition on -- app id,
+//! protocol, remote address, local interface -- is identical for the
+//! two, because the difference between them is not a property of the
+//! send. It is whether a *later* lookup will find the socket still
+//! open. Nothing at connect time knows that.
+//!
+//! What user-mode WFP could not do here, the callout driver this
+//! service already loads can: WinDivert sees the datagram after the
+//! send, with the owner lookup's answer in hand, and can drop exactly
+//! the one that has no answer. The teardown guarantee is the same one a
+//! `FWPM_SESSION_FLAG_DYNAMIC` session would have given -- the filter
+//! lives in the driver only while the handle is open, and closing the
+//! last handle removes it whether or not any code of ours ran. Adding a
+//! second kill-switch-shaped object to the filtering table would have
+//! bought nothing and risked the leftover-block failure customers
+//! already report as a broken network.
+//!
+//! `engines/ipv6_block.rs` remains the right shape for what it does:
+//! it blocks a whole family for a full tunnel, where there is no
+//! redirect downstream to starve.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -162,7 +236,7 @@ use windivert_sys::{WinDivertFlags, WinDivertLayer};
 
 use super::divert::{recalculate_checksums, Handle};
 use super::flows::{Nat, Origin, Verdict};
-use super::owner::{Family, OwnerLookup, Selection, SharedSelection, Transport};
+use super::owner::{Family, OwnerLookup, Selection, SharedSelection, Transport, Unattributed};
 use super::proxy::OwnSockets;
 
 /// The largest packet WinDivert will hand over.
@@ -314,6 +388,33 @@ pub struct Stats {
     /// continuously -- so a failure here would light a warning about
     /// something else entirely.
     pub reset_v6: AtomicU64,
+    /// Datagrams swallowed because nothing could say who sent them --
+    /// see `Selection::verdict_for_unattributed`.
+    ///
+    /// The one counter here that reports the *inversion* of this
+    /// feature's usual trade. Everywhere else an unanswerable question
+    /// fails open, because unprotected traffic beats a stalled app; for
+    /// this one shape failing open **is** the leak, so it fails closed
+    /// and this is what says how often that happened.
+    ///
+    /// It has to be counted for a reason the other refusals do not: a
+    /// drop nobody records is a change to this loop that cannot be
+    /// argued about afterwards, and this is the only drop that can hit
+    /// an application the customer did not choose. If it is large on a
+    /// customer's machine, something is sending one-shot UDP hard and
+    /// the number is where that conversation starts.
+    ///
+    /// Both families. An IPv6 refusal is also counted in `blocked_v6`,
+    /// which is a count of v6 packets dropped whatever the reason;
+    /// overlapping is better here than a `blocked_v6` that silently
+    /// stops being the total.
+    ///
+    /// Deliberately not read by [`Stats::complaint`], for the reason
+    /// `blocked_v6` is not: it counts a refusal working as designed. A
+    /// machine with chatty one-shot senders would light that warning
+    /// permanently, and this project has already decided a warning that
+    /// is always on is one nobody reads when it matters.
+    pub refused_unattributed: AtomicU64,
 }
 
 /// How many packets must have gone out before silence means anything.
@@ -339,7 +440,7 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} grace_dropped={} reset_v6={}",
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} grace_dropped={} reset_v6={} refused_unattributed={}",
             self.seen.load(Ordering::Relaxed),
             self.matched.load(Ordering::Relaxed),
             self.redirected.load(Ordering::Relaxed),
@@ -349,6 +450,7 @@ impl Stats {
             self.escaped.load(Ordering::Relaxed),
             self.grace_dropped.load(Ordering::Relaxed),
             self.reset_v6.load(Ordering::Relaxed),
+            self.refused_unattributed.load(Ordering::Relaxed),
         )
     }
 
@@ -832,15 +934,20 @@ fn worker(
 /// Which half of the translation a packet went through, so the worker
 /// can attribute the injection that follows.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 enum Leg {
     /// App towards the proxy.
     Outbound,
     /// Proxy's reply back to the app.
     Return,
     /// Swallowed on purpose: not re-injected, and not a hole in the
-    /// machine's networking but a deliberate refusal. Only the DNS
-    /// branch produces this, and only when the alternative would be to
-    /// send the lookup to the customer's own ISP.
+    /// machine's networking but a deliberate refusal. Three branches
+    /// produce it, and all three are cases where letting the packet
+    /// through would send it somewhere the customer asked it not to
+    /// go: a lookup that would otherwise reach their own ISP, an IPv6
+    /// packet this loop has no way to carry, and a datagram nobody can
+    /// be shown to have sent -- see
+    /// `Selection::verdict_for_unattributed`.
     Swallowed,
 }
 
@@ -899,6 +1006,12 @@ fn parse(packet: &[u8]) -> Option<Parsed> {
 /// looking like the beginning of a v6 rewrite that does not exist.
 struct ParsedV6 {
     transport: Transport,
+    /// Where the packet is going, read for the same reason the IPv4
+    /// parser reads it: the decision about a packet nobody can
+    /// attribute turns on whether the destination is the internet or
+    /// the local network, and asking the packet is what stops that rule
+    /// and the kernel filter drifting into disagreement.
+    destination: Ipv6Addr,
     source_port: u16,
     destination_port: u16,
     tcp_flags: u8,
@@ -945,6 +1058,12 @@ fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
         return None;
     }
 
+    // Bytes 24..40 of the fixed header, which the length check above
+    // has already guaranteed are there.
+    let mut destination = [0u8; 16];
+    destination.copy_from_slice(&packet[24..40]);
+    let destination = Ipv6Addr::from(destination);
+
     let mut next = packet[6];
     let mut offset = IPV6_HEADER;
 
@@ -987,6 +1106,7 @@ fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
         let ports = packet.get(offset..offset + 14)?;
         return Some(ParsedV6 {
             transport,
+            destination,
             source_port: u16::from_be_bytes([ports[0], ports[1]]),
             destination_port: u16::from_be_bytes([ports[2], ports[3]]),
             tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
@@ -1209,9 +1329,38 @@ fn handle_ipv6(
         return block(stats);
     }
 
+    // The same question the IPv4 path asks, answered the same way and
+    // for the same measurement -- see
+    // `Selection::verdict_for_unattributed`. A datagram nobody can
+    // attribute is refused rather than passed through, because passing
+    // it through is how a selected application's traffic leaves in
+    // clear text.
+    //
+    // Stated plainly: **the IPv6 half of this is reasoned, not
+    // measured.** The rig run that found the leak was IPv4. What makes
+    // it worth doing anyway is that refusing costs a selected app
+    // nothing it was not already losing -- its IPv6 is blocked either
+    // way, deliberately, see the module header -- so the only new cost
+    // is a non-selected app's one-shot v6 UDP, and leaving the arm
+    // open would mean knowingly shipping the leak over the other
+    // family. There is no reset for a refused datagram on either
+    // family; UDP has no in-band way to say so, which is the gap the
+    // `tunnelled` branch below already states.
     let tunnelled = match owner_image {
         Some(image) => selection.should_tunnel(image),
-        None => selection.tunnel_when_owner_unknown(),
+        None => match selection
+            .verdict_for_unattributed(parsed.transport, IpAddr::V6(parsed.destination))
+        {
+            Unattributed::Carry => true,
+            Unattributed::LeaveAlone => false,
+            Unattributed::Refuse => {
+                stats.refused_unattributed.fetch_add(1, Ordering::Relaxed);
+                // `block` as well, so `blocked_v6` stays the whole
+                // count of IPv6 packets this loop swallowed rather than
+                // quietly becoming a subset of it.
+                return block(stats);
+            }
+        },
     };
     if tunnelled {
         stats.matched.fetch_add(1, Ordering::Relaxed);
@@ -1455,51 +1604,28 @@ fn decide(
                 .any(|own| image.eq_ignore_ascii_case(own))
         })
         .unwrap_or(false);
+    // A port with no owner this can see, which is the case the rest of
+    // this function used to get wrong -- see
+    // `Selection::verdict_for_unattributed` for the measurement and for
+    // why the answer for a datagram is now "refuse" rather than "leave
+    // it alone".
+    //
+    // Worked out here and acted on further down rather than returned on
+    // the spot, because the DNS branch below has to run first: a lookup
+    // is carried whoever made it, and carrying an unattributable one is
+    // strictly better than swallowing it. Refusing here would have
+    // turned a carried query into a dropped one, which is a slower page
+    // in exchange for nothing.
+    let unattributed = match owner_image {
+        Some(_) => None,
+        None => Some(selection.verdict_for_unattributed(
+            parsed.transport,
+            IpAddr::V4(parsed.destination),
+        )),
+    };
     let selected = match owner_image {
         Some(image) => !is_own && selection.should_tunnel(image),
-        // A port with no owner this can see. Which way to fail depends
-        // on the direction -- see `tunnel_when_owner_unknown`.
-        //
-        // # The measured gap this arm cannot close
-        //
-        // A UDP socket that is closed immediately after its send leaks
-        // in `OnlySelected`, and no amount of asking harder fixes it.
-        // Windows drops the port from the UDP endpoint table when the
-        // socket closes, and this loop is handed the datagram after the
-        // send returns -- so by the time `image_for_new_connection`
-        // rebuilds, the row naming the owner is already gone. No owner
-        // means `tunnel_when_owner_unknown()`, which in `OnlySelected`
-        // is false, which is "leave it alone". The datagram egresses in
-        // clear text from a selected application.
-        //
-        // Measured on the rig, twice: a selected program sending 15
-        // datagrams from 15 sockets, each closed microseconds after the
-        // send, put 13 and 14 of them respectively on the wire
-        // unredirected. It is reproducible, it is not a race that
-        // retrying wins, and it is the one hole the redesign of the
-        // paragraph above did not close.
-        //
-        // It is deliberately not the browser case, and the same session
-        // measured that too: a real QUIC client holds its socket open
-        // for the life of the connection, so the second datagram is
-        // always attributable and the first is caught by
-        // `image_for_new_connection`. Chrome went from 219 plaintext
-        // UDP/443 datagrams before activation to 0 after. What is left
-        // is fire-and-forget senders -- a beacon, a one-shot resolver, a
-        // telemetry ping -- which is a smaller shape than QUIC and still
-        // real.
-        //
-        // Closing it needs a mechanism that does not depend on the
-        // socket still existing when the packet is classified. A WFP
-        // filter at `FWPM_LAYER_ALE_AUTH_CONNECT_V4` keyed on
-        // `FWPM_CONDITION_ALE_APP_ID` is classified by the kernel at
-        // send time, inside the sending process, where the owner is not
-        // a lookup but the caller -- the B2 proposal on the roadmap.
-        // `engines/ipv6_block.rs` already builds and installs a dynamic
-        // filter set from this service, so the machinery exists; what is
-        // missing is the decision about what such a filter should do
-        // with a datagram it cannot hand to the relay.
-        None => selection.tunnel_when_owner_unknown(),
+        None => matches!(unattributed, Some(Unattributed::Carry)),
     };
 
     // A lookup is carried whoever made it -- see `is_dns` -- except this
@@ -1535,6 +1661,21 @@ fn decide(
             // the leak cannot be taken back.
             None => Verdict::Drop,
         };
+    }
+
+    // Nothing on this machine can say who sent this datagram, and in
+    // `OnlySelected` the honest answer is to refuse it rather than to
+    // let it out in the clear on the chance it was not the selected
+    // app's. See `Selection::verdict_for_unattributed`.
+    //
+    // Nothing is recorded against the port. A leave-alone verdict here
+    // would exempt whatever opens that port next, and the whole point
+    // of this branch is that the port is not evidence of anything -- it
+    // had no owner a moment ago and may have a perfectly ordinary one
+    // by the next datagram, which then gets decided on its merits.
+    if matches!(unattributed, Some(Unattributed::Refuse)) {
+        stats.refused_unattributed.fetch_add(1, Ordering::Relaxed);
+        return Verdict::Drop;
     }
 
     if !selected {
@@ -1716,6 +1857,7 @@ mod tests {
             escaped: AtomicU64::new(0),
             grace_dropped: AtomicU64::new(0),
             reset_v6: AtomicU64::new(0),
+            refused_unattributed: AtomicU64::new(0),
         }
     }
 
@@ -1952,6 +2094,247 @@ mod tests {
             Verdict::Direct,
             "a known owner's verdict must be remembered"
         );
+    }
+
+    /// A UDP port whose socket is already gone, which is the shape that
+    /// leaked.
+    ///
+    /// Bound and then dropped, because that is the only honest way to
+    /// produce it. A port that never existed does not reproduce the bug
+    /// -- the bug is that Windows *removes* a row it had -- and a port
+    /// whose socket is still open does not either, since that one is
+    /// attributable and always was.
+    ///
+    /// The lookup is made here, before the packet is built, and its
+    /// answer asserted. Ephemeral ports get reused, and a port the
+    /// machine handed to somebody else between the close and the
+    /// decision would make every assertion below pass for a reason that
+    /// has nothing to do with this fix.
+    fn dead_udp_port(owner: &mut OwnerLookup) -> u16 {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        assert!(
+            owner.image_for_new_connection(Family::V4, Transport::Udp, port).is_none(),
+            "UDP port {port} was taken by something else between the close and the \
+             lookup, so this run proves nothing about an unattributable datagram"
+        );
+        port
+    }
+
+    #[test]
+    fn a_datagram_from_a_socket_that_is_already_gone_is_refused_not_leaked() {
+        // The measured leak, in the smallest form a test can hold.
+        //
+        // On the rig this was a selected program sending 15 datagrams
+        // from 15 sockets, each closed microseconds after its send: 13
+        // of them went out unredirected in one run and 14 in the next,
+        // in clear text, from the customer's own address, with the app
+        // reporting Custom mode on. The mechanism is that Windows drops
+        // the port from the UDP endpoint table when the socket closes,
+        // so `image_for_new_connection` rebuilds and finds nothing --
+        // and "nothing" used to mean "leave it alone".
+        //
+        // The selection deliberately does not contain this test binary.
+        // That is the point: the loop cannot tell whether the sender was
+        // selected, and the only safe answer to a question that cannot
+        // be answered is to refuse.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+
+        let port = dead_udp_port(&mut owner);
+        let destination = Ipv4Addr::new(203, 0, 113, 9);
+        // Not port 53: the DNS branch carries a lookup whoever made it,
+        // so it would answer this before the refusal is ever reached.
+        let packet = udp_packet(Ipv4Addr::new(192, 168, 1, 20), destination, port, 443);
+        let parsed = parse(&packet).expect("a well-formed packet");
+
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Drop,
+            "a datagram nobody can attribute must not go out in the clear"
+        );
+        assert_eq!(
+            stats.refused_unattributed.load(Ordering::Relaxed),
+            1,
+            "a drop nothing records is a change to this loop nobody can argue about later"
+        );
+        assert_eq!(
+            nat.lookup(Transport::Udp, port, destination, 443),
+            Verdict::Unknown,
+            "a refusal must not be remembered against the port -- whatever opens it \
+             next deserves to be decided on its own merits"
+        );
+    }
+
+    #[test]
+    fn a_lookup_nobody_can_attribute_is_carried_rather_than_refused() {
+        // Order inside `decide`, asserted rather than assumed. The DNS
+        // branch runs before the refusal on purpose: a lookup is carried
+        // whoever made it, and carrying an unattributable one is
+        // strictly better than swallowing it -- same protection, and the
+        // page still loads. Refusing first would have quietly turned
+        // every carried query from a short-lived socket into a dropped
+        // one.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+
+        let port = dead_udp_port(&mut owner);
+        let packet =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(203, 0, 113, 9), port, 53);
+        let parsed = parse(&packet).expect("a well-formed packet");
+
+        assert!(
+            matches!(
+                decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+                Verdict::Redirect { .. }
+            ),
+            "an unattributable lookup must still be carried through the tunnel"
+        );
+        assert_eq!(stats.refused_unattributed.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn everything_except_mode_still_carries_what_it_cannot_attribute() {
+        // The other direction of the list is untouched by this fix and
+        // has to stay that way. "Everything except these" means an
+        // unknown owner is one of the many, so it is carried -- leaving
+        // it out is what would be the leak there. Refusing it would take
+        // traffic away from a customer who asked for all of it.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::AllExcept);
+
+        let port = dead_udp_port(&mut owner);
+        let packet =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(203, 0, 113, 9), port, 443);
+        let parsed = parse(&packet).expect("a well-formed packet");
+
+        assert!(
+            matches!(
+                decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+                Verdict::Redirect { .. }
+            ),
+            "AllExcept carries an unknown owner and this fix must not change that"
+        );
+        assert_eq!(stats.refused_unattributed.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_unattributable_tcp_connection_still_fails_open() {
+        // The refusal is UDP-only, and that is a claim worth a test
+        // rather than a comment. A TCP socket cannot be gone before its
+        // SYN is classified -- it has to stay open to receive the
+        // handshake -- so the shape this fix exists for does not arise
+        // over TCP, and inverting the fail-open there would refuse
+        // connections for no measured reason.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        if owner.image_for_new_connection(Family::V4, Transport::Tcp, port).is_some() {
+            // Reused between the close and the lookup. Nothing is proven
+            // either way, and failing here would be reporting the
+            // machine's port allocator as a bug in this file.
+            eprintln!("skipped: TCP port {port} was reused before the lookup");
+            return;
+        }
+        let packet = tcp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            443,
+            TCP_FLAG_SYN,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct,
+            "TCP must keep failing open"
+        );
+        assert_eq!(stats.refused_unattributed.load(Ordering::Relaxed), 0);
+    }
+
+    /// A minimal IPv6 UDP packet. Sized to what `parse_v6` reads rather
+    /// than to a UDP header, since the parser takes fourteen bytes at
+    /// the transport offset so that one read covers TCP's flags too.
+    fn ipv6_udp_packet(destination: &str, source_port: u16, destination_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; IPV6_HEADER + 20];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&20u16.to_be_bytes());
+        packet[6] = IPPROTO_UDP;
+        packet[7] = 64; // hop limit
+        let source: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let destination: Ipv6Addr = destination.parse().unwrap();
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40..42].copy_from_slice(&source_port.to_be_bytes());
+        packet[42..44].copy_from_slice(&destination_port.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn the_same_datagram_over_ipv6_is_refused_too() {
+        // The IPv4 arm and the IPv6 arm are the same decision written
+        // twice, and before this they disagreed: v4 leaked an
+        // unattributable datagram out of the physical link and v6 passed
+        // one straight through. Refusing on one family and not the other
+        // is the shape of half-fix this file has shipped before -- see
+        // the module header on the filter that matched no IPv6 at all.
+        //
+        // Reasoned from the IPv4 measurement rather than measured, and
+        // the journal says so. What makes it safe is that a selected
+        // app's IPv6 is already dropped deliberately, so this takes
+        // nothing further from it.
+        let mut owner = OwnerLookup::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+        let mut reset = None;
+
+        let socket = std::net::UdpSocket::bind("[::]:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        if owner.image_for_new_connection(Family::V6, Transport::Udp, port).is_some() {
+            eprintln!("skipped: UDP6 port {port} was reused before the lookup");
+            return;
+        }
+
+        // Not 53: the DNS-port branch above blocks a v6 lookup already,
+        // and would answer this without consulting the owner at all.
+        let packet = ipv6_udp_packet("2001:db8:6ec5::1", port, 8686);
+        let leg = handle_ipv6(&packet, &redirect, &selection, &mut owner, &stats, &mut reset);
+
+        assert!(
+            matches!(leg, Some(Leg::Swallowed)),
+            "an unattributable v6 datagram must not be passed through, got {leg:?}"
+        );
+        assert_eq!(stats.refused_unattributed.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            stats.blocked_v6.load(Ordering::Relaxed),
+            1,
+            "blocked_v6 has to stay the whole count of v6 packets this loop swallowed"
+        );
+        assert!(reset.is_none(), "there is no reset to send for a refused datagram");
     }
 
     #[test]

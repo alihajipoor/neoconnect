@@ -19,9 +19,19 @@
 //!
 //! `GetExtendedTcpTable`/`GetExtendedUdpTable` have no such race. The
 //! socket appears in the table when it is created, before anything is
-//! sent, so a lookup at the moment the first packet arrives is always
-//! answerable. The cost is a table walk, which is why the result is
-//! cached and the refresh rate-limited below.
+//! sent, so a lookup at the moment the first packet arrives is
+//! answerable -- *provided the socket is still open when it is made*.
+//! The cost is a table walk, which is why the result is cached and the
+//! refresh rate-limited below.
+//!
+//! That proviso used to read "always answerable", and it was measured
+//! wrong. A socket closed immediately after its send is out of the
+//! table before the redirect loop is handed the datagram, and no
+//! rebuild can recover a row that no longer exists. That is not a race
+//! this file can win by asking harder, and it is why
+//! [`Selection::verdict_for_unattributed`] exists: the question moves
+//! from "who owns this port" -- unanswerable -- to "what is the safe
+//! thing to do when nobody does".
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -171,9 +181,130 @@ impl Selection {
     /// is how a split tunnel becomes a full one. Tunnelling everything
     /// *except* named applications means an unknown owner is carried,
     /// because leaving it out is how it becomes a leak.
+    ///
+    /// **This is no longer the whole answer for a datagram**, and
+    /// callers deciding about one must use
+    /// [`Self::verdict_for_unattributed`] instead. It survives because
+    /// two callers really do only need the boolean: the IPv6 packet
+    /// whose ports could not be read at all, which has no transport to
+    /// key a finer rule on, and this function's own place inside that
+    /// finer rule.
     pub fn tunnel_when_owner_unknown(&self) -> bool {
         matches!(self.mode, SplitTunnelMode::AllExcept)
     }
+
+    /// What to do with a packet nobody can be shown to have sent.
+    ///
+    /// # Why "leave it alone" was not safe enough
+    ///
+    /// [`Self::tunnel_when_owner_unknown`] answers this in `AllExcept`
+    /// and gets it right: carry it, because leaving it out is the leak.
+    /// In `OnlySelected` it answers "leave it alone", on the reasoning
+    /// that redirecting traffic of unknown origin turns a split tunnel
+    /// into a full one. That reasoning is sound and the outcome was
+    /// still a leak, because of one shape it did not account for.
+    ///
+    /// A UDP socket that is closed microseconds after its send is
+    /// already out of the Windows UDP endpoint table by the time the
+    /// redirect loop is handed the datagram. There is no row naming the
+    /// owner and no rebuild can produce one -- the fact is gone, not
+    /// late. So a *selected* application's datagram arrives with no
+    /// owner, is answered "leave it alone", and egresses in clear text
+    /// carrying the customer's real address while the app says Custom
+    /// mode is on.
+    ///
+    /// Measured on the rig, twice: a selected program sending 15
+    /// datagrams from 15 sockets, each closed microseconds after the
+    /// send, put 13 and 14 of them respectively on the wire
+    /// unredirected. Reproducible, and not a race retrying wins.
+    ///
+    /// # Why refusing, and not carrying
+    ///
+    /// Carrying it would send a non-selected application's traffic out
+    /// of the node -- the customer asked for the opposite, and for
+    /// someone whose account is judged by the address it connects from,
+    /// silently moving their traffic onto a VPN address is its own kind
+    /// of harm. Refusing is the same answer this feature already gives
+    /// IPv6 and already gives a lookup it cannot carry: a stated gap in
+    /// place of a silent leak. A one-shot datagram that does not arrive
+    /// is visible, complainable-about and recoverable. Being logged by
+    /// an ISP in Iran is none of those.
+    ///
+    /// # Why this does not take the customer's internet down
+    ///
+    /// The refusal is deliberately the narrowest thing that closes the
+    /// hole, and every clause below is a clause that keeps ordinary
+    /// traffic working:
+    ///
+    /// * **`AllExcept` is untouched.** It carries an unknown owner, has
+    ///   no leak of this shape, and nothing here changes it.
+    /// * **TCP is untouched.** A TCP socket cannot be gone before its
+    ///   SYN is classified -- it has to stay open to receive the
+    ///   handshake -- so this shape is UDP-only, and TCP keeps failing
+    ///   open exactly as before.
+    /// * **Only destinations that are the internet.** Loopback, RFC1918,
+    ///   link-local, multicast and broadcast are the local network. A
+    ///   datagram to one of them is not a privacy leak, and refusing it
+    ///   would break mDNS, LLMNR, SSDP, WS-Discovery and DHCP -- one-shot
+    ///   senders every one of them, which is precisely the shape that
+    ///   would be caught.
+    /// * **Only an owner that could not be found at all.** A live socket
+    ///   is in the table from the moment it is created, so anything
+    ///   still holding its socket -- which is every QUIC client, every
+    ///   game, every long-running connection -- is attributed and
+    ///   decided on its merits. Chrome went from 219 plaintext UDP/443
+    ///   datagrams to 0 under the existing code precisely because a real
+    ///   QUIC client holds its socket open; none of that reaches here.
+    ///
+    /// What is left, and it is the honest cost of this change, is a
+    /// non-selected application's *one-shot* UDP to the internet, which
+    /// is refused while Custom mode is on. That is a real behavioural
+    /// change and it is deliberate: the alternative is that the same
+    /// datagram from a selected application leaves in the clear, and
+    /// this loop cannot tell the two apart. The feature fails open
+    /// everywhere else; here it fails closed, because failing open here
+    /// is the leak itself.
+    ///
+    /// Callers pass the destination rather than having it reached for,
+    /// so the rule can be tested without a packet and so the WinDivert
+    /// filter -- which excludes the same addresses in the kernel -- and
+    /// this cannot drift apart into disagreeing about one destination.
+    pub fn verdict_for_unattributed(
+        &self,
+        transport: Transport,
+        destination: IpAddr,
+    ) -> Unattributed {
+        if self.tunnel_when_owner_unknown() {
+            return Unattributed::Carry;
+        }
+        let is_internet = match destination {
+            IpAddr::V4(addr) => is_public_v4(addr),
+            IpAddr::V6(addr) => is_public_v6(addr),
+        };
+        if matches!(transport, Transport::Udp) && is_internet {
+            Unattributed::Refuse
+        } else {
+            Unattributed::LeaveAlone
+        }
+    }
+}
+
+/// What to do with a packet whose owning program cannot be seen.
+///
+/// Three answers rather than the boolean this used to be, because the
+/// two the boolean could express were both wrong for one case -- see
+/// [`Selection::verdict_for_unattributed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unattributed {
+    /// Put it in the tunnel. `AllExcept`, where an unknown owner is one
+    /// of the many rather than one of the few.
+    Carry,
+    /// Send it out untouched, as before.
+    LeaveAlone,
+    /// Swallow it. The only answer that is neither of the two the
+    /// redirect loop can otherwise give, and the one that closes the
+    /// fire-and-forget leak.
+    Refuse,
 }
 
 /// Caches the two connection tables and the image path of each process
@@ -854,6 +985,98 @@ fn image_path(pid: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule, spelled out as a table, because every cell of it is a
+    /// decision somebody could reasonably make differently and three of
+    /// them are the difference between a leak and an outage.
+    ///
+    /// `Refuse` appears exactly once: `OnlySelected`, UDP, a destination
+    /// on the internet. That single cell is the fire-and-forget leak.
+    /// Every other cell keeps the behaviour that shipped, and the test
+    /// asserts them by name rather than trusting the one that changed to
+    /// have stayed in its lane.
+    #[test]
+    fn only_a_datagram_to_the_internet_with_no_owner_is_refused() {
+        let internet = IpAddr::V4("203.0.113.9".parse().unwrap());
+        let only = Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+        let except = Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::AllExcept);
+
+        assert_eq!(
+            only.verdict_for_unattributed(Transport::Udp, internet),
+            Unattributed::Refuse,
+            "the measured leak: a datagram nobody owns, going to the internet, in the \
+             mode where an unknown owner used to mean leave it alone"
+        );
+        assert_eq!(
+            only.verdict_for_unattributed(Transport::Tcp, internet),
+            Unattributed::LeaveAlone,
+            "TCP keeps failing open -- a TCP socket cannot be gone before its SYN is \
+             classified, so this shape does not arise there"
+        );
+        assert_eq!(
+            except.verdict_for_unattributed(Transport::Udp, internet),
+            Unattributed::Carry,
+            "everything-except carries an unknown owner; leaving it out is the leak there"
+        );
+        assert_eq!(
+            except.verdict_for_unattributed(Transport::Tcp, internet),
+            Unattributed::Carry,
+        );
+    }
+
+    /// The clauses that keep a customer's machine on its own network.
+    ///
+    /// Refusing these would not close any leak -- a datagram that never
+    /// leaves the local network cannot tell an ISP anything -- and it
+    /// would break mDNS, LLMNR, SSDP, WS-Discovery and DHCP, every one
+    /// of which is a one-shot sender and therefore exactly the shape
+    /// that would be caught. "Blocked too broadly" here means the
+    /// customer's printer and their television stop being found, which
+    /// is a far worse day than the leak.
+    ///
+    /// The list is the same one `is_public_v4`/`is_public_v6` answer and
+    /// the same one the WinDivert filter excludes in the kernel, which
+    /// is why the destination is passed in rather than reached for: the
+    /// three cannot drift into disagreeing about one address.
+    #[test]
+    fn the_local_network_is_never_refused() {
+        let only = Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+        for local in [
+            "127.0.0.1",     // loopback
+            "10.1.2.3",      // RFC1918
+            "172.16.0.5",    // RFC1918
+            "192.168.1.1",   // RFC1918, and the router
+            "169.254.10.1",  // link-local
+            "224.0.0.251",   // mDNS
+            "239.255.255.250", // SSDP
+            "255.255.255.255", // broadcast, and DHCP
+        ] {
+            let address = IpAddr::V4(local.parse().unwrap());
+            assert_eq!(
+                only.verdict_for_unattributed(Transport::Udp, address),
+                Unattributed::LeaveAlone,
+                "{local} is the local network, not the internet"
+            );
+        }
+
+        for local in ["::1", "fe80::1", "fd00::1", "ff02::fb"] {
+            let address = IpAddr::V6(local.parse().unwrap());
+            assert_eq!(
+                only.verdict_for_unattributed(Transport::Udp, address),
+                Unattributed::LeaveAlone,
+                "{local} is the local network, not the internet"
+            );
+        }
+
+        assert_eq!(
+            only.verdict_for_unattributed(
+                Transport::Udp,
+                IpAddr::V6("2001:db8:6ec5::1".parse().unwrap())
+            ),
+            Unattributed::Refuse,
+            "a global v6 address is the internet and leaks the same way v4 does"
+        );
+    }
 
     #[test]
     fn selection_matching_ignores_case() {

@@ -8281,6 +8281,216 @@ was found by reading.
   no-logs, kill-switch, auto-connect, refund or signed-installer claim.
   That is deliberate and load-bearing. `website/README.md` now lists it
   as a convention so the next pass does not "improve" it back.
+
+---
+
+## 2026-08-24 — the fire-and-forget UDP leak is closed in source, and the WFP filter that was going to close it cannot
+
+**Status:** in flight — in source and unit-tested, **never run on a rig**
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/owner.rs`,
+`.../redirect.rs`, on branch `claude/fix-udp-fire-and-forget-leak`
+(off `main` at `522299e`, pushed, not merged)
+
+This is the leak the 0928 entry measured and wrote into the `None =>`
+arm of `decide`. It is **not** the leave-alone-cache leak on
+`claude/split-tunnel-direct-cache-destination`; that one is separate,
+still unmerged, and untouched by this.
+
+### The mechanism, unchanged from what was measured
+
+A UDP socket closed microseconds after its send is already out of the
+Windows UDP endpoint table by the time the redirect loop is handed the
+datagram. `image_for_new_connection` rebuilds and finds no row, because
+there is no row — the fact is gone, not late. In `OnlySelected` an
+unknown owner meant "leave it alone", so a **selected** application's
+datagram left in clear text from the customer's own address while the
+app reported Custom mode on. 13 of 15 unredirected in one rig run, 14 of
+15 in the next.
+
+Nothing above is new. What follows is.
+
+### The B2 filter cannot be built, and the reason is ordering, not attribution
+
+The recorded direction was a user-mode WFP BLOCK at
+`FWPM_LAYER_ALE_AUTH_CONNECT_V4` keyed on `FWPM_CONDITION_ALE_APP_ID`,
+because the kernel classifies there inside the sending process where the
+owner is the caller rather than a lookup. **The attribution argument is
+right and the filter is still not buildable.**
+
+`ALE_AUTH_CONNECT_V4` is classified when the flow is established, which
+is *before* the packet reaches the network layer where WinDivert's
+callout sits and where this loop rewrites it. A BLOCK there does not
+hand the loop a datagram to refuse — `sendto` fails and **no packet is
+produced at all**. So the filter cannot carry a selected app's traffic
+into the relay; it can only stop it.
+
+And it cannot be narrowed to just the leaking sends. At that layer a
+selected app's fire-and-forget datagram and its QUIC handshake are the
+same app id, the same protocol and the same kind of destination. Every
+field ALE can condition on is identical for the two, because the
+difference between them is not a property of the send at all — it is
+whether a *later* lookup will still find the socket open, which nothing
+at connect time knows. The filter would have to block both, turning a
+partial leak into a **total outage of the selected application's UDP**,
+including the Chrome 219-plaintext-datagrams-to-0 case that already
+works today.
+
+The 0928 comment ended "what is missing is the decision about what such
+a filter should do with a datagram it cannot hand to the relay". That
+was the right question and it has an answer, and the answer kills the
+proposal: there is no such thing as "a datagram it cannot hand to the
+relay" at that layer, because the filter sees *all* of them and can tell
+none of them apart.
+
+So B2 should come off the roadmap in the form it is written in.
+`engines/ipv6_block.rs` stays the right shape for what *it* does — a
+whole family, for a full tunnel, where there is no redirect downstream
+to starve.
+
+### What was built instead
+
+`Selection::verdict_for_unattributed` replaces the
+`tunnel_when_owner_unknown()` boolean with three answers — Carry, Leave
+alone, **Refuse** — and refuses this one case. WinDivert is the callout
+driver this service already loads; it sees the datagram *after* the
+send, with the owner lookup's answer in hand, and can drop exactly the
+one that has no answer. The teardown guarantee a dynamic WFP session
+would have given is already there: the filter lives in the driver only
+while the handle is open, and closing the last handle removes it whether
+or not any code of ours ran. **No second kill-switch-shaped object was
+added to the filtering table**, which was a deliberate call — a leftover
+block is the leftover-state failure customers already report as a broken
+network needing a reset and an uninstall.
+
+**This inverts the feature's usual trade and that is the point.**
+Everywhere else an unanswerable question fails open, because unprotected
+traffic beats a stalled application. Here failing open *is* the leak.
+
+Scoped as narrowly as the evidence allows, and each clause is load
+bearing:
+
+- `AllExcept` untouched — it carries an unknown owner and has no leak of
+  this shape.
+- **TCP untouched.** A TCP socket cannot be gone before its SYN is
+  classified; it has to stay open to receive the handshake.
+- **Only destinations that are the internet.** Loopback, RFC1918,
+  link-local, multicast and broadcast are left alone, because refusing
+  them closes no leak and would break mDNS, LLMNR, SSDP, WS-Discovery
+  and DHCP — one-shot senders every one, which is exactly the shape that
+  would be caught.
+- **Only an owner that could not be found at all.** A live socket is in
+  the table from the moment it is created, so QUIC, games and every
+  long-running connection are attributed and decided on their merits and
+  never reach this arm.
+
+**The honest cost:** an *unselected* application's one-shot UDP to the
+internet is refused while Custom mode is on. That is a real behavioural
+change. The alternative is that the identical datagram from a selected
+app leaves in the clear, and this loop cannot tell the two apart.
+
+The refusal deliberately runs **after** the DNS branch. A lookup is
+carried whoever made it, and carrying an unattributable one is strictly
+better than swallowing it — same protection, and the page still loads.
+
+The IPv6 arm got the same answer, and **that half is reasoned, not
+measured** — the rig run was IPv4. It is worth doing anyway because a
+selected app's IPv6 is already dropped deliberately, so refusing takes
+nothing further from it; the only new cost is an unselected app's
+one-shot v6 UDP. `ParsedV6` now carries the destination address so the
+rule and the kernel filter cannot drift into disagreeing about one
+address.
+
+New counter `refused_unattributed` in the loop's summary line, both
+families. A v6 refusal is also counted in `blocked_v6` so that number
+stays the whole count of v6 packets swallowed. It is deliberately **not**
+read by `Stats::complaint`, for the reason `blocked_v6` is not: it
+counts a refusal working as designed, and a warning that is always on is
+one nobody reads when it matters.
+
+### What is proven: nothing about a machine
+
+`cargo check --workspace --all-targets` clean and `cargo test
+--workspace` green — 152 in the service crate, 145 before. Seven new
+tests, and **all four guards were checked by mutation rather than
+asserted**, which is the only reason to believe any of them:
+
+| mutation | what failed |
+|---|---|
+| decision reverted to the old fail-open | 4 tests; `left: Direct right: Drop`, and the v6 packet `got None` |
+| refusal moved ahead of the DNS branch | the ordering test |
+| local-network guard removed | `127.0.0.1 is the local network, not the internet` |
+| transport guard removed | both TCP tests, `left: Drop right: Direct` |
+
+That is table logic. It says nothing whatsoever about whether the leak
+is gone on a machine.
+
+### The rig procedure that would settle it
+
+Needs a Windows guest with WinDivert loaded, a tunnel up, Custom mode on
+in **OnlySelected** with one app selected, and a capture taken **on the
+host side of the guest's vNIC** — outside anything the client can
+influence. Counters do not count; this file already records that exit
+codes and "no error was thrown" have produced false passes here.
+
+1. **Build the sender.** A small program that opens a UDP socket, sends
+   one datagram to a public address, and closes the socket immediately —
+   15 times, 15 sockets. This is the program that produced 13/15 and
+   14/15. Put it at a known path.
+2. **Baseline, before.** Select that program. Connect. Run it. In the
+   capture, count datagrams to the target address arriving **from the
+   guest's own LAN address**. On 0.9.31 this is 13 or 14 of 15. Record
+   the number; a run that shows 0 here has not reproduced the bug and
+   proves nothing about the fix.
+3. **After.** Same guest, same selection, service built from this
+   branch. Expect **0** plaintext datagrams at the vNIC, and
+   `refused_unattributed` in the custom-mode log to be non-zero. Both,
+   not either: a zero count with a zero counter means the sender did not
+   run.
+4. **The scoping test, which is the one that can go wrong.** This is the
+   `curl.exe`-and-a-copy-of-curl experiment from the IPv6 work, in the
+   other direction. With the same session live:
+   - a **selected** app's ordinary QUIC (a browser, a real page load)
+     must still be carried — `matched`/`redirected` climbing, exit IP
+     the node's;
+   - an **unselected** app's ordinary TCP and its long-lived UDP must be
+     untouched — full speed, real IP, nothing in `refused_unattributed`
+     attributable to it;
+   - the LAN must still work: `ping` the router, browse an SMB share,
+     find a network printer, and confirm mDNS/SSDP still resolve. If any
+     of this breaks, the destination guard is wrong and the fix is worse
+     than the leak.
+5. **The second-handle check, which is the only honest one.** Open a
+   second WinDivert handle *below* this loop's priority (`prio -1000`),
+   as `live_custom_mode_blocks_ipv6_and_keeps_carrying_ipv4` does, and
+   confirm it sees **none** of the fire-and-forget datagrams surviving
+   the loop. The counter reports intent; this reports what got past.
+6. **Teardown.** Disconnect, then confirm the machine's networking is
+   whole: `netsh wfp show filters` shows no Neoxify objects, one-shot
+   UDP works again, and the sender from step 1 puts all 15 datagrams on
+   the wire. Nothing this change adds is supposed to survive the
+   session.
+
+The IPv6 half of step 3 needs a dual-stack guest and has the same shape:
+run the sender over IPv6 and expect 0 at the vNIC.
+
+### Open, and one of them is the owner's
+
+1. **Nothing has run on a rig.** Everything above is source and unit
+   tests.
+2. **The customer is not told.** The IPv6 gap is stated in words on the
+   dashboard (`dash.customActive`); this gap is not stated anywhere. It
+   should probably get the same treatment, but that is an i18n string
+   across every language and a UI file another session is holding, so it
+   was deliberately not touched here.
+3. **B2 needs removing from the roadmap** in the form it is written in,
+   with the ordering reason above kept — otherwise somebody spends a
+   week rediscovering it.
+4. A real kill switch — blocking a selected app's traffic when the
+   redirect loop is *not* running while the app claims Custom mode is on
+   — is a separate feature and genuinely is WFP-shaped. The watchdog
+   currently stops interception and tells the UI, which is honest but is
+   not a kill switch. Not built, not in scope, worth its own decision.
+
 ## 2026-08-24 — the leave-alone cache never looked at where the packet was going
 
 **Status:** in flight — in source and unit-tested, **never run on a rig**
