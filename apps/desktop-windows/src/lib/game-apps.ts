@@ -1,0 +1,204 @@
+import type { GameProfileSummary } from "./customer";
+import type { RunningApp } from "./split-tunnel";
+
+/** Turning the server's curated executable list into a Custom-mode
+ * selection.
+ *
+ * The gap this closes: the catalogue names a game's executables
+ * (`VALORANT.exe`, `RiotClientServices.exe`, ...) but the split tunnel
+ * matches on **full lowercased paths** and its wire validation rejects
+ * anything that is not an absolute path ending in `.exe`. A bare
+ * filename cannot be pushed at all -- and a config with one bad entry
+ * is rejected whole, not partially, so an unfiltered push would take
+ * the customer's existing selection down with it.
+ *
+ * Full paths are the stronger design and are worth keeping. ExitLag
+ * matches on filename alone, which is why a DPS meter can get itself
+ * proxied by copying its own binary to `LOSTARK.exe`; a path match
+ * cannot be fooled that way. So rather than weaken the match, this
+ * resolves each curated name against the processes actually running on
+ * this machine and takes the real path from there.
+ *
+ * The cost of that choice, stated plainly because the UI has to state
+ * it too: **a program that is not running cannot be resolved.** There
+ * is no filesystem access on this side to go looking for it. So the
+ * answer is always "these were found, these were not", never a claim
+ * that a game is fully covered.
+ */
+
+/** One curated executable name and where it was actually found. */
+export interface GameAppMatch {
+  /** The name as the catalogue gave it, for display. */
+  name: string;
+  /** Absolute paths of running processes with that filename.
+   *
+   * Plural: a game can legitimately have the same executable name in
+   * two places (a live and a PBE install), and routing one while
+   * leaving the other direct is the half-product failure this whole
+   * feature exists to stop. */
+  paths: string[];
+}
+
+export interface GameAppResolution {
+  /** Curated names that matched something running, with their paths. */
+  found: GameAppMatch[];
+  /** Curated names with nothing running to match. Named, not counted:
+   * the customer can start them or find them with Browse, but only if
+   * they are told which ones. */
+  missing: string[];
+  /** Every found path, deduplicated, ready to hand to the split
+   * tunnel. Already filtered to what the wire format accepts. */
+  paths: string[];
+}
+
+export const EMPTY_RESOLUTION: GameAppResolution = { found: [], missing: [], paths: [] };
+
+/** Whether the split tunnel will accept this path.
+ *
+ * A deliberate mirror of `SplitTunnelConfig::validate` in the ipc
+ * crate. It has to be mirrored rather than trusted because that
+ * validation rejects the **entire** `SetSplitTunnel` request on one bad
+ * entry: pushing a single malformed path from the catalogue would drop
+ * every app the customer had already chosen. Keep the two in step.
+ *
+ * The rules there: no control characters, at most 32767 characters, an
+ * absolute path (`C:\...` or a UNC `\\server\...`), ending in `.exe`
+ * case-insensitively.
+ */
+export function isSelectableAppPath(path: string): boolean {
+  if (!path || path.length > 32_767) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(path)) return false;
+  const absolute = path.charAt(1) === ":" || path.startsWith("\\\\");
+  if (!absolute) return false;
+  return path.toLowerCase().endsWith(".exe");
+}
+
+/** The filename part of a path, lowercased.
+ *
+ * Handles both separators because a path can arrive from either side:
+ * Windows reports backslashes, and a catalogue entry written by hand
+ * may not. */
+function baseName(value: string): string {
+  const parts = value.split(/[\\/]/);
+  return (parts[parts.length - 1] ?? "").trim().toLowerCase();
+}
+
+/** Every path a running-app entry knows about.
+ *
+ * `paths` is the whole product group and `path` is the one the picker
+ * displays; the group normally contains the displayed one, but taking
+ * both costs nothing and a missing sibling here is a silently
+ * half-routed game. */
+function pathsOf(app: RunningApp): string[] {
+  return [app.path, ...(app.paths ?? [])];
+}
+
+/** Match a game's curated executable names against what is running.
+ *
+ * Case-insensitive on the filename, because Windows is and because the
+ * catalogue's spelling of `VALORANT.exe` need not match what the
+ * process reports.
+ */
+export function resolveGameApps(
+  profile: Pick<GameProfileSummary, "processNames">,
+  running: RunningApp[],
+): GameAppResolution {
+  const wanted = curatedNames(profile);
+  if (wanted.length === 0) return EMPTY_RESOLUTION;
+
+  // filename -> real paths seen running. Built once rather than
+  // scanned per name: a machine can have several hundred processes and
+  // a game several executables.
+  const byName = new Map<string, string[]>();
+  for (const app of running) {
+    for (const path of pathsOf(app)) {
+      if (!isSelectableAppPath(path)) continue;
+      const key = baseName(path);
+      if (!key) continue;
+      const slot = byName.get(key);
+      if (!slot) {
+        byName.set(key, [path]);
+      } else if (!slot.some((p) => p.toLowerCase() === path.toLowerCase())) {
+        slot.push(path);
+      }
+    }
+  }
+
+  const found: GameAppMatch[] = [];
+  const missing: string[] = [];
+  const seen = new Set<string>();
+  const paths: string[] = [];
+
+  for (const name of wanted) {
+    const hits = byName.get(baseName(name)) ?? [];
+    if (hits.length === 0) {
+      missing.push(name);
+      continue;
+    }
+    found.push({ name, paths: hits });
+    for (const path of hits) {
+      const key = path.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        paths.push(path);
+      }
+    }
+  }
+
+  return { found, missing, paths };
+}
+
+/** The catalogue's executable names, cleaned up.
+ *
+ * Defensive about shape rather than trusting the server: this list is
+ * edited by hand in the panel, and a stray path separator or a
+ * duplicate spelling must not become two rows saying the same thing in
+ * the customer's face. Optional on the wire, because a client can be
+ * newer than the server it is talking to -- an older server simply has
+ * nothing to offer here, which is not an error. */
+export function curatedNames(profile: Pick<GameProfileSummary, "processNames">): string[] {
+  const names = profile.processNames;
+  if (!Array.isArray(names)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of names) {
+    if (typeof raw !== "string") continue;
+    // Displayed as a filename even if somebody typed a whole path into
+    // the panel, so the row reads the same either way.
+    const name = baseName(raw);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(raw.split(/[\\/]/).pop()!.trim());
+  }
+  return out;
+}
+
+/** Whether this profile has anything to offer Custom mode at all.
+ *
+ * False for every profile that has not been researched, and the picker
+ * must say so rather than offer a row that would add nothing. */
+export function hasCuratedApps(profile: Pick<GameProfileSummary, "processNames">): boolean {
+  return curatedNames(profile).length > 0;
+}
+
+/** Whether this profile's address list may be used to route by
+ * destination.
+ *
+ * Always false today for a second reason as well -- the split tunnel
+ * has no destination-based routing at all, it matches on process --
+ * but the rule encoded here is the one that survives that being built.
+ *
+ * A **partial** prefix list is worse than none. A game that holds two
+ * connections at once (World of Warcraft keeps Home and World open
+ * together) would get one of them routed and the other not, which
+ * presents one account from two source addresses at the same instant.
+ * That is the account-sharing signature. So an incomplete list is
+ * refused rather than approximated, and `prefixComplete` is the
+ * server's own statement about whether its list is whole.
+ */
+export function canRouteByDestination(
+  profile: Pick<GameProfileSummary, "destinationCidrs" | "prefixComplete">,
+): boolean {
+  return profile.prefixComplete === true && (profile.destinationCidrs?.length ?? 0) > 0;
+}

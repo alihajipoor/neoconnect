@@ -44,6 +44,9 @@ describe("GamingService", () => {
     hostnames: ["oauth.battle.net"],
     excludeHostnames: ["blzddist1-a.akamaihd.net"],
     canaryHostname: "oauth.battle.net",
+    processNames: ["Battle.net.exe", "Wow.exe"],
+    destinationCidrs: ["137.221.64.0/24"],
+    prefixComplete: false,
   };
 
   function subscriptionGranting(...features: PlanFeatureKey[]) {
@@ -194,6 +197,63 @@ describe("GamingService", () => {
 
       expect(prisma.gamingResolverToken.upsert).toHaveBeenCalled();
       expect(payload.resolver?.dohUrl).not.toContain("leaked");
+    });
+
+    /** The curated executable list is the half of this feature that
+     * works with no node at all: the desktop client resolves those
+     * names against running processes and puts the real full paths into
+     * the split tunnel, which already exists.
+     *
+     * It reached nobody. The rows carried `processNames` and
+     * `destinationCidrs`, the panel wrote them, and the customer
+     * projection selected neither -- so the catalogue arrived stripped
+     * of the only part that does anything today. The failure was silent
+     * at every layer: a missing `select` key is not a type error, and
+     * the payload type did not name the fields either.
+     *
+     * Asserting the payload alone would not catch it coming back. The
+     * mock returns whatever it is given regardless of `select`, so the
+     * `select` itself is asserted -- that is where the bug lived. */
+    it("selects the fields that make the catalogue usable without a node", async () => {
+      await service.profileForCustomer("customer-1");
+
+      const select = prisma.gameProfile.findMany.mock.calls[0][0].select;
+      expect(select.processNames).toBe(true);
+      expect(select.destinationCidrs).toBe(true);
+      // Travels with the list because the list is unsafe without it.
+      expect(select.prefixComplete).toBe(true);
+    });
+
+    it("carries the executable list through to the client", async () => {
+      const payload = await service.profileForCustomer("customer-1");
+
+      expect(payload.games[0].processNames).toEqual(["Battle.net.exe", "Wow.exe"]);
+      expect(payload.games[0].destinationCidrs).toEqual(["137.221.64.0/24"]);
+      expect(payload.games[0].prefixComplete).toBe(false);
+    });
+
+    /** The catalogue is not a credential and the client needs it in
+     * exactly the state every customer is in right now -- entitled or
+     * not, there is no resolver anywhere, so `noResolver` is the live
+     * answer. If the executables only travelled on the happy path, the
+     * feature would reach nobody until a node exists. */
+    it("carries the executable list even when the mode is unavailable", async () => {
+      prisma.gamingResolver.findFirst.mockResolvedValue(null);
+
+      const payload = await service.profileForCustomer("customer-1");
+
+      expect(payload.unavailableReason).toBe("noResolver");
+      expect(payload.resolver).toBeNull();
+      expect(payload.games[0].processNames).toEqual(["Battle.net.exe", "Wow.exe"]);
+    });
+
+    it("carries it for a customer with no subscription at all", async () => {
+      prisma.subscription.findMany.mockResolvedValue([]);
+
+      const payload = await service.profileForCustomer("customer-1");
+
+      expect(payload.unavailableReason).toBe("noSubscription");
+      expect(payload.games[0].processNames).toEqual(["Battle.net.exe", "Wow.exe"]);
     });
 
     it("only offers active games", async () => {

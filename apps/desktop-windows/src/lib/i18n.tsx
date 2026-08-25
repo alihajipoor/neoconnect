@@ -239,6 +239,29 @@ const en = {
   "settings.customCancel": "Cancel",
   "settings.customAppUsesVpn": "Uses VPN",
   "settings.customAppBypasses": "Bypasses VPN",
+  // Adding a game by name. The value is that Neoxify knows which
+  // programs a game needs and the customer does not: choosing one
+  // executable and getting half a product is a failure already on the
+  // record here.
+  //
+  // What it can honestly do is bounded, and every string below is
+  // bounded the same way. A program is added only when it is running,
+  // because that is the only way this side learns its real path --
+  // there is no filesystem search here, and the split tunnel matches on
+  // the full path rather than the filename. That is deliberate: a
+  // filename match is what lets any program called VALORANT.exe be
+  // routed as VALORANT.
+  "settings.customPickGame": "Add a game",
+  "settings.customGameTitle": "Add a game's programs",
+  "settings.customGameHint":
+    "Neoxify knows which programs each game uses. Start the game or its launcher first: Neoxify adds the ones it can see running, by their full path.",
+  "settings.customGameParts": "{count} programs",
+  "settings.customGameAdded": "Added {count} of {total} programs for {game}.",
+  "settings.customGameMissing":
+    "Not running, so not added: {names}. Start them and add the game again, or use Browse.",
+  "settings.customGameNone":
+    "None of the programs for {game} are running, so nothing was added. Start the game or its launcher, then add it again.",
+  "settings.customGameEmpty": "Neoxify has no program list for any game yet.",
   // Android picks from the installed-app list rather than a file
   // dialog, so these have no Windows counterpart.
   //
@@ -455,17 +478,21 @@ const en = {
   "dash.modeVpn": "VPN",
   "dash.modeGaming": "Gaming",
   "dash.modeVpnHint": "Everything on this computer goes through Neoxify.",
+  // "on the shortest path" was a speed claim, and this app has never
+  // measured one. From Tehran the direct path to a Blizzard EU game
+  // server was 72.0 ms and the best route through our fleet 72.8 ms --
+  // a dead heat before encryption. Nothing here may imply otherwise.
   "dash.modeGamingHint":
-    "Only the game services you choose go through Neoxify. The game itself connects directly, on the shortest path.",
+    "Only the game services you choose go through Neoxify: the launcher, sign-in and updates. The game's own connection is not carried, and this does not make it faster.",
 
   "gaming.off": "Gaming mode is off",
   "gaming.offHint":
-    "Nothing is being redirected right now. Turn it on to send the game services you chose through Neoxify.",
+    "Nothing is being redirected right now. Turn it on to send the launcher, sign-in and updates for the games you chose through Neoxify.",
   "gaming.arming": "Setting up...",
   "gaming.armingHint": "Installing the rules for the games you chose.",
   "gaming.active": "Gaming mode is on",
   "gaming.activeHint":
-    "The launcher, login and updates for the games you chose go through Neoxify. The game itself connects directly.",
+    "The launcher, sign-in and updates for the games you chose go through Neoxify, and those services see Neoxify's address. The game's own connection is not carried.",
   "gaming.partial": "Gaming mode is on, but not confirmed",
   // The exact sentence from the design, and it is not to be softened.
   // Rules present with a failed canary means the redirection may not be
@@ -476,10 +503,23 @@ const en = {
   "gaming.unknown": "Can't tell right now",
   "gaming.unknownHint":
     "Neoxify could not ask the helper service what it has installed, so it cannot say whether gaming mode is on.",
-  // Replaces the exit-IP pill, which must not render in this mode: the
-  // address is unchanged by design and showing one would be a plain lie.
-  "gaming.pathDirect": "Game path: direct",
-  "gaming.ipUnchanged": "Your computer's IP address does not change in this mode.",
+  // Replaces the exit-IP pill, which must not render in this mode:
+  // there is no single exit address to show, so showing one would be a
+  // plain lie.
+  "gaming.pathDirect": "Game connection: not carried",
+  // The old wording here was "Your computer's IP address does not
+  // change in this mode." That was written when this was meant as a
+  // latency feature, and it is not true as stated: the whole mechanism
+  // is that the redirected services are reached from Neoxify's server,
+  // so those services do see a different address. What is unchanged is
+  // everything else.
+  "gaming.ipUnchanged":
+    "The services being redirected are reached from Neoxify's server and see its address. Everything else on this computer, the game included, keeps your normal connection and your own address.",
+  // Said outright rather than left to be inferred. Ping is the thing
+  // customers assume a "gaming mode" sells, and it is the one thing
+  // this cannot claim.
+  "gaming.noSpeedClaim":
+    "Neoxify does not measure ping and does not promise a faster connection. This mode is about reaching a service, not about speed.",
   "gaming.turnOn": "Turn on",
   "gaming.turnOff": "Turn off",
   // On with nothing chosen is a reachable state and it does nothing at
@@ -495,6 +535,8 @@ const en = {
   "gaming.needsPlan": "Gaming mode needs an active plan.",
   "gaming.notInPlan": "Your plan does not include gaming mode.",
   "gaming.noResolver": "Gaming mode is not available on your server yet.",
+  "gaming.noResolverBody":
+    "Nothing on this computer is being redirected, and turning this on would not change that. Custom mode, under Custom, does not need this and works today.",
   "gaming.profileFailed": "Neoxify could not load the game list.",
   "gaming.retry": "Try again",
   "gaming.loading": "Loading games...",
@@ -502,7 +544,7 @@ const en = {
   "settings.gaming": "Gaming",
   "gaming.title": "Gaming mode",
   "gaming.hint":
-    "Send a game's launcher, login and updates through Neoxify, and leave the game itself on the direct path.",
+    "Send a game's launcher, sign-in and updates through Neoxify. The game's own connection is left on your normal one.",
   "gaming.chosen": "Games you've chosen",
   "gaming.addGame": "Add a game",
   "gaming.remove": "Remove",
@@ -518,6 +560,14 @@ const en = {
   "gaming.tooMany": "You can choose up to {max} games.",
   "gaming.games": "Games",
   "gaming.resolver": "Resolver",
+  // The risk that actually costs people accounts, which this product
+  // had nowhere on screen. It is not detection: publishers rarely act
+  // on a VPN they merely see. It is disclosure -- a player lost seven
+  // years of Riot progress after describing where he was in a support
+  // ticket. Short, and useful enough to act on.
+  "gaming.accountRisk": "Keep your account safe",
+  "gaming.accountRiskBody":
+    "The usual way an account is lost is not detection -- it is the player telling support. One player lost seven years of progress after mentioning where he was in a support ticket. If you contact a game's support, answer what they ask and do not volunteer your location or that you use a VPN.",
 
   "common.loading": "Loading...",
 
@@ -750,6 +800,17 @@ const fa: Record<TranslationKey, string> = {
   "settings.customCancel": "انصراف",
   "settings.customAppUsesVpn": "از VPN استفاده می‌کند",
   "settings.customAppBypasses": "بدون VPN",
+  "settings.customPickGame": "افزودن یک بازی",
+  "settings.customGameTitle": "افزودن برنامه‌های یک بازی",
+  "settings.customGameHint":
+    "نئوکسیفای می‌داند هر بازی از چه برنامه‌هایی استفاده می‌کند. اول بازی یا لانچرش را اجرا کنید: نئوکسیفای برنامه‌هایی را که در حال اجرا ببیند، با مسیر کاملشان اضافه می‌کند.",
+  "settings.customGameParts": "{count} برنامه",
+  "settings.customGameAdded": "{count} برنامه از {total} برنامه‌ی {game} اضافه شد.",
+  "settings.customGameMissing":
+    "این‌ها در حال اجرا نبودند و اضافه نشدند: {names}. آن‌ها را اجرا کنید و بازی را دوباره اضافه کنید، یا از «جست‌وجوی برنامه» استفاده کنید.",
+  "settings.customGameNone":
+    "هیچ‌کدام از برنامه‌های {game} در حال اجرا نیست، پس چیزی اضافه نشد. بازی یا لانچرش را اجرا کنید و دوباره اضافه کنید.",
+  "settings.customGameEmpty": "هنوز برای هیچ بازی‌ای فهرست برنامه‌ها وجود ندارد.",
   "dash.offlineTitle": "در حال حاضر به Neoxify دسترسی نیست — همچنان می‌توانید متصل شوید.",
   "dash.offlineHint":
     "از سرورهای ذخیره‌شده استفاده می‌شود. مصرف داده و تاریخ انقضا آخرین بار در {when} به‌روز شده و ممکن است دقیق نباشد.",
@@ -884,24 +945,27 @@ const fa: Record<TranslationKey, string> = {
   "dash.modeGaming": "بازی",
   "dash.modeVpnHint": "همه‌ی ترافیک این رایانه از نئوکسیفای عبور می‌کند.",
   "dash.modeGamingHint":
-    "فقط سرویس‌های بازی‌ای که انتخاب می‌کنید از نئوکسیفای عبور می‌کنند. خود بازی مستقیم و از کوتاه‌ترین مسیر وصل می‌شود.",
+    "فقط سرویس‌های بازی‌ای که انتخاب می‌کنید از نئوکسیفای عبور می‌کنند: لانچر، ورود و به‌روزرسانی‌ها. اتصال خودِ بازی از تونل عبور داده نمی‌شود و این حالت آن را سریع‌تر نمی‌کند.",
 
   "gaming.off": "حالت بازی خاموش است",
   "gaming.offHint":
-    "در حال حاضر هیچ ترافیکی هدایت نمی‌شود. برای عبور دادن سرویس‌های بازی‌ای که انتخاب کرده‌اید، آن را روشن کنید.",
+    "در حال حاضر هیچ ترافیکی هدایت نمی‌شود. برای عبور دادن لانچر، ورود و به‌روزرسانی بازی‌هایی که انتخاب کرده‌اید، آن را روشن کنید.",
   "gaming.arming": "در حال آماده‌سازی...",
   "gaming.armingHint": "قواعد بازی‌هایی که انتخاب کرده‌اید در حال نصب است.",
   "gaming.active": "حالت بازی روشن است",
   "gaming.activeHint":
-    "لانچر، ورود و به‌روزرسانی بازی‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کند. خود بازی مستقیم وصل می‌شود.",
+    "لانچر، ورود و به‌روزرسانی بازی‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کند و این سرویس‌ها نشانی نئوکسیفای را می‌بینند. اتصال خودِ بازی از تونل عبور داده نمی‌شود.",
   "gaming.partial": "حالت بازی روشن است، اما تأیید نشده",
   "gaming.partialHint":
     "حالت بازی روشن است، اما نئوکسیفای نتوانست تأیید کند که ترافیک بازی شما به آن می‌رسد.",
   "gaming.unknown": "الان نمی‌توان گفت",
   "gaming.unknownHint":
     "نئوکسیفای نتوانست از سرویس کمکی بپرسد چه چیزی نصب شده است، پس نمی‌تواند بگوید حالت بازی روشن است یا نه.",
-  "gaming.pathDirect": "مسیر بازی: مستقیم",
-  "gaming.ipUnchanged": "در این حالت نشانی آی‌پی رایانه‌ی شما تغییر نمی‌کند.",
+  "gaming.pathDirect": "اتصال بازی: از تونل عبور نمی‌کند",
+  "gaming.ipUnchanged":
+    "سرویس‌هایی که هدایت می‌شوند از سرور نئوکسیفای گرفته می‌شوند و نشانی آن را می‌بینند. باقی چیزها روی این رایانه، از جمله خودِ بازی، با اتصال معمولی و نشانی خودتان باقی می‌مانند.",
+  "gaming.noSpeedClaim":
+    "نئوکسیفای پینگ را اندازه نمی‌گیرد و اتصال سریع‌تری وعده نمی‌دهد. این حالت برای دسترسی به یک سرویس است، نه برای سرعت.",
   "gaming.turnOn": "روشن کردن",
   "gaming.turnOff": "خاموش کردن",
   "gaming.noGames": "هیچ بازی‌ای انتخاب نشده است، پس حالت بازی هیچ کاری نمی‌کند. از پایین یکی اضافه کنید.",
@@ -911,6 +975,8 @@ const fa: Record<TranslationKey, string> = {
   "gaming.needsPlan": "حالت بازی به یک اشتراک فعال نیاز دارد.",
   "gaming.notInPlan": "اشتراک شما شامل حالت بازی نمی‌شود.",
   "gaming.noResolver": "حالت بازی هنوز روی سرور شما در دسترس نیست.",
+  "gaming.noResolverBody":
+    "هیچ ترافیکی روی این رایانه هدایت نمی‌شود و روشن کردن این گزینه هم آن را تغییر نمی‌دهد. «حالت سفارشی» به این نیاز ندارد و همین حالا کار می‌کند.",
   "gaming.profileFailed": "نئوکسیفای نتوانست فهرست بازی‌ها را بارگیری کند.",
   "gaming.retry": "تلاش دوباره",
   "gaming.loading": "در حال بارگذاری بازی‌ها...",
@@ -918,7 +984,7 @@ const fa: Record<TranslationKey, string> = {
   "settings.gaming": "بازی",
   "gaming.title": "حالت بازی",
   "gaming.hint":
-    "لانچر، ورود و به‌روزرسانی یک بازی را از نئوکسیفای عبور دهید و خود بازی را روی مسیر مستقیم بگذارید.",
+    "لانچر، ورود و به‌روزرسانی یک بازی را از نئوکسیفای عبور دهید. اتصال خودِ بازی روی اینترنت معمولی شما می‌ماند.",
   "gaming.chosen": "بازی‌هایی که انتخاب کرده‌اید",
   "gaming.addGame": "افزودن بازی",
   "gaming.remove": "حذف",
@@ -932,6 +998,9 @@ const fa: Record<TranslationKey, string> = {
   "gaming.tooMany": "حداکثر {max} بازی می‌توانید انتخاب کنید.",
   "gaming.games": "بازی‌ها",
   "gaming.resolver": "سرور نام",
+  "gaming.accountRisk": "مراقب حساب بازی‌تان باشید",
+  "gaming.accountRiskBody":
+    "حساب‌ها معمولاً به این دلیل از دست نمی‌روند که سازنده‌ی بازی فیلترشکن را تشخیص داده است؛ به این دلیل از دست می‌روند که خودِ بازیکن به پشتیبانی گفته است. یک بازیکن پس از آنکه در یک تیکت پشتیبانی به موقعیت مکانی‌اش اشاره کرد، هفت سال پیشرفتش را از دست داد. اگر با پشتیبانی یک بازی تماس گرفتید، فقط به آنچه می‌پرسند پاسخ دهید و از خودتان درباره‌ی کشور یا استفاده از فیلترشکن چیزی نگویید.",
 
   "common.loading": "در حال بارگذاری...",
 
