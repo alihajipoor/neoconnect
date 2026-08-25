@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   anythingFixed,
   diagnosticsToText,
+  failedSteps,
+  indeterminateSteps,
   unresolvedSteps,
   type Diagnostics,
   type RepairReport,
@@ -43,6 +45,62 @@ describe("what counts as a repaired machine", () => {
       steps: [step("dns", "alreadyClean"), step("wfp", "unknown", "the filtering platform would not answer")],
     };
     expect(unresolvedSteps(report).map((s) => s.id)).toEqual(["wfp"]);
+  });
+
+  /** The false failure, on the app side of the wire.
+   *
+   * Rebuilt from the rig run of 2026-08-24: the WFP step removed three
+   * leftover filters (independently confirmed by `netsh`, 5 -> 0), every
+   * other step was clean, and the NRPT cmdlets timed out on a slow guest
+   * holding no rules of ours. The old summary painted that whole result
+   * in the destructive colour and told the customer some of it could not
+   * be repaired -- a claim nothing in the run established.
+   */
+  it("does not call a repair failed because one check timed out", () => {
+    const report: RepairReport = {
+      steps: [
+        step("tunnel", "alreadyClean"),
+        step("dns", "unknown", "the DNS cmdlets did not confirm the removal"),
+        step("wfp", "fixed", "removed 3 leftover filter(s)"),
+      ],
+    };
+    expect(failedSteps(report)).toEqual([]);
+    // Still surfaced, just not as a failure.
+    expect(indeterminateSteps(report).map((s) => s.id)).toEqual(["dns"]);
+    // And still not silently counted as a clean machine.
+    expect(unresolvedSteps(report).map((s) => s.id)).toEqual(["dns"]);
+  });
+
+  /** The discriminator. Without it the split above is just "never
+   * fail". */
+  it("still calls a repair failed when a step checked and found residue", () => {
+    const report: RepairReport = {
+      steps: [
+        step("dns", "failed", "1 rule(s) of ours are still in the registry"),
+        step("wfp", "fixed", "removed 3 leftover filter(s)"),
+      ],
+    };
+    expect(failedSteps(report).map((s) => s.id)).toEqual(["dns"]);
+    expect(indeterminateSteps(report)).toEqual([]);
+  });
+
+  it("keeps the two kinds apart when both are present", () => {
+    const report: RepairReport = {
+      steps: [step("dns", "unknown", "timed out"), step("wfp", "failed", "still there")],
+    };
+    expect(failedSteps(report).map((s) => s.id)).toEqual(["wfp"]);
+    expect(indeterminateSteps(report).map((s) => s.id)).toEqual(["dns"]);
+    expect(unresolvedSteps(report)).toHaveLength(2);
+  });
+
+  // The controls, so none of the above passes on a helper that returned
+  // a hardcoded answer.
+  it("finds neither kind in a wholly successful repair", () => {
+    const report: RepairReport = {
+      steps: [step("dns", "alreadyClean"), step("wfp", "fixed", "removed 3")],
+    };
+    expect(failedSteps(report)).toEqual([]);
+    expect(indeterminateSteps(report)).toEqual([]);
   });
 
   it("treats a step that could not be fixed as unresolved", () => {

@@ -31,7 +31,7 @@ pub fn apply(resolver: &str) -> Result<(), String> {
     let script = format!(
         "Add-DnsClientNrptRule -Namespace '.' -NameServers '{resolver}' -Comment '{NRPT_COMMENT}' -ErrorAction Stop"
     );
-    powershell(&script)
+    powershell(&script, super::HELPER_BUDGET)
         .map(|_| ())
         .map_err(|e| format!("could not force tunnel DNS: {e}"))
 }
@@ -80,8 +80,35 @@ const NRPT_REGISTRY_PATHS: [&str; 2] = [
 /// PowerShell removal exceed the 15s helper budget three times under
 /// load, so "the cmdlets answered" is not something to build on.
 pub fn clear() {
-    let _ = clear_reporting();
+    let _ = clear_within(super::HELPER_BUDGET);
 }
+
+/// How long the NRPT cmdlets get on the *repair* path, as opposed to the
+/// connect and disconnect path.
+///
+/// [`super::HELPER_BUDGET`] is 15s, and that number is right for what it
+/// bounds: helpers that run with the `Engines` lock held on every
+/// connect and disconnect, where the measured worst case is under a
+/// second and the budget exists so one wedged child cannot make the
+/// service deaf to `status` and `disconnect`. Nothing about that
+/// reasoning is being weakened here -- `clear()` above still uses it.
+///
+/// It is the wrong number for this call. `Get-DnsClientNrptRule` is a
+/// CIM-backed cmdlet in the `DnsClient` module, so a cold invocation
+/// pays PowerShell start-up *and* module and CIM-session load, twice in
+/// the one script; the rig watched exactly that exceed 15s three times
+/// on a constrained guest. Sixty seconds is chosen because it is four
+/// times the old budget -- comfortably past a cold CIM load on a machine
+/// under load -- while staying short enough that a customer watching a
+/// repair does not conclude it has hung, and short enough that the
+/// unbounded-wait failure this whole budget mechanism exists to prevent
+/// is still prevented.
+///
+/// It can be this much longer only because the caller is different.
+/// `repair` is a one-shot operation the customer deliberately started
+/// and is waiting on; there is no `status` poll behind it whose latency
+/// this would become.
+const REPAIR_CMDLET_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What one NRPT clear did, for the caller that has to say so.
 ///
@@ -101,6 +128,16 @@ pub(super) struct DnsCleared {
 }
 
 pub(super) fn clear_reporting() -> DnsCleared {
+    clear_within(REPAIR_CMDLET_BUDGET)
+}
+
+/// The clear itself, against whichever cmdlet budget it is given.
+///
+/// Split from its two callers for one reason: the connect/disconnect
+/// path and the repair path have genuinely different tolerances for a
+/// slow helper, and before this split they shared one that suited the
+/// first and quietly broke the second. See [`REPAIR_CMDLET_BUDGET`].
+fn clear_within(budget: std::time::Duration) -> DnsCleared {
     // Removal and verification in a single invocation, because this
     // runs with the `Engines` lock held on every connect and
     // disconnect: a second PowerShell spawn would double the latency of
@@ -113,7 +150,7 @@ pub(super) fn clear_reporting() -> DnsCleared {
     // did not do the job, which changes what the sweep below means but
     // not whether it runs.
     let mut cleared = DnsCleared::default();
-    let cmdlets_reported_clean = match powershell(&script) {
+    let cmdlets_reported_clean = match powershell(&script, budget) {
         Ok(out) if out.trim() == "0" => true,
         Ok(out) => {
             crate::cleanup_log::note(
@@ -322,10 +359,10 @@ fn poke_resolver() {
 /// connect and the disconnect path. A PowerShell that never returns
 /// would take every other request with it, `status` included -- see
 /// [`super::HELPER_BUDGET`].
-fn powershell(script: &str) -> Result<String, String> {
+fn powershell(script: &str, budget: std::time::Duration) -> Result<String, String> {
     let mut command = Command::new("powershell");
     command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
-    let out = super::capture_hidden(command, super::HELPER_BUDGET).map_err(|e| e.to_string())?;
+    let out = super::capture_hidden(command, budget).map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(out.stderr.trim().to_string());
     }
