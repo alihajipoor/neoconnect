@@ -60,6 +60,33 @@ export interface GamingProfilePayload {
     hostnames: string[];
     excludeHostnames: string[];
     canaryHostname: string | null;
+    /** Windows executable names covering launcher AND game together.
+     *
+     * Carried because it is the half of this feature that works without a
+     * node: the desktop client can put these processes in the split tunnel
+     * today, and process-based selection is complete by construction --
+     * every connection a named process opens goes the same way, so it
+     * cannot produce the two-source-IP split that `destinationCidrs`
+     * can. Empty for a profile that has not been researched; a client
+     * must treat empty as "nothing to offer", never as "route
+     * everything". */
+    processNames: string[];
+    /** Whole announced prefixes for the publisher's address space.
+     *
+     * Only meaningful together with `prefixComplete`. Read the comment on
+     * that field before using this one for anything. */
+    destinationCidrs: string[];
+    /** Whether `destinationCidrs` is believed to cover the publisher's
+     * whole ASN.
+     *
+     * Travels with the list because without it the list is unsafe to act
+     * on. A partial prefix set puts a game's connections on opposite
+     * sides -- WoW holds Home and World at the same instant -- which
+     * gives one account two source addresses simultaneously and is the
+     * signature that produces account-sharing penalties. The client must
+     * refuse destination-based routing when this is false, and it cannot
+     * make that check if the flag never arrives. */
+    prefixComplete: boolean;
   }[];
 }
 
@@ -353,6 +380,14 @@ export class GamingService {
         hostnames: true,
         excludeHostnames: true,
         canaryHostname: true,
+        // The three below are what makes the catalogue useful without a
+        // node. Leaving them out of this select was the whole reason the
+        // curated process lists never reached a customer's machine: the
+        // rows carried them, the payload type did not name them, and the
+        // omission was silent at every layer in between.
+        processNames: true,
+        destinationCidrs: true,
+        prefixComplete: true,
       },
     });
 
