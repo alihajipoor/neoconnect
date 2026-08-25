@@ -8281,3 +8281,112 @@ was found by reading.
   no-logs, kill-switch, auto-connect, refund or signed-installer claim.
   That is deliberate and load-bearing. `website/README.md` now lists it
   as a convention so the next pass does not "improve" it back.
+
+## 2026-08-24 — Gaming Mode is built everywhere except the end that makes it work
+
+**Status:** in flight on `claude/gaming-mode`, pushed, **not merged**
+**Touches:** `apps/backend/**`, `apps/panel/**`, `apps/desktop-windows/**`
+(service and src), `README.md`, `scripts/check-feature-drift.sh`
+
+`docs/design/gaming-mode.md` is now merged onto that branch instead of
+sitting alone on `claude/gaming-mode-design`, because every comment in the
+implementation points at it. Read it before touching any of this.
+
+### The thing the next session will assume and get wrong
+
+**This is not a lower-ping feature.** Direct from Tehran to Blizzard's EU
+game server is **72.0 ms**; the best path through our fleet is **72.8 ms**;
+the other four nodes are **28–66 ms worse**. And turkey-1 is the *closest*
+node to Tehran while being one of the *worst* paths to Blizzard — node
+proximity to the customer is not the metric, total path is. "Pick the
+nearest server" is the intuitive design here and it is wrong.
+
+The schema comments, the panel copy and the client strings are all written
+to make a ping claim awkward to add by accident. If a future pass finds a
+natural-looking place to put "lower ping", that is the guardrail working,
+not an omission to fix.
+
+### What exists, and the one thing that does not
+
+Built and green: Prisma models and migration, a Nest module with admin CRUD
+and one customer endpoint, the panel page, and the whole Windows client —
+mode selector, Settings pane, game picker, plus a service-side loopback DoH
+stub and namespace-scoped NRPT rules.
+
+**The node side does not exist.** No resolver process, no SNI proxy, no
+agent command, no installer support. Nothing ever sets
+`GamingResolver.confirmedAt`, so `/customer/gaming-profile` answers
+`unavailableReason: "noResolver"` for every customer and **no client can
+arm**. The feature is inert on purpose and says so rather than
+half-working: `isEnabled` records what the operator meant, `confirmedAt`
+records what a node reported, and only the second connects anybody. Same
+decision as `Route.uplinkAssertedAt`, same reason — thirteen relay routes
+once reported ONLINE with every one of them dead.
+
+That omission was a choice, not a shortfall of time. The node side cannot
+be verified without deploying to a production node, and an installer
+function nobody has ever run is fiction; that lesson is already in this
+file twice. Building it blind would have produced the most confident-looking
+and least trustworthy part of the branch.
+
+### What is blocked, and on a person rather than on code
+
+**Instrument #1 in §14 gates whether this should be sold at all**, and it
+needs a beta tester in Iran on TCI / MCI / Irancell running the hostname
+sweep and posting raw output. Every Iranian probe used so far is a
+**datacenter** network and none of them found anything blocked — so the
+"sanctions-blocked vs merely slow" split this feature was conceived around
+**did not hold on the evidence available**. A negative result kills the
+unblocking premise, and that has to be allowed to happen.
+
+Also unmeasured and cheap to get wrong: whether the Battle.net launcher
+resolves in-process (instrument #9). If it does, DNS mode never sees its
+lookups and the launcher half of this reaches nothing.
+
+### Ground truth that does exist
+
+The DNS stub was stood up against a real DoH endpoint on a loopback port:
+`example.com` → rcode 0 with real A records, three non-matching names →
+rcode 5 REFUSED, a dead resolver → rcode 2 SERVFAIL, and counters reading
+`forwarded=1 refused=3 failed=0`. The counters are the useful part — they
+are positive evidence the refusals produced **no outbound request**, and
+that `notexample.com` does not match an `example.com` namespace in the
+running stub rather than only in a unit test.
+
+**Never run, and it is the half that matters:** NRPT installation,
+verify-present, and the canary. Those need an elevated service and the
+shell was not elevated, so the entire `active` path is compile-and-unit-test
+only. Binding 127.0.0.53:53 has never been attempted either (instrument
+#11) — the tests bind an ephemeral port.
+
+### Gotchas worth the next session's time
+
+- **`docs/journal/shared.md` on `main` carries committed merge-conflict
+  markers** — `<<<<<<< HEAD` at 152, `=======` at 201, `>>>>>>> origin/main`
+  at 239. Both sides are real 2026-08-23 entries. It is the only channel to
+  the Mac session and it currently reads as corrupt. Left alone here rather
+  than risk a second conflict in the one file two machines share.
+
+- **Three agents shared this working tree and HEAD belonged to another
+  session throughout.** Rather than `git checkout` — which moves HEAD under
+  everyone else, and is how a commit landed on the wrong branch earlier
+  today — every commit here was built with a private index:
+  `GIT_INDEX_FILE=… git read-tree <branch>`, stage paths, `commit-tree`,
+  then `update-ref` with the old value passed for compare-and-swap. The
+  working tree, the shared index and HEAD are never touched, and a
+  concurrent branch move fails loudly instead of silently. Worth reaching
+  for again rather than re-deriving.
+
+- **`apps/desktop-windows/src/lib/**` and `src/screens/Settings.tsx` are
+  compiled by the mobile app** through the `@shared` alias. The new Settings
+  section therefore takes an **optional** `gamingSection` prop and renders
+  its rail row only when supplied, so nothing under `apps/mobile/**` needed
+  editing. Mobile's `build` is `tsc && vite build`, so its build is the gate
+  that catches a mistake here — and `@neoxify/desktop-windows` and
+  `@neoxify/mobile` define **no `lint` or `typecheck` script at all**, which
+  makes `turbo run lint typecheck --filter=…` report success while executing
+  nothing. Run `build`.
+
+- Gaming NRPT rules carry their own comment tag. `dns::clear()` matches on
+  the tunnel tag alone and runs unconditionally on every disconnect, so
+  without separate tags the two features would delete each other's rules.
