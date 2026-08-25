@@ -14,9 +14,9 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    ConnectProfile, Ikev2Profile, OpenvpnProfile, Request, Response, ShadowsocksProfile,
-    RunningApp, SplitTunnelConfig, SplitTunnelMode, TrojanProfile, TunnelHealth, VlessTlsProfile,
-    WireguardProfile, XrayProfile,
+    ConnectProfile, GamingConfig, GamingPhase, Ikev2Profile, OpenvpnProfile, Request, Response,
+    ShadowsocksProfile, RunningApp, SplitTunnelConfig, SplitTunnelMode, TrojanProfile,
+    TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile,
     PIPE_NAME,
 };
 use serde::Deserialize;
@@ -354,7 +354,7 @@ async fn call_expecting_ok(request: &Request) -> Result<(), String> {
     match call(request).await? {
         Response::Ok => Ok(()),
         Response::Error { message } => Err(message),
-        Response::State { .. } | Response::RunningApps { .. } => {
+        Response::State { .. } | Response::RunningApps { .. } | Response::Gaming { .. } => {
             Err("the background service returned an unexpected reply".into())
         }
     }
@@ -718,9 +718,173 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             ipv6_blocked,
         }),
         Response::Error { message } => Err(message),
-        Response::Ok | Response::RunningApps { .. } => {
+        Response::Ok | Response::RunningApps { .. } | Response::Gaming { .. } => {
             Err("the background service returned an unexpected reply".into())
         }
+    }
+}
+
+/// Gaming DNS mode's state, in the shape the frontend reads.
+///
+/// Hand-renamed field by field, exactly as [`VpnStatus`] is: the wire
+/// format between the app and the service is snake_case Rust, and the
+/// names the React side is written against are these. Getting one wrong
+/// is a field that silently reads `undefined`, which in a status
+/// surface means a check quietly counted as failed -- or worse, as
+/// passed.
+///
+/// `state` is deliberately not a connection state. Gaming mode brings
+/// up no tunnel, so there is nothing "Connected" could truthfully mean,
+/// and `unknown` is its own value that must never be shown as `off` --
+/// see design §8.3.
+#[derive(Debug, serde::Serialize)]
+pub struct GamingStatus {
+    /// `off` | `arming` | `active` | `partial` | `unknown`.
+    state: GamingPhase,
+    /// Which check failed, in words, when `state` is not `active`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    /// Check 1: every NRPT rule the service installed is present in the
+    /// registry right now.
+    #[serde(rename = "rulesPresent")]
+    rules_present: bool,
+    /// Check 2: the canary hostname resolves to the proxy address.
+    #[serde(rename = "canaryOk")]
+    canary_ok: bool,
+    /// Check 3: a TCP connect to the proxy succeeds.
+    #[serde(rename = "proxyReachable")]
+    proxy_reachable: bool,
+    /// The suffixes actually scoped right now -- what is installed, not
+    /// what was asked for.
+    namespaces: Vec<String>,
+}
+
+/// Every reply the three gaming commands can get, in one place.
+///
+/// A `Gaming` reply is the only success: `Ok` would mean the service
+/// answered a different question, and there is no state to report from
+/// it. Refused rather than defaulted to `off`, because "the service
+/// said something unexpected" is the `unknown` case and the caller has
+/// to be able to tell it from "nothing is armed".
+fn gaming_reply(response: Response) -> Result<GamingStatus, String> {
+    match response {
+        Response::Gaming {
+            state,
+            detail,
+            rules_present,
+            canary_ok,
+            proxy_reachable,
+            namespaces,
+        } => Ok(GamingStatus {
+            state,
+            detail,
+            rules_present,
+            canary_ok,
+            proxy_reachable,
+            namespaces,
+        }),
+        Response::Error { message } => Err(message),
+        Response::Ok | Response::State { .. } | Response::RunningApps { .. } => {
+            Err("the background service returned an unexpected reply".into())
+        }
+    }
+}
+
+/// Turns Gaming DNS mode on: a loopback DoH stub plus namespace-scoped
+/// DNS policy rules for the game's hostnames.
+///
+/// Brings up no tunnel and no adapter, and does not change this
+/// machine's exit IP -- which the UI is required to say in words.
+///
+/// The reply carries the three checks rather than a bare success,
+/// because "the rules were installed" and "the game's lookups are
+/// actually reaching us" are different facts and only the second one is
+/// worth showing a customer.
+#[tauri::command]
+pub async fn gaming_arm(config: GamingConfig) -> Result<GamingStatus, String> {
+    gaming_reply(call(&Request::ArmGaming { config }).await?)
+}
+
+/// Turns Gaming DNS mode off and removes its DNS policy rules.
+///
+/// Safe when nothing is armed. Worth calling even then: the rules
+/// outlive this process, so a previous life that ended badly is
+/// something only a sweep can find.
+#[tauri::command]
+pub async fn gaming_disarm() -> Result<(), String> {
+    call_expecting_ok(&Request::DisarmGaming).await
+}
+
+#[tauri::command]
+pub async fn gaming_status() -> Result<GamingStatus, String> {
+    gaming_reply(call(&Request::GamingStatus).await?)
+}
+
+#[cfg(test)]
+mod gaming_contract {
+    use super::*;
+
+    /// The names the React side is written against, pinned.
+    ///
+    /// Worth a test rather than a comment because this is the one place
+    /// the two halves of the feature are built in parallel against a
+    /// written-down shape, and a renamed field does not fail to compile
+    /// -- it reads as `undefined` in the webview. On a surface whose
+    /// entire job is to say which of three checks failed, an
+    /// `undefined` boolean is a check silently counted as failed, or
+    /// worse, as passed.
+    #[test]
+    fn the_field_names_reaching_the_webview_are_the_agreed_ones() {
+        let status = GamingStatus {
+            state: GamingPhase::Partial,
+            detail: Some("the game proxy is not answering".into()),
+            rules_present: true,
+            canary_ok: true,
+            proxy_reachable: false,
+            namespaces: vec![".blizzard.com".into()],
+        };
+        let json: serde_json::Value = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["state"], "partial");
+        assert_eq!(json["detail"], "the game proxy is not answering");
+        assert_eq!(json["rulesPresent"], true);
+        assert_eq!(json["canaryOk"], true);
+        assert_eq!(json["proxyReachable"], false);
+        assert_eq!(json["namespaces"][0], ".blizzard.com");
+        // Exactly these six, so a field added here without the React
+        // side knowing is caught rather than shipped.
+        let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        assert_eq!(keys.len(), 6, "{json}");
+    }
+
+    /// `unknown` must survive the trip as itself. Folding it into `off`
+    /// would tell a customer their DNS rules are gone at exactly the
+    /// moment nothing can confirm they are.
+    #[test]
+    fn unknown_does_not_arrive_as_off() {
+        let status = GamingStatus {
+            state: GamingPhase::Unknown,
+            detail: None,
+            rules_present: false,
+            canary_ok: false,
+            proxy_reachable: false,
+            namespaces: Vec::new(),
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["state"], "unknown");
+        assert!(json.get("detail").is_none(), "an absent detail is omitted, not null");
+    }
+
+    /// A service that answered a different question is an error, never
+    /// a state -- least of all `off`, which would read as "gaming mode
+    /// is not on" when the truth is "we do not know".
+    #[test]
+    fn an_unexpected_reply_is_an_error_rather_than_a_state() {
+        assert!(gaming_reply(Response::Ok).is_err());
+        assert!(gaming_reply(Response::RunningApps { apps: Vec::new() }).is_err());
+        assert_eq!(
+            gaming_reply(Response::Error { message: "nope".into() }).unwrap_err(),
+            "nope"
+        );
     }
 }
 

@@ -245,6 +245,77 @@ mod tests {
         assert!(parsed["message"].as_str().unwrap().contains("endpoint"));
     }
 
+    /// Disarm, then read the state back, over the real pipe.
+    ///
+    /// One test rather than two on purpose. Gaming state is a
+    /// process-global -- it has to be, since service start, service
+    /// stop, uninstall and the idle watchdog all sweep it without an
+    /// `Engines` value in hand -- so two tests touching it in parallel
+    /// race each other, and the first version of this pair did: the
+    /// status read landed while a disarm held the mutex and correctly
+    /// answered "being turned off". Sequencing them tests the thing
+    /// that actually matters, which is the state *after* a disarm.
+    ///
+    /// Disarming when nothing is armed must also succeed: every caller
+    /// of it is a cleanup path -- the idle watchdog, the window
+    /// closing, service stop -- and a cleanup that reports failure on a
+    /// clean machine is one people learn to ignore.
+    #[tokio::test]
+    async fn disarming_leaves_gaming_mode_reporting_off() {
+        let name = r"\\.\pipe\neoconnect-test-gaming-lifecycle";
+        start_server(name).await;
+
+        let reply = round_trip(name, r#"{"type":"disarmGaming"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "ok", "{parsed}");
+
+        let reply = round_trip(name, r#"{"type":"gamingStatus"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "gaming");
+        assert_eq!(parsed["state"], "off");
+        assert_eq!(parsed["rules_present"], false);
+        assert_eq!(parsed["canary_ok"], false);
+        assert_eq!(parsed["proxy_reachable"], false);
+        assert!(parsed["namespaces"].as_array().unwrap().is_empty());
+        // `off` claims nothing, so it carries no detail to explain.
+        assert!(parsed.get("detail").is_none() || parsed["detail"].is_null());
+    }
+
+    /// Validation is wired into the request path, not merely available
+    /// to call -- and the `.` rejection in particular, since a `.` rule
+    /// installed by a gaming profile is the whole-machine DNS outage
+    /// this feature must not be able to cause.
+    #[tokio::test]
+    async fn refuses_a_gaming_profile_scoped_to_the_root_namespace() {
+        let name = r"\\.\pipe\neoconnect-test-gaming-root";
+        start_server(name).await;
+        let request = r#"{"type":"armGaming","config":{"dohUrl":"https://fi1.neoxify.site/dns-query","proxyIp":"1.2.3.4","proxyPort":443,"namespaces":["."]}}"#;
+        let reply = round_trip(name, request).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert!(
+            parsed["message"]
+                .as_str()
+                .unwrap()
+                .contains("every name on the machine"),
+            "{parsed}"
+        );
+    }
+
+    /// The same for a namespace carrying a shell metacharacter, which
+    /// would otherwise reach a PowerShell command line in a process
+    /// running as SYSTEM.
+    #[tokio::test]
+    async fn refuses_a_gaming_namespace_that_could_reach_the_shell() {
+        let name = r"\\.\pipe\neoconnect-test-gaming-injection";
+        start_server(name).await;
+        let request = r#"{"type":"armGaming","config":{"dohUrl":"https://fi1.neoxify.site/dns-query","proxyIp":"1.2.3.4","proxyPort":443,"namespaces":["blizzard.com'; calc; #"]}}"#;
+        let reply = round_trip(name, request).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert!(parsed["message"].as_str().unwrap().contains("namespaces"), "{parsed}");
+    }
+
     #[tokio::test]
     async fn reports_a_missing_engine_binary_clearly() {
         let name = r"\\.\pipe\neoconnect-test-missing-engine";
@@ -352,12 +423,73 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
         }
         Request::Connect { profile } => {
             let mut engines = engines.lock().await;
+            // Mutual exclusion with gaming mode, and it is refused
+            // rather than resolved.
+            //
+            // Custom mode redirects *every* UDP/53 packet on the
+            // machine to 1.1.1.1 for as long as it runs, which would
+            // swallow the loopback stub whole -- and a full tunnel
+            // installs a `.` NRPT rule, which outranks nothing but
+            // certainly changes what the game's lookups do. Either way
+            // the two features would be quietly fighting over the same
+            // resolver.
+            //
+            // Tearing gaming mode down on the customer's behalf was the
+            // alternative and is worse: they asked for one thing and
+            // would silently lose another, with the app showing no
+            // trace of having done it. Saying so costs one tap.
+            if crate::gaming::is_armed() {
+                return Response::Error {
+                    message: "Gaming mode is on, and a VPN connection cannot run alongside it. \
+                              Turn Gaming mode off first."
+                        .to_string(),
+                };
+            }
             crate::engines::begin_operation();
             match engines.connect(&profile) {
                 Ok(()) => Response::Ok,
                 Err(message) => Response::Error { message },
             }
         }
+        // The `Engines` lock is held across the arm, and that is the
+        // other half of the mutual exclusion above: `Connect` cannot
+        // start while this runs, and this cannot start while a
+        // `Connect` runs, so "is a tunnel up" is a fact for the whole
+        // of the decision rather than a value that was true a moment
+        // ago. See the lock-order note in `gaming`.
+        Request::ArmGaming { config } => {
+            if let Err(e) = config.validate() {
+                return Response::Error { message: e.to_string() };
+            }
+            let mut engines = engines.lock().await;
+            crate::engines::begin_operation();
+            let (tunnel_up, protocol, _) = engines.status();
+            if tunnel_up {
+                return Response::Error {
+                    message: format!(
+                        "A {} connection is running, and Gaming mode cannot run alongside it. Disconnect first.",
+                        protocol.unwrap_or_else(|| "VPN".to_string())
+                    ),
+                };
+            }
+            match crate::gaming::arm(config) {
+                Ok(report) => gaming_response(report),
+                Err(message) => Response::Error { message },
+            }
+        }
+        Request::DisarmGaming => {
+            let _engines = engines.lock().await;
+            match crate::gaming::disarm() {
+                Ok(()) => Response::Ok,
+                Err(message) => Response::Error { message },
+            }
+        }
+        // Deliberately does not take the `Engines` lock, for the same
+        // reason `Status` does not queue behind it: this is the request
+        // that tells a customer whether their game's DNS is actually
+        // being redirected, and it is worth nothing if it can be
+        // starved by whatever is slow at the time.
+        Request::GamingStatus => gaming_response(crate::gaming::status()),
         Request::ProbeSplitTunnel => {
             let engines = engines.lock().await;
             crate::engines::begin_operation();
@@ -383,6 +515,23 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
     }
 }
 
+/// Turns a gaming report into the wire response.
+///
+/// One place, so the arm path and the status path can never disagree
+/// about what the three checks were -- the arm reply is the first thing
+/// the app puts on screen, and a state it derived differently from the
+/// poll that follows a second later would show as the mode flickering.
+fn gaming_response(report: crate::gaming::Report) -> Response {
+    Response::Gaming {
+        state: report.state,
+        detail: report.detail,
+        rules_present: report.rules_present,
+        canary_ok: report.canary_ok,
+        proxy_reachable: report.proxy_reachable,
+        namespaces: report.namespaces,
+    }
+}
+
 /// Tears the tunnel down once the app has stopped talking to us.
 ///
 /// Polls rather than reacting to a connection closing, because the app
@@ -398,6 +547,33 @@ fn spawn_idle_watchdog(engines: Arc<Mutex<Engines>>, last_seen: Arc<Mutex<Instan
             }
             let mut engines = engines.lock().await;
             crate::engines::begin_operation();
+
+            // Gaming mode first, and outside the tunnel check below --
+            // which is the whole point.
+            //
+            // This watchdog keys on `status()` reporting a tunnel, and
+            // a gaming session reports none: no engine, no adapter, no
+            // route. So the `if !up { continue }` a few lines down
+            // would skip every gaming session forever, and an app that
+            // crashed or was killed would leave namespace-scoped NRPT
+            // rules on the machine pointing at a stub inside a service
+            // nobody is talking to. That is the same class of leftover
+            // as a tunnel outliving its app, only quieter: the game
+            // stops launching and nothing on screen suggests why.
+            //
+            // Decided deliberately: gaming rules must not outlive the
+            // app. The `Engines` lock is held here, which is the lock
+            // order gaming's own mutex is always taken under.
+            if crate::gaming::is_armed() {
+                eprintln!("app silent for {IDLE_GRACE:?} with gaming mode armed -- disarming it");
+                if let Err(err) = crate::gaming::disarm() {
+                    crate::cleanup_log::note(
+                        "disarm gaming mode after the app went away",
+                        &err,
+                    );
+                }
+            }
+
             // status() consults the OS, so this asks "is anything
             // actually tunnelling" rather than "did we start something".
             let (up, _, _) = engines.status();

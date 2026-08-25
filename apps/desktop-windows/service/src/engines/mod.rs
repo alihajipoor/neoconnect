@@ -7,7 +7,10 @@
 //! job is to write the right config file and drive the right process,
 //! invisibly.
 
-mod dns;
+// `pub(crate)` for the gaming module, which installs a second,
+// separately-tagged set of NRPT rules through the sibling functions in
+// here. Nothing about `apply`/`clear` changes for the engines.
+pub(crate) mod dns;
 mod ikev2;
 mod ipv6_block;
 mod janitor;
