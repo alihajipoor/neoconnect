@@ -1388,7 +1388,16 @@ fn decide(
                 return Verdict::Drop;
             }
         }
-        nat.record_direct(parsed.transport, parsed.source_port);
+        // Recorded against this flow, not this port. For TCP the two
+        // are almost the same thing -- a port changes destination by
+        // sending a SYN, and a SYN skips this cache -- so this call is
+        // the one of the three whose meaning barely moves.
+        nat.record_direct(
+            parsed.transport,
+            parsed.source_port,
+            parsed.destination,
+            parsed.destination_port,
+        );
         return Verdict::Direct;
     }
 
@@ -1556,8 +1565,23 @@ fn decide(
         // itself had to stop happening -- see
         // `OwnerLookup::image_for_new_connection`, which is what the
         // lookup above uses for a SYN.
+        //
+        // Recorded against this flow rather than this port, and for UDP
+        // that is the difference between remembering an answer and
+        // inventing one. The old key covered every destination the port
+        // reached for five seconds, on the strength of one decision
+        // about one peer -- so a port that had been left alone once
+        // short-circuited `Nat::lookup` for a name lookup sent from it
+        // afterwards, and the DNS branch above, which carries a lookup
+        // whoever makes it, never ran. The query went to whichever
+        // resolver the network supplied. See `Tables::direct`.
         if known_owner {
-            nat.record_direct(parsed.transport, parsed.source_port);
+            nat.record_direct(
+                parsed.transport,
+                parsed.source_port,
+                parsed.destination,
+                parsed.destination_port,
+            );
         }
         return Verdict::Direct;
     }
@@ -1577,8 +1601,23 @@ fn decide(
         }
         // Out of synthetic ports. Fail open, consistent with the rest of
         // the feature: unprotected traffic beats a stalled game.
+        //
+        // This is a *selected* application, so what is recorded here has
+        // to be as narrow as the failure that caused it. Keyed on the
+        // port it was not: one exhausted moment handed the whole port a
+        // five-second exemption covering every destination it reached
+        // next, and because UDP has no SYN to re-decide, nothing took it
+        // back early -- a selected app kept egressing in the clear long
+        // after `expire_idle` had freed the ports that would have
+        // carried it. Keyed on the flow it says only what is true: this
+        // one flow could not be carried.
         None => {
-            nat.record_direct(parsed.transport, parsed.source_port);
+            nat.record_direct(
+                parsed.transport,
+                parsed.source_port,
+                parsed.destination,
+                parsed.destination_port,
+            );
             Verdict::Direct
         }
     }
@@ -1912,6 +1951,64 @@ mod tests {
             nat.lookup(Transport::Udp, port, Ipv4Addr::new(203, 0, 113, 9), 443),
             Verdict::Direct,
             "a known owner's verdict must be remembered"
+        );
+    }
+
+    #[test]
+    fn a_left_alone_port_does_not_take_a_name_lookup_with_it() {
+        // The leave-alone cache used to be keyed on the source port, so
+        // the verdict recorded by the test above answered for every
+        // destination that port reached next -- and it answered at the
+        // top of `decide`, before the DNS rule below it was ever
+        // consulted.
+        //
+        // A lookup is carried whoever makes it. That rule is not about
+        // whose traffic it is, it is about who gets to see the name: a
+        // query answered by the resolver the network handed out is a
+        // record of where somebody went, kept by their ISP, which for
+        // this product's customers is the thing being avoided. The
+        // exhaustion path below drops such a query rather than let it
+        // out in the clear -- and none of that ran, because the cache
+        // had already said Direct.
+        //
+        // Two datagrams from one socket, which is all it takes: one to
+        // an ordinary destination, then one to a resolver.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+
+        let fresh = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = fresh.local_addr().unwrap().port();
+
+        let ordinary = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            443,
+        );
+        let parsed = parse(&ordinary).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct,
+            "an unselected app's ordinary traffic is left alone, as before"
+        );
+
+        let lookup = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(8, 8, 8, 8),
+            port,
+            DNS_PORT,
+        );
+        let parsed = parse(&lookup).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats);
+
+        assert!(
+            matches!(verdict, Verdict::Redirect { .. }),
+            "a lookup must reach the DNS rule rather than a verdict recorded
+             about somewhere else -- got {verdict:?}"
         );
     }
 
