@@ -85,7 +85,7 @@ func payloadWithSNI(sni string) ConfigureRoutePayload {
 		RouteID:         "route-1",
 		EntryInboundTag: "vless-in",
 		Exit: ExitParams{
-			Address:  "204.168.161.100",
+			Address:  "203.0.113.40",
 			Port:     443,
 			Protocol: "XRAY_VLESS_REALITY",
 			PublicParams: map[string]any{
@@ -114,7 +114,9 @@ const tag = "route-route-1-out"
 //
 // Proven on ir1 by A/B, 2026-08-24: same credential, same shortId,
 // serverName cloudflare.com -> curl exit 35; serverName www.shatel.ir ->
-// exit IP 204.168.161.100.
+// the expected exit IP. The address below is an RFC 5737 documentation
+// address; real node addresses are not committed, see
+// docs/node-address-hygiene.md.
 func TestConfigureRouteRebuildsAStaleOutbound(t *testing.T) {
 	h := newFakeHandler()
 	p := newProvisioner(h)

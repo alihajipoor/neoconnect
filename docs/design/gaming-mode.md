@@ -153,15 +153,18 @@ and the server answers.**
 
 ICMP, 8 packets, from the same four Iranian networks, to our actual
 production node addresses (this is the first time these have been measured
-directly rather than by proxy through same-city rentals):
+directly rather than by proxy through same-city rentals). The addresses
+themselves are deliberately not written down here -- see
+`docs/node-address-hygiene.md`; the node names are enough to read the
+table:
 
 | Target | AS59441 Hostiran | AS202468 Arvan | AS42043 Parsian | AS59580 Batterflyai |
 |---|---|---|---|---|
-| **turkey-1** `130.94.0.27` | **51.6** | 53.2 | 53.8 | 232.5 |
-| **germany-1** `38.60.249.229` | **66.1** | 75.9 | 87.0 | 199.5 |
-| **france-1** `104.105.205.233` | 88.0 | 88.4 | 88.3 | 211.3 |
-| **finland1** `204.168.161.100` | 109.0 | 119.9 | 115.5 (12.5% loss) | 225.5 |
-| **singapore-1** `172.236.143.200` | 225.8 | 228.8 | 248.3 (12.5% loss) | 512.3 |
+| **turkey-1** | **51.6** | 53.2 | 53.8 | 232.5 |
+| **germany-1** | **66.1** | 75.9 | 87.0 | 199.5 |
+| **france-1** | 88.0 | 88.4 | 88.3 | 211.3 |
+| **finland1** | 109.0 | 119.9 | 115.5 (12.5% loss) | 225.5 |
+| **singapore-1** | 225.8 | 228.8 | 248.3 (12.5% loss) | 512.3 |
 | **Blizzard EU game** `37.244.62.99` | **72.0** | 72.4 | 78.5 | 218.5 |
 | `eu.actual.battle.net` | 93.2 | 91.0 | 98.5 | 212.7 |
 

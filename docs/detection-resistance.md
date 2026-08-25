@@ -330,7 +330,12 @@ Checked, and correct as of this writing:
    the fleet from a public log, with no probing at all, and block the
    addresses in bulk. Mitigations all cost something: unrelated domains
    per node, or a wildcard issued by DNS-01 (which hides the specific
-   subdomain but not the apex). **Owner decision.**
+   subdomain but not the apex). **Owner decision.** A measurement now
+   attaches a second consequence to this, beyond bulk blocking:
+   enumerability is what earns an exit IP the `is_vpn` label from
+   reputation feeds. The remediation runbook is
+   `docs/node-enumerability-remediation.md`; the committed-address
+   half of the same exposure is `docs/node-address-hygiene.md`.
 2. **Aggregate port profile of the Iran relay.** ir1 answers on 443,
    2053, 2054, 8443, 8444, 8445, 46731, 46732. Individually defensible;
    together they say "this host runs eight services, four of them on

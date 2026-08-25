@@ -47,7 +47,9 @@ const EGRESS_TIMEOUT_MS = 6000;
  * `cf-connecting-ip` with the *node's* address -- so those mirrors
  * return the node's own IP, which is exactly what a working tunnel looks
  * like (HANDOVER-2026-08-22 §6 item 4; measured, turkey-1 answering
- * `130.94.0.27` where finland1 answered the real client address).
+ * its own address -- shown here as `203.0.113.20`, an RFC 5737 stand-in;
+ * node addresses are not committed, see docs/node-address-hygiene.md --
+ * where finland1 answered the real client address).
  *
  * `publicIp` used to discard this, and the comparison at the heart of
  * the whole file was therefore between two numbers that were not

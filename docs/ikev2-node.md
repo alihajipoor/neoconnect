@@ -1,8 +1,7 @@
 # Building an IKEv2 node
 
-Status: strongSwan is proven working by hand on sg1 (Singapore,
-172.236.143.200). The installer role that reproduces it is **not written
-yet**. This is the spec for it, taken from what actually works rather
+Status: strongSwan is proven working by hand on sg1 (Singapore). The
+installer role that reproduces it is **not written yet**. This is the spec for it, taken from what actually works rather
 than from documentation.
 
 ## Why IKEv2 is different from every other protocol here

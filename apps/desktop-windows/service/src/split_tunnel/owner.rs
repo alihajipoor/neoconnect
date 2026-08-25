@@ -1705,9 +1705,10 @@ mod audit_tests {
         }
         // The near misses, which is where an off-by-one range would
         // show: 172.15 and 172.32 are outside RFC1918, and 192.169 is
-        // not 192.168.
+        // not 192.168. 203.0.113.10 stands in for a node address --
+        // redacted, see docs/node-address-hygiene.md.
         for public in
-            ["1.1.1.1", "8.8.8.8", "38.60.249.229", "172.15.0.1", "172.32.0.1", "192.169.0.1"]
+            ["1.1.1.1", "8.8.8.8", "203.0.113.10", "172.15.0.1", "172.32.0.1", "192.169.0.1"]
         {
             assert!(is_public_v4(public.parse().unwrap()), "{public} must count as public");
         }

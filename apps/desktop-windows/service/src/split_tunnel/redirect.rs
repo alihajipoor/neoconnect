@@ -757,9 +757,14 @@ fn drop_while_converging(
 /// Measured on the test rig, one run, same moment:
 ///
 /// ```text
-/// CUSTOM  tcp egress: 38.60.249.229   (the node)
-/// CUSTOM  dns egress: 50.34.35.228    (the customer's own address)
+/// CUSTOM  tcp egress: 203.0.113.10    (the node)
+/// CUSTOM  dns egress: 192.0.2.228     (the customer's own line)
 /// ```
+///
+/// Both addresses above are redacted to documentation ranges. The
+/// real ones were a node exit and a beta tester's home line; what
+/// the capture showed is that the two differ. See
+/// docs/node-address-hygiene.md.
 ///
 /// So a selected application's traffic went through the tunnel while
 /// the name it looked up was resolved by the network the customer was
@@ -3133,8 +3138,11 @@ mod tests {
     fn a_lookup_is_carried_even_when_its_app_is_not_selected() {
         // The leak this closes, measured on the test rig in one run:
         //
-        //   CUSTOM  tcp egress: 38.60.249.229   (the node)
-        //   CUSTOM  dns egress: 50.34.35.228    (the customer's own line)
+        //   CUSTOM  tcp egress: 203.0.113.10    (the node)
+        //   CUSTOM  dns egress: 192.0.2.228     (the customer's own line)
+        //
+        // (Addresses redacted to documentation ranges; what the
+        // capture showed is that the two differ.)
         //
         // A selected app's traffic went through the tunnel while the
         // name it asked about was resolved by the network being escaped.

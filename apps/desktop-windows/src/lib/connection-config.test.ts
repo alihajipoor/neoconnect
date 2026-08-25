@@ -44,14 +44,16 @@ const { refreshConnectionConfig, describeConfigDrift } = await import("./connect
 const { SNAPSHOT_TTL_MS, isSnapshotStale, saveSnapshot, loadSnapshot } = await import("./credential-cache");
 
 /** A REALITY credential. `serverName` is the decoy SNI -- the field this
- * whole change exists to make changeable. */
+ * whole change exists to make changeable. The `host` is a documentation
+ * address standing in for a node (RFC 5737); node addresses are never
+ * committed -- see docs/node-address-hygiene.md. */
 function reality(serverName: string, id = "pu-1"): ProtocolUser {
   return {
     id,
     routeId: "route-france-1",
     protocol: "XRAY_VLESS_REALITY",
     connection: {
-      host: "38.60.249.229",
+      host: "203.0.113.10",
       port: 443,
       transport: "TCP",
       security: "REALITY",

@@ -2722,8 +2722,11 @@ install_ikev2() {
   # certificate is named explicitly:
   #
   #   "Are you trying to change the key type of the certificate named
-  #    de1.neoxify.site from ECDSA to RSA? Please provide both
+  #    <node hostname> from ECDSA to RSA? Please provide both
   #    --cert-name and --key-type on the command line"
+  #
+  # (Node hostname redacted from the quoted message -- see
+  # docs/node-address-hygiene.md.)
   #
   # Without it, IKEv2 fails on every node that also serves Xray over TLS
   # for the same hostname -- which is every node installed with the full
