@@ -69,13 +69,7 @@ $nx_portal_url = trim((string) nx_cfg('customer_portal_url', ''));
 
     <div class="site-footer__bottom">
       <p><?php echo nx_e('footer.rights', array('year' => date('Y'))); ?></p>
-      <a class="lang-switch"
-         href="<?php echo nx_esc(nx_switch_url()); ?>"
-         lang="<?php echo nx_esc(nx_other_locale()); ?>"
-         hreflang="<?php echo nx_esc(nx_other_locale()); ?>">
-        <?php echo nx_icon('globe'); ?>
-        <span><?php echo nx_e('lang.switch'); ?></span>
-      </a>
+      <?php echo nx_lang_switch(); ?>
     </div>
   </div>
 </footer>

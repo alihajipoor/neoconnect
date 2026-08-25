@@ -30,7 +30,10 @@ $nx_relay = $nx_show_relay ? nx_relay_location() : null;
                helps nobody. Windows renders these as the two letters in a
                box rather than a flag, which is why the name is always
                present as text and never conveyed by the glyph alone. */ ?>
-      <span class="loc__flag" aria-hidden="true"><?php echo nx_flag($nx_loc['code']); ?></span>
+      <?php /* nx_flag_svg, not nx_flag: Windows ships no flag emoji font,
+               so the regional-indicator pair renders there as bare letters in
+               a box -- on the platform the desktop client targets. */ ?>
+      <?php echo nx_flag_svg($nx_loc['code']); ?>
       <span>
         <span class="loc__name"><?php echo nx_esc(nx_pick($nx_loc['country'])); ?></span>
         <?php if (!empty($nx_loc['city'])): ?>
@@ -42,7 +45,10 @@ $nx_relay = $nx_show_relay ? nx_relay_location() : null;
 
   <?php if ($nx_relay): ?>
     <li class="loc loc--relay">
-      <span class="loc__flag" aria-hidden="true"><?php echo nx_flag($nx_relay['code']); ?></span>
+      <?php /* nx_flag_svg, not nx_flag: Windows ships no flag emoji font,
+               so the regional-indicator pair renders there as bare letters in
+               a box -- on the platform the desktop client targets. */ ?>
+      <?php echo nx_flag_svg($nx_relay['code']); ?>
       <span>
         <span class="loc__name"><?php echo nx_esc(nx_pick($nx_relay['country'])); ?></span>
         <span class="loc__meta"><?php echo nx_e('locations.relay_label'); ?></span>

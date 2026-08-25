@@ -8284,6 +8284,198 @@ was found by reading.
 
 ---
 
+## 2026-08-24 — Website rebuilt as "The Ladder", and four faults nothing was looking for
+
+The marketing site is redesigned and shipped on `claude/website-ladder`.
+The concept the owner approved was a single HTML file with hash routing;
+it is now ported into the existing PHP architecture — real per-locale
+URLs, the partials, the content files, both language files, all intact.
+`build/neoxify-website.zip` is the deliverable.
+
+### Things that were broken and are not any more
+
+**Every account-deletion request was being thrown away.** `nx_form_open()`
+built its action from `nx_url($form)`. The form is named `deletion`, the
+route key is `delete-account`, and `nx_url()` falls back to the home page
+for a key it does not know — so the form rendered `action="/"` and posted
+to a page with no handler. Silently. For however long it has been there.
+That page is a **Play Console data-safety requirement**, so it is the one
+form where failing quietly is expensive. `check-site.php` passed clean
+throughout: it renders pages and never looks at a form action. If you add
+a form, add an action assertion with it.
+
+**`/account/` could not load at all on a correctly-configured host.** The
+portal is a compiled SPA with only `index.html`, and all three server
+configs listed `index.php` as the sole directory index. `/account/` → 403
+on Apache and nginx, 404 under the dev router, *while every file inside
+`/account/assets/` served 200*. That asymmetry is why it looks fine: the
+bundle is reachable, the page that loads it is not. On the live nginx box
+this depends on the hand-written config — **check `index` there before
+assuming the portal works in production.**
+
+**Every icon on the site was unsized.** `nx_icon()` emitted `viewBox` and
+no `width`/`height`, and the old stylesheet's sizing rule did not survive
+the restyle. An inline SVG with only a viewBox has no intrinsic size, so
+as a flex item it takes the container's width: the alert glyph beside the
+unsigned-installer warning measured **331×331** and crushed the sentence
+beside it to 52px. All three emitters now carry explicit dimensions.
+
+**Flag emoji do not render on Windows at all.** `nx_flag()` returns
+regional-indicator pairs; Windows ships no flag font, so every location
+showed as bare letters in a box — on the platform the desktop client
+targets. Replaced with inline SVG flags on a 3×2 viewBox, with the emoji
+kept as the fallback for a country not drawn yet.
+
+### The class of bug that dominated this pass
+
+`body { overflow-x: clip }` means a too-wide element **does not scroll,
+it silently disappears**. Nothing looks broken; the sentence just ends
+early. Six separate instances, every one found by measuring rather than
+reading:
+
+- flex children with no `min-width: 0` (the automatic minimum is
+  min-content, not zero)
+- grid tracks written `1fr` instead of `minmax(0, 1fr)`
+- `.notice` used two ways on the download page — icon+body *and*
+  heading+list — where the two-column rule gave the heading 173px of a
+  320px screen and left the install steps 58px
+- the Persian header row, 14px over at 375px, quietly clipping the menu
+  button
+
+**If you touch this stylesheet, re-run the width sweep.** Checking
+`scrollWidth` is not enough on its own; walk the text nodes, and check
+`left < 0` too, because in RTL the overflow escapes leftward.
+
+### Two judgement calls worth knowing about
+
+**The interactive panel publishes no numbers.** The approved concept had
+a per-protocol latency column — invented figures, chosen to look
+plausible. Dropped, and the panel says in both locales that it is an
+illustration that contacts nothing. Same reasoning as `down_mbps` being
+null in `plans.php`: a number beside a protocol name reads as a
+measurement. What stayed is the `blocked_by` mapping, which is traceable
+from how each transport looks on the wire.
+
+**Lanes are ordered by a new `try_order` field, not the content file's
+order.** `protocols.php` lists REALITY first, and REALITY is stopped by
+none of the conditions — so listed that way the top lane survives
+everything, the handover counter is nailed to zero, and the one thing the
+panel exists to demonstrate never happens. `try_order` is explicitly *not*
+a speed or quality ranking and no page presents it as one.
+
+### Counts are gone from the copy
+
+At the owner's instruction: no "eight protocols", no "five countries", no
+Persian equivalent. Thirteen strings per locale, including two `<title>`s,
+four meta descriptions and two JSON-LD descriptions — the places where a
+stale number is worst and least visible. **The protocol names stayed**;
+those are the search terms worth having. `home.stats.*` and the counted
+stat strip are deleted. `nx_protocol_count()` and `nx_location_count()`
+still exist but are now unused — leave them, or remove them deliberately.
+
+### Environment notes that cost time
+
+- **`zip` is not installed on this box.** `make-zip.sh` now falls back to
+  Python. It must never fall back to `Compress-Archive`: that writes
+  **backslash** separators, which unpack fine on Windows and produce a
+  flat pile of files named `inc\bootstrap.php` on a Linux host.
+- **`python3` on Windows is a Microsoft Store stub.** It satisfies
+  `command -v`, then prints "Python was not found" and exits non-zero.
+  Probe candidates by actually running them, not by name resolution.
+- **A stale `php -S` from another session was already bound to 8123** and
+  answering my requests with the *old* site. Two processes were listening
+  on the same port and `curl` got whichever won. Three locale tests
+  "failed" against code I had already fixed. Check `netstat -ano | grep
+  :<port>` before believing a negative result, and prefer an unused port.
+- The browser pane's `resize_window` did not change layout width —
+  `innerWidth` stayed at its native value while `clientWidth` reported the
+  requested one. Measuring against `clientWidth` invents overflow that is
+  not there. **Same-origin iframes at a fixed pixel width worked**, and
+  made an 18-page × 4-width sweep one call instead of 72.
+
+### Open
+
+- **`account/` is gitignored build output.** It is not in the repo, so a
+  worktree does not have it, and `make-zip.sh` picks it up only because
+  `zip`/the Python fallback walk the directory rather than git. **Copy it
+  in, or rebuild it, before packaging** — otherwise the archive ships with
+  no customer portal and nothing warns you.
+- Persian still has not had a native review; that caveat stands.
+- Ultimate Max is still `isActive = false` / `isPurchasable = true` and
+  still absent from the site. Owner decision, unchanged.
+- The display faces the design was drawn with (Bricolage Grotesque,
+  Instrument Sans, Martian Mono) are **not vendored** and are not linked
+  from Google Fonts — that would be a third-party request on exactly the
+  networks this product exists for. The stacks fall back to the
+  self-hosted Vazirmatn plus the platform UI and mono faces. To adopt them
+  properly, vendor the woff2 files into `assets/fonts/` and put the family
+  first in the three custom properties at the top of `site.css`; the
+  comment there says so.
+
+### Follow-up the same day: the display faces are now vendored
+
+The first pass shipped without Bricolage Grotesque / Instrument Sans /
+Martian Mono, on the grounds that linking Google Fonts is a third-party
+request on exactly the networks this product exists for. That reasoning
+was right and the conclusion was wrong: the answer is to **self-host
+them**, which keeps both the design and the rule. Done.
+
+All three are SIL OFL 1.1 — checked per font rather than assumed, and
+each licence now ships beside the file. Keep `--name-IDs=0,1,2,3,4,5,6,13,14`
+in the subsetting step: pyftsubset drops name records by default, and 0,
+13 and 14 are the copyright and licence the OFL requires to travel with
+the font.
+
+**Per-page weight is what matters, not the total on disk.** The three
+files are 156 KB, but no page loads all four faces:
+
+| | before | after |
+|---|---|---|
+| English page | 109 KB | 156 KB (+47) |
+| Persian page | 109 KB | 125 KB (+16) |
+
+Two measurements drove that, and both were invisible until the network
+panel was open:
+
+- **An English page was downloading Vazirmatn.** The two Persian letters
+  «فا» in the language switch pulled the entire 111 KB Persian face —
+  40% of the page's font weight, for two glyphs. `html[lang="en"]
+  .lang-switch__opt[lang="fa"]` now uses the platform's Arabic font.
+- **A Persian page was downloading Bricolage.** The concept keeps prices
+  and the marquee in the Latin display face, which reads well and costs
+  110 KB on every Persian page for an aria-hidden marquee and three price
+  figures. Persian now renders those in Vazirmatn. 235 KB → 125 KB.
+
+**Axis pinning is most of the subsetting saving**, more than the character
+subset: Instrument Sans 60 → 30 KB and Martian Mono 37 → 16 KB, purely by
+pinning `wdth`, which the stylesheet never varies. Bricolage keeps `opsz`
+and `wdth` because varying them is the entire reason the design chose it.
+
+**The font swap moved the page 84px and the fix had to be measured.**
+Bricolage at `wdth 92` is about 13% narrower than Segoe UI, so the hero
+headline wrapped to an extra line in the fallback and pushed everything
+below it down 83px. Fixed with metric-matched fallback `@font-face` rules
+that load no file (`size-adjust: 87%` and `103.5%`, ascent/descent from
+each font's own hhea, ratios measured on a canvas). Above-the-fold shift
+is now **0px in both locales**.
+
+One related trap worth remembering: **a `ch` measure rewraps on font
+swap by definition**, because `ch` is the advance of "0" in the *current*
+font. `.lede` was `max-width: 46ch` and contributed 26px of the jump on
+its own. It is `rem` now. Everything below the fold keeps its `ch`
+measure — better typography, and nothing visible moves down there.
+
+**Regenerating.** `python3 scripts/make-fonts.py --check` re-derives the
+character inventory from the rendered pages and says whether the shipped
+subset still covers it; without `--check` it rebuilds. **Run the check
+after any copy change**, because a missing glyph does not break anything
+— it falls through to the platform font and looks subtly wrong in one
+place, which is the kind of fault that survives for months. Neither the
+script nor `scripts/fonts-unicodes.txt` ships; `scripts/` is excluded
+from the archive.
+
+Deploy archive is now **751 KB** (was 584 KB), 78 entries.
+
 ## 2026-08-24 — the fire-and-forget UDP leak is closed in source, and the WFP filter that was going to close it cannot
 
 **Status:** in flight — in source and unit-tested, **never run on a rig**

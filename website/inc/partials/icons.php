@@ -32,7 +32,11 @@ function nx_logo_mark($class = '')
     $seq++;
     $id = 'nx-brand-' . $seq;
 
-    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"'
+    // Explicit size, like the other two emitters: CSS scales it per
+    // component, but a bare inline SVG with only a viewBox has no intrinsic
+    // size and will otherwise fill whatever box it lands in.
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"'
+        . ' width="28" height="28" fill="none"'
         . ($class !== '' ? ' class="' . nx_esc($class) . '"' : '')
         . ' aria-hidden="true" focusable="false">'
         . '<defs><linearGradient id="' . $id . '" x1="0" y1="0" x2="1" y2="1">'
@@ -84,9 +88,12 @@ function nx_platform_icon($name, $class = '')
         return '';
     }
 
+    // Explicit size for the same reason as nx_icon(): a viewBox alone gives
+    // an inline SVG no intrinsic size at all.
     return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"'
+        . ' width="40" height="40"'
         . ' fill="currentColor" stroke="none"'
-        . ($class !== '' ? ' class="' . nx_esc($class) . '"' : '')
+        . ' class="icon icon--platform' . ($class !== '' ? ' ' . nx_esc($class) : '') . '"'
         . ' aria-hidden="true" focusable="false">' . $paths[$name] . '</svg>';
 }
 
@@ -187,14 +194,218 @@ function nx_icon($name, $class = '')
     // Every icon here is a stroked outline at the Lucide default weight. The
     // brand mark is not one of these -- it has its own gradient and lives in
     // nx_logo_mark() above.
+    /* width/height AND the .icon class, always.
+       An inline <svg> with only a viewBox has no intrinsic size: as a flex
+       item it resolves to the container's width, and as a block it falls
+       back to the SVG default of 300x150. Both were happening -- the alert
+       glyph beside the unsigned-installer warning measured 331x331 and
+       squeezed the sentence next to it down to nothing.
+
+       The attributes give it a correct size before any CSS loads (so there
+       is no first-paint jump), and the class lets the stylesheet scale it
+       per component with `width:1em` or an explicit size. */
     $attrs = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"'
+        . ' width="18" height="18"'
         . ' fill="none" stroke="currentColor" stroke-width="2"'
         . ' stroke-linecap="round" stroke-linejoin="round"'
-        . ' aria-hidden="true" focusable="false"';
-
-    if ($class !== '') {
-        $attrs .= ' class="' . nx_esc($class) . '"';
-    }
+        . ' aria-hidden="true" focusable="false"'
+        . ' class="icon' . ($class !== '' ? ' ' . nx_esc($class) : '') . '"';
 
     return '<svg ' . $attrs . '>' . $paths[$name] . '</svg>';
+}
+
+
+// ---------------------------------------------------------------------
+// Flags
+// ---------------------------------------------------------------------
+
+/**
+ * A country flag as inline SVG.
+ *
+ * NOT the regional-indicator emoji nx_flag() produces, and that is the whole
+ * point: Windows ships no flag emoji font at all. Every 🇫🇮 on this site
+ * renders there as the bare letters "FI" in a box -- on the platform the
+ * desktop client targets, which is to say most of the audience. macOS and
+ * most phones show the flag; Windows shows nothing useful, and it looks
+ * broken rather than deliberate.
+ *
+ * Drawn on a 3x2 viewBox so every flag is the same aspect ratio and can be
+ * clipped to a rounded rectangle by CSS. These are simplified: a tricolour
+ * or a bicolour with the one distinguishing element, at 2.2rem wide, where
+ * a faithful coat of arms would be an unreadable smudge and several
+ * kilobytes each.
+ *
+ * Falls back to the emoji for a country not drawn here, so adding a location
+ * to inc/content/locations.php degrades rather than breaks.
+ *
+ * @param string $code ISO 3166-1 alpha-2, any case
+ * @return string inline <svg>, or the emoji fallback
+ */
+function nx_flag_svg($code)
+{
+    $code = strtoupper(trim((string) $code));
+
+    $flags = array(
+        'FI' => '<rect width="3" height="2" fill="#fff"/>'
+              . '<rect y=".75" width="3" height=".5" fill="#003580"/>'
+              . '<rect x=".9" width=".5" height="2" fill="#003580"/>',
+
+        'FR' => '<rect width="1" height="2" fill="#002654"/>'
+              . '<rect x="1" width="1" height="2" fill="#fff"/>'
+              . '<rect x="2" width="1" height="2" fill="#ce1126"/>',
+
+        'DE' => '<rect width="3" height=".667" fill="#000"/>'
+              . '<rect y=".667" width="3" height=".667" fill="#dd0000"/>'
+              . '<rect y="1.334" width="3" height=".666" fill="#ffce00"/>',
+
+        'SG' => '<rect width="3" height="1" fill="#ed2939"/>'
+              . '<rect y="1" width="3" height="1" fill="#fff"/>'
+              . '<circle cx=".62" cy=".5" r=".3" fill="#fff"/>'
+              . '<circle cx=".74" cy=".5" r=".3" fill="#ed2939"/>',
+
+        'TR' => '<rect width="3" height="2" fill="#e30a17"/>'
+              . '<circle cx="1.1" cy="1" r=".45" fill="#fff"/>'
+              . '<circle cx="1.24" cy="1" r=".36" fill="#e30a17"/>',
+
+        'IR' => '<rect width="3" height=".667" fill="#239f40"/>'
+              . '<rect y=".667" width="3" height=".666" fill="#fff"/>'
+              . '<rect y="1.333" width="3" height=".667" fill="#da0000"/>',
+    );
+
+    if (!isset($flags[$code])) {
+        return nx_flag($code);
+    }
+
+    return '<svg class="fl" viewBox="0 0 3 2" preserveAspectRatio="none"'
+        . ' aria-hidden="true" focusable="false">' . $flags[$code] . '</svg>';
+}
+
+
+// ---------------------------------------------------------------------
+// Signal traces
+// ---------------------------------------------------------------------
+
+/**
+ * A deterministic pseudo-random signal trace, as an SVG path `d`.
+ *
+ * Drawn in PHP rather than JS so the waveform is in the markup and survives
+ * with scripting off. Deterministic on purpose: a trace that reshuffled on
+ * every page load would read as data changing, and none of this is data.
+ * Purely decorative -- every SVG carrying one is aria-hidden.
+ *
+ * Lives here, beside the other drawing helpers, rather than in the
+ * instrument partial: the specimen cards on the home page use it too, and
+ * that partial returns early when there is no protocol data, which would
+ * leave the function undefined exactly when the page still needs it.
+ *
+ * @param int    $seed
+ * @param int    $w
+ * @param int    $h
+ * @param string $kind pulse | tls | noise | regular
+ * @return string
+ */
+function nx_signal_path($seed, $w, $h, $kind)
+{
+    $s = $seed;
+    $points = array();
+    $n = 48;
+
+    for ($i = 0; $i < $n; $i++) {
+        // Linear congruential generator: same constants the design used, so
+        // the shapes match it exactly.
+        $s = ($s * 1103515245 + 12345) & 0x7fffffff;
+        $r = $s / 0x7fffffff;
+
+        $x = $i / ($n - 1) * $w;
+
+        if ($kind === 'regular') {
+            $y = $h / 2 + sin($i * 0.72) * $h * 0.34 + ($r - 0.5) * $h * 0.05;
+        } elseif ($kind === 'pulse') {
+            $y = $h / 2 + (($i % 7 < 2) ? $h * 0.36 : -$h * 0.10) + ($r - 0.5) * $h * 0.06;
+        } elseif ($kind === 'tls') {
+            $y = $h / 2 + sin($i * 0.42) * $h * 0.16 + ($r - 0.5) * $h * 0.30;
+        } else {
+            $y = $h / 2 + ($r - 0.5) * $h * 0.86;
+        }
+
+        $points[] = number_format($x, 1, '.', '') . ',' . number_format($y, 1, '.', '');
+    }
+
+    return 'M' . implode(' L', $points);
+}
+
+/**
+ * The gradient definitions every decorative SVG on the page refers to.
+ *
+ * Emitted ONCE near the top of <body> by head.php, in a zero-size SVG, so
+ * that `stroke="url(#nx-beam)"` resolves anywhere in the document. Defining
+ * them inside the component that happens to be first would make every other
+ * component depend on that one rendering -- which is how the specimen cards
+ * lost their traces the first time round.
+ *
+ * @return string
+ */
+function nx_svg_defs()
+{
+    return '<svg width="0" height="0" class="sr-only" aria-hidden="true" focusable="false"><defs>'
+        . '<linearGradient id="nx-brand-grad" x1="0" y1="0" x2="1" y2="1">'
+        . '<stop offset="0" stop-color="#8b5cf6"/><stop offset="1" stop-color="#22d3ee"/>'
+        . '</linearGradient>'
+        . '<linearGradient id="nx-beam" x1="0" y1="0" x2="1" y2="0">'
+        . '<stop offset="0" stop-color="#6D3AE8"/><stop offset="1" stop-color="#0A6E82"/>'
+        . '</linearGradient>'
+        . '<linearGradient id="nx-orb" x1="0" y1="0" x2="1" y2="1">'
+        . '<stop offset="0" stop-color="#10b981"/><stop offset="1" stop-color="#22d3ee"/>'
+        . '</linearGradient>'
+        . '</defs></svg>';
+}
+
+
+// ---------------------------------------------------------------------
+// Language switch
+// ---------------------------------------------------------------------
+
+/**
+ * The language switch, as a two-option group.
+ *
+ * Deliberately NOT a single "فارسی" link to the other locale. Two options,
+ * with the current one marked aria-current, means a visitor can see which
+ * language they are on as well as which one they can move to -- and a
+ * screen reader announces it as a choice rather than as an unexplained
+ * foreign word.
+ *
+ * Both options are real links to real per-locale URLs, so this works with
+ * scripting off. The inactive one carries ?setlang, which is what records
+ * the preference cookie and stops the automatic redirect from overriding
+ * the choice on the next page.
+ *
+ * It links to THE SAME PAGE in the other language, never to the home page.
+ *
+ * @param string $class extra classes for the wrapper
+ * @return string
+ */
+function nx_lang_switch($class = '')
+{
+    $out = '<div class="lang-switch' . ($class !== '' ? ' ' . nx_esc($class) : '') . '"'
+        . ' role="group" aria-label="' . nx_e('lang.switch_label') . '">';
+
+    $labels = array('en' => 'EN', 'fa' => 'فا');
+
+    foreach (array('en', 'fa') as $code) {
+        $isCurrent = ($code === nx_locale());
+        $label = '<span lang="' . $code . '">' . nx_esc($labels[$code]) . '</span>'
+            . '<span class="sr-only">' . nx_e('lang.' . $code) . '</span>';
+
+        if ($isCurrent) {
+            // A link to the page you are already on is noise in the tab
+            // order; render the current language as plain text.
+            $out .= '<span class="lang-switch__opt is-current" aria-current="true">'
+                . $label . '</span>';
+        } else {
+            $out .= '<a class="lang-switch__opt" href="' . nx_esc(nx_switch_url()) . '"'
+                . ' lang="' . $code . '" hreflang="' . $code . '">' . $label . '</a>';
+        }
+    }
+
+    return $out . '</div>';
 }
