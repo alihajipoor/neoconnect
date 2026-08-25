@@ -10497,3 +10497,165 @@ table, so it is a ten-minute job for whoever owns them next.
 on `claude/gaming-ip-reputation` tabulates every node address with its
 provider and ASN. It is the densest listing in the project and it is not
 yet on `main`. **Redact it before that branch merges.**
+
+---
+
+## 2026-08-25 — Per-app destination scoping, and the leak fix that had to land first
+
+**Status:** in source, unproven on a machine
+**Touches:** `apps/desktop-windows/{ipc,service,src-tauri,src}/**`
+**Branch:** `claude/split-tunnel-destination-scope`, off `main` at `38f5ccd`, pushed, not merged
+
+`destinationCidrs` and `prefixComplete` have reached the client since
+`0090c7b` with nothing consuming them. They have a consumer now:
+`SplitTunnelConfig` grew an optional `scopes`, and the redirect loop
+narrows a selected app to the destinations its publisher announces.
+
+### The shape of it
+
+One clause on the `selected` computation in `decide`, and the mirror of
+it in `handle_ipv6`. Everything else is construction-time filtering, in
+`Selection::with_scopes` and `Scope::new`, so that the hot path has one
+question to ask and no special cases to remember.
+
+`Scope::new` returns `Option<Scope>` and there is **no other
+constructor**. A scope exists only if every prefix parsed; one bad entry
+and the whole thing is `None`, which reads as "carry this app in full".
+That is the `prefixComplete` rule made structural rather than
+remembered — a partial list splits WoW's Home and World across two
+source addresses, and §5.4 of `gaming-mode.md` says refuse rather than
+approximate. The client refuses too (`scopesForGame`, gated on
+`canRouteByDestination`); two independent refusals, because one of them
+being wrong is a ban rather than a bug.
+
+### How it composes with the two leak fixes — the part worth reading
+
+**It is not the unattributable case, and the signatures enforce that.**
+`destination_scope` takes an `image_path`, so it can only be asked about
+a packet whose owner is known. A packet with no owner has no app and
+therefore no scope; it still goes to `verdict_for_unattributed` and
+still comes back `Refuse`. Collapsing the two — treating "no scope
+matched" as "out of scope, pass it through" — would reinstate the
+13-of-15 fire-and-forget leak while every scope test still passed. There
+is a test for exactly that mutation.
+
+**Destination scoping could not have been built before `72c8978`.** The
+out-of-scope verdict falls through to `record_direct`. Keyed on
+`(transport, source port)` — as `Tables.direct` was until that commit —
+one telemetry packet would have exempted the port for five seconds
+*including the game servers*, and a game scoped to its servers would
+have been carried only to whichever destination it reached first.
+`gaming-mode.md` §5.3 lists `record_direct` as a trap for a
+per-destination policy for precisely this reason. **That trap is
+spent**, and the note in `decide` now records that the flow key is
+load-bearing for two features instead of one. Anyone tempted to re-key
+that cache should read it.
+
+### Why `Scoped` has three answers
+
+Because IPv6 inverts. There is no v6 proxy, so a *carried* app's IPv6 is
+**blocked** and the app retries over IPv4. Publisher prefix lists are
+usually v4-only, and reading "no v6 prefixes" as "not in scope" would
+pass a scoped game's IPv6 to its own game server straight through while
+its IPv4 to the same server went through the tunnel — one account, two
+source addresses, at the same instant. The exact thing `prefixComplete`
+exists to prevent, arriving by the family nobody was looking at.
+`Unscoped` therefore restores whatever the caller was already doing,
+which is "carry" on v4 and "block" on v6. Every uncertainty — missing
+list, unparseable list, over-long list, wrong family — lands there.
+
+### Gaps, stated
+
+* **The WFP per-app IPv6 block does not know about scopes.**
+  `SelectedAppsIpv6Block` blocks `ALE_AUTH_CONNECT_V6` for the whole
+  app path, so a scoped app's out-of-scope IPv6 is blocked by the
+  filter before `handle_ipv6` ever sees it. Not a leak — the app falls
+  back to IPv4 and goes out direct, which is what out-of-scope means —
+  but it does mean the v6 out-of-scope arm mostly fires only when the
+  filter failed to install. Narrowing it would need per-app-per-prefix
+  filters in `ipv6_block.rs`, which was out of scope for this change.
+* **Nothing is scoped today.** No seeded profile is prefix-complete
+  (Blizzard and Riot both ship `destinationCidrs: []`,
+  `prefixComplete: false` on purpose), so `has_scopes()` is false on
+  every machine until a list is finished. The data is the gate.
+* **§5.6 still stands.** The design doc says route mode must not ship
+  before the four `claude/split-tunnel-latency` fixes are merged *and*
+  verified on the rig. This lands the mechanism; it does not discharge
+  that.
+* §5.2 suggested a single `destinations: Option<DestinationFilter>`.
+  This is per-app instead, because two scoped games with different
+  publishers would union into one filter and mis-scope both.
+* §5.5's per-profile `failClosed` is not built. This fails **open** on
+  the new axis throughout, deliberately: a game that keeps working
+  unprotected beats a game that stops.
+
+### Verified
+
+`cargo build -p neoconnect-service` links; `cargo check --workspace
+--all-targets` clean, no warnings from these files; `cargo test
+--workspace` 17/38/**237** pass, 0 failed; `tsc --noEmit` clean;
+`vitest run` **157** passed in 13 files; `pnpm turbo run lint typecheck
+build test --force` 16/16 successful.
+
+**Ten mutations, each caught by the test written for it** — the part
+that says the tests discriminate rather than merely pass:
+
+| mutation | fails |
+|---|---|
+| drop the v4 scope clause | scoped-app carry/leave-alone, out-of-scope cache |
+| drop the v6 scope clause | v6 blocked-in-scope/passed-outside |
+| unknown family reads as out-of-scope | family-coverage, v4-only-scope-vs-IPv6 |
+| `Scope::new` narrows to what parsed | refuses-unless-all-parsed, selection filtering, carried-in-full |
+| drop the range merge | overlapping-prefixes |
+| out-of-scope refused like unattributable | scoped-app carry/leave-alone, out-of-scope cache |
+| **leave-alone cache re-keyed on the port** | **the three existing `flows` leak tests + `a_left_alone_port_does_not_take_a_name_lookup_with_it` + this feature's out-of-scope cache test** |
+| client ignores `prefixComplete` | both `scopesForGame` refusal tests |
+| scope survives app removal | `scopesFor` |
+| `scopeOf` case-sensitive | `scopeOf` |
+
+The seventh is the one to note: re-keying that cache breaks this feature
+and the earlier leak fix *together*, which is the composition claim
+above shown rather than asserted.
+
+**None of this has run against WinDivert, a packet capture or a
+machine.** Unit tests prove the decision logic and nothing else.
+
+### Rig procedure for whoever runs it next
+
+Custom mode on, one selected app, capture **host-side of the guest's
+vNIC** — counters do not count, this file has recorded false passes from
+them before.
+
+1. **Baseline first.** With a scoped app and no scope applied, confirm
+   all of its traffic reaches the node. A run that shows nothing carried
+   has not exercised the feature and proves nothing.
+2. Force a scope on. No catalogue profile is prefix-complete, so either
+   flip `prefixComplete` on a local seed row or hand-write
+   `split-tunnel.json` with a `scopes` entry. The session log header now
+   says which of the two states it is in — grep for `narrowed to
+   specific destinations`, and if it says `carried in full` the scope
+   was dropped somewhere and the rest of the run is meaningless.
+3. **In scope:** traffic to a prefix in the list must have an exit IP
+   matching the node. Exit IP, not a counter — force IPv4, and remember
+   `urllib` cannot speak SOCKS.
+4. **Out of scope:** traffic from the *same app* to an address outside
+   the list must show the real address. Both halves in one run, or the
+   test says nothing about the narrowing.
+5. **Same-socket discrimination.** From one UDP socket, send to an
+   out-of-scope peer and then to an in-scope peer within five seconds.
+   The second must be carried. This is the flow-key composition and it
+   is the one that would have silently regressed under the old cache.
+6. **The leak fixes must still hold.** Re-run the fire-and-forget rig
+   from the 2026-08-24 entry with a scope active: 15 one-shot datagrams
+   from a selected app, expect 0 plaintext at the vNIC **and** non-zero
+   `refused_unattributed`. Both, not either.
+7. **IPv6.** A scoped app's v6 to an in-scope address must be blocked;
+   to an out-of-scope address it should pass — but see the WFP gap
+   above, which will block it first if the filter installed. Check
+   `netsh wfp show filters` before concluding the loop did it.
+8. LAN sanity throughout: mDNS, SSDP, printers, SMB. If any of that
+   breaks, the guard is wrong and the feature is worse than the gap.
+
+Fresh-worktree trap, again: copy `src-tauri/resources/` in **before** the
+first cargo invocation. Doing it in that order this time meant no
+`windivert-sys` build-script cache to delete afterwards.
