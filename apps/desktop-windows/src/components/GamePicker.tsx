@@ -26,19 +26,31 @@ import { Button } from "./ui";
  *   the whole of it.
  *
  * Each row states what will actually be redirected, because that is the
- * only way somebody can tell what they bought.
+ * only way somebody can tell what they bought -- and what that is
+ * differs by where the picker is used, which is why `subtitle` is a
+ * prop. Gaming mode redirects hostnames; Custom mode routes programs.
+ * A row that said "launcher, login and updates" in both places would be
+ * false in one of them.
  */
 export function GamePicker({
   games,
   chosen,
   onPick,
   onClose,
+  subtitle,
+  emptyLabel,
 }: {
   games: GameProfileSummary[];
   /** Slugs already on the customer's list. */
   chosen: string[];
   onPick: (slug: string) => void;
   onClose: () => void;
+  /** What choosing this row buys, per row. Defaults to gaming mode's
+   * answer, which is what every existing caller means. */
+  subtitle?: (game: GameProfileSummary) => string;
+  /** Shown when the catalogue itself is empty for this caller, which
+   * is a different fact from a search matching nothing. */
+  emptyLabel?: string;
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -92,7 +104,7 @@ export function GamePicker({
 
         {shown.length === 0 ? (
           <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {query.trim() ? t("gaming.searchEmpty") : t("gaming.listEmpty")}
+            {query.trim() ? t("gaming.searchEmpty") : (emptyLabel ?? t("gaming.listEmpty"))}
           </p>
         ) : (
           <ul className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
@@ -121,7 +133,7 @@ export function GamePicker({
                           construction, and a row that implied otherwise
                           would be selling something we do not do. */}
                       <p className="truncate text-[10px] text-muted-foreground">
-                        {t("gaming.redirects")}
+                        {subtitle ? subtitle(game) : t("gaming.redirects")}
                         {game.publisher ? ` · ${game.publisher}` : ""}
                       </p>
                     </div>
