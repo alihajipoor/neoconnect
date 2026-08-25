@@ -10,9 +10,15 @@ import type { TranslationKey } from "./i18n";
  * The thing to hold on to while reading anything below: **this brings up
  * no tunnel and no adapter.** It installs resolver rules for named
  * hostnames -- launcher, login, patching, store -- and the game's own
- * connections are left on the direct path by construction. The machine's
- * exit address is unchanged, which is why the exit-IP pill is not
- * rendered in this mode and why a line saying so is always on screen.
+ * connections are left on the direct path by construction.
+ *
+ * So there is no single exit address in this mode: the redirected
+ * services are reached from the node and see its address, everything
+ * else keeps the customer's own. That is why the exit-IP pill is not
+ * rendered here -- one address in it would be false about half the
+ * traffic -- and why a line saying which is which is always on screen.
+ * Note what this is NOT: it is not a claim that nothing changes
+ * address, and it is not a speed feature. Nothing here measures ping.
  *
  * So "Connected" has nothing it could truthfully mean here, and this
  * module deliberately does not use `ConnectionState`. It has its own

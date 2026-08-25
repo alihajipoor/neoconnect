@@ -108,7 +108,15 @@ export function GamingModeCard() {
 
   const unavailable = unavailableKey(profile);
   const picked = chosenGames(profile, settings.games);
-  const canAdd = !unavailable && !profileFailed && (profile?.games.length ?? 0) > 0;
+  /** Only games this mode can actually redirect.
+   *
+   * A profile with no hostnames contributes no DNS rules, so offering
+   * it here would be a row that does nothing when chosen. The Riot
+   * profiles are exactly that: they carry executables for Custom mode
+   * and no hostnames, because no Riot name has been probed from an
+   * Iranian network and their login sits behind Cloudflare. */
+  const redirectable = (profile?.games ?? []).filter((g) => g.hostnames.length > 0);
+  const canAdd = !unavailable && !profileFailed && redirectable.length > 0;
 
   return (
     <Card className="flex flex-col gap-3">
@@ -124,9 +132,13 @@ export function GamingModeCard() {
 
       {/* The anti-lie, and it is not conditional on the mode being on.
           Somebody reading this card is deciding whether to buy the idea,
-          and the single most likely wrong belief they can leave with is
-          that this changes where they appear to be. */}
+          and it must not be possible to leave with the wrong one.
+          Two separate wrong beliefs are addressed, because they are
+          different mistakes: what changes address (only the redirected
+          services do), and whether this is a speed feature (it is not,
+          and nothing here measures ping). */}
       <p className="mt-1 text-xs text-highlight">{t("gaming.ipUnchanged")}</p>
+      <p className="text-[11px] text-muted-foreground">{t("gaming.noSpeedClaim")}</p>
 
       {profileFailed ? (
         <div className="flex flex-col gap-2">
@@ -138,9 +150,17 @@ export function GamingModeCard() {
           </Button>
         </div>
       ) : unavailable ? (
-        <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-          {t(unavailable)}
-        </p>
+        <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+          <p>{t(unavailable)}</p>
+          {/* "Not available yet" on its own leaves the switch above it
+              looking like it would still do something. It would not.
+              Said plainly, with the mode that does work today named --
+              this is the state every customer is in right now, because
+              no node serves a resolver. */}
+          {unavailable === "gaming.noResolver" ? (
+            <p className="mt-1 opacity-90">{t("gaming.noResolverBody")}</p>
+          ) : null}
+        </div>
       ) : null}
 
       {canAdd || picked.length > 0 ? (
@@ -211,9 +231,19 @@ export function GamingModeCard() {
         </div>
       ) : null}
 
+      {/* The risk this product had nowhere on screen, and the one that
+          actually costs people accounts. Always shown, not folded into
+          a details pane: somebody deciding whether to run a game
+          through a VPN is exactly who needs it, and they are deciding
+          here. */}
+      <div className="rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2">
+        <p className="text-[11px] font-semibold">{t("gaming.accountRisk")}</p>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">{t("gaming.accountRiskBody")}</p>
+      </div>
+
       {picking && profile ? (
         <GamePicker
-          games={profile.games}
+          games={redirectable}
           chosen={settings.games}
           onClose={() => setPicking(false)}
           onPick={(slug) => {
