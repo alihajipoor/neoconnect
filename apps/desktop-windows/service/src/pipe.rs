@@ -380,6 +380,28 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             }
             Err(e) => Response::Error { message: e.to_string() },
         },
+        // Takes the lock on the ordinary terms and holds it for the
+        // whole pass, which is right: every step removes something a
+        // live tunnel depends on, so nothing else may touch the machine
+        // while it runs. `status` still answers throughout -- it has its
+        // own short wait and an unlocked fallback -- which matters here
+        // more than anywhere, because this is a customer watching to see
+        // whether their internet came back.
+        Request::Repair => {
+            let mut engines = engines.lock().await;
+            crate::engines::begin_operation();
+            Response::Repaired { report: crate::engines::repair::run(&mut engines) }
+        }
+        // Reads state and changes none, but still behind the lock: it
+        // enumerates the same routes and processes a connect is in the
+        // middle of rearranging, and a snapshot taken mid-connect would
+        // describe a machine that never existed.
+        Request::Diagnostics => {
+            let mut engines = engines.lock().await;
+            Response::Diagnostics {
+                diagnostics: Box::new(crate::engines::repair::diagnostics(&mut engines)),
+            }
+        }
     }
 }
 

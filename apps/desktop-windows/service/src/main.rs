@@ -78,9 +78,238 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("install") => install(),
         Some("uninstall") => uninstall(),
+        Some("repair") => repair(),
         // No argument means the service control manager started us.
         _ => service_dispatcher::start(SERVICE_NAME, ffi_service_main).map_err(Into::into),
     }
+}
+
+/// How long the service is given to stop before the repair goes ahead
+/// without it.
+///
+/// Generous, because a service in the middle of a connect can legitimately
+/// take a few seconds, and bounded because the whole premise of this
+/// command is that the service may be the broken thing. Timing out is not
+/// a failure: the repair runs anyway and says the service was still
+/// running, which is the honest description of what it then did.
+const SERVICE_STOP_BUDGET: Duration = Duration::from_secs(15);
+
+/// `neoconnect-service.exe repair`, run by hand from an elevated command
+/// prompt.
+///
+/// # Why this is a command and not only a button
+///
+/// The in-app button reaches this same code through the service, and is
+/// the right answer whenever the service answers. The cases that
+/// actually strand people are the ones where it does not: a service that
+/// will not start never runs its start-up reconcile, and a service that
+/// is wedged never answers a disconnect -- while the NRPT rule, the
+/// routes and the tunnel service all sit there surviving reboots. This
+/// path needs nothing but an administrator prompt and the binary that is
+/// already installed, which is the same reason Windscribe ships an
+/// out-of-band `-firewall_off`.
+///
+/// # What it does about the service
+///
+/// Stops it first, if it is running, and starts it again afterwards.
+/// Not politeness: this process's `Engines` knows nothing about a tunnel
+/// the *service's* `Engines` is holding, so repairing underneath a live
+/// service would leave it believing it had a tunnel whose engine,
+/// routes and DNS rule had all just been removed -- a machine reporting
+/// "connected" while carrying nothing, which is the one state this
+/// product refuses to produce. Stopping it also ends any split-tunnel
+/// redirect loop inside it, which is the residue that captures every
+/// process's DNS and which no registry or firewall work can reach.
+///
+/// Both the stop and the restart are best-effort and reported. A service
+/// that will not stop does not cancel the repair, and a service that
+/// will not start again is named rather than hidden -- the customer's
+/// next connect depends on it.
+fn repair() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Neoxify network repair\n");
+
+    if !is_elevated() {
+        eprintln!(
+            "This must be run as an administrator.\n\n\
+             Open Start, type \"cmd\", right-click Command Prompt and choose\n\
+             \"Run as administrator\", then run this command again."
+        );
+        // Distinct from the failure exit below, so a script can tell
+        // "you did not elevate" from "something could not be repaired".
+        std::process::exit(2);
+    }
+
+    let stopped = stop_service_for_repair();
+    println!("  {}", stopped.line);
+
+    let exe_dir = exe_dir()?;
+    let config = config_dir();
+    // Best-effort: the log and the config directory both live here, and
+    // a repair on a half-removed install may find neither.
+    let _ = security::create_protected_dir(&config);
+    let mut engines = engines::Engines::new(exe_dir.clone(), config);
+    let report = engines::repair::run(&mut engines);
+
+    for step in &report.steps {
+        let (mark, detail) = match &step.outcome {
+            neoconnect_ipc::RepairOutcome::AlreadyClean => ("ok  ", "nothing of ours was there".to_string()),
+            neoconnect_ipc::RepairOutcome::Fixed { detail } => ("FIXED", detail.clone()),
+            neoconnect_ipc::RepairOutcome::Failed { detail } => ("FAIL", detail.clone()),
+            neoconnect_ipc::RepairOutcome::Unknown { detail } => ("????", detail.clone()),
+        };
+        println!("  [{mark}] {} -- {detail}", step.label);
+    }
+
+    let restarted = start_service_after_repair(stopped.was_running);
+    if let Some(line) = &restarted {
+        println!("  {line}");
+    }
+
+    let unresolved = report.unresolved();
+    println!();
+    if unresolved.is_empty() {
+        println!("Everything was either already clean or has been repaired.");
+        println!("A full record is in {}.", config_dir().join("cleanup.log").display());
+        return Ok(());
+    }
+
+    // Named, not counted. "3 steps failed" tells whoever is helping
+    // nothing; "the WireGuard tunnel service is still registered" tells
+    // them what to do next.
+    eprintln!("Some things could not be repaired:");
+    for step in &unresolved {
+        eprintln!("  - {}", step.label);
+    }
+    eprintln!("\nA full record is in {}.", config_dir().join("cleanup.log").display());
+    eprintln!("Restarting Windows clears most of what is left; if it does not, send that file to support.");
+    std::process::exit(1);
+}
+
+/// The outcome of stopping the service before a repair.
+struct ServiceStop {
+    /// Whether it was running when asked. Decides whether it is started
+    /// again afterwards -- a service that was already stopped is left
+    /// stopped, because this command must not silently change what the
+    /// machine was doing.
+    was_running: bool,
+    /// What to print. One sentence, aimed at whoever is reading the
+    /// output rather than at a log.
+    line: String,
+}
+
+fn stop_service_for_repair() -> ServiceStop {
+    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else {
+        return ServiceStop {
+            was_running: false,
+            line: "The service manager could not be reached; repairing anyway.".into(),
+        };
+    };
+    let Ok(service) = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+    ) else {
+        return ServiceStop {
+            was_running: false,
+            line: "The Neoxify service is not installed; repairing anyway.".into(),
+        };
+    };
+
+    let running = matches!(service.query_status(), Ok(s) if s.current_state != ServiceState::Stopped);
+    if !running {
+        return ServiceStop {
+            was_running: false,
+            line: "The Neoxify service was already stopped.".into(),
+        };
+    }
+
+    let _ = service.stop();
+    let deadline = std::time::Instant::now() + SERVICE_STOP_BUDGET;
+    while std::time::Instant::now() < deadline {
+        match service.query_status() {
+            Ok(status) if status.current_state == ServiceState::Stopped => {
+                return ServiceStop {
+                    was_running: true,
+                    line: "Stopped the Neoxify service so nothing fights the repair.".into(),
+                }
+            }
+            Err(_) => break,
+            Ok(_) => std::thread::sleep(Duration::from_millis(250)),
+        }
+    }
+    ServiceStop {
+        was_running: true,
+        // Said plainly. The repair below is still worth running -- most
+        // of what it removes outlives any process -- but a service that
+        // would not stop may put some of it back, and whoever is reading
+        // this needs to know that rather than be told it all went.
+        line: format!(
+            "The Neoxify service did not stop within {}s; repairing anyway, \
+             but restart Windows if anything below comes back.",
+            SERVICE_STOP_BUDGET.as_secs()
+        ),
+    }
+}
+
+/// Puts the service back, if this command took it away.
+///
+/// Returns the line to print, or `None` when there is nothing to say.
+fn start_service_after_repair(was_running: bool) -> Option<String> {
+    if !was_running {
+        return None;
+    }
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    let service = manager.open_service(SERVICE_NAME, ServiceAccess::START).ok()?;
+    match service.start(&[] as &[&std::ffi::OsStr]) {
+        Ok(()) => Some("Started the Neoxify service again.".into()),
+        // Not fatal, and not hidden either: the service is AutoStart, so
+        // a reboot brings it back, but until then Connect will not work
+        // and the customer deserves to know which of the two problems
+        // they have.
+        Err(e) => Some(format!(
+            "The Neoxify service could not be started again ({e}). Restart Windows, or reinstall Neoxify."
+        )),
+    }
+}
+
+/// Whether this process is running with administrator rights.
+///
+/// Asked before anything is attempted rather than discovered halfway
+/// through: without elevation the registry sweep, the service manager
+/// and netsh all fail *individually*, so the output would be a wall of
+/// unrelated errors that reads like a broken product instead of a
+/// missing "Run as administrator".
+///
+/// Uses the generated `TOKEN_ELEVATION` binding rather than a
+/// hand-declared struct, which is a rule in this codebase paid for in a
+/// memory-corrupting crash -- see `engines/ras.rs`.
+fn is_elevated() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
+    // release; `token` is a valid out-pointer.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    // SAFETY: zeroed is a valid TOKEN_ELEVATION -- a single u32.
+    let mut elevation: TOKEN_ELEVATION = unsafe { std::mem::zeroed() };
+    let mut returned = 0u32;
+    // SAFETY: `token` is live, and the buffer and its length match the
+    // information class being asked for.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    // SAFETY: `token` came from OpenProcessToken and is not used again.
+    unsafe { CloseHandle(token) };
+    ok != 0 && elevation.TokenIsElevated != 0
 }
 
 /// Registers and starts the service. Run by the installer, elevated --

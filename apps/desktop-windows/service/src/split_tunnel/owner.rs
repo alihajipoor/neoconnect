@@ -139,6 +139,19 @@ impl Selection {
         self.paths.is_empty()
     }
 
+    /// The customer's list, as WFP will need it.
+    ///
+    /// Lower-cased on the way in by [`Selection::new`], which is what
+    /// `matches` compares against and what
+    /// `FwpmGetAppIdFromFileName0` is handed. The two therefore agree
+    /// about which file is meant by construction rather than by
+    /// coincidence -- both identify an application by its full path,
+    /// so a byte-for-byte copy of a selected binary somewhere else is
+    /// a different application to both of them.
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
     /// Whether an executable path is one the customer selected.
     pub fn matches(&self, image_path: &str) -> bool {
         let lowered = image_path.to_lowercase();
