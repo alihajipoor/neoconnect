@@ -10497,3 +10497,210 @@ table, so it is a ten-minute job for whoever owns them next.
 on `claude/gaming-ip-reputation` tabulates every node address with its
 provider and ASN. It is the densest listing in the project and it is not
 yet on `main`. **Redact it before that branch merges.**
+
+---
+
+## 2026-08-25 — the 0.9.30 latency control ran; two fixes attributed, one shown untestable by its own experiment
+
+**Status:** `claude/latency-control-v30`, off `main` at `6f2dcfc`.
+**Touches:** this file only. No product code changed.
+**The 0.9.30 control is done.** Item 2 of the 0.9.31 block list is closed.
+
+### The 162-byte artifact was not a 0.9.30 defect
+
+`setSplitTunnel` answers in **61 ms** on 0.9.30. Measured, this run, on a
+service freshly installed from `nx30-setup.exe`. The source says the same
+thing: `Engines::set_split_tunnel` returns at the `self.active.is_empty()`
+early exit when no tunnel is up, having done nothing but a `stop()` that
+takes `None`. And the `Request::SetSplitTunnel` arm of `dispatch` is
+**byte-identical** between `desktop-v0.9.30` and `main`, so no version
+difference was ever available to explain it.
+
+What produced that file was the run, not the build:
+
+- It was **phase 6 of a chain**. Phase 4 was `R1` — the repair — which
+  `taskkill`s the service, `sc config NeoxifyService start= disabled`, and
+  copies `nxsvc31i.exe`, an instrumented **0.9.31** build, over the
+  installed service. `R1-v31e.txt` ends at `EXIT-IP: {tester-home}`, the
+  machine's own address: it **aborted**, so the second half of that script
+  — the half that puts the service back — never ran. `L1-v31`, the thing
+  this is a control for, ran on a service that had just been installed and
+  nothing else.
+- **Nothing in the chain checked which service was running.** `i31.ps1`
+  looks for `C:\Program Files\Neoxify\neoconnect-service.exe` and for a
+  service named `neoconnect-service`. Both are wrong: the binary installs
+  to `...\Neoxify\resources\neoconnect-service.exe` and the service is
+  registered as **`NeoxifyService`**. So `i31` reports
+  `service exe present=False` and `service query failed` on **every** run —
+  `i31-31.txt` from the previous chain says it too, on a machine that
+  demonstrably had a working service. The only version the chain ever
+  confirmed was `neoconnect-desktop.exe`'s `FileVersion`, which the 0.9.30
+  installer does replace. A 0.9.31 service under a 0.9.30 desktop exe would
+  have read as "client: 0.9.30" and nobody would have known.
+- The guest was in trouble. The host-side NIC capture from that attempt,
+  `L1-v30.pcap`, holds **179 packets**. Almost all are *inbound*
+  retransmissions the guest never answered — 50, 35 and 35 packets from
+  Microsoft `:443` endpoints against **zero** outbound in reply — plus one
+  DHCP exchange and nothing whatsoever to the node or to
+  `connect.neoxify.site`. That is a machine that had stopped servicing its
+  network, which is also what the previous session wrote in `lastrun.py`'s
+  own header: the pipe was accepting connections and never answering.
+
+### The trap that turned a wedge into 162 bytes
+
+`Pipe()` in `lib6.ps1` was `$r.ReadLine()` with **no read timeout at all**.
+`Connect(8000)` bounds the connect; nothing bounded the answer. So one
+unanswered request hung the phase until the host driver's 900 s job
+timeout, leaving a file with no error in it and no way to tell a wedged
+service from a slow one. It now waits a bounded 120 s and returns
+`PIPE-READ-TIMEOUT` / `PIPE-CONNECT-FAILED` as a value. The success path is
+unchanged, which is the point: every request in a healthy run answers in
+well under a second, so this cannot move a measurement — it can only turn
+an infinite block into something readable.
+
+Worth keeping: the **first** `status` of a run cost **20.3 s** on this
+guest, cold. Later ones cost milliseconds. Any future timeout must clear
+that, or it will manufacture the failure it was added to detect.
+
+### What the control says, per fix
+
+Same script, same route (germany-1 / WireGuard, node {germany-1}), same
+selected app, same steady + burst + reconnect sequence. Both versions
+proved the tunnel by exit IP before measuring anything.
+
+**1. `TCP_NODELAY` (`7ca86af`) — SUPPORTED.** Forty 11-byte writes, 10 ms
+apart, read off the capture at the relay's upstream socket:
+
+| | segments carrying the writes | payload sizes | max inter-segment gap |
+|---|---|---|---|
+| 0.9.30 | 12 | `{88:6, 110:2, 33:4}` | **197.0 ms** |
+| 0.9.31 | 66 | `{11:64, 88:2}` | 34.8 ms |
+
+(pktmon logs each packet at two stack components, so both counts are
+doubled; the ratio is what matters.) 0.9.30 coalesces the writes into a
+handful of multi-write segments and shows the **197 ms** delayed-ACK mode
+the fix was aimed at. 0.9.31 sends them as individual 11-byte segments.
+This is the predicted signature exactly — the 200 ms mode disappearing,
+not a lower mean.
+
+**2. UDP head-of-line / the bind retry (`ed9cd58`) — STILL UNATTRIBUTABLE,
+and now we know why: `L1` cannot test it.** The steady flow across the
+reconnect:
+
+| RECV side, 1200 datagrams | 0.9.30 | 0.9.31 | 0.9.30 base | 0.9.31 base |
+|---|---|---|---|---|
+| replies / loss | 1198 / 2 | 1198 / 2 | 1198 / 2 | 1198 / 2 |
+| max gap | 730 ms | 1045 ms | 609 ms | 981 ms |
+| gaps > 100 ms | 56 | 82 | 89 | 140 |
+| RTT median | 34.8 ms | 37.4 ms | 162.1 ms | 163.1 ms |
+| RTT p95 | 166.7 ms | 186.6 ms | 218.4 ms | 239.8 ms |
+
+**No multi-second freeze on 0.9.30.** The predicted broken behaviour is a
+gap of up to 6 s; the worst 0.9.30 gap is 730 ms, and the *undisturbed*
+baseline — no reconnect at all — is 609 ms on 0.9.30 and 981 ms on 0.9.31.
+The reconnect adds nothing detectable above this guest's own noise floor on
+either version.
+
+The reason is structural, and it invalidates the experiment rather than the
+fix. `L1`'s reconnect **stops and restarts the whole split-tunnel session**
+— two `custom mode` activation blocks appear in both versions'
+`split-tunnel.log`. The relay is therefore rebuilt, and
+`SplitTunnel::start` opens with `wait_for_addressed_adapter`, which
+*consumes the tentative-address window before the relay exists*. By the
+time any flow asks `bind_upstream_retrying` for a socket, the adapter
+already has its address and the bind succeeds first time. 0.9.31's own
+counters confirm it: `udp_unbound=0` and `udp_send_failed=0` for the whole
+of `L1-v31`.
+
+So this fix remains unproven on the wire, and **`L1` will never prove it.**
+A real test has to make a bind fail while an established flow is running
+*and* while the relay stays up — a failover that swaps the tunnel
+underneath a live session, not a stop/start of Custom mode. The
+deterministic stand-in already recorded in this file (an address in
+`203.0.113.0/24` fails `bind` the same way) is the cheaper route.
+
+**3. Flow affinity (`a67c7ef`) — SUPPORTED. The reading was never pointing
+the wrong way; it had nothing to point at.** 300 sequenced datagrams under
+twelve concurrent flows, order read off the capture at the relay's upstream
+socket (`10.66.0.2`), each sequence number collapsed to its first sighting:
+
+| | out-of-order steps |
+|---|---|
+| **0.9.30** | **42** |
+| 0.9.31 run a | 13 |
+| 0.9.31 run b | 15 |
+| 0.9.31 run c | 11 |
+
+Three-fold. The 11–15 that looked like a failure is the floor, not the
+signal, and 0.9.30 sits three times above it.
+
+The reason this capture point can settle it: the relay's upstream leg is
+**single-threaded in both versions** — one `serve_udp` thread does
+`send_to` for every flow, onto a socket that is per-flow anyway. So the
+only reordering site inside the product was the two-worker `handle.recv`
+race in `redirect.rs`, which sits *upstream* of the relay and set the order
+in which rewritten packets reached it. Removing that race is what the
+difference measures. The residual 11–15 is below the relay, between
+`handle.send` and the relay socket, and no dispatcher change can reach it.
+
+**4. The UDP failure counters — SUPPORTED, and no control was possible.**
+0.9.30's `split-tunnel.log` has no such fields at all; its counter line
+ends at `reset_v6`. On 0.9.31, pulling the tunnel out from under a live
+flow moved `udp_send_failed` to **58** while `udp_reply_failed` and
+`udp_unbound` stayed 0. Behaviour is unchanged by design — only the silence
+was fixed — so absent-versus-present is the whole of the claim.
+
+### Deviations, stated
+
+Three, all recorded so the comparison can be judged:
+
+1. `lib6.ps1`'s `Pipe` gained the bounded read described above. Success
+   path unchanged.
+2. `L1.ps1` gained a pre-flight line (service state, one `status`) and a
+   failure-path dump that runs **only** if a pipe call returns `PIPE-*`.
+   Neither executes on the measured path. The pre-flight's
+   `Get-Service neoconnect-service` inherits `i31.ps1`'s wrong service name
+   and logs a harmless failure — worth fixing to `NeoxifyService`.
+3. The control ran as its own chain from a `clean-base` boot — `p31`,
+   `i31 30`, `L1`, `L2`, `L1 base` — instead of as the tail of a
+   seven-phase run. That is not a compromise, it is the correction: it is
+   what makes the two runs differ by version alone.
+
+`L1-v30.pcapng` is 2.4 MB against 0.9.31's 52 MB. That is background
+traffic, not a short run: the measurement files match almost exactly
+(52 701 bytes of `steady.txt` against 52 726), both runs sent 1200
+datagrams and got 1198 back, and the 0.9.31 guest had 198 k packets of
+Windows chatter against this clean guest's 14.5 k.
+
+### Rig traps found this run
+
+- **The Run dialog autocompletes from history, and the history survives in
+  `clean-base`.** `nx31boot.py` types
+  `powershell -ExecutionPolicy Bypass -File Z:/boot2.ps1`; the snapshot's
+  `RunMRU` held `powershell -ExecutionPolicy Bypass -File
+  C:/Users/Public/rig-fix6c.ps1`. Windows completed the shared prefix, left
+  the stale tail **selected**, and Enter ran the wrong script. No UAC ever
+  appeared, which reads in the log as `never saw the secure desktop` — a
+  bring-up failure that is nothing of the kind. Clear
+  `HKCU:\...\Explorer\RunMRU`, restart Explorer, and press **Delete** after
+  typing to drop whatever autocomplete selected.
+- `clean-base` has **no** `NeoxifyVerifyRunner` logon task, so `kick.py`
+  cannot work on a freshly restored guest and the keyboard channel is the
+  only way in. `kick`'s failure text is `ERROR: The system cannot find the
+  file specified.` — that is schtasks reporting a missing task, and it
+  means guestcontrol is working, not broken.
+- A `guestcontrol` session sees `Z:` but **not** `\\VBOXSVR\vmx`, and its
+  token is not elevated. `copyto` needs absolute host paths, and a
+  multi-line script passed via `-Command` gets mangled — pass a file.
+- Defender flagged `nx31-setup.exe` as a threat on the previous chain
+  (`2147731849`). Unsigned builds again; see the releases-are-unsigned
+  entry.
+
+### Where 0.9.31 stands
+
+Of the four latency claims, **two are now attributed on the wire**
+(`TCP_NODELAY`, flow affinity), **one is an addition with nothing to
+compare** (the counters), and **one is untested and cannot be tested by the
+experiment written for it** (head-of-line). None is contradicted. Nothing
+regressed: every 0.9.30-versus-0.9.31 number is level or better, and the
+two that moved, moved the right way.
