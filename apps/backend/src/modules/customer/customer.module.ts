@@ -12,6 +12,7 @@ import { RoutesModule } from "../routes/routes.module";
 import { BillingModule } from "../billing/billing.module";
 import { InvoicesModule } from "../invoices/invoices.module";
 import { PaymentSettingsModule } from "../payment-settings/payment-settings.module";
+import { GamingModule } from "../gaming/gaming.module";
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { PaymentSettingsModule } from "../payment-settings/payment-settings.modu
     VouchersModule,
     AppLinksModule,
     SupportModule,
+    GamingModule,
   ],
   controllers: [CustomerController],
 })

@@ -1483,6 +1483,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "262590f4fe6afeb0bc83be1daa64e52657fe185690a958af7f3ad0e92085c5ae"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -2723,6 +2724,7 @@ name = "neoconnect-service"
 version = "0.1.0"
 dependencies = [
  "neoconnect-ipc",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "socket2 0.5.10",
@@ -3850,7 +3852,9 @@ dependencies = [
  "cookie",
  "cookie_store",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",

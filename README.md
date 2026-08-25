@@ -52,6 +52,27 @@ protocol is active and fails open while reconnecting (the UI says so); on
 Android the platform's own allow-list does the same job, so there is no
 reconnect window to leak through.
 
+**Gaming mode -- built, and not usable yet.** A second mode beside the
+VPN one, selectable on the client's main screen: instead of tunnelling
+everything, it points DNS for a game's launcher, login, account and store
+hostnames at a node, and leaves the game's own connections on the direct
+path. The backend, the panel and the Windows client are done. **The node
+side is not** -- there is no resolver process, no proxy, no agent command
+and no installer support -- so nothing ever confirms a resolver, the API
+tells every client the mode is unavailable, and no client can turn it on.
+That is the intended behaviour of an unfinished feature here, not a bug.
+
+It is deliberately **not** a lower-ping feature and must not be described
+as one. Measured from Tehran, the direct path to Blizzard's EU game server
+is 72.0 ms and the best path through our fleet is 72.8 ms, with the other
+four nodes 28-66 ms worse; the closest node to Tehran is one of the worst
+paths to the game. What the mode is for is carrying less: the launcher and
+store traffic that benefits from a different exit, without putting the
+game itself behind one. Whether Iranian consumer ISPs block any of it is
+still unmeasured, and that measurement gates selling it at all --
+`docs/design/gaming-mode.md` has the numbers, the method and the open
+questions.
+
 **Billing.** Stripe and NowPayments, invoices with a printable branded
 document, and vouchers that grant a plan without payment (one-time,
 expiring, or unlimited).

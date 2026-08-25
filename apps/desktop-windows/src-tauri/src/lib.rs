@@ -132,6 +132,9 @@ pub fn run() {
             vpn::vpn_repair,
             vpn::vpn_diagnostics,
             vpn::repair_command_line,
+            vpn::gaming_arm,
+            vpn::gaming_disarm,
+            vpn::gaming_status,
             // Asked from a socket rather than the frontend's fetch: the
             // app's HTTP permission is scoped to *.neoxify.site, so a
             // probe address would be refused by the ACL and the check
@@ -155,9 +158,18 @@ pub fn run() {
         //
         // Blocking on purpose: the process is about to exit, and a
         // disconnect that races the exit is no disconnect at all.
+        //
+        // Gaming mode goes the same way, and for a sharper version of
+        // the same reason. Its NRPT rules point every one of the game's
+        // lookups at a loopback stub that only exists while the service
+        // holds it, and the service's idle watchdog is a minute behind
+        // -- so closing the app would leave a window where the game
+        // simply will not resolve, with nothing on screen to explain
+        // it. Rules must not outlive the app.
         .on_window_event(|_window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let _ = tauri::async_runtime::block_on(vpn::vpn_disconnect());
+                let _ = tauri::async_runtime::block_on(vpn::gaming_disarm());
             }
         })
         .run(tauri::generate_context!())

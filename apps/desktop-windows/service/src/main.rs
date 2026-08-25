@@ -33,6 +33,7 @@
 mod adapters;
 mod cleanup_log;
 mod engines;
+mod gaming;
 mod pipe;
 mod security;
 mod split_tunnel;
@@ -418,6 +419,19 @@ fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
             cleanup_log::note("tear the tunnel down before uninstalling", &err);
         }
     }
+    // Gaming mode's rules too, and this is the path where leaving one
+    // behind is least recoverable: after an uninstall there is nothing
+    // on the machine that knows what a "Neoxify gaming DNS" rule is or
+    // how to remove it, and the customer is left with a DNS policy
+    // pointing at a stub that no longer exists on a product they no
+    // longer have. Same reasoning as the OpenVPN adapter, which
+    // `uninstall_cleanup` removes here and nowhere else.
+    //
+    // This runs in the uninstaller's own process, not the service's, so
+    // it sweeps the registry rather than any session -- which is the
+    // right thing to sweep: the service is about to be deleted and its
+    // in-memory state with it.
+    gaming::sweep_leftovers();
 
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     let service = manager.open_service(
@@ -513,6 +527,18 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         // nobody is ever watching, because it runs at boot.
         cleanup_log::note("clear leftovers at service start", &err);
     }
+    // Gaming mode's NRPT rules are a separate set with their own
+    // comment tag, so the sweep above does not touch them -- which is
+    // exactly the property that keeps a live tunnel from deleting them,
+    // and exactly the reason they need their own sweep here.
+    //
+    // Namespace-scoped rather than `.`, but stranded in the same two
+    // registry locations and with the same consequence at a smaller
+    // radius: lookups for the game's hostnames pointed at a loopback
+    // stub that no longer exists, on a machine where Neoxify may not
+    // even be running. This service is AutoStart, so the machine heals
+    // itself at the next boot rather than needing the app opened.
+    gaming::sweep_leftovers();
 
     let engines = Arc::new(Mutex::new(engines));
 
@@ -531,6 +557,15 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         // away would strand the machine's routing table pointed at an
         // engine nothing is tracking.
         let _ = engines.lock().await.disconnect();
+        // And the same for gaming mode, which has no tunnel to strand
+        // but whose NRPT rules would outlive the only process that
+        // knows what they are. The stub goes with them: it is the thing
+        // those rules point at, and stopping the service without
+        // removing them leaves every game lookup aimed at a closed
+        // port.
+        if let Err(err) = gaming::disarm() {
+            cleanup_log::note("disarm gaming mode as the service stops", &err);
+        }
     });
 
     status_handle.set_service_status(running(ServiceState::Stopped, ServiceControlAccept::empty()))?;
