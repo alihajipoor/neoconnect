@@ -397,10 +397,13 @@ fn step_wfp(found: &Survey, report: &mut RepairReport) {
         let ids = match our_filter_ids_detailed(engine) {
             Ok(ids) => ids,
             Err(why) => {
+                // "under our provider" would be a lie now: the sweep asks
+                // for every filter on the machine and does the provider
+                // comparison itself. Saying so matters -- a support
+                // conversation that starts from a wrong description of
+                // what was attempted starts in the wrong place.
                 return RepairOutcome::Unknown {
-                    detail: format!(
-                        "the filtering platform would not list filters under our provider: {why}"
-                    ),
+                    detail: format!("the filtering platform would not list its filters: {why}"),
                 }
             }
         };
@@ -721,6 +724,19 @@ fn with_wfp_engine<T>(body: impl FnOnce(HANDLE) -> T) -> Option<T> {
 /// return fewer than asked.
 const FILTER_PAGE: u32 = 512;
 
+/// Whether two WFP GUIDs are the same value.
+///
+/// A named function rather than a comparison written inline, because
+/// `windows_sys::core::GUID` derives no `PartialEq` and the hand-written
+/// form has to remember all four fields. Forgetting one is the failure
+/// that matters here: `data4` carries the last *eight* bytes, so a
+/// comparison that stops at `data3` still agrees on every GUID this
+/// codebase happens to use and would quietly sweep another product's
+/// filters off a customer's machine. The test below is the guard.
+fn guid_eq(a: &GUID, b: &GUID) -> bool {
+    (a.data1, a.data2, a.data3, a.data4) == (b.data1, b.data2, b.data3, b.data4)
+}
+
 /// The ids of every filter carrying our provider key.
 ///
 /// Matched on the provider key alone, which is the whole reason
@@ -748,19 +764,35 @@ fn our_filter_ids_detailed(engine: HANDLE) -> Result<Vec<u64>, String> {
     // No template at all, and the provider comparison done here instead.
     //
     // The obvious version of this -- a template carrying only our
-    // providerKey, with a zeroed `layerKey` meaning "every layer" -- does
-    // not work, and fails in a way no amount of reading catches. Measured
-    // on the rig: `FwpmFilterCreateEnumHandle0` returns 0x80320004,
-    // FWP_E_LAYER_NOT_FOUND. `FWP_FILTER_ENUM_FULLY_CONTAINED` requires a
-    // real layer to be contained *in*, and a NULL GUID is not one. Every
-    // repair therefore reported this step as `Unknown` on a machine that
-    // demonstrably had eight of our filters installed -- `netsh wfp show
-    // filters` listed them in the same breath.
+    // providerKey, with `layerKey` left zero by `mem::zeroed()` on the
+    // assumption that a NULL GUID means "every layer" -- does not work.
+    // `FwpmFilterCreateEnumHandle0` answers 0x80320004,
+    // FWP_E_LAYER_NOT_FOUND, and the whole step reported `Unknown` on
+    // every machine forever, including one demonstrably carrying eight of
+    // our filters that `netsh wfp show filters` listed in the same breath.
+    //
+    // The trap is worth naming precisely, because it is a shape that
+    // recurs across this API. In `FWPM_FILTER_ENUM_TEMPLATE0` the two
+    // fields sit side by side and look alike, but they are not:
+    //
+    //     providerKey: *mut GUID   <- a pointer. NULL is "any provider".
+    //     layerKey:    GUID        <- by value. There is no "absent".
+    //
+    // A nullable pointer can encode "unspecified"; a by-value GUID cannot,
+    // so an all-zero `layerKey` is not a wildcard but a *specific* GUID
+    // that names no layer on the machine -- hence LAYER_NOT_FOUND rather
+    // than a wildcard match. The original code generalised the pointer
+    // field's rule to the value field one line below it. Nothing about
+    // that is visible at the call site, and three readings of the source
+    // missed it; what found it in one run was letting the error code
+    // travel into the message instead of being discarded, which is why it
+    // still does.
     //
     // Enumerating everything and comparing the provider ourselves is also
-    // the more honest sweep: it is not tied to the set of layers the
-    // *current* build installs at, and the objects this step exists to
-    // find were left by some *previous* one.
+    // the more honest sweep, independently of the bug: it is not tied to
+    // the set of layers the *current* build installs at, and the objects
+    // this step exists to find were left by some *previous* one, at
+    // whatever layers that build used.
     let ours: GUID = ipv6_block::PROVIDER_KEY;
     let mut enum_handle: HANDLE = std::ptr::null_mut();
     // SAFETY: `engine` is live; a null template is the documented way to
@@ -786,6 +818,14 @@ fn our_filter_ids_detailed(engine: HANDLE) -> Result<Vec<u64>, String> {
             return Err(format!("FwpmFilterEnum0 returned {err:#010x}"));
         }
         if returned == 0 || entries.is_null() {
+            // A zero-entry page still allocates the array it would have
+            // filled, so it has to be freed like any other -- breaking
+            // straight out would leak it. Only a genuinely null `entries`
+            // has nothing to give back.
+            if !entries.is_null() {
+                // SAFETY: as for the free at the end of the loop body.
+                unsafe { FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut core::ffi::c_void) };
+            }
             break;
         }
         for i in 0..returned as usize {
@@ -804,12 +844,8 @@ fn our_filter_ids_detailed(engine: HANDLE) -> Result<Vec<u64>, String> {
                 continue;
             }
             // SAFETY: non-null, and WFP owns it until FwpmFreeMemory0.
-            // Compared field by field: windows-sys' GUID is a plain repr(C)
-            // struct with no PartialEq, and its Data4 is a byte array.
             let key = unsafe { *key };
-            if (key.data1, key.data2, key.data3, key.data4)
-                != (ours.data1, ours.data2, ours.data3, ours.data4)
-            {
+            if !guid_eq(&key, &ours) {
                 continue;
             }
             // SAFETY: as above.
@@ -950,5 +986,43 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), count, "two repair steps share an id");
+    }
+
+    /// The WFP sweep decides what to delete off a customer's machine by
+    /// this comparison and nothing else, so it has to be exact.
+    ///
+    /// The failure being guarded is a partial one. `data4` holds the last
+    /// eight bytes of the GUID, and a comparison that stopped at `data3`
+    /// would still agree on every key this codebase uses -- so it would
+    /// pass any test written only from our own constants, and then delete
+    /// some other vendor's filters on a machine where a provider key
+    /// happened to share our first eight bytes. Hence a neighbour that
+    /// differs in exactly one byte, at the far end of `data4`.
+    ///
+    /// This is a table test, not a WFP test: nothing here proves an
+    /// enumeration works. That needs an elevated run on Windows.
+    #[test]
+    fn a_provider_key_is_matched_on_all_sixteen_bytes() {
+        let ours = ipv6_block::PROVIDER_KEY;
+        assert!(guid_eq(&ours, &ours), "a key must match itself");
+
+        let mut last_byte_differs = ours;
+        last_byte_differs.data4[7] ^= 0x01;
+        assert!(
+            !guid_eq(&ours, &last_byte_differs),
+            "a key differing only in the final byte of data4 must not match"
+        );
+
+        let mut first_field_differs = ours;
+        first_field_differs.data1 ^= 0x0100_0000;
+        assert!(!guid_eq(&ours, &first_field_differs));
+
+        // The two sublayers and the provider are three distinct objects.
+        // They are compared by different code paths, but a copy-paste
+        // that gave two of them the same value would make the repair
+        // delete one and silently believe it had deleted both.
+        assert!(!guid_eq(&ipv6_block::SUBLAYER_KEY, &ipv6_block::SPLIT_SUBLAYER_KEY));
+        assert!(!guid_eq(&ipv6_block::SUBLAYER_KEY, &ipv6_block::PROVIDER_KEY));
+        assert!(!guid_eq(&ipv6_block::SPLIT_SUBLAYER_KEY, &ipv6_block::PROVIDER_KEY));
     }
 }
