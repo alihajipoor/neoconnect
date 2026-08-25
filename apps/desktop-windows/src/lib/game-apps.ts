@@ -185,9 +185,15 @@ export function hasCuratedApps(profile: Pick<GameProfileSummary, "processNames">
 /** Whether this profile's address list may be used to route by
  * destination.
  *
- * Always false today for a second reason as well -- the split tunnel
- * has no destination-based routing at all, it matches on process --
- * but the rule encoded here is the one that survives that being built.
+ * This is now load-bearing rather than advisory. The split tunnel does
+ * route by destination, so a `true` here is what puts a game's prefix
+ * list on the wire and narrows what is carried; a `false` sends no
+ * scope at all and the game's programs are carried in full, exactly as
+ * they were before any of this existed.
+ *
+ * It is still false for every seeded profile, because no catalogue
+ * entry has a finished prefix list yet. That is the data being the
+ * gate, which is where the gate belongs.
  *
  * A **partial** prefix list is worse than none. A game that holds two
  * connections at once (World of Warcraft keeps Home and World open
@@ -201,4 +207,27 @@ export function canRouteByDestination(
   profile: Pick<GameProfileSummary, "destinationCidrs" | "prefixComplete">,
 ): boolean {
   return profile.prefixComplete === true && (profile.destinationCidrs?.length ?? 0) > 0;
+}
+
+/** The scopes to attach to a game's programs, which is usually none.
+ *
+ * The single place this client decides to narrow anything, extracted
+ * from the screen that calls it so the rule above can be proven by a
+ * test rather than by reading a component. That is not tidiness: the
+ * cost of `canRouteByDestination` being bypassed is not a broken
+ * screen, it is a customer's game account presenting from two source
+ * addresses at once, and a rule that important should not live
+ * somewhere only an end-to-end test can reach.
+ *
+ * Returns `[]` for every profile whose prefix list the server will not
+ * vouch for as complete -- which today is every profile there is -- and
+ * an empty list means the programs are carried in full, exactly as they
+ * were before scoping existed. */
+export function scopesForGame(
+  profile: Pick<GameProfileSummary, "destinationCidrs" | "prefixComplete">,
+  paths: string[],
+): { app: string; destinations: string[] }[] {
+  if (!canRouteByDestination(profile)) return [];
+  const destinations = profile.destinationCidrs ?? [];
+  return paths.map((app) => ({ app, destinations }));
 }

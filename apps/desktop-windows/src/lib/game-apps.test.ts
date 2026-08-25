@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canRouteByDestination,
+  scopesForGame,
   curatedNames,
   hasCuratedApps,
   isSelectableAppPath,
@@ -207,5 +208,49 @@ describe("canRouteByDestination", () => {
     expect(
       canRouteByDestination({ destinationCidrs: ["137.221.64.0/24"], prefixComplete: true }),
     ).toBe(true);
+  });
+});
+
+describe("scopesForGame", () => {
+  const PATHS = [String.raw`C:\Games\game.exe`, String.raw`C:\Games\launcher.exe`];
+
+  /** The same rule as above, at the point where it actually decides
+   * what goes on the wire. `canRouteByDestination` being right is worth
+   * nothing if the one caller forgets to ask it, and that caller used
+   * to be a branch inside a React component where no test could see it. */
+  it("sends no scope for an incomplete prefix list", () => {
+    // The common case, and the case every seeded profile is in today.
+    // No scope means the game's programs are carried in full, exactly
+    // as they were before destination scoping existed.
+    expect(
+      scopesForGame({ destinationCidrs: ["104.160.128.0/19"], prefixComplete: false }, PATHS),
+    ).toEqual([]);
+  });
+
+  it("sends no scope when the server said nothing about completeness", () => {
+    expect(scopesForGame({ destinationCidrs: ["104.160.128.0/19"] }, PATHS)).toEqual([]);
+    expect(scopesForGame({}, PATHS)).toEqual([]);
+  });
+
+  it("sends no scope for an empty list called complete", () => {
+    expect(scopesForGame({ destinationCidrs: [], prefixComplete: true }, PATHS)).toEqual([]);
+  });
+
+  it("narrows every program of the game when the list is complete", () => {
+    // All of them, not just the executable that happens to be first. A
+    // launcher left carrying everything while the game is scoped is
+    // the same product talking from two addresses, which is the thing
+    // the rule exists to stop.
+    const destinations = ["137.221.64.0/24", "137.221.104.0/22"];
+    expect(scopesForGame({ destinationCidrs: destinations, prefixComplete: true }, PATHS)).toEqual([
+      { app: PATHS[0], destinations },
+      { app: PATHS[1], destinations },
+    ]);
+  });
+
+  it("has nothing to narrow when no program was resolved", () => {
+    expect(
+      scopesForGame({ destinationCidrs: ["137.221.64.0/24"], prefixComplete: true }, []),
+    ).toEqual([]);
   });
 });

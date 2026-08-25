@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use neoconnect_ipc::SplitTunnelMode;
+use neoconnect_ipc::{SplitTunnelConfig, SplitTunnelMode};
 
 use crate::adapters;
 use crate::engines::ipv6_block;
@@ -834,9 +834,18 @@ impl SplitTunnel {
     /// It shipped that way, and because editing the list within Custom
     /// mode deliberately rebuilds nothing, the customer's first choice
     /// was the only one that ever took effect.
-    pub fn set_selection(&mut self, enabled: bool, apps: Vec<String>, mode: SplitTunnelMode) {
-        self.enabled = enabled;
-        *self.selection.write().unwrap_or_else(|e| e.into_inner()) = Selection::new(apps, mode);
+    /// Takes the whole config rather than its fields one by one.
+    ///
+    /// Deliberate: `apps` and the applications named inside `scopes`
+    /// are two lists that have to agree, and passing them as separate
+    /// positional arguments through three layers is an invitation to
+    /// hand one of them to the wrong parameter. Nothing about a scope
+    /// can be lost or crossed on the way in if the way in is the
+    /// message itself.
+    pub fn set_selection(&mut self, config: SplitTunnelConfig) {
+        self.enabled = config.enabled;
+        *self.selection.write().unwrap_or_else(|e| e.into_inner()) =
+            Selection::with_scopes(config.apps, config.mode, config.scopes);
 
         // The redirect loop reads the selection per decision and so
         // needs nothing here. The WFP filters are a fixed set installed
@@ -1044,14 +1053,34 @@ impl SplitTunnel {
         // whether it was pointed at the right adapter and the right
         // local address, and this is the only place that is written
         // down.
+        // Whether any application is narrowed to particular
+        // destinations is written down here for one reason: a scoped
+        // app not being carried and an unscoped app not being carried
+        // are the same symptom on a packet capture and two completely
+        // different faults. Without this line the first question on the
+        // rig cannot be answered from the evidence.
+        //
+        // It says only whether scoping is in play, never which
+        // addresses. The list is the customer's own catalogue choice
+        // and belongs in no log this may be asked to send anywhere.
+        let scoped = self
+            .selection
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_scopes();
         let header = format!(
-            "custom mode ({direction}) on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}",
+            "custom mode ({direction}, {scoping}) on {adapter_name} (index {}, tunnel {tunnel_address})              via {local_addr}, node {node}, proxy tcp {} udp {}",
             tunnel_adapter.index,
             relays.tcp_port,
             relays.udp_port,
             direction = match mode {
                 SplitTunnelMode::OnlySelected => "only the selected apps are tunnelled",
                 SplitTunnelMode::AllExcept => "everything except the selected apps is tunnelled",
+            },
+            scoping = if scoped {
+                "some apps narrowed to specific destinations"
+            } else {
+                "every selected app carried in full"
             }
         );
 
@@ -1438,19 +1467,30 @@ fn own_images() -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// A selection with no destination scoping, which is what every
+    /// test in this file is about.
+    fn config_of(enabled: bool, apps: Vec<String>) -> SplitTunnelConfig {
+        SplitTunnelConfig {
+            enabled,
+            mode: SplitTunnelMode::OnlySelected,
+            apps,
+            scopes: Vec::new(),
+        }
+    }
+
     #[test]
     fn an_empty_selection_does_not_shape_the_tunnel() {
         // The toggle being on with nothing chosen must not be read as
         // "tunnel everything" -- that is the opposite of Custom mode,
         // and it would arrive as a surprise full tunnel.
         let mut split = SplitTunnel::new();
-        split.set_selection(true, Vec::new(), SplitTunnelMode::OnlySelected);
+        split.set_selection(config_of(true, Vec::new()));
         assert!(!split.wants_passive_tunnel());
 
-        split.set_selection(true, vec![r"C:\Games\game.exe".into()], SplitTunnelMode::OnlySelected);
+        split.set_selection(config_of(true, vec![r"C:\Games\game.exe".into()]));
         assert!(split.wants_passive_tunnel());
 
-        split.set_selection(false, vec![r"C:\Games\game.exe".into()], SplitTunnelMode::OnlySelected);
+        split.set_selection(config_of(false, vec![r"C:\Games\game.exe".into()]));
         assert!(!split.wants_passive_tunnel());
     }
 
