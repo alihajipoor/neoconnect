@@ -61,14 +61,7 @@ $nx_links = array(
     </nav>
 
     <div class="header-actions">
-      <a class="lang-switch"
-         href="<?php echo nx_esc(nx_switch_url()); ?>"
-         lang="<?php echo nx_esc(nx_other_locale()); ?>"
-         hreflang="<?php echo nx_esc(nx_other_locale()); ?>"
-         aria-label="<?php echo nx_e('lang.switch_label'); ?>">
-        <?php echo nx_icon('globe'); ?>
-        <span><?php echo nx_e('lang.switch'); ?></span>
-      </a>
+      <?php echo nx_lang_switch(); ?>
 
       <?php if ($nx_portal !== ''): ?>
         <a class="btn btn--ghost" href="<?php echo nx_esc($nx_portal); ?>">

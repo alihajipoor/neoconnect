@@ -1,1915 +1,2505 @@
-/* ==========================================================================
-   Neoxify website
-   --------------------------------------------------------------------------
-   Hand-written CSS, no build step -- this ships as-is to shared hosting.
+/* ═══════════════════════════════════════════════════════════════════════
+   NEOXIFY — "The Ladder"
+   A light, full-bleed technical broadsheet.
 
-   Design tokens are lifted from the admin panel (apps/panel/src/app/
-   globals.css) so the marketing site, the panel and the native clients read
-   as one product: dark only, violet primary, cyan reserved as a secondary
-   highlight so it never competes with a primary action.
+   Warm-neutral paper ground, cool violet-cast ink, and the brand gradient
+   reserved — strictly — for the one thing that is actually live.
 
-   Direction: every directional rule uses CSS logical properties
-   (margin-inline, padding-inline, inset-inline, text-align: start), so the
-   Persian pages mirror correctly from <html dir="rtl"> alone. There is no
-   separate RTL stylesheet to keep in sync -- please keep it that way and
-   avoid left/right properties when adding to this file.
+   ───────────────────────────────────────────────────────────────────────
+   THREE RULES THIS FILE EXISTS TO ENFORCE. Read before editing.
 
-   No @import and no external URL of any kind -- the one @font-face below
-   points at a file in this repository. The audience is largely on networks
-   where a third-party CDN request is slow at best and blocked at worst, and
-   a blocked font request is a visibly broken page.
-   ========================================================================== */
+   1. NO EXTERNAL REQUESTS. No CDN, no Google Fonts, no analytics. The
+      audience is largely on networks where a third-party request is slow
+      at best and blocked at worst, and a blocked font is a visibly broken
+      page. Every byte this stylesheet references is served from this host.
 
-/* ==========================================================================
-   0. Typeface
-   --------------------------------------------------------------------------
-   Vazirmatn, self-hosted. One variable file (~110KB) covers weights 100-900
-   for BOTH languages -- it has a genuine Latin set alongside the Persian, so
-   English and Persian share one typeface and the brand reads as one thing.
+      All four typefaces are SELF-HOSTED in assets/fonts/ — Vazirmatn for
+      Persian, and Bricolage Grotesque / Instrument Sans / Martian Mono
+      for Latin, subset to the characters this site renders. Every one is
+      SIL OFL 1.1 and its licence ships beside it. There is no
+      fonts.googleapis.com link anywhere and there must never be one.
 
-   Self-hosted, never a CDN: a webfont fetched from a third party is exactly
-   the kind of request that fails on the networks this audience is on, and a
-   failed font request is a visibly broken page.
+   2. NO DARK MODE. Light only, no toggle, no prefers-color-scheme block.
+      Asked for twice and settled.
 
-   SIL Open Font Licence 1.1 -- see assets/fonts/OFL.txt, which ships with the
-   site because the licence requires the copyright notice to travel with it.
-   ========================================================================== */
+   3. DIRECTION-AGNOSTIC. Layout uses logical properties
+      (margin-inline, inset-inline, border-inline-start, text-align:start),
+      so Persian mirrors from <html dir="rtl"> alone. There is no second
+      RTL stylesheet. Avoid left/right. The only exceptions are the handful
+      of components whose geometry carries a direction, collected in the
+      LOCALE section at the bottom.
+
+   Also: no inline styles anywhere in the templates — the CSP carries no
+   'unsafe-inline'. Anything one-off goes in the utilities at the end.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+
+/* ── the typefaces ──────────────────────────────────────────────────────
+   FOUR faces, ALL SELF-HOSTED. The site makes no third-party request of
+   any kind — no CDN, no fonts.googleapis.com, no fonts.gstatic.com. The
+   audience is largely on networks where a third-party request is slow at
+   best and blocked at worst, and a blocked font is a visibly broken page.
+   Do not "optimise" any of these back to a CDN.
+
+   Every one is SIL OFL 1.1. The licences ship beside the files in
+   assets/fonts/ and must stay there; see the README there for the
+   subsetting method and the per-font copyright notices.
+
+   The three Latin faces are subset to the 241 codepoints this site
+   actually renders and carry NO Persian glyphs — that is deliberate.
+   html[lang="fa"] swaps --display and --sans to Vazirmatn wholesale, and
+   the mono stack keeps Martian first only so that Latin tokens and
+   figures inside a Persian sentence stay in it.
+
+   font-display:swap everywhere: text is readable in a fallback face
+   immediately and reflows when the real one lands. On a throttled
+   connection the alternative (block) is a blank page for up to 3s.
+
+   The URLs carry no ?v= stamp so they match head.php's <link rel=preload>
+   character for character. If they differ, the font downloads twice. */
 
 @font-face {
   font-family: "Vazirmatn";
   src: url("../fonts/vazirmatn-variable.woff2") format("woff2");
-  /* Single variable file serving the whole range, rather than one request
-     per weight. */
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
 }
 
-/* ==========================================================================
-   1. Tokens
-   ========================================================================== */
+/* opsz AND wdth are kept variable: display sizes get a wider, tighter cut
+   than the small ones, which is the entire reason the design chose this
+   face. wght is narrowed to 600–800 because nothing here asks for less. */
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("../fonts/bricolage-grotesque-variable.woff2") format("woff2");
+  font-weight: 600 800;
+  font-stretch: 86% 100%;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("../fonts/instrument-sans-variable.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── metric-matched fallbacks ──────────────────────────────────────────
+   These load NO file. Each aliases a font already on the device and bends
+   its metrics to match the web font, so the swap from fallback to real
+   face barely moves anything.
+
+   Without them the jump is large and measured, not theoretical: on the
+   English home page the hero headline laid out 84px taller in the platform
+   face and pushed everything below it down 70px, because Bricolage at
+   wdth 92 is about 13% narrower than Segoe UI and the headline wrapped to
+   an extra line. Document height differed by 173px.
+
+   The percentages come from measuring the same string in each face on a
+   canvas, not from taste:
+
+     display  Bricolage 800 is 3179px where Segoe UI is 3548px -> 89.6%,
+              and .d-xl narrows further to wdth 92, so 87% is the closer
+              match for the headline that dominates the shift.
+     sans     Instrument 400 is 3256px where Segoe UI is 3145px -> 103.5%.
+
+   ascent/descent come from each font's own hhea table (93/27 and 97/25
+   against system-ui's 108/25), which is what stops the line boxes
+   changing height as well as width.
+
+   NOT done for the mono face, deliberately. Martian is ~27% wider than
+   Consolas, so a matched fallback would have to scale the local font up by
+   that much -- and mono here is only small tracked labels, where the swap
+   is barely visible but an over-scaled fallback could overflow a lane or a
+   readout before the real font lands. Not worth the risk it introduces.
+
+   Safari before 16.4 ignores size-adjust and simply gets today's
+   behaviour, which is a jump, not a break. */
+@font-face {
+  font-family: "NX Display Fallback";
+  src: local("Segoe UI Bold"), local("Segoe UI"), local("Roboto"),
+       local("Helvetica Neue"), local("Arial");
+  size-adjust: 87%;
+  ascent-override: 93%;
+  descent-override: 27%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "NX Sans Fallback";
+  src: local("Segoe UI"), local("Roboto"), local("Helvetica Neue"), local("Arial");
+  size-adjust: 103.5%;
+  ascent-override: 97%;
+  descent-override: 25%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "Martian Mono";
+  src: url("../fonts/martian-mono-variable.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
-  /* Surfaces */
-  --bg: #0a0a10;
-  --bg-soft: #0e0e15;
-  --card: #131319;
-  --card-hover: #17171f;
-  --elevated: #1a1a22;
+  /* ── ground ───────────────────────────────────────────────────────────
+     Never pure white. White is reserved for lifted surfaces, so the page
+     always has two planes and a card can read as raised without a glow.
+     The neutral is biased a few points toward the brand violet rather than
+     toward cream: it is this product's paper, it agrees with the
+     violet-cast ink, and it keeps the accent from reading as a warm/cool
+     clash. */
+  --paper: #F2F1F6;
+  --paper-2: #EAE9F1;
+  --paper-3: #E1E0EB;
+  --white: #FFFFFF;
 
-  /* Text */
-  --fg: #f4f4f8;
-  --fg-muted: #9797a8;
-  --fg-subtle: #6c6c80;
+  /* ── ink: near-black with a violet cast, so it agrees with the accent */
+  --ink: #12111A;
+  --ink-2: #3A3849;
+  --ink-3: #65627A;
 
-  /* Accents */
-  --primary: #8b5cf6;
-  --primary-soft: #a78bfa;
-  --primary-deep: #6d3fd4;
-  --highlight: #22d3ee;
-  --success: #10b981;
-  --danger: #ef4444;
+  /* Hairlines are either a whisper or full ink — never the 20–30% grey
+     that reads as an unstyled <hr>. */
+  --rule: rgba(18, 17, 26, .075);
+  --rule-2: rgba(18, 17, 26, .13);
+  --rule-3: rgba(18, 17, 26, .62);
 
-  /* Lines */
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  /* ── accent. Every one AA-checked against --paper (#F2F1F6) for normal
+     body text; the ratio is recorded so a future edit cannot quietly drop
+     one below 4.5:1. */
+  --violet: #6D3AE8;      /* 5.49:1 on paper */
+  --cyan:   #0A6E82;      /* 5.27:1 */
+  --ok:     #0F7D5C;      /* 4.59:1 */
+  --warn:   #A15C00;      /* 4.62:1 */
+  --dead:   #B3261E;      /* 5.87:1 */
 
-  /* Shape */
-  --radius-sm: 0.5rem;
-  --radius: 0.75rem;
-  --radius-lg: 1.25rem;
-  --radius-xl: 1.75rem;
-  --radius-pill: 999px;
+  /* The real brand tokens. Neither passes AA as text on paper, so they are
+     allowed ONLY in gradients, fills and the dark app mockup — never as a
+     text colour on the light ground. */
+  --violet-raw: #8b5cf6;
+  --cyan-raw:   #22d3ee;
 
-  /* Rhythm
-     --------------------------------------------------------------
-     The container was 72rem (1152px). The owner's complaint about
-     this site was that it reads narrow and basic next to a
-     reference site that reads wide, and 1152px is genuinely the
-     narrow end for a 2026 marketing page -- it leaves ~200px of
-     dead gutter each side on a 1536px laptop, which is the single
-     biggest reason a layout feels cramped.
+  /* ── the app's own tokens, verbatim from
+     apps/desktop-windows/src/theme.css. The hero mockup is a drawing of
+     the real client, so it uses the real client's palette. */
+  --a-bg: #0a0a10;
+  --a-card: #131319;
+  --a-elev: #1a1a22;
+  --a-fg: #f4f4f8;
+  --a-muted: #9797a8;
+  --a-pri: #8b5cf6;
+  --a-hi: #22d3ee;
+  --a-ok: #10b981;
+  --a-warn: #f59e0b;
+  --a-line: rgba(255, 255, 255, .08);
 
-     Three widths now, because "wide" is not one number:
+  /* ── families ─────────────────────────────────────────────────────────
+     Every one of these is self-hosted; see the @font-face block above.
+     The platform fallbacks after each are real and deliberate — if a woff2
+     ever fails to load, the text must still be readable rather than
+     invisible, which is also why font-display is swap and not block. */
+  --display: "Bricolage Grotesque", "NX Display Fallback", "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sans:    "Instrument Sans", "NX Sans Fallback", "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Vazirmatn sits after Martian so that Persian glyphs, which Martian has
+     none of, fall through to it rather than to a platform mono. */
+  --mono:    "Martian Mono", "Vazirmatn", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
 
-       --container       80rem / 1280px. Everything. One width,
-                         so every section on a page shares a left
-                         edge -- a second, wider container was tried
-                         and removed: the hero at 80rem above a
-                         table at 90rem reads as a misalignment,
-                         which costs more than the width gains.
-       --container-prose 44rem / 704px. Body copy, CENTRED inside
-                         the above, so it introduces no competing
-                         left edge. Going WIDER for
-                         everything would have been the naive read
-                         of "make it wide": prose at 1280px is 150
-                         characters per line and unreadable. The
-                         privacy policy and FAQ answers use this. */
-  --container: 80rem;
-  --container-prose: 44rem;
-  --gutter: clamp(1.25rem, 4vw, 2.5rem);
-  --section-y: clamp(4.5rem, 10vw, 8rem);
-  --section-y-lg: clamp(6rem, 13vw, 11rem);
+  --rail: 3.5rem;                        /* the fixed frame down each edge */
+  --gut: clamp(1.15rem, 3.2vw, 3.5rem);  /* page gutter inside the frame   */
+  --maxw: 96rem;                         /* one container width, sitewide  */
 
-  /* Type */
-  --font-sans: "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-    "Liberation Mono", monospace;
+  /* ── lift ─────────────────────────────────────────────────────────────
+     Layered shadow ladders, tinted toward the brand hue rather than
+     neutral black — a light design gets its depth here, never from glow.
+     Each is a contact shadow plus progressively wider, fainter ambient
+     layers. Nothing here is ever animated. */
+  --lift-1:
+    0 1px 1px rgba(30, 14, 60, .035),
+    0 2px 4px -1px rgba(30, 14, 60, .045),
+    0 5px 12px -4px rgba(30, 14, 60, .05);
+  --lift-2:
+    0 1px 2px rgba(30, 14, 60, .05),
+    0 4px 8px -2px rgba(30, 14, 60, .05),
+    0 12px 24px -8px rgba(30, 14, 60, .07),
+    0 28px 52px -20px rgba(30, 14, 60, .09);
+  --lift-3:
+    0 1px 2px rgba(30, 14, 60, .06),
+    0 6px 12px -3px rgba(30, 14, 60, .06),
+    0 18px 36px -12px rgba(30, 14, 60, .08),
+    0 44px 80px -30px rgba(30, 14, 60, .12),
+    0 90px 140px -70px rgba(30, 14, 60, .14);
 
-  /* Elevation
-     --------------------------------------------------------------
-     Each of these leads with an INSET hairline rather than only
-     casting a shadow outward. On a dark palette an outer shadow
-     alone does almost nothing -- black on near-black is invisible
-     -- so what actually separates a surface from its background is
-     the 1px lit edge along its top. That is the whole trick behind
-     why a well-made dark UI looks crisp and a naive one looks
-     flat, and it costs one shadow layer. */
-  --shadow-card:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 1px 2px rgba(0, 0, 0, 0.4),
-    0 8px 24px -12px rgba(0, 0, 0, 0.8);
-  --shadow-lift:
-    inset 0 1px 0 rgba(255, 255, 255, 0.07),
-    0 2px 4px rgba(0, 0, 0, 0.4),
-    0 18px 44px -20px rgba(0, 0, 0, 0.9);
-  --shadow-glow: 0 0 32px -8px var(--primary);
-  /* Violet-tinted rather than black. A coloured ambient shadow under a
-     violet-accented card reads as light behind the object; a grey one
-     reads as dirt. */
-  --shadow-violet: 0 24px 60px -28px rgba(139, 92, 246, 0.55);
+  --r-sm: .45rem;
+  --r: .6rem;
+  --r-lg: .95rem;
 
-  /* Washes -- the large, soft background gradients that give the page
-     depth between sections. Declared as tokens so the same two light
-     sources are reused everywhere instead of each section inventing
-     its own angle and colour. */
-  --wash-violet: radial-gradient(
-    60% 60% at 50% 0%,
-    rgba(139, 92, 246, 0.16) 0%,
-    rgba(139, 92, 246, 0) 70%
-  );
-  --wash-cyan: radial-gradient(
-    50% 50% at 85% 20%,
-    rgba(34, 211, 238, 0.1) 0%,
-    rgba(34, 211, 238, 0) 70%
-  );
-  /* The hairline that separates stacked full-bleed bands. Fades out at
-     both ends so it never looks like a table rule. */
-  --rule: linear-gradient(
-    to right,
-    transparent,
-    rgba(255, 255, 255, 0.1) 20%,
-    rgba(255, 255, 255, 0.1) 80%,
-    transparent
-  );
-
-  /* Motion. One duration and one curve, so everything on the page
-     accelerates the same way. */
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --dur: 220ms;
+  --ease: cubic-bezier(.22, 1, .36, 1);
 }
 
-/* Persian needs a noticeably taller line than Latin to stay readable. The
-   fallbacks after Vazirmatn only matter for the moment before the webfont
-   lands (font-display: swap) or if it fails to load entirely. */
-html[lang="fa"] {
-  --font-sans: "Vazirmatn", "Segoe UI", Tahoma, "Iranian Sans", "IRANSans",
-    system-ui, "Noto Naskh Arabic", sans-serif;
-  --line-body: 1.95;
-}
 
-html[lang="en"] {
-  --line-body: 1.7;
-}
+/* ═══ RESET ══════════════════════════════════════════════════════════ */
 
-/* ==========================================================================
-   2. Base
-   ========================================================================== */
-
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
+*, *::before, *::after { box-sizing: border-box; }
 
 html {
   -webkit-text-size-adjust: 100%;
   scroll-behavior: smooth;
-  scroll-padding-block-start: 6rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
 }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--font-sans);
-  font-size: 1rem;
-  line-height: var(--line-body, 1.7);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  font-synthesis-weight: none;
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  overflow-x: hidden;
+  -moz-osx-font-smoothing: grayscale;
+  /* clip, not hidden: `hidden` on <body> silently turns every ancestor
+     into a scroll container and breaks position:sticky on the header. */
+  overflow-x: clip;
+  padding-inline: var(--rail);
+}
+@media (max-width: 70rem) {
+  body { padding-inline: 0; }
 }
 
-/* A soft violet wash at the top of every page, so no page starts as a flat
-   black rectangle. Cheap, and it ties the pages together. */
-body::before {
-  content: "";
-  position: fixed;
-  inset-block-start: -14rem;
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
-  width: min(70rem, 140vw);
-  height: 32rem;
-  background: radial-gradient(
-    ellipse at center,
-    rgba(139, 92, 246, 0.16),
-    transparent 65%
-  );
-  pointer-events: none;
-  z-index: 0;
-}
+img, svg, video { max-width: 100%; }
+img { height: auto; border: 0; }
 
-img,
-svg {
-  max-width: 100%;
-  height: auto;
-  display: block;
-}
-
-a {
-  color: inherit;
-  text-decoration: none;
-}
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  color: inherit;
-}
-
-:focus-visible {
-  outline: 2px solid var(--primary-soft);
-  outline-offset: 3px;
-  border-radius: 4px;
-}
-
-::selection {
-  background: rgba(139, 92, 246, 0.4);
-  color: #fff;
-}
-
-/* ==========================================================================
-   3. Typography
-   ========================================================================== */
-
-h1,
-h2,
-h3,
-h4 {
+h1, h2, h3, h4, h5, h6 {
   margin: 0;
-  line-height: 1.18;
-  letter-spacing: -0.02em;
-  font-weight: 650;
+  font-family: var(--display);
+  font-weight: 700;
+  letter-spacing: -.03em;
+  line-height: 1.15;
   text-wrap: balance;
 }
+p { margin: 0; }
+ul, ol { margin: 0; padding: 0; }
 
-/* Persian doesn't take negative tracking well -- it tightens the joins. */
-html[lang="fa"] h1,
-html[lang="fa"] h2,
-html[lang="fa"] h3,
-html[lang="fa"] h4 {
-  letter-spacing: 0;
-  line-height: 1.5;
+a { color: inherit; }
+a:hover { color: var(--ink); }
+
+button { font: inherit; color: inherit; }
+
+::selection { background: rgba(109, 58, 232, .18); color: var(--ink); }
+
+/* Every control keeps a visible keyboard state. The switches inside the
+   instrument are the entire interaction and are reachable by tab. */
+:focus-visible {
+  outline: 2px solid var(--violet);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+.flood :focus-visible,
+.cta-band :focus-visible { outline-color: #fff; }
+
+
+/* ── paper tooth ────────────────────────────────────────────────────────
+   High-frequency fractal noise, converted to alpha then posterised with a
+   discrete transfer function, so it lands as hard grain rather than a soft
+   haze. Rendered once into a data URI — the SVG filter never runs live.
+
+   Deliberately NOT mix-blend-mode. A blended layer over a fixed,
+   viewport-sized element forces the whole page to re-composite on every
+   scroll and resize, which pins a software renderer — and a share of these
+   customers are on exactly that. The tile is already dark-on-transparent,
+   so straight alpha lands in the same place for none of the cost.
+
+   Without this a light page reads as an empty browser window. With it, it
+   reads as a printed surface, and that is most of the difference. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  pointer-events: none;
+  opacity: .34;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1 1' numOctaves='3' stitchTiles='stitch' seed='1038' result='n'/%3E%3CfeColorMatrix in='n' type='luminanceToAlpha' result='a'/%3E%3CfeComponentTransfer in='a'%3E%3CfeFuncA type='discrete' tableValues='0 0 0 0 0 0 0 0 0 0 0 0 1'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23g)' fill='%2312111a'/%3E%3C/svg%3E");
+}
+@media print {
+  body::after { display: none; }
 }
 
-h1 {
-  font-size: clamp(2.35rem, 6vw, 4rem);
-}
-h2 {
-  font-size: clamp(1.85rem, 4vw, 2.75rem);
-}
-h3 {
-  font-size: clamp(1.1rem, 2vw, 1.3rem);
-}
 
-p {
-  margin: 0;
+/* ── the frame ──────────────────────────────────────────────────────────
+   Fixed hairline rails down both edges. This is what lets the content run
+   genuinely edge to edge and still look deliberate rather than unstyled. */
+.rail {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  width: var(--rail);
+  z-index: 70;
+  background: var(--paper-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
 }
-
-.lead {
-  font-size: clamp(1.03rem, 1.7vw, 1.2rem);
-  color: var(--fg-muted);
-  max-width: 46ch;
+.rail--start { inset-inline-start: 0; border-inline-end: 1px solid var(--rule); }
+.rail--end   { inset-inline-end: 0;   border-inline-start: 1px solid var(--rule); }
+.rail__text {
+  writing-mode: vertical-rl;
+  font-family: var(--mono);
+  font-size: .625rem;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
 }
+.rail--start .rail__text { transform: rotate(180deg); }
+/* Reading progress, drawn on the rail itself rather than as a bar stuck to
+   the top of the viewport. Height is set from JS. */
+.rail__prog {
+  position: absolute;
+  top: 0;
+  inset-inline-start: -1px;
+  width: 1px;
+  height: 0;
+  background: linear-gradient(180deg, var(--violet-raw), var(--cyan-raw));
+}
+.rail__prog::after {
+  content: "";
+  position: absolute;
+  bottom: -3px;
+  inset-inline-start: -2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--violet-raw);
+}
+@media (max-width: 70rem) { .rail { display: none; } }
+@media print { .rail { display: none; } }
 
-/* .lead caps its measure at 46ch, which is right, but in a centred head
-   that box then sits against the start edge while the h1 above it is
-   centred -- so the paragraph hung ~170px to the left of the heading on
-   /faq/ and /pricing/, and to the right of it in Persian. The text-align
-   centred the lines inside the box and hid what was actually wrong. */
-.page-hero--center .lead,
-.section-head--center .lead,
-.section-head--center p {
+
+/* ── the column grid, drawn ─────────────────────────────────────────────
+   Twelve hairlines behind everything. Editorial structure you can actually
+   see, which is what makes a full-bleed layout read as a decision rather
+   than as a missing max-width. */
+.grid-lines {
+  position: fixed;
+  inset: 0 var(--rail);
+  z-index: 0;
+  pointer-events: none;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  padding-inline: var(--gut);
+  max-width: var(--maxw);
   margin-inline: auto;
 }
+.grid-lines i { border-inline-start: 1px solid rgba(18, 17, 26, .045); }
+.grid-lines i:first-child { border-inline-start: 0; }
+@media (max-width: 70rem) {
+  .grid-lines { inset: 0; grid-template-columns: repeat(6, 1fr); }
+  .grid-lines i:nth-child(n + 7) { display: none; }
+}
+@media print { .grid-lines { display: none; } }
 
+
+/* ═══ TYPE SCALE ═════════════════════════════════════════════════════════
+   Display sizes are set tighter and heavier than the body, and the tracking
+   opens back up as the size drops. That is the difference between a type
+   scale and a list of font-sizes. */
+
+/* Bricolage is variable on optical size AND width, so the scale is not
+   just "bigger": display sizes get a wider, tighter cut than the small
+   ones. That is the difference between a type scale and a font-size, and
+   it is most of why this face was chosen. Persian clears these below —
+   Vazirmatn has neither axis, so the settings would be inherited and
+   silently ignored. */
+.d-xl {
+  font-size: clamp(2.6rem, 7.4vw, 7.4rem);
+  line-height: .88;
+  letter-spacing: -.042em;
+  font-weight: 800;
+  font-variation-settings: "opsz" 96, "wdth" 92;
+}
+.d-lg {
+  font-size: clamp(2rem, 4.5vw, 4.2rem);
+  line-height: .98;
+  letter-spacing: -.038em;
+  font-weight: 800;
+  font-variation-settings: "opsz" 72, "wdth" 94;
+}
+.d-md {
+  font-size: clamp(1.5rem, 2.5vw, 2.35rem);
+  line-height: 1.08;
+  letter-spacing: -.03em;
+  font-weight: 700;
+  font-variation-settings: "opsz" 40, "wdth" 96;
+}
+.d-sm, .h-sm {
+  font-size: clamp(1.02rem, 1.35vw, 1.25rem);
+  line-height: 1.24;
+  letter-spacing: -.02em;
+  font-weight: 700;
+  font-variation-settings: "opsz" 20, "wdth" 100;
+}
+
+.lede, .lead {
+  font-size: clamp(1.02rem, 1.28vw, 1.28rem);
+  line-height: 1.55;
+  color: var(--ink-2);
+  font-weight: 400;
+  /* rem, not ch, and only here. The ch unit is the advance of "0" in the
+     CURRENT font, so a measure written in ch changes the moment the web
+     font swaps in -- the line box gets wider or narrower, the text rewraps,
+     and the whole page below it moves. That is invisible on a cached load
+     and a 26px jump on a cold one. Everything below the fold keeps its ch
+     measure, which is better typography; this one element sits above it
+     and buys stability instead. */
+  max-width: 33rem;
+  text-wrap: pretty;
+}
+.body {
+  color: var(--ink-2);
+  max-width: 60ch;
+  text-wrap: pretty;
+}
+
+/* The eyebrow. A rule, then a tracked mono label — the thing that tells you
+   a section has started without spending a heading on it. */
+.eyb, .eyebrow {
+  font-family: var(--mono);
+  font-size: .645rem;
+  font-weight: 500;
+  letter-spacing: .19em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+}
+.eyb::before, .eyebrow::before {
+  content: "";
+  width: 1.35rem;
+  height: 1px;
+  background: var(--rule-3);
+  flex: none;
+}
+.section-head--center .eyebrow,
+.page-hero--center .eyebrow,
+.u-center .eyebrow { justify-content: center; }
+
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.num  { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+/* The one place the brand gradient is allowed to touch type. Because it
+   paints the text transparent, it can only ever be used on a phrase that is
+   decorative — never on the only copy of a piece of information. */
 .gradient-text {
-  background: linear-gradient(100deg, var(--primary-soft), var(--highlight));
+  background-image: linear-gradient(104deg, var(--violet) 0%, #7c4bd8 34%, var(--cyan) 82%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  background-size: 220% 100%;
+  animation: nx-slide 9s ease-in-out infinite alternate;
 }
+@keyframes nx-slide { to { background-position: 100% 0; } }
+@media (prefers-reduced-motion: reduce) { .gradient-text { animation: none; } }
 
-.eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--highlight);
-  margin-block-end: 1rem;
-}
 
-html[lang="fa"] .eyebrow {
-  letter-spacing: 0;
-  text-transform: none;
-}
+/* ═══ LAYOUT PRIMITIVES ══════════════════════════════════════════════════ */
 
-.eyebrow::before {
-  content: "";
-  width: 1.5rem;
-  height: 1px;
-  background: linear-gradient(to right, transparent, var(--highlight));
-}
-
-/* Gradients have no logical-property equivalent, so the one directional rule
-   in this file that can't be expressed logically gets flipped by hand. */
-[dir="rtl"] .eyebrow::before {
-  transform: scaleX(-1);
-}
-
-/* ==========================================================================
-   4. Layout
-   ========================================================================== */
-
+/* One container width, so section edges line up down the whole page. */
 .container {
   width: 100%;
-  max-width: var(--container);
+  max-width: var(--maxw);
   margin-inline: auto;
-  padding-inline: var(--gutter);
+  padding-inline: var(--gut);
+  position: relative;
+  z-index: 1;
+}
+.container--prose { max-width: 52rem; }
+
+/* .bleed is the container for full-bleed bands — same gutter, same max
+   width, but used inside a band that paints its own background edge to
+   edge. */
+.bleed {
+  width: 100%;
+  max-width: var(--maxw);
+  margin-inline: auto;
+  padding-inline: var(--gut);
   position: relative;
   z-index: 1;
 }
 
-/* Body copy. Deliberately much narrower than the page: the privacy policy
-   and the FAQ answers are read line by line, and a 1280px measure is
-   roughly 150 characters, well past the point where the eye loses the
-   start of the next line. */
-.container--prose {
-  max-width: var(--container-prose);
-}
+.band { border-top: 1px solid var(--rule); position: relative; z-index: 1; }
+.band-2, .section--band { background: var(--paper-2); }
+.band-3, .section--wash { background: var(--paper-3); }
 
-.section {
-  padding-block: var(--section-y);
-  position: relative;
-}
+.section, .pad { padding-block: clamp(3.5rem, 7vw, 7.5rem); }
+.section--tight { padding-block: clamp(2.4rem, 4.5vw, 4rem); }
 
-.section--tight {
-  padding-block: clamp(3rem, 7vw, 5rem);
+.section-head, .head {
+  display: grid;
+  gap: 1rem;
+  margin-bottom: clamp(2rem, 4vw, 3.4rem);
 }
-
-/* For the one or two sections that should breathe more than the rest --
-   used to break the metronome so the page does not scroll like a list of
-   equal-height boxes. */
-.section--roomy {
-  padding-block: var(--section-y-lg);
-}
-
-/* A full-bleed band with its own surface, separated from its neighbours by
-   the faded hairline rather than a hard border. This is what stops a long
-   page reading as one undifferentiated column. */
-.section--band {
-  background: var(--bg-soft);
-}
-
-.section--band::before,
-.section--band::after {
-  content: "";
-  position: absolute;
-  inset-inline: 0;
-  height: 1px;
-  background: var(--rule);
-}
-
-.section--band::before {
-  inset-block-start: 0;
-}
-
-.section--band::after {
-  inset-block-end: 0;
-}
-
-/* A violet wash bled in from the top of a section. Purely decorative, so
-   it is pointer-events: none and sits behind .container's z-index: 1. */
-.section--wash {
-  isolation: isolate;
-}
-
-.section--wash::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: var(--wash-violet);
-  pointer-events: none;
-  z-index: 0;
-}
-
-.section-head {
-  max-width: 48rem;
-  margin-block-end: clamp(2.5rem, 5vw, 4rem);
-}
-
+.section-head .d-lg, .head .d-lg { max-width: 19ch; }
 .section-head--center {
-  margin-inline: auto;
+  justify-items: center;
   text-align: center;
 }
+.section-head--center .lead { margin-inline: auto; }
 
-.section-head--center .eyebrow::before {
-  display: none;
-}
-
-.section-head p {
-  color: var(--fg-muted);
-  margin-block-start: 1rem;
-  font-size: 1.05rem;
-}
-
-.grid {
-  display: grid;
-  gap: 1.25rem;
-}
-
-/* Grid and flex children default to min-width:auto, so one stubborn
-   unwrappable child can push a whole column past the viewport. Letting them
-   shrink is the general guard against exactly the overflow that the
-   full-width button above caused. */
-.grid > *,
-.download-main > *,
-.form-layout > * {
-  min-width: 0;
-}
-
-@media (min-width: 40rem) {
-  .grid--2 {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  .grid--3 {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  .grid--4 {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (min-width: 62rem) {
-  .grid--3 {
-    grid-template-columns: repeat(3, 1fr);
-  }
-  .grid--4 {
-    grid-template-columns: repeat(4, 1fr);
-  }
-}
-
-/* Auto-fitting grid for lists whose length is data-driven and will change --
-   the server locations especially. A fixed column count would leave a lone
-   orphan card on a row the day a sixth location is added, and nobody would
-   notice until it shipped. minmax() lets the row decide. */
-.grid--auto {
-  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
-}
-
-.skip-link {
-  position: absolute;
-  inset-inline-start: 0.75rem;
-  inset-block-start: -100%;
-  z-index: 100;
-  background: var(--primary);
-  color: #fff;
-  padding: 0.65rem 1rem;
-  border-radius: var(--radius);
+.section-link {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .88rem;
   font-weight: 600;
+  color: var(--violet);
+  text-decoration: none;
+}
+.section-link:hover { color: var(--violet); text-decoration: underline; text-underline-offset: 3px; }
+.section-link svg { flex: none; }
+
+.flow, .grid { display: grid; }
+.grid { gap: clamp(1rem, 2vw, 1.6rem); }
+.grid--3 { grid-template-columns: repeat(3, 1fr); }
+.grid--4 { grid-template-columns: repeat(4, 1fr); }
+.grid--auto { grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); }
+@media (max-width: 62rem) {
+  .grid--3, .grid--4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 40rem) {
+  .grid--3, .grid--4 { grid-template-columns: 1fr; }
 }
 
-.skip-link:focus {
-  inset-block-start: 0.75rem;
-}
 
-/* ==========================================================================
-   5. Buttons
-   ========================================================================== */
+/* ═══ BUTTONS ════════════════════════════════════════════════════════════ */
 
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.55rem;
-  padding: 0.8rem 1.4rem;
-  border-radius: var(--radius);
+  gap: .55rem;
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: .9rem;
+  letter-spacing: -.01em;
+  padding: .82rem 1.35rem;
+  border-radius: var(--r);
   border: 1px solid transparent;
-  font-weight: 600;
-  font-size: 0.95rem;
+  text-decoration: none;
   cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease,
-    border-color 0.2s ease;
-  white-space: nowrap;
+  position: relative;
+  text-align: center;
+  transition: transform .16s var(--ease), box-shadow .2s, background-color .2s, border-color .2s, color .2s;
 }
+.btn svg { flex: none; }
 
-/* Icons inside buttons MUST be sized here. The inline SVGs carry a viewBox
-   but no width/height, so without this they fall back to the SVG default and
-   render enormous -- a download icon was rendering at 234px inside a button
-   before this rule existed. */
-.btn svg {
-  width: 1.05rem;
-  height: 1.05rem;
-  flex-shrink: 0;
+.btn--primary {
+  background: var(--ink);
+  color: var(--paper);
+  box-shadow: var(--lift-2);
 }
-
-.btn--lg svg {
-  width: 1.15rem;
-  height: 1.15rem;
-}
-
-.btn:hover {
+.btn--primary:hover {
+  background: #000;
+  color: var(--paper);
+  box-shadow: var(--lift-3);
   transform: translateY(-1px);
 }
 
-.btn:active {
-  transform: translateY(0);
-}
-
-.btn--primary {
-  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
-  color: #fff;
-  box-shadow: 0 6px 20px -8px var(--primary);
-}
-
-.btn--primary:hover {
-  box-shadow: 0 10px 28px -8px var(--primary);
-}
-
 .btn--ghost {
-  background: rgba(255, 255, 255, 0.03);
-  border-color: var(--border-strong);
-  color: var(--fg);
+  background: var(--white);
+  color: var(--ink);
+  border-color: var(--rule-2);
+  box-shadow: var(--lift-1);
 }
-
 .btn--ghost:hover {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--ink);
+  border-color: var(--rule-3);
+  transform: translateY(-1px);
+  box-shadow: var(--lift-2);
 }
 
-.btn--lg {
-  padding: 0.95rem 1.75rem;
-  font-size: 1rem;
+.btn:active { transform: translateY(1px) scale(.99); }
+.btn--lg { padding: 1rem 1.7rem; font-size: .98rem; }
+.btn--sm { padding: .55rem .85rem; font-size: .75rem; border-radius: var(--r-sm); }
+.btn--block { display: flex; width: 100%; }
+
+/* A button mid-submit. aria-disabled, not disabled — see site.js. */
+.btn[aria-disabled="true"] { opacity: .6; pointer-events: none; }
+
+@media (max-width: 62rem) {
+  /* On a narrow screen a row of buttons stacks and each one earns full
+     width; a 40%-wide button beside a gap looks like a mistake. */
+  .hero__actions .btn, .u-center-actions .btn { width: 100%; }
 }
 
-.btn--block {
-  width: 100%;
-  /* Buttons are nowrap by default, which is right for a button sitting in a
-     row. A full-width one is different: on a 320px screen the label's
-     min-content width was forcing its whole grid column wider than the
-     viewport and making the download page scroll sideways. Let it wrap. */
-  white-space: normal;
+
+/* ═══ SKIP LINK ══════════════════════════════════════════════════════════
+   First focusable thing in the document. Off-screen until focused. */
+.skip-link {
+  position: absolute;
+  inset-inline-start: -9999px;
+  top: 0;
+  z-index: 999;
+  background: var(--ink);
+  color: var(--paper);
+  padding: .8rem 1.2rem;
+  border-radius: 0 0 var(--r) 0;
+  font-weight: 700;
+  font-size: .88rem;
+  text-decoration: none;
+}
+.skip-link:focus {
+  inset-inline-start: 0;
+  color: var(--paper);
 }
 
-.btn[aria-disabled="true"],
-.btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
 
-/* Arrow glyphs have to point the other way when the page is mirrored. */
-[dir="rtl"] .btn .icon-arrow {
-  transform: scaleX(-1);
-}
-
-/* ==========================================================================
-   6. Header
-   ========================================================================== */
+/* ═══ HEADER ═════════════════════════════════════════════════════════════ */
 
 .site-header {
   position: sticky;
-  inset-block-start: 0;
-  z-index: 50;
-  background: rgba(10, 10, 16, 0.72);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border-block-end: 1px solid var(--border);
+  top: 0;
+  z-index: 80;
+  background: rgba(242, 241, 246, .86);
+  backdrop-filter: blur(14px) saturate(1.3);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  border-bottom: 1px solid var(--rule);
+}
+/* No backdrop-filter support: fall back to an opaque bar rather than
+   letting the page scroll through unreadably behind the nav. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .site-header { background: var(--paper); }
 }
 
 .site-header__inner {
   display: flex;
   align-items: center;
-  gap: 1.5rem;
-  min-height: 4.25rem;
+  gap: clamp(.75rem, 2.5vw, 2.4rem);
+  min-height: 4rem;
 }
 
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 0.65rem;
-  font-weight: 650;
-  font-size: 1.05rem;
-  letter-spacing: -0.01em;
-  flex-shrink: 0;
+  gap: .6rem;
+  text-decoration: none;
+  flex: none;
+  color: var(--ink);
+  font-family: var(--display);
+  font-size: 1.06rem;
+  font-weight: 800;
+  letter-spacing: -.035em;
+  font-variation-settings: "opsz" 20, "wdth" 100;
 }
-
-/* The mark carries the gradient itself now, so the filled tile the old bolt
-   sat inside would be gradient on gradient. A soft glow gives it presence
-   without a plate. */
-.brand__mark {
-  width: 2rem;
-  height: 2rem;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  filter: drop-shadow(0 0 10px rgba(139, 92, 246, 0.5));
-}
-
-.brand__mark svg {
-  width: 100%;
-  height: 100%;
-}
-
-/* Beta marker beside the wordmark. Cyan rather than violet so it reads as a
-   status, not as another call to action. */
+.brand__mark { display: block; flex: none; }
+.brand__mark svg { width: 1.7rem; height: 1.7rem; display: block; }
 .brand__beta {
-  padding: 0.08rem 0.4rem;
-  border-radius: var(--radius-pill);
-  border: 1px solid rgba(34, 211, 238, 0.4);
-  background: rgba(34, 211, 238, 0.12);
-  color: var(--highlight);
-  font-size: 0.6rem;
-  font-weight: 700;
-  letter-spacing: 0.07em;
+  font-family: var(--mono);
+  font-size: .55rem;
+  font-weight: 500;
+  letter-spacing: .14em;
   text-transform: uppercase;
-  align-self: center;
-  flex-shrink: 0;
-}
-
-html[lang="fa"] .brand__beta {
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.hero__beta {
-  color: var(--highlight);
-  font-weight: 650;
+  color: var(--violet);
+  border: 1px solid rgba(109, 58, 232, .3);
+  border-radius: 999px;
+  padding: .12rem .45rem;
+  letter-spacing: .12em;
 }
 
 .site-nav {
-  display: none;
-  align-items: center;
-  gap: 0.35rem;
+  display: flex;
+  gap: clamp(.9rem, 2vw, 1.6rem);
   margin-inline-start: auto;
 }
-
 .site-nav a {
-  padding: 0.5rem 0.8rem;
-  border-radius: var(--radius);
-  color: var(--fg-muted);
-  font-size: 0.93rem;
+  font-size: .83rem;
   font-weight: 500;
-  transition: color 0.15s ease, background 0.15s ease;
+  color: var(--ink-2);
+  text-decoration: none;
+  position: relative;
+  padding-block: .2rem;
+  white-space: nowrap;
 }
-
-.site-nav a:hover {
-  color: var(--fg);
-  background: rgba(255, 255, 255, 0.05);
+.site-nav a::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--ink);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform .28s var(--ease);
 }
-
-.site-nav a[aria-current="page"] {
-  color: var(--fg);
-}
+.site-nav a:hover { color: var(--ink); }
+.site-nav a:hover::after { transform: scaleX(1); }
+.site-nav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+.site-nav a[aria-current="page"]::after { transform: scaleX(1); }
 
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: .5rem;
   margin-inline-start: auto;
 }
+.site-nav ~ .header-actions { margin-inline-start: 0; }
 
+.header-actions .btn {
+  padding: .46rem .9rem;
+  font-size: .8rem;
+  border-radius: var(--r-sm);
+  white-space: nowrap;
+}
+
+/* The language switch. Two options, both real links to real per-locale
+   URLs, carrying ?setlang so the choice sticks — never a JS-only toggle,
+   and never a link to the homepage. The current one is marked with
+   aria-current and rendered as plain text rather than a link to the page
+   you are already on. */
 .lang-switch {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.45rem 0.8rem;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border-strong);
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--fg-muted);
-  transition: color 0.15s ease, border-color 0.15s ease;
+  gap: 2px;
+  flex: none;
+  background: var(--paper-2);
+  border: 1px solid var(--rule-2);
+  border-radius: 999px;
+  padding: 2px;
+  box-shadow: var(--lift-1);
 }
-
-.lang-switch:hover {
-  color: var(--fg);
-  border-color: var(--primary);
+.lang-switch__opt {
+  display: inline-block;
+  font-family: var(--sans);
+  font-size: .75rem;
+  font-weight: 700;
+  padding: .34rem .7rem;
+  border-radius: 999px;
+  color: var(--ink-3);
+  text-decoration: none;
+  line-height: 1.4;
+  white-space: nowrap;
+  transition: background-color .2s, color .2s, box-shadow .2s;
 }
+.lang-switch__opt:hover { color: var(--ink); }
+.lang-switch__opt.is-current {
+  background: var(--white);
+  color: var(--ink);
+  box-shadow: var(--lift-1);
+}
+.lang-switch__opt[lang="fa"] { font-size: .8rem; }
 
-.lang-switch svg {
-  width: 0.95rem;
-  height: 0.95rem;
-  opacity: 0.8;
+/* «فا» in the switcher is the ONLY Persian on an English page, and left in
+   the Vazirmatn stack it pulls the entire 111 KB Persian face down for two
+   glyphs -- about 40% of that page's font weight, measured in the network
+   panel, not guessed. Every platform this site runs on has an Arabic-capable
+   UI font that draws two isolated letters perfectly well, so the English
+   page uses that instead and never requests Vazirmatn at all.
+   On the Persian page the font is already loaded, so the stack stands. */
+html[lang="en"] .lang-switch__opt[lang="fa"] {
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Naskh Arabic",
+               "Geeza Pro", "Tahoma", sans-serif;
 }
 
 .nav-toggle {
-  display: inline-grid;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  padding: 0;
+  background: var(--white);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  box-shadow: var(--lift-1);
+  color: var(--ink);
+}
+.nav-toggle .icon-close { display: none; }
+.nav-toggle[aria-expanded="true"] .icon-close { display: block; }
+.nav-toggle[aria-expanded="true"] .icon-menu { display: none; }
+
+/* The drawer is rendered VISIBLE and hidden by JS on load. That ordering
+   matters: hidden-in-markup plus a script that never runs would leave a
+   visitor on a small screen with no navigation at all. */
+.mobile-nav {
+  display: grid;
+  gap: .2rem;
+  padding-block: .8rem 1.2rem;
+  border-top: 1px solid var(--rule);
+}
+.mobile-nav a {
+  padding: .7rem .2rem;
+  font-size: .95rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  text-decoration: none;
+  border-bottom: 1px solid var(--rule);
+}
+.mobile-nav a:hover { color: var(--ink); }
+.mobile-nav .btn { margin-top: .8rem; border-bottom: 0; }
+.mobile-nav[hidden] { display: none; }
+
+@media (max-width: 68rem) {
+  .site-nav { display: none; }
+  .nav-toggle { display: inline-flex; }
+  .header-actions .btn--ghost { display: none; }
+}
+/* ── the header at phone widths ────────────────────────────────────────
+   Five things share this row: the wordmark, the beta badge, the language
+   switch, the download CTA and the menu button. At 375px in Persian they
+   add up to about 14px more than the screen, and because <body> is
+   overflow-x:clip the excess is not scrolled to — it is silently CUT OFF,
+   taking part of the menu button with it. Measured, not guessed.
+
+   Order of sacrifice, cheapest first: gaps, then the beta badge (which the
+   hero repeats as a chip two hundred pixels further down), then padding.
+   The language switch and the menu button are never touched — both are the
+   only route to something. */
+@media (max-width: 34rem) {
+  .site-header__inner { gap: .5rem; }
+  .brand { min-width: 0; font-size: 1rem; }
+  .brand__beta { display: none; }
+}
+@media (max-width: 30rem) {
+  /* Tighten the switch rather than hiding half of it — both language
+     options have to stay reachable at every width. */
+  .header-actions .lang-switch__opt { padding: .3rem .5rem; font-size: .72rem; }
+  .header-actions .btn { padding: .42rem .7rem; font-size: .76rem; }
+}
+@media (max-width: 24rem) {
+  /* Last resort. The CTA is still in the drawer and is the first thing in
+     the hero, so it is the one control here that is genuinely duplicated. */
+  .header-actions > .btn--primary { display: none; }
+}
+@media (min-width: 68.01rem) {
+  .mobile-nav { display: none; }
+}
+
+
+/* ═══ ANNOUNCEMENT BANNER ════════════════════════════════════════════════
+   An inline strip in the page flow, not a modal: it never covers content,
+   needs no scroll lock or focus management, and is fully visible with
+   scripting off. The failure mode is "the message shows", not "the page is
+   blocked". */
+.banner-wrap { padding-top: 1.2rem; }
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  background: var(--white);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-lg);
+  padding: .9rem 1.1rem;
+  box-shadow: var(--lift-2);
+  position: relative;
+  overflow: hidden;
+}
+.banner::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--violet-raw), var(--cyan-raw));
+}
+.banner[hidden] { display: none; }
+.banner__icon {
+  flex: none;
+  display: grid;
   place-items: center;
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--border-strong);
-  background: rgba(255, 255, 255, 0.03);
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 50%;
+  background: rgba(109, 58, 232, .1);
+  color: var(--violet);
+}
+.banner__text { flex: 1; min-width: 12rem; display: grid; gap: .2rem; }
+.banner__title {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  flex-wrap: wrap;
+  font-size: .92rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+.banner__pill {
+  font-family: var(--mono);
+  font-size: .58rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--violet);
+  border: 1px solid rgba(109, 58, 232, .3);
+  background: rgba(109, 58, 232, .06);
+  border-radius: 999px;
+  padding: .2rem .55rem;
+}
+.banner__body { font-size: .84rem; color: var(--ink-2); line-height: 1.55; }
+.banner__actions { display: flex; align-items: center; gap: .5rem; flex: none; margin-inline-start: auto; }
+.banner__actions .btn { padding: .55rem 1rem; font-size: .82rem; }
+
+/* Below this the three columns cannot share a line without crushing the
+   middle one — the headline was wrapping one word per line at 375px. Stack
+   instead, and keep the dismiss button beside the call to action rather
+   than on a line of its own. */
+@media (max-width: 40rem) {
+  .banner { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .6rem .8rem; }
+  .banner__icon { grid-row: 1; }
+  .banner__text { grid-column: 2; min-width: 0; }
+  .banner__actions { grid-column: 1 / -1; margin-inline-start: 0; }
+  .banner__actions .btn { flex: 1; }
+}
+.banner__x {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  background: transparent;
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-sm);
+  color: var(--ink-3);
   cursor: pointer;
 }
+.banner__x:hover { color: var(--ink); border-color: var(--rule-3); }
 
-.nav-toggle svg {
-  width: 1.15rem;
-  height: 1.15rem;
-}
 
-.nav-toggle .icon-close {
-  display: none;
-}
+/* ═══ HERO ═══════════════════════════════════════════════════════════════
+   Twelve columns. The headline takes seven and runs to the edge; the app
+   mockup takes five and overhangs the gutter. Deliberately not a centred
+   column with a picture beside it. */
 
-.nav-toggle[aria-expanded="true"] .icon-close {
-  display: block;
-}
-
-.nav-toggle[aria-expanded="true"] .icon-menu {
-  display: none;
-}
-
-/* Mobile drawer. Hidden by the `hidden` attribute when JS is present; when JS
-   is absent the nav simply stays visible in the flow, which is a usable
-   fallback rather than a dead button. */
-.mobile-nav {
-  border-block-start: 1px solid var(--border);
-  padding-block: 0.75rem 1.25rem;
-  display: grid;
-  gap: 0.15rem;
-}
-
-/* The `hidden` attribute is how site.js closes this drawer, and a UA
-   stylesheet's `[hidden] { display: none }` loses to the author rule above.
-   Without this line the drawer sets display:grid forever: JS sets .hidden,
-   nothing happens, and every page under 56rem renders with the whole
-   navigation permanently expanded under the header. Measured in a real
-   browser at 375px -- hidden === true, computed display still `grid`. */
-.mobile-nav[hidden] {
-  display: none;
-}
-
-.mobile-nav a {
-  padding: 0.7rem 0.6rem;
-  border-radius: var(--radius);
-  color: var(--fg-muted);
-  font-weight: 500;
-}
-
-.mobile-nav a:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--fg);
-}
-
-.mobile-nav .btn {
-  margin-block-start: 0.6rem;
-}
-
-/* Below ~480px the brand, the language switch, the CTA and the hamburger do
-   not all fit on one line -- they were overflowing the viewport by about
-   20px, which is enough to make the whole page scroll sideways. The CTA is
-   the one to drop: it is repeated inside the mobile drawer, so nothing is
-   actually lost. */
-@media (max-width: 30rem) {
-  .site-header__inner {
-    gap: 0.75rem;
-  }
-  .header-actions {
-    gap: 0.4rem;
-  }
-  .header-actions > .btn {
-    display: none;
-  }
-}
-
-@media (min-width: 56rem) {
-  .site-nav {
-    display: flex;
-  }
-  .header-actions {
-    margin-inline-start: 0;
-  }
-  .nav-toggle,
-  .mobile-nav {
-    display: none !important;
-  }
-}
-
-/* ==========================================================================
-   7. Hero
-   ========================================================================== */
-
-.hero {
-  position: relative;
-  padding-block: clamp(4rem, 11vw, 8.5rem) clamp(3.5rem, 8vw, 6rem);
-  isolation: isolate;
-  overflow: hidden;
-}
-
-/* The panel's glow-backdrop treatment, ported to plain CSS. */
-.hero::before,
-.hero::after {
-  content: "";
-  position: absolute;
-  z-index: -1;
-  border-radius: var(--radius-pill);
-  filter: blur(120px);
-  opacity: 0.32;
-  pointer-events: none;
-}
-
-.hero::before {
-  width: 32rem;
-  height: 32rem;
-  background: var(--primary);
-  inset-block-start: -12rem;
-  inset-inline-start: -10rem;
-}
-
-.hero::after {
-  width: 26rem;
-  height: 26rem;
-  background: var(--highlight);
-  inset-block-end: -12rem;
-  inset-inline-end: -8rem;
-  opacity: 0.22;
-}
-
+.hero { padding-block: clamp(3rem, 6.5vw, 7rem) clamp(3rem, 6vw, 6rem); position: relative; }
 .hero__inner {
   display: grid;
-  gap: clamp(2.5rem, 6vw, 4rem);
-  align-items: center;
+  grid-template-columns: repeat(12, 1fr);
+  gap: clamp(1.5rem, 3vw, 3rem);
+  align-items: start;
+}
+.hero__copy { grid-column: 1 / 8; display: grid; gap: clamp(1.4rem, 2.4vw, 2.2rem); }
+.hero__art  { grid-column: 8 / 13; position: relative; justify-self: end; width: 100%; max-width: 26rem; }
+@media (max-width: 78rem) {
+  .hero__copy { grid-column: 1 / 13; }
+  .hero__art  { grid-column: 1 / 13; justify-self: center; margin-top: 1rem; }
 }
 
-@media (min-width: 62rem) {
-  .hero__inner {
-    grid-template-columns: 1.05fr 0.95fr;
-  }
-}
-
-.hero h1 {
-  margin-block-end: 1.35rem;
-}
-
-.hero h1 span {
-  display: block;
-}
-
-.hero__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.85rem;
-  margin-block-start: 2rem;
-}
-
-.hero__note {
-  margin-block-start: 1.25rem;
-  font-size: 0.9rem;
-  color: var(--fg-subtle);
-}
-
-/* ==========================================================================
-   7b. App mockup
-   --------------------------------------------------------------------------
-   A CSS recreation of the real desktop app -- same header, subscription card,
-   circular Connect button and "Change location" control as
-   apps/desktop-windows/src/screens/Dashboard.tsx. It is a drawing, not a
-   screenshot, but it is drawn from the actual product rather than invented.
-
-   The macOS window and the phone carry visible "Soon" badges because those
-   clients genuinely do not exist yet, and the download page says so. The
-   hero must not contradict it.
-
-   Whole thing is aria-hidden with a text alternative on the wrapper: it is
-   an illustration, and reading out two dozen fake UI labels helps nobody.
-   ========================================================================== */
-
-.mockup {
-  position: relative;
-  width: 100%;
-  max-width: 30rem;
-  margin-inline: auto;
-  aspect-ratio: 1 / 1;
-  /* Keeps the mirrored layout from flipping the composition into an
-     arrangement the shadows were not designed for. */
-  direction: ltr;
-}
-
-.device {
-  position: absolute;
-  border-radius: 0.9rem;
-  border: 1px solid var(--border-strong);
-  background: var(--card);
-  box-shadow: 0 24px 48px -20px rgba(0, 0, 0, 0.9),
-    0 2px 8px rgba(0, 0, 0, 0.5);
-  overflow: hidden;
-}
-
-/* Window chrome ---------------------------------------------------------- */
-
-.device__bar {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.5rem 0.7rem;
-  background: rgba(255, 255, 255, 0.04);
-  border-block-end: 1px solid var(--border);
-}
-
-.device__dots {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.device__dots i {
-  width: 0.42rem;
-  height: 0.42rem;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.22);
-}
-
-.device__title {
-  font-size: 0.62rem;
-  font-weight: 600;
-  color: var(--fg-subtle);
-  margin-inline-start: auto;
-}
-
-.device__soon {
-  position: absolute;
-  inset-block-end: 0.55rem;
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
-  padding: 0.2rem 0.6rem;
-  border-radius: var(--radius-pill);
-  background: rgba(34, 211, 238, 0.16);
-  border: 1px solid rgba(34, 211, 238, 0.4);
-  color: var(--highlight);
-  font-size: 0.58rem;
-  font-weight: 700;
-  white-space: nowrap;
-  backdrop-filter: blur(4px);
-}
-
-/* macOS window, behind and dimmed ---------------------------------------- */
-
-.device--mac {
-  inset-block-start: 0;
-  inset-inline-end: 0;
-  width: 58%;
-  z-index: 1;
-  opacity: 0.55;
-}
-
-/* The shared badge position is bottom-centre, which works for the phone but
-   put the macOS one directly behind the app window in front of it -- about
-   two thirds of it was covered, so it read as a fragment of a word. The top
-   corner is the part of this window nothing overlaps. */
-.device--mac .device__soon {
-  inset-block-start: 0.5rem;
-  inset-block-end: auto;
-  inset-inline-start: auto;
-  inset-inline-end: 0.5rem;
-  transform: none;
-}
-
-.device--mac .device__body {
-  height: 7.5rem;
-  background: linear-gradient(
-    170deg,
-    rgba(139, 92, 246, 0.14),
-    rgba(19, 19, 25, 0.95)
-  );
-}
-
-/* Windows app, front and full ------------------------------------------- */
-
-.device--win {
-  inset-block-start: 12%;
-  inset-inline-start: 0;
-  width: 74%;
-  z-index: 2;
-}
-
-/* Phone ------------------------------------------------------------------ */
-
-.device--phone {
-  inset-block-end: 0;
-  inset-inline-end: 1%;
-  width: 27%;
-  z-index: 3;
-  border-radius: 1.4rem;
-  padding: 0.35rem;
-  background: #1b1b24;
-}
-
-.device--phone .phone__screen {
-  border-radius: 1.1rem;
-  background: linear-gradient(170deg, rgba(139, 92, 246, 0.16), var(--bg) 60%);
-  aspect-ratio: 9 / 17;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-}
-
-.phone__notch {
-  position: absolute;
-  inset-block-start: 0.35rem;
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
-  width: 32%;
-  height: 0.5rem;
-  border-radius: var(--radius-pill);
-  background: #1b1b24;
-  z-index: 2;
-}
-
-/* The app interface ------------------------------------------------------ */
-
-.app {
-  padding: 0.7rem;
-  display: grid;
-  gap: 0.55rem;
-  font-size: 0.62rem;
-}
-
-.app__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.app__brand {
+.hero__beta {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  font-weight: 650;
-  font-size: 0.66rem;
+  gap: .45rem;
+  font-family: var(--mono);
+  font-size: .62rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--violet);
 }
 
-.app__mark {
-  width: 1.05rem;
-  height: 1.05rem;
-  flex-shrink: 0;
-}
+.hero-meta { display: flex; flex-wrap: wrap; gap: .6rem 1.6rem; align-items: center; }
 
-.app__mark svg {
-  width: 100%;
-  height: 100%;
-}
-
-.app__muted {
-  color: var(--fg-subtle);
-  font-size: 0.58rem;
-}
-
-.app__head-actions {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.app__head-actions i {
-  width: 0.85rem;
-  height: 0.85rem;
-  border-radius: 0.25rem;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--border);
-}
-
-.app__card {
-  padding: 0.6rem;
-  border-radius: 0.55rem;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.03);
-  display: grid;
-  gap: 0.3rem;
-}
-
-.app__row {
-  display: flex;
+.chip {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
+  gap: .45rem;
+  font-family: var(--mono);
+  font-size: .62rem;
+  letter-spacing: .09em;
+  color: var(--ink-2);
+  background: var(--white);
+  border: 1px solid var(--rule-2);
+  border-radius: 999px;
+  padding: .36rem .75rem;
+  box-shadow: var(--lift-1);
 }
+.chip .d { width: 5px; height: 5px; border-radius: 50%; flex: none; }
+.d-ok   { background: var(--ok);   box-shadow: 0 0 0 3px rgba(15, 125, 92, .14); }
+.d-warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(161, 92, 0, .14); }
 
-.app__pill {
-  padding: 0.1rem 0.45rem;
-  border-radius: var(--radius-pill);
-  background: rgba(16, 185, 129, 0.18);
-  color: #6ee7b7;
-  font-size: 0.55rem;
-  font-weight: 700;
+.hero__actions, .u-center-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .7rem;
+  align-items: center;
 }
+.u-center-actions { justify-content: center; }
 
-.app__meter {
-  height: 0.25rem;
-  border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.08);
+/* The unsigned-installer line. It stays until there is a certificate. */
+.hero__note, .warnline {
+  display: flex;
+  gap: .6rem;
+  align-items: flex-start;
+  font-size: .8rem;
+  color: var(--warn);
+  max-width: 46ch;
+  line-height: 1.5;
+}
+.hero__note svg, .warnline svg { flex: none; margin-top: .15rem; }
+
+/* flex:1 AND min-width:0 on the text, both needed.
+   Without them the span is a `flex: 0 1 auto` item whose automatic minimum
+   size lets it shrink to its widest word — measured at 52px on a 375px
+   screen — and the sentence then spills straight out of the page. This is
+   the standard flex-child overflow trap, and it bit exactly the line that
+   must never be missed: the unsigned-installer warning. */
+.hero__note > span, .warnline > span { flex: 1; min-width: 0; }
+
+
+/* ── the real app, on paper ─────────────────────────────────────────────
+   Dark window on a light page. Every token comes from the desktop client's
+   theme.css and the orb geometry from ConnectOrb.tsx, because this is a
+   drawing of the actual product rather than a generic device shot.
+
+   The macOS and phone frames elsewhere carry visible "Soon" badges: those
+   clients do not exist, and an illustration that implies otherwise is a
+   claim the site cannot support. */
+.mockup, .app {
+  background: var(--a-bg);
+  border: 1px solid rgba(255, 255, 255, .10);
+  border-radius: var(--r-lg);
   overflow: hidden;
-  margin-block-start: 0.15rem;
-}
-
-.app__meter i {
-  display: block;
-  height: 100%;
-  /* 84 of 300 GB, matching the label beside it. */
-  width: 28%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--primary), var(--highlight));
-}
-
-.app__connect {
-  display: grid;
-  place-items: center;
-  padding-block: 0.5rem;
-}
-
-.app__orb {
+  color: var(--a-fg);
+  font-family: var(--sans);
   position: relative;
-  width: 4.4rem;
-  height: 4.4rem;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  font-weight: 700;
-  font-size: 0.6rem;
-  color: #6ee7b7;
-  background: rgba(16, 185, 129, 0.16);
-  box-shadow: 0 0 40px -8px var(--success);
+  box-shadow:
+    0 2px 4px rgba(18, 17, 26, .12),
+    0 30px 60px -24px rgba(18, 17, 26, .42),
+    0 80px 130px -70px rgba(109, 58, 232, .55);
+  transform: perspective(1600px) rotateY(-7deg) rotateX(3deg) translateZ(0);
+  transition: transform .5s var(--ease);
+  user-select: none;
+}
+.hero__art:hover .mockup,
+.hero__art:hover .app { transform: perspective(1600px) rotateY(-2.5deg) rotateX(1deg); }
+@media (prefers-reduced-motion: reduce) {
+  .mockup, .app { transform: none; }
+  .hero__art:hover .mockup, .hero__art:hover .app { transform: none; }
+}
+@media (max-width: 78rem) {
+  .mockup, .app { transform: none; }
 }
 
-.app__orb--sm {
-  width: 2.6rem;
-  height: 2.6rem;
-  font-size: 0.42rem;
-}
-
-/* Slow breathing ring, to suggest a live connection without animating
-   anything that implies a measured figure. */
-.app__orb::after {
+/* the violet wash the app paints behind every screen */
+.app::before {
   content: "";
   position: absolute;
-  inset: -0.35rem;
-  border-radius: 50%;
-  border: 1px solid rgba(16, 185, 129, 0.45);
-  animation: nx-pulse 3.2s ease-out infinite;
+  top: -6rem;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  width: 22rem;
+  height: 14rem;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(139, 92, 246, .20), transparent 65%);
 }
 
-@keyframes nx-pulse {
-  0% {
-    transform: scale(0.92);
-    opacity: 0.9;
-  }
-  70% {
-    transform: scale(1.14);
-    opacity: 0;
-  }
-  100% {
-    opacity: 0;
-  }
-}
-
-.app__loc {
+.device__bar, .app__head {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 0.35rem;
-  padding: 0.4rem;
-  border-radius: 0.5rem;
-  border: 1px solid var(--border-strong);
-  color: var(--fg-muted);
-  font-size: 0.58rem;
+  gap: .45rem;
+  padding: .55rem .8rem;
+  border-bottom: 1px solid var(--a-line);
+  background: #0d0d14;
+}
+.device__dots { display: flex; gap: .35rem; }
+.device__dots i, .device__dots span {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: rgba(255, 255, 255, .15); display: block;
+}
+.device__title {
+  margin-inline-start: .5rem;
+  font-family: var(--mono);
+  font-size: .55rem;
+  letter-spacing: .14em;
+  color: var(--a-muted);
 }
 
-.app__loc svg {
-  width: 0.7rem;
-  height: 0.7rem;
+.app__body, .app__row { position: relative; }
+.app__body { padding: .85rem; display: flex; flex-direction: column; gap: .7rem; }
+
+.app__head-actions { display: flex; align-items: center; justify-content: space-between; }
+.app__brand { display: flex; align-items: center; gap: .5rem; }
+.app__mark svg, .app__brand svg { width: 1.15rem; height: 1.15rem; filter: drop-shadow(0 0 10px rgba(139, 92, 246, .7)); }
+.app__brand b { font-size: .78rem; font-weight: 700; letter-spacing: -.02em; }
+.app__muted { color: var(--a-muted); font-size: .62rem; display: flex; align-items: center; gap: .45rem; }
+.app__muted .d, .app__pill .d {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--a-ok); box-shadow: 0 0 8px var(--a-ok); flex: none;
 }
 
-/* On narrow screens the composition gets cramped, so the two supporting
-   devices step back and the real app takes the full width. */
-@media (max-width: 30rem) {
-  .device--mac {
-    display: none;
-  }
-  .device--win {
-    width: 82%;
-    inset-block-start: 6%;
-  }
-  .device--phone {
-    width: 30%;
-  }
-}
-
-/* ==========================================================================
-   8. Cards
-   ========================================================================== */
-
-.card {
+/* the ConnectOrb */
+.app__connect {
   position: relative;
-  padding: 1.6rem;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow-card);
-  transition: border-color 0.2s ease, background 0.2s ease,
-    transform 0.2s ease;
+  width: 11rem;
+  height: 11rem;
+  margin: .4rem auto .2rem;
+  display: grid;
+  place-items: center;
+}
+.app__orb {
+  position: relative;
+  width: 7rem;
+  height: 7rem;
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .35rem;
+  border: 1px solid rgba(16, 185, 129, .4);
+  background: rgba(16, 185, 129, .12);
+  color: var(--a-ok);
+  box-shadow:
+    0 0 50px -12px var(--a-ok),
+    inset 0 1px 0 rgba(255, 255, 255, .14),
+    inset 0 -14px 28px -14px rgba(0, 0, 0, .55);
+}
+.app__orb span { font-size: .6rem; font-weight: 700; letter-spacing: .02em; }
+.app__orb--sm { width: 5rem; height: 5rem; }
+.orb-ring {
+  position: absolute;
+  width: 8rem; height: 8rem;
+  border-radius: 50%;
+  border: 1px solid rgba(16, 185, 129, .5);
+  animation: nx-ping 2.8s cubic-bezier(0, 0, .2, 1) infinite;
+}
+.orb-ring--b { border-color: rgba(16, 185, 129, .3); animation-delay: 1.4s; }
+@keyframes nx-ping {
+  0%        { transform: scale(1);   opacity: .5; }
+  80%, 100% { transform: scale(1.9); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .orb-ring { animation: none; opacity: .35; } }
+.orb-bloom {
+  position: absolute;
+  width: 7rem; height: 7rem;
+  border-radius: 50%;
+  background: rgba(16, 185, 129, .35);
+  filter: blur(30px);
+}
+.orb-svg { position: absolute; width: 11rem; height: 11rem; }
+
+.app__loc, .app__card {
+  background: var(--a-card);
+  border: 1px solid var(--a-line);
+  border-radius: var(--r-sm);
+  padding: .6rem .7rem;
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -12px rgba(0, 0, 0, .8);
+}
+.app__card .fl, .app__loc .fl {
+  width: 1.35rem; height: 1rem; border-radius: 2px;
+  overflow: hidden; flex: none; display: block;
+}
+.app__card .tx { flex: 1; min-width: 0; }
+.app__card .tx b { display: block; font-size: .7rem; font-weight: 700; }
+.app__card .tx i { display: block; font-style: normal; font-size: .58rem; color: var(--a-muted); }
+.app__card .ch { color: var(--a-muted); flex: none; }
+
+.app__pill {
+  margin: .15rem auto 0;
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  border: 1px solid rgba(16, 185, 129, .25);
+  background: rgba(16, 185, 129, .10);
+  border-radius: 999px;
+  padding: .22rem .6rem;
+  font-family: var(--mono);
+  font-size: .55rem;
+  color: var(--a-ok);
+  letter-spacing: .03em;
 }
 
-.card {
+.app__meter { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.app__meter > div {
+  background: var(--a-card);
+  border: 1px solid var(--a-line);
+  border-radius: var(--r-sm);
+  padding: .5rem .6rem;
+}
+.app__meter i {
+  display: block; font-style: normal; font-family: var(--mono);
+  font-size: .5rem; letter-spacing: .13em; text-transform: uppercase; color: var(--a-muted);
+}
+.app__meter b {
+  display: block; font-size: .78rem; font-weight: 700;
+  margin-top: .15rem; font-variant-numeric: tabular-nums;
+}
+
+.app__status { text-align: center; display: grid; gap: .2rem; }
+.app__status b { font-size: .82rem; font-weight: 700; letter-spacing: -.02em; color: var(--a-ok); }
+.app__status p { font-size: .6rem; color: var(--a-muted); line-height: 1.45; }
+
+.artnote {
+  margin-top: 1rem;
+  font-family: var(--mono);
+  font-size: .615rem;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  text-align: end;
+}
+
+
+/* ═══ KINETIC BAND ═══════════════════════════════════════════════════════
+   Outlined display type, two rows, opposite directions, edges masked off.
+   Full-bleed past the gutters on purpose — the one place the page ignores
+   its own grid. Pure decoration, so aria-hidden in the markup. */
+.tick {
   overflow: hidden;
+  border-block: 1px solid var(--rule);
+  background: var(--paper-2);
+  padding-block: clamp(.7rem, 1.4vw, 1.15rem);
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: .15rem;
+  mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 7%, #000 93%, transparent);
+}
+.tick__row { display: flex; width: max-content; will-change: transform; contain: layout paint; }
+/* Off-screen the marquee stops entirely — outlined glyphs at display size
+   are not cheap to raster and there is no reason to pay for it while
+   nobody is looking at the band. site.js sets data-off. */
+.tick[data-off="1"] .tick__row { animation-play-state: paused; }
+.tick__row--a { animation: nx-tickA 46s linear infinite; }
+.tick__row--b { transform: translateX(-50%); animation: nx-tickB 58s linear infinite; }
+@keyframes nx-tickA { from { transform: translateX(0);    } to { transform: translateX(-50%); } }
+@keyframes nx-tickB { from { transform: translateX(-50%); } to { transform: translateX(0);    } }
+.tick:hover .tick__row { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) { .tick__row { animation: none; } }
+.tick i {
+  font-family: var(--display);
+  font-style: normal;
+  font-size: clamp(1.7rem, 4.4vw, 4rem);
+  font-weight: 800;
+  line-height: 1.12;
+  letter-spacing: -.035em;
+  padding-inline: .85rem;
+  white-space: nowrap;
+  font-variation-settings: "opsz" 72, "wdth" 86;
+  color: transparent;
+  -webkit-text-stroke: 1px rgba(18, 17, 26, .32);
+}
+.tick i.on { color: var(--ink); -webkit-text-stroke: 0; }
+.tick i.gr {
+  -webkit-text-stroke: 0;
+  background-image: linear-gradient(100deg, var(--violet), var(--cyan));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.tick i.dot { -webkit-text-stroke: 0; color: var(--rule-3); padding-inline: .2rem; }
+
+
+/* ═══ THE INSTRUMENT ═════════════════════════════════════════════════════
+   The interactive centrepiece: switch on the blocking a network is doing
+   and watch which connection methods survive.
+
+   It is an ILLUSTRATION of the product's behaviour, not a live probe of
+   the fleet — the copy beside it says so, and it must keep saying so. The
+   site never reports a connection state it has not measured. */
+.inst {
+  display: grid;
+  grid-template-columns: 19rem minmax(0, 1fr) 20rem;
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: var(--white);
+  box-shadow: var(--lift-3);
+}
+@media (max-width: 82rem) {
+  .inst { grid-template-columns: 17rem minmax(0, 1fr); }
+  .inst__console { grid-column: 1 / -1; border-top: 1px solid var(--rule); border-inline-start: 0; }
+}
+@media (max-width: 56rem) {
+  .inst { grid-template-columns: 1fr; }
+  .inst__conds { border-inline-end: 0; border-bottom: 1px solid var(--rule); }
 }
 
-.card:hover {
-  border-color: var(--border-strong);
-  background: var(--card-hover);
-  transform: translateY(-2px);
+.inst__conds {
+  padding: 1.15rem;
+  border-inline-end: 1px solid var(--rule);
+  background: var(--paper-2);
+  display: flex;
+  flex-direction: column;
+  gap: .55rem;
+}
+.inst__ttl {
+  font-family: var(--mono);
+  font-size: .615rem;
+  letter-spacing: .17em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: .3rem;
+}
+.inst__list { display: grid; gap: .5rem; }
+
+/* A real switch built from a checkbox — :has() drives the whole row, so it
+   works from the keyboard and from a screen reader without any JS. */
+.sw {
+  display: flex;
+  gap: .75rem;
+  align-items: flex-start;
+  cursor: pointer;
+  background: var(--white);
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  padding: .62rem .7rem;
+  transition: border-color .2s, box-shadow .2s, background-color .2s;
+  box-shadow: var(--lift-1);
+  position: relative;
+}
+.sw:hover { border-color: var(--rule-2); }
+.sw:has(input:checked) {
+  border-color: rgba(179, 38, 30, .4);
+  background: #FFF7F6;
+  box-shadow: 0 1px 2px rgba(179, 38, 30, .10), 0 6px 16px -8px rgba(179, 38, 30, .28);
+}
+.sw:has(input:focus-visible) { outline: 2px solid var(--violet); outline-offset: 2px; }
+.sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+.sw__track {
+  width: 2.05rem;
+  height: 1.15rem;
+  border-radius: 999px;
+  background: var(--paper-3);
+  border: 1px solid var(--rule-2);
+  position: relative;
+  flex: none;
+  margin-top: .1rem;
+  transition: background-color .22s var(--ease), border-color .22s;
+}
+.sw__track::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  inset-inline-start: 1px;
+  width: .9rem;
+  height: .9rem;
+  border-radius: 50%;
+  background: var(--white);
+  box-shadow: 0 1px 2px rgba(18, 17, 26, .3);
+  transition: transform .22s var(--ease);
+}
+.sw:has(input:checked) .sw__track { background: var(--dead); border-color: var(--dead); }
+.sw:has(input:checked) .sw__track::after { transform: translateX(.87rem); }
+.sw__lb { min-width: 0; }
+.sw__lb b { display: block; font-size: .795rem; font-weight: 700; letter-spacing: -.015em; line-height: 1.3; }
+.sw__lb i { display: block; font-style: normal; font-size: .665rem; color: var(--ink-3); line-height: 1.4; margin-top: .1rem; }
+.sw:has(input:checked) .sw__lb b { color: var(--dead); }
+/* The "total shutdown" switch is not a filter, it is the whole network
+   going away, so it inverts rather than turning red. */
+.sw--total:has(input:checked) { border-color: var(--ink); background: var(--ink); }
+.sw--total:has(input:checked) .sw__lb b { color: var(--paper); }
+.sw--total:has(input:checked) .sw__lb i { color: rgba(242, 241, 246, .65); }
+.sw--total:has(input:checked) .sw__track { background: var(--paper); border-color: var(--paper); }
+.sw--total:has(input:checked) .sw__track::after { background: var(--ink); }
+
+/* No :has() (older Safari/Firefox): fall back to styling from a class that
+   site.js mirrors onto the row, so the switch is never left looking dead. */
+.sw.is-on { border-color: rgba(179, 38, 30, .4); background: #FFF7F6; }
+.sw.is-on .sw__track { background: var(--dead); border-color: var(--dead); }
+.sw.is-on .sw__track::after { transform: translateX(.87rem); }
+.sw.is-on .sw__lb b { color: var(--dead); }
+.sw--total.is-on { border-color: var(--ink); background: var(--ink); }
+.sw--total.is-on .sw__lb b { color: var(--paper); }
+.sw--total.is-on .sw__lb i { color: rgba(242, 241, 246, .65); }
+.sw--total.is-on .sw__track { background: var(--paper); border-color: var(--paper); }
+.sw--total.is-on .sw__track::after { background: var(--ink); }
+
+.inst__condfoot { margin-top: auto; padding-top: .85rem; display: grid; gap: .5rem; }
+
+/* ── lanes ─────────────────────────────────────────────────────────────*/
+.inst__lanes-wrap { position: relative; min-width: 0; display: flex; flex-direction: column; }
+.inst__readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .35rem 1.4rem;
+  padding: .85rem 1.15rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--white);
+}
+.ro { display: flex; flex-direction: column; gap: .05rem; }
+.ro i {
+  font-style: normal; font-family: var(--mono); font-size: .585rem;
+  letter-spacing: .15em; text-transform: uppercase; color: var(--ink-3);
+}
+.ro b {
+  font-family: var(--mono); font-size: .98rem; font-weight: 700;
+  font-variant-numeric: tabular-nums; letter-spacing: -.01em;
+}
+.ro--carry b { font-family: var(--sans); letter-spacing: -.02em; }
+.ro--carry b .g {
+  background-image: linear-gradient(100deg, var(--violet), var(--cyan));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.ro-live {
+  margin-inline-start: auto;
+  display: flex; align-items: center; gap: .45rem;
+  font-family: var(--mono); font-size: .57rem; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--ok);
+}
+.ro-live .d {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ok); animation: nx-beat 1.9s ease-in-out infinite;
+}
+@keyframes nx-beat {
+  0%, 100% { opacity: 1;   transform: scale(1); }
+  50%      { opacity: .35; transform: scale(.8); }
+}
+@media (prefers-reduced-motion: reduce) { .ro-live .d { animation: none; } }
+.ro-live.is-down { color: var(--dead); }
+.ro-live.is-down .d { background: var(--dead); }
+
+.lanes { position: relative; padding: .55rem; display: grid; gap: .3rem; }
+/* Behind the rows, not over them. Drawn on top, the dashed carrier line
+   crossed the transport column and read as a strike-through — which in this
+   panel is the one thing it must not say, because a struck-out lane means
+   "blocked". */
+.beam { position: absolute; inset: 0; pointer-events: none; overflow: visible; z-index: 0; }
+.lane { z-index: 1; }
+.beam path { fill: none; stroke-linecap: round; }
+.beam .glow { stroke: url(#nx-beam); stroke-width: 7; opacity: .16; filter: blur(4px); }
+.beam .core { stroke: url(#nx-beam); stroke-width: 2; stroke-dasharray: 7 7; animation: nx-march 1s linear infinite; }
+@keyframes nx-march { to { stroke-dashoffset: -14; } }
+@media (prefers-reduced-motion: reduce) { .beam .core { animation: none; } }
+
+.lane {
+  display: grid;
+  grid-template-columns: 2.1rem minmax(7.5rem, 1.5fr) minmax(4.5rem, 1fr) 4.6rem 5.4rem 1.5rem;
+  align-items: center;
+  gap: .7rem;
+  padding: .55rem .7rem;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  position: relative;
+  transition: background-color .35s, border-color .35s, opacity .35s, transform .35s var(--ease);
+}
+.lane .rk { font-family: var(--mono); font-size: .635rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.lane .nm { min-width: 0; }
+.lane .nm b {
+  display: block; font-size: .87rem; font-weight: 700; letter-spacing: -.02em;
+  line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lane .nm i {
+  display: block; font-style: normal; font-family: var(--mono); font-size: .615rem;
+  color: var(--ink-3); letter-spacing: .04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lane .sig { height: 1.5rem; opacity: .55; transition: opacity .35s; }
+.lane .sig svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.lane .ms {
+  font-family: var(--mono); font-size: .72rem; font-variant-numeric: tabular-nums;
+  text-align: end; color: var(--ink-2); transition: color .35s;
+}
+.lane .st {
+  font-family: var(--mono); font-size: .585rem; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--ink-3); text-align: end; white-space: nowrap; display: grid; gap: .1rem; justify-items: end;
+}
+.lane .st b { font-weight: 500; color: inherit; }
+.lane .st u { text-decoration: none; font-size: .585rem; letter-spacing: .08em; color: var(--ink-3); opacity: 0; transition: opacity .3s; }
+.inst[data-relay="1"] .lane.is-live .st u { opacity: 1; color: var(--cyan); }
+.lane .pin { width: 1.5rem; display: grid; place-items: center; }
+.lane .pin .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--rule-3);
+  transition: background-color .35s, box-shadow .35s, transform .35s;
 }
 
-/* A violet filament along the top edge on hover. Subtle enough that a grid
-   of six doesn't turn into a light show. */
-.card::after {
+.lane.is-live:hover { background: var(--paper-2); }
+.lane.is-active {
+  background: var(--white);
+  border-color: rgba(109, 58, 232, .30);
+  box-shadow: 0 1px 2px rgba(109, 58, 232, .10), 0 12px 28px -14px rgba(109, 58, 232, .42);
+  transform: translateX(2px);
+}
+.lane.is-active .nm b { color: var(--violet); }
+.lane.is-active .st { color: var(--violet); }
+.lane.is-active .sig { opacity: 1; }
+.lane.is-active .pin .dot { background: var(--violet); box-shadow: 0 0 0 4px rgba(109, 58, 232, .16); transform: scale(1.15); }
+.lane.is-active .ms { color: var(--ink); font-weight: 700; }
+
+.lane.is-dead { opacity: .42; }
+.lane.is-dead .nm b { text-decoration: line-through; text-decoration-color: var(--dead); text-decoration-thickness: 1.5px; }
+.lane.is-dead .st { color: var(--dead); }
+.lane.is-dead .sig { opacity: .18; filter: grayscale(1); }
+.lane.is-dead .ms { color: var(--ink-3); text-decoration: line-through; }
+.lane.is-dead .pin .dot { background: var(--dead); box-shadow: none; }
+
+.lane.is-handover { animation: nx-flash .7s var(--ease); }
+@keyframes nx-flash {
+  0%   { background: rgba(34, 211, 238, .30); }
+  100% { background: var(--white); }
+}
+@media (prefers-reduced-motion: reduce) { .lane.is-handover { animation: none; } }
+
+@media (max-width: 60rem) {
+  .lane { grid-template-columns: 2rem minmax(0, 1.6fr) 4.4rem 5.2rem 1.4rem; }
+  .lane .sig { display: none; }
+}
+@media (max-width: 44rem) {
+  .lane { grid-template-columns: 1.7rem minmax(0, 1fr) 4rem 1.2rem; }
+  .lane .sig, .lane .st { display: none; }
+}
+
+/* ── console ───────────────────────────────────────────────────────────*/
+.inst__console {
+  background: var(--paper-2);
+  border-inline-start: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.inst__console .inst__ttl {
+  padding: 1.15rem 1.15rem .5rem;
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 1.15rem 1.15rem;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: .4rem;
+  min-height: 11rem;
+  max-height: 26rem;
+  font-family: var(--mono);
+  font-size: .655rem;
+  line-height: 1.55;
+  mask-image: linear-gradient(to top, #000 82%, transparent);
+  -webkit-mask-image: linear-gradient(to top, #000 82%, transparent);
+}
+.log .ln {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(0, 1fr);
+  gap: .55rem;
+  color: var(--ink-2);
+  animation: nx-logIn .35s var(--ease);
+}
+@keyframes nx-logIn { from { opacity: 0; transform: translateY(-5px); } }
+@media (prefers-reduced-motion: reduce) { .log .ln { animation: none; } }
+.log .ln time { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.log .ln b { font-weight: 700; }
+.log .ln.is-warn b { color: var(--dead); }
+.log .ln.is-good b { color: var(--ok); }
+.log .ln.is-info b { color: var(--violet); }
+
+.verdict {
+  border-top: 1px solid var(--rule);
+  padding: .9rem 1.15rem;
+  font-size: .78rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  background: var(--white);
+}
+.verdict b { color: var(--ink); font-weight: 700; }
+.verdict.is-bad { background: #FFF7F6; color: var(--dead); }
+.verdict.is-bad b { color: var(--dead); }
+
+.pricenote, .compare-hint, .tablehint {
+  margin-top: 1.4rem;
+  font-size: .82rem;
+  color: var(--ink-3);
+  max-width: 62ch;
+  line-height: 1.6;
+}
+
+
+/* ═══ SPECIMEN SHEET — the connection methods ════════════════════════════ */
+.specimens {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid var(--rule);
+  border-inline-start: 1px solid var(--rule);
+}
+@media (max-width: 76rem) { .specimens { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 38rem) { .specimens { grid-template-columns: 1fr; } }
+.spec {
+  border-inline-end: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding: 1.5rem 1.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+  background: var(--paper);
+  position: relative;
+  isolation: isolate;
+  transition: background-color .3s;
+}
+.spec::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: 0;
+  background: linear-gradient(160deg, rgba(139, 92, 246, .07), rgba(34, 211, 238, .05));
+  transition: opacity .35s;
+}
+.spec:hover::before { opacity: 1; }
+.spec .no { font-family: var(--mono); font-size: .615rem; letter-spacing: .16em; color: var(--ink-3); }
+.spec .wave { height: 3.2rem; margin-block: -.15rem; }
+.spec .wave svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.spec h3 { font-size: 1.18rem; letter-spacing: -.03em; line-height: 1.15;
+  font-variation-settings: "opsz" 24, "wdth" 100; }
+.spec .tech { font-family: var(--mono); font-size: .615rem; letter-spacing: .06em; color: var(--violet); }
+.spec .note { font-size: .83rem; color: var(--ink-2); line-height: 1.55; flex: 1; }
+.spec .verdict-tag {
+  font-family: var(--mono); font-size: .585rem; letter-spacing: .11em; text-transform: uppercase;
+  display: inline-flex; align-items: center; gap: .4rem;
+}
+.spec .verdict-tag .d { width: 5px; height: 5px; border-radius: 50%; }
+.t-ok   { color: var(--ok); }   .t-ok .d   { background: var(--ok); }
+.t-warn { color: var(--warn); } .t-warn .d { background: var(--warn); }
+.t-bad  { color: var(--dead); } .t-bad .d  { background: var(--dead); }
+
+/* Per-platform availability, stated plainly. A customer on a phone must not
+   read a row and expect something the Android client does not have. */
+.spec .avail {
+  display: flex; flex-wrap: wrap; gap: .4rem;
+  font-family: var(--mono); font-size: .56rem; letter-spacing: .1em; text-transform: uppercase;
+}
+.spec .avail span {
+  border: 1px solid var(--rule-2); border-radius: 999px; padding: .16rem .5rem; color: var(--ink-3);
+}
+.spec .avail .yes { color: var(--ok); border-color: rgba(15, 125, 92, .35); }
+.spec .avail .no  { color: var(--ink-3); text-decoration: line-through; }
+
+
+/* ═══ EXITS / LOCATIONS ══════════════════════════════════════════════════ */
+.exits, .loc-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  border-inline-start: 1px solid var(--rule);
+  border-top: 1px solid var(--rule);
+}
+@media (max-width: 70rem) { .exits, .loc-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 40rem) { .exits, .loc-grid { grid-template-columns: repeat(2, 1fr); } }
+.exit, .loc {
+  border-inline-end: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding: 1.35rem 1.1rem;
+  display: grid;
+  gap: .45rem;
+  align-content: start;
+  transition: background-color .3s, transform .35s var(--ease), box-shadow .35s;
+}
+.exit:hover, .loc:hover { background: var(--white); transform: translateY(-2px); box-shadow: var(--lift-2); }
+/* .fl is the class nx_flag_svg() puts on the inline <svg>. .loc__flag is
+   kept for the old emoji span, which no longer renders but costs nothing
+   to leave matched. */
+.exit .fl, .loc .fl, .loc__flag {
+  width: 2.2rem; height: 1.5rem; border-radius: 3px;
+  overflow: hidden; box-shadow: var(--lift-1); display: block;
+}
+.exit b, .loc__name { font-family: var(--display); font-size: 1.05rem; font-weight: 800;
+  letter-spacing: -.028em; font-variation-settings: "opsz" 18, "wdth" 100; }
+.exit i, .loc__meta {
+  font-style: normal; font-family: var(--mono); font-size: .615rem;
+  letter-spacing: .11em; text-transform: uppercase; color: var(--ink-3);
+}
+.exit .rt { font-size: .78rem; color: var(--ink-2); line-height: 1.45; }
+/* The relay is the one that is different, and the gradient says so. */
+.exit--relay, .loc--relay { background: linear-gradient(165deg, rgba(139, 92, 246, .09), rgba(34, 211, 238, .06)); }
+.exit--relay b, .loc--relay .loc__name { color: var(--violet); }
+
+
+/* ═══ STRAIGHT ANSWERS ═══════════════════════════════════════════════════
+   A claim, struck through, and what is true instead. The strike draws
+   itself as the row crosses the viewport. */
+.answers { display: grid; border-top: 1px solid var(--rule-2); }
+.ans {
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: clamp(1rem, 3vw, 3rem);
+  align-items: start;
+  padding-block: clamp(1.6rem, 3.2vw, 2.8rem);
+  border-bottom: 1px solid var(--rule);
+}
+@media (max-width: 62rem) {
+  .ans { grid-template-columns: 2.4rem 1fr; }
+  .ans .say { grid-column: 2; }
+}
+.ans .n { font-family: var(--mono); font-size: .635rem; letter-spacing: .14em; color: var(--ink-3); padding-top: .5rem; }
+.ans .claim {
+  font-family: var(--display);
+  font-weight: 800;
+  letter-spacing: -.035em;
+  line-height: 1.08;
+  font-size: clamp(1.55rem, 3.5vw, 3.1rem);
+  position: relative;
+  display: inline-block;
+  color: var(--ink);
+  font-variation-settings: "opsz" 60, "wdth" 94;
+}
+.ans .claim .strike {
+  position: absolute;
+  inset-inline: -1.5%;
+  top: 50%;
+  height: clamp(3px, .42vw, 6px);
+  pointer-events: none;
+}
+.ans .claim .strike svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.ans .claim .strike path {
+  fill: none;
+  stroke: var(--dead);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+  vector-effect: non-scaling-stroke;
+}
+.ans .say {
+  font-size: clamp(.92rem, 1.05vw, 1.02rem);
+  color: var(--ink-2);
+  line-height: 1.65;
+  max-width: 52ch;
+  padding-top: .35rem;
+}
+.ans .say b { color: var(--ink); font-weight: 700; }
+.ans.is-visible .strike path,
+.ans.in .strike path {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 1s var(--ease) .15s;
+}
+/* No script, or reduced motion: the strike is simply drawn. It carries
+   meaning — the claim is false — so it must never depend on animation. */
+.no-js .ans .strike path { stroke-dashoffset: 0; }
+@media (prefers-reduced-motion: reduce) { .ans .strike path { stroke-dashoffset: 0; } }
+
+
+/* ═══ PLANS ══════════════════════════════════════════════════════════════ */
+.plan-wrap, .plans {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--rule-2);
+  border-inline-start: 1px solid var(--rule);
+}
+@media (max-width: 60rem) { .plan-wrap, .plans { grid-template-columns: 1fr; } }
+.plan {
+  border-inline-end: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding: clamp(1.5rem, 2.6vw, 2.4rem) clamp(1.2rem, 2vw, 1.9rem);
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+  position: relative;
+  transition: background-color .3s;
+}
+.plan:hover { background: var(--white); }
+.plan__name {
+  font-family: var(--mono); font-size: .635rem; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.plan__price { display: flex; align-items: baseline; gap: .3rem; flex-wrap: wrap; }
+.plan__amount {
+  font-family: var(--display);
+  font-size: clamp(2.6rem, 5vw, 4.4rem);
+  font-weight: 800;
+  letter-spacing: -.05em;
+  line-height: .95;
+  font-variant-numeric: tabular-nums;
+  font-variation-settings: "opsz" 72, "wdth" 92;
+}
+.plan__period {
+  font-style: normal; font-family: var(--mono); font-size: .65rem;
+  color: var(--ink-3); letter-spacing: .08em;
+}
+.plan__tagline { font-size: .88rem; color: var(--ink-2); line-height: 1.55; }
+.plan__features { list-style: none; display: grid; gap: .5rem; }
+.plan__features li {
+  display: grid;
+  grid-template-columns: .9rem minmax(0, 1fr);
+  gap: .55rem;
+  font-size: .85rem;
+  color: var(--ink-2);
+  line-height: 1.5;
+  align-items: start;
+}
+.plan__features li svg { margin-top: .28rem; color: var(--ok); }
+.plan__features li.off { color: var(--ink-3); }
+.plan__features li.off svg { color: var(--rule-3); }
+.plan--featured, .plan.is-featured { background: var(--white); box-shadow: var(--lift-2); }
+.plan--featured::before, .plan.is-featured::before {
   content: "";
   position: absolute;
   inset-block-start: 0;
   inset-inline: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--primary), transparent);
-  opacity: 0;
-  transition: opacity 0.25s ease;
+  height: 2px;
+  background: linear-gradient(90deg, var(--violet-raw), var(--cyan-raw));
 }
-
-.card:hover::after {
-  opacity: 0.9;
-}
-
-.card h3 {
-  margin-block-end: 0.6rem;
-}
-
-.card p {
-  color: var(--fg-muted);
-  font-size: 0.95rem;
-}
-
-.card__icon {
-  width: 2.75rem;
-  height: 2.75rem;
-  border-radius: var(--radius);
-  display: grid;
-  place-items: center;
-  margin-block-end: 1.1rem;
-  background: rgba(34, 211, 238, 0.1);
-  border: 1px solid rgba(34, 211, 238, 0.22);
-  color: var(--highlight);
-}
-
-.card__icon svg {
-  width: 1.3rem;
-  height: 1.3rem;
-}
-
-/* Numbered steps */
-.step {
-  position: relative;
-  padding-block-start: 0.5rem;
-}
-
-.step__num {
-  display: grid;
-  place-items: center;
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: var(--radius);
-  font-family: var(--font-mono);
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: var(--primary-soft);
-  background: rgba(139, 92, 246, 0.12);
-  border: 1px solid rgba(139, 92, 246, 0.28);
-  margin-block-end: 1.1rem;
-}
-
-[dir="rtl"] .step__num {
-  direction: ltr;
-}
-
-.step h3 {
-  margin-block-end: 0.5rem;
-}
-
-.step p {
-  color: var(--fg-muted);
-  font-size: 0.95rem;
-}
-
-/* ==========================================================================
-   9. Pricing
-   ========================================================================== */
-
-.plan {
-  display: flex;
-  flex-direction: column;
-  padding: 1.75rem;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow-card);
-}
-
-.plan--featured {
-  border-color: rgba(139, 92, 246, 0.45);
-  background: linear-gradient(
-    170deg,
-    rgba(139, 92, 246, 0.12),
-    var(--card) 45%
-  );
-  box-shadow: var(--shadow-card), 0 0 40px -18px var(--primary);
-}
-
 .plan__badge {
   position: absolute;
-  inset-block-start: -0.75rem;
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
-  padding: 0.3rem 0.8rem;
-  border-radius: var(--radius-pill);
-  background: linear-gradient(135deg, var(--primary), var(--highlight));
-  color: #fff;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  top: 1rem;
+  inset-inline-end: 1rem;
+  font-family: var(--mono);
+  font-size: .53rem;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--violet);
+  border: 1px solid rgba(109, 58, 232, .3);
+  border-radius: 999px;
+  padding: .16rem .5rem;
+}
+.pricing-note { margin-top: 1.4rem; font-size: .82rem; color: var(--ink-3); max-width: 62ch; line-height: 1.6; }
+
+/* The trial is granted, not sold, so it is a paragraph — never a card with
+   a buy button, because there is no checkout behind it. */
+.trial-banner {
+  border: 1px solid rgba(109, 58, 232, .28);
+  background: rgba(109, 58, 232, .05);
+  border-radius: var(--r-lg);
+  padding: 1.3rem 1.4rem;
+  margin-top: 1.8rem;
+  max-width: 60rem;
+  display: grid;
+  gap: .5rem;
+}
+.trial-banner h3 { font-size: 1.05rem; letter-spacing: -.02em; font-family: var(--sans); font-weight: 700; }
+.trial-banner p { color: var(--ink-2); line-height: 1.7; font-size: .9rem; }
+.trial-banner .stat-row { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .35rem; }
+
+
+/* ═══ COMPARISON TABLE ═══════════════════════════════════════════════════ */
+.table-wrap, .compare-scroll, .tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-lg);
+  background: var(--white);
+  box-shadow: var(--lift-2);
+  margin-top: 1.6rem;
+  -webkit-overflow-scrolling: touch;
+}
+table.compare, table.cmp, .proto-table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 44rem;
+  font-size: .87rem;
+}
+table.compare th, table.compare td,
+table.cmp th, table.cmp td,
+.proto-table th, .proto-table td {
+  padding: .85rem 1rem;
+  text-align: start;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+table.compare thead th, table.cmp thead th, .proto-table thead th {
+  font-family: var(--mono);
+  font-size: .62rem;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+  background: var(--paper-2);
   white-space: nowrap;
 }
-
-/* translateX(-50%) centres the wrong way once the axis is flipped. */
-[dir="rtl"] .plan__badge {
-  transform: translateX(50%);
+table.compare tbody th, table.cmp tbody th, .proto-table tbody th {
+  font-weight: 700; color: var(--ink); white-space: nowrap;
 }
+table.compare td, table.cmp td, .proto-table td { color: var(--ink-2); }
+table.compare tbody tr:last-child th, table.compare tbody tr:last-child td,
+table.cmp tbody tr:last-child th, table.cmp tbody tr:last-child td { border-bottom: 0; }
+.compare__price { font-family: var(--mono); font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+table .hi, table.cmp .hi { background: rgba(109, 58, 232, .05); }
+.proto__yes, table .yes, table.cmp .yes { color: var(--ok); font-weight: 700; }
+.proto__no,  table .no,  table.cmp .no  { color: var(--ink-3); }
+.proto__name { font-weight: 700; color: var(--ink); }
+.proto__tech { font-family: var(--mono); font-size: .72rem; color: var(--violet); }
+.proto__hint { color: var(--ink-2); }
 
-.plan-wrap {
-  position: relative;
-}
+/* ── the protocol table becomes cards on a narrow screen ───────────────
+   Restored, and it is not cosmetic. At 375px a four-column table is
+   ~700px wide: inside .table-wrap it scrolls sideways, which on a phone
+   hides the two platform columns behind a gesture most people never make —
+   and those columns carry the one thing a phone visitor most needs to see,
+   that OpenVPN is not available on Android.
 
-.plan__name {
-  font-size: 1.15rem;
-  font-weight: 650;
-}
-
-.plan__tagline {
-  color: var(--fg-muted);
-  font-size: 0.9rem;
-  margin-block-start: 0.35rem;
-  /* Reserve exactly two rendered lines so the price row lines up across
-     the three cards. 2.6em was less than two lines at either locale's line
-     height, which left Ultimate's price sitting ~11px below the others. */
-  min-height: calc(2em * var(--line-body));
-}
-
-.plan__price {
-  display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  margin-block: 1.25rem 0.25rem;
-  /* Prices read left-to-right in both locales -- "$6.99/month" mirrored
-     would render as nonsense. */
-  direction: ltr;
-}
-
-[dir="rtl"] .plan__price {
-  justify-content: flex-end;
-}
-
-.plan__amount {
-  font-size: 2.5rem;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1;
-}
-
-.plan__period {
-  color: var(--fg-subtle);
-  font-size: 0.9rem;
-}
-
-.plan__features {
-  list-style: none;
-  margin: 1.5rem 0 0;
-  padding: 0;
-  display: grid;
-  gap: 0.7rem;
-  flex: 1;
-}
-
-.plan__features li {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.65rem;
-  font-size: 0.92rem;
-  color: var(--fg-muted);
-}
-
-.plan__features svg {
-  width: 1.05rem;
-  height: 1.05rem;
-  margin-block-start: 0.2rem;
-  color: var(--success);
-  flex-shrink: 0;
-}
-
-.plan .btn {
-  margin-block-start: 1.75rem;
-}
-
-.pricing-note {
-  margin-block-start: 2rem;
-  text-align: center;
-  color: var(--fg-subtle);
-  font-size: 0.88rem;
-}
-
-.trial-banner {
-  margin-block-start: 1.5rem;
-  padding: 0.9rem 1.2rem;
-  border-radius: var(--radius);
-  border: 1px solid rgba(16, 185, 129, 0.3);
-  background: rgba(16, 185, 129, 0.08);
-  color: #6ee7b7;
-  font-size: 0.92rem;
-  text-align: center;
-}
-
-/* ==========================================================================
-   10. FAQ
-   ========================================================================== */
-
-.faq {
-  display: grid;
-  gap: 0.75rem;
-  max-width: 48rem;
-  margin-inline: auto;
-}
-
-.faq details {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--card);
-  overflow: hidden;
-  transition: border-color 0.2s ease;
-}
-
-.faq details[open] {
-  border-color: var(--border-strong);
-}
-
-.faq summary {
-  padding: 1.1rem 1.35rem;
-  cursor: pointer;
-  font-weight: 600;
-  font-size: 1rem;
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  list-style: none;
-}
-
-.faq summary::-webkit-details-marker {
-  display: none;
-}
-
-.faq summary::after {
-  content: "";
-  margin-inline-start: auto;
-  width: 0.6rem;
-  height: 0.6rem;
-  border-inline-end: 2px solid var(--fg-subtle);
-  border-block-end: 2px solid var(--fg-subtle);
-  transform: rotate(45deg);
-  transition: transform 0.2s ease;
-  flex-shrink: 0;
-}
-
-.faq details[open] summary::after {
-  transform: rotate(-135deg);
-}
-
-.faq__answer {
-  padding: 0 1.35rem 1.25rem;
-  color: var(--fg-muted);
-  font-size: 0.95rem;
-}
-
-/* ==========================================================================
-   11. Download page
-   ========================================================================== */
-
-.download-hero {
-  padding-block: clamp(3.5rem, 8vw, 5.5rem) 0;
-}
-
-.download-main {
-  display: grid;
-  gap: 1.5rem;
-  align-items: start;
-}
-
-@media (min-width: 56rem) {
-  .download-main {
-    grid-template-columns: 1.2fr 0.8fr;
+   inc/partials/protocol-table.php already emits data-label on every
+   platform cell precisely so this can exist without a second set of
+   markup. min-width is dropped here too, which is what stops the page
+   scrolling horizontally at this width. */
+@media (max-width: 55rem) {
+  .proto-table { min-width: 0; display: block; }
+  .proto-table thead {
+    position: absolute;
+    width: 1px; height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
+  .proto-table tbody, .proto-table tr, .proto-table th, .proto-table td { display: block; }
+  .proto-table tr {
+    border-bottom: 1px solid var(--rule-2);
+    padding: 1rem 1.1rem;
+  }
+  .proto-table tr:last-child { border-bottom: 0; }
+  .proto-table tbody th {
+    border-bottom: 0;
+    padding: 0 0 .35rem;
+    white-space: normal;
+  }
+  .proto-table td { border-bottom: 0; padding: .2rem 0; }
+  .proto-table .proto__hint { padding-bottom: .5rem; }
+  /* The platform cells regain their column heading as an inline label. */
+  .proto-table td[data-label] {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .proto-table td[data-label]::before {
+    content: attr(data-label);
+    min-width: 5.5rem;
+  }
+  html[lang="fa"] .proto-table td[data-label] {
+    letter-spacing: 0;
+    text-transform: none;
+    font-family: var(--sans);
+    font-size: .78rem;
+  }
+  .table-wrap:has(.proto-table) { overflow-x: visible; }
 }
 
-.download-card {
-  padding: clamp(1.75rem, 4vw, 2.5rem);
-  border-radius: var(--radius-lg);
-  border: 1px solid rgba(139, 92, 246, 0.3);
-  background: linear-gradient(
-    160deg,
-    rgba(139, 92, 246, 0.1),
-    var(--card) 55%
-  );
-  box-shadow: var(--shadow-card);
-}
 
-.download-card__head {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  margin-block-end: 1.5rem;
-}
-
-.download-card__icon {
-  width: 3.25rem;
-  height: 3.25rem;
-  border-radius: var(--radius);
-  display: grid;
-  place-items: center;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border-strong);
-  flex-shrink: 0;
-}
-
-.download-card__icon svg {
-  width: 1.6rem;
-  height: 1.6rem;
-  color: var(--fg);
-}
-
-.download-card__meta {
-  color: var(--fg-subtle);
-  font-size: 0.88rem;
-  margin-block-start: 0.2rem;
-}
-
-.download-card__links {
-  margin-block-start: 1rem;
-  font-size: 0.85rem;
-  color: var(--fg-subtle);
-}
-
-.download-card__links a {
-  color: var(--highlight);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-.badge-soon {
-  display: inline-block;
-  padding: 0.25rem 0.7rem;
-  border-radius: var(--radius-pill);
-  font-size: 0.72rem;
+/* ═══ FAQ ════════════════════════════════════════════════════════════════
+   <details>/<summary>, so it opens with scripting off and is findable by
+   in-page search. */
+.faq { display: grid; border-top: 1px solid var(--rule-2); max-width: 60rem; }
+.faq details { border-bottom: 1px solid var(--rule); }
+.faq summary {
+  padding-block: 1.15rem;
+  font-size: 1.02rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--highlight);
-  background: rgba(34, 211, 238, 0.12);
-  border: 1px solid rgba(34, 211, 238, 0.3);
-}
-
-.notice {
-  padding: 1.25rem 1.4rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
-}
-
-.notice--warn {
-  border-color: rgba(245, 158, 11, 0.3);
-  background: rgba(245, 158, 11, 0.07);
-}
-
-/* h2 or h3 depending on what precedes the box: on /download/ and
-   /reseller/ this notice is the first heading after the h1, so an h3 there
-   was a level skip. Matched on both levels rather than pinned to one. */
-.notice h2,
-.notice h3 {
-  font-size: 1rem;
-  font-weight: 650;
-  line-height: 1.4;
-  margin-block-start: 0;
-  margin-block-end: 0.5rem;
+  letter-spacing: -.015em;
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  gap: 1rem;
+  align-items: baseline;
+  justify-content: space-between;
+  list-style: none;
+  color: var(--ink);
+  cursor: pointer;
 }
-
-.notice h2 svg,
-.notice h3 svg {
-  width: 1.05rem;
-  height: 1.05rem;
-  color: var(--highlight);
-  flex-shrink: 0;
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after { content: "+"; font-family: var(--mono); color: var(--violet); flex: none; font-size: 1.1rem; }
+.faq details[open] summary::after { content: "\2013"; }
+.faq__answer, .faq details p {
+  padding-bottom: 1.15rem;
+  color: var(--ink-2);
+  line-height: 1.75;
+  max-width: 66ch;
 }
+.faq__answer p + p { margin-top: .8rem; }
 
-.notice p {
-  color: var(--fg-muted);
-  font-size: 0.92rem;
+
+/* ═══ TWO-COLUMN INFO ROWS ═══════════════════════════════════════════════
+   A label and a paragraph. Used for the feature list, the payment notes,
+   the contact details and the reseller terms — anywhere a heading and a
+   sentence beat a card. */
+.rows { display: grid; border-top: 1px solid var(--rule-2); max-width: 64rem; }
+.rows > div, .rows > li {
+  display: grid;
+  grid-template-columns: minmax(9rem, 15rem) minmax(0, 1fr);
+  gap: clamp(1rem, 3vw, 2.5rem);
+  padding-block: 1.15rem;
+  border-bottom: 1px solid var(--rule);
+  align-items: start;
+  list-style: none;
 }
+@media (max-width: 44rem) {
+  .rows > div, .rows > li { grid-template-columns: 1fr; gap: .35rem; }
+}
+.rows h3 { font-size: .95rem; font-weight: 700; letter-spacing: -.015em; font-family: var(--sans); }
+.rows p { color: var(--ink-2); line-height: 1.7; font-size: .92rem; }
+.rows p + p { margin-top: .6rem; }
+.rows a { color: var(--violet); }
 
-/* Platform tiles -- the main event on the download page. Someone arriving
-   here is looking for their own platform and a button, so the grid leads with
-   a recognisable brand glyph and puts the button directly under it.
 
-   auto-fit with a minimum means four across on a desktop, two on a tablet and
-   one on a phone, without a media query per breakpoint. */
+/* ═══ PAGE HERO (sub-pages) ══════════════════════════════════════════════ */
+.page-hero {
+  padding-block: clamp(2.6rem, 5vw, 5rem) clamp(1.6rem, 3vw, 2.6rem);
+  border-bottom: 1px solid var(--rule);
+}
+.page-hero__inner { display: grid; gap: 1rem; max-width: 62rem; }
+.page-hero h1 { font-size: clamp(2rem, 4.4vw, 4rem); line-height: 1; letter-spacing: -.038em;
+  font-variation-settings: "opsz" 72, "wdth" 94; }
+.page-hero--center .page-hero__inner { justify-items: center; text-align: center; margin-inline: auto; }
+.page-hero--center .lead { margin-inline: auto; }
+
+
+/* ═══ DOWNLOAD ═══════════════════════════════════════════════════════════ */
+.download-hero { padding-bottom: 0; }
 .platform-grid {
   display: grid;
-  gap: 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--rule);
+  border-inline-start: 1px solid var(--rule);
 }
-
-/* Between phone and desktop, auto-fit lands on three across and leaves the
-   fourth tile stranded on its own row. Two-by-two is the better shape. */
-@media (min-width: 40rem) and (max-width: 61.99rem) {
-  .platform-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
+@media (max-width: 64rem) { .platform-grid { grid-template-columns: 1fr; } }
 .platform-tile {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 1.75rem 1.25rem;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow-card);
-  transition: transform 0.2s ease, border-color 0.2s ease;
-}
-
-/* A platform you can actually download carries the brand tint; one that is
-   not built yet is visibly dimmer. The difference should be obvious at a
-   glance, before reading a word. */
-.platform-tile--ready {
-  border-color: rgba(139, 92, 246, 0.32);
-  background: linear-gradient(170deg, rgba(139, 92, 246, 0.13), var(--card) 55%);
-}
-
-.platform-tile--ready:hover {
-  transform: translateY(-3px);
-  border-color: rgba(139, 92, 246, 0.55);
-}
-
-.platform-tile--soon {
-  opacity: 0.6;
-}
-
-.platform-tile__glyph {
+  border-inline-end: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding: clamp(1.6rem, 2.8vw, 2.4rem) clamp(1.3rem, 2.2vw, 2rem);
   display: grid;
-  place-items: center;
-  width: 3.5rem;
-  height: 3.5rem;
-  margin-block-end: 1rem;
-  border-radius: var(--radius);
-  color: var(--fg-muted);
+  gap: .9rem;
+  align-content: start;
+  background: var(--paper);
+  transition: background-color .3s;
 }
-
-.platform-tile__glyph svg {
-  width: 2.4rem;
-  height: 2.4rem;
-}
-
-.platform-tile--ready .platform-tile__glyph {
-  color: var(--fg);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border);
-}
-
-.platform-tile__name {
-  font-size: 1.15rem;
-  margin-block-end: 0.4rem;
-}
-
+.platform-tile:hover { background: var(--white); }
+.platform-tile--soon { background: var(--paper-2); }
+.platform-tile__glyph { width: 2.6rem; height: 2.6rem; display: block; color: var(--ink); }
+.platform-tile--soon .platform-tile__glyph { color: var(--ink-3); }
+.platform-tile__name { font-size: 1.5rem; letter-spacing: -.03em;
+  font-variation-settings: "opsz" 32, "wdth" 100; }
 .platform-tile__meta {
-  color: var(--fg-muted);
-  font-size: 0.88rem;
-  margin-block-end: 1.25rem;
+  font-family: var(--mono); font-size: .615rem; letter-spacing: .1em;
+  color: var(--ink-3); text-transform: uppercase;
+}
+.platform-tile__note { font-size: .87rem; color: var(--ink-2); line-height: 1.6; }
+.platform-tile__cta { margin-top: .2rem; }
+.badge-soon {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  justify-self: start;
+  font-family: var(--mono);
+  font-size: .6rem;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  /* Darker than --warn on purpose: this badge sits on the recessed paper-2
+     tile, where the standard warn tone only reaches 3.95:1. */
+  color: #7A4500;
+  border: 1px solid rgba(122, 69, 0, .4);
+  background: rgba(122, 69, 0, .08);
+  border-radius: 999px;
+  padding: .3rem .7rem;
 }
 
-/* Pushed to the bottom so the buttons line up across tiles of different
-   text lengths. */
-.platform-tile__cta {
-  margin-block-start: auto;
-  width: 100%;
-}
-
-.platform-tile__note {
-  margin-block-start: 0.6rem;
-  font-size: 0.78rem;
-  color: var(--fg-subtle);
-}
-
-.platform-tile .badge-soon {
-  margin-block-end: 0.75rem;
-}
-
+/* Numbered install steps. These get numbers because they are a real
+   sequence performed in order, unlike a set of features. */
 .steps-list {
-  counter-reset: step;
+  display: grid;
+  counter-reset: nx-step;
+  border-top: 1px solid var(--rule);
+  margin-top: 1.4rem;
   list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 1rem;
 }
-
 .steps-list li {
-  counter-increment: step;
-  display: flex;
-  gap: 0.9rem;
-  color: var(--fg-muted);
-  font-size: 0.95rem;
+  counter-increment: nx-step;
+  list-style: none;
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: 1rem;
+  padding-block: .95rem;
+  border-bottom: 1px solid var(--rule);
+  font-size: .9rem;
+  color: var(--ink-2);
+  line-height: 1.7;
+  align-items: baseline;
 }
-
 .steps-list li::before {
-  content: counter(step);
-  flex-shrink: 0;
-  width: 1.6rem;
-  height: 1.6rem;
-  border-radius: var(--radius-pill);
-  display: grid;
-  place-items: center;
-  background: rgba(139, 92, 246, 0.15);
-  border: 1px solid rgba(139, 92, 246, 0.3);
-  color: var(--primary-soft);
-  font-size: 0.8rem;
-  font-weight: 700;
-  font-family: var(--font-mono);
+  content: counter(nx-step, decimal-leading-zero);
+  font-family: var(--mono);
+  font-size: .7rem;
+  color: var(--violet);
+  font-variant-numeric: tabular-nums;
 }
-
-/* ==========================================================================
-   12. Forms
-   ========================================================================== */
-
-.form-layout {
+/* Three children, two columns: the number, then a heading AND a paragraph.
+   Without the explicit placement below the paragraph wraps onto the next
+   row and lands in the 2rem number track, which renders it one word per
+   line — seen on the reseller page's "Apply / Fill in the form below"
+   step. Everything that is not the number belongs in column two. */
+.step {
   display: grid;
-  gap: 1.75rem;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: .3rem 1rem;
+  align-items: baseline;
+  align-content: start;
+}
+.step__num {
+  grid-column: 1;
+  grid-row: 1;
+  font-family: var(--mono);
+  font-size: .7rem;
+  color: var(--violet);
+  font-variant-numeric: tabular-nums;
+}
+.step > :not(.step__num) { grid-column: 2; min-width: 0; }
+.step h3 { font-size: 1.02rem; letter-spacing: -.02em; }
+.step p { color: var(--ink-2); font-size: .9rem; line-height: 1.65; }
+html[lang="fa"] .step h3 { letter-spacing: 0; }
+html[lang="fa"] .step p { line-height: 2; }
+
+
+/* ═══ NOTICE / CALLOUT / ALERT ═══════════════════════════════════════════ */
+/* Two shapes share this component, and the difference is load-bearing:
+     .notice > svg + div      an icon beside a body      (two columns)
+     .notice > h3 + ol        a heading above a list      (one column)
+
+   The download page uses BOTH. Laying the second one out as two columns put
+   the heading in the `auto` track, where it took 173px of a 320px screen and
+   left the install steps 58px — the sentences then ran straight off the page.
+   Measured at 320px, and it is exactly the kind of fault that only appears
+   on the narrowest real phone.
+
+   So the two-column form is opted into by actually having an icon first. */
+.notice, .callout {
+  display: block;
+  border: 1px solid var(--rule-2);
+  background: var(--white);
+  border-radius: var(--r-lg);
+  padding: 1rem 1.1rem;
+  margin-top: 1.4rem;
+  max-width: 60rem;
+}
+.notice > h3, .callout > h3 {
+  font-size: .95rem;
+  font-weight: 700;
+  letter-spacing: -.015em;
+  font-family: var(--sans);
+  color: var(--ink);
+}
+html[lang="fa"] .notice > h3, html[lang="fa"] .callout > h3 { letter-spacing: 0; }
+
+/* :has() is supported everywhere this design targets; where it is not, the
+   block fallback above still reads correctly — the icon simply sits on its
+   own line above the text instead of beside it. */
+.notice:has(> svg), .callout:has(> svg) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: .9rem;
   align-items: start;
 }
-
-@media (min-width: 56rem) {
-  .form-layout {
-    grid-template-columns: 1.15fr 0.85fr;
-    gap: 2.5rem;
-  }
+.notice > svg, .callout > svg, .card__icon { flex: none; margin-top: .15rem; color: var(--violet); }
+.notice h4, .callout__title {
+  font-family: var(--sans);
+  font-size: .9rem;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  margin: 0 0 .3rem;
+  color: var(--ink);
 }
+.notice p, .callout p { font-size: .85rem; color: var(--ink-2); line-height: 1.7; }
+.notice p + p, .callout p + p { margin-top: .5rem; }
+.notice--warn, .callout--warn { border-color: rgba(161, 92, 0, .3); background: rgba(161, 92, 0, .06); }
+.notice--warn > svg, .callout--warn > svg { color: var(--warn); }
+.callout--info { border-color: rgba(109, 58, 232, .28); background: rgba(109, 58, 232, .05); }
+
+.alert {
+  border-radius: var(--r-lg);
+  padding: 1rem 1.15rem;
+  margin-bottom: 1.4rem;
+  font-size: .9rem;
+  line-height: 1.65;
+  border: 1px solid var(--rule-2);
+  background: var(--white);
+}
+.alert h3 { font-size: 1rem; font-family: var(--sans); font-weight: 700; margin-bottom: .3rem; letter-spacing: -.01em; }
+.alert p { color: inherit; }
+.alert--success { border-color: rgba(15, 125, 92, .35); background: rgba(15, 125, 92, .07); color: #0B5C44; }
+.alert--success h3 { color: var(--ok); }
+.alert--error { border-color: rgba(179, 38, 30, .35); background: #FFF7F6; color: #8E1E18; }
+
+
+/* ═══ CARDS / BENTO / PILLARS / SPLIT ════════════════════════════════════ */
+.card, .aside-card, .form-card, .bento__cell, .pillar {
+  background: var(--white);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r-lg);
+  padding: clamp(1.25rem, 2.2vw, 1.9rem);
+  box-shadow: var(--lift-1);
+}
+.card, .pillar, .bento__cell { display: grid; gap: .7rem; align-content: start; }
+.card h3, .pillar h3, .bento__cell h3 { font-size: 1.05rem; letter-spacing: -.025em; }
+.card p, .pillar p, .bento__cell p { color: var(--ink-2); font-size: .9rem; line-height: 1.65; }
+
+.pillar__icon, .bento__icon {
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: var(--r-sm);
+  background: rgba(109, 58, 232, .1);
+  color: var(--violet);
+  flex: none;
+}
+
+.bento {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: clamp(1rem, 2vw, 1.5rem);
+}
+.bento__cell--wide { grid-column: span 2; }
+@media (max-width: 62rem) {
+  .bento { grid-template-columns: repeat(2, 1fr); }
+  .bento__cell--wide { grid-column: span 2; }
+}
+@media (max-width: 40rem) {
+  .bento { grid-template-columns: 1fr; }
+  .bento__cell--wide { grid-column: span 1; }
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(1.6rem, 4vw, 4rem);
+  align-items: center;
+}
+.split__body { display: grid; gap: 1rem; align-content: start; }
+.split__media { min-width: 0; }
+.split--flip .split__media { order: -1; }
+@media (max-width: 62rem) {
+  .split { grid-template-columns: 1fr; }
+  .split--flip .split__media { order: 0; }
+}
+
+.checklist { display: grid; gap: .6rem; list-style: none; }
+.checklist li {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  gap: .6rem;
+  align-items: start;
+  font-size: .92rem;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+.checklist li svg { margin-top: .3rem; color: var(--ok); flex: none; }
+
+.stat-row { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
+.stat { display: grid; gap: .1rem; }
+.stat__value {
+  font-family: var(--display);
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+}
+.stat__value--text { font-size: 1.05rem; }
+.stat__label {
+  font-family: var(--mono); font-size: .58rem; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+
+/* ── the encryption / routing diagram ──────────────────────────────────
+   The protected leg stops at our servers rather than running to the
+   destination, because that is what is true. */
+.flow { display: grid; gap: .6rem; }
+.flow--stack { grid-auto-flow: row; }
+.flow__node {
+  display: grid;
+  gap: .3rem;
+  background: var(--white);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r);
+  padding: .85rem 1rem;
+  box-shadow: var(--lift-1);
+}
+.flow__node--end { background: var(--paper-2); box-shadow: none; }
+.flow__node--dead { opacity: .55; }
+.flow__tag {
+  font-family: var(--mono); font-size: .56rem; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.flow__caption { font-size: .82rem; color: var(--ink-2); line-height: 1.6; }
+.flow__link {
+  display: grid;
+  gap: .25rem;
+  justify-items: center;
+  font-family: var(--mono);
+  font-size: .58rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--violet);
+  padding-block: .2rem;
+}
+.flow__link--plain { color: var(--ink-3); }
+.flow__line {
+  display: block;
+  width: 2px;
+  height: 1.4rem;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--violet-raw), var(--cyan-raw));
+}
+.flow__link--plain .flow__line { background: var(--rule-2); }
+
+.device, .phone__screen {
+  background: var(--a-bg);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  color: var(--a-fg);
+  position: relative;
+}
+.device__body { padding: .9rem; display: grid; gap: .6rem; }
+.device__soon {
+  position: absolute;
+  inset-block-start: .6rem;
+  inset-inline-end: .6rem;
+  z-index: 2;
+}
+.device--phone { max-width: 15rem; margin-inline: auto; border-radius: 1.6rem; }
+.phone__notch {
+  width: 4rem; height: .35rem; border-radius: 999px;
+  background: rgba(255, 255, 255, .16); margin: .6rem auto 0;
+}
+.device--mac, .device--win { width: 100%; }
+
+
+/* ═══ THE FLOOD ══════════════════════════════════════════════════════════
+   The one saturated block on the page, and it closes the argument. Flat
+   brand violet — no gradient, no glow — and the paper grain still sits over
+   it, so it reads as a printed panel rather than a wash. */
+.flood, .cta-band { background: #5B2CD6; color: #fff; border-top: 0; }
+.flood .eyb, .cta-band .eyebrow { color: rgba(255, 255, 255, .74); }
+.flood .eyb::before, .cta-band .eyebrow::before { background: rgba(255, 255, 255, .6); }
+.flood .lede, .flood .lead, .cta-band .lead, .cta-band .lede { color: rgba(255, 255, 255, .88); }
+.flood h1, .flood h2, .flood h3, .cta-band h1, .cta-band h2, .cta-band h3 { color: #fff; }
+.flood .warnline, .cta-band .hero__note { color: rgba(255, 255, 255, .82); }
+.flood .warnline b, .cta-band .hero__note b { color: #fff; }
+.flood a, .cta-band a { color: #fff; }
+
+.flood .btn--primary, .cta-band .btn--primary {
+  background: #fff;
+  color: #3C1A9E;
+  box-shadow: 0 1px 2px rgba(20, 4, 60, .3), 0 14px 30px -12px rgba(20, 4, 60, .5);
+}
+.flood .btn--primary:hover, .cta-band .btn--primary:hover { background: #fff; color: #2E1179; }
+.flood .btn--ghost, .cta-band .btn--ghost {
+  background: transparent; color: #fff; border-color: rgba(255, 255, 255, .45); box-shadow: none;
+}
+.flood .btn--ghost:hover, .cta-band .btn--ghost:hover { border-color: #fff; background: rgba(255, 255, 255, .12); color: #fff; }
+
+.close { display: grid; grid-template-columns: repeat(12, 1fr); gap: clamp(1.4rem, 3vw, 3rem); align-items: end; }
+.close__lhs { grid-column: 1 / 8; display: grid; gap: 1.1rem; }
+.close__rhs { grid-column: 8 / 13; display: grid; gap: .85rem; justify-items: start; }
+@media (max-width: 70rem) { .close__lhs, .close__rhs { grid-column: 1 / 13; } }
+.close-list { display: grid; border-top: 1px solid rgba(255, 255, 255, .34); margin-top: 1.6rem; }
+.close-list div {
+  padding-block: .85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, .2);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: .7rem;
+  align-items: baseline;
+  font-size: .86rem;
+  color: rgba(255, 255, 255, .84);
+}
+.close-list b { color: #fff; font-weight: 700; }
+
+
+/* ═══ FORMS ══════════════════════════════════════════════════════════════
+   Restyled only. Every validation rule, the CSRF token, the honeypot, the
+   minimum fill time and the rate limiter are server-side in inc/form.php
+   and inc/security.php, and none of them depend on anything here. */
+.form-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr);
+  gap: clamp(1.6rem, 4vw, 3.5rem);
+  align-items: start;
+}
+@media (max-width: 68rem) { .form-layout { grid-template-columns: 1fr; } }
 
 .form-card {
-  padding: clamp(1.5rem, 4vw, 2.25rem);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--card);
-  box-shadow: var(--shadow-card);
-}
-
-.field {
   display: grid;
-  gap: 0.45rem;
-  margin-block-end: 1.15rem;
+  gap: 1.1rem;
+  box-shadow: var(--lift-2);
+  padding: clamp(1.4rem, 2.6vw, 2.2rem);
 }
+.form-card form { display: grid; gap: 1.1rem; }
 
+.field { display: grid; gap: .4rem; }
 .field__label {
   display: flex;
   align-items: baseline;
-  gap: 0.5rem;
-  font-size: 0.9rem;
-  font-weight: 600;
+  justify-content: space-between;
+  gap: .8rem;
+  font-size: .88rem;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: -.01em;
 }
-
 .field__flag {
-  font-size: 0.75rem;
+  font-family: var(--mono);
+  font-size: .56rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
   font-weight: 500;
-  color: var(--fg-subtle);
+  flex: none;
 }
-
-.field__hint {
-  font-size: 0.82rem;
-  color: var(--fg-subtle);
-}
-
-.input,
-.textarea,
-.select {
+.input, .textarea, .select {
   width: 100%;
-  padding: 0.75rem 0.9rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--border-strong);
-  background: rgba(10, 10, 16, 0.6);
-  color: var(--fg);
-  font-size: 0.95rem;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.input::placeholder,
-.textarea::placeholder {
-  color: var(--fg-subtle);
-}
-
-.input:focus,
-.textarea:focus,
-.select:focus {
-  outline: none;
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
-}
-
-.textarea {
-  min-height: 9rem;
-  resize: vertical;
-  line-height: 1.65;
-}
-
-.select {
+  font-family: var(--sans);
+  font-size: .95rem;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--r);
+  padding: .7rem .85rem;
+  transition: border-color .2s, box-shadow .2s, background-color .2s;
+  -webkit-appearance: none;
   appearance: none;
-  cursor: pointer;
-  /* Room for the chevron drawn by the wrapper, on whichever side is "end". */
-  padding-inline-end: 2.5rem;
 }
-
-.select-wrap {
-  position: relative;
+.textarea { resize: vertical; min-height: 8rem; }
+.input:hover, .textarea:hover, .select:hover { border-color: var(--rule-3); }
+.input:focus, .textarea:focus, .select:focus {
+  outline: none;
+  background: var(--white);
+  border-color: var(--violet);
+  box-shadow: 0 0 0 3px rgba(109, 58, 232, .16);
 }
+.input::placeholder, .textarea::placeholder { color: var(--ink-3); opacity: .8; }
 
+.select-wrap { position: relative; display: block; }
+/* The arrow is a background image rather than a pseudo-element, because a
+   <select> cannot host one. inset-inline-end keeps it on the correct side
+   in Persian. */
 .select-wrap::after {
   content: "";
   position: absolute;
-  inset-inline-end: 1rem;
-  inset-block-start: 50%;
-  width: 0.5rem;
-  height: 0.5rem;
-  margin-block-start: -0.35rem;
-  border-inline-end: 2px solid var(--fg-subtle);
-  border-block-end: 2px solid var(--fg-subtle);
+  inset-inline-end: .9rem;
+  top: 50%;
+  width: .5rem;
+  height: .5rem;
+  margin-top: -.35rem;
+  border-inline-end: 2px solid var(--ink-3);
+  border-bottom: 2px solid var(--ink-3);
   transform: rotate(45deg);
   pointer-events: none;
 }
+.select { padding-inline-end: 2.4rem; }
 
-.field--error .input,
-.field--error .textarea,
-.field--error .select {
-  border-color: var(--danger);
+.field__hint { font-size: .78rem; color: var(--ink-3); line-height: 1.55; }
+.field__error { font-size: .8rem; color: var(--dead); font-weight: 600; line-height: 1.5; }
+.field--error .input, .field--error .textarea, .field--error .select {
+  border-color: var(--dead);
+  background: #FFF7F6;
+}
+.field--error .input:focus, .field--error .textarea:focus, .field--error .select:focus {
+  box-shadow: 0 0 0 3px rgba(179, 38, 30, .16);
 }
 
-.field__error {
-  font-size: 0.83rem;
-  color: #fca5a5;
-}
-
-/* Off-screen rather than display:none -- a bot reading the DOM should still
-   find the honeypot, which is the entire point of it, and a screen reader
-   should still reach .sr-only labels. */
-.honeypot,
-.sr-only {
+/* The honeypot. Off-screen rather than display:none, so a bot parsing the
+   DOM still finds and fills it. Never hide this with `hidden` — that is
+   exactly what a modern bot checks for. */
+.honeypot {
   position: absolute !important;
   width: 1px;
   height: 1px;
@@ -1917,1561 +2507,372 @@ html[lang="fa"] .brand__beta {
   clip: rect(0 0 0 0);
   clip-path: inset(50%);
   white-space: nowrap;
-}
-
-.alert {
-  padding: 1rem 1.2rem;
-  border-radius: var(--radius);
-  margin-block-end: 1.5rem;
-  font-size: 0.93rem;
-}
-
-.alert--success {
-  border: 1px solid rgba(16, 185, 129, 0.35);
-  background: rgba(16, 185, 129, 0.1);
-  color: #6ee7b7;
-}
-
-.alert--error {
-  border: 1px solid rgba(239, 68, 68, 0.35);
-  background: rgba(239, 68, 68, 0.09);
-  color: #fca5a5;
-}
-
-.alert h3 {
-  font-size: 1rem;
-  margin-block-end: 0.3rem;
-  color: inherit;
-}
-
-.aside-card {
-  padding: 1.5rem;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
-}
-
-.aside-card + .aside-card {
-  margin-block-start: 1rem;
-}
-
-.aside-card h3 {
-  font-size: 1rem;
-  margin-block-end: 0.5rem;
-}
-
-.aside-card p {
-  color: var(--fg-muted);
-  font-size: 0.93rem;
-}
-
-.aside-card a {
-  color: var(--highlight);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  /* Email addresses stay LTR inside Persian sentences. */
-  unicode-bidi: isolate;
-}
-
-/* ==========================================================================
-   13. CTA band + footer
-   ========================================================================== */
-
-.cta-band {
-  position: relative;
-  overflow: hidden;
-  border-radius: var(--radius-lg);
-  border: 1px solid rgba(139, 92, 246, 0.3);
-  background: linear-gradient(
-    140deg,
-    rgba(139, 92, 246, 0.18),
-    rgba(34, 211, 238, 0.08) 60%,
-    var(--card)
-  );
-  padding: clamp(2.25rem, 6vw, 3.5rem);
-  text-align: center;
-}
-
-.cta-band h2 {
-  margin-block-end: 0.75rem;
-}
-
-.cta-band p {
-  color: var(--fg-muted);
-  max-width: 34rem;
-  margin-inline: auto;
-  margin-block-end: 1.75rem;
-}
-
-.site-footer {
-  border-block-start: 1px solid var(--border);
-  padding-block: 3rem 2rem;
-  margin-block-start: var(--section-y);
-}
-
-.site-footer__grid {
-  display: grid;
-  gap: 2rem;
-}
-
-@media (min-width: 48rem) {
-  .site-footer__grid {
-    grid-template-columns: 1.5fr 1fr 1fr;
-  }
-}
-
-/* These are h2 elements, not h4: an h4 straight after the page's last h2
-   was a heading-level skip on every page of the site, and the footer's
-   groups are top-level sections of the footer landmark. Every size,
-   weight and spacing value the heading needs is set here, because the
-   element now inherits the document's h2 styling instead of h4's. */
-.site-footer__title {
-  font-size: 0.82rem;
-  font-weight: 600;
-  line-height: 1.4;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--fg-subtle);
-  margin-block: 0 0.9rem;
-}
-
-html[lang="fa"] .site-footer__title {
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-.site-footer ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 0.55rem;
-}
-
-.site-footer a {
-  color: var(--fg-muted);
-  font-size: 0.92rem;
-}
-
-.site-footer a:hover {
-  color: var(--fg);
-}
-
-.site-footer__about p {
-  color: var(--fg-muted);
-  font-size: 0.92rem;
-  margin-block-start: 0.9rem;
-  max-width: 30rem;
-}
-
-.site-footer__bottom {
-  margin-block-start: 2.5rem;
-  padding-block-start: 1.5rem;
-  border-block-start: 1px solid var(--border);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem 1.5rem;
-  align-items: center;
-  color: var(--fg-subtle);
-  font-size: 0.85rem;
-}
-
-.site-footer__bottom p {
-  margin-inline-end: auto;
-}
-
-/* ==========================================================================
-   13b. Assurance strip
-   ========================================================================== */
-
-.assurance {
-  border-block: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.015);
-}
-
-.assurance__inner {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.85rem 2.75rem;
-  padding-block: 1.15rem;
-}
-
-.assurance__item {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-  font-size: 0.88rem;
-  font-weight: 500;
-  color: var(--fg-muted);
-}
-
-.assurance__item svg {
-  width: 1rem;
-  height: 1rem;
-  color: var(--highlight);
-  flex-shrink: 0;
-}
-
-/* ==========================================================================
-   13c. Encryption flow diagram
-   --------------------------------------------------------------------------
-   Conceptual, and captioned as such. It shows where the encryption sits --
-   between the device and our servers -- rather than implying the tunnel
-   extends all the way to the destination, which would be untrue.
-   ========================================================================== */
-
-.flow {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: clamp(1.25rem, 3vw, 2rem);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
-}
-
-.flow__node {
-  display: grid;
-  place-items: center;
-  gap: 0.5rem;
-  flex: 0 0 auto;
-  min-width: 6.5rem;
-  padding: 1rem 0.75rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--card);
-  text-align: center;
-  font-size: 0.82rem;
-  font-weight: 500;
-}
-
-.flow__node svg {
-  width: 1.4rem;
-  height: 1.4rem;
-  color: var(--primary-soft);
-}
-
-.flow__node--end svg {
-  color: var(--fg-subtle);
-}
-
-.flow__link {
-  flex: 1 1 3rem;
-  display: grid;
-  place-items: center;
-  gap: 0.45rem;
-}
-
-.flow__line {
-  width: 100%;
-  height: 2px;
-  border-radius: 2px;
-  background-image: linear-gradient(
-    90deg,
-    var(--primary) 0 6px,
-    transparent 6px 12px
-  );
-  background-size: 12px 2px;
-  animation: nx-flow 0.9s linear infinite;
-}
-
-/* The unencrypted leg beyond our servers is deliberately grey and static --
-   it is not part of what we protect. */
-.flow__link--plain .flow__line {
-  background-image: linear-gradient(
-    90deg,
-    var(--border-strong) 0 6px,
-    transparent 6px 12px
-  );
-  animation: none;
-}
-
-@keyframes nx-flow {
-  to {
-    background-position: 12px 0;
-  }
-}
-
-.flow__tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.18rem 0.55rem;
-  border-radius: var(--radius-pill);
-  background: rgba(139, 92, 246, 0.14);
-  border: 1px solid rgba(139, 92, 246, 0.38);
-  color: var(--primary-soft);
-  font-size: 0.68rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.flow__tag svg {
-  width: 0.75rem;
-  height: 0.75rem;
-}
-
-.flow__caption {
-  margin-block-start: 1rem;
-  font-size: 0.83rem;
-  color: var(--fg-subtle);
-  text-align: center;
-}
-
-@media (max-width: 48rem) {
-  .flow {
-    flex-direction: column;
-  }
-  .flow__node {
-    width: 100%;
-  }
-  .flow__link {
-    flex: 0 0 auto;
-  }
-  .flow__line {
-    width: 2px;
-    height: 2rem;
-    background-image: linear-gradient(
-      180deg,
-      var(--primary) 0 6px,
-      transparent 6px 12px
-    );
-    background-size: 2px 12px;
-    animation-name: nx-flow-v;
-  }
-  .flow__link--plain .flow__line {
-    background-image: linear-gradient(
-      180deg,
-      var(--border-strong) 0 6px,
-      transparent 6px 12px
-    );
-  }
-}
-
-@keyframes nx-flow-v {
-  to {
-    background-position: 0 12px;
-  }
-}
-
-/* ==========================================================================
-   13d. Step connectors
-   ========================================================================== */
-
-@media (min-width: 62rem) {
-  .steps-grid .step {
-    position: relative;
-  }
-
-  /* Hairline joining each step's number to the next, so the three read as a
-     sequence rather than three unrelated cards. */
-  .steps-grid .step:not(:last-child)::after {
-    content: "";
-    position: absolute;
-    inset-block-start: 1.75rem;
-    inset-inline-start: 3.5rem;
-    inset-inline-end: -1.25rem;
-    height: 1px;
-    background: linear-gradient(to right, var(--border-strong), transparent);
-  }
-
-  [dir="rtl"] .steps-grid .step:not(:last-child)::after {
-    background: linear-gradient(to left, var(--border-strong), transparent);
-  }
-}
-
-/* ==========================================================================
-   13e. Launch banner
-   --------------------------------------------------------------------------
-   An inline strip at the top of the home page, deliberately NOT a modal. It
-   sits in the flow, so it covers nothing, needs no scroll lock or focus
-   handling, and renders fine with JavaScript off -- the script only hides it
-   again for someone who already dismissed it.
-
-   Styled off the .notice card so it reads as part of the page rather than an
-   ad bolted on top, with a violet tint to earn a little more attention than a
-   plain notice gets.
-
-   Note the background: two layered backgrounds rather than a pseudo-element
-   at z-index -1. That trick breaks the instant the element becomes its own
-   stacking context -- which is exactly what turned the modal this replaced
-   into a solid gradient with unreadable text on top of it.
-   ========================================================================== */
-
-.banner-wrap {
-  padding-block-start: 1.5rem;
-}
-
-.banner {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 1rem 1.25rem;
-  border-radius: var(--radius);
-  border: 1px solid rgba(139, 92, 246, 0.32);
-  background: linear-gradient(
-      100deg,
-      rgba(139, 92, 246, 0.14),
-      rgba(34, 211, 238, 0.06) 55%,
-      transparent
-    ),
-    var(--card);
-  box-shadow: var(--shadow-card);
-}
-
-.banner[hidden] {
-  display: none;
-}
-
-.banner__icon {
-  display: grid;
-  place-items: center;
-  width: 2.5rem;
-  height: 2.5rem;
-  flex-shrink: 0;
-  border-radius: var(--radius);
-  background: rgba(139, 92, 246, 0.16);
-  border: 1px solid rgba(139, 92, 246, 0.34);
-  color: var(--primary-soft);
-}
-
-.banner__icon svg {
-  width: 1.25rem;
-  height: 1.25rem;
-}
-
-.banner__text {
-  flex: 1 1 16rem;
-  min-width: 0;
-}
-
-.banner__title {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.45rem 0.65rem;
-  font-weight: 650;
-  font-size: 1rem;
-}
-
-.banner__pill {
-  padding: 0.15rem 0.6rem;
-  border-radius: var(--radius-pill);
-  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
-  color: #fff;
-  font-size: 0.72rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.banner__body {
-  margin-block-start: 0.3rem;
-  color: var(--fg-muted);
-  font-size: 0.9rem;
-}
-
-.banner__actions {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-shrink: 0;
-}
-
-.banner__x {
-  display: grid;
-  place-items: center;
-  width: 1.9rem;
-  height: 1.9rem;
-  flex-shrink: 0;
   border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--fg-subtle);
-  cursor: pointer;
-  transition: color 0.15s ease, background 0.15s ease;
-}
-
-.banner__x:hover {
-  color: var(--fg);
-  background: rgba(255, 255, 255, 0.07);
-}
-
-.banner__x svg {
-  width: 0.9rem;
-  height: 0.9rem;
-}
-
-@media (max-width: 48rem) {
-  .banner {
-    flex-wrap: wrap;
-  }
-  .banner__actions {
-    width: 100%;
-  }
-  .banner__actions .btn {
-    flex: 1;
-  }
-}
-
-/* ==========================================================================
-   13f. Long-form prose (privacy statement)
-   ========================================================================== */
-
-.privacy__updated {
-  margin-block-start: 1rem;
-  font-size: 0.85rem;
-  color: var(--fg-subtle);
-}
-
-.prose {
-  max-width: 44rem;
-  color: var(--fg-muted);
-}
-
-.prose h2 {
-  font-size: clamp(1.15rem, 2.2vw, 1.35rem);
-  color: var(--fg);
-  margin-block: 2.5rem 0.85rem;
-}
-
-.prose h2:first-child {
-  margin-block-start: 0;
-}
-
-.prose p {
-  margin-block-end: 0.9rem;
-  font-size: 0.98rem;
-}
-
-.prose ul {
-  margin: 0 0 1rem;
   padding: 0;
-  list-style: none;
-  display: grid;
-  gap: 0.6rem;
+  margin: -1px;
 }
 
-.prose li {
-  position: relative;
-  padding-inline-start: 1.25rem;
-  font-size: 0.98rem;
+
+/* ═══ PROSE (privacy, legal) ═════════════════════════════════════════════ */
+.prose { max-width: 46rem; display: grid; gap: 1.05rem; }
+.prose h2 { font-size: clamp(1.15rem, 1.9vw, 1.6rem); letter-spacing: -.025em; margin-top: 1.4rem;
+  font-variation-settings: "opsz" 28, "wdth" 100; }
+.prose h3 { font-size: 1.05rem; letter-spacing: -.02em; margin-top: .8rem; }
+.prose p, .prose li { color: var(--ink-2); line-height: 1.8; }
+.prose ul, .prose ol { display: grid; gap: .5rem; padding-inline-start: 1.2rem; }
+.prose li { list-style: disc; }
+.prose a { color: var(--violet); }
+.privacy__updated, .prose .upd {
+  font-family: var(--mono);
+  font-size: .65rem;
+  letter-spacing: .1em;
+  color: var(--ink-3);
+  text-transform: uppercase;
 }
 
-.prose li::before {
-  content: "";
-  position: absolute;
-  inset-inline-start: 0;
-  inset-block-start: 0.6em;
-  width: 0.35rem;
-  height: 0.35rem;
-  border-radius: 50%;
-  background: var(--primary);
-}
 
-.prose a {
-  color: var(--highlight);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  unicode-bidi: isolate;
-}
-
-/* ==========================================================================
-   14. Utilities
-   --------------------------------------------------------------------------
-   A deliberately small set. They exist so no template needs a style="..."
-   attribute, which in turn lets the Content-Security-Policy in .htaccess
-   stay strict (no 'unsafe-inline'). If you are tempted to add an inline
-   style to a page, add a class here instead.
-   ========================================================================== */
-
-.u-flush-top {
-  padding-block-start: 0;
-}
-
-.u-center {
-  text-align: center;
-}
-
-.u-center-actions {
-  justify-content: center;
-}
-
-.u-narrow {
-  max-width: 40rem;
-  margin-inline: auto;
-}
-
-.u-push-end {
-  margin-inline-start: auto;
-}
-
-.u-mt-sm {
-  margin-block-start: 1rem;
-}
-.u-mt-md {
-  margin-block-start: 1.5rem;
-}
-.u-mb-xs {
-  margin-block-end: 0.5rem;
-}
-.u-mb-md {
-  margin-block-end: 1.5rem;
-}
-.u-mb-lg {
-  margin-block-end: 2.5rem;
-}
-.u-mb-xl {
-  margin-block-end: 3rem;
-}
-.u-my-lead {
-  margin-block: 1.25rem 2rem;
-}
-
-.h-md {
-  font-size: 1.35rem;
-}
-.h-sm {
-  font-size: 1.2rem;
-}
-.h-xs {
-  font-size: 1.05rem;
-}
-
-.text-body {
-  color: var(--fg-muted);
-  font-size: 0.95rem;
-}
-
-/* ==========================================================================
-   15. Motion
-   ========================================================================== */
-
-/* Scroll reveal is opt-IN, applied by JavaScript rather than assumed here.
- *
- * .reveal on its own hides nothing. assets/js/site.js adds .is-armed only
- * once it has an IntersectionObserver in hand and is about to observe the
- * element, then .is-visible when it scrolls into view.
- *
- * The ordering matters: if this stylesheet hid .reveal by default, any error
- * in the script -- or any browser where the observer never fires -- would
- * leave real content permanently invisible. Done this way, the worst case is
- * a page that appears without animating.
- */
-.reveal {
-  transition: opacity 0.5s ease, transform 0.5s ease;
-}
-
-.reveal.is-armed {
-  opacity: 0;
-  transform: translateY(14px);
-}
-
-.reveal.is-armed.is-visible {
-  opacity: 1;
-  transform: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
-  /* Never arm the reveal animation for someone who asked for less motion. */
-  .reveal.is-armed {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-/* ==========================================================================
-   16. Wide layout components (2026-08 rebuild)
-   --------------------------------------------------------------------------
-   Added when the site was widened from 1152px to 1280px. The brief was
-   "clean and wide" against a site that read narrow and basic -- and width
-   alone does not achieve that. A wider container running the same three
-   equal cards just spreads the same thinness further apart. What reads as
-   considered is a page whose sections have DIFFERENT shapes: a bento
-   block, a real table, a location grid, an alternating split row.
-
-   Direction: logical properties only, as everywhere else in this file, so
-   the Persian pages mirror from <html dir="rtl"> with no second stylesheet.
-   Three rules below need a hand-flip because gradients and transforms have
-   no logical form. Each is marked.
-   ========================================================================== */
-
-/* --------------------------------------------------------------------------
-   16.1 Interior page hero
-   --------------------------------------------------------------------------
-   The home page has the app mockup; every other page needs an opening that
-   is more than an h1 on a flat background. Deliberately shallow -- an
-   interior hero that fills the viewport is a page that makes you scroll
-   before it has told you anything.
-   -------------------------------------------------------------------------- */
-
-.page-hero {
-  position: relative;
-  padding-block: clamp(3.5rem, 8vw, 6rem) clamp(2.5rem, 5vw, 4rem);
-  overflow: hidden;
-  isolation: isolate;
-}
-
-.page-hero::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: var(--wash-violet), var(--wash-cyan);
-  pointer-events: none;
-  z-index: 0;
-}
-
-.page-hero::after {
-  content: "";
-  position: absolute;
-  inset-inline: 0;
-  inset-block-end: 0;
-  height: 1px;
-  background: var(--rule);
-}
-
-.page-hero__inner {
-  max-width: 52rem;
-}
-
-.page-hero--center .page-hero__inner {
-  margin-inline: auto;
-  text-align: center;
-}
-
-.page-hero--center .eyebrow {
-  justify-content: center;
-}
-
-.page-hero h1 {
-  margin-block: 0.9rem 1.1rem;
-}
-
-.page-hero .lead {
-  color: var(--fg-muted);
-}
-
-/* --------------------------------------------------------------------------
-   16.2 Stat strip
-   --------------------------------------------------------------------------
-   The figures a visitor wants before reading anything: how many locations,
-   how many ways to connect, which platforms.
-
-   Every number here is COUNTED from a data file at render time
-   (nx_location_count(), nx_protocol_count()), never typed into copy. That
-   is the entire reason this is a component and not three spans: a
-   hand-typed "5 locations" goes stale silently the day a node is added,
-   and this site has already shipped exactly that bug with plan data.
-   -------------------------------------------------------------------------- */
-
-.stat-row {
-  display: grid;
-  gap: 1px;
-  grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr));
-  background: var(--border);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  box-shadow: var(--shadow-card);
-}
-
-/* The 1px gap over a border-coloured background draws the dividers --
-   cheaper and more robust than border-inline-start on each child, which
-   needs a :first-child exception that breaks the moment the row wraps. */
-.stat {
-  background: var(--card);
-  padding: clamp(1.25rem, 3vw, 2rem);
-  text-align: center;
-}
-
-.stat__value {
-  display: block;
-  font-size: clamp(1.75rem, 3.5vw, 2.5rem);
-  font-weight: 700;
-  line-height: 1.1;
-  letter-spacing: -0.03em;
-  /* Brand gradient: violet into cyan, running top-left to bottom-right.
-     That direction is fixed across the whole product -- see brand/README. */
-  background: linear-gradient(135deg, var(--fg) 15%, var(--primary-soft) 55%, var(--highlight));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-html[lang="fa"] .stat__value {
-  letter-spacing: 0;
-}
-
-/* One of the three stats is a phrase rather than a numeral. At the shared
-   size it was two to three times the width of "8" and "5" and unbalanced
-   the whole band; at 768px it wrapped to two lines beside two single
-   characters. Smaller, and no negative tracking, since that is tuned for
-   large numerals. */
-.stat__value--text {
-  font-size: clamp(1.15rem, 2.1vw, 1.5rem);
-  letter-spacing: -0.01em;
-  text-wrap: balance;
-}
-
-.stat__label {
-  display: block;
-  margin-block-start: 0.4rem;
-  color: var(--fg-muted);
-  font-size: 0.9rem;
-}
-
-/* --------------------------------------------------------------------------
-   16.3 Bento grid
-   --------------------------------------------------------------------------
-   An asymmetric feature block. The point is that the cells are NOT equal:
-   one wide cell carries the headline feature and the rest fill around it.
-   Collapses to one column on small screens, where the asymmetry would be
-   meaningless anyway.
-   -------------------------------------------------------------------------- */
-
-.bento {
-  display: grid;
-  gap: 1.25rem;
-  grid-template-columns: 1fr;
-}
-
-@media (min-width: 48rem) {
-  .bento {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  .bento__cell--wide {
-    grid-column: span 2;
-  }
-}
-
-@media (min-width: 68rem) {
-  .bento {
-    grid-template-columns: repeat(3, 1fr);
-  }
-  .bento__cell--wide {
-    grid-column: span 2;
-  }
-}
-
-/* A bento nested in a split column only has half the container to work with,
-   but the media queries above ask the VIEWPORT, which knows nothing about
-   that. At 1280px the home page's nested bento was laid out in three columns
-   inside a ~570px box: the wide cell took two of them and the remaining cell
-   came out about 170px wide, rendering one word per line. Stack instead --
-   once the split itself is two-column there is no width left to divide. A
-   container query would say this more directly but is not safe to rely on
-   for this audience's browsers. */
-@media (min-width: 62rem) {
-  .split__media .bento {
-    grid-template-columns: 1fr;
-  }
-  .split__media .bento__cell--wide {
-    grid-column: auto;
-  }
-}
-
-.bento__cell {
-  position: relative;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: clamp(1.35rem, 2.5vw, 2rem);
-  box-shadow: var(--shadow-card);
-  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease),
-    box-shadow var(--dur) var(--ease);
-  overflow: hidden;
-}
-
-.bento__cell:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-3px);
-  box-shadow: var(--shadow-lift);
-}
-
-/* A soft violet corner light inside the featured cell. */
-.bento__cell--wide::after {
-  content: "";
-  position: absolute;
-  inset-block-start: -40%;
-  inset-inline-end: -20%;
-  width: 60%;
-  height: 160%;
-  background: radial-gradient(closest-side, rgba(139, 92, 246, 0.18), transparent);
-  pointer-events: none;
-}
-
-.bento__cell > * {
+/* ═══ FOOTER ═════════════════════════════════════════════════════════════ */
+.site-footer {
+  border-top: 1px solid var(--rule);
+  background: var(--paper-2);
   position: relative;
   z-index: 1;
 }
-
-.bento__icon {
-  display: inline-flex;
+.site-footer__grid {
+  display: grid;
+  grid-template-columns: 1.7fr repeat(3, 1fr);
+  gap: clamp(1.4rem, 3vw, 3rem);
+  padding-block: clamp(2rem, 4vw, 3.2rem);
+}
+@media (max-width: 60rem) { .site-footer__grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 36rem) { .site-footer__grid { grid-template-columns: 1fr; } }
+.site-footer__about .brand { font-size: .95rem; }
+.site-footer__about .brand__mark svg { width: 1.2rem; height: 1.2rem; }
+.site-footer__about p {
+  font-size: .85rem;
+  color: var(--ink-3);
+  line-height: 1.7;
+  margin-top: .8rem;
+  max-width: 38ch;
+}
+.site-footer__title {
+  font-family: var(--mono);
+  font-size: .615rem;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+  margin-bottom: .8rem;
+}
+.site-footer ul { list-style: none; display: grid; gap: .5rem; }
+.site-footer a { font-size: .87rem; color: var(--ink-2); text-decoration: none; }
+.site-footer a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.site-footer__bottom {
+  border-top: 1px solid var(--rule);
+  padding-block: 1.2rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .8rem 1.5rem;
   align-items: center;
-  justify-content: center;
-  width: 2.75rem;
-  height: 2.75rem;
-  border-radius: var(--radius);
-  background: linear-gradient(135deg, rgba(139, 92, 246, 0.22), rgba(34, 211, 238, 0.12));
-  border: 1px solid var(--border-strong);
-  margin-block-end: 1rem;
+  font-size: .8rem;
+  color: var(--ink-3);
+}
+.site-footer__bottom .lang-switch { margin-inline-start: auto; }
+
+
+/* ═══ REVEALS ════════════════════════════════════════════════════════════
+   Nothing here is allowed to hide content on a browser that cannot animate.
+   The stylesheet hides NOTHING on its own: .is-armed does the hiding and is
+   only ever applied by site.js immediately before observing the element, so
+   a page whose script never runs simply shows everything. */
+.reveal.is-armed { opacity: 0; transform: translateY(18px); }
+.reveal.is-armed.is-visible {
+  opacity: 1;
+  transform: none;
+  transition: opacity .7s var(--ease), transform .7s var(--ease);
+}
+.reveal--d1.is-visible { transition-delay: .07s; }
+.reveal--d2.is-visible { transition-delay: .14s; }
+.reveal--d3.is-visible { transition-delay: .21s; }
+.reveal--d4.is-visible { transition-delay: .28s; }
+@media (prefers-reduced-motion: reduce) {
+  .reveal.is-armed { opacity: 1; transform: none; transition: none; }
 }
 
-.bento__icon svg {
-  width: 1.35rem;
-  height: 1.35rem;
-  stroke: var(--primary-soft);
+
+/* ═══ LOCALE ═════════════════════════════════════════════════════════════
+   Two complete locales, one stylesheet. Direction lives on <html>, so the
+   layout mirrors from logical properties rather than from a pile of
+   per-component overrides. Only things with a direction baked into their
+   geometry are listed here. */
+
+/* Latin technical tokens must never be reordered by the bidi algorithm.
+   `isolate` rather than `embed`: isolate also stops the token changing the
+   order of the Persian around it, which is what scrambles a sentence like
+   «پورت 443 باز است». Same data-ltr convention the desktop client uses. */
+[data-ltr] { unicode-bidi: isolate; }
+[dir="rtl"] [data-ltr] { direction: ltr; unicode-bidi: isolate; }
+
+/* Geometry that carries a direction. The carrier beam flows from the
+   reader's starting edge toward the lane, so in Persian it flows the other
+   way — mirroring the whole SVG is exactly right, since the path is the
+   only thing in it. */
+[dir="rtl"] .beam { transform: scaleX(-1); }
+[dir="rtl"] .lane.is-active { transform: translateX(-2px); }
+[dir="rtl"] .site-nav a::after { transform-origin: right; }
+[dir="rtl"] .sw:has(input:checked) .sw__track::after { transform: translateX(-.87rem); }
+[dir="rtl"] .sw.is-on .sw__track::after { transform: translateX(-.87rem); }
+[dir="rtl"] .banner::before { inset-inline-start: auto; inset-inline-end: 0; }
+/* Chevrons and arrows point the way the reader is going. */
+[dir="rtl"] .mirror { transform: scaleX(-1); }
+[dir="rtl"] .select-wrap::after { transform: rotate(45deg); }
+
+/* ── Persian: the families change wholesale ────────────────────────────
+   Bricolage and Martian carry no Persian glyphs at all -- they are subset
+   to Latin on purpose -- so --display and --sans are swapped rather than
+   left to fall through. Falling through would work, but it would mean
+   every Persian run pays a failed lookup in a face that can never match.
+
+   --mono deliberately does NOT swap: it keeps Martian first so that
+   digits, ports and protocol names inside a Persian sentence stay in the
+   mono face, and only the Persian glyphs drop through to Vazirmatn. */
+html[lang="fa"] {
+  --display: "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sans: "Vazirmatn", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-.bento__cell h3 {
-  margin-block-end: 0.6rem;
+/* Vazirmatn is not variable on optical size or width, so an inherited
+   font-variation-settings would be carried around and silently ignored.
+   Cleared explicitly, for the next person reading this. */
+html[lang="fa"] .d-xl, html[lang="fa"] .d-lg, html[lang="fa"] .d-md,
+html[lang="fa"] .d-sm, html[lang="fa"] .h-sm, html[lang="fa"] .spec h3,
+html[lang="fa"] .exit b, html[lang="fa"] .loc__name,
+html[lang="fa"] .page-hero h1, html[lang="fa"] .prose h2,
+html[lang="fa"] .platform-tile__name, html[lang="fa"] .ans .claim {
+  font-variation-settings: normal;
 }
 
-.bento__cell p {
-  color: var(--fg-muted);
-  line-height: var(--line-body);
-  font-size: 0.95rem;
+/* A PERSIAN PAGE DOES NOT LOAD BRICOLAGE AT ALL, and that is a deliberate
+   trade rather than an oversight.
+ *
+ * The concept kept prices and the marquee in the Latin display face --
+ * they are figures and proper nouns with no Persian form, so it reads
+ * well. Measured, though, it costs 110 KB on every Persian page for a
+ * decorative aria-hidden marquee and the figures in three price cards.
+ * That is most of the page's font budget, spent on the audience least
+ * able to afford it, for the least important text on the page.
+ *
+ * So Persian renders those in Vazirmatn too, which carries Latin figures
+ * and capitals perfectly well and is already loaded. Persian pages fetch
+ * 125 KB of font in total; forcing the display face would make it 235 KB.
+ *
+ * The wordmark also must NOT be pinned to Bricolage here: brand.name is
+ * «نئوکسیفای» in Persian, and a face with no Persian glyphs would drop it
+ * through to whatever the platform happened to pick. */
+
+/* ── Persian typography ────────────────────────────────────────────────
+   Arabic script is cursive: letter-spacing pulls joined letters apart and
+   is ALWAYS wrong. Every tracked style is reset, and the tracked mono
+   labels also lose their uppercasing, which Persian does not have. */
+html[lang="fa"] body { line-height: 1.9; }
+
+html[lang="fa"] h1, html[lang="fa"] h2, html[lang="fa"] h3, html[lang="fa"] h4,
+html[lang="fa"] .d-xl, html[lang="fa"] .d-lg, html[lang="fa"] .d-md,
+html[lang="fa"] .d-sm, html[lang="fa"] .h-sm,
+html[lang="fa"] .eyb, html[lang="fa"] .eyebrow, html[lang="fa"] .chip,
+html[lang="fa"] .inst__ttl, html[lang="fa"] .ro i, html[lang="fa"] .lane .st,
+html[lang="fa"] .plan__name, html[lang="fa"] .spec .verdict-tag,
+html[lang="fa"] .artnote, html[lang="fa"] .rail__text,
+html[lang="fa"] .exit i, html[lang="fa"] .loc__meta,
+html[lang="fa"] .spec .tech, html[lang="fa"] .lane .nm i,
+html[lang="fa"] .site-footer__title, html[lang="fa"] .field__flag,
+html[lang="fa"] .platform-tile__meta, html[lang="fa"] .badge-soon,
+html[lang="fa"] .stat__label, html[lang="fa"] .flow__tag,
+html[lang="fa"] .banner__pill, html[lang="fa"] .plan__badge,
+html[lang="fa"] .brand, html[lang="fa"] .brand__beta,
+html[lang="fa"] .privacy__updated, html[lang="fa"] .ans .claim,
+html[lang="fa"] table.compare thead th, html[lang="fa"] table.cmp thead th,
+html[lang="fa"] .proto-table thead th, html[lang="fa"] .faq summary,
+html[lang="fa"] .rows h3, html[lang="fa"] .notice h4, html[lang="fa"] .callout__title,
+html[lang="fa"] .trial-banner h3, html[lang="fa"] .prose h2, html[lang="fa"] .prose h3,
+html[lang="fa"] .field__label, html[lang="fa"] .alert h3,
+html[lang="fa"] .card h3, html[lang="fa"] .pillar h3, html[lang="fa"] .bento__cell h3,
+html[lang="fa"] .platform-tile__name, html[lang="fa"] .plan__amount,
+html[lang="fa"] .stat__value, html[lang="fa"] .exit b, html[lang="fa"] .loc__name,
+html[lang="fa"] .spec h3, html[lang="fa"] .sw__lb b, html[lang="fa"] .lane .nm b,
+html[lang="fa"] .page-hero h1, html[lang="fa"] .flow__link, html[lang="fa"] .ro-live,
+html[lang="fa"] .site-footer__bottom .sp {
+  letter-spacing: 0;
 }
 
-/* --------------------------------------------------------------------------
-   16.4 Protocol table
-   --------------------------------------------------------------------------
-   A real <table>, because eight connection methods against two platforms is
-   real tabular data. Screen readers get row and column semantics for free,
-   which a grid of divs throws away.
+/* Tracked mono labels: Persian has no uppercase, and forcing it produces
+   nothing at best and mangles shaping at worst. */
+html[lang="fa"] .eyb, html[lang="fa"] .eyebrow, html[lang="fa"] .inst__ttl,
+html[lang="fa"] .ro i, html[lang="fa"] .lane .st, html[lang="fa"] .plan__name,
+html[lang="fa"] .spec .verdict-tag, html[lang="fa"] .artnote,
+html[lang="fa"] .site-footer__title, html[lang="fa"] .field__flag,
+html[lang="fa"] .platform-tile__meta, html[lang="fa"] .badge-soon,
+html[lang="fa"] .stat__label, html[lang="fa"] .flow__tag,
+html[lang="fa"] .banner__pill, html[lang="fa"] .plan__badge,
+html[lang="fa"] .exit i, html[lang="fa"] .loc__meta,
+html[lang="fa"] .privacy__updated, html[lang="fa"] .ro-live,
+html[lang="fa"] table.compare thead th, html[lang="fa"] table.cmp thead th,
+html[lang="fa"] .proto-table thead th, html[lang="fa"] .spec .avail {
+  text-transform: none;
+  font-size: .74rem;
+  font-family: var(--sans);
+}
+html[lang="fa"] .lane .st { font-size: .68rem; }
 
-   Below 55rem it becomes a stack of cards using the data-label trick: each
-   platform cell prints its own column heading from an attribute. One set of
-   markup, not two -- a duplicated mobile card list is how the two versions
-   drift apart.
-   -------------------------------------------------------------------------- */
+/* Persian needs more leading and smaller display sizes than Latin: at Latin
+   values the ascenders and diacritics collide with the line above. Same
+   1.75+ floor the desktop client sets in theme.css. */
+html[lang="fa"] .d-xl { font-size: clamp(2.1rem, 5.4vw, 5.6rem); line-height: 1.38; font-weight: 800; }
+html[lang="fa"] .d-lg { font-size: clamp(1.6rem, 3.3vw, 3.1rem); line-height: 1.48; font-weight: 700; }
+html[lang="fa"] .d-md { font-size: clamp(1.3rem, 2.1vw, 2rem);   line-height: 1.52; font-weight: 700; }
+html[lang="fa"] .d-sm, html[lang="fa"] .h-sm { font-size: 1.02rem; line-height: 1.62; font-weight: 700; }
+html[lang="fa"] .page-hero h1 { font-size: clamp(1.65rem, 3.2vw, 2.9rem); line-height: 1.45; }
+html[lang="fa"] .lede, html[lang="fa"] .lead { line-height: 2.05; max-width: 31rem; }
+html[lang="fa"] .spec h3 { font-size: 1.14rem; line-height: 1.5; }
+html[lang="fa"] .exit b, html[lang="fa"] .loc__name { font-size: 1.02rem; }
+html[lang="fa"] .platform-tile__name { font-size: 1.3rem; }
+html[lang="fa"] .ans .claim { line-height: 1.4; font-size: clamp(1.3rem, 3vw, 2.5rem); }
+html[lang="fa"] .body, html[lang="fa"] .ans .say, html[lang="fa"] .spec .note,
+html[lang="fa"] .exit .rt, html[lang="fa"] .verdict, html[lang="fa"] .plan__features li,
+html[lang="fa"] .rows p, html[lang="fa"] .faq__answer, html[lang="fa"] .faq details p,
+html[lang="fa"] .prose p, html[lang="fa"] .prose li, html[lang="fa"] .notice p,
+html[lang="fa"] .callout p, html[lang="fa"] .steps-list li,
+html[lang="fa"] .platform-tile__note, html[lang="fa"] .card p,
+html[lang="fa"] .pillar p, html[lang="fa"] .bento__cell p,
+html[lang="fa"] .trial-banner p, html[lang="fa"] .checklist li,
+html[lang="fa"] .site-footer__about p, html[lang="fa"] .banner__body {
+  line-height: 2;
+}
 
-.table-wrap {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  box-shadow: var(--shadow-card);
+/* Prices, protocol names and the marquee stay Latin — they are digits and
+   proper nouns with no Persian form. Western digits throughout, which is
+   what Iranian technology sites do. */
+html[lang="fa"] .plan__amount, html[lang="fa"] .compare__price,
+html[lang="fa"] .tick i { letter-spacing: -.03em; }
+
+
+/* ═══ UTILITIES ══════════════════════════════════════════════════════════
+   The CSP carries no 'unsafe-inline', so there are no inline styles
+   anywhere in the templates. One-offs live here. */
+/* ── the flex/grid minimum-size trap ───────────────────────────────────
+   A flex or grid item's automatic minimum size is min-content, not zero, so
+   an item holding a long word (or a Latin token inside Persian text) refuses
+   to shrink and pushes its container wider than the page. It does not
+   produce a scrollbar here, because body is overflow-x:clip — it silently
+   CLIPS the text instead, which is worse, because nothing looks broken until
+   you read the sentence and find the end missing.
+
+   Collected rather than scattered: every one of these is a text-bearing item
+   inside a flex/grid parent that has a fixed or auto-sized sibling. */
+.chip > span,
+.banner__text,
+.field__label > span:first-child,
+.close-list div > span,
+.rows > div > *,
+.checklist li > span,
+.plan__features li > span,
+.spec .note,
+.exit .rt,
+.steps-list li,
+.flow__node > span,
+.site-footer__bottom > * { min-width: 0; }
+
+/* Last-resort wrapping for the places a genuinely unbreakable token can
+   appear — an email address in the contact aside, a domain in the privacy
+   text, a Latin protocol name mid-Persian-sentence. Breaking a word mid-way
+   is ugly; a sentence running off the page is broken. */
+.rows p, .prose p, .faq__answer, .notice p, .callout p,
+.field__hint, .field__error, .alert { overflow-wrap: break-word; }
+
+.sr-only {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
   overflow: hidden;
-}
-
-.proto-table {
-  width: 100%;
-  border-collapse: collapse;
-  text-align: start;
-}
-
-.proto-table th,
-.proto-table td {
-  padding: 1rem clamp(0.85rem, 2vw, 1.4rem);
-  text-align: start;
-  vertical-align: middle;
-  border-block-end: 1px solid var(--border);
-}
-
-.proto-table thead th {
-  background: rgba(255, 255, 255, 0.025);
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--fg-subtle);
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
   white-space: nowrap;
+  border: 0;
 }
 
-html[lang="fa"] .proto-table thead th {
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.proto-table tbody tr:last-child th,
-.proto-table tbody tr:last-child td {
-  border-block-end: 0;
-}
-
-.proto-table tbody tr {
-  transition: background var(--dur) var(--ease);
-}
-
-.proto-table tbody tr:hover {
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.proto__name {
-  font-weight: 650;
-  display: block;
-}
-
-.proto__tech {
-  display: block;
-  margin-block-start: 0.15rem;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  color: var(--highlight);
-  /* Always LTR: these are Latin-script proper nouns ("VLESS + REALITY").
-     Inheriting RTL moves the plus sign to the wrong side of the pair. */
-  direction: ltr;
-  unicode-bidi: isolate;
-}
-
-/* An isolated LTR run inside an RTL cell still needs its own alignment or
-   it hugs the wrong edge. `start` is not usable here -- the isolate has
-   already reset the direction. */
-html[lang="fa"] .proto__tech {
-  text-align: right;
-}
-
-.proto__hint {
-  color: var(--fg-muted);
-  font-size: 0.9rem;
-}
-
-.proto__yes,
-.proto__no {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: var(--radius-pill);
-}
-
-.proto__yes {
-  background: rgba(16, 185, 129, 0.14);
-  color: var(--success);
-}
-
-.proto__no {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--fg-subtle);
-}
-
-.proto__yes svg,
-.proto__no svg {
-  width: 0.9rem;
-  height: 0.9rem;
-}
-
-@media (max-width: 55rem) {
-  .proto-table thead {
-    /* Visually hidden rather than display:none -- the headings are still
-       announced through each cell's data-label, and removing them from the
-       accessibility tree would strip the table's structure entirely. */
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-
-  .proto-table,
-  .proto-table tbody,
-  .proto-table tr,
-  .proto-table td,
-  .proto-table th {
-    display: block;
-    width: 100%;
-  }
-
-  .proto-table tr {
-    padding: 1rem clamp(0.85rem, 3vw, 1.25rem);
-    border-block-end: 1px solid var(--border);
-  }
-
-  .proto-table tr:last-child {
-    border-block-end: 0;
-  }
-
-  .proto-table th,
-  .proto-table td {
-    border-block-end: 0;
-    padding: 0.3rem 0;
-  }
-
-  .proto-table td[data-label] {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: var(--fg-muted);
-    font-size: 0.9rem;
-  }
-
-  .proto-table td[data-label]::before {
-    content: attr(data-label);
-  }
-}
-
-/* --------------------------------------------------------------------------
-   16.5 Server locations
-   -------------------------------------------------------------------------- */
-
-.loc {
-  display: flex;
-  align-items: center;
-  gap: 0.9rem;
-  padding: 1rem 1.15rem;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-card);
-  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
-}
-
-.loc:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-2px);
-}
-
-.loc__flag {
-  font-size: 1.6rem;
-  line-height: 1;
-  /* Flag emoji are pictographic and must never be mirrored on RTL pages. */
-  direction: ltr;
-  unicode-bidi: isolate;
-}
-
-.loc__name {
-  font-weight: 600;
-}
-
-.loc__meta {
-  display: block;
-  font-size: 0.82rem;
-  color: var(--fg-subtle);
-  margin-block-start: 0.1rem;
-}
-
-/* The relay entry, called out rather than listed as a sixth location --
-   it is where traffic goes IN, not where it comes out. */
-.loc--relay {
-  border-color: rgba(139, 92, 246, 0.35);
-  background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), transparent 60%), var(--card);
-}
-
-/* --------------------------------------------------------------------------
-   16.6 Split row
-   --------------------------------------------------------------------------
-   Text beside a visual, alternating side down the page. Reversed with
-   `order`, not row-reverse or a float, so it stays correct under RTL with
-   no directional override at all.
-   -------------------------------------------------------------------------- */
-
-.split {
+.u-list-reset { list-style: none; margin: 0; padding: 0; }
+.u-center { text-align: center; }
+.u-narrow { max-width: 46rem; }
+.u-flush-top { margin-top: 0; }
+.u-mt-sm { margin-top: .6rem; }
+.u-mt-md { margin-top: 1.2rem; }
+.u-mt-lg { margin-top: clamp(1.6rem, 3vw, 2.6rem); }
+.u-mt-xl { margin-top: clamp(2.4rem, 5vw, 4.5rem); }
+.u-mb-md { margin-bottom: 1.2rem; }
+.u-mb-lg { margin-bottom: clamp(1.6rem, 3vw, 2.6rem); }
+.u-mb-xl { margin-bottom: clamp(2.4rem, 5vw, 4.5rem); }
+.u-my-lead { margin-block: clamp(1.4rem, 3vw, 2.4rem); }
+.u-cols-2 {
   display: grid;
-  gap: clamp(2rem, 5vw, 4rem);
-  align-items: center;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: clamp(1.5rem, 3vw, 3rem);
 }
 
-@media (min-width: 62rem) {
-  .split {
-    grid-template-columns: 1fr 1fr;
-  }
-  .split--flip .split__media {
-    order: -1;
-  }
-}
+.icon-arrow, .icon-menu, .icon-close { display: block; }
 
-.split__body h2 {
-  margin-block-end: 1rem;
-}
-
-.split__body p {
-  color: var(--fg-muted);
-  line-height: var(--line-body);
-}
-
-.split__media {
-  position: relative;
-}
-
-/* --------------------------------------------------------------------------
-   16.7 Checklist
-   -------------------------------------------------------------------------- */
-
-.checklist {
-  list-style: none;
-  margin: 1.5rem 0 0;
-  padding: 0;
-  display: grid;
-  gap: 0.85rem;
-}
-
-.checklist li {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.7rem;
-  color: var(--fg-muted);
-  line-height: 1.6;
-}
-
-.checklist svg {
+/* ── inline icons ──────────────────────────────────────────────────────
+   nx_icon() emits width/height on every glyph so it is correctly sized
+   before this stylesheet loads. These rules scale it per component and,
+   critically, stop it ever being treated as a growable flex item — an
+   unsized inline SVG in a flex row resolves to the container's width, which
+   is how one 18px alert glyph rendered at 331px. */
+.icon {
   flex: none;
-  width: 1.15rem;
-  height: 1.15rem;
-  margin-block-start: 0.2rem;
-  stroke: var(--success);
+  display: inline-block;
+  vertical-align: -.18em;
+  width: 1.05em;
+  height: 1.05em;
 }
+.btn .icon { width: 1em; height: 1em; }
+.checklist li .icon,
+.plan__features li .icon { width: .9rem; height: .9rem; }
+.card__icon .icon,
+.pillar__icon .icon,
+.bento__icon .icon,
+.banner__icon .icon { width: 1.15rem; height: 1.15rem; }
+.notice > .icon, .callout > .icon { width: 1.05rem; height: 1.05rem; margin-top: .18rem; }
+.flow__node > .icon { width: 1.2rem; height: 1.2rem; color: var(--violet); }
+.flow__tag .icon { width: .85rem; height: .85rem; }
+.section-link .icon { width: .95rem; height: .95rem; }
+.hero__note > .icon, .warnline > .icon { width: .95rem; height: .95rem; margin-top: .18rem; }
+.app__card .ch .icon, .app__muted .icon { width: .85rem; height: .85rem; }
+.nav-toggle .icon { width: 1.15rem; height: 1.15rem; }
+.proto__yes .icon, .proto__no .icon { width: 1rem; height: 1rem; }
+.icon--platform { width: 2.6rem; height: 2.6rem; }
 
-/* --------------------------------------------------------------------------
-   16.8 Callout
-   --------------------------------------------------------------------------
-   For the honest caveats -- the unsigned installer, the platforms that do
-   not exist, the fact that no VPN can promise a route stays open. Those are
-   load-bearing on this site, so they get a real component instead of being
-   buried in small grey text.
-   -------------------------------------------------------------------------- */
+/* The brand mark. Sized per placement; never left to fill its parent. */
+.brand__mark svg { width: 1.7rem; height: 1.7rem; display: block; }
+.site-footer__about .brand__mark svg { width: 1.2rem; height: 1.2rem; }
+.app__mark svg, .app__brand svg { width: 1.15rem; height: 1.15rem; }
 
-.callout {
-  display: flex;
-  gap: 1rem;
-  padding: 1.15rem 1.35rem;
-  border-radius: var(--radius);
-  background: var(--bg-soft);
-  /* Logical, so the accent bar moves to the right edge on Persian pages. */
-  border-inline-start: 3px solid var(--primary);
-  border-block: 1px solid var(--border);
-  border-inline-end: 1px solid var(--border);
-}
+/* Controls that only do something once the script has run. They operate an
+   enhancement, not content, so hiding them without JS is correct — a button
+   that visibly does nothing is worse than no button. */
+.no-js [data-enhanced-only] { display: none; }
 
-.callout--warn {
-  border-inline-start-color: #f59e0b;
-}
+/* "No route" in the instrument's readout. Not a --dead-coloured .g, because
+   that one is a gradient and would paint the text transparent. */
+.ro--carry b .is-none { color: var(--dead); font-weight: 700; }
 
-.callout--info {
-  border-inline-start-color: var(--highlight);
-}
 
-.callout svg {
-  flex: none;
-  width: 1.25rem;
-  height: 1.25rem;
-  margin-block-start: 0.15rem;
-  stroke: var(--primary-soft);
-}
-
-.callout--warn svg {
-  stroke: #f59e0b;
-}
-
-.callout--info svg {
-  stroke: var(--highlight);
-}
-
-.callout__title {
-  font-weight: 650;
-  margin-block-end: 0.3rem;
-}
-
-.callout p {
-  color: var(--fg-muted);
-  font-size: 0.92rem;
-  line-height: 1.65;
-}
-
-/* --------------------------------------------------------------------------
-   16.9 Plan comparison table
-   -------------------------------------------------------------------------- */
-
-.compare {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.compare th,
-.compare td {
-  padding: 0.95rem clamp(0.75rem, 2vw, 1.25rem);
-  border-block-end: 1px solid var(--border);
-  text-align: start;
-}
-
-.compare thead th {
-  font-size: 0.95rem;
-  font-weight: 650;
-  color: var(--fg);
-  border-block-end: 1px solid var(--border-strong);
-}
-
-.compare thead th:first-child {
-  color: var(--fg-subtle);
-  font-weight: 500;
-  font-size: 0.8rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-html[lang="fa"] .compare thead th:first-child {
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.compare tbody th {
-  font-weight: 500;
-  color: var(--fg-muted);
-  font-size: 0.92rem;
-}
-
-.compare td {
-  font-weight: 600;
-}
-
-.compare tbody tr:last-child th,
-.compare tbody tr:last-child td {
-  border-block-end: 0;
-}
-
-/* The highlighted column: a background tint on every cell of that column,
-   because an outline around a table column is not expressible without
-   absolute positioning. */
-.compare .is-featured {
-  background: rgba(139, 92, 246, 0.07);
-}
-
-.compare__price {
-  font-size: 1.15rem;
-  letter-spacing: -0.02em;
-}
-
-html[lang="fa"] .compare__price {
-  letter-spacing: 0;
-}
-
-/* Only meaningful once the table is actually scrolling; above that it is
-   noise, so it is hidden by default and shown by the query below. */
-.compare-hint {
-  display: none;
-}
-
-@media (max-width: 48rem) {
-  .compare-hint {
-    display: block;
-    margin-block-end: 0.75rem;
-    color: var(--fg-subtle);
-    font-size: 0.85rem;
-  }
-
-  /* Below this the comparison genuinely does not fit and squeezing it gives
-     four unreadable columns. Scroll it instead, with the row headings
-     pinned so you always know which row you are on. */
-  .compare-scroll {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-  .compare {
-    min-width: 34rem;
-  }
-  .compare tbody th {
-    position: sticky;
-    inset-inline-start: 0;
-    background: var(--card);
-  }
-}
-
-/* --------------------------------------------------------------------------
-   16.10 Trust pillars
-   -------------------------------------------------------------------------- */
-
-.pillar {
-  padding: clamp(1.35rem, 2.5vw, 1.85rem);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
-  box-shadow: var(--shadow-card);
-}
-
-.pillar__icon {
-  display: inline-flex;
-  width: 2.4rem;
-  height: 2.4rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius);
-  background: rgba(34, 211, 238, 0.1);
-  border: 1px solid rgba(34, 211, 238, 0.22);
-  margin-block-end: 0.9rem;
-}
-
-.pillar__icon svg {
-  width: 1.2rem;
-  height: 1.2rem;
-  stroke: var(--highlight);
-}
-
-.pillar h3 {
-  margin-block-end: 0.5rem;
-}
-
-.pillar p {
-  color: var(--fg-muted);
-  font-size: 0.93rem;
-  line-height: var(--line-body);
-}
-
-/* --------------------------------------------------------------------------
-   16.11 Prose
-   --------------------------------------------------------------------------
-   Long-form copy: the privacy policy and the explanatory pages. Spacing is
-   set on the container rather than on each element, so the rhythm holds
-   however the content file is structured.
-   -------------------------------------------------------------------------- */
-
-.prose h2 {
-  font-size: clamp(1.4rem, 2.6vw, 1.8rem);
-  margin-block: 2.5rem 0.85rem;
-}
-
-.prose h2:first-child {
-  margin-block-start: 0;
-}
-
-.prose h3 {
-  margin-block: 1.75rem 0.6rem;
-}
-
-.prose p,
-.prose li {
-  color: var(--fg-muted);
-  line-height: var(--line-body);
-}
-
-.prose p + p {
-  margin-block-start: 1rem;
-}
-
-.prose ul {
-  margin-block: 1rem 0;
-  padding-inline-start: 1.15rem;
-  display: grid;
-  gap: 0.55rem;
-}
-
-.prose a {
-  color: var(--primary-soft);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-.prose a:hover {
-  color: var(--highlight);
-}
-
-/* --------------------------------------------------------------------------
-   16.12 Section link
-   -------------------------------------------------------------------------- */
-
-.section-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  margin-block-start: 1.5rem;
-  color: var(--primary-soft);
-  font-weight: 600;
-  font-size: 0.95rem;
-}
-
-.section-link:hover {
-  color: var(--highlight);
-}
-
-.section-link svg {
-  width: 1rem;
-  height: 1rem;
-  transition: transform var(--dur) var(--ease);
-}
-
-/* Mirrored on Persian pages -- an arrow meaning "onward" points left in
-   RTL. Same hand-flip as .eyebrow::before, and for the same reason: there
-   is no logical property for a transform. */
-[dir="rtl"] .section-link svg {
-  transform: scaleX(-1);
-}
-
-.section-link:hover svg {
-  transform: translateX(3px);
-}
-
-[dir="rtl"] .section-link:hover svg {
-  transform: scaleX(-1) translateX(3px);
-}
-
-/* --------------------------------------------------------------------------
-   16.13 Nav dropdown-free "more" row and footer widening
-   -------------------------------------------------------------------------- */
-
-/* The footer grid was three columns against a 72rem container. At 80rem
-   with a fourth link column it needs to be told, or the about block
-   stretches to half the page and the link lists bunch up at the end. */
-@media (min-width: 62rem) {
-  .site-footer__grid {
-    grid-template-columns: 1.6fr 1fr 1fr 1fr;
-  }
-}
-
-/* List reset for grids whose items are semantically a list -- the server
-   locations especially. Using <ul>/<li> keeps "list of 6 items" in the
-   accessibility tree, which a stack of <div>s throws away; this just
-   removes the marker and indent that come with it. */
-.u-list-reset {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-/* Vertical rhythm helpers used by the pages added in the rebuild. */
-.u-mt-lg {
-  margin-block-start: clamp(2rem, 4vw, 3rem);
-}
-
-.u-mt-xl {
-  margin-block-start: clamp(3rem, 6vw, 4.5rem);
-}
-
-/* --------------------------------------------------------------------------
-   16.14 Vertical flow diagram
-   --------------------------------------------------------------------------
-   The horizontal .flow (section 7) reads as a journey across the page and
-   is right for "you -> our server -> the internet". The failover diagram is
-   a sequence in TIME, not in space, so it stacks -- and stacking also means
-   it needs no horizontal room, which is what lets it sit in a split column.
-   -------------------------------------------------------------------------- */
-
-.flow--stack {
-  flex-direction: column;
-  align-items: stretch;
-}
-
-.flow--stack .flow__node {
-  width: 100%;
-}
-
-.flow--stack .flow__link {
-  min-height: 2.25rem;
-  width: 100%;
-}
-
-.flow--stack .flow__line {
-  width: 1px;
-  height: 100%;
-  background: linear-gradient(to bottom, var(--border-strong), var(--primary));
-}
-
-/* The route that stopped working. Muted and struck through with a warm
-   border rather than coloured red: it is the normal, expected first step
-   of the sequence, not an error state. */
-.flow__node--dead {
-  opacity: 0.65;
-  border-color: rgba(245, 158, 11, 0.35);
-}
-
-.flow__node--dead svg {
-  stroke: #f59e0b;
+/* ═══ PRINT ══════════════════════════════════════════════════════════════
+   Someone printing the privacy statement or a receipt of what they read
+   should get the text, not the furniture. */
+@media print {
+  body { padding-inline: 0; background: #fff; color: #000; }
+  .site-header, .site-footer, .tick, .banner, .flood, .cta-band,
+  .nav-toggle, .mobile-nav, .skip-link, .inst__console, .lang-switch { display: none !important; }
+  .inst { grid-template-columns: 1fr; box-shadow: none; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .75em; color: #555; }
+  .reveal.is-armed { opacity: 1 !important; transform: none !important; }
 }

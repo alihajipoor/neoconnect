@@ -365,6 +365,23 @@ function nx_pick($value, $locale = null)
 }
 
 /**
+ * Pick a per-locale value and HTML-escape it in one step.
+ *
+ * The content-file counterpart to nx_e(), and the common case in templates
+ * that render inc/content/*.php. Having it means a template never writes
+ * nx_pick() bare into the document, which is the shape an unescaped echo
+ * takes when someone is in a hurry.
+ *
+ * @param mixed       $value  per-locale array, or a plain string
+ * @param string|null $locale defaults to the current locale
+ * @return string
+ */
+function nx_e_pick($value, $locale = null)
+{
+    return nx_esc(nx_pick($value, $locale));
+}
+
+/**
  * Pick a per-locale LIST out of a content entry -- the paragraph and bullet
  * arrays in inc/content/privacy.php, where nx_pick() would return an array
  * where a string is expected.

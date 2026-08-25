@@ -101,7 +101,11 @@ function nx_field($state, $name, $labelKey, $opts = array())
  */
 function nx_form_open($form)
 {
-    echo '<form method="post" action="' . nx_esc(nx_url($form)) . '" data-form="'
+    /* nx_form_url(), never nx_url($form). A form name is not a route key --
+       'deletion' is served from the page registered as 'delete-account' --
+       and nx_url() silently falls back to the home page for anything it does
+       not recognise. See nx_form_page() in inc/form.php. */
+    echo '<form method="post" action="' . nx_esc(nx_form_url($form)) . '" data-form="'
         . nx_esc($form) . '" novalidate>';
 
     echo '<input type="hidden" name="_token" value="'

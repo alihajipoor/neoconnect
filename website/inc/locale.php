@@ -111,6 +111,80 @@ function nx_accepts_persian()
 }
 
 /**
+ * Whether this request looks like a search-engine crawler.
+ *
+ * Crawlers are never redirected by language. Googlebot crawls from the US
+ * with `Accept-Language: en`, and bouncing a bot around on the strength of a
+ * header it did not really mean is how half a site stops being indexed. The
+ * Persian pages are already safe -- the redirect below only ever fires on an
+ * English URL -- but this makes the English half safe too, so a bot that
+ * happens to send `fa` still indexes `/` as English rather than following a
+ * 302 to `/fa/` and indexing that instead.
+ *
+ * Deliberately a coarse substring match rather than a precise list: the cost
+ * of a false positive is one visitor not being auto-redirected (they can
+ * still switch, and the switch still sticks), and the cost of a false
+ * negative is a page dropping out of the index.
+ *
+ * @return bool
+ */
+function nx_is_crawler()
+{
+    if (empty($_SERVER['HTTP_USER_AGENT'])) {
+        // No UA at all is far more likely to be a bot or a probe than a
+        // browser, and not redirecting it costs nothing.
+        return true;
+    }
+
+    $ua = strtolower((string) $_SERVER['HTTP_USER_AGENT']);
+
+    $signatures = array(
+        'bot', 'crawl', 'spider', 'slurp', 'archiver',
+        'facebookexternalhit', 'embedly', 'quora link preview',
+        'telegrambot', 'whatsapp', 'discordbot', 'twitterbot',
+        'linkedinbot', 'pinterest', 'redditbot', 'applebot',
+        'lighthouse', 'chrome-lighthouse', 'headlesschrome',
+    );
+
+    foreach ($signatures as $needle) {
+        if (strpos($ua, $needle) !== false) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * The query string of the current request, including the leading '?', or ''.
+ *
+ * The automatic redirect has to carry it. `/pricing?ref=abc` must land on
+ * `/fa/pricing?ref=abc` and not on `/fa/pricing`, or every referral and
+ * campaign parameter is silently dropped for exactly the visitors the
+ * redirect exists to serve.
+ *
+ * `setlang` is stripped on the way through: it has done its job by the time
+ * anything redirects, and letting it ride along would put it back in the
+ * address bar and into anything the visitor then shares.
+ *
+ * @return string
+ */
+function nx_query_suffix()
+{
+    if (empty($_GET)) {
+        return '';
+    }
+
+    $params = $_GET;
+    unset($params['setlang']);
+
+    if (!$params) {
+        return '';
+    }
+
+    return '?' . http_build_query($params);
+}
+
+/**
  * The locale this visitor should see if they have expressed no preference.
  *
  * @return string
@@ -193,22 +267,36 @@ function nx_apply_locale_preference()
         $wanted = (string) $_GET['setlang'];
         if (in_array($wanted, $NX_LOCALES, true)) {
             nx_remember_locale($wanted);
-            header('Location: ' . nx_url(nx_page(), $wanted), true, 302);
+            // Carry any other query parameters across, and drop setlang
+            // itself so it never ends up shared or indexed.
+            header('Location: ' . nx_url(nx_page(), $wanted) . nx_query_suffix(), true, 302);
             exit;
         }
     }
 
-    // 2. Automatic redirect, only from the English URLs and only while the
-    //    visitor has expressed no preference.
-    if (nx_locale() !== 'en' || nx_stored_locale() !== '') {
+    // 2. Automatic redirect. Four guards, and every one of them matters:
+    //
+    //    a. Only from the ENGLISH URLs. A request for /fa/anything is an
+    //       explicit request for Persian -- somebody followed a Persian
+    //       link -- and is never redirected. This is also what keeps every
+    //       Persian page directly reachable by a crawler.
+    //    b. Only while the visitor has expressed no preference. Once the
+    //       cookie exists, nothing here fires again in either direction:
+    //       somebody who chose English can sit on / forever.
+    //    c. Never for a crawler. See nx_is_crawler().
+    //    d. At most once per request -- guaranteed by (a), since the target
+    //       of the redirect is a /fa/ URL, which (a) then refuses to touch.
+    if (nx_locale() !== 'en' || nx_stored_locale() !== '' || nx_is_crawler()) {
         return;
     }
 
     $detected = nx_detect_locale();
     if ($detected !== 'en') {
-        // 302, not 301: this depends on who is asking, so it must never be
-        // cached as a permanent property of the URL.
-        header('Location: ' . nx_url(nx_page(), $detected), true, 302);
+        // 302, NEVER 301. This response depends on who is asking, so it must
+        // not be cached as a permanent property of the URL -- a 301 here
+        // would pin a visitor to one language in their own browser cache,
+        // including after they switch.
+        header('Location: ' . nx_url(nx_page(), $detected) . nx_query_suffix(), true, 302);
         exit;
     }
 }
@@ -223,5 +311,9 @@ function nx_apply_locale_preference()
  */
 function nx_switch_url()
 {
+    /* Points at THE SAME PAGE in the other language, never at the home page.
+       Sending someone who is reading /fa/faq to / because they wanted
+       English is the single most irritating bug a language switch can have,
+       and it is the default one. nx_page() is what prevents it. */
     return nx_url(nx_page(), nx_other_locale()) . '?setlang=' . nx_other_locale();
 }

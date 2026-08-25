@@ -73,6 +73,58 @@ function nx_form_schema($form)
 }
 
 /**
+ * The page key a form lives on.
+ *
+ * Form names and route keys are NOT the same vocabulary and must not be
+ * assumed to be. Two of the three happen to match; the deletion form does
+ * not, because the form is called 'deletion' while the page it is served
+ * from is registered in $NX_ROUTES as 'delete-account'.
+ *
+ * That mismatch was a live bug. nx_form_open() built its action from
+ * nx_url($form), and nx_url() falls back to the home page for a key it does
+ * not recognise -- so the deletion form rendered as
+ *
+ *     <form method="post" action="/">          (and action="/fa/")
+ *
+ * and every account-deletion request POSTed to the home page, which has no
+ * form handler, and was silently discarded. The success redirect in
+ * nx_form_process() was broken the same way. Nothing caught it:
+ * check-site.php renders pages but never inspects form actions, and the
+ * page looked completely normal.
+ *
+ * That page is a Google Play compliance requirement whose URL is declared
+ * in the Play Console data safety form, so it failing quietly is expensive
+ * in a way the other two forms are not.
+ *
+ * Route the lookup through here, always, rather than passing a form name to
+ * nx_url() and hoping the two vocabularies agree.
+ *
+ * @param string $form form name as passed to nx_form_process()
+ * @return string page key for nx_url()
+ */
+function nx_form_page($form)
+{
+    $map = array(
+        'contact'  => 'contact',
+        'reseller' => 'reseller',
+        'deletion' => 'delete-account',
+    );
+
+    return isset($map[$form]) ? $map[$form] : $form;
+}
+
+/**
+ * The URL a form posts to, and redirects back to on success.
+ *
+ * @param string $form
+ * @return string
+ */
+function nx_form_url($form)
+{
+    return nx_url(nx_form_page($form));
+}
+
+/**
  * Strip control characters that have no business in a submitted field.
  *
  * Newlines survive in textareas and are removed everywhere else -- which is
@@ -217,7 +269,11 @@ function nx_form_process($form)
         return $result;
     }
 
-    header('Location: ' . nx_url($form) . '?sent=1', true, 303);
+    // nx_form_url(), not nx_url($form): see the note on nx_form_page(). The
+    // deletion form's name is not its route key, and redirecting to the home
+    // page after a successful submission would show the visitor no
+    // confirmation at all.
+    header('Location: ' . nx_form_url($form) . '?sent=1', true, 303);
     exit;
 }
 
