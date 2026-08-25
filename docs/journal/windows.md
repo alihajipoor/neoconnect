@@ -8281,3 +8281,76 @@ was found by reading.
   no-logs, kill-switch, auto-connect, refund or signed-installer claim.
   That is deliberate and load-bearing. `website/README.md` now lists it
   as a convention so the next pass does not "improve" it back.
+## 2026-08-24 — the leave-alone cache never looked at where the packet was going
+
+**Status:** in flight — in source and unit-tested, **never run on a rig**
+**Touches:** `apps/desktop-windows/service/src/split_tunnel/flows.rs`,
+`.../redirect.rs`, on branch
+`claude/split-tunnel-direct-cache-destination` (not merged)
+
+**This is not the leak the 0928 entry wrote down, and that one is still
+open.** The fire-and-forget gap recorded at the `None =>` arm in
+`redirect.rs` — socket closed microseconds after the send, no row in the
+UDP endpoint table, no owner, so `OnlySelected` leaves it alone — is
+untouched by this and still needs B2. What follows is a *second*
+mechanism in the same decision path, found by reading rather than by
+capture, and it does not need the owner lookup to fail at all.
+
+`Tables.direct` was keyed on `(transport, source port)`. `Nat::lookup`
+consults it before anything else, so a Direct verdict recorded about one
+peer answered for **every destination that port reached** for the next
+five seconds. TCP never showed it: a TCP port changes destination by
+sending a SYN, a SYN skips this cache on purpose, and `Nat::redirect`
+clears the entry. UDP has no SYN and nothing else re-decides.
+
+Two of the three places that record a verdict make that a leak rather
+than a curiosity:
+
+- **The `if known_owner` arm.** `decide` carries a DNS query through the
+  tunnel whoever makes it, and drops one it cannot carry rather than
+  hand it to the resolver the network supplied. None of that ran when
+  the cache answered first — and any port left alone in the previous
+  five seconds made it answer first. The query left in the clear, past
+  a rule written specifically to stop that.
+- **The out-of-synthetic-ports fail-open**, which is reached from a
+  *selected* app. Failing open on the flow that could not be carried is
+  the intended trade; what was recorded was the whole port, so one
+  exhausted moment exempted every destination that port used next.
+  `expire_idle` frees ports continuously, so the exemption routinely
+  outlived the shortage that caused it.
+
+The fix keys the cache on the flow — the same lesson `forward` was built
+on and which this field one line down did not get. Hot path unchanged in
+shape: one hash lookup per packet, wider key. A miss for a socket that
+is still open costs a lookup in the owner snapshot the loop already
+holds, not a table walk, because `image_for_new_connection` only forces
+a rebuild when the port is *absent* from the snapshot. A flow-keyed
+table can outgrow the port space, so it is capped; overflow forgets
+verdicts, which costs a re-decision and cannot leak.
+
+**What is proven: nothing about a machine.** Six unit tests, three of
+which fail against the old key and pass against the new one, including
+one end to end through `decide`. That is table logic. `cargo test
+--workspace` is green (151 in the service crate) and `cargo check
+--workspace --all-targets`, which is what CI runs, passes.
+
+**What a rig has to do**, and until it does this entry claims nothing
+else:
+
+1. Custom mode, one app selected, WinDivert loaded, capture at the vNIC.
+2. From the selected app, one UDP socket, datagram to an ordinary
+   destination, then a DNS query from the same socket inside five
+   seconds. The query must not appear in clear text.
+3. The exhaustion path is the harder one to stage — it needs the
+   synthetic port range full — and has not been thought through as a
+   rig procedure yet.
+
+**Gotcha, and it cost real time:** another session was checking branches
+in and out of this same working tree while I worked. A commit I made on
+my own branch landed on `claude/gaming-mode`, because HEAD had moved
+under me between `checkout -b` and `commit`. Recovered with `branch -f`
+(nothing of theirs was lost — that branch had no commits of its own),
+but **verify `git branch --show-current` immediately before every commit
+in this repo**, or work in a `git worktree`. This is the same class as
+the journal-conflict note: two sessions on one machine, not two
+machines.
