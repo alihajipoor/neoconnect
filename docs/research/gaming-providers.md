@@ -1581,11 +1581,16 @@ Unchanged from the design doc, and reinforced by this research:
 ### 5. The one-line answer
 
 **Gaming Mode as designed solves a latency problem the measurements say does
-not exist, with a mechanism that cannot reach an access problem that has
-never been measured. The access problem, if it is real, is already solved by
-what Neoxify ships — so the work is one hour of measurement from an Iranian
-living room, then reliability work on a split tunnel that already exists,
-and no node software at all.**
+not exist, using a mechanism that has been observed failing in exactly the way
+it would be predicted to — an Iranian Fortnite player reaching the lobby and
+failing matchmaking. The access problem is real and the publishers are mostly
+the ones causing it, over-complying with a sanctions rule that has authorised
+e-gaming since 2022. Where a changed exit address is enough, Neoxify already
+ships everything required; where it is not, no node software and no amount of
+address-space spending fixes it, because the `is_vpn` label survives owning
+your own ASN. So the work is one hour of measurement from an Iranian living
+room, a `GameProfile` row for Riot that helps players today, reliability work
+on a split tunnel that already exists — and no node software at all.**
 
 ---
 
