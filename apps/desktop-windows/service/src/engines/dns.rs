@@ -406,7 +406,13 @@ pub fn apply_gaming(namespaces: &[String], resolver: &str) -> Result<Vec<String>
         "$ErrorActionPreference='Stop'; foreach ($ns in @({list})) {{ \
          Add-DnsClientNrptRule -Namespace $ns -NameServers '{resolver}' -Comment '{GAMING_NRPT_COMMENT}' }}"
     );
-    powershell(&script)
+    // `HELPER_BUDGET`, not `REPAIR_CMDLET_BUDGET`: that longer budget is
+    // justified only by its caller -- a one-shot repair the customer
+    // started and is waiting on, with no `status` poll behind it. Gaming
+    // mode applies and clears on the session path, where there is, so it
+    // takes the same 15s bound as every other helper that runs with the
+    // `Engines` lock held.
+    powershell(&script, super::HELPER_BUDGET)
         .map_err(|e| format!("could not install the gaming DNS rules: {e}"))?;
     Ok(scoped)
 }
@@ -463,7 +469,13 @@ pub fn clear_gaming() {
         "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{GAMING_NRPT_COMMENT}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
          (Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{GAMING_NRPT_COMMENT}' }} | Measure-Object).Count"
     );
-    let cmdlets_reported_clean = match powershell(&script) {
+    // `HELPER_BUDGET`, not `REPAIR_CMDLET_BUDGET`: that longer budget is
+    // justified only by its caller -- a one-shot repair the customer
+    // started and is waiting on, with no `status` poll behind it. Gaming
+    // mode applies and clears on the session path, where there is, so it
+    // takes the same 15s bound as every other helper that runs with the
+    // `Engines` lock held.
+    let cmdlets_reported_clean = match powershell(&script, super::HELPER_BUDGET) {
         Ok(out) if out.trim() == "0" => true,
         Ok(out) => {
             crate::cleanup_log::note(
