@@ -7,7 +7,7 @@ import "testing"
 // connection carrying two child SAs.
 const sample = `neoxify-ikev2: {
   uniqueid=1 version=2 state=ESTABLISHED local-host=10.0.0.1 local-port=4500
-  local-id=sg1.neoxify.site remote-host=203.0.113.5 remote-port=4500
+  local-id=sg1.example.net remote-host=203.0.113.5 remote-port=4500
   remote-eap-id=nx-aaaaaaaaaaaaaaaa
   child-sas {
     neoxify-ikev2-1: { uniqueid=11 state=INSTALLED bytes-in=1000 bytes-out=2000 }

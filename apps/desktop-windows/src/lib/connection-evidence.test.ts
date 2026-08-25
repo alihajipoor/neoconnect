@@ -147,10 +147,13 @@ describe("Custom mode on a routine poll", () => {
 });
 
 describe("a full tunnel on a routine poll", () => {
-  const through: EgressVerdict = { state: "throughTunnel", exitIp: "38.60.249.229" };
-  const bypassing: EgressVerdict = { state: "bypassingTunnel", exitIp: "50.34.35.228" };
+  // Exit addresses are RFC 5737 documentation addresses standing in
+  // for a node and for a customer's own line; only the fact that
+  // they differ matters. See docs/node-address-hygiene.md.
+  const through: EgressVerdict = { state: "throughTunnel", exitIp: "203.0.113.10" };
+  const bypassing: EgressVerdict = { state: "bypassingTunnel", exitIp: "192.0.2.228" };
   const nothing: EgressVerdict = { state: "unreachable" };
-  const noComparison: EgressVerdict = { state: "indeterminate", exitIp: "50.34.35.228" };
+  const noComparison: EgressVerdict = { state: "indeterminate", exitIp: "192.0.2.228" };
 
   it("treats a proven change of exit address as proof", () => {
     expect(fullTunnelPollState("unverified", through)).toBe("connected");
@@ -185,7 +188,7 @@ describe("a full tunnel on a routine poll", () => {
 
 describe("combining the connect path's two instruments", () => {
   it("does not turn an absent comparison into a claim", () => {
-    const egress: EgressVerdict = { state: "indeterminate", exitIp: "50.34.35.228" };
+    const egress: EgressVerdict = { state: "indeterminate", exitIp: "192.0.2.228" };
     expect(combineEvidence("unverified", egress)).toBe("unverified");
     expect(combineEvidence("connected", egress)).toBe("connected");
   });

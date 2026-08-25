@@ -27,7 +27,12 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: () => Promise.reject(new Error(
 const { captureBaselineIp, verifyEgress } = await import("./egress");
 
 /** The real production list, in the real order (`config.ts`). The first
- * entry is the Cloudflare-fronted panel; the rest are node mirrors. */
+ * entry is the Cloudflare-fronted panel; the rest are node mirrors.
+ *
+ * The IP literals below are RFC 5737 documentation addresses standing in
+ * for real ones: 203.0.113.x for a node exit, 192.0.2.x for a customer's
+ * own line. Only the fact that they differ is under test. See
+ * docs/node-address-hygiene.md. */
 const CDN = "https://connect.neoxify.site/api";
 const FI_MIRROR = "https://fi1.neoxify.site:2053/api";
 
@@ -37,12 +42,12 @@ afterEach(() => {
 });
 
 /** The client's real address, as the CDN reports it. */
-const CLIENT = "50.34.35.228";
-/** A node's own address, as a mirror with a broken `X-Forwarded-For`
- * chain reports it -- measured on turkey-1, where the mirror proxies to
- * the Cloudflare-fronted panel and Cloudflare overwrites
- * `cf-connecting-ip` with the node. */
-const NODE = "130.94.0.27";
+const CLIENT = "192.0.2.228";
+/** A node's own address (redacted), as a mirror with a broken
+ * `X-Forwarded-For` chain reports it -- measured on turkey-1, where the
+ * mirror proxies to the Cloudflare-fronted panel and Cloudflare
+ * overwrites `cf-connecting-ip` with the node. */
+const NODE = "203.0.113.20";
 
 describe("comparing the address the world sees", () => {
   it("calls a changed address through the same endpoint proof", async () => {
@@ -50,10 +55,10 @@ describe("comparing the address the world sees", () => {
     answers.set(CDN, { ip: CLIENT });
     const baseline = await captureBaselineIp();
 
-    answers.set(CDN, { ip: "38.60.249.229" });
+    answers.set(CDN, { ip: "203.0.113.10" });
     await expect(verifyEgress(baseline)).resolves.toEqual({
       state: "throughTunnel",
-      exitIp: "38.60.249.229",
+      exitIp: "203.0.113.10",
     });
   });
 

@@ -2,6 +2,8 @@
 
 Written by the Windows session only. Append at the bottom.
 
+Addresses in this file are redacted: `{germany-1}`, `{ir1}`, `{finland1-host}` and the like stand in for real node addresses and hostnames, and `{tester-home}` for a beta tester's home line. Node addresses are never committed -- see `docs/node-address-hygiene.md`.
+
 ---
 
 ## 2026-08-11 — Desktop 0.9.3 shipped; three honesty bugs fixed
@@ -133,7 +135,7 @@ depends on waiting.
 SSH to the panel host works again. It had broken purely because the box
 moved OVH -> Hetzner on 2026-08-10 and the key was never copied across;
 nothing was revoked. The user added the public key to **root** on
-`167.233.65.166`.
+`{panel}`.
 
 Two traps worth remembering, both of which cost time today:
 
@@ -334,7 +336,7 @@ Voucher short links live at `/r/CODE`, prefilling the redeem field.
 
 ### NEXT — relay, and the ordering is not optional
 
-Iran VPS exists (`ir1.neoxify.site`). Decisions taken: full protocol set
+Iran VPS exists (`{ir1-host}`). Decisions taken: full protocol set
 on the relay, routes to **both** Finland and France, Ultimate goes on
 sale if tests pass, clients **built and held** — publish nothing to the
 beta testers.
@@ -351,8 +353,8 @@ an exit IP that matches the exit node, not from route rows.
 ## 2026-08-13 (later) — the Iran relay carries traffic
 
 **Proven, not inferred.** A credential on `ir1 relay -> finland1` exits
-at **204.168.161.100** (finland1) while the machine's own address is
-50.34.35.228, and ir1's access log shows
+at **{finland1}** (finland1) while the machine's own address is
+{tester-home}, and ir1's access log shows
 `[vless-in -> route-c1b3f538-...-out]`. Both, together, are the standard
 this needed.
 
@@ -388,7 +390,7 @@ All three re-verified against the deployed backend, not just in tests.
 ### ir1 is not finished, and neither is the plan it backs
 
 - **One protocol on the relay: REALITY.** The decision was the full set.
-  Trojan / VLESS+TLS / WS need a real certificate for `ir1.neoxify.site`;
+  Trojan / VLESS+TLS / WS need a real certificate for `{ir1-host}`;
   WireGuard, OpenVPN and Shadowsocks are not installed. So an Ultimate
   customer today has **exactly one credential and no failover** — on the
   plan sold as the one that always connects. This is the most important
@@ -429,14 +431,14 @@ Six relay routes live, all proven by exit IP:
 
 | Entry on ir1 | Port | Exit |
 |---|---|---|
-| VLESS+REALITY | 443 | finland1 (204.168.161.100, measured) |
+| VLESS+REALITY | 443 | finland1 ({finland1}, measured) |
 | VLESS+TLS | 2053 | finland1 |
 | VLESS+TLS over WebSocket | 2053 `/ws` | finland1 |
 | Trojan+TLS | 8443 | finland1 |
 | Shadowsocks 2022 | 46731 | finland1 |
-| VLESS+REALITY | **8444** | **france-1 (104.105.205.233, measured)** |
+| VLESS+REALITY | **8444** | **france-1 ({france-1}, measured)** |
 
-Real Let's Encrypt certificate on `ir1.neoxify.site`, expiring 2026-11-11,
+Real Let's Encrypt certificate on `{ir1-host}`, expiring 2026-11-11,
 which is what makes Trojan and the two TLS variants possible at all.
 
 ### Two exits from one relay: how
@@ -539,7 +541,7 @@ hot-added over the same gRPC API and die with the same restart.
 The failure is not an outage. With no rule matching the entry inbound,
 traffic falls through to the relay's own `direct` outbound and egresses
 **at the relay**. Measured: a customer on the France route came out at
-**185.222.28.186 -- the Iran node's own address** -- while the tunnel
+**{ir1} -- the Iran node's own address** -- while the tunnel
 worked and the app reported a healthy connection. For this product that
 is the worst failure available, and reconnect is automatic, so no
 operator care could have avoided it.
@@ -724,7 +726,7 @@ untested.
 Captured on **both** ends of the same handshake:
 
 - Client (panel box) egress: **4 packets leave** —
-  `167.233.65.166.45455 > 185.222.28.186.51064: UDP, length 148`
+  `{panel}.45455 > {ir1}.51064: UDP, length 148`
 - ir1 ingress: **0 arrive**, 0 return. Client ends `tx=592, rx=0,
   handshake=0`.
 
@@ -784,7 +786,7 @@ same capture so an empty result is distinguishable from a dead capture.
 
 ```
 handshake=1786681655  tx=3508  rx=5948
-EXIT IP: 204.168.161.100   (finland1)
+EXIT IP: {finland1}   (finland1)
 ```
 
 Real handshake, traffic both ways, exit at the relay's exit node.
@@ -875,7 +877,7 @@ matrix of a dependency is worth five minutes up front.
 
 ```
 handshake=1786693718  tx=3700  rx=6876
-EXIT IP: 204.168.161.100   (finland1)
+EXIT IP: {finland1}   (finland1)
 ```
 
 Same result as phantun, over WebSocket instead of fake TCP, through the
@@ -1558,8 +1560,8 @@ desktop matrices deliberately skipped — the UI, the failover ladder and
 the connection verification. Checked by comparing what the screen said
 against an independently measured exit IP every time:
 
-- Connected, showing "Your IP: 104.105.205.233" — measured exit was
-  **104.105.205.233**. Agreed exactly.
+- Connected, showing "Your IP: {france-1}" — measured exit was
+  **{france-1}**. Agreed exactly.
 - "You're not protected" — measured exit was the rig's own WAN address.
   Agreed.
 - Mid-ladder it says "Checking connection... trying each protocol until
@@ -1722,7 +1724,7 @@ change, no new environment variables**. Only two of the nine commits
 touch the running backend (the voucher link and the route sweep); the
 rest are journal, workflows and client versions.
 
-    ssh -i ~/.ssh/ovh_neo root@167.233.65.166 \
+    ssh -i ~/.ssh/ovh_neo root@{panel} \
       'cd /root/neoconnect && git pull --ff-only origin main && \
        docker compose -f infra/docker-compose.yml up -d --build backend'
 
@@ -1837,7 +1839,7 @@ The relay was then proven directly rather than inferred, without touching
 any node's config: a throwaway xray **client** on france-1, dialling
 ir1:443 with the test account's REALITY credential and exposing it as a
 loopback SOCKS proxy, then one curl through it. Path france-1 -> ir1 ->
-exit. Result **204.168.161.100 = finland1**, which is the exit that route
+exit. Result **{finland1} = finland1**, which is the exit that route
 is wired to. Process killed and config removed afterwards.
 
 That client test is worth keeping as a technique: it exercises the real
@@ -1892,7 +1894,7 @@ entry predicted.
 Then each survivor's address block was looked up, and that is what
 actually decided it:
 
-    ir1              185.222.28.186   VUNIFY-NETWORK      ordinary IR hosting
+    ir1              {ir1}   VUNIFY-NETWORK      ordinary IR hosting
     www.torob.com    81.12.31.29      MobinhostInfra      ordinary IR hosting
     www.shatel.ir    85.15.17.13      SHTL-NET-INFRA      ISP hosting
     www.varzesh3.com 185.143.232.202  AbrArvan ANYCAST    a CDN
@@ -1918,8 +1920,8 @@ A throwaway xray client on one node dialling ir1 and exposing loopback
 SOCKS, then one curl. Client host chosen so a correct answer cannot be
 the client's own address:
 
-- client on france-1 -> ir1:443 -> **204.168.161.100 (finland1)**
-- client on finland1 -> ir1:8444 -> **104.105.205.233 (france-1)**
+- client on france-1 -> ir1:443 -> **{finland1} (finland1)**
+- client on finland1 -> ir1:8444 -> **{france-1} (france-1)**
 
 ### The failure in the middle, and what it taught
 
@@ -2486,8 +2488,8 @@ verification is **outstanding and must not be read as passing** — see the
 end.
 
 Node list taken from the database, not from client config or
-known_hosts: finland1 204.168.161.100, france-1 104.105.205.233, ir1
-185.222.28.186. singapore-1 has no Xray at all (0 configs) and was
+known_hosts: finland1 {finland1}, france-1 {france-1}, ir1
+{ir1}. singapore-1 has no Xray at all (0 configs) and was
 correctly skipped.
 
     node       -test        restart  logs removed          rotate  mode
@@ -2852,7 +2854,7 @@ was, in effect, the test rig.
 ### The DNS leak, which is the one that mattered
 
 A customer sent a screenshot: connected on Stealth Lite, exit IP
-104.105.205.233 (france-1, correct), Telegram working, **google.com
+{france-1} (france-1, correct), Telegram working, **google.com
 loading and youtube.com refusing** in the browser.
 
 Every part of that says the tunnel was carrying traffic, and it was. The
@@ -3303,8 +3305,8 @@ It works, and both halves are measured rather than assumed:
 |---|---|
 | interface | `ipsec1`, `10.68.0.6/32` -- Android's own IPsec profile, not our tun |
 | our tun service | not running, as it should not be for this protocol |
-| exit IP | **172.236.143.200** -- Singapore, Akamai Connected Cloud |
-| host IP for contrast | 50.34.35.228 -- United States |
+| exit IP | **{singapore-1}** -- Singapore, Akamai Connected Cloud |
+| host IP for contrast | {tester-home} -- United States |
 | disconnect | `ipsec1` gone at **+0.29s**, VPN transport cleared at **+0.65s** |
 | device TCP afterwards | fine |
 
@@ -3373,7 +3375,7 @@ not been looked at -- the VM still cannot be driven.
 **Status:** done
 **Touches:** `installer/lib/agent.sh`, live: germany-1 + plan route lists
 
-A LightNode box in Frankfurt (38.60.249.229, `de1.neoxify.site`, Ubuntu
+A LightNode box in Frankfurt ({germany-1}, `{germany-1-host}`, Ubuntu
 24.04, 1 vCPU / 2 GB) is live as `germany-1` / `de-germany` with all
 eight protocols: REALITY 443, VLESS+TLS 2053 TCP and WS, Trojan 8443,
 Shadowsocks 41831, WireGuard 28458, OpenVPN 38416, IKEv2 500. Ports
@@ -3381,7 +3383,7 @@ match finland1 and france-1, which were read out of the database rather
 than guessed.
 
 Verified from a real client, not from the panel: the emulator picked
-germany-1 Shadowsocks and reported exit IP **38.60.249.229**, which is
+germany-1 Shadowsocks and reported exit IP **{germany-1}**, which is
 the node's own address, with five established connections to it.
 
 Three separate faults had to be cleared, and each of them produces a
@@ -3391,7 +3393,7 @@ node that looks fine and serves nobody.
 
 `grpcTarget` is empty after enrolment, so the agent falls back to
 `<panel host>:50051` -- which resolves to Cloudflare, which does not
-proxy that port. Confirmed from the box: direct 167.233.65.166:50051
+proxy that port. Confirmed from the box: direct {panel}:50051
 connects, connect.neoxify.site:50051 does not. The installer still does
 not set this; it is a manual step on every new node.
 
@@ -3404,7 +3406,7 @@ request is a key type change, and certbot refuses that non-interactively
 without `--cert-name`:
 
     Are you trying to change the key type of the certificate named
-    de1.neoxify.site from ECDSA to RSA?
+    {germany-1-host} from ECDSA to RSA?
 
 The installer swallowed that and printed its own guidance about inbound
 port 80 -- which was serving an ACME probe file over the public address
@@ -3511,7 +3513,7 @@ so its UDP left while `Test-NetConnection` from PowerShell was blocked.
 ### A key that opens everything
 
 `~/.ssh/ovh_neo` authenticates root on the panel **and on every VPN
-node** -- 167.233.65.166, finland1, france-1. I twice told the owner I
+node** -- {panel}, finland1, france-1. I twice told the owner I
 lacked access I had, and both times one command would have shown it. The
 `azs_vps` key is for the TeamSpeak/bot host and works on none of these.
 
@@ -3859,7 +3861,7 @@ testing earlier in the session:
 
 ```
 NeoxifyBlackhole   Outbound  Block  enabled=True
-  remoteIP = 204.168.161.100, 104.105.205.233, 172.236.143.200
+  remoteIP = {finland1}, {france-1}, {singapore-1}
   protocol = Any   remotePort = Any
 ```
 
@@ -3879,7 +3881,7 @@ moment I finally pointed it at the right thing:
 
 ```
 Drop: Direction Tx, DropReason "Inspection drop"
-ip: 192.168.88.10.63962 > 204.168.161.100.49266: UDP, length 54
+ip: 192.168.88.10.63962 > {finland1}.49266: UDP, length 54
 ```
 
 **The lesson, and it is the same one twice in one night.** When a
@@ -3973,8 +3975,8 @@ changed but no site would open, and a full tunnel fixed it. One
 measurement explains all of it:
 
 ```text
-CUSTOM  tcp egress: 38.60.249.229   (the node)
-CUSTOM  dns egress: 50.34.35.228    (his own line)
+CUSTOM  tcp egress: {germany-1}   (the node)
+CUSTOM  dns egress: {tester-home}    (his own line)
 ```
 
 The selected app's traffic went through the tunnel while the *name* it
@@ -4300,9 +4302,9 @@ which has to come out of the path before either is measured.
 Custom mode **off**, every route, from the app's own service:
 
 ```text
-HOME (no vpn): 50.34.35.228
+HOME (no vpn): {tester-home}
 PASS 25   FAIL 1   of 26
-connectivity restored after run: 50.34.35.228
+connectivity restored after run: {tester-home}
 ```
 
 The one failure is `finland1 / Xray VLESS+REALITY`, which returns no
@@ -4507,7 +4509,7 @@ from a local build:
 ```text
 app version now : 0.9.19        service: Running
 stale connection: RESET -- PASS
-selected app exit: 38.60.249.229  (expected 38.60.249.229)
+selected app exit: {germany-1}  (expected {germany-1})
 warm-up polls +5/+10/+15/+20s: no problem reported
 log: closed 1 existing connection(s) so they rebuild through the tunnel
      redirected=11 returned=11
@@ -5029,10 +5031,10 @@ independent check on which path it took:
 
 | | shipped 0.9.24 | with fix |
 |---|---|---|
-| run 1 | 50.34.35.228 US, tcp 21ms | 104.105.205.233 FR, tcp 294ms |
-| run 2 | 50.34.35.228 US, tcp 9ms | 104.105.205.233 FR, tcp 291ms |
-| run 3 | -- | 104.105.205.233 FR, tcp 290ms |
-| run 4 | -- | 104.105.205.233 FR, tcp 300ms |
+| run 1 | {tester-home} US, tcp 21ms | {france-1} FR, tcp 294ms |
+| run 2 | {tester-home} US, tcp 9ms | {france-1} FR, tcp 291ms |
+| run 3 | -- | {france-1} FR, tcp 290ms |
+| run 4 | -- | {france-1} FR, tcp 300ms |
 
 2/2 escaped before; 4/4 tunnelled after.
 
@@ -5060,7 +5062,7 @@ independent check on which path it took:
 **Status:** done and verified; one fleet-wide finding left open
 **Touches:** nothing in the repo — live: turkey-1 (new), plan route lists
 
-`tr1.neoxify.site` / 130.94.0.27, Istanbul (Light Node Limited, AS2914),
+`{turkey-1-host}` / {turkey-1}, Istanbul (Light Node Limited, AS2914),
 Ubuntu 24.04, 1 vCPU / 2 GB, public address bound directly to the
 interface. STANDALONE. Node id `da93fde4`.
 
@@ -5068,14 +5070,14 @@ All eight, each measured by exit IP rather than by a green connect:
 
 | protocol | port | exit |
 |---|---|---|
-| VLESS+REALITY | 443 | 130.94.0.27 |
-| VLESS+TLS | 8443 TCP | 130.94.0.27 |
-| VLESS+TLS over WebSocket | 8443 `/assets/…` | 130.94.0.27 |
-| Trojan+TLS | 2053 | 130.94.0.27 |
-| Shadowsocks 2022 | 26633 | 130.94.0.27 |
-| WireGuard | 37036/udp | 130.94.0.27 |
-| OpenVPN | 50263/udp | 130.94.0.27 |
-| IKEv2 | 500/4500 | 130.94.0.27 |
+| VLESS+REALITY | 443 | {turkey-1} |
+| VLESS+TLS | 8443 TCP | {turkey-1} |
+| VLESS+TLS over WebSocket | 8443 `/assets/…` | {turkey-1} |
+| Trojan+TLS | 2053 | {turkey-1} |
+| Shadowsocks 2022 | 26633 | {turkey-1} |
+| WireGuard | 37036/udp | {turkey-1} |
+| OpenVPN | 50263/udp | {turkey-1} |
+| IKEv2 | 500/4500 | {turkey-1} |
 
 Added to Trial, Starter, Pro and Ultimate Max — 8 routes each, 216
 credentials provisioned. **Ultimate deliberately excluded**: it is the
@@ -5091,7 +5093,7 @@ sequence predictable.
 
 **The gRPC/PENDING trap is fixed and confirmed working.** The installer
 probed `connect.neoxify.site:50051`, found it dead, said why, and asked;
-answering `167.233.65.166` produced a node that came up ONLINE
+answering `{panel}` produced a node that came up ONLINE
 immediately. The entry above calling this "unfixed and a fleet-wide
 latent outage" is stale — the detection landed.
 
@@ -5129,14 +5131,14 @@ Cloudflare then replaces the client address, so `X-Forwarded-For` never
 survives the hop:
 
 ```
-direct   -> {"ip":"50.34.35.228","country":"US"}    (real client)
-turkey-1 -> {"ip":"130.94.0.27","country":"TR"}     (the node itself)
-finland1 -> {"ip":"50.34.35.228"}                   (real client)
+direct   -> {"ip":"{tester-home}","country":"US"}    (real client)
+turkey-1 -> {"ip":"{turkey-1}","country":"TR"}     (the node itself)
+finland1 -> {"ip":"{tester-home}"}                   (real client)
 ```
 
 finland1 and france-1 escape it only because they were built when the
 panel URL was `connect.neoxify.com`, which resolves straight to
-167.233.65.166. Turkey is simply the first node built since the switch.
+{panel}. Turkey is simply the first node built since the switch.
 
 Two consequences, both of which the installer's own comments say the
 XFF header exists to prevent. Every customer arriving through a node
@@ -5147,7 +5149,7 @@ exactly what a *working* tunnel looks like, so it would pass the
 it is a fleet-wide decision and the same argument as `grpcTarget`.
 
 Noticed alongside it: **germany-1's mirror returns 502** on
-`de1.neoxify.site:2053/api/...` — the stale-upstream failure the
+`{germany-1-host}:2053/api/...` — the stale-upstream failure the
 installer comments already describe. singapore-1 has no fallback site at
 all, having only OpenVPN and IKEv2.
 
@@ -5422,7 +5424,7 @@ same node, same credentials, only the SNI changed, through a SOCKS-only
 xray with no tunnel at all:
 
 ```
-SNI www.shatel.ir   -> exits at 204.168.161.100   (the node)
+SNI www.shatel.ir   -> exits at {finland1}   (the node)
 SNI cloudflare.com  -> curl exit 35, nothing
 ```
 
@@ -5449,10 +5451,10 @@ narrowed deliberately:
 
 | link MTU | config | tun0 | exit IP | 8 MB download |
 |---|---|---|---|---|
-| 1500 | as shipped | 1500 | 130.94.0.27 | 8388608 B in 3 s |
+| 1500 | as shipped | 1500 | {turkey-1} | 8388608 B in 3 s |
 | **1400** | **as shipped** | **1500** | **(none)** | **0 B in 15 s** |
-| 1400 | with the fix | 1348 | 130.94.0.27 | 8388608 B in 3 s |
-| 1500 | with the fix | 1348 | 130.94.0.27 | 8388608 B in 2 s |
+| 1400 | with the fix | 1348 | {turkey-1} | 8388608 B in 3 s |
+| 1500 | with the fix | 1348 | {turkey-1} | 8388608 B in 2 s |
 
 The tunnel reports "Initialization Sequence Completed" in every row,
 including the one that carries nothing. Sub-1500 paths are ordinary on
@@ -5536,12 +5538,12 @@ node, each measured by exit IP rather than by a green install:
 
 | protocol | port | exit |
 |---|---|---|
-| VLESS+REALITY | 443 | 172.236.143.200 |
-| VLESS+TLS | 2083 TCP | 172.236.143.200 |
-| VLESS+TLS over WebSocket | 2083 `/assets/…` | 172.236.143.200 |
-| Trojan+TLS | 2053 | 172.236.143.200 |
-| Shadowsocks 2022 | 40083 | 172.236.143.200 |
-| WireGuard | 20176/udp | 172.236.143.200 |
+| VLESS+REALITY | 443 | {singapore-1} |
+| VLESS+TLS | 2083 TCP | {singapore-1} |
+| VLESS+TLS over WebSocket | 2083 `/assets/…` | {singapore-1} |
+| Trojan+TLS | 2053 | {singapore-1} |
+| Shadowsocks 2022 | 40083 | {singapore-1} |
+| WireGuard | 20176/udp | {singapore-1} |
 | OpenVPN | 26471/udp | pre-existing, untouched |
 | IKEv2 | 500/4500 | pre-existing, untouched |
 
@@ -5566,7 +5568,7 @@ same as proving a VLESS one. Cheaper than WSL2 and nothing to tear down.
 
 REALITY passing on exit IP is the load-bearing part: a wrong shortId
 produces a tunnel that comes up and quietly proxies to the decoy site,
-so `PASS 172.236.143.200` rather than Shopee's address is what says the
+so `PASS {singapore-1}` rather than Shopee's address is what says the
 identity is right.
 
 ### The decoy had to be measured, and Singapore is the hard case
@@ -5619,10 +5621,10 @@ marker. Verified by removing the file on sg1 and re-running.
 
 ### germany-1: the diagnosis is certain, the fix is not reachable
 
-`/api/` returns 502 on `de1.neoxify.site:2053` while the fallback site
+`/api/` returns 502 on `{germany-1-host}:2053` while the fallback site
 serves 200 — still the stale-upstream shape. Worth recording *why*, and
 it is not what the old entry assumed: `connect.neoxify.com`, the name
-germany-1 was built against, **still resolves to 167.233.65.166**, the
+germany-1 was built against, **still resolves to {panel}**, the
 current panel. So DNS is fine and the name is fine; nginx cached the
 address of a literal `proxy_pass` hostname at config load, back when the
 panel was a different VPS, and has held it ever since. A re-run of
@@ -5643,7 +5645,7 @@ there is one.**
 ### Left open: the mirror still loses the client's address
 
 Unchanged, and now with the missing measurement. `origin.neoxify.site`
-resolves straight to 167.233.65.166, serves the API, and **preserves the
+resolves straight to {panel}, serves the API, and **preserves the
 real client address** — a direct call returned the caller's own IP, not
 the panel's. So pointing the mirror there would fix XFF fleet-wide.
 
@@ -6162,8 +6164,8 @@ would have produced a green result on a broken build:**
 `activation reset settled after 12 rescan(s): 0 connection(s) closed in
 total`, with `redirected` still climbing — 68/38 and 60/30
 seen/matched/redirected/returned across the two runs — and the selected
-app's exit IP reading `38.60.249.229` while an unselected app read
-`50.34.35.228`. The counter alone would not have been evidence: a reset
+app's exit IP reading `{germany-1}` while an unselected app read
+`{tester-home}`. The counter alone would not have been evidence: a reset
 that closes nothing because it now skips everything reports the same 0.
 The exit IPs are what make it mean something.
 
@@ -6316,7 +6318,7 @@ which is the field report's "app is gone":
 | `seen=` over the next 100s | **570 -> 1264** | **99 -> 99** |
 | machine DNS | **FAIL, 12s timeout** | **OK, 7ms / 8ms** |
 | `Invoke-WebRequest` | **FAIL: name could not be resolved** | OK |
-| selected app | no answer | `50.34.35.228` (its own connection) |
+| selected app | no answer | `{tester-home}` (its own connection) |
 
 A frozen `seen` counter is the direct evidence that the loop stopped;
 the DNS latency is what the customer would feel. On the before build,
@@ -6324,8 +6326,8 @@ End Task then restored DNS at 12ms, immediately, exactly as reported. On
 the after build there was nothing left for End Task to fix.
 
 Traffic really was carried first, so this is a broken tunnel and not a
-tunnel that never worked: selected-app exit IP `50.34.35.228`
-disconnected -> `38.60.249.229` (the node) connected.
+tunnel that never worked: selected-app exit IP `{tester-home}`
+disconnected -> `{germany-1}` (the node) connected.
 
 **The backstop fired, and said so.** `cleanup.log` on the fixed build:
 
@@ -6442,7 +6444,7 @@ unreliable there and is not relied on. The 9999-versus-0 difference is
 the evidence, and it is unambiguous.
 
 AllExcept was also confirmed to do what it advertises: excluded app
-`50.34.35.228` (its own connection), non-excluded `38.60.249.229` (the
+`{tester-home}` (its own connection), non-excluded `{germany-1}` (the
 node), simultaneously.
 
 ### Measured while in there, NOT fixed — the AllExcept activation reset
@@ -6537,7 +6539,7 @@ otherwise does what it advertises.
   WireGuard tunnel up: DNS back at 16ms immediately, selected app on its
   own address -- the kernel closing the handle is doing the work, as
   designed. A fresh service then reconnected cleanly, selected-app exit
-  IP back to `38.60.249.229`, and a normal Disconnect left the machine
+  IP back to `{germany-1}`, and a normal Disconnect left the machine
   at 10ms DNS.
 - **Not proven: the exact path the user's own session took.** An
   explicit Disconnect always did stop the split tunnel, even before this
@@ -6935,7 +6937,7 @@ morning — and ir1's eight finland1 outbounds still carried
 
 Isolated by A/B on one route with everything else held constant: same
 credential, same shortId; `cloudflare.com` → curl exit 35,
-`www.shatel.ir` → exit IP 204.168.161.100.
+`www.shatel.ir` → exit IP {finland1}.
 
 The agent now fingerprints the exit parameters it last installed per
 route. A matching duplicate is the genuine no-op; a differing one is
@@ -6953,7 +6955,7 @@ removed and re-added. Not an unconditional rebuild — the sweep runs every
   failure is still the likeliest thing to be broken.
 - **The positive control is what made the negatives mean anything.** A
   throwaway user added to france-1's `vless-in` and removed straight
-  after: exit IP 104.105.205.233, and france-1's log naming it. Without
+  after: exit IP {france-1}, and france-1's log naming it. Without
   that, thirteen FAILs prove nothing.
 - **Credentials never left the nodes.** The probe reads the live
   outbound, builds its client config and curls, all on ir1; only the exit
@@ -7620,7 +7622,7 @@ That is upstream's own warning and it cuts against the entire point of
 the change. `www.free.fr` does not serve its site on 2083, so the decoy
 is now port-inconsistent in a way `cloudflare.com:443` at least was not.
 **There is no way around it on this node:** one global IPv4
-(104.105.205.233), and xray's existing inbound binds `*:443`, which
+({france-1}), and xray's existing inbound binds `*:443`, which
 covers v6 too — measured, not assumed. A second REALITY on 443 here is
 impossible. So the honest framing of option (c) is *better decoy
 identity, worse port*, and whether that trade is worth taking is the
@@ -7634,8 +7636,8 @@ A real client, not a handshake:
 |---|---|
 | TLS from outside, SNI `www.free.fr` | `CN=free.fr`, Sectigo — byte-identical issuer/subject to the real site |
 | wrong SNI (`example.org`) to 2083 | still `CN=free.fr` — prober gets the decoy, not a reset |
-| **exit IP through the tunnel** | **104.105.205.233** |
-| the client host's own IP | 172.236.143.200 |
+| **exit IP through the tunnel** | **{france-1}** |
+| the client host's own IP | {singapore-1} |
 | 1 MB payload | 1048576 bytes in 1555 ms |
 | HTTPS to a third host | `example.com` → HTTP 200 |
 
@@ -9128,7 +9130,7 @@ connect on this guest and this is **not** a finding about the product:
 OpenVPN failed with "tapctl returned nothing", IKEv2 and Xray/REALITY
 both with "powershell did not finish within 15s" -- the service's own
 internal timeouts firing on a CPU-starved guest. **WireGuard connected
-and its exit IP was the node** (38.60.249.229, DE), so every experiment
+and its exit IP was the node** ({germany-1}, DE), so every experiment
 below ran over a tunnel proven to carry a selected app's traffic before
 anything was measured.
 
@@ -9217,7 +9219,7 @@ filters do not catch being stopped a layer down.
 
 **And the check that catches a missing `::/64` permit passed**: the
 selected app's own IPv4 exit, asked by that executable rather than by
-curl, was `{"ip":"38.60.249.229","country":"DE"}` both while the v6 was
+curl, was `{"ip":"{germany-1}","country":"DE"}` both while the v6 was
 being refused and again after it. Evidence: `V1-v31.txt`,
 `V1-v31b.pcap`, `V1-v31-ipv6-block-custom.log`,
 `V1-v31-split-tunnel.log`.

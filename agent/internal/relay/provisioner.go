@@ -81,7 +81,8 @@ type Provisioner struct {
 	// eight routes were dead, and the panel and the outbox both said
 	// they were fine. Proven by A/B on one route: identical credential
 	// and shortId, serverName cloudflare.com -> curl 35, serverName
-	// www.shatel.ir -> exit IP 204.168.161.100.
+	// www.shatel.ir -> the expected exit IP. (Node addresses are not
+	// written down here; see docs/node-address-hygiene.md.)
 	//
 	// In-process only. An agent restart empties it, so the next
 	// re-assert rebuilds each outbound once -- one brief drop per agent

@@ -63,10 +63,11 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
      * -- including the DNS lookup `Config.parse` performs when a peer's
      * endpoint is a hostname rather than a literal address.
      *
-     * That asymmetry shipped and was reported: Finland's endpoint is
-     * 204.168.161.100:51820 and connected fine, France's is
-     * fr1.neoxify.com:51820 and failed every time, so the ladder walked
-     * past France to Finland on every attempt. The node's own capture
+     * That asymmetry shipped and was reported: Finland's endpoint was a
+     * literal address and connected fine, France's was a hostname and
+     * failed every time, so the ladder walked past France to Finland on
+     * every attempt. (The two addresses are not written down here; see
+     * docs/node-address-hygiene.md.) The node's own capture
      * showed the desktop client handshaking with France perfectly while
      * the tablet never sent it a single packet -- the connection died
      * inside the app, before the network was involved at all.
