@@ -5,6 +5,8 @@ network except where it quotes `docs/design/gaming-mode.md`, which is.
 
 Written 2026-08-25 on branch `claude/gaming-providers-research`.
 
+Addresses in this file are redacted: `{germany-1}`, `{ir1}` and the like stand in for real Neoxify node addresses. Third-party addresses -- Mudfish, ExitLag, Mullvad, Blizzard, ArvanCloud, and the Iranian block-page ranges -- are kept exactly as measured, because they are the evidence. Node addresses are never committed -- see `docs/node-address-hygiene.md`.
+
 Read `docs/design/gaming-mode.md` first. This document does not repeat its
 measurements; it tests two hypotheses against them.
 
@@ -943,10 +945,10 @@ What is already known, and it is bad:
 - **The label is ASN-wide, not earned.** Controls on unrelated IPs in the
   same ASNs return identical verdicts. **Rotating to a fresh address at the
   same provider buys nothing** — which kills the cheapest-looking remedy.
-- The ASNs, verified by lookup: germany-1 `38.60.249.229` and turkey-1
-  `130.94.0.27` are both **AS154177 LIGHT NODE LIMITED**; france-1
-  `104.105.205.233` is **AS63949 Akamai Connected Cloud** (Linode); finland1
-  `204.168.161.100` is **AS24940 Hetzner**. Hetzner and Linode are among the
+- The ASNs, verified by lookup: germany-1 `{germany-1}` and turkey-1
+  `{turkey-1}` are both **AS154177 LIGHT NODE LIMITED**; france-1
+  `{france-1}` is **AS63949 Akamai Connected Cloud** (Linode); finland1
+  `{finland1}` is **AS24940 Hetzner**. Hetzner and Linode are among the
   most heavily VPN-flagged hosting ASNs in existence. And two of the five
   nodes share one ASN, so they share one reputation.
 ### Publishers do block datacenter ranges, and here is the mechanism at three
@@ -1098,7 +1100,7 @@ is right it outranks building anything.
   and `exitProtocolConfigId`, and the fleet has run thirteen of them; an
   Iran-reachable entry chained to a foreign exit is a shipped, provisioned
   capability, not a design (`apps/backend/prisma/schema.prisma:548-569`).
-  An Iranian entry node has existed — `185.222.28.186`, Tehran,
+  An Iranian entry node has existed — `{ir1}`, Tehran,
   **AS210814 VUNIFY LTD** (verified by lookup). *Whether it is live today is
   not established here and must be checked before anything is planned on it.*
 - **Per-application split tunnel exists and is shipping.** `SplitTunnelConfig`
