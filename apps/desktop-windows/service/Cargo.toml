@@ -33,6 +33,13 @@ socket2 = { version = "0.5", features = ["all"] }
 # (embed-resource pulls the same version), so this adds no new code to
 # the tree.
 winreg = "0.55"
+# The Gaming-mode DNS stub speaks RFC 8484 DoH upstream. Blocking rather
+# than async on purpose: the stub runs on dedicated `std::thread`s (the
+# `split_tunnel::proxy` precedent) so a slow resolver can never stall the
+# tokio runtime that serves the control pipe. rustls rather than
+# schannel because rustls, ring and webpki are already in the workspace
+# lockfile via the Tauri plugins, so this adds no new TLS stack.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [dependencies.windows-sys]
 version = "0.59"
