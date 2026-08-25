@@ -9275,6 +9275,270 @@ wrong way that only the control can explain.
 Item 1 is now a fifteen-minute test that needs no tunnel, provided a rig
 will stay up long enough to run it.
 
+---
+
+## 2026-08-24 (later still) — the WFP sweep enumerated, removed, and was cross-checked on real hardware
+
+**Status:** `claude/repair-wfp-sweep-0931` at `8fe55e9`. **Touches:** this
+file only. **The sweep is now hardware-verified.** Item 1 of the previous
+entry's block list is closed.
+
+### What ran, and where
+
+Two independent runs, both elevated, both against real WFP:
+
+- **Host, read-only.** A purpose-built read-only probe (the `residue`/
+  `clean` mutators physically deleted from the binary, verified by
+  `grep` of the Fwpm*Add/Delete symbols — none present) run elevated on
+  the Windows 11 host. This settled phase 0 only; it never wrote WFP
+  state and left nothing behind.
+- **Guest, full end-to-end.** `Neoxify-Test2`, restored to `clean-base`,
+  ran the whole of `W1b` elevated: the three enumeration forms, install
+  persistent residue, enumerate again, `netsh` cross-check, the *actual
+  service `repair`*, enumerate again, `netsh` again, and a safety-valve
+  clean. Powered off and snapshot-restored afterwards; nothing stranded.
+
+### Phase 0, the single-variable control — verbatim, both machines agree
+
+    A  provider + ZEROED layerKey (the shipped bug): FwpmFilterCreateEnumHandle0 -> 0x80320004  FAILED
+    C  provider + REAL layerKey (ALE_AUTH_CONNECT_V6): OK  handle=0  filters_seen=0  ours=0
+    B  no template at all (the fix): OK  handle=0  filters_seen=547  ours=0
+
+A fails with `FWP_E_LAYER_NOT_FOUND`; C, byte-identical but with a real
+`layerKey`, succeeds. **The diagnosis in this file is confirmed, not
+refuted.** The zeroed layer key is the whole cause. On the host the same
+three lines held with `filters_seen=262` — the count is machine-specific,
+the verdict is not.
+
+### The fix does what the per-layer template cannot
+
+With three persistent filters installed under our provider across two
+layers (CONNECT_V6, RECV_ACCEPT_V6):
+
+    C  provider + REAL layerKey (ALE_AUTH_CONNECT_V6): ... filters_seen=2  ours=2
+    B  no template at all (the fix): ... filters_seen=550  ours=3
+
+The real-layer template C sees only the **two** filters that live at the
+one layer it names and misses the inbound one entirely; the fix's
+no-template sweep finds all **three**. This is the reason the sweep is
+written to enumerate everything and compare the provider itself, stated
+now as a measurement rather than an argument.
+
+### The service's own `repair` — verbatim, the line that matters
+
+    [FIXED] Windows Filtering Platform filters -- removed 3 leftover filter(s)
+
+Post-repair: form B `ours=0`, and the independent `netsh wfp show filters`
+count of `Neoxify` went `5 -> 0`. The teardown also removed the sublayers
+and provider (the safety-valve clean that followed got
+`FWP_E_SUBLAYER_NOT_FOUND`/`FWP_E_PROVIDER_NOT_FOUND` — already gone).
+
+**Honest caveat on the exit code:** the run exited `1`, not `0`. Not the
+WFP step — that is `[FIXED]`. The non-zero came from the NRPT tunnel-DNS
+item, whose PowerShell removal timed out at 15s in the constrained guest
+and fell back to the registry, which held no rules of ours. That is an
+unrelated teardown item and a guest-performance artifact, not a WFP
+result. The WFP-specific pass criteria (removed N filters; phase 5
+`ours=0`; netsh 0) are all met.
+
+### Rig traps paid for this time, for the next session
+
+- **The staged binaries were stale and the built binaries would not
+  launch.** `nxsvc-wfpfix.exe`/`wfpprobe.exe` on the share were built
+  from `c5213d6`, before `a03b0e3`'s `guid_eq` and zero-page free — the
+  strings prove it. Rebuilt both from tip. Then they failed on the clean
+  guest with `0xC0000135` (STATUS_DLL_NOT_FOUND): a stock Windows 11 has
+  the UCRT but **not** `VCRUNTIME140.dll`, and the service **also**
+  imports `WinDivert.dll` at load time even for the WFP-only `repair`
+  path. Fix: build the rig binaries with `-C target-feature=+crt-static`,
+  and drop `WinDivert.dll` beside the service. Both are now in `W1b.ps1`.
+- **The wedged guest from the prior session could not be cleared with
+  `taskkill`, even elevated** — the hung `guestcontrol` process sat in a
+  kernel wait on the VBox driver. Killing `VBoxHeadless` did not free it
+  either; only killing `VBoxSVC.exe` (the COM server, which respawns on
+  demand) reaped it. That is the recovery when a guest session jams and
+  the machine lock will not release.
+- **Guest-control tokens are medium-IL**, so `schtasks /ru SYSTEM /rl
+  highest` is `Access denied` from them — the no-UAC scheduled-task idea
+  does not work cold. The path that *did* work is the documented one:
+  `boot2.ps1` via an interactive Win+R, `Start-Process -Verb RunAs`, and
+  the UAC consent accepted by injected keystrokes. **Scancode injection
+  does reach the secure desktop on 7.2.10** (Left to move No->Yes, then
+  Enter, both confirmed by screenshot) — the previous "Failed to send a
+  scancode" was not a hard ceiling. `keyboardputstring`, however, is the
+  reliable one for text; a bare Win+R still sometimes lands nowhere, so
+  launching `boot2.ps1` straight from `guestcontrol start` and only
+  injecting the UAC accept is cleaner than driving Run by keyboard.
+- **A screenshot beats `bringup.py`'s readiness test.** Headless, the
+  guest reports 1024x768 for ever and `wait_desktop`'s `(1920,955)` gate
+  never trips though the desktop is plainly up. Confirm boot with
+  `controlvm screenshotpng`, not the resolution.
+
+### What still blocks 0.9.31
+
+1. ~~The repair's WFP sweep has never enumerated on hardware.~~ **Done.**
+2. The 0.9.30 latency control still has not run. Not attempted here: it
+   needs a real client-to-node connection to measure, and the standing
+   rule is not to lean on production nodes for tests. What it needs is a
+   node that can be driven without disturbing live users (a throwaway
+   exit, or explicit sign-off), then `L1.ps1` against the 0.9.30 client
+   exactly as the 0.9.31 run was done. Until then head-of-line,
+   TCP_NODELAY and flow affinity stay measured-but-unattributed.
+3. The one unexplained cell in the IPv6 table.
+4. Unrelated but seen in passing: the `repair` NRPT step's 15s PowerShell
+   timeout fires readily on a slow machine and pushes the exit code to 1
+   even when nothing of ours was present. Worth a look before release —
+   a clean machine should not report a partial repair.
+
+---
+
+## 2026-08-24 (later) — the repair's false failure, and why the exit code was the bug rather than the timeout
+
+**Status:** `claude/repair-nrpt-timeout-indeterminate`, branched from
+`claude/repair-wfp-sweep-0931` at `c76c2e9`. **Touches:** `ipc`,
+`service/src/{main.rs,engines/{dns,repair}.rs}`, `src-tauri/src/vpn.rs`,
+and the repair UI (`lib/repair.ts`, `components/RepairNetwork.tsx`,
+`lib/i18n.tsx`). Closes item 4 of the previous entry's block list.
+
+### The bug was one layer up from where it looked
+
+The previous entry recorded the symptom honestly: the WFP step was
+`[FIXED]`, `netsh` confirmed 5 -> 0, and the run still exited `1`
+because the NRPT step timed out. The obvious reading is "the timeout is
+the bug, raise it". That is half of it, and the smaller half.
+
+`RepairOutcome` already had four variants. `Unknown` already existed and
+already said the right thing; `step_dns` already produced it; and
+`RepairOutcome::is_failure()` already returned false for it. **Every
+piece of the distinction was in place and nothing consumed it.** Both
+ends derived their verdict from the same "not `AlreadyClean` and not
+`Fixed`" filter, so `Unknown` arrived at the exit code and at the
+summary banner as a failure:
+
+- `main.rs` exited `1` on `report.unresolved()`, which includes
+  `Unknown`.
+- `RepairNetwork.tsx` picked `repair.resultProblems` and the destructive
+  colour from `unresolvedSteps()` — the same conflation, in the place a
+  customer actually reads.
+
+So raising the timeout alone would have made the symptom rarer and left
+the false claim in the code, waiting for the next slow machine.
+
+### What "we could not check" is allowed to mean
+
+`RepairReport` now answers three questions instead of one:
+`failed()` (a step looked, found ours, could not remove it),
+`indeterminate()` (a step could not complete), and `has_failures()` for
+the exit status. `unresolved()` is unchanged and still returns both
+kinds, because both are worth *naming* to whoever is helping — it is
+only the verdict that had to stop treating them alike. The app mirrors
+this with `failedSteps()` / `indeterminateSteps()`.
+
+Only `failed()` sets the exit code. An indeterminate step is still
+reported — named on the command line under its own heading, and in the
+UI as a third summary state (`repair.resultUnverified`, en + fa) in the
+same highlight tone the per-step "Couldn't check" already used, so the
+banner and the row it refers to finally agree. It is not silently
+swallowed and it still does not count as clean; `is_clean()` is
+untouched.
+
+This is the product rule applied to the tool that exists to enforce it.
+Exiting `1` on a timeout asserts "this did not work", which is the one
+thing a timeout does not establish — and the person reading it has
+networking that is already broken, on a machine slow enough to have hit
+the timeout, being told the last resort before a network reset failed.
+
+### The NRPT query was never the PowerShell problem
+
+Worth recording because the obvious fix here is the wrong one.
+`rule_count()` — the census, on both the survey and the verify side —
+has always read the registry directly, and deliberately: a rule under
+`SOFTWARE\Policies\...\DnsPolicyConfig` is invisible to
+`Get-DnsClientNrptRule`, so asking the cmdlet would under-report exactly
+the case the sweep exists for. **There is no PowerShell to remove from
+the query; it is already gone.**
+
+What timed out is the cmdlet *removal*, which runs alongside the
+registry sweep that does the real work across both locations. That belt
+stays — dropping it would narrow coverage on an argument, and there is
+no rig time tonight to test the narrowing. But 15s is the wrong budget
+for it: `Get-DnsClientNrptRule` is CIM-backed, so a cold call pays
+PowerShell start-up plus module and CIM-session load, twice in the one
+script. `REPAIR_CMDLET_BUDGET` gives it 60s **on the repair path only**.
+
+`clear()` keeps `HELPER_BUDGET`. That number's reasoning is untouched
+and still correct where it applies: on connect and disconnect the
+`Engines` lock is held, and one wedged child must not make the service
+deaf to `status` and `disconnect`. The repair is a one-shot the customer
+deliberately started and is waiting on, with no status poll queued
+behind it — which is the only reason it can afford four times as long.
+
+`REPAIR_TIMEOUT` moves 150s -> 195s and the app's deadline 160s -> 205s,
+by exactly the 45s the NRPT budget gained. The old comment's arithmetic
+("each bounded by the fifteen-second helper budget") was load-bearing
+and would otherwise have quietly stopped being true; abandoning the pass
+early would be the same false failure arriving one layer up.
+
+### What is proven and what is not
+
+Proven: `cargo check --workspace --all-targets` clean, `cargo test
+--workspace` 214 passed / 0 failed, `tsc --noEmit` clean, `vitest` 128
+passed. The new tests rebuild the rig's own report — clean tunnel,
+timed-out dns, fixed wfp — and assert it is not a failure, with the
+discriminator beside it: a dns step that *checked* and found residue
+still is. Both were confirmed to discriminate by reverting the logic and
+watching only those cases fail, on both sides of the wire.
+
+**Not proven: any of this on a slow Windows machine.** A unit test
+cannot produce a 15s CIM load; it asserts the classification, not the
+conditions that trigger it. The rig was left powered off with its
+snapshot restored to `clean-base`, so this was not re-run on hardware.
+The end-to-end claim that stays open is narrow but real: that on a guest
+slow enough to have timed out at 15s, 60s is now enough — and failing
+that, that the run reports indeterminate rather than failed. The second
+half is what the tests cover; the first is a guess with a rationale.
+
+### What still blocks 0.9.31
+
+1. ~~The repair's WFP sweep has never enumerated on hardware.~~ **Done.**
+2. ~~The `repair` NRPT step's 15s timeout pushes the exit code to 1.~~
+   **Fixed here, but see the caveat above: not re-run on the rig.**
+3. The 0.9.30 latency control still has not run. Unchanged.
+4. The one unexplained cell in the IPv6 table. Still unexplained, but
+   there is now a candidate mechanism worth testing rather than
+   reasoning about — see below.
+
+### The IPv6 cell: a lead, not an answer
+
+The cell is the unselected app's **UDP** v6 to `2620:fe::9` reading `0`
+where the control read `4`. Two mechanisms sit on it, and neither was
+checked against the probe's actual parameters:
+
+- `redirect.rs`'s `handle_ipv6` blocks **any** v6 packet to **port 53**
+  before it consults the selection list (`carry_dns` is `true` in
+  production), by the stated design that while Custom mode is on every
+  lookup goes through the tunnel. If the probe's UDP leg was a DNS query
+  to `2620:fe::9:53`, a zero for an unselected app is **by design**, and
+  its TCP leg to `2620:fe::fe` is untouched because the block is
+  destination-port-53 only — which is exactly the shape of the table.
+- Against that: this path calls `block(stats)`, which increments
+  `blocked_v6`, and the journal's argument for the benign reading rests
+  on `blocked_v6` reaching **exactly 5**, all accounted for by the
+  selected app. Both cannot be true as stated.
+
+Settling it needs the probe's actual destination port and datagram count
+out of `V1-v31.txt` / `V1-v31b.pcap`, which live on the VM share and not
+in git. **So: still unexplained.** What changed is that there is now a
+specific thing to read rather than a rerun to schedule — and if the
+probe did use port 53, the cell is not a bug at all.
+
+Also worth knowing before that rerun: the merge on `claude/integration-all`
+reports that the UDP-leak fix's `verdict_for_unattributed` and 0931's
+`SelectedAppsIpv6Block` now both act on a selected app's unattributable
+IPv6 from opposite ends. `verdict_for_unattributed` did **not** exist in
+the binary that produced this table, so it cannot explain this cell —
+but it will be present for whatever run settles it.
+
 ## 2026-08-24 — The integration branch, and the one semantic conflict in it
 
 **Status:** `claude/integration-all` now carries four of the five queued

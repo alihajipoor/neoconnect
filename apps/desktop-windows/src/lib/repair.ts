@@ -56,10 +56,12 @@ export interface RepairReport {
  * often the thing misbehaving -- the worst case is several of those
  * budgets end to end.
  *
- * A little longer than the Rust side's own deadline (150s), so a
+ * A little longer than the Rust side's own deadline (195s), so a
  * timeout surfaces as the service's sentence about being stuck rather
- * than as this one racing it. */
-const REPAIR_TIMEOUT_MS = 160_000;
+ * than as this one racing it. Both moved up by 45s together when the
+ * NRPT clear's budget did; the gap between them is the point, so they
+ * have to move as a pair. */
+const REPAIR_TIMEOUT_MS = 205_000;
 
 /** Everything a step's outcome can be, plus whether the pass as a whole
  * counts as a success.
@@ -69,6 +71,35 @@ const REPAIR_TIMEOUT_MS = 160_000;
  * the customer is told which. */
 export function unresolvedSteps(report: RepairReport): RepairStep[] {
   return report.steps.filter((s) => s.outcome !== "alreadyClean" && s.outcome !== "fixed");
+}
+
+/** The steps that looked, found something of ours, and could not remove
+ * it.
+ *
+ * The only steps that make a repair a failure, and deliberately separate
+ * from {@link indeterminateSteps}: the two are different claims about
+ * the machine. This one asserts "we checked and it is still there",
+ * which the step actually established. Mirrors `RepairReport::failed`
+ * on the Rust side. */
+export function failedSteps(report: RepairReport): RepairStep[] {
+  return report.steps.filter((s) => s.outcome === "failed");
+}
+
+/** The steps that could not complete, so they say nothing either way.
+ *
+ * A helper that was killed at its timeout establishes *nothing* -- not
+ * that the residue is gone, and not that it is still there. This used to
+ * be folded into {@link unresolvedSteps} and painted the whole result in
+ * the destructive colour, so a repair in which every check succeeded and
+ * one merely timed out told the customer it had failed.
+ *
+ * That is the worst outcome this screen can produce. The people who
+ * reach it have networking that is already broken and machines slow
+ * enough to hit the timeout in the first place, and this is the last
+ * thing offered to them before a network reset and an uninstall.
+ * Mirrors `RepairReport::indeterminate` on the Rust side. */
+export function indeterminateSteps(report: RepairReport): RepairStep[] {
+  return report.steps.filter((s) => s.outcome === "unknown");
 }
 
 /** Whether anything was actually found and removed.
