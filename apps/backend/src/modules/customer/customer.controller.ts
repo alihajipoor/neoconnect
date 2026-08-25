@@ -33,6 +33,7 @@ import { ReplyTicketDto } from "../support/dto/reply-ticket.dto";
 import { RedeemVoucherDto } from "../vouchers/dto/redeem-voucher.dto";
 import { CustomerJwtAuthGuard } from "../../common/guards/customer-jwt-auth.guard";
 import { CurrentCustomer } from "../../common/decorators/current-customer.decorator";
+import { GamingService } from "../gaming/gaming.service";
 import { AuthenticatedCustomer } from "../customer-auth/types";
 
 // Everything here is scoped to the calling customer only (never another
@@ -59,6 +60,7 @@ export class CustomerController {
     private readonly config: ConfigService,
     private readonly invoicesService: InvoicesService,
     private readonly paymentSettings: PaymentSettingsService,
+    private readonly gamingService: GamingService,
   ) {}
 
   @Get("me")
@@ -100,6 +102,27 @@ export class CustomerController {
   @Get("plans")
   plans() {
     return this.plansService.listActive();
+  }
+
+  /** Everything the app needs to run Gaming Mode, or an honest reason it
+   * cannot.
+   *
+   * Its own endpoint rather than another field on `/customer/protocol-users`,
+   * for two concrete reasons. That payload is filtered through the
+   * `CLIENT_VISIBLE_PUBLIC_PARAMS` whitelist, so a field added near it is
+   * silently dropped before it reaches a client and nothing reports the
+   * silence. And the desktop app caches that payload behind a `version`
+   * discriminator whose bump throws the cache away -- which would cost every
+   * customer their offline credentials to ship a feature unrelated to them.
+   *
+   * Returns the game catalogue even when the customer is not entitled, so the
+   * app can show what the mode covers and say what is missing rather than
+   * render an empty screen that reads as a fault. The catalogue holds no
+   * credential. `resolver` is null unless the plan grants the feature AND a
+   * node has actually confirmed it is serving one. */
+  @Get("gaming-profile")
+  gamingProfile(@CurrentCustomer() customer: AuthenticatedCustomer) {
+    return this.gamingService.profileForCustomer(customer.sub);
   }
 
   /** The calling customer's own referral standing: their code, who has
