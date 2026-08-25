@@ -290,13 +290,14 @@ model Customer {
   transactions  PaymentTransaction[]
   invoices      Invoice[]
 
-  referredBy         Customer?           @relation("CustomerReferrals", fields: [referredByCustomerId], references: [id])
-  referrals          Customer[]          @relation("CustomerReferrals")
-  referralRewards    ReferralReward[]    @relation("ReferralRewardsEarned")
-  referralCredits    ReferralCredit[]    @relation("ReferralCreditsGiven")
+  referredBy         Customer?            @relation("CustomerReferrals", fields: [referredByCustomerId], references: [id])
+  referrals          Customer[]           @relation("CustomerReferrals")
+  referralRewards    ReferralReward[]     @relation("ReferralRewardsEarned")
+  referralCredits    ReferralCredit[]     @relation("ReferralCreditsGiven")
   voucherRedemptions VoucherRedemption[]
   supportTickets     SupportTicket[]
   clientAttempts     ClientAttempt[]
+  gamingToken        GamingResolverToken?
 
   @@index([referredByCustomerId])
   @@map("customers")
@@ -362,11 +363,11 @@ model SubscriptionPlan {
   /// traffic crosses two servers and the Iran side costs more per
   /// gigabyte, so quietly provisioning every customer onto it would be
   /// paying twice to serve people who never asked for it.
-  relayOnly Boolean @default(false)
+  relayOnly                Boolean    @default(false)
 
-  defaultRouteId           String?
-  createdAt                DateTime   @default(now())
-  updatedAt                DateTime   @updatedAt
+  defaultRouteId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   /// Which Routes this plan may be served by, chosen per plan.
   ///
@@ -388,7 +389,7 @@ model SubscriptionPlan {
   /// subscription should pick it up automatically. An explicit list
   /// cannot do that -- a new route would reach nobody until someone
   /// remembered to edit each plan, and nothing would report the silence.
-  allowedRoutes     Route[]                @relation("PlanAllowedRoutes")
+  allowedRoutes Route[] @relation("PlanAllowedRoutes")
 
   subscriptions     Subscription[]
   freeTrialSettings FreeTrialSettings[]
@@ -396,6 +397,9 @@ model SubscriptionPlan {
   defaultRoute      Route?                 @relation(fields: [defaultRouteId], references: [id])
   Voucher           Voucher[]
   resellerBalances  ResellerTokenBalance[]
+  /// Capabilities this plan grants. See PlanFeature -- rows, not booleans,
+  /// and an absent row means not granted.
+  features          PlanFeature[]
 
   @@map("subscription_plans")
 }
@@ -462,6 +466,10 @@ model Node {
   usageRecords     UsageRecord[]
   subscriptions    Subscription[]
   enrollmentTokens EnrollmentToken[]
+  /// Optional, and absent on every node until one is provisioned for it.
+  /// See GamingResolver -- a node without one simply does not serve gaming
+  /// mode, which is the state the whole fleet is in today.
+  gamingResolver   GamingResolver?
 
   @@map("nodes")
 }
@@ -1239,4 +1247,244 @@ model SupportMessage {
 
   @@index([ticketId, createdAt])
   @@map("support_messages")
+}
+
+// ---------------------------------------------------------------------------
+// Gaming Mode
+//
+// Modelled on docs/design/gaming-mode.md. Read §2 of that document before
+// changing anything here, because the shape of these tables is a direct
+// consequence of a measurement that contradicted the obvious product.
+//
+// The short version: from Tehran, the direct path to Blizzard's EU game
+// server is 72.0 ms and the best path through our fleet is 72.8 ms. Every
+// other node is 28-66 ms worse. So gaming mode is NOT a lower-ping product,
+// and nothing in this schema exists to support a latency claim. What it
+// models is *narrower* routing -- carrying the launcher, login, store and
+// web surface while leaving the game's own connections on the direct path.
+//
+// That last part is by construction, and it is the load-bearing property. A
+// GameProfile lists HOSTNAMES, and WoW's realm and world addresses arrive
+// inside the Battle.net session as literals that no resolver ever sees. A
+// DNS-based mechanism therefore cannot touch the game path even by
+// accident, which given the numbers above is the best property it has.
+// ---------------------------------------------------------------------------
+
+/// A capability a plan grants, as a row rather than a boolean column.
+///
+/// A join table on purpose. SubscriptionPlan.relayOnly is this repo's
+/// cautionary tale in one direction -- a boolean whose enforcement was later
+/// removed, leaving a column nothing reads and every reader has to be told
+/// to ignore. isActive / isPurchasable is the tale in the other: one boolean
+/// doing two jobs, which silently broke the free trial for every signup.
+///
+/// Rows also make "which plans grant this" a query rather than a scan, which
+/// is the question the panel actually asks.
+enum PlanFeatureKey {
+  /// Selective DNS redirection of a game's launcher, login and store
+  /// surface. The game's own connections are untouched. Mechanism (a).
+  GAMING_DNS
+
+  /// Per-game private exit -- a stable, low-density address for the game
+  /// connection itself. Mechanism (b), and NOT BUILT. It depends on a
+  /// destination filter in the split tunnel and on four latency fixes that
+  /// have never run against real traffic. The key exists so plan data can be
+  /// prepared ahead of it; every reader in the backend treats it as
+  /// unavailable and the clients are not told about it.
+  GAMING_PRIVATE_EXIT
+}
+
+model PlanFeature {
+  id      String           @id @default(uuid())
+  planId  String
+  plan    SubscriptionPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  feature PlanFeatureKey
+
+  createdAt DateTime @default(now())
+
+  /// A row means granted. There is deliberately no `enabled` boolean here:
+  /// that would be a second way to say no, and the two would drift -- which
+  /// is the exact failure the enum comment above describes.
+  @@unique([planId, feature])
+  @@index([feature])
+  @@map("plan_features")
+}
+
+/// One game, curated in the panel, covering its launcher and the game itself
+/// as a single row.
+///
+/// One row per game rather than one per executable, because making the
+/// customer find the launcher and the game separately is a usability failure
+/// already on record for Custom mode: nothing there says you need both, so
+/// people select one and get half a product.
+model GameProfile {
+  id          String @id @default(uuid())
+  slug        String @unique
+  displayName String
+
+  /// Icon identifier the clients map to a bundled asset. Deliberately not a
+  /// URL: the picker has to render with no network at all, and an icon
+  /// fetched from a Neoxify-looking host is a request that gets blocked in
+  /// Iran -- which would leave the picker looking broken for exactly the
+  /// customers it exists for.
+  iconKey   String?
+  publisher String?
+
+  /// Hostnames whose answers the resolver redirects to the node's proxy.
+  /// Launcher, login, account, web and store only.
+  ///
+  /// A scalar String[] where the rest of this schema uses either an
+  /// implicit m2m relation or a Json blob, so it is worth saying why. A
+  /// relation is for things that exist independently and are referenced from
+  /// several places -- a Route is a Route whether or not a plan allows it. A
+  /// hostname list is neither: it is edited as a whole in one form, it is
+  /// read as a whole by one client, and no row anywhere points at "one
+  /// hostname". Json was rejected because these need to be queryable and
+  /// type-checked; text[] gives both and the panel form maps to it directly.
+  hostnames String[] @default([])
+
+  /// Hostnames left truthful even though they belong to the same game.
+  ///
+  /// This exists for one reason and it is a billing one: patch CDN hosts
+  /// serve multi-gigabyte downloads, and carrying those through a node eats
+  /// a metered plan's cap. A bill the customer did not expect is our fault,
+  /// so the exclusion is data rather than a rule each client re-implements
+  /// and one of them forgets.
+  excludeHostnames String[] @default([])
+
+  /// Windows process names covering launcher AND game, so one row is one
+  /// game. Used by the unbuilt private-exit mode only; DNS mode never looks
+  /// at processes.
+  processNames String[] @default([])
+
+  /// Whole announced prefixes for the publisher's address space, for the
+  /// unbuilt private-exit mode.
+  ///
+  /// Whole prefixes at ASN granularity, never individual host addresses. WoW
+  /// holds two connections for one account -- Home (realm, chat, auction
+  /// house) and World (combat) -- and a filter that can put them on opposite
+  /// sides gives one account two source IPs at the same instant. That is the
+  /// signature which produces "Account Sharing" penalties. A partial list
+  /// can do it; a complete prefix set cannot.
+  destinationCidrs String[] @default([])
+
+  /// The publisher's ASN, recorded so the prefix list can be re-derived and
+  /// audited rather than trusted. Blizzard is AS57976.
+  destinationAsn String?
+
+  /// Whether destinationCidrs is believed to cover that whole ASN.
+  ///
+  /// Defaults to false, and a client must refuse to activate private exit
+  /// for a profile where it is false rather than activate a partial one. A
+  /// half-filter is worse than no filter, for the reason above.
+  prefixComplete Boolean @default(false)
+
+  /// A hostname the client resolves through its stub to prove the rules are
+  /// actually live: it must come back as the node's proxy address, not the
+  /// real one.
+  ///
+  /// Without this the client can report only that it *installed* rules,
+  /// which is not the same as them working -- and reporting a state the app
+  /// has not verified is the one thing this product must never do.
+  canaryHostname String?
+
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  /// Operator-facing note. Never shown to a customer.
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+  @@map("game_profiles")
+}
+
+/// The DoH resolver and SNI proxy on one node that serve gaming mode.
+///
+/// Separate from Node because it is optional, because it carries a health
+/// signal that has to be confirmed rather than inferred, and because the
+/// hostname it answers on is deliberately NOT a Neoxify name -- OONI shows
+/// roughly 94% of VPN vendor sites blocked in Iran, so a resolver on a name
+/// that looks like ours is a resolver that gets blocked.
+model GamingResolver {
+  id     String @id @default(uuid())
+  nodeId String @unique
+  node   Node   @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  /// Host the DoH endpoint answers on.
+  ///
+  /// DoH rather than plain 53 twice over: plain 53 to a foreign address is
+  /// the most tampered-with path there is in Iran, and a plain-53 listener
+  /// that recurses for strangers is a DDoS amplifier and a fast route to
+  /// getting the node's address blocklisted -- which costs us the node, and
+  /// the node's address reputation is the product.
+  dohHost String
+  dohPort Int    @default(443)
+
+  /// Address the SNI proxy answers on -- what the resolver hands back for a
+  /// redirected hostname, and therefore what the client's canary has to
+  /// observe before it may claim the mode is working.
+  proxyIp   String
+  proxyPort Int    @default(443)
+
+  isEnabled Boolean @default(false)
+
+  /// When the node last confirmed it is actually serving this.
+  ///
+  /// Nullable with no default, and NULL means "never confirmed" rather than
+  /// "missing data" -- the same decision as Route.uplinkAssertedAt, taken
+  /// for the same reason. Thirteen relay routes once reported ONLINE while
+  /// every one of them was dead, because health was inferred from a
+  /// neighbouring signal instead of measured. A resolver that has never
+  /// acked is not offered to a client at all.
+  confirmedAt DateTime?
+
+  /// The last error from that confirmation, cleared on success. Without a
+  /// field for it a failed confirm is discarded silently, which is how the
+  /// dead relay routes stayed invisible.
+  lastError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("gaming_resolvers")
+}
+
+/// Per-customer credential for the DoH endpoint, carried in the URL path.
+///
+/// Path-token auth rather than a source-IP allowlist: Iranian consumer
+/// networks are behind CGNAT, so the source address is neither stable nor
+/// unique to a customer, and an allowlist would either lock people out or
+/// admit their entire ISP.
+///
+/// Its own table rather than a column on Customer so it can be rotated and
+/// revoked without touching the account row, and so a leaked token is one
+/// DELETE rather than a schema-wide question.
+model GamingResolverToken {
+  id         String   @id @default(uuid())
+  customerId String   @unique
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  /// Opaque, high-entropy, URL-safe. A bearer credential: never logged,
+  /// never included in an error message, never selected into anything that
+  /// gets pasted anywhere. This repo is public.
+  ///
+  /// Stored in cleartext, unlike EnrollmentToken which stores only a sha256
+  /// and hands the secret out exactly once. The difference is lifetime: an
+  /// enrollment token is claimed once by one machine, whereas this one has
+  /// to be handed to the same customer again on every app launch and on
+  /// every device they own. Hash-only storage would force a new token on
+  /// each fetch, which would silently cut off whichever of their devices
+  /// asked second -- a worse failure than the one hashing prevents. It is
+  /// also a low-value credential: it authorises DNS lookups against an
+  /// allowlist and nothing else. Revocation is a row delete.
+  token String @unique
+
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime?
+  revokedAt  DateTime?
+
+  @@map("gaming_resolver_tokens")
 }
