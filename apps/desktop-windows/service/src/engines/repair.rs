@@ -912,6 +912,86 @@ mod tests {
         assert!(RepairReport::default().is_clean());
     }
 
+    /// The false failure this split exists to remove, rebuilt from the
+    /// run that produced it.
+    ///
+    /// On `Neoxify-Test2` on 2026-08-24 the WFP step reported
+    /// `[FIXED] ... removed 3 leftover filter(s)`, `netsh wfp show
+    /// filters` independently confirmed our count went 5 -> 0, every
+    /// other step was clean -- and the repair still exited `1`, because
+    /// the NRPT cmdlets timed out at the 15s helper budget on a
+    /// constrained guest while the registry, which is what actually
+    /// removes the rule, held nothing of ours.
+    ///
+    /// A timeout establishes nothing. Exiting non-zero over one asserts
+    /// "this did not work", which is the one claim the step did not
+    /// make, in front of the customer this feature exists to rescue.
+    #[test]
+    fn a_step_that_timed_out_does_not_make_the_repair_a_failure() {
+        let mut rig = RepairReport::default();
+        rig.push("tunnel", "tunnel", RepairOutcome::AlreadyClean);
+        rig.push(
+            "dns",
+            "dns",
+            RepairOutcome::Unknown {
+                detail: "the DNS cmdlets did not confirm the removal; the registry held no rules of ours".into(),
+            },
+        );
+        rig.push("wfp", "wfp", RepairOutcome::Fixed { detail: "removed 3 leftover filter(s)".into() });
+
+        // The fix: nothing here determined that anything went wrong.
+        assert!(
+            !rig.has_failures(),
+            "a timed-out step was counted as a determined failure"
+        );
+        assert!(rig.failed().is_empty(), "a timed-out step is not a failed step");
+
+        // But it is still not silently swallowed -- it is reported, as
+        // indeterminate, which is the other half of the requirement.
+        assert_eq!(rig.indeterminate().len(), 1);
+        assert_eq!(rig.indeterminate()[0].id, "dns");
+        assert!(!rig.is_clean(), "an unverified step is still not a clean machine");
+
+        // The discriminator. Same report, same clean WFP step, but the
+        // DNS step now says it looked and the rule is still there. That
+        // *is* a determined failure and must still exit non-zero --
+        // otherwise the change above is just a blanket "never fail".
+        let mut genuine = RepairReport::default();
+        genuine.push("tunnel", "tunnel", RepairOutcome::AlreadyClean);
+        genuine.push(
+            "dns",
+            "dns",
+            RepairOutcome::Failed { detail: "1 rule(s) of ours are still in the registry".into() },
+        );
+        genuine.push("wfp", "wfp", RepairOutcome::Fixed { detail: "removed 3 leftover filter(s)".into() });
+
+        assert!(genuine.has_failures(), "a step that checked and found residue must fail the repair");
+        assert_eq!(genuine.failed().len(), 1);
+        assert_eq!(genuine.failed()[0].id, "dns");
+        assert!(genuine.indeterminate().is_empty(), "a determined failure is not indeterminate");
+
+        // And the two kinds together: the failure decides the exit
+        // status, the timeout is still named, and neither is lost.
+        let mut both = RepairReport::default();
+        both.push("dns", "dns", RepairOutcome::Unknown { detail: "timed out".into() });
+        both.push("wfp", "wfp", RepairOutcome::Failed { detail: "still there".into() });
+        assert!(both.has_failures());
+        assert_eq!(both.failed().len(), 1);
+        assert_eq!(both.indeterminate().len(), 1);
+        assert_eq!(both.unresolved().len(), 2, "both kinds are still worth naming");
+
+        // The controls, so none of the above passes on a function that
+        // hardcoded an answer.
+        let mut all_good = RepairReport::default();
+        all_good.push("a", "a", RepairOutcome::AlreadyClean);
+        all_good.push("b", "b", RepairOutcome::Fixed { detail: "gone".into() });
+        assert!(!all_good.has_failures());
+        assert!(all_good.failed().is_empty());
+        assert!(all_good.indeterminate().is_empty());
+        assert!(RepairReport::default().failed().is_empty());
+        assert!(!RepairReport::default().has_failures());
+    }
+
     #[test]
     fn only_failures_count_as_failures() {
         assert!(step("x", RepairOutcome::Failed { detail: String::new() }).outcome.is_failure());

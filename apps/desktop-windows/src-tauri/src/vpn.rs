@@ -297,14 +297,22 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(45);
 ///
 /// It is nine steps, several of which shell out to PowerShell or netsh,
 /// and each of those is separately bounded by the service's fifteen-second
-/// helper budget. On a healthy machine the whole pass is a few seconds;
-/// on the machine somebody actually presses this button on -- where the
-/// cmdlets are the thing misbehaving, which is the documented reason the
-/// registry fallback exists at all -- the worst case is several budgets
-/// end to end. Giving it the ordinary 45s would abandon a repair that was
+/// helper budget -- except the NRPT clear, which gets 60s on this path
+/// (`engines::dns::REPAIR_CMDLET_BUDGET`) because `Get-DnsClientNrptRule`
+/// is CIM-backed and 15s was not enough for it cold on a slow machine.
+/// On a healthy machine the whole pass is a few seconds; on the machine
+/// somebody actually presses this button on -- where the cmdlets are the
+/// thing misbehaving, which is the documented reason the registry
+/// fallback exists at all -- the worst case is several budgets end to
+/// end. Giving it the ordinary 45s would abandon a repair that was
 /// working, leave the app with no report, and tell the customer nothing
 /// about a machine that had just been half-changed.
-const REPAIR_TIMEOUT: Duration = Duration::from_secs(150);
+///
+/// Raised from 150s by exactly the 45s the NRPT budget gained, so that
+/// change spends its own margin rather than the one this number already
+/// had. Abandoning the pass early would be the same false failure the
+/// budget increase exists to remove, arriving one layer up.
+const REPAIR_TIMEOUT: Duration = Duration::from_secs(195);
 
 async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Response, String> {
     const ERROR_PIPE_BUSY: i32 = 231;

@@ -169,11 +169,63 @@ impl RepairReport {
     }
 
     /// The steps that stop this being a success, for naming them.
+    ///
+    /// Both kinds together, because everything that is not a plain
+    /// success is worth *naming* to whoever is helping. What this must
+    /// not be used for is deciding the exit status -- see
+    /// [`Self::failed`] and [`Self::indeterminate`], which is the whole
+    /// point of the split below.
     pub fn unresolved(&self) -> Vec<&RepairStep> {
         self.steps
             .iter()
             .filter(|s| !matches!(s.outcome, RepairOutcome::AlreadyClean | RepairOutcome::Fixed { .. }))
             .collect()
+    }
+
+    /// The steps that looked, found something of ours, and could not
+    /// remove it.
+    ///
+    /// The only steps that make this repair a failure. Kept apart from
+    /// [`Self::indeterminate`] because the two are different claims
+    /// about the machine and must not share an exit code: this one
+    /// asserts "we checked and it is still there", which is a thing the
+    /// step actually established.
+    pub fn failed(&self) -> Vec<&RepairStep> {
+        self.steps.iter().filter(|s| s.outcome.is_failure()).collect()
+    }
+
+    /// The steps that could not complete, so they say nothing either
+    /// way.
+    ///
+    /// A timeout is the case this exists for. A helper that was killed
+    /// at its budget establishes *nothing* about the machine -- not that
+    /// the residue is gone, and not that it is still there. Reporting
+    /// such a run as a failure tells a customer their repair did not
+    /// work, which is a state this code did not verify and, on the run
+    /// that produced this split, was not even true: every other step had
+    /// succeeded and the step in question held nothing of ours.
+    ///
+    /// That matters more here than the general rule would suggest. This
+    /// feature is the last resort offered to somebody whose networking
+    /// is already broken, on a machine already slow enough to have hit
+    /// the timeout. Telling that person it failed when it worked is the
+    /// worst outcome the one rescue tool can produce.
+    pub fn indeterminate(&self) -> Vec<&RepairStep> {
+        self.steps
+            .iter()
+            .filter(|s| matches!(s.outcome, RepairOutcome::Unknown { .. }))
+            .collect()
+    }
+
+    /// Whether the repair should be reported to the customer as having
+    /// failed.
+    ///
+    /// True only when a step determined something went wrong. An
+    /// indeterminate step is reported honestly as indeterminate and does
+    /// not, on its own, turn a successful repair into a reported
+    /// failure.
+    pub fn has_failures(&self) -> bool {
+        self.steps.iter().any(|s| s.outcome.is_failure())
     }
 }
 

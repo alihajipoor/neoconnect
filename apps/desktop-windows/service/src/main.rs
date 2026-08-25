@@ -165,24 +165,54 @@ fn repair() -> Result<(), Box<dyn std::error::Error>> {
         println!("  {line}");
     }
 
-    let unresolved = report.unresolved();
+    let failed = report.failed();
+    let indeterminate = report.indeterminate();
+    let log = config_dir().join("cleanup.log");
     println!();
-    if unresolved.is_empty() {
+
+    if failed.is_empty() && indeterminate.is_empty() {
         println!("Everything was either already clean or has been repaired.");
-        println!("A full record is in {}.", config_dir().join("cleanup.log").display());
+        println!("A full record is in {}.", log.display());
         return Ok(());
+    }
+
+    // Reported before the failures, and to stdout, because on its own
+    // this is not bad news: every check that completed was a success and
+    // the repair did its work. Saying "could not be repaired" here --
+    // which this used to, by lumping both kinds into one list -- tells a
+    // customer the tool failed when nothing established that it had.
+    if !indeterminate.is_empty() {
+        println!("These checks could not be completed, so they say nothing either way:");
+        for step in &indeterminate {
+            println!("  - {}", step.label);
+        }
+        println!(
+            "\nThis usually means a helper took too long on a busy machine. It does\n\
+             not mean anything was left behind. A full record is in {}.",
+            log.display()
+        );
     }
 
     // Named, not counted. "3 steps failed" tells whoever is helping
     // nothing; "the WireGuard tunnel service is still registered" tells
     // them what to do next.
-    eprintln!("Some things could not be repaired:");
-    for step in &unresolved {
-        eprintln!("  - {}", step.label);
+    if !failed.is_empty() {
+        if !indeterminate.is_empty() {
+            eprintln!();
+        }
+        eprintln!("Some things could not be repaired:");
+        for step in &failed {
+            eprintln!("  - {}", step.label);
+        }
+        eprintln!("\nA full record is in {}.", log.display());
+        eprintln!("Restarting Windows clears most of what is left; if it does not, send that file to support.");
+        // Only a step that determined something was wrong gets here. An
+        // indeterminate step establishes nothing, and exiting non-zero
+        // over one would assert a failure this code never verified.
+        std::process::exit(1);
     }
-    eprintln!("\nA full record is in {}.", config_dir().join("cleanup.log").display());
-    eprintln!("Restarting Windows clears most of what is left; if it does not, send that file to support.");
-    std::process::exit(1);
+
+    Ok(())
 }
 
 /// The outcome of stopping the service before a repair.
