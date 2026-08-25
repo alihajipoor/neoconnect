@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AppWindow, FolderOpen, ListChecks, X } from "lucide-react";
+import { AppWindow, FolderOpen, Gamepad2, ListChecks, X } from "lucide-react";
 import { RunningAppPicker } from "./RunningAppPicker";
+import { GamePicker } from "./GamePicker";
 import { useI18n } from "../lib/i18n";
 import {
   appName,
   isEffective,
+  listRunningApps,
   loadSplitTunnel,
   MAX_APPS,
   pushSplitTunnel,
@@ -13,6 +15,8 @@ import {
   type SplitTunnelMode,
   type SplitTunnelSettings,
 } from "../lib/split-tunnel";
+import { getGamingProfile, type GameProfileSummary } from "../lib/customer";
+import { curatedNames, hasCuratedApps, resolveGameApps } from "../lib/game-apps";
 import { Button, Card } from "../components/ui";
 
 /** Custom mode: pick the apps that go through the VPN, leave the rest
@@ -32,11 +36,25 @@ export function CustomModeCard() {
   const [settings, setSettings] = useState<SplitTunnelSettings | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
+  /** The server's curated game list, or null until it has been asked
+   * for. Games with no executable list are dropped here rather than in
+   * the picker: a row that would add nothing must not be offered. */
+  const [games, setGames] = useState<GameProfileSummary[] | null>(null);
+  const [pickingGame, setPickingGame] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     void loadSplitTunnel().then((loaded) => {
       if (!cancelled) setSettings(loaded);
+    });
+    // Failure is silent on purpose and leaves `games` null, which hides
+    // the button. The catalogue is an extra way in, not the only one --
+    // both existing pickers still work with no network at all, and a
+    // customer in Iran whose API call was blocked should not be shown a
+    // control that cannot do anything.
+    void getGamingProfile().then((result) => {
+      if (cancelled || !result.ok) return;
+      setGames(result.data.games.filter(hasCuratedApps));
     });
     return () => {
       cancelled = true;
@@ -74,13 +92,60 @@ export function CustomModeCard() {
     const fresh = picked.filter((p) => !have.has(p.toLowerCase()));
     if (fresh.length === 0) {
       setNotice(t("settings.customAlready"));
-      return;
+      return false;
     }
     if (settings.apps.length + fresh.length > MAX_APPS) {
       setNotice(t("settings.customTooMany", { max: MAX_APPS }));
-      return;
+      return false;
     }
     await apply({ ...settings, apps: [...settings.apps, ...fresh] });
+    return true;
+  }
+
+  /** Adds every program of one game that is currently running.
+   *
+   * Running, and only running, because that is the only way this side
+   * can learn a real path: the split tunnel matches on the full path,
+   * its wire format rejects a bare filename outright, and there is no
+   * filesystem access here to go looking for one. Matching on the name
+   * alone would be the weaker design anyway -- it is what lets anything
+   * renamed to a game executable be routed as that game.
+   *
+   * What was not found is named rather than counted, so the customer
+   * knows which program to start. Adding a fraction silently is how a
+   * feature gets reported as broken.
+   */
+  async function addGame(game: GameProfileSummary) {
+    setNotice(null);
+    if (!settings) return;
+    const wanted = curatedNames(game);
+    let running;
+    try {
+      running = await listRunningApps();
+    } catch {
+      setNotice(t("settings.customRunningEmpty"));
+      return;
+    }
+    const resolved = resolveGameApps(game, running);
+    if (resolved.paths.length === 0) {
+      setNotice(t("settings.customGameNone", { game: game.displayName }));
+      return;
+    }
+    const added = await addPaths(resolved.paths);
+    // A refusal above already said why -- the cap, or nothing new. It
+    // must not be followed by a sentence claiming a count was added.
+    if (!added) return;
+    const parts = [
+      t("settings.customGameAdded", {
+        count: resolved.found.length,
+        total: wanted.length,
+        game: game.displayName,
+      }),
+    ];
+    if (resolved.missing.length > 0) {
+      parts.push(t("settings.customGameMissing", { names: resolved.missing.join(", ") }));
+    }
+    setNotice(parts.join(" "));
   }
 
   async function browseForApp() {
@@ -276,6 +341,50 @@ export function CustomModeCard() {
               {t("settings.customPickFile")}
             </Button>
           </div>
+
+          {/* A third way in, and the only one that knows what a game
+              needs. The other two ask the customer to already know:
+              the handover records people choosing one executable,
+              getting half a product routed, and reporting Custom mode
+              as broken. */}
+          {games && games.length > 0 ? (
+            <>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setNotice(null);
+                  setPickingGame(true);
+                }}
+                className="w-full justify-center gap-2"
+              >
+                <Gamepad2 className="size-4" />
+                {t("settings.customPickGame")}
+              </Button>
+              <p className="text-[11px] text-muted-foreground">{t("settings.customGameHint")}</p>
+            </>
+          ) : null}
+
+          {pickingGame && games ? (
+            <GamePicker
+              games={games}
+              // Nothing is "already chosen" here: Custom mode does not
+              // store a game, only the paths one resolved to. Marking
+              // rows chosen would claim a memory this mode does not
+              // keep, and would block re-adding a game after starting
+              // the programs that were missing the first time.
+              chosen={[]}
+              emptyLabel={t("settings.customGameEmpty")}
+              subtitle={(game) =>
+                t("settings.customGameParts", { count: curatedNames(game).length })
+              }
+              onClose={() => setPickingGame(false)}
+              onPick={(slug) => {
+                setPickingGame(false);
+                const game = games.find((g) => g.slug === slug);
+                if (game) void addGame(game);
+              }}
+            />
+          ) : null}
 
           {picking ? (
             <RunningAppPicker
