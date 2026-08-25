@@ -87,13 +87,25 @@ names the experiment that would settle it.
    gateway whichever foreign relay it is aimed at. There is no second path to
    put a second copy on, and nothing sold on a multipath premise can be true
    for this customer.
-6. **The access premise is untested, not disproved — and the distinction is
-   load-bearing.** Every Iranian probe used so far is a `datacenter-network`
-   vantage. This research shows those are *differently connected*: ArvanCloud
-   has ten observed BGP peers, Irancell has one. A negative result from a
-   vantage that cannot see the phenomenon is not evidence of absence, and the
-   journal's "the split did not hold" should be re-worded accordingly.
-7. **For access, Neoxify is not the challenger in this comparison — it is
+6. **The access premise is now partly measurable, and it splits cleanly.**
+   OONI — which, unlike Globalping, *does* have thousands of monthly
+   measurements on real Iranian consumer and mobile lines — shows Iran
+   blocking gaming's **social layer**, not its platforms:
+   Discord 67%, Twitch 59%, **Free Fire 76%**, ModDB 71%, Kotaku 69%; against
+   Steam 0.9%, Epic 0.1%, Xbox 0.4%, PSN 0.7% and **`www.blizzard.com` at
+   zero confirmed blocks in 681 measurements.** Meanwhile **QUIC has been
+   100% blocked since June 2025 and never came back**, DNS-over-UDP drops sit
+   at 89%, IPv6 is reported disabled on all ISPs, and the DPI now inspects SNI
+   on **all TCP ports** with full TCP reassembly.
+7. **So for Blizzard the likely answer is that the blocking is the
+   publisher's, not Iran's** — which is the opposite direction and needs an
+   exit address the *publisher* accepts, not censorship circumvention. But
+   `battle.net`, `riotgames.com`, `valorant.com` and `steamcommunity.com` are
+   **not on the Citizen Lab Iran test list at all**, so nobody has ever
+   measured them, and **no measurement anywhere has ever looked at real game
+   protocol traffic from Iran.** That is a void in the literature, not a
+   negative result.
+8. **For access, Neoxify is not the challenger in this comparison — it is
    ahead.** Eight transports with an automatic ladder, REALITY and
    TLS-in-WebSocket obfuscation, per-network memory of what worked, Iranian
    relay entry nodes, and `uot: true` so game UDP survives a network that
@@ -102,19 +114,19 @@ names the experiment that would settle it.
    ports, which is precisely what Iranian DPI handles best. Measured here on
    Neoxify's own wire: a *valid* WireGuard handshake into Iran is dropped
    while a malformed one of identical size passes.
-8. **And the access product needs no node software.** Custom mode already
+9. **And the access product needs no node software.** Custom mode already
    routes chosen executables by absolute path through an existing protocol to
    an existing exit; relay routes already chain an Iranian entry to a foreign
    exit; the full tunnel's IPv6 leak is measured closed. **The unbuilt
    resolver and SNI proxy add nothing to any of it, and are strictly weaker,
    because DNS cannot reach a game that receives its server as a literal.**
-9. **The remaining hard case is address reputation, not routing.** All five
+10. **The remaining hard case is address reputation, not routing.** All five
    node addresses are datacenter-labelled ASN-wide, two of the five share one
    ASN, and rotating within those ASNs is already known to buy nothing. If the
    game refuses Neoxify's exit as well as the player's own address, that is a
    procurement problem and a separate programme — and no competitor has solved
    it either.
-10. **The whole question turns on one hour of measurement that has never been
+11. **The whole question turns on one hour of measurement that has never been
     taken**: a real account, on a real Iranian home connection, trying to log
     in and connect — direct, then through germany-1, then direct again. Every
     outcome of that test, including "nothing is blocked", changes the decision.
@@ -145,11 +157,17 @@ to the other may not be buildable at all.
 | What fixes it | Censorship circumvention — a transport the filter does not recognise | An exit IP the *game* accepts |
 | Does Neoxify have it | **Yes.** Six transports, REALITY/TLS/WS obfuscation, an automatic ladder, and Iran-reachable relay entries | **Partly.** It changes the exit IP; whether the game accepts that IP is a different problem |
 | What it costs | Nothing new | Possibly new address space, which is the expensive kind of problem |
+| What the evidence says | **Confirmed for Discord (67%), Free Fire (76%), Twitch (59%); QUIC blocked outright since June 2025.** Not confirmed for any game platform | **Structurally likely and the probable dominant cause for Blizzard/Riot/Epic** — but the reports are from 2019 and current status is unverified |
 
 A single product can fail either way, and the failure looks identical to the
 customer: the game does not connect. **The two are distinguishable only by
-instrumentation**, and no instrument has yet been pointed at a real Iranian
-home connection. That is the central gap in this whole programme.
+instrumentation**, and the one instrument that would separate them — a real
+account logging in from a real Iranian home connection — has never been
+pointed at the problem. That is the central gap in this whole programme.
+
+And note the asymmetry the last row exposes: the direction with hard,
+repeated, consumer-network measurement behind it is **not** the one the
+Gaming Mode design was built around.
 
 ---
 
@@ -565,38 +583,146 @@ HTTPS status identical to the control across sixteen hostnames, and **TCP to
 the WoW game port `37.244.62.99:3724` completed from Iranian address space
 with the server answering.**
 
+### Measured independently, on real Iranian consumer and mobile lines
+
+**This corrects an assumption that has been carried through the whole
+programme.** The design doc's caveat — every Iranian probe is a datacenter —
+is true of **Globalping**. It is **not** true of **OONI**, which has thousands
+of measurements per month on MCI (AS197207), Irancell (AS44244), Rightel
+(AS57218), TCI (AS58224), Shatel (AS31549) and Asiatech (AS43754) from real
+handsets and home lines.
+
+OONI aggregation, Iran, all ASNs, 2025-08-01 → 2026-08-25. "Confirmed" means
+OONI verified a block page or poisoning, not merely an anomaly:
+
+| Domain | measurements | confirmed blocked | % |
+|---|---|---|---|
+| `discord.com` | 12,571 | 8,419 | **67%** |
+| `ff.garena.com` (Free Fire) | 482 | 365 | **76%** |
+| `www.moddb.com` | 694 | 490 | **71%** |
+| `kotaku.com` | 695 | 479 | **69%** |
+| `www.twitch.tv` | 1,407 | 836 | **59%** |
+| `www.gog.com` | 510 | 42 | 8% |
+| `www.pubg.com` | 673 | 13 | 2% |
+| `store.steampowered.com` | 691 | 6 | 0.9% |
+| `www.ea.com` / `www.roblox.com` | ~665 each | 6 | 0.9% |
+| `store.playstation.com` / `www.ubisoft.com` | ~690 each | 5 | 0.7% |
+| `www.xbox.com` | 687 | 3 | 0.4% |
+| `store.epicgames.com` | 748 | 1 | 0.1% |
+| **`www.blizzard.com`** | **681** | **0** | **0%** |
+
+**The pattern is sharp and it holds across every ISP: Iran blocks gaming's
+social layer and gaming journalism, not the game platforms.** Poisoning is to
+`10.10.34.35` / `.36` — and there is an IPv6 block-page address too,
+`2001:4188:2:600:10:10:34:35`. Blizzard sits at literally zero confirmed
+blocks across 681 measurements from consumer networks.
+
+One counter-intuitive detail worth carrying: on Discord, **MCI (81.9%) and
+Irancell (86.2%) block *more* than TCI (50.8%)**. The USENIX Security 2025
+IRBlock paper reports the opposite — MCI at 0.86%, Irancell at 0.69% — and
+that is a measurement artifact of probing Iranian address space from
+*outside*: mobile CGNAT pools never answer unsolicited inbound packets, so
+the injector never fires. **Do not use IRBlock's per-AS table to conclude
+Iranian mobile networks filter less.**
+
+### The one thing that has changed regime, and it matters more than any of the above
+
+**QUIC is blocked outright, and it has been since June 2025.** Niere, Lange &
+Somorovsky, *Insights into an Iranian Internet Shutdown* (FOCI 2026), scanned
+9,000 Tranco domains from inside Iran before, during and after the June 2025
+shutdown:
+
+| Protocol | before (Jun 1–12 2025) | during (Jun 17–18) | after (Jun 25–Jul 7) |
+|---|---|---|---|
+| DNS over UDP | 15.12% | 16.77% | **89.18%** |
+| DNS over TCP | 15.12% | 96.68% | 15.38% |
+| TLS | 15.01% | 19.22% | 15.69% |
+| HTTP | 15.28% | 17.28% | 15.21% |
+| **QUIC** | **0.01%** | **100%** | **100%** |
+
+**QUIC was essentially untouched under normal filtering; it was switched off
+as a shutdown measure and never switched back on.** DNS-over-UDP drops went
+to 89% and stayed there. Corroborated in-country: *"QUIC: disabled on all
+ISPs"*, *"IPv6: disabled on all ISPs"*, and unidentified UDP blocked on most
+ISPs depending on destination IP (net4people #489). Nym's independent June
+2025 analysis found essentially all UDP protocols blocked — WireGuard,
+AmneziaWG, QUIC, WebRTC, OpenVPN — with **UDP/53 deliberately spared**.
+
+Caveat, stated because it is the same trap this document warns about
+elsewhere: the FOCI scan is a **single vantage in AS57497, a hosting AS**, not
+a consumer line. The in-country anecdote is consumer; the measurement is not.
+
+Two further mechanisms that change what a transport can assume:
+
+- **The HTTP and HTTPS DPI now runs on all TCP ports**, not just 80/443
+  (IRBlock). Moving TLS to an unusual port no longer avoids SNI inspection —
+  which is a direct hit on one of this project's standing assumptions.
+- **The DPI performs full TCP reassembly to extract SNI**, defeating
+  client-side ClientHello fragmentation (net4people #628, June 2026), and
+  fragmentation was reported dead outright by July 2026 (#640). REALITY has
+  been reported hit with RST floods after the handshake.
+- **MCI applies upload throttling to under 1 Mbps**, keyed on non-whitelisted
+  SNI or IP, while download stays fine. For a game that is the worst possible
+  shape of degradation: the connection still looks up while client→server
+  updates collapse.
+
 ### The correction that has to be made explicitly
 
-The journal currently reads that the *"sanctions-blocked vs merely slow"
-split did not hold on the evidence available*. That is accurate as written
-and it is being misread as a disproof.
+The journal reads that the *"sanctions-blocked vs merely slow" split did not
+hold on the evidence available*. With OONI's consumer data in hand that
+sentence can now be sharpened rather than merely hedged:
 
-**All five Iranian probes are tagged `datacenter-network`.** There is no
-consumer-ISP probe in Iran on Globalping. And this document's §4 shows the
-two are not interchangeable: ArvanCloud has ten observed BGP peers, Irancell
-has one. A datacenter in Tehran and a home connection on Irancell are
-different networks with different filtering, and the difference is exactly
-where national filtering lives.
+**For Blizzard specifically, direction 1 is looking genuinely negative** —
+zero confirmed blocks across 681 consumer measurements, on top of the
+datacenter sweep. **But the measurement covers `www.blizzard.com`, not
+`battle.net` and not the game path.** `battle.net`, `riotgames.com`,
+`leagueoflegends.com`, `steamcommunity.com`, `minecraft.net`, `valorant.com`
+and `dota2.com` **are not on the Citizen Lab Iran test list at all**, so OONI
+has zero measurements for any of them. That is a void in the public record,
+not a negative result.
 
-**So the access premise is untested, not disproved.** A negative result from
-a vantage point that structurally cannot see the phenomenon is not evidence
-of absence. Anything downstream that treats it as a disproof — including the
-framing that Gaming Mode's premise "did not hold" — should be re-worded to
-"remains unmeasured on the networks that matter".
+**And there is a void underneath all of it: no measurement anywhere, by
+anyone, has ever looked at actual game protocol traffic from Iran.** No
+captures of game sessions, no game-server reachability studies, no evidence
+on ports 3724, 1119, 27015 or the high UDP ranges. This is a gap in the
+literature, not a gap in the searching.
 
 ### What is not established about direction 1
 
-- Whether any game's traffic is filtered on a **consumer** Iranian ISP.
-- Whether **UDP** specifically is degraded for games. Every probe run so far
-  is TCP-shaped, and games are largely UDP. This is the single most likely
-  place for a real, unmeasured problem to live, and nothing in the design
-  doc's instrument set targets it directly.
-- Whether **domestic** WireGuard (Iranian customer → Iranian relay) survives
-  the filter. Recorded as open in `docs/detection-resistance.md`.
+- **Whether any game's own connection is filtered** on a consumer Iranian
+  ISP. Nothing published touches it.
+- **Whether QUIC is still 100% blocked today.** Hard evidence runs to
+  mid-2025 plus anecdote; one consumer reporter called things "mostly normal"
+  by June 2026.
+- **Whether Iran's UDP blocklist contains game-server IPs.** The mechanism is
+  destination-IP-keyed, so it is answerable in principle — but only from
+  inside Iran.
+- **Whether domestic WireGuard** (Iranian customer → Iranian relay) survives
+  the filter. Already open in `docs/detection-resistance.md`.
 
 ---
 
 ## Direction 2 — the game refusing the player
+
+### This now looks like the dominant direction, and the OONI data is why
+
+Roughly half of the "games do not work in Iran" corpus is **the publisher's
+own US-sanctions geo-block, not Iranian filtering**: Blizzard blocking
+Battle.net, Riot blocking League of Legends with *"Due to US laws and
+regulations, players in your country cannot access League of Legends"*, Epic
+blocking its store. The OONI numbers are consistent with exactly this —
+`www.blizzard.com` shows **zero** confirmed Iranian blocks because **Iran is
+not the one blocking it.**
+
+Those specific reports date to 2019 and current status is **not established**,
+which is precisely what the experiment below has to settle. But the mechanism
+is structural rather than incidental, and it points the whole product a
+different way: **a player whose problem is publisher geo-blocking needs an
+exit address the *publisher* accepts, and is entirely unaffected by anything
+Iran does or by any amount of censorship circumvention.**
+
+That is the case in which Neoxify's existing transports — its strongest asset
+— are irrelevant, and its exit IP reputation is the entire product.
 
 ### What is established
 
@@ -767,9 +893,13 @@ Iranian filtering is not static and a single-arm result proves nothing.
 3. TCP connect, with timing, to each game's real service and game ports —
    for Blizzard, `37.244.62.99:3724` and `eu.actual.battle.net:1119`.
    Record connect / refused / timeout, not just success.
-4. **UDP reachability**, separately from TCP, because the widely-reported
-   Iranian pathology is UDP-specific and every TCP-only probe run so far
-   would have missed it.
+4. **UDP reachability**, separately from TCP — and **QUIC separately again.**
+   This is now the highest-value step in the whole run, not a footnote: QUIC
+   measured **100% blocked** from inside Iran after June 2025 and never
+   recovered, DNS-over-UDP drops sit at 89%, and Iran's UDP filter is keyed on
+   destination IP rather than port. Every probe this programme has run so far
+   is TCP-shaped, and games are largely UDP. If anything is broken for a real
+   player, the prior probability says it is here.
 5. `ping -4 -n 100` to `37.244.62.99` — **and report loss and the min/max
    spread, not the mean.** Below WoW's 400 ms `SpellQueueWindow` the mean
    barely matters and loss does.
@@ -803,10 +933,27 @@ The last two rows are why this experiment is worth running even if the access
 question resolves immediately: **the same ping settles the EZ Connect
 mechanism that the design doc records as unexplained.**
 
-**One tester on one ISP is one data point.** Iran's three consumer networks
-filter differently and filtering changes by day and by hour. Three testers on
-three ISPs, twice, is the smallest run that should be allowed to justify
-building anything.
+**One tester on one ISP is one data point.** Iran's consumer networks filter
+differently — on Discord, Irancell blocks at 86% while TCI blocks at 51% —
+and filtering changes by day and by hour. Three testers on three ISPs, twice,
+is the smallest run that should be allowed to justify building anything.
+
+### A second experiment that costs a pull request
+
+**Add the game domains to the Citizen Lab Iran test list.** `battle.net`,
+`riotgames.com`, `leagueoflegends.com`, `valorant.com`, `steamcommunity.com`,
+`minecraft.net` and `dota2.com` are **not on it**, which is why OONI has
+thousands of measurements of `www.blizzard.com` and zero of `battle.net`.
+Adding them means every OONI probe in Iran — real consumer handsets and home
+lines, continuously, for free, forever — starts answering the question this
+programme has been trying to answer with one-off sweeps.
+
+It is one pull request against
+[`citizenlab/test-lists`](https://github.com/citizenlab/test-lists/blob/master/lists/ir.csv),
+it costs nothing, it benefits the whole censorship-measurement community, and
+it produces a continuous longitudinal dataset that no amount of internal
+probing can match. **This is the highest value-per-effort item in this entire
+document** and it does not depend on any decision about the product.
 
 ---
 
@@ -961,6 +1108,17 @@ Not latency. Three things, in descending confidence:
    censorship circumvention at all.** They are unencrypted relays; an
    unencrypted relay on a fixed port is what Iranian DPI is best at. This is
    the one axis on which Neoxify is not the challenger.
+
+   **And there is already a measured, un-hypothetical market here.** Iran
+   confirmably blocks **Discord at 67%** across 12,571 consumer measurements
+   and **Free Fire's `ff.garena.com` at 76%** — Free Fire being a mass-market
+   mobile title, and Discord being where gaming's social life happens. Those
+   are DNS-poisoned to `10.10.34.35`, which Neoxify's tunnel already defeats
+   today, on Android, with per-app routing. **The gaming feature with the best
+   evidence behind it is not a WoW feature at all**; it is "Discord and your
+   mobile game work again", for an audience far larger than the WoW one, and
+   against a block that has been measured thousands of times rather than
+   hypothesised once.
 9. **Keeping the tunnel narrow.** Per-app routing keeps banking and domestic
    Iranian services — which commonly refuse foreign addresses — off the
    tunnel, keeps multi-GB patch downloads off a metered plan, and avoids
@@ -1054,11 +1212,18 @@ must change. And the honesty bar does not move: the client must not say
 "Connected" or "protected" for a game until it has verified the game's
 traffic is actually leaving through the node.
 
-**Step 5 — Android, which may be the larger market.** Per-app routing already
-works there for both the Xray/TUN and WireGuard paths. The Iranian mobile
-audience — Clash of Clans, PUBG Mobile, Free Fire — is far larger than the
-WoW audience, and EZ Connect, the closest local competitor, **has no Android
-app at all.** That is the most concrete competitive gap this research found.
+**Step 5 — Android, which is probably the larger market and has the better
+evidence.** Per-app routing already works there for both the Xray/TUN and
+WireGuard paths. The Iranian mobile audience — Clash of Clans, PUBG Mobile,
+Free Fire — is far larger than the WoW audience; **Free Fire is measured
+DNS-blocked in Iran at 76% and Discord at 67%**, which is a real, repeatedly
+measured block rather than a hypothesised one; and EZ Connect, the closest
+local competitor, **has no Android app at all.** Those three facts together
+are the most concrete opportunity this research found, and they do not
+depend on the Blizzard question resolving either way.
+
+Worth considering seriously: **this step could reasonably come first.** It
+is the only part of the programme whose premise is already measured.
 
 **A note on iOS, which the access framing improves.** Under the DNS design
 iOS was the worst platform: no per-app anything, DNS-only and system-wide.
@@ -1153,15 +1318,19 @@ not re-derive the same dead ends.
 
 **About Iran and the games**
 
-- **Which specific games and platforms refuse Iranian addresses today, and
-  by what mechanism** — IP-level, account-level or payment-level. Three
-  research threads on this, on Iranian filtering of game traffic specifically,
-  and on obtaining address space that is not labelled datacenter, were still
-  running when this document was assembled and their results are **not**
-  included here. Treat the per-game blocking picture as **open**.
-- **Whether UDP specifically is degraded for games on Iranian consumer
-  ISPs.** Every probe run in this programme so far is TCP-shaped and games are
-  largely UDP. This is the most likely place for a real, unmeasured problem.
+- **Which specific games and platforms refuse Iranian addresses *today*, and
+  by what mechanism** — IP-level, account-level or payment-level. The
+  publisher geo-blocking reports for Blizzard, Riot and Epic date to **2019**
+  and current status is unverified. Two research threads — one on the
+  per-publisher blocking picture, one on obtaining address space that is not
+  labelled datacenter — were still running when this document was assembled
+  and their results are **not** included. Treat both as **open**.
+- **Whether UDP specifically is degraded for a game's own traffic** on
+  Iranian consumer ISPs. The evidence that Iran's UDP filter is keyed on
+  destination IP means a game server has no obvious reason to be on the
+  blocklist while a VPN's VPS does — **but that asymmetry is an inference, and
+  it cuts against the product**: it would mean Neoxify's own transport is more
+  exposed to the UDP filter than the game it is carrying.
 - **Whether a block sits behind authentication.** No unauthenticated probe can
   see it, and it is the most likely place for a real sanctions block to live.
 - **Whether announcing your own leased address space escapes the
@@ -1175,3 +1344,54 @@ not re-derive the same dead ends.
 negatives here before:** force IPv4 on every exit-IP assertion (the nodes have
 v6 and a v6 answer fakes a total failure), and remember that `urllib` cannot
 speak SOCKS.
+
+---
+
+## Sources
+
+Grouped by what they are worth. Vendor pages are listed because they are
+quoted, not because they are evidence.
+
+**Peer-reviewed and measurement**
+
+- Andersen et al., *Resilient Overlay Networks*, SOSP 2001 — <https://www.sosp.org/2001/papers/andersen.pdf>, <http://nms.csail.mit.edu/ron/>
+- Bozkurt et al., *Dissecting Latency in the Internet's Fiber Infrastructure*, arXiv:1811.10737 — <https://arxiv.org/pdf/1811.10737>
+- *Holes in the Geofence: Privacy Vulnerabilities in "Smart" DNS Services*, arXiv:2012.07944 — <https://arxiv.org/abs/2012.07944>
+- Tai et al., *IRBlock: A Large-Scale Measurement Study of the Great Firewall of Iran*, USENIX Security 2025 — <https://www.usenix.org/system/files/usenixsecurity25-tai.pdf>
+- Niere, Lange & Somorovsky, *Insights into an Iranian Internet Shutdown*, FOCI 2026 — <https://www.petsymposium.org/foci/2026/foci-2026-0016.php>
+- Elmenhorst et al., *Web Censorship Measurements of HTTP/3 over QUIC*, IMC 2021 — <https://dl.acm.org/doi/10.1145/3487552.3487836>
+- UCSC RandLab, *A Swift Look into the Internet Allowlist in Iran*, June 2026 — <https://randlab.engineering.ucsc.edu/blogs/iran-allowlist/>
+
+**Measurement platforms and network data**
+
+- OONI aggregation API — <https://api.ooni.io/api/v1/aggregation>; Explorer — <https://explorer.ooni.org/country/IR>
+- Citizen Lab Iran test list — <https://github.com/citizenlab/test-lists/blob/master/lists/ir.csv>
+- bgp.he.net (Iranian ISP peer sets, 2026-08-25); ipinfo.io (node ASN lookups); RIPE database (ExitLag and NoPing inetnums); PeeringDB (absence of records)
+- Censys, *Iran's Internet: A Censys Perspective* — <https://www.censys.com/blog/irans-internet-a-censys-perspective>
+- net4people/bbs issues [#181](https://github.com/net4people/bbs/issues/181), [#253](https://github.com/net4people/bbs/issues/253), [#489](https://github.com/net4people/bbs/issues/489), [#612](https://github.com/net4people/bbs/issues/612), [#626](https://github.com/net4people/bbs/issues/626), [#628](https://github.com/net4people/bbs/issues/628), [#640](https://github.com/net4people/bbs/issues/640) — in-country anecdote, labelled as such throughout
+- IODA, *The Normalization of Tiered Internet in Iran* — <https://ioda.inetintel.cc.gatech.edu/reports/from-war-to-sovereignty-the-normalization-of-tiered-internet-in-iran/>
+- Freedom House, *Freedom on the Net 2024: Iran* — <https://freedomhouse.org/country/iran/freedom-net/2024>
+
+**Artifacts that establish a mechanism**
+
+- `ndextlag.sys` version block, "NDIS 6 LWF packet redirector driver" — <https://www.pconlife.com/viewfileinfo/ndextlag-sys/>
+- `wtfenginedrv.sys`, "WTFastEngine WFP Driver x64", signer Initex — <https://www.freefixer.com/library/file/wtfenginedrv.sys-203952/>; Initex product list — <https://initex.com/>; Proxifier v4 WFP architecture — <https://www.proxifier.com/docs/win-v4/install.html>
+- NoPing support naming **WinpkFilter** and its route-count/bandwidth advice — <https://noping.com/support>
+- Mudfish WFP Item mode — <https://docs.mudfish.net/en/docs/mudfish-features/wfp-item-mode/>; Item syntax — <https://docs.mudfish.net/en/docs/mudfish-launcher/item/>; Multi-Path — <https://docs.mudfish.net/en/docs/mudfish-features/multipath-node-mode/>; per-node fleet with provider names — <http://mudfish.net/server/status>
+- GearUP driver inventory (`tap0901`, `gunetfilter.sys`, `lspinst_x64.exe`) — <https://www.advanceduninstaller.com/GearUP-2e0305367e05976edb2b1de2a2f9776f-application.htm>; "Adaptive Intelligent Routing" in their own words — <https://www.gearupbooster.com/support/what-is-adaptive-intelligent-routing-technology.html>
+- ExitLag process-name matching, exploited in the open — `snoww/loa-logs`, `src-tauri/src/constants.rs` (`NINEVEH_COMPAT_EXE_NAME = "LOSTARK.exe"`)
+- Netch process mode on `netfilter2.sys` — <https://github.com/NetchX/Netch/blob/main/Netch/Controllers/NFController.cs>; NetFilter SDK — <https://www.netfiltersdk.com/help/nfsdk2/nfapi_index.html>
+- EZ Connect terms of service — <https://ezconnect.ir/policies/terms-of-service>; usage flow — <https://ezconnect.ir/how-to-use>; Telegram channel naming foreign routes — <https://t.me/ezconnect_ir>
+
+**Industry context**
+
+- Riot Games, *Fixing the Internet for Real-Time Applications* — <https://www.riotgames.com/en/news/fixing-internet-real-time-applications-part-ii>
+- WTFast GPN performance evaluation, IEEE SysCon 2020 — co-authored by WTFast's COO; read the spike-magnitude figures, not the headline — <https://www.okanagancollege.ca/sites/default/files/2025-01/2020sysconwtfastgpnperfevresults.pdf>
+- Cox discontinuing "Elite Gamer" (white-labelled WTFast) — <https://www.lightreading.com/customer-experience/cox-killed-its-elite-gamer-service-here-s-why-that-s-important>
+- Publisher sanctions geo-blocking, **dated 2019 and unverified for today** — <https://www.pcgamer.com/blizzard-battle-net-being-blocked-in-iran-is-due-to-us-sanctions-not-government-censorship/>, <https://www.aljazeera.com/economy/2019/12/23/locked-out-us-sanctions-are-ruining-online-gaming-in-iran/>
+
+**Marketing, quoted but not relied on**
+
+- ExitLag technology page and "how it works" blog; NoPing technology page;
+  GearUP node/mode pages; LagoFast claims; Outfox via Golden Frog's blog and
+  Windows Central's reporting.
