@@ -10003,7 +10003,7 @@ What produced that file was the run, not the build:
 - It was **phase 6 of a chain**. Phase 4 was `R1` — the repair — which
   `taskkill`s the service, `sc config NeoxifyService start= disabled`, and
   copies `nxsvc31i.exe`, an instrumented **0.9.31** build, over the
-  installed service. `R1-v31e.txt` ends at `EXIT-IP: 50.34.35.228`, the
+  installed service. `R1-v31e.txt` ends at `EXIT-IP: {tester-home}`, the
   machine's own address: it **aborted**, so the second half of that script
   — the half that puts the service back — never ran. `L1-v31`, the thing
   this is a control for, ran on a service that had just been installed and
@@ -10046,7 +10046,7 @@ that, or it will manufacture the failure it was added to detect.
 
 ### What the control says, per fix
 
-Same script, same route (germany-1 / WireGuard, node 38.60.249.229), same
+Same script, same route (germany-1 / WireGuard, node {germany-1}), same
 selected app, same steady + burst + reconnect sequence. Both versions
 proved the tunnel by exit IP before measuring anything.
 
