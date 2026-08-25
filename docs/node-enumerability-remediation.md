@@ -232,7 +232,7 @@ it is behaviour-driven, so it responds to being fixed.
 What to do, in order:
 
 1. Confirm the flag is still live and check whether it is address-wide or
-   range-wide. The control `38.60.249.1` — a different address in
+   range-wide. The control `{germany-1-neighbour}` — a different address in
    germany-1's `/24` — also returned `is_abuser: true`, which points at
    the *range*, not at Neoxify's traffic. Re-check that control first;
    if the whole `/24` is flagged, this is LightNode's problem and
