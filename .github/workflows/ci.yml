@@ -100,6 +100,13 @@ jobs:
       - name: Panel offers every protocol the schema has
         run: bash scripts/check-protocol-drift.sh
 
+      # And the same for plan features, which are more exposed to this than
+      # protocols are: a capability is granted by ticking a box, so a box
+      # that does not exist makes the capability unreachable and the only
+      # symptom is a customer quietly not getting something.
+      - name: Panel offers every plan feature the schema has
+        run: bash scripts/check-feature-drift.sh
+
   desktop:
     name: Desktop client tests
     # The only Windows runner here, and the only reason this job exists:

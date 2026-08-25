@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
@@ -16,6 +16,11 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
   { href: "/nodes", label: "Nodes", icon: Server },
   { href: "/protocol-configs", label: "Protocol Configs", icon: Radio },
   { href: "/routes", label: "Routes", icon: RouteIcon },
+  // Same gating as the rest of the infrastructure pages: any staff role
+  // may read it, create/delete are SUPERADMIN-only via `canManage`.
+  // Deliberately not in RESELLER_ALLOWED -- curating which hostnames the
+  // fleet carries is not a reseller's to touch.
+  { href: "/gaming", label: "Gaming Mode", icon: Gamepad2 },
   { href: "/invoices", label: "Invoices", icon: ReceiptText, roles: ["SUPERADMIN", "BILLING"] },
   // Same gating as Invoices: a voucher gives a paid plan away, which is
   // a commercial act rather than routine support work.

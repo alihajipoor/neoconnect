@@ -404,3 +404,97 @@ export interface ResellerSummary {
   balances: { balance: number; plan: { id: string; name: string } }[];
   vouchersIssued: number;
 }
+
+// ----------------------------------------------------------- gaming mode
+
+/** A game the panel knows how to carry.
+ *
+ * What "carry" means here is narrow on purpose, and every operator-facing
+ * string on the gaming page repeats it: gaming mode takes the launcher,
+ * login, account, web and store surface of a game onto our network and
+ * leaves the game's own connections on the customer's direct path, by
+ * construction. It is not a latency product. Measured from Tehran in
+ * August 2026, the direct path to Blizzard's EU game server was 72.0 ms
+ * and the best node in the fleet was 72.8 ms, so there is no headroom to
+ * sell and the realm addresses never pass through a resolver anyway. */
+export interface GameProfile {
+  id: string;
+  /** URL-safe identifier the clients match on. Immutable in practice --
+   * changing it orphans whatever a shipped client already caches. */
+  slug: string;
+  displayName: string;
+  iconKey: string | null;
+  publisher: string | null;
+  /** Launcher, login, account, web and store hosts. Never realm/world
+   * servers: the game is handed those as literal addresses inside its own
+   * session, so no resolver ever sees them and listing one does nothing. */
+  hostnames: string[];
+  /** Hosts deliberately left on the customer's own path -- patch and CDN
+   * endpoints above all, because a multi-gigabyte download pulled through
+   * a node eats a metered plan's cap. */
+  excludeHostnames: string[];
+  /** Per-game private exit only, which is not built. */
+  processNames: string[];
+  /** Per-game private exit only, which is not built. */
+  destinationCidrs: string[];
+  /** Per-game private exit only, which is not built. */
+  destinationAsn: string | null;
+  /** Whether destinationCidrs is believed to cover every prefix the game
+   * uses. Per-game private exit only, which is not built. */
+  prefixComplete: boolean;
+  /** One of `hostnames`. The client resolves it to prove the rules are
+   * actually live; with none set the client can never report better than
+   * "partial", because it has nothing to check. */
+  canaryHostname: string | null;
+  sortOrder: number;
+  isActive: boolean;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A node's DNS-over-HTTPS resolver plus the proxy it points named hosts
+ * at.
+ *
+ * `confirmedAt` is the only field that says whether it works. Everything
+ * else is what an operator typed. */
+export interface GamingResolver {
+  id: string;
+  nodeId: string;
+  node?: { id: string; name: string; region: string } | null;
+  dohHost: string;
+  dohPort: number;
+  proxyIp: string;
+  proxyPort: number;
+  isEnabled: boolean;
+  /** Null until the resolver has answered a probe. Null means the control
+   * plane has never seen it work and will not hand it to a client. */
+  confirmedAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/* Feature entitlements, as a join rather than another boolean on
+ * SubscriptionPlan -- the plan already carries the repo's cautionary tale
+ * about one boolean doing two jobs (isActive vs isPurchasable, which cost
+ * the free trial). Keep the union on one line and these two members
+ * exactly as written: a drift check parses this declaration. */
+export type PlanFeatureKey = "GAMING_DNS" | "GAMING_PRIVATE_EXIT";
+
+/* Same trick as PROTOCOL_PRESENCE above, for the same reason. A Record
+ * keyed by the union cannot silently miss a member, so adding a feature
+ * key is a compile error here rather than a checkbox nobody notices is
+ * absent from the plan grid. */
+const PLAN_FEATURE_PRESENCE: Record<PlanFeatureKey, true> = {
+  GAMING_DNS: true,
+  GAMING_PRIVATE_EXIT: true,
+};
+
+export const ALL_PLAN_FEATURES = Object.keys(PLAN_FEATURE_PRESENCE) as PlanFeatureKey[];
+
+export interface PlanFeatureGrant {
+  planId: string;
+  planName: string;
+  features: PlanFeatureKey[];
+}
