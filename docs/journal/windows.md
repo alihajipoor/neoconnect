@@ -8411,3 +8411,67 @@ still exist but are now unused — leave them, or remove them deliberately.
   properly, vendor the woff2 files into `assets/fonts/` and put the family
   first in the three custom properties at the top of `site.css`; the
   comment there says so.
+
+### Follow-up the same day: the display faces are now vendored
+
+The first pass shipped without Bricolage Grotesque / Instrument Sans /
+Martian Mono, on the grounds that linking Google Fonts is a third-party
+request on exactly the networks this product exists for. That reasoning
+was right and the conclusion was wrong: the answer is to **self-host
+them**, which keeps both the design and the rule. Done.
+
+All three are SIL OFL 1.1 — checked per font rather than assumed, and
+each licence now ships beside the file. Keep `--name-IDs=0,1,2,3,4,5,6,13,14`
+in the subsetting step: pyftsubset drops name records by default, and 0,
+13 and 14 are the copyright and licence the OFL requires to travel with
+the font.
+
+**Per-page weight is what matters, not the total on disk.** The three
+files are 156 KB, but no page loads all four faces:
+
+| | before | after |
+|---|---|---|
+| English page | 109 KB | 156 KB (+47) |
+| Persian page | 109 KB | 125 KB (+16) |
+
+Two measurements drove that, and both were invisible until the network
+panel was open:
+
+- **An English page was downloading Vazirmatn.** The two Persian letters
+  «فا» in the language switch pulled the entire 111 KB Persian face —
+  40% of the page's font weight, for two glyphs. `html[lang="en"]
+  .lang-switch__opt[lang="fa"]` now uses the platform's Arabic font.
+- **A Persian page was downloading Bricolage.** The concept keeps prices
+  and the marquee in the Latin display face, which reads well and costs
+  110 KB on every Persian page for an aria-hidden marquee and three price
+  figures. Persian now renders those in Vazirmatn. 235 KB → 125 KB.
+
+**Axis pinning is most of the subsetting saving**, more than the character
+subset: Instrument Sans 60 → 30 KB and Martian Mono 37 → 16 KB, purely by
+pinning `wdth`, which the stylesheet never varies. Bricolage keeps `opsz`
+and `wdth` because varying them is the entire reason the design chose it.
+
+**The font swap moved the page 84px and the fix had to be measured.**
+Bricolage at `wdth 92` is about 13% narrower than Segoe UI, so the hero
+headline wrapped to an extra line in the fallback and pushed everything
+below it down 83px. Fixed with metric-matched fallback `@font-face` rules
+that load no file (`size-adjust: 87%` and `103.5%`, ascent/descent from
+each font's own hhea, ratios measured on a canvas). Above-the-fold shift
+is now **0px in both locales**.
+
+One related trap worth remembering: **a `ch` measure rewraps on font
+swap by definition**, because `ch` is the advance of "0" in the *current*
+font. `.lede` was `max-width: 46ch` and contributed 26px of the jump on
+its own. It is `rem` now. Everything below the fold keeps its `ch`
+measure — better typography, and nothing visible moves down there.
+
+**Regenerating.** `python3 scripts/make-fonts.py --check` re-derives the
+character inventory from the rendered pages and says whether the shipped
+subset still covers it; without `--check` it rebuilds. **Run the check
+after any copy change**, because a missing glyph does not break anything
+— it falls through to the platform font and looks subtly wrong in one
+place, which is the kind of fault that survives for months. Neither the
+script nor `scripts/fonts-unicodes.txt` ships; `scripts/` is excluded
+from the archive.
+
+Deploy archive is now **751 KB** (was 584 KB), 78 entries.
