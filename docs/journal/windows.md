@@ -9981,3 +9981,118 @@ nothing in them is integration-created, and installing the whole
 monorepo to prove that was not worth the time. CI will say. Nothing in
 Gaming Mode has run on a rig either, and the entry above it already says
 what is missing at the node end.
+
+---
+
+## 2026-08-25 — The fleet was enumerable, and the repo was helping
+
+**Status:** repo cleanup done; the infrastructure half is a runbook
+nobody has executed.
+**Touches:** `docs/**`, split-tunnel comments, four `src/lib` test files,
+`agent/internal/relay/**`, one installer comment, one Android comment.
+**Nothing live was touched** — no certificate, no DNS record, no node.
+
+The `claude/gaming-ip-reputation` measurement landed a real finding: what
+earns an operator's exits an `is_vpn` label is **enumerability**, not the
+ASN, not the provider, not the address-space age. Two same-provider
+control pairs carried it — on identical infrastructure the operator who
+publishes a node list is flagged and the one who does not is clean.
+
+**What that report missed is that we are enumerable.** `crt.sh` for
+`%.neoxify.site` returns `connect, de1, fi1, fr1, ir1, sg1, tr1` and all
+six node names resolve. Certificate transparency → hostname → DNS → IP,
+ten seconds, free, no account. That is the same technique the report
+itself used to pull Mudfish's 635 nodes. **The mechanism that applies the
+label is already fully in place; the fleet has simply not been scraped
+yet.** `ir1` is the one that matters most.
+
+Worth saying clearly: **this was not new.** `docs/detection-resistance.md`
+item 1 and the matching entry in this file both already recorded CT
+exposure as an open owner decision, with "unrelated domains per node, or
+a DNS-01 wildcard" as the candidates. What the measurement adds is a
+second consequence — it is not only that someone could block the
+addresses in bulk, it is that being findable is what earns the label.
+
+### What was actually done
+
+Redacted forward, 106 sites. Documentation-range addresses (RFC 5737) in
+source and tests, `{curly-brace}` placeholders in prose and tables, and a
+one-line note at every site saying what was replaced. Curly braces
+because GitHub's markdown sanitiser eats unknown `<angle>` tags outside
+code spans, which would have silently deleted half the redactions.
+
+Two things came out that were not on the list: **a beta tester's home
+address** (13 sites — a real person's residential IP in a public repo),
+and the **panel's Cloudflare origin address**, publishing which is what
+lets someone bypass the proxy entirely.
+
+**No history was rewritten and nothing was force-pushed.** Every value is
+still in every older commit and the repo is public. This shrinks the
+future scraping surface; it un-publishes nothing. Anyone who reads the
+cleanup as "the addresses are gone" has been misled.
+
+### The three findings that decide the infrastructure fix
+
+Grounded in the installer and client source, not guessed:
+
+1. **REALITY, Shadowsocks, WireGuard and OpenVPN need no certificate of
+   ours.** A node running only those four never enters CT and never needs
+   a public A record. Only the Xray TLS trio and IKEv2 do. That is a free
+   lever for the next node built — at the cost of four transports, which
+   is a gap to state, not a decision to make quietly.
+2. **The Xray TLS names do not need to resolve for clients at all.** The
+   customer payload sets `connection.host` to `node.publicIp`; the
+   hostname travels as `publicParams.serverName` and is used only as SNI
+   and cert name. The A record exists *solely* for certbot's HTTP-01
+   challenge at every renewal. DNS-01 would let those names stop
+   resolving entirely — better than a wildcard, because an unresolvable
+   name is not an exit even to someone reading the log.
+3. **IKEv2 and the two hardcoded API mirrors are immovable.** IKEv2
+   clients dial `endpointHost` by name and refuse to substitute the IP.
+   `config.ts` compiles `fi1` and `fr1` into every shipped build as the
+   censorship fallback, and the bare IP fails the cert name check. Those
+   two names must keep resolving forever — which means two exits stay
+   enumerable no matter what else is done.
+
+### The trap in the obvious wildcard
+
+Let's Encrypt issues wildcards **only** via DNS-01, and this repo has no
+DNS-provider integration anywhere — no plugin, no token handling,
+nothing. The natural implementation (issue `*.neoxify.site` centrally,
+copy the key to every node) **puts the private key for
+`connect.neoxify.site` — panel, API, billing, updater — on a box in
+Iran.** Today compromising `ir1` costs you `ir1`. That is a security
+downgrade traded for a privacy gain and it should not be waved through;
+the runbook's recommendation is a nodes-only `*.n.neoxify.site` with the
+panel keeping its own separate cert.
+
+The runbook is `docs/node-enumerability-remediation.md`, ordered by value
+per risk with the steps that can disconnect live users marked. Headline:
+**a wildcard freezes the exposure, it does not reduce it** — the six
+logged names are permanent.
+
+### Verified
+
+`cargo check --workspace --all-targets` clean; `cargo test --workspace`
+17/38/223 pass, 0 failed; `vitest run` 128 passed in 12 files;
+`tsc --noEmit` clean; `go test ./internal/relay ./internal/protocols/ikev2`
+ok; `bash -n installer/lib/agent.sh` clean. The worktree needed
+`src-tauri/resources/` copied in **and** `target/debug/build/windivert-sys-*`
+deleted afterwards — the cached build script had already decided
+`WinDivert.lib` was missing, so copying the resources alone still failed
+to link.
+
+### Left for their owners
+
+Roughly a dozen node addresses remain in `apps/backend/**`, the Gaming
+Mode files (`ipc/src/lib.rs`, `service/src/gaming/mod.rs`,
+`service/src/pipe.rs`, `src-tauri/src/vpn.rs`) and `config.ts`. Three
+sessions were running in parallel and every one of those files was
+already dirty; colliding on them to redact a comment was not worth it.
+Inventoried in `docs/node-address-hygiene.md` with the substitution
+table, so it is a ten-minute job for whoever owns them next.
+
+**And a warning for the merge:** `docs/research/gaming-ip-reputation.md`
+on `claude/gaming-ip-reputation` tabulates every node address with its
+provider and ASN. It is the densest listing in the project and it is not
+yet on `main`. **Redact it before that branch merges.**
