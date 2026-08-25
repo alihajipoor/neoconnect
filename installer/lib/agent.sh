@@ -262,9 +262,10 @@ EOF
   # NAT the interface holds a private address and ipify is correct. On a
   # host whose outbound traffic is NAT'd or proxied through a different
   # address than it accepts inbound on -- seen for real on the Iran node,
-  # where ipify reported 31.171.101.2 while inbound only worked on
-  # 185.222.28.186 -- the interface address is correct and ipify is
-  # actively wrong.
+  # where ipify reported one address while inbound only worked on a
+  # different one -- the interface address is correct and ipify is
+  # actively wrong. (Both addresses redacted; node addresses are not
+  # committed, see docs/node-address-hygiene.md.)
   #
   # Nothing here can tell those apart, so when they differ we say so and
   # make it a deliberate choice instead of defaulting into a broken node.
