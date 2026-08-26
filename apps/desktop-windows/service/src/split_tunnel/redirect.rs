@@ -2897,6 +2897,147 @@ mod tests {
         );
     }
 
+    /// This process, selected, with an exit preference on it.
+    fn selection_preferring(exit: &str) -> Selection {
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        Selection::with_exits(
+            [me.clone()],
+            SplitTunnelMode::OnlySelected,
+            Vec::new(),
+            [neoconnect_ipc::AppExit { app: me, exit: exit.to_string() }],
+        )
+    }
+
+    #[test]
+    fn a_preferred_exit_that_is_not_live_still_carries_the_game() {
+        // Constraint 3 of the feature, in the place it would actually
+        // fail: the packet path.
+        //
+        // A customer picked an exit for this game and the session is
+        // carrying a different one. The traffic must still be
+        // redirected -- on the wrong exit, which is a thing the status
+        // surface reports and the customer can act on. Dropping it, or
+        // leaving it in the clear because "the exit is unavailable",
+        // would be the feature taking a working game away to enforce a
+        // preference.
+        //
+        // Nothing in `decide` reads the preference, and that is exactly
+        // what this asserts: a selection carrying an exit preference
+        // decides identically to one that does not.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection = selection_preferring("some-exit-nobody-is-on");
+
+        // Held open, so the owner lookup attributes it to this process
+        // -- which is the selected application here.
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            8686,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats);
+        assert!(
+            matches!(verdict, Verdict::Redirect { .. }),
+            "a selected app whose preferred exit is not live must still be carried, \
+             got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn an_exit_preference_does_not_reopen_the_unattributable_datagram() {
+        // The composition question the exit axis has to answer, and the
+        // same shape as `scoping_does_not_reopen_the_unattributable_datagram`
+        // beside it.
+        //
+        // An exit preference belongs to an application. A datagram with
+        // no owner has no application, so it can never acquire one --
+        // and the tempting mistake in the multi-exit version of this
+        // feature is to give such a datagram a *default* exit and send
+        // it there. Choosing where to send it means having decided to
+        // carry it, which is precisely the fire-and-forget leak
+        // `verdict_for_unattributed` refuses: 13 of 15 datagrams in the
+        // clear on one rig run, 14 on the next.
+        //
+        // If exit selection were ever moved upstream of the carry
+        // decision, this is the test that would go red.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection = selection_preferring("germany-1");
+
+        let port = dead_udp_port(&mut owner);
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            8686,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Drop,
+            "an unattributable datagram is still refused when exits are in play"
+        );
+        assert_eq!(stats.refused_unattributed.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn an_exit_preference_does_not_change_the_leave_alone_cache_key() {
+        // The other leak fix, guarded the same way.
+        //
+        // `Tables.direct` is keyed on the whole `FlowKey`, which has no
+        // exit in it, and it must not grow one. The cache records "this
+        // flow is not carried" -- a fact about an application and a
+        // peer, true whichever exit the session happens to be on. Adding
+        // an exit to the key would multiply the entries a chatty socket
+        // produces and push the table towards the overflow path, for a
+        // distinction that does not exist.
+        //
+        // Asserted behaviourally rather than by reading the struct: an
+        // unselected app's flow is left alone and remembered, and the
+        // remembering is unaffected by the selection carrying exit
+        // preferences.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        // Preferences on an app that is not this one, so this process
+        // is unselected and takes the leave-alone path.
+        let selection = Selection::with_exits(
+            [r"C:\Games\game.exe".to_string()],
+            SplitTunnelMode::OnlySelected,
+            Vec::new(),
+            [neoconnect_ipc::AppExit {
+                app: r"C:\Games\game.exe".to_string(),
+                exit: "germany-1".to_string(),
+            }],
+        );
+
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+        let there = Ipv4Addr::new(203, 0, 113, 9);
+        let elsewhere = Ipv4Addr::new(203, 0, 113, 30);
+
+        let packet = udp_packet(Ipv4Addr::new(192, 168, 1, 20), there, port, 8686);
+        let parsed = parse(&packet).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct,
+        );
+        // Recorded, so the same flow short-circuits.
+        assert_eq!(nat.lookup(Transport::Udp, port, there, 8686), Verdict::Direct);
+        // And only that flow. This is the 72c8978 property: the same
+        // port to a different peer is still undecided.
+        assert_eq!(nat.lookup(Transport::Udp, port, elsewhere, 8686), Verdict::Unknown);
+    }
+
     #[test]
     fn scoping_does_not_reopen_the_unattributable_datagram() {
         // The two axes must not be collapsed. A packet with no owner

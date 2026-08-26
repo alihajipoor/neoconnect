@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use neoconnect_ipc::{
-    AppScope, ConnectProfile, Diagnostics, GamingConfig, GamingPhase, Ikev2Profile, OpenvpnProfile,
+    AppExit, AppPlacement, AppScope, ConnectProfile, Diagnostics, GamingConfig, GamingPhase, Ikev2Profile, OpenvpnProfile,
     RepairReport, Request, Response,
     ShadowsocksProfile, RunningApp, SplitTunnelConfig, SplitTunnelMode, TrojanProfile,
     TunnelHealth, VlessTlsProfile, WireguardProfile, XrayProfile,
@@ -408,7 +408,8 @@ async fn call_expecting_ok(request: &Request) -> Result<(), String> {
         | Response::RunningApps { .. }
         | Response::Repaired { .. }
         | Response::Diagnostics { .. }
-        | Response::Gaming { .. } => {
+        | Response::Gaming { .. }
+        | Response::ExitPlacements { .. } => {
             Err("the background service returned an unexpected reply".into())
         }
     }
@@ -521,6 +522,12 @@ pub async fn vpn_set_split_tunnel(
     // service is a Windows service with its own lifetime -- so both
     // directions of version skew have to be uneventful.
     #[allow(clippy::default_trait_access)] scopes: Option<Vec<AppScope>>,
+    // Defaulted for the same reason and on the same terms: a caller
+    // that predates per-application exits sends neither of these and
+    // gets exactly the behaviour it was written against -- one tunnel,
+    // one exit, every selected application on it.
+    #[allow(clippy::default_trait_access)] exits: Option<Vec<AppExit>>,
+    egress: Option<String>,
 ) -> Result<(), String> {
     call_expecting_ok(&Request::SetSplitTunnel {
         config: SplitTunnelConfig {
@@ -528,9 +535,42 @@ pub async fn vpn_set_split_tunnel(
             apps,
             mode,
             scopes: scopes.unwrap_or_default(),
+            exits: exits.unwrap_or_default(),
+            egress,
         },
     })
     .await
+}
+
+/// Where each selected application's traffic is leaving from.
+///
+/// Its own command rather than a field on `vpn_status`, mirroring the
+/// request it makes -- see `Request::SplitTunnelExits`.
+#[tauri::command]
+pub async fn vpn_exit_placements() -> Result<ExitPlacements, String> {
+    match call(&Request::SplitTunnelExits).await? {
+        Response::ExitPlacements { egress, apps } => Ok(ExitPlacements { egress, apps }),
+        Response::Error { message } => Err(message),
+        // Refused rather than reported as an empty list, for the reason
+        // `gaming_reply` gives: "the service said something unexpected"
+        // must not be renderable as "no application has a preference".
+        Response::Ok
+        | Response::State { .. }
+        | Response::RunningApps { .. }
+        | Response::Repaired { .. }
+        | Response::Diagnostics { .. }
+        | Response::Gaming { .. } => {
+            Err("the background service returned an unexpected reply".into())
+        }
+    }
+}
+
+/// The reply, as the front end receives it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitPlacements {
+    pub egress: Option<String>,
+    pub apps: Vec<AppPlacement>,
 }
 
 /// The applications running right now, for the in-app picker.
@@ -866,7 +906,8 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
         | Response::RunningApps { .. }
         | Response::Repaired { .. }
         | Response::Diagnostics { .. }
-        | Response::Gaming { .. } => {
+        | Response::Gaming { .. }
+        | Response::ExitPlacements { .. } => {
             Err("the background service returned an unexpected reply".into())
         }
     }
@@ -936,7 +977,8 @@ fn gaming_reply(response: Response) -> Result<GamingStatus, String> {
         | Response::State { .. }
         | Response::RunningApps { .. }
         | Response::Repaired { .. }
-        | Response::Diagnostics { .. } => {
+        | Response::Diagnostics { .. }
+        | Response::ExitPlacements { .. } => {
             Err("the background service returned an unexpected reply".into())
         }
     }

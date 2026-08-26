@@ -38,7 +38,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStrExt;
 use std::sync::{Arc, RwLock};
 
-use neoconnect_ipc::{SplitTunnelMode, MAX_SCOPE_PREFIXES};
+use neoconnect_ipc::{AppPlacement, ExitPlacement, SplitTunnelMode, MAX_SCOPE_PREFIXES};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
@@ -134,6 +134,20 @@ pub struct Selection {
     /// four failures land on the same safe answer without a caller
     /// having to remember which is which.
     scopes: HashMap<String, Scope>,
+    /// Lowercased path -> the exit that application's traffic should
+    /// leave from.
+    ///
+    /// Sparse for the same reasons `scopes` is, and read on the same
+    /// terms: an application absent from here has no preference, which
+    /// is what every application had before this existed.
+    ///
+    /// **Deliberately not consulted by anything on the packet path.**
+    /// A preference says where a carried flow should egress, not
+    /// whether it is carried, and one session has one egress -- so
+    /// there is nothing per-packet for it to decide and `decide` does
+    /// not ask it. See `docs/design/per-game-exits.md` for why that
+    /// separation is the safety argument rather than an optimisation.
+    exits: HashMap<String, String>,
 }
 
 impl Selection {
@@ -165,8 +179,48 @@ impl Selection {
         I: IntoIterator<Item = String>,
         S: IntoIterator<Item = neoconnect_ipc::AppScope>,
     {
+        Self::with_exits(paths, mode, scopes, Vec::new())
+    }
+
+    /// The same selection, plus the exit each of those applications
+    /// should leave from.
+    ///
+    /// A separate constructor rather than a fourth argument on
+    /// [`Self::with_scopes`], so that every existing caller keeps the
+    /// signature it was written against -- the same additive rule the
+    /// wire protocol follows, applied to the Rust API, because this
+    /// type is constructed from tests that must not have to be
+    /// rewritten to prove something unrelated.
+    ///
+    /// Everything that could make a preference wrong is filtered out
+    /// here, once, on the same two grounds `with_scopes` uses:
+    ///
+    /// * **Not `OnlySelected`, no preferences at all.** Under
+    ///   `AllExcept` the named applications are the ones deliberately
+    ///   *not* carried, so they have no egress and a preference for one
+    ///   would be an invention. This makes per-application exits an
+    ///   `OnlySelected` feature, which is a real limit and is stated in
+    ///   the design doc rather than worked around: "everything except
+    ///   these" has no vocabulary for naming the applications that
+    ///   *are* carried, so there is nothing to hang a preference on.
+    /// * **A preference naming an application that was not selected is
+    ///   dropped.** It describes no traffic, so it can only mislead
+    ///   whoever reads the placement report later.
+    ///
+    /// A preference is never dropped for naming an exit that is not
+    /// live. That case is not an error and is not decided here -- it is
+    /// [`ExitPlacement::Fallback`], worked out against the session's
+    /// egress at the moment somebody asks, with the traffic carried
+    /// either way.
+    pub fn with_exits<I, S, E>(paths: I, mode: SplitTunnelMode, scopes: S, exits: E) -> Self
+    where
+        I: IntoIterator<Item = String>,
+        S: IntoIterator<Item = neoconnect_ipc::AppScope>,
+        E: IntoIterator<Item = neoconnect_ipc::AppExit>,
+    {
         let paths: Vec<String> = paths.into_iter().map(|p| p.to_lowercase()).collect();
         let mut built = HashMap::new();
+        let mut chosen = HashMap::new();
         if matches!(mode, SplitTunnelMode::OnlySelected) {
             for scope in scopes {
                 let app = scope.app.to_lowercase();
@@ -177,8 +231,15 @@ impl Selection {
                     built.insert(app, built_scope);
                 }
             }
+            for exit in exits {
+                let app = exit.app.to_lowercase();
+                if !paths.contains(&app) {
+                    continue;
+                }
+                chosen.insert(app, exit.exit);
+            }
         }
-        Self { paths, mode, scopes: built }
+        Self { paths, mode, scopes: built, exits: chosen }
     }
 
     pub fn mode(&self) -> SplitTunnelMode {
@@ -300,6 +361,103 @@ impl Selection {
             Some(false) => Scoped::OutOfScope,
             None => Scoped::Unscoped,
         }
+    }
+
+    /// Whether any application has been given an exit at all.
+    ///
+    /// The cheap answer, for a caller that would otherwise walk the
+    /// selection to find out that nobody chose anything.
+    pub fn has_exits(&self) -> bool {
+        !self.exits.is_empty()
+    }
+
+    /// The exit this application's traffic was asked to leave from.
+    ///
+    /// # The third axis, and why it does not meet the other two
+    ///
+    /// [`Self::should_tunnel`] answers "is this application's traffic
+    /// ours". [`Self::destination_scope`] answers "and is *this packet*
+    /// of it". Both of those decide **whether** a packet is carried,
+    /// and both are asked on the packet path.
+    ///
+    /// This answers something else entirely: **where** a flow that is
+    /// already being carried leaves from. It cannot narrow, it cannot
+    /// widen, and it cannot turn a carried packet into an uncarried one
+    /// or the reverse. Today one session has exactly one egress, so
+    /// there is nothing for it to select between and the packet path
+    /// does not call it at all -- `decide` is unchanged by this
+    /// feature, which is the reason neither leak fix can regress
+    /// through it.
+    ///
+    /// # Why the signature takes an image path
+    ///
+    /// The same reason [`Self::destination_scope`] does, and it is the
+    /// load-bearing half of the safety argument rather than a
+    /// convenience. A preference belongs to an application. A packet
+    /// nobody can be shown to have sent has no application, so it can
+    /// never acquire one of these -- it goes to
+    /// [`Self::verdict_for_unattributed`] and comes back with the
+    /// answer it came back with before this existed.
+    ///
+    /// That matters for the version of this feature that carries two
+    /// exits at once. There, the temptation is to give an unattributed
+    /// packet a default exit and send it somewhere -- and *deciding
+    /// where to send it* would first require deciding to carry it,
+    /// which is precisely the fire-and-forget UDP leak that
+    /// `verdict_for_unattributed` exists to refuse. Exit selection has
+    /// to sit strictly downstream of the carry decision. This
+    /// signature is what makes taking it upstream require a
+    /// deliberate change rather than an oversight.
+    pub fn preferred_exit(&self, image_path: &str) -> Option<&str> {
+        if self.exits.is_empty() {
+            return None;
+        }
+        self.exits.get(&image_path.to_lowercase()).map(String::as_str)
+    }
+
+    /// Where one application's traffic is leaving from, against where
+    /// the customer asked for it to leave from.
+    ///
+    /// `egress` is what the client said the live tunnel leaves from, or
+    /// `None` when nothing is intercepting or the client did not say.
+    /// `None` is answered as [`ExitPlacement::Unknown`] and never as a
+    /// match: this product does not report a placement it has not
+    /// established, for the same reason it does not report a tunnel
+    /// state it has not verified.
+    pub fn placement(&self, image_path: &str, egress: Option<&str>) -> ExitPlacement {
+        let Some(preferred) = self.preferred_exit(image_path) else {
+            return ExitPlacement::NoPreference;
+        };
+        match egress {
+            None => ExitPlacement::Unknown { preferred: preferred.to_string() },
+            Some(live) if live == preferred => ExitPlacement::OnPreferred,
+            Some(_) => ExitPlacement::Fallback { preferred: preferred.to_string() },
+        }
+    }
+
+    /// The whole selection's placements, one entry per selected
+    /// application.
+    ///
+    /// Includes the applications with no preference, so the caller
+    /// renders a complete list from this alone rather than filling
+    /// gaps from what it remembers asking for -- which is the
+    /// difference between reporting where traffic is and reporting
+    /// what was requested.
+    ///
+    /// Empty under `AllExcept`, and that is honest rather than a
+    /// shortcut: the listed applications there are the ones *not*
+    /// carried, so none of them has an egress to report.
+    pub fn placements(&self, egress: Option<&str>) -> Vec<AppPlacement> {
+        if !matches!(self.mode, SplitTunnelMode::OnlySelected) {
+            return Vec::new();
+        }
+        self.paths
+            .iter()
+            .map(|app| AppPlacement {
+                app: app.clone(),
+                placement: self.placement(app, egress),
+            })
+            .collect()
     }
 
     /// What to do with traffic whose owning program cannot be seen.
@@ -2444,6 +2602,264 @@ mod audit_tests {
         assert!(
             escapes.iter().all(|e| matches!(e.remote, IpAddr::V6(_))),
             "an IPv4 flow the NAT table holds must not be an escape: {escapes:?}"
+        );
+    }
+
+    // ---- per-application exits -------------------------------------
+
+    const GAME: &str = r"C:\Games\game.exe";
+    const OTHER: &str = r"C:\Games\other.exe";
+
+    fn exit_of(app: &str, exit: &str) -> neoconnect_ipc::AppExit {
+        neoconnect_ipc::AppExit { app: app.to_string(), exit: exit.to_string() }
+    }
+
+    fn preferring(apps: &[&str], exits: &[(&str, &str)], mode: SplitTunnelMode) -> Selection {
+        Selection::with_exits(
+            apps.iter().map(|a| (*a).to_string()),
+            mode,
+            Vec::new(),
+            exits.iter().map(|(app, exit)| exit_of(app, exit)).collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn a_game_on_its_preferred_exit_is_reported_as_such() {
+        let selection = preferring(
+            &[GAME],
+            &[(GAME, "germany-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        assert_eq!(
+            selection.placement(GAME, Some("germany-1")),
+            ExitPlacement::OnPreferred
+        );
+    }
+
+    #[test]
+    fn a_game_with_no_preference_takes_the_session_exit() {
+        // The overwhelmingly common case, and the one that must not
+        // acquire an opinion: an application nobody chose an exit for
+        // is on whatever the session is on, and says so.
+        let selection = preferring(
+            &[GAME, OTHER],
+            &[(GAME, "germany-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        assert_eq!(
+            selection.placement(OTHER, Some("germany-1")),
+            ExitPlacement::NoPreference
+        );
+        assert_eq!(
+            selection.placement(OTHER, Some("finland-1")),
+            ExitPlacement::NoPreference,
+            "an app with no preference cannot be on the wrong exit"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_preferred_exit_falls_back_and_names_what_was_asked_for() {
+        // Fail open on the new axis. The application is carried; the
+        // report says where the customer wanted it, so the app can
+        // offer to reconnect there rather than silently doing nothing
+        // or silently dropping the game.
+        let selection = preferring(
+            &[GAME],
+            &[(GAME, "turkey-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        assert_eq!(
+            selection.placement(GAME, Some("germany-1")),
+            ExitPlacement::Fallback { preferred: "turkey-1".to_string() }
+        );
+        // And the carry decision is untouched by any of it.
+        assert!(
+            selection.should_tunnel(GAME),
+            "a preference that cannot be honoured must not stop the app being carried"
+        );
+    }
+
+    #[test]
+    fn an_unknown_egress_is_never_reported_as_a_match() {
+        // The honesty clause. With nothing to compare against, the
+        // answer is `Unknown` -- not `OnPreferred`, which would claim a
+        // match nobody established, and not `Fallback`, which would
+        // claim a mismatch nobody established.
+        let selection = preferring(
+            &[GAME],
+            &[(GAME, "germany-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        assert_eq!(
+            selection.placement(GAME, None),
+            ExitPlacement::Unknown { preferred: "germany-1".to_string() }
+        );
+    }
+
+    #[test]
+    fn a_preference_for_an_app_that_was_not_selected_is_dropped() {
+        let selection = preferring(
+            &[GAME],
+            &[(OTHER, "germany-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        assert!(!selection.has_exits());
+        assert_eq!(selection.preferred_exit(OTHER), None);
+        assert_eq!(
+            selection.placement(OTHER, Some("finland-1")),
+            ExitPlacement::NoPreference
+        );
+    }
+
+    #[test]
+    fn preferences_are_dropped_under_everything_except() {
+        // Under `AllExcept` the named applications are the ones
+        // deliberately *not* carried. They have no egress, so a
+        // preference for one would be an invention -- the same rule
+        // `with_scopes` applies to scopes, for the same reason.
+        let selection = preferring(
+            &[GAME],
+            &[(GAME, "germany-1")],
+            SplitTunnelMode::AllExcept,
+        );
+        assert!(!selection.has_exits());
+        assert_eq!(selection.preferred_exit(GAME), None);
+        assert!(
+            selection.placements(Some("germany-1")).is_empty(),
+            "the listed apps in AllExcept are the uncarried ones and have nothing to report"
+        );
+    }
+
+    #[test]
+    fn a_preference_is_matched_however_the_path_is_cased() {
+        // Paths arrive from the client spelled however the shell spelled
+        // them, and are compared against what a process reports. The
+        // selection lowercases once at construction; the preference map
+        // has to be built and read on the same terms or a customer whose
+        // picker returned `C:\GAMES\Game.exe` gets a preference that
+        // silently never applies.
+        let selection = preferring(
+            &[r"C:\Games\Game.exe"],
+            &[(r"C:\GAMES\GAME.EXE", "germany-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        assert_eq!(
+            selection.placement(r"c:\games\game.exe", Some("germany-1")),
+            ExitPlacement::OnPreferred
+        );
+    }
+
+    #[test]
+    fn every_selected_app_appears_in_the_report() {
+        // The app renders the list from this answer alone. A report
+        // that omitted the unpreferred applications would force it to
+        // fill the gaps from what it remembers asking for, which is the
+        // difference between reporting where traffic is and reporting
+        // what was requested.
+        let selection = preferring(
+            &[GAME, OTHER],
+            &[(GAME, "turkey-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        let placements = selection.placements(Some("germany-1"));
+        assert_eq!(placements.len(), 2);
+        let game = placements
+            .iter()
+            .find(|p| p.app.eq_ignore_ascii_case(GAME))
+            .expect("the preferred game is in the report");
+        assert_eq!(
+            game.placement,
+            ExitPlacement::Fallback { preferred: "turkey-1".to_string() }
+        );
+        let other = placements
+            .iter()
+            .find(|p| p.app.eq_ignore_ascii_case(OTHER))
+            .expect("the unpreferred game is in the report too");
+        assert_eq!(other.placement, ExitPlacement::NoPreference);
+    }
+
+    #[test]
+    fn two_games_may_prefer_two_different_exits() {
+        // The customer-visible point of the feature, and the reason
+        // `ban-safety.md` counts it as risk reduction rather than
+        // convenience: a restriction on a shared exit hits every user of
+        // that address, so spreading games across exits shrinks the
+        // blast radius. One session can only honour one of these today,
+        // which is why the other reports `Fallback` rather than being
+        // silently treated as satisfied.
+        let selection = preferring(
+            &[GAME, OTHER],
+            &[(GAME, "germany-1"), (OTHER, "finland-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        assert_eq!(selection.preferred_exit(GAME), Some("germany-1"));
+        assert_eq!(selection.preferred_exit(OTHER), Some("finland-1"));
+        assert_eq!(
+            selection.placement(GAME, Some("germany-1")),
+            ExitPlacement::OnPreferred
+        );
+        assert_eq!(
+            selection.placement(OTHER, Some("germany-1")),
+            ExitPlacement::Fallback { preferred: "finland-1".to_string() }
+        );
+    }
+
+    #[test]
+    fn exits_and_scopes_are_independent_axes() {
+        // One narrows what is carried, the other says where what is
+        // carried leaves from. Neither may quietly become the other:
+        // an out-of-scope destination is still reported on the exit the
+        // application prefers, because the placement describes the
+        // application and not one packet of it.
+        let selection = Selection::with_exits(
+            [GAME.to_string()],
+            SplitTunnelMode::OnlySelected,
+            [neoconnect_ipc::AppScope {
+                app: GAME.to_string(),
+                destinations: vec!["203.0.113.0/24".to_string()],
+            }],
+            [exit_of(GAME, "germany-1")],
+        );
+        assert!(selection.has_scopes() && selection.has_exits());
+        assert_eq!(
+            selection.destination_scope(GAME, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))),
+            Scoped::OutOfScope
+        );
+        assert_eq!(
+            selection.placement(GAME, Some("germany-1")),
+            ExitPlacement::OnPreferred
+        );
+    }
+
+    #[test]
+    fn an_unattributable_packet_can_never_reach_a_preference() {
+        // The composition rule, asserted at the type level as far as a
+        // test can. `verdict_for_unattributed` takes no image path and
+        // therefore cannot consult `exits`; its answer with preferences
+        // configured is byte-for-byte the answer without them.
+        //
+        // This is the guard against the multi-exit version of this
+        // feature giving an ownerless datagram a "default exit" -- which
+        // would mean deciding to carry it, which is the fire-and-forget
+        // leak.
+        let bare = Selection::new([GAME.to_string()], SplitTunnelMode::OnlySelected);
+        let with_exits = preferring(
+            &[GAME],
+            &[(GAME, "germany-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        let internet = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        assert_eq!(
+            with_exits.verdict_for_unattributed(Transport::Udp, internet),
+            Unattributed::Refuse
+        );
+        assert_eq!(
+            with_exits.verdict_for_unattributed(Transport::Udp, internet),
+            bare.verdict_for_unattributed(Transport::Udp, internet),
+        );
+        assert_eq!(
+            with_exits.verdict_for_unattributed(Transport::Tcp, internet),
+            bare.verdict_for_unattributed(Transport::Tcp, internet),
         );
     }
 }
