@@ -11948,3 +11948,241 @@ disconnect that reported the previous tunnel still shutting down.
   healthy.** Its logon task is what recovers it — a reboot brought it
   back with no Win+R fight, which is exactly what that registration is
   for.
+
+---
+
+## 2026-08-26 — the two leak fixes read under Xray and OpenVPN, and the IPv6 question is answered
+
+**Status:** done — measured, and one long-standing "not established" is now established
+**Touches:** nothing in the repo but this file
+**Branch:** `claude/split-tunnel-engines-verification` (`b2079cb`, a merge of
+`claude/engine-activation-timeouts` `f3ccd63` and `main` `77f5df2`)
+
+Addresses redacted per `docs/node-address-hygiene.md`: `{germany-1}` is
+the node's exit address. The probe destinations are public resolvers and
+are real, as are the guest's own private addresses.
+
+The 0825 entry proved three split-tunnel claims against packet captures
+and then said, in its own "still not proven" list, that **every number in
+it was WireGuard** — because three of four engines could not activate on
+that guest at all. The 0826 entry fixed that. This is the consequence:
+the same claims, re-read under **Xray** and **OpenVPN**, on the build
+that carries both the leak fixes and the engine budgets.
+
+### Why it had to be these two engines
+
+Not for coverage. The two differ from WireGuard in exactly the way that
+could have broken the fixes, and in the way that made one question
+unanswerable:
+
+- WireGuard is a kernel adapter that arms **its own WFP kill-switch**.
+  Anything that failed to escape under WireGuard might have been stopped
+  by that rather than by anything this feature does. The 0825 entry said
+  so and refused to claim otherwise.
+- Xray is a user-mode proxy whose adapter (`neoconnect0`) it creates
+  itself; OpenVPN attaches to a Wintun adapter. Neither arms a
+  kill-switch. So a packet that does not escape under them was stopped by
+  something this feature owns.
+
+### The build, and what makes a zero mean anything
+
+One binary, `sha256 DE1F66F397FCDDFE`, 4989952 bytes, swapped into a
+fresh 0.9.31 install and **hash-checked on the running process**, not on
+disk. Capture is a VirtualBox `nictrace` on the guest vNIC — outside the
+service, so what is counted is what left the machine.
+
+**No before/after was run here and none is claimed.** Both fixes were
+reproduced against an unfixed build on 0825, on this rig, at 13/15,
+12/15 and 6/6 in the clear. What this run has to establish is different:
+that the *fixed* build behaves correctly under the other two transports,
+with in-capture controls that make a zero evidence rather than an
+absence.
+
+Two rules did that work, and both are inherited from mistakes:
+
+1. **Every probe destination is used exactly once in a run**, so the
+   whole-capture count to that address is the answer and no phase window
+   has to be reconstructed from markers. The 0825 session lost four rows
+   to `INCONCLUSIVE` when markers went missing with a capture.
+2. **Every post-activation phase carries a row that must be non-zero.**
+   A `nictrace` that dies mid-run reads exactly like a fix working — 0825
+   had one go silent for 24 minutes with every probe destination at 0.
+   Here the per-minute histogram is printed first (24694 packets over 7
+   minutes for Xray, 15665 over 7 for OpenVPN, no silent minute in
+   either) and two live rows sit beside every zero.
+
+### Both engines brought Custom mode up
+
+```
+                connect returned   split_tunnel_active   exit IP        health
+  Xray             t+41.79s          t+42.38s (+0.6s)    {germany-1}    unknown
+  OpenVPN          t+36.67s          t+37.20s (+0.53s)   {germany-1}    unknown
+```
+
+**OpenVPN is the one that was outstanding.** The 0826 entry called it
+"CONFIRMED in mechanism, NOT in the thing it was aimed at" because the
+failure being fixed was `split_tunnel_active` never arriving and Custom
+mode was never run. It has now been run: it arrives half a second after
+the connect returns.
+
+`health: unknown` on both is deliberate and correct — `Engines::status`
+reports Unknown for Xray and OpenVPN "rather than implying evidence that
+was never gathered". The exit IP is what supplies the ground truth those
+two deliberately decline to guess at.
+
+### The wire, both engines, one table
+
+Counts are plaintext packets leaving the vNIC addressed to that
+destination, whole capture.
+
+```
+                                              Xray   OpenVPN
+  no tunnel (instrument check, all must be > 0)
+    selapp closed-socket UDP                    15      15
+    selapp held-open UDP                        15      15
+    otherapp ordinary UDP                        6       6
+    otherapp DNS                                 6       6
+    selapp IPv6                                 20      20
+  Custom mode on
+    selapp held-open UDP                         0       0
+    selapp closed-at-once UDP    <- CLAIM 2      0       0
+    otherapp DNS, fresh socket                   0       0
+    otherapp ordinary UDP        <- LIVENESS     6       6
+    otherapp DNS, same port      <- CLAIM 1      0       0
+    selapp IPv6                                  0       0
+    otherapp IPv6                <- LIVENESS    20      20
+    otherapp IPv6 to :53                         0       0
+
+  refused_unattributed                          18      15
+  escaped                                        0       0
+```
+
+**Claim 2 — unattributable UDP is refused. CONFIRMED under both.** 15
+datagrams from sockets closed microseconds after the send, against a
+fresh routable destination, 0 in the clear on each engine, with
+`refused_unattributed` off zero and the held-open burst at 0 in the same
+capture. The unselected app's ordinary UDP reads 6 in that same capture,
+so the run is not a picture of a dead instrument.
+
+**Claim 1 — the leave-alone cache is keyed on the flow. CONFIRMED under
+both.** The commit's named failure staged literally: an unselected app
+sends an ordinary datagram, then a DNS query from the *same source port*
+800ms later. By source port, which is what the claim is actually about:
+
+```
+  Xray      ordinary leg -> 4.2.2.6         ports 49814 49816 49818 49820 54199 54201
+            DNS leg      -> 9.9.9.11        ports (none)
+  OpenVPN   ordinary leg -> 216.146.35.35   ports 50076 50078 50080 50082 50084 52991
+            DNS leg      -> 149.112.112.11  ports (none)
+```
+
+The ordinary leg is on the wire and names the ports, so the pairing was
+really staged; not one of those ports put its DNS query there. The
+fresh-socket DNS row at 0 in the same phase shows the carry rule was
+active, and the ordinary leg at 6 shows the fix did not over-reach into
+traffic that is supposed to leave.
+
+### The IPv6 question — ANSWERED, and by which filter
+
+The 0825 entry could say only that a scoped app's IPv6 did not escape and
+that **which filter prevented it was not established**, because
+WireGuard's kill-switch was in the frame. Three candidates: the per-app
+WFP block at `ALE_AUTH_CONNECT_V6`
+(`engines::ipv6_block::SelectedAppsIpv6Block`), the redirect loop's own
+`handle_ipv6`, or the engine.
+
+Three rows, each ruling exactly one in or out, identical under both
+engines:
+
+```
+                                        outcome                     wire   blocked_v6
+  V1  SELECTED app   -> v6 :443    WSAEACCES in 1-2ms (38/18ms once)   0     0 -> 0
+  V2  UNSELECTED app -> v6 :443    refused after ~2.1s                20     0 -> 0
+  V3  UNSELECTED app -> v6 :53     TIMEOUT, 3.0s x4                    0     0 -> 11
+```
+
+- **V2 rules out the engine and anything machine-wide.** IPv6 still
+  leaves this guest with the tunnel up. Whatever stopped V1 was scoped to
+  the selected application.
+- **V3 rules out "the loop was asleep".** `handle_ipv6` blocks a DNS
+  query over IPv6 for *any* app, before it asks who sent it, and an
+  unselected app carries no per-app filter — so this is the loop's own
+  block, alone, and it moved `blocked_v6` from 0 to 11 in the same
+  session. Silently swallowed, no reset, which is why the app sees a
+  timeout rather than a refusal.
+- **V1 is therefore the per-app WFP filter.** `blocked_v6` did not move
+  while the loop was demonstrably counting, and `WSAEACCES` in one or two
+  milliseconds is a verdict reached in the calling thread before a packet
+  existed — not a packet dropped after one did.
+
+And the filtering engine says it in its own words. `netsh wfp show
+filters`, same session, same guest:
+
+```
+  before Custom mode        0 filters of ours
+  Custom mode on            Neoxify: block outbound IPv6 for selapp.exe (custom mode)
+                            Neoxify: permit ::/64      for selapp.exe (custom mode)
+                            Neoxify: permit fc00::/7   for selapp.exe (custom mode)
+                            Neoxify: permit fe00::/8   for selapp.exe (custom mode)
+                            Neoxify: permit ff00::/8   for selapp.exe (custom mode)
+                            Neoxify: permit loopback IPv6 for selapp.exe (custom mode)
+  selapp deselected,        the same six, naming otherapp.exe -- selapp.exe gone
+    otherapp selected
+  after disconnect          0 filters of ours
+```
+
+**So: `SelectedAppsIpv6Block` is what stops a selected app's IPv6.** Not
+the loop, not the engine. Three further things fall out of that dump and
+are worth having: the permit table on the wire is exactly
+`SPLIT_PERMITTED`; `set_selection`'s rebuild really does fire, so a
+deselected app gets its IPv6 back without a reconnect, which is the case
+its comment exists for; and nothing of ours outlives the session.
+
+`212ebad` ends "Nothing below proves a packet stops; only the rig can."
+The rig has.
+
+### One rig trap, new, and it cost half an hour
+
+**A blanked display makes a healthy guest look dead, and the recovery is
+not a keystroke.** After a 13-minute unattended settle, `screenshotpng`
+returned a 2367-byte pure-black PNG. `ebboot` read a run-box mean of 0.0
+eight times and reported "the Run dialog would not open"; the guest was
+in fact up, auto-logged-in and perfectly healthy. Ten minutes of polling
+`GuestAdditionsRunLevel` sat at 2 and told me nothing. **Keystrokes do
+not un-blank it. `VBoxManage controlvm <vm> setvideomodehint 1024 768 32`
+does, instantly** — the next screenshot was the ordinary Windows 11
+desktop. `ebboot.py` now hints before every Run-dialog attempt, not once
+before the loop, because the blank can come back between tries.
+
+Read that alongside the 0826 note about the runner's heartbeat stalling:
+**on this rig a black screenshot means the framebuffer is asleep, not
+that the guest is gone**, and `showvminfo` cannot tell the two apart.
+
+Everything else behaved as the two previous entries describe: the RunMRU
+`.cmd`-shim dance worked, `Stop-Service` again returned before the
+process stopped so the swap had to wait it out, and the exit-IP probe
+again needed its retries.
+
+### What is still not proven
+
+- **IKEv2, still.** Untouched here and expected to be: `f3ccd63` refuted
+  it against an exit IP and named the fix — entry creation has to move to
+  `RasSetEntryPropertiesW`, because one PowerShell spawn is still over a
+  budget that cannot rise past the app's 45s. Until then it is the
+  protocol a slow machine cannot have.
+- **The unfixed build was not re-run under these two engines.** The leak
+  was reproduced under WireGuard only. The redirect loop is
+  engine-independent and the mechanism does not depend on the transport,
+  but that is an argument, not a measurement, and it is the one place
+  this run leans on the previous one.
+- **Destination scoping was not re-read under Xray or OpenVPN.** It was
+  confirmed on 0825 under WireGuard and nothing here touches it.
+- The three items the 0825 entry left open are all still open: the
+  leave-alone cache's **exhaustion path**, scoping under a **real
+  prefix-complete profile**, and the unattributable-UDP refusal **under
+  load**.
+- Both engines ran on a guest whose IPv6 is a ULA on a VirtualBox NAT
+  network. Packets leave the vNIC, which is the whole definition of the
+  leak, but no IPv6 destination here was genuinely reachable — every
+  control ends in a refusal from the NAT rather than a completed
+  handshake.
