@@ -23,7 +23,7 @@
 # feature, and the owner has been explicit that a Gaming Mode which gets
 # players banned is worse than no Gaming Mode at all.
 #
-# Six invariants, all offline, no network, no database:
+# Seven invariants, all offline, no network, no database:
 #
 #   1. game-apps.ts     -- `exitsForGames` exists and is the only
 #      producer of an AppExit. It withholds a group that is not whole
@@ -31,6 +31,11 @@
 #   2. split-tunnel.ts  -- the persisted settings carry `games`
 #      (the groups) and NO per-application exit field. A customer cannot
 #      hand-build a split because there is nowhere to write one.
+#   2b. split-tunnel.invariants.ts -- that same rule, asserted
+#      structurally and enforced by `tsc`, plus the package still having
+#      a typecheck task to enforce it with. This one, not the grep
+#      above, is the real guard: only the compiler can see an OPTIONAL
+#      field. See the header of that file.
 #   3. split-tunnel.ts  -- `pushSplitTunnel` derives `exits` only from
 #      `exitsForGames`. Everything above is bypassed if the wire is
 #      filled in from somewhere else.
@@ -51,11 +56,13 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 CLIENT_RULE="apps/desktop-windows/src/lib/game-apps.ts"
 CLIENT_WIRE="apps/desktop-windows/src/lib/split-tunnel.ts"
+ASSERTIONS="apps/desktop-windows/src/lib/split-tunnel.invariants.ts"
+CLIENT_PKG="apps/desktop-windows/package.json"
 IPC="apps/desktop-windows/ipc/src/lib.rs"
 SERVICE="apps/desktop-windows/service/src/split_tunnel/owner.rs"
 CATALOGUE="apps/backend/prisma/catalogue/curated.json"
 
-for f in "$CLIENT_RULE" "$CLIENT_WIRE" "$IPC" "$SERVICE" "$CATALOGUE"; do
+for f in "$CLIENT_RULE" "$CLIENT_WIRE" "$CLIENT_PKG" "$IPC" "$SERVICE" "$CATALOGUE"; do
   [ -f "$f" ] || { echo "check-exit-groups: missing $f" >&2; exit 1; }
 done
 
@@ -117,7 +124,15 @@ else
       "'apps' list and nothing knows which binaries belong together any" \
       "more -- which is the state this whole guard exists to leave behind."
   fi
-  if grep -qE '^\s*exits\s*:' <<< "$settings"; then
+  # Field lines only: a doc comment mentioning an exit is not a field.
+  # Any identifier CONTAINING "exit", in either case, with or without an
+  # optional marker -- `exits:`, `appExits?:`, `perAppExit:`. The
+  # original pattern here was `^\s*exits\s*:`, which allowed for neither
+  # a different name nor a `?`, and `appExits?: AppExit[]` walked
+  # straight past it. This is still only a name heuristic; the rule
+  # itself is asserted structurally in $ASSERTIONS.
+  fields=$(grep -vE '^[[:space:]]*(\*|/\*|//)' <<< "$settings")
+  if grep -qiE '^[[:space:]]*[A-Za-z0-9_$]*exit[A-Za-z0-9_$]*[[:space:]]*[?]?[[:space:]]*:' <<< "$fields"; then
     fail "SplitTunnelSettings in $CLIENT_WIRE has grown a per-application" \
       "exit field." \
       "" \
@@ -126,6 +141,53 @@ else
       "two different exits, and no warning covers a state the app persists." \
       "Keep the exit on GameExitGroup, where a split is unrepresentable."
   fi
+fi
+
+# --- 2b. the same rule, asserted by the compiler ---------------------------
+#
+# The check above reads source and matches names, and a name is not the
+# rule. $ASSERTIONS states the rule structurally -- the persisted key set
+# pinned exactly, and no persisted shape carrying an exit unless it is
+# keyed on a game -- and `tsc` enforces it. That is the only instrument
+# that can see an OPTIONAL field at all: types are erased, so a runtime
+# test can only reflect over a value, and an optional field is absent
+# from values by definition.
+#
+# What is checked here is that the assertions still exist and are still
+# reached. Deleting them has to be as loud as breaking them, or the
+# guard is one quiet `rm` from gone.
+
+if [ ! -f "$ASSERTIONS" ]; then
+  fail "$ASSERTIONS is gone." \
+    "" \
+    "That file is where 'no per-application exit in persisted state' is" \
+    "actually enforced -- by the compiler, which unlike this script and" \
+    "unlike any runtime test can see an optional field. If it moved," \
+    "point this check at it."
+else
+  for proof in PersistedSettingsKeysArePinned ScopeKeysArePinned \
+    GroupKeysArePinned WireExitIsNotPersisted ExitLivesOnlyOnTheGameGroup \
+    GroupHasOneExitOrNone WireExitAlwaysNamesItsGame; do
+    if ! grep -q "export type $proof = Proof<" "$ASSERTIONS"; then
+      fail "$ASSERTIONS no longer asserts '$proof'." \
+        "" \
+        "Each assertion in that file closes a shape of the split that" \
+        "compiles cleanly and breaks no test. Removing one removes the" \
+        "only thing that would have failed."
+    fi
+  done
+fi
+
+# The assertions are only worth anything if something compiles them.
+# `tsc` covers every file under src, so the risk is not this file being
+# missed -- it is the package losing the step that runs tsc at all.
+if ! grep -qE '"typecheck"[[:space:]]*:[[:space:]]*"tsc --noEmit"' "$CLIENT_PKG"; then
+  fail "$CLIENT_PKG no longer runs 'tsc --noEmit' as its typecheck task." \
+    "" \
+    "CI runs 'turbo run lint typecheck build test'. Without that script," \
+    "the assertions in $ASSERTIONS are compiled only as a side effect of" \
+    "the build step, and a build that stops running tsc would silently" \
+    "take the guard with it."
 fi
 
 # --- 3. the wire is derived, not stored ------------------------------------
