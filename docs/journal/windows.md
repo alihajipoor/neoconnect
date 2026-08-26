@@ -13460,3 +13460,152 @@ than everything, and do the joining on the host.
 * Do not call `Get-Process` per connection per sample on this guest — a
   run that did took over 25 minutes and never finished. One process
   snapshot per sample, joined by PID, is the same data in seconds.
+
+---
+
+## 2026-08-26 — Custom mode's DNS: the rule that looks over-broad is the one carrying the lookups
+
+**Status:** Xray/IKEv2 disagreement resolved and committed; IKEv2 native
+entry creation investigated and **not attempted** — see the refusal below
+**Touches:** `apps/desktop-windows/service/src/engines/**`
+**Branch:** `claude/engine-dns-consistency` (`4f08abd`)
+
+### The DNS decision, and why it went the opposite way to the brief
+
+The two engines disagreed: Xray called `dns::force` from
+`prepare_passive` as well as `install_routes`, IKEv2 gated the same call
+on `!passive`. The expected fix was to make Xray follow IKEv2, on the
+premise that Custom mode leaves unselected traffic alone and a
+`Namespace '.'` rule is redundant there. **Reading the split tunnel
+inverts that**, and IKEv2 is the engine that moved.
+
+Custom mode already captures DNS machine-wide, deliberately:
+`split_tunnel` sets `carry_dns: true` unconditionally and
+`redirect::is_dns` carries the argument — Windows resolves through its
+own DNS Client service, so a query leaves under svchost's name and
+cannot be attributed to the selected application.
+
+The part that is not written down anywhere, and is the whole point:
+
+- `redirect::filter_for` excludes **every RFC1918 range**.
+- So a lookup sent to a router at `192.168.1.1` is dropped by the kernel
+  filter before `decide` runs. `is_dns`, the redirect and the
+  `Verdict::Drop` at `redirect.rs` never execute for it.
+- The NRPT rule points the machine at `1.1.1.1`, a **public** address the
+  filter admits — which is what lets the redirect carry it at all.
+
+**The two mechanisms are coupled and neither file says so.** Nothing in
+`split_tunnel/` mentions NRPT; nothing in `dns.rs` mentioned the filter.
+Removing the rule in passive mode would not have restored "unselected
+traffic is untouched" — connections are untouched either way — it would
+have reintroduced the leak, on the networks most customers are on.
+
+So IKEv2's old comment was wrong in its second half, and that half was
+load-bearing for the first: "the selected ones still resolve through the
+tunnel, because their DNS is redirected with the rest of their traffic"
+holds only where the configured resolver already has a public address.
+
+The condition is a named function both engines call now
+(`dns::machine_wide_rule_wanted`), because a condition written out once
+per engine is exactly how they came to disagree.
+
+**Two contradictions found and left alone, both in files this branch does
+not own:**
+
+- `redirect.rs`'s test `a_lookup_is_carried_even_when_its_app_is_not_selected`
+  asserts the carry using destination `192.168.1.1:53` — a destination the
+  production filter can never deliver — while the very next test asserts
+  `192.168.0.0` is excluded. The two disagree about the real path.
+- `mod.rs`'s comment on the passive check says it "answers no" for
+  everything except interception, but `wants_passive_tunnel` is defined as
+  `self.wants_interception()`.
+
+**Not proven:** no tunnel was dialled. This changes what IKEv2 does in
+Custom mode on a real machine and the rig was occupied throughout (see
+below). The change is argued from the split tunnel's own code and proven
+only by mutation.
+
+### IKEv2 native entry creation — investigated, and deliberately not attempted
+
+The brief was `RasSetEntryPropertiesW`, on the standing conclusion that
+PowerShell cannot stay on this path. The investigation **changes the
+reason it has not been done**, and the new reason is not the one on
+record.
+
+**The struct hazard is smaller than assumed, and is now measured.** On
+this workstation, against `windows-sys` 0.59:
+
+```
+  size_of::<RASENTRYW>()                       6724
+  RasGetEntryPropertiesW's own required size   6724   (null-buffer probe, rc 603)
+  align_of::<RASENTRYW>()                         4
+```
+
+`RASENTRYW` is `#[repr(C)]` with **no field wider than 4 bytes** — no
+trailing pointer, unlike `RASDIALPARAMSW` — so `packed(4)` and natural
+alignment coincide and the 2120-byte coincidence that produced the
+`ras.rs` crash cannot recur in the same shape. The two-call size probe
+works and RAS confirms the layout at runtime. A real entry read back
+gave `dwVpnStrategy=7` (`VS_Ikev2Only`), `dwType=2`, `dwCustomAuthKey=26`
+(EAP-MSCHAPv2), `szDeviceType="vpn"`, and `RASEO_RemoteDefaultGateway`
+set — i.e. everything `Add-VpnConnection` does is reachable, and
+split-tunnelling is that one flag.
+
+**The blocker is the IPsec policy, and it has no API.**
+`Set-VpnConnectionIPsecConfiguration` is not optional here — the note in
+`ikev2::connect` records that Windows' default proposals are 3DES/AES-CBC
+over MODP_1024 and the node answers every one with NO_PROPOSAL_CHOSEN.
+`RASENTRYW` has no field for it. It is stored in the phonebook INI as
+two keys:
+
+```
+  NumCustomPolicy=1
+  CustomIPSecPolicies=<24 bytes, hex>
+```
+
+**`RasSetEntryPropertiesW` preserves both.** Measured: an entry
+configured by PowerShell, read with `RasGetEntryPropertiesW` and written
+straight back natively, kept `NumCustomPolicy=1` and its blob. So the
+per-connect work (server address, split-tunnel flag) *can* be native —
+but something has to write that blob the first time.
+
+**And the blob's field order is not the documented struct's.** Six
+little-endian u32s, pinned by changing one cmdlet parameter at a time:
+
+```
+  on disk   Integrity  Encryption  DhGroup  Cipher  Auth  Pfs
+  windows-sys ROUTER_CUSTOM_IKEv2_POLICY0:
+            Integrity  Encryption  Cipher   Auth    Pfs   Dh
+```
+
+Serialising the generated struct in declaration order would put DHGroup
+in the cipher slot. It is **24 bytes either way** — the same
+match-on-size, wrong-in-content failure as the original `ras.rs`
+incident, in a new place, and this time in the cipher suite.
+
+**So the honest position:** this is doable, and the design is above, but
+it requires owning an undocumented binary format on the connect path of
+the protocol customers fall back to when the others are blocked. Its
+correctness is not checkable in-process — a wrong blob fails closed at
+IKE_SA_INIT, which is indistinguishable from a network problem — so the
+only verification is a real tunnel. It was derived from **one** Windows
+build (this workstation, 26200); the rig runs 22000.348 and would be the
+second.
+
+**It was not attempted, and that is a decision rather than a shortfall.**
+The rig was in continuous use by another session for the whole of this
+one — `oldschool.msi` was written to the shared folder at 11:53 and
+screenshots every ~8s until 11:58, which is the Old School RuneScape run
+the previous entry names as its highest-value remaining item. Restoring
+the snapshot or sending it keystrokes would have destroyed that. With no
+rig, the only available evidence for a hand-written cipher blob would
+have been "it compiles".
+
+**For whoever picks this up:** the probe that produced the numbers above
+is ~120 lines against `windows-sys` with features
+`Win32_NetworkManagement_Rras` + `Win32_Networking_WinSock` (the latter
+is not currently in the service's feature list and gates `RASENTRYW`).
+Re-derive the blob order on the target build before trusting it —
+one-parameter-at-a-time against `Set-VpnConnectionIPsecConfiguration`
+takes about a minute and is the only thing standing between this and a
+silently weakened cipher suite.
