@@ -296,24 +296,45 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// The repair's own deadline, which has to be a different number.
 ///
-/// It is nine steps, several of which shell out to PowerShell or netsh,
-/// and each of those is separately bounded by the service's fifteen-second
-/// helper budget -- except the NRPT clear, which gets 60s on this path
-/// (`engines::dns::REPAIR_CMDLET_BUDGET`) because `Get-DnsClientNrptRule`
-/// is CIM-backed and 15s was not enough for it cold on a slow machine.
-/// On a healthy machine the whole pass is a few seconds; on the machine
-/// somebody actually presses this button on -- where the cmdlets are the
-/// thing misbehaving, which is the documented reason the registry
-/// fallback exists at all -- the worst case is several budgets end to
-/// end. Giving it the ordinary 45s would abandon a repair that was
-/// working, leave the app with no report, and tell the customer nothing
-/// about a machine that had just been half-changed.
+/// **Derived, not chosen**, and the derivation is
+/// [`neoconnect_ipc::REPAIR_WORST_CASE`] -- 735s, itemised there from
+/// the service's own budget constants and asserted against them by a
+/// test in `engines::repair`. The test below asserts this number covers
+/// it, so the two cannot drift apart again.
 ///
-/// Raised from 150s by exactly the 45s the NRPT budget gained, so that
-/// change spends its own margin rather than the one this number already
-/// had. Abandoning the pass early would be the same false failure the
-/// budget increase exists to remove, arriving one layer up.
-const REPAIR_TIMEOUT: Duration = Duration::from_secs(195);
+/// They had drifted. The comment this replaces derived 195s as "nine
+/// steps, each bounded by the fifteen-second helper budget", which was
+/// arithmetic over a call graph nobody had counted: the pass makes 37
+/// bounded spawns, not nine, and it spends 135s more in SCM poll loops
+/// that spawn nothing at all. A clean machine with a leftover
+/// `Neoxify-OpenVPN` adapter -- which is the ordinary state, because
+/// that adapter is deliberately never deleted -- can reach 240s at full
+/// budget with **nothing wrong on it**. The old number abandoned a
+/// working repair, left the app with no report, and told the customer
+/// nothing about a machine that had just been half-changed. This
+/// feature exists for people whose networking is already broken, so
+/// that is the worst direction to be wrong in.
+///
+/// The DNS change on this branch made the pass *cheaper*, not dearer,
+/// and the saving is measurable rather than assumed: `dns::clear` and
+/// `dns::clear_reporting` now ask the registry in-process and return
+/// without a process when it reports zero rules of ours, which is the
+/// answer on a clean machine. That removes both NRPT PowerShell spawns
+/// from the clean path -- 15s + 60s -- taking a clean pass from 225s to
+/// 150s at full budget. It removes nothing from the worst case, because
+/// a machine that actually has rules to clear still reaches the
+/// cmdlets. So the constant goes up despite the pass getting faster.
+///
+/// 750s rather than 735s: the spare 15s is one helper budget of slack
+/// for the work on this path that has no budget at all -- three full
+/// WFP filter enumerations, the ToolHelp process scans, the registry
+/// sweeps and the report assembly.
+///
+/// It is a **backstop, not a target**. A clean machine's ten spawns
+/// measure 3-5s in total on a developer workstation and about 48s on a
+/// constrained guest; the 750s is what the code permits, and a customer
+/// should never see it.
+const REPAIR_TIMEOUT: Duration = Duration::from_secs(750);
 
 async fn call_within(request: &Request, reply_timeout: Duration) -> Result<Response, String> {
     const ERROR_PIPE_BUSY: i32 = 231;
@@ -1003,6 +1024,28 @@ mod gaming_contract {
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["state"], "unknown");
         assert!(json.get("detail").is_none(), "an absent detail is omitted, not null");
+    }
+
+    /// The app's half of the repair-deadline contract.
+    ///
+    /// `REPAIR_WORST_CASE` is what the service says its pass can cost;
+    /// this is the app agreeing to wait that long. They were kept apart
+    /// once and the app's number ended up at less than a third of the
+    /// service's, which turns a repair that is still working into "the
+    /// background service did not answer" -- on a machine whose
+    /// networking is already broken and which has just been half
+    /// changed.
+    #[test]
+    fn the_repair_deadline_covers_what_the_service_says_it_can_cost() {
+        assert!(
+            REPAIR_TIMEOUT >= neoconnect_ipc::REPAIR_WORST_CASE,
+            "the repair deadline ({}s) abandons a pass the service says can take {}s",
+            REPAIR_TIMEOUT.as_secs(),
+            neoconnect_ipc::REPAIR_WORST_CASE.as_secs()
+        );
+        // And it is still a different number from the ordinary one --
+        // the reason this constant exists at all.
+        assert!(REPAIR_TIMEOUT > REPLY_TIMEOUT);
     }
 
     /// A service that answered a different question is an error, never
