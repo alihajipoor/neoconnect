@@ -1,5 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
-import { catalogueEntries, toSeedRow, validateCatalogue } from "./catalogue";
+import { catalogueEntries, toSeedRow, validateCatalogue, validateProcessNames } from "./catalogue";
 
 /** The curated game catalogue, seeded so a fresh install is not an empty
  * picker.
@@ -70,14 +70,23 @@ export async function seedGameProfiles(prisma: PrismaClient) {
        * customers selecting one and getting half a product in Custom mode,
        * because nothing there said you needed both.
        *
-       * Used only by the per-game private exit, which is not built. */
-      processNames: [
-        "Battle.net.exe",
-        "Agent.exe",
-        "Wow.exe",
-        "WowClassic.exe",
-        "WowT.exe",
-      ],
+       * `Agent.exe` -- the Blizzard Update Agent -- was here until
+       * 2026-08-25 and was removed rather than kept. Blizzard's own
+       * manifest names it, so its provenance was never the problem; the
+       * problem is that the name is also used by a great deal of
+       * enterprise monitoring, backup and MDM software. The client
+       * resolves a catalogue name against every running process and
+       * adds the full path of whatever matched, so a customer picking
+       * World of Warcraft on a work laptop would have silently put
+       * their employer's agent on the tunnel. It cannot be rescued by
+       * writing it as a full path either: the catalogue validator
+       * rejects a path where a bare filename belongs, and the client's
+       * `curatedNames()` strips a path back to its basename before
+       * matching. What is lost is the patcher, which carries downloads
+       * that the CDN exclusions above already keep off the tunnel on
+       * purpose. It is now on the generic-names denylist, so it cannot
+       * come back by hand. */
+      processNames: ["Battle.net.exe", "Wow.exe", "WowClassic.exe", "WowT.exe"],
 
       /* Recorded so the prefix list can be audited. It stays EMPTY, and
        * `prefixComplete` stays false -- and as of 2026-08-25 that is no
@@ -168,9 +177,18 @@ export async function seedGameProfiles(prisma: PrismaClient) {
       excludeHostnames: [] as string[],
 
       /* Taken from Riot's own "Configure your Firewall" support article,
-       * which lists the paths Riot says a VALORANT install needs open,
-       * plus `UnrealCEFSubProcess.exe` from their "Your Firewall VS.
-       * VALORANT" article.
+       * which lists the paths Riot says a VALORANT install needs open.
+       *
+       * `UnrealCEFSubProcess.exe` came from Riot's "Your Firewall VS.
+       * VALORANT" article and was removed on 2026-08-25. First-party
+       * provenance does not make a name safe: this one belongs to
+       * Unreal Engine's embedded-browser helper, not to VALORANT, and
+       * every UE title that ships a CEF pane runs a process with the
+       * same name. It identifies an engine, not a game. Matching it
+       * would route whichever unrelated Unreal game happened to be
+       * open. It carries the in-game browser pane, not gameplay
+       * traffic, so dropping it costs nothing that matters here; it is
+       * now on the generic-names denylist.
        *
        * Deliberately NOT the seven-executable list circulating in the
        * community and repeated in docs/research/gaming-providers.md. That
@@ -185,7 +203,6 @@ export async function seedGameProfiles(prisma: PrismaClient) {
       processNames: [
         "VALORANT.exe",
         "VALORANT-Win64-Shipping.exe",
-        "UnrealCEFSubProcess.exe",
         "RiotClientServices.exe",
         "vgc.exe",
         "vgm.exe",
@@ -281,6 +298,32 @@ export async function seedGameProfiles(prisma: PrismaClient) {
         "Executables from Riot's first-party 'Configure your Firewall' article, read 2026-08-25. Two spellings of the LCU renderer are listed because Riot's own pages disagree; exactly one will ever resolve. UNPROVEN on a real install -- see the valorant row.",
     },
   ];
+
+  /* The hand-written rows go through the same executable-name rules as the
+   * bulk catalogue, and for the same reason the bulk catalogue does: a
+   * generic name here routes whatever unrelated program is running under
+   * it, and the customer is never told.
+   *
+   * These three rows predate `generic-names.json` and were the only rows it
+   * did not cover, which is exactly how `Agent.exe` and
+   * `UnrealCEFSubProcess.exe` stayed in the product after the denylist
+   * landed. They could not simply be passed to `validateCatalogue`: that
+   * refuses a reserved slug, and these three rows own all three reserved
+   * slugs, so it would have reported the reservation rather than the name.
+   * Hence the narrower `validateProcessNames`.
+   *
+   * Thrown rather than warned, matching `seedCatalogue` below. The seed is
+   * the last point at which a bad name is still cheap; past here it is in
+   * the database and on its way to every client. */
+  const nameProblems = profiles.flatMap((profile) =>
+    validateProcessNames(profile.processNames).map((problem) => `  ${profile.slug}: ${problem}`),
+  );
+  if (nameProblems.length > 0) {
+    throw new Error(
+      `Hand-written game profiles failed executable-name validation ` +
+        `(${nameProblems.length} problems):\n${nameProblems.join("\n")}`,
+    );
+  }
 
   for (const profile of profiles) {
     await prisma.gameProfile.upsert({
