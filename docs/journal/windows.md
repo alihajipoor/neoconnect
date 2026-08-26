@@ -11499,3 +11499,75 @@ must not be allowed to imply otherwise. `cargo check --workspace
 --all-targets` is clean and all 16 turbo tasks pass (455 backend tests,
 158 desktop) — that means it compiles and the data is well-formed, which
 is not the same claim.
+
+---
+
+## 2026-08-25 — Ban safety is now monitored, and the CT exposure is worse than recorded
+
+**Status:** done, but one item needs an owner decision
+**Touches:** `scripts/**`, `docs/design/ban-safety.md`, `README.md`, `ci.yml`
+**Branch:** `claude/ban-safety-monitor`
+
+Three things landed. What matters for whoever picks this up:
+
+**The prefix gate has teeth now.** `prefixComplete` existed as prose in
+four files — schema default, the API's `?? false`, the seeded profiles,
+and `canRouteByDestination` in the client — and nothing would have gone
+red if any one of them changed. `scripts/check-prefix-completeness.sh`
+runs in CI. All four invariants were mutated and confirmed to fail, then
+reverted. If you are editing `game-profiles.ts` or `game-apps.ts` and
+this check goes red, it is not being fussy: a partial prefix list splits
+WoW's Home and World across two source addresses, which is the
+account-sharing signature.
+
+**The reputation monitor is `scripts/check-exit-reputation.py`.** Run it
+monthly and after every node install. It needs the panel DB, which this
+session could not reach — SSH to the panel host is publickey-denied from
+here — so it was proven against a node list assembled from public CT +
+DNS instead. Numbers reproduce the research file exactly. Exit 1 was
+verified against a live Mullvad relay, not asserted.
+
+**Three findings that are not in any existing doc:**
+
+1. **The CT exposure spans two domains.** `neoxify.com` carries historical
+   node names as well as `neoxify.site`. `docs/node-enumerability-
+   remediation.md` only accounts for the `.site` ones.
+2. **A wildcard cert exists and the nodes are not using it.** Per-node
+   single-name certificates were still being issued *weeks after* the
+   wildcard was. So every ~90-day renewal re-publishes the fleet's names,
+   and §5 of that runbook is genuinely unexecuted at the node level.
+3. **tr1 is not where the research put it.** ipapi.is says AS154177
+   LightNode; ip-api.com says AS2914 NTT America, org "Light Node
+   Limited", `hosting: false`. Sub-allocated space. It is the only exit in
+   the fleet that a feed does not call hosting — the best ASN-type posture
+   we have.
+
+**The whole fleet fell out in about ninety seconds** from two public APIs,
+no account, no probing, nothing touched. That is the enumerability
+mechanism the research measured as *causing* the `is_vpn` label, fully in
+place. The fleet has just not been scraped yet.
+
+**Needs the owner:** `docs/node-enumerability-remediation.md` is still
+unexecuted. It cannot be picked up unilaterally — its central option puts
+the panel's private key on six machines including the Iran relay, and its
+stronger option needs a client release that the users who most need the
+censorship fallback are least able to install.
+
+**Gotcha, and it cost nothing only because the tooling caught it:** I used
+a live node address as the example in a docstring explaining *why node
+addresses must not be committed*. The script's own redaction scan found
+it before the commit. Run a four-form scan — plain, reversed, and both
+dashed spellings — over anything you are about to commit; two of those
+forms survive a plain grep for the address.
+
+**Deliberately not built:** route selection does not avoid the Linode
+exits. The one publisher-vs-provider case that exists anywhere is
+Blizzard against a Linode range in 2019, reactive, resolved within hours.
+No primary source describes a standing hosting-ASN blocklist at any
+publisher. Building a blocker on that would be building on nothing, and
+removing an exit is dropping capability for censored users to solve a
+gaming problem. The design is written down in `docs/design/ban-safety.md`
+for when evidence hardens — including that it must key on the route's
+**exit** node, not its entry, because a relayed route shows the publisher
+the exit's address and `listAvailableForPlan` deliberately never exposes
+it.

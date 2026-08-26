@@ -1,0 +1,162 @@
+{
+  "_readme": [
+    "Documented cases of a game publisher blocking or restricting traffic by",
+    "hosting provider. Read by scripts/check-exit-reputation.py, which annotates",
+    "each exit with whatever is on record for the ASN it sits in.",
+    "",
+    "This file is deliberately almost empty, and that is the finding. A search",
+    "across publisher support sites, EULAs, provider forums and VPN operator",
+    "forums produced exactly ONE ASN-attributable case: Blizzard blocking a",
+    "Linode range in 2019, reactively, resolved within hours after the provider",
+    "escalated. No primary source anywhere says any publisher maintains a",
+    "standing blocklist keyed to hosting-provider ASNs. It is universally",
+    "assumed and nowhere documented.",
+    "",
+    "So DO NOT populate this file from vendor marketing. Roughly four in five",
+    "search results on this subject are VPN and proxy sellers, several of whom",
+    "assert things their own cited documents contradict -- Epic's terms of",
+    "service contain zero occurrences of 'VPN' or 'proxy', and so do Riot's.",
+    "Every entry needs a primary source and an honest evidence level.",
+    "",
+    "evidence: verified | corroborated | single-report | vendor-claim | speculation",
+    "  verified        publisher's own statement, provider support confirming,",
+    "                  or reproducible technical evidence in the source",
+    "  corroborated    several independent reports of the same symptom",
+    "  single-report   one user, unconfirmed",
+    "  vendor-claim    a competing VPN/proxy seller asserting it. Never treat as",
+    "                  fact. Recorded so nobody has to re-discover that it is",
+    "                  unsourced.",
+    "  speculation     community guessing",
+    "",
+    "mechanism: edge-block | cdn-waf-block | login-restriction | account-ban |",
+    "           client-environment",
+    "  These are NOT interchangeable, and conflating them is the failure mode",
+    "  this table exists to prevent. See docs/design/ban-safety.md.",
+    "",
+    "status: standing | resolved | unknown -- whether the block is believed to",
+    "  still be in force. A resolved incident is history, not a routing input."
+  ],
+
+  "byAsn": {
+    "63949": {
+      "provider": "Akamai Connected Cloud (Linode)",
+      "neoxifyExits": "fr1, sg1 sit here",
+      "incidents": [
+        {
+          "publisher": "Blizzard / Battle.net",
+          "mechanism": "edge-block",
+          "evidence": "verified",
+          "status": "resolved",
+          "when": "2019-09",
+          "what": "A self-hosted WireGuard VPN on a Linode New Jersey host could not reach Battle.net. Traceroute died at hop 4 on a Blizzard-side router. The reporter says Linode support confirmed Blizzard was blocking the traffic and worked with Blizzard to resolve it.",
+          "source": "https://us.forums.blizzard.com/en/blizzard/t/cant-login-to-bnet-when-using-vpn/509",
+          "caveats": [
+            "One thread. The traceroute is primary evidence; the provider confirmation reaches us only as the reporter relaying it, and Blizzard staff replied in-thread without confirming.",
+            "It cleared within hours once Linode escalated. That is the behaviour of a reactive, revocable abuse response -- not of a standing policy against Linode's address space.",
+            "The router hostname quoted in the thread does not obviously correspond to a New Jersey PoP.",
+            "Treating this as 'Blizzard blocks Linode' overstates it by a wide margin. It is 'Blizzard once blocked a Linode range and then stopped'."
+          ]
+        }
+      ]
+    }
+  },
+
+  "byCidr": {},
+
+  "providerAgnostic": [
+    {
+      "publisher": "Blizzard, legacy Diablo II (2000) Battle.net only",
+      "mechanism": "edge-block",
+      "evidence": "verified",
+      "status": "standing",
+      "what": "Blizzard's own support article lists 'Connecting to Battle.net using a business network, cloud hosting service, VPN, or proxy' among the behaviours that trigger an automatic temporary play restriction. The restriction is keyed to the IP address, lasts up to two weeks, is realm-specific, and support cannot lift it. Crucially it is collateral: the article states that where an address is shared, a restriction affects every user of that address.",
+      "source": "https://us.support.blizzard.com/en/article/119708",
+      "caveats": [
+        "Scope is legacy Diablo II only. Modern Battle.net has no equivalent documented mechanism, and a Blizzard forum agent in 2023 described VPNs as unsupported but permitted.",
+        "This is the clearest published evidence that a publisher treats 'cloud hosting' as a blockable category independent of any VPN label -- and the collateral-damage clause is the reason shared-exit blast radius belongs in the ban model."
+      ]
+    },
+    {
+      "publisher": "Riot (Valorant, League of Legends)",
+      "mechanism": "cdn-waf-block",
+      "evidence": "corroborated",
+      "status": "unknown",
+      "what": "Riot's Cloudflare-fronted auth and patch tiers refuse some datacenter exits while the game servers themselves stay reachable. Reported for several European exits of one VPN operator (Prague, Frankfurt, Vienna, Brussels) with Netherlands and US exits working at the same time; the reporter authenticated through one exit and played through another.",
+      "source": "https://airvpn.org/forums/topic/51583-valorant-riot-authentication-servers-are-blocked-by-cloudflare/",
+      "caveats": [
+        "Per-datacenter, not per-operator and not per-ASN, which is more consistent with bot-management scoring than with a Riot policy decision. Whether Riot configured it or Cloudflare scored it is unresolved.",
+        "This is the single most useful correction to the naive model: the failure was on the auth path, not the gameplay path, and the two need separate risk terms."
+      ]
+    },
+    {
+      "publisher": "Riot",
+      "mechanism": "edge-block",
+      "evidence": "verified",
+      "status": "standing",
+      "what": "Riot announced on 2020-11-06 that it had cut access for 'a few of the highest volume VPN services'. No brands named, no technical detail, and the stated consequence is inability to connect cross-region -- no account penalty.",
+      "source": "https://www.riotgames.com/en/news/changes-to-cross-region-vpn-access",
+      "caveats": [
+        "Named-brand, volume-driven. It says nothing about datacenter space wholesale.",
+        "Riot's terms of service contain zero occurrences of 'VPN' or 'proxy'."
+      ]
+    },
+    {
+      "publisher": "Valve / Steam",
+      "mechanism": "account-ban",
+      "evidence": "verified",
+      "status": "standing",
+      "what": "The Steam Subscriber Agreement section 3.A prohibits using IP proxying or other methods to disguise the place of residence, and states Valve may terminate the account for it. Valve's own region-restrictions FAQ repeats it.",
+      "source": "https://store.steampowered.com/subscriber_agreement/",
+      "caveats": [
+        "This is account-side and behaviour-side, not range-side. It is triggered by apparent-region mismatch, not by the address being a datacenter address.",
+        "No primary evidence found in either direction on whether VAC penalises VPN use."
+      ]
+    },
+    {
+      "publisher": "Blizzard",
+      "mechanism": "account-ban",
+      "evidence": "verified",
+      "status": "standing",
+      "what": "Blizzard's EULA section 1.C.v prohibits use in connection with unauthorised third-party cloud computing or cloud gaming services. Enforced in 2018 with 30-day account suspensions against users of hosted cloud-PC services.",
+      "source": "https://www.blizzard.com/en-us/legal/fba4d00f-c7e4-4883-b8b9-1b4500a402ea/blizzard-end-user-license-agreement",
+      "caveats": [
+        "This targets running the GAME on rented hardware, not routing traffic through it. It does not apply to a VPN exit.",
+        "Recorded here because it is the usual source of the folklore that 'Blizzard bans datacenter IPs', and the folklore is a misreading of it."
+      ]
+    },
+    {
+      "publisher": "Jagex / RuneScape",
+      "mechanism": "login-restriction",
+      "evidence": "verified",
+      "status": "standing",
+      "what": "Jagex support states it does not support or endorse the use of VPNs, proxies or hosting servers when connecting to its services. The documented consequence is connection interference and failed logins; VPN use is not listed among its bannable rules.",
+      "source": "https://support.runescape.com/hc/en-gb/articles/360018322517-Access-Blocked",
+      "caveats": [
+        "Retrieved as a search-index snippet; the page itself refused automated fetching, so the wording is consistent across queries but not render-verified.",
+        "One of only two publishers found that name hosting providers as a category in their own documentation."
+      ]
+    },
+    {
+      "publisher": "Epic / Fortnite",
+      "mechanism": "edge-block",
+      "evidence": "speculation",
+      "status": "unknown",
+      "what": "No evidence found of Epic blocking any hosting provider's ranges. Recorded as an explicit negative so nobody re-runs this search.",
+      "source": "https://legal.epicgames.com/fortnite/eula",
+      "caveats": [
+        "Epic's terms of service and community rules contain zero occurrences of 'VPN', 'proxy' or 'virtual private network'. The widely repeated claim that Epic's terms explicitly prohibit VPNs is contradicted by the document those articles cite.",
+        "Epic does publish a support article about a message saying a VPN is active; what triggers it and what it gates is unknown."
+      ]
+    }
+  ],
+
+  "noEvidenceFound": {
+    "_note": "Searched and nothing non-vendor was found. This is a useful result: it is the reason the byAsn table has one entry rather than ten. Absence of evidence here is not evidence of absence -- Reddit in particular was not searchable -- but nothing should be added to byAsn on the strength of a guess.",
+    "providers": [
+      "Hetzner (AS24940) -- fi1 sits here",
+      "LightNode / Kaopu Cloud (AS154177) -- de1, tr1 sit here",
+      "OVH", "Vultr", "DigitalOcean", "AWS", "Azure", "Google Cloud", "Oracle Cloud", "Contabo"
+    ],
+    "publishers": ["Epic", "Roblox", "Niantic", "Rockstar", "Activision"]
+  }
+}

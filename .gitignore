@@ -31,3 +31,8 @@ __pycache__/
 # from the network; committing them would add thousands of files that nobody
 # reads to make one JSON that everybody does.
 apps/backend/prisma/catalogue/tools/.appinfo-cache/
+# Reputation-monitor artifacts. They contain live node addresses by
+# necessity (that is what is being checked) and this repository is public --
+# see docs/node-address-hygiene.md. scripts/check-exit-reputation.py writes
+# here and nothing else does.
+var/
