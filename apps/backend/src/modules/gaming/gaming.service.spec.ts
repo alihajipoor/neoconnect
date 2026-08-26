@@ -316,6 +316,109 @@ describe("GamingService", () => {
     });
   });
 
+  /** The API boundary half of `docs/design/ban-safety.md` mechanism 4.
+   *
+   * `prefixComplete` is an operator's claim that the recorded prefix set
+   * covers the whole publisher ASN. A list marked complete that is not
+   * complete is worse than not routing at all: WoW holds its Home and its
+   * World connection open at the same instant, so routing one and not the
+   * other presents the account from two source addresses simultaneously,
+   * which is the account-sharing signature publishers ban for.
+   *
+   * These are behavioural rather than a grep in
+   * `scripts/check-prefix-completeness.sh` on purpose. That script asserted
+   * the string `dto.prefixComplete ?? false` appeared *at least once* in
+   * this file, which two write sites satisfy with one of them coerced --
+   * and `updateProfile` was in fact the uncoerced one. Presence of a
+   * substring is not coverage of a code path. */
+  describe("the prefix-completeness claim", () => {
+    const EXISTING = {
+      ...GAME,
+      id: "p1",
+      destinationCidrs: ["137.221.64.0/24"],
+      prefixComplete: true,
+      canaryHostname: null,
+    };
+
+    it("reads an absent claim on create as 'not complete'", async () => {
+      const created: any = await service.createProfile({
+        slug: "wow",
+        displayName: "World of Warcraft",
+        hostnames: ["oauth.battle.net"],
+        destinationCidrs: ["137.221.64.0/24"],
+      } as any);
+
+      // Never "unchanged", never "true". An operator who did not say it
+      // did not claim it.
+      expect(created.prefixComplete).toBe(false);
+    });
+
+    it("drops the claim when a PATCH changes the prefix list without re-stating it", async () => {
+      // The live hazard: shortening the list leaves the old `true`
+      // standing over prefixes nobody has vouched for since. Prisma reads
+      // `undefined` as "leave the column alone", so this has to be an
+      // explicit false rather than an omission.
+      prisma.gameProfile.findUnique.mockResolvedValue(EXISTING);
+
+      const updated: any = await service.updateProfile("p1", {
+        destinationCidrs: ["137.221.64.0/24", "137.221.68.0/24"],
+      } as any);
+
+      expect(updated.prefixComplete).toBe(false);
+    });
+
+    it("keeps the claim when a PATCH leaves the prefix list alone", async () => {
+      // Ordinary PATCH semantics for an unrelated edit. The claim is about
+      // the list, so an edit that does not touch the list does not
+      // invalidate it -- resetting here would make operators re-assert
+      // completeness after every rename, and a safety gate people route
+      // around is not a safety gate.
+      prisma.gameProfile.findUnique.mockResolvedValue(EXISTING);
+
+      const updated: any = await service.updateProfile("p1", {
+        displayName: "World of Warcraft Classic",
+      } as any);
+
+      expect(updated.prefixComplete).toBeUndefined();
+    });
+
+    it("honours a claim re-stated alongside the new list", async () => {
+      prisma.gameProfile.findUnique.mockResolvedValue(EXISTING);
+
+      const updated: any = await service.updateProfile("p1", {
+        destinationCidrs: ["137.221.64.0/24", "137.221.68.0/24"],
+        prefixComplete: true,
+      } as any);
+
+      expect(updated.prefixComplete).toBe(true);
+    });
+
+    it("refuses a complete claim with no prefixes on create", async () => {
+      // The flag says the set is whole and there is no set. The client
+      // refuses to route on it at the far end, but the claim would sit in
+      // the database being trusted by everything in between.
+      await expect(
+        service.createProfile({
+          slug: "wow",
+          displayName: "World of Warcraft",
+          hostnames: ["oauth.battle.net"],
+          prefixComplete: true,
+        } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it("refuses a PATCH that empties the list while claiming completeness", async () => {
+      prisma.gameProfile.findUnique.mockResolvedValue(EXISTING);
+
+      await expect(
+        service.updateProfile("p1", {
+          destinationCidrs: [],
+          prefixComplete: true,
+        } as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
   describe("resolvers", () => {
     it("drops a node's confirmation when the endpoint it confirmed is changed", async () => {
       prisma.gamingResolver.findUnique.mockResolvedValue({
