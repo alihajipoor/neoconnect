@@ -32,7 +32,7 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use neoconnect_ipc::{ConnectProfile, SplitTunnelMode, TunnelHealth};
+use neoconnect_ipc::{ConnectProfile, SplitTunnelConfig, TunnelHealth};
 
 use crate::adapters;
 use crate::split_tunnel::SplitTunnel;
@@ -210,16 +210,11 @@ impl Engines {
     /// So the rebuild happens here, from the profile the live tunnel was
     /// built with. Failure is returned rather than swallowed: a switch
     /// that leaves no tunnel up must not look like success.
-    pub fn set_split_tunnel(
-        &mut self,
-        enabled: bool,
-        apps: Vec<String>,
-        mode: SplitTunnelMode,
-    ) -> Result<(), String> {
+    pub fn set_split_tunnel(&mut self, config: SplitTunnelConfig) -> Result<(), String> {
         let was_passive = self.split_tunnel.wants_passive_tunnel();
         let was_intercepting = self.split_tunnel.wants_interception();
         let was_mode = self.split_tunnel.mode();
-        self.split_tunnel.set_selection(enabled, apps, mode);
+        self.split_tunnel.set_selection(config);
         let now_passive = self.split_tunnel.wants_passive_tunnel();
         let now_intercepting = self.split_tunnel.wants_interception();
         let now_mode = self.split_tunnel.mode();
