@@ -229,6 +229,9 @@ export class GamingService {
     )[0] ?? null;
     this.assertProfileCoherent(hostnames, excludeHostnames, canaryHostname);
 
+    const destinationCidrs = dto.destinationCidrs ?? [];
+    this.assertPrefixClaim(dto.prefixComplete ?? false, destinationCidrs);
+
     return this.prisma.gameProfile.create({
       data: {
         slug: dto.slug,
@@ -238,7 +241,7 @@ export class GamingService {
         hostnames,
         excludeHostnames,
         processNames: dto.processNames ?? [],
-        destinationCidrs: dto.destinationCidrs ?? [],
+        destinationCidrs,
         destinationAsn: dto.destinationAsn ?? null,
         prefixComplete: dto.prefixComplete ?? false,
         canaryHostname,
@@ -266,6 +269,22 @@ export class GamingService {
 
     this.assertProfileCoherent(hostnames, excludeHostnames, canary);
 
+    // Completeness is a claim about a *particular* prefix list, so it must
+    // not outlive the list it was made about. `undefined` in a Prisma
+    // `update` means "leave the column alone", so a PATCH that shortens
+    // destinationCidrs without re-stating prefixComplete used to leave a
+    // stale `true` standing over a list nobody has vouched for since --
+    // which is docs/design/ban-safety.md mechanism 4 arriving through the
+    // admin API: a partial list marked complete, WoW's Home and World
+    // connections split across two source addresses. Change the list and
+    // you re-state the claim or lose it.
+    const prefixComplete =
+      dto.prefixComplete ?? (dto.destinationCidrs === undefined ? undefined : false);
+    this.assertPrefixClaim(
+      prefixComplete ?? existing.prefixComplete,
+      dto.destinationCidrs ?? existing.destinationCidrs,
+    );
+
     return this.prisma.gameProfile.update({
       where: { id },
       data: {
@@ -278,7 +297,7 @@ export class GamingService {
         processNames: dto.processNames,
         destinationCidrs: dto.destinationCidrs,
         destinationAsn: dto.destinationAsn,
-        prefixComplete: dto.prefixComplete,
+        prefixComplete,
         canaryHostname: dto.canaryHostname === undefined ? undefined : canary,
         sortOrder: dto.sortOrder,
         isActive: dto.isActive,
@@ -298,6 +317,24 @@ export class GamingService {
    * panel and does nothing on a customer's machine -- the failure mode this
    * whole feature is most exposed to, because nothing downstream would
    * complain. */
+  /** A completeness claim has to be a claim about something.
+   *
+   * `prefixComplete: true` with an empty `destinationCidrs` is the worst
+   * of both states: the flag says the prefix set is whole and there is no
+   * prefix set. The seeded profiles are held to this by
+   * `scripts/check-prefix-completeness.sh`, the bulk catalogue by
+   * `validateCatalogue`, and the client refuses to route on it at the far
+   * end -- but until here nothing stopped an admin payload asserting it,
+   * and a claim recorded in the database is the thing every other layer
+   * trusts. See `docs/design/ban-safety.md` mechanism 4. */
+  private assertPrefixClaim(prefixComplete: boolean, destinationCidrs: string[]) {
+    if (prefixComplete && destinationCidrs.length === 0) {
+      throw new BadRequestException(
+        "prefixComplete: true with an empty destinationCidrs claims a complete prefix set and supplies none. Record the whole set or leave prefixComplete false -- a list marked complete that is partial or absent is what splits one game across two source addresses.",
+      );
+    }
+  }
+
   private assertProfileCoherent(
     hostnames: string[],
     excludeHostnames: string[],
