@@ -502,6 +502,11 @@ export function Dashboard({
    * machine is. */
   const [splitTunnelActive, setSplitTunnelActive] = useState(false);
   const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
+  // Whether the service asked for the tunnel's DNS rule and did not get
+  // it. Read from the service, never derived: only it knows whether an
+  // engine tried. `false` is "nothing was reported", not "DNS is
+  // protected" -- see VpnStatus.tunnelDnsUnprotected.
+  const [tunnelDnsUnprotected, setTunnelDnsUnprotected] = useState(false);
   /** VPN mode or gaming mode.
    *
    * Read before anything else on the screen, because it changes what
@@ -616,6 +621,7 @@ export function Dashboard({
     statusMissesRef.current = 0;
     setSplitTunnelActive(Boolean(status.splitTunnelActive));
     setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+    setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
     return stateFromStatus(status);
   }
@@ -981,6 +987,7 @@ export function Dashboard({
         const status = await serviceStatus();
         setSplitTunnelActive(Boolean(status.splitTunnelActive));
         setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+    setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
         setIpv6Blocked(Boolean(status.ipv6Blocked));
         fromStatus = stateFromStatus(status);
         statusMissesRef.current = 0;
@@ -2061,6 +2068,28 @@ export function Dashboard({
                           that made this leak invisible for so long. */}
                       {isTunnelUp(connectionState) && ipv6Escaping ? (
                         <p className="mt-1 text-xs text-destructive">{t("dash.ipv6Escaping")}</p>
+                      ) : null}
+
+                      {/* The tunnel is up and the machine's name lookups
+                          are not pinned to it.
+
+                          Destructive styling, next to the IPv6 leak,
+                          because it is the same shape of problem: the
+                          traffic is tunnelled and one channel around it
+                          is not. In Iran that channel is the one that
+                          decides whether a site opens at all -- the ISP
+                          resolver answers first and answers wrongly for
+                          exactly the domains the customer connected in
+                          order to reach.
+
+                          Shown rather than refused. The engines used to
+                          disagree about this: one failed the connect and
+                          one carried on silently, and both are bad for
+                          someone who may have no other protocol that
+                          works. They bring the tunnel up and say this
+                          instead. */}
+                      {isTunnelUp(connectionState) && tunnelDnsUnprotected ? (
+                        <p className="mt-1 text-xs text-destructive">{t("dash.tunnelDnsUnforced")}</p>
                       ) : null}
                     </div>
 

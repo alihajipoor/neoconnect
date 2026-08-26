@@ -201,6 +201,15 @@ const en = {
   // customer's IPv4 may well be tunnelled, and their IPv6 is not.
   "dash.ipv6Escaping":
     "Some of your traffic is leaving over IPv6, outside the VPN. Your IPv6 address is visible to your network. Disconnect and reconnect; if it keeps happening, tell support.",
+  // Shown when an engine asked for the tunnel's DNS rule and the service
+  // could not install it. The tunnel is up and carrying traffic, so the
+  // wording must not read as "you are not connected" -- and the lookups
+  // are not pinned to it, so it must not read as "you are protected"
+  // either. Both halves are stated, in that order, because a customer in
+  // Iran who reads only the first line still has to come away knowing
+  // which part is not covered.
+  "dash.tunnelDnsUnforced":
+    "Your traffic is going through the VPN, but Neoxify couldn't send this device's DNS lookups through it. Your internet provider's DNS can still answer, and on a filtered network those answers are often wrong — so some sites may still not open. Disconnect and reconnect to try again; if it keeps happening, use Repair network.",
   "voucher.title": "Have a voucher?",
   "voucher.subtitle": "Enter a code to activate a plan without paying.",
   "voucher.placeholder": "Enter your code",
@@ -822,6 +831,8 @@ const fa: Record<TranslationKey, string> = {
     "تا زمانی که متصل هستید، IPv6 مسدود است. سرورهای Neoxify فقط IPv4 را منتقل می‌کنند، بنابراین IPv6 به جای ارسال بیرون از VPN همین‌جا متوقف می‌شود. سایتی که فقط IPv6 دارد تا وقتی اتصال را قطع نکنید باز نمی‌شود.",
   "dash.ipv6Escaping":
     "بخشی از ترافیک شما از طریق IPv6 و بیرون از VPN ارسال می‌شود. نشانی IPv6 شما برای شبکه‌تان دیده می‌شود. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
+  "dash.tunnelDnsUnforced":
+    "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست درخواست‌های DNS این دستگاه را از داخل آن بفرستد. سرویس‌دهنده اینترنت شما همچنان می‌تواند به این درخواست‌ها پاسخ بدهد و روی شبکه فیلترشده این پاسخ‌ها اغلب نادرست هستند — بنابراین ممکن است بعضی سایت‌ها همچنان باز نشوند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، از «ترمیم شبکه» استفاده کنید.",
   "voucher.title": "کد هدیه دارید؟",
   "voucher.subtitle": "با وارد کردن کد، بدون پرداخت اشتراک فعال کنید.",
   "voucher.placeholder": "کد خود را وارد کنید",

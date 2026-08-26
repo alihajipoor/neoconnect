@@ -593,6 +593,19 @@ pub struct VpnStatus {
     /// between this and the leak it replaced.
     #[serde(rename = "ipv6Blocked")]
     ipv6_blocked: bool,
+    /// Whether this session asked for the tunnel's DNS rule and did not
+    /// get it.
+    ///
+    /// Carried as a fact, not as a sentence, unlike `split_tunnel_problem`
+    /// above it: this one is put in front of customers in Iran, and an
+    /// English sentence arriving over the pipe cannot be translated by
+    /// the app that renders it. The wording is in `i18n.tsx` in both
+    /// languages.
+    ///
+    /// `false` is not a claim that DNS is protected -- see the field's
+    /// documentation in the IPC crate and `engines::dns::TunnelDns`.
+    #[serde(rename = "tunnelDnsUnprotected")]
+    tunnel_dns_unprotected: bool,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -817,6 +830,7 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_active,
             split_tunnel_problem,
             ipv6_blocked,
+            tunnel_dns_unprotected,
         } => Ok(VpnStatus {
             connected,
             protocol,
@@ -824,6 +838,7 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_active,
             split_tunnel_problem,
             ipv6_blocked,
+            tunnel_dns_unprotected,
         }),
         Response::Error { message } => Err(message),
         Response::Ok

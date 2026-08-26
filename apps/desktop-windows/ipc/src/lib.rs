@@ -761,6 +761,30 @@ pub enum Response {
         /// See `engines::ipv6_block`.
         #[serde(default)]
         ipv6_blocked: bool,
+        /// Whether this session asked for the tunnel's DNS rule and did
+        /// not get it.
+        ///
+        /// A fact rather than a sentence, unlike `split_tunnel_problem`
+        /// beside it, because this one is shown to customers in Iran and
+        /// an English sentence arriving over the pipe cannot be
+        /// translated by the app that renders it. The wording lives in
+        /// the app's dictionary in both languages; the reason lives in
+        /// `cleanup.log` for support.
+        ///
+        /// True means: traffic is going through the tunnel, and the
+        /// machine's name lookups are not pinned to it -- so the
+        /// customer's ISP resolver can still answer, which in a censored
+        /// network means answer wrongly, for exactly the domains they
+        /// connected in order to reach.
+        ///
+        /// False is not "DNS is protected". It means no engine on this
+        /// session reported a rule it could not install: WireGuard
+        /// installs its own, a Custom-mode tunnel deliberately leaves
+        /// the machine's lookups alone, and a session that succeeded
+        /// reports false too. The app must not turn this into a positive
+        /// claim. See `engines::dns::TunnelDns`.
+        #[serde(default)]
+        tunnel_dns_unprotected: bool,
     },
     /// What the repair found and what it did about it.
     ///

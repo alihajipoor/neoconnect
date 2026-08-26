@@ -75,6 +75,20 @@ export type VpnStatus = {
    * handles IPv6 per app), and an install that failed has none either.
    * The customer is told about the gap, so the claim has to be true. */
   ipv6Blocked?: boolean;
+  /** Whether this session asked for the tunnel's DNS rule and did not
+   * get it.
+   *
+   * `true` means the tunnel is carrying traffic and the machine's name
+   * lookups are not pinned to it, so the customer's ISP resolver can
+   * still answer -- which on a censored network means answer wrongly,
+   * for exactly the domains they connected in order to reach.
+   *
+   * `false` is NOT "DNS is protected", and nothing in the UI may render
+   * it as one. It means no engine reported a rule it could not install:
+   * WireGuard installs its own, Custom mode deliberately leaves the
+   * machine's lookups alone, and a session that succeeded is `false`
+   * too. It is a complaint channel, not a green light. */
+  tunnelDnsUnprotected?: boolean;
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }

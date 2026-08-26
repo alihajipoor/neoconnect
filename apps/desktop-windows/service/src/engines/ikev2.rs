@@ -192,6 +192,20 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
             // traffic at this point, and refusing the connection over a
             // DNS rule would take away a working protocol from someone
             // who may have no other one that connects.
+            //
+            // That was right about the tunnel and wrong about the
+            // silence. Xray used to take the opposite view for this
+            // exact call -- fail the connect -- and neither comment
+            // acknowledged the other, which made it an inconsistency
+            // rather than a decision. Both engines call `dns::force`
+            // now: it returns no error, so neither can fail a connect
+            // over this again, and the failure reaches the customer
+            // through `status` instead of only `stderr`. Carrying on
+            // without saying so was the part that could not stand -- in
+            // Iran the missing rule means the ISP resolver answers
+            // first, with a poisoned address, for exactly the domains
+            // they connected to reach.
+            //
             // Full tunnel only. In Custom mode this tunnel is not where
             // most traffic goes, so pointing the whole machine's lookups
             // down it would be wrong for every application the customer
@@ -200,9 +214,7 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
             // their traffic -- the same reasoning as WireGuard dropping
             // its DNS in passive mode.
             if !passive {
-                if let Err(e) = super::dns::apply(IKEV2_DNS) {
-                    eprintln!("ikev2: {e}");
-                }
+                super::dns::force(IKEV2_DNS);
             }
             Ok(())
         }

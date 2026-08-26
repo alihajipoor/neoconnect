@@ -172,6 +172,22 @@ pub struct Engines {
     /// decided when the engine starts, so changing the mode means
     /// building it again, and that needs the profile back.
     last_profile: Option<ConnectProfile>,
+    /// What happened to the tunnel's own DNS rule on this session.
+    ///
+    /// Beside `ipv6_block` and for the same reason: the app puts this in
+    /// front of the customer in words, so it has to be a fact about the
+    /// machine rather than a guess from the protocol name. WireGuard
+    /// installs its own DNS and a Custom-mode tunnel deliberately leaves
+    /// the machine's lookups alone, and both are `NotRequested` -- which
+    /// is not a complaint and must never be shown as one.
+    ///
+    /// Collected from `dns::tunnel_dns()` at the end of a connect rather
+    /// than passed back up: `xray::configure_adapter` installs the rule
+    /// from a free function two frames below any `Engines`, so there is
+    /// nowhere to return it to. See `dns::TunnelDns` for the decision it
+    /// records, which is that a tunnel comes up even when this fails and
+    /// the customer is told.
+    dns_state: dns::TunnelDns,
 }
 
 impl Engines {
@@ -183,6 +199,7 @@ impl Engines {
             split_tunnel: SplitTunnel::new(),
             ipv6_block: None,
             last_profile: None,
+            dns_state: dns::TunnelDns::NotRequested,
         }
     }
 
@@ -283,6 +300,34 @@ impl Engines {
         self.ipv6_block.is_some()
     }
 
+    /// Whether this session asked for the tunnel's DNS rule and did not
+    /// get it. `false` is not a claim that DNS is protected -- see
+    /// [`dns::TunnelDns`].
+    pub fn tunnel_dns_unprotected(&self) -> bool {
+        self.dns_state.unprotected()
+    }
+
+    /// Drops what this service can claim about the machine's lookups.
+    ///
+    /// Called from `disconnect` and at the top of a connect. Separate
+    /// from the field so the discipline can be tested without running a
+    /// teardown that touches the machine -- a stale complaint surviving
+    /// into the next session is the failure that matters here, and it is
+    /// a one-line mistake to make.
+    fn forget_dns_state(&mut self) {
+        self.dns_state = dns::TunnelDns::NotRequested;
+    }
+
+    /// Puts a session into a given DNS state without connecting.
+    ///
+    /// The pipe test needs a session that reports a complaint, and the
+    /// only honest way to get one otherwise is to bring a tunnel up on
+    /// the machine running the tests.
+    #[cfg(test)]
+    pub(crate) fn set_dns_state_for_test(&mut self, state: dns::TunnelDns) {
+        self.dns_state = state;
+    }
+
     /// What Custom mode's packet counters say is wrong, for the status
     /// poll. `None` while it is healthy or not running.
     pub fn split_tunnel_complaint(&self) -> Option<String> {
@@ -359,6 +404,10 @@ impl Engines {
     fn connect_inner(&mut self, profile: &ConnectProfile) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
         self.disconnect()?;
+        // Belt and braces with `disconnect`'s own reset: a connect that
+        // fails part way must not leave the previous session's DNS
+        // complaint attached to nothing.
+        self.forget_dns_state();
         // Checked between the stages as well as inside the waits, so a
         // customer who pressed Disconnect gets the tunnel left down
         // rather than watching it come back up because the request that
@@ -459,6 +508,11 @@ impl Engines {
             self.start_split_tunnel(profile)?;
         }
         self.block_ipv6_if_needed(profile);
+        // Whatever the engine above reported about the tunnel's DNS
+        // rule, collected onto the session now that there is one. Read
+        // rather than returned because the engines install it from free
+        // functions with no `Engines` to hand it back to.
+        self.dns_state = dns::tunnel_dns();
         Ok(())
     }
 
@@ -561,6 +615,9 @@ impl Engines {
     }
 
     pub fn disconnect(&mut self) -> Result<(), String> {
+        // The rule is going away with everything else, so what this
+        // service can claim about the machine's lookups goes with it.
+        self.forget_dns_state();
         let result = match self.end_session() {
             None => {
                 // Still ask wireguard.exe to remove the tunnel service:
@@ -1376,6 +1433,41 @@ fn with_rival_hint(error: String, rivals: &[String]) -> String {
 
 #[cfg(test)]
 mod helper_tests {
+    /// A stale DNS complaint must not outlive the session it came from.
+    ///
+    /// The failure mode is a customer who reconnects successfully and is
+    /// still shown a red line saying their lookups are not pinned -- or
+    /// worse, one who disconnects and is shown it with nothing running.
+    /// It is a one-line mistake: the field is set on every connect and
+    /// the reset is a separate statement.
+    ///
+    /// Per-instance on purpose. This state was briefly a process-global
+    /// that `status` read directly, and two tests that shared it passed
+    /// alone and failed together -- which is the same class of bug on a
+    /// customer's machine, not merely a test problem.
+    #[test]
+    fn a_session_that_ended_stops_claiming_anything_about_dns() {
+        use std::path::PathBuf;
+        let dir = PathBuf::from(std::env::temp_dir()).join("neoconnect-test-no-engines");
+        let mut engines = super::Engines::new(dir.clone(), dir);
+
+        assert!(
+            !engines.tunnel_dns_unprotected(),
+            "a fresh session claimed a DNS problem it never had"
+        );
+
+        engines.set_dns_state_for_test(super::dns::TunnelDns::Unforced(
+            "powershell did not finish within 35s".into(),
+        ));
+        assert!(engines.tunnel_dns_unprotected(), "the test hook did not take");
+
+        engines.forget_dns_state();
+        assert!(
+            !engines.tunnel_dns_unprotected(),
+            "a DNS complaint survived the end of the session it came from"
+        );
+    }
+
     use super::*;
     use std::ffi::OsStr;
     use std::time::{Duration, Instant};
