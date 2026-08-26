@@ -10778,3 +10778,282 @@ this repository is public. It shrinks the future scraping surface, and
 certificate transparency still carries the node hostnames regardless —
 `docs/node-enumerability-remediation.md` is the runbook for that, still
 unexecuted.
+
+---
+
+## 2026-08-25 — the three split-tunnel fixes went to a rig with packet captures; two reproduced first, all three hold
+
+**Status:** done — measured, not argued
+**Touches:** nothing in the repo but this file
+**Branch:** `claude/split-tunnel-rig-verification`
+
+Addresses below are redacted per `docs/node-address-hygiene.md`:
+`{germany-1}` is the node's exit address, `{tester-own}` is this
+machine's own public address. The probe destinations are public
+resolvers and are real.
+
+Three changes had landed source-proven only — `72c8978` (leave-alone
+cache keyed on the flow), `945cfad` (unattributable UDP refused), and
+destination scoping on `claude/split-tunnel-destination-scope`. None had
+been read against a capture. All three now have been.
+
+**The discipline that makes the numbers mean anything:** the two leak
+fixes were reproduced on an *unfixed* build first — same guest, same
+probe binary, same capture point, minutes apart. A build that shows zero
+without that is a machine being observed, not a fix being tested.
+
+### How it was measured
+
+Two service binaries, swapped in and out of one 0.9.31 install, each
+hash-checked on disk before its runs:
+
+| build | commit | sha256 (first 16) | size |
+|---|---|---|---|
+| BEFORE | `522299e` (main before both fixes) | `F5ABA49A9865CD28` | 1678336 |
+| AFTER | `704ed44` (scope branch tip; contains both) | `2CBC4112BDAD732A` | 4974080 |
+
+Capture is a VirtualBox `nictrace` on the guest vNIC — **outside the
+service**, so what is counted is what left the machine. Counters are
+reported only as a cross-check, and this session is one more reason why:
+**the unfixed build's own counters read `escaped=0` straight through a
+leak of 25 datagrams.**
+
+### Claim 2 — unattributable UDP is refused. CONFIRMED.
+
+15 datagrams from sockets closed microseconds after the send, from the
+selected app, against a fresh routable destination per burst. In the
+same capture, 15 more from sockets held open — a real QUIC client's
+shape — as the internal control that the tunnel was carrying this app's
+UDP at all.
+
+```
+                              BEFORE (F5ABA49A)      AFTER (2CBC4112)
+control, pre-activation
+  sockets held open                15 / 15 clear        15 / 15 clear
+  sockets closed at once           15 / 15 clear        15 / 15 clear
+after activation + 3s
+  sockets held open                 0 / 15               0 / 15
+  sockets closed at once           13 / 15  <-- LEAK     0 / 15
+later
+  sockets held open                 0 / 15               0 / 15
+  sockets closed at once           12 / 15  <-- LEAK     0 / 15
+
+selected app exit IP           {germany-1}          {germany-1}
+service counter                escaped=0            escaped=0
+                                                    refused_unattributed=12
+```
+
+**13/15 and 12/15 is the 0928 entry's measurement reproduced exactly**,
+and the held-open rows at 0/15 in the *same* capture are what stop it
+being a story about a tunnel that was not up. After the fix both are 0,
+and `refused_unattributed` moves off zero.
+
+Worth stating precisely: 30 closed-socket datagrams were sent after
+activation on the AFTER build and only 12 were refused. The other 18
+were attributed and carried — `image_for_new_connection` now forces a
+rebuild for UDP, so most short-lived sockets *are* found. The refusal
+arm catches only the residue that genuinely has no row. Nothing escaped
+either way.
+
+### Claim 1 — the leave-alone cache is keyed on the flow. CONFIRMED.
+
+The commit's own named failure, staged literally: an **unselected** app
+sends UDP from a port, then a DNS query leaves the **same port** 800ms
+later. Sockets held open throughout, so the owner is always findable —
+that keeps this test off claim 2's mechanism entirely.
+
+The control is the whole test: the identical DNS query from a *fresh*
+socket, in the same phase, on the same build.
+
+```
+                                        BEFORE            AFTER
+DNS from a fresh socket, no tunnel        6 / 6 clear       6 / 6 clear
+DNS from a fresh socket, Custom mode on   0                 0
+DNS from a port that sent 800ms earlier   6 / 6  <-- LEAK   0
+unselected app's ordinary UDP (direct)    6                 6
+```
+
+The wire shows the mechanism directly, one source port doing both:
+
+```
+t+181.631s  10.66.0.4:50872 -> 208.67.222.123:443   (ordinary datagram)
+t+182.390s  10.66.0.4:50872 -> 9.9.9.11:53          (DNS, IN THE CLEAR)
+```
+
+A lookup that `decide` carries through the tunnel whoever makes it, out
+to a resolver the network supplied, because a verdict about a different
+peer 760ms earlier answered first. The fresh-socket row at 0 in the same
+phase proves the rule was active and that only the prior datagram made
+the difference.
+
+The last row matters too: the unselected app's ordinary UDP is still
+direct, 6 in the clear, **on both builds**. The fix did not over-reach
+into traffic that is supposed to leave.
+
+### Claim 3 — destination scoping. CONFIRMED, with one honest gap.
+
+No before/after is possible here and none is claimed: the feature does
+not exist in the earlier build. What is claimed is that each case does
+what it says on the current one, each with a control in the same capture
+that could have come back the wrong way.
+
+Nothing real is prefix-complete, so the scope was synthetic: three
+adjacent addresses, two in scope and one not, because "adjacent but out
+of scope" is what a range-merge bug gets wrong.
+
+```
+scope = [4.2.2.3/32, 4.2.2.5/32]           plaintext leaving the vNIC
+  4.2.2.3   in scope                          0        (carried)
+  4.2.2.4   out of scope, adjacent            8        (direct -- CONTROL)
+  4.2.2.6   out of scope                      8        (direct -- CONTROL)
+  4.2.2.5   in scope                          0        <-- the key row
+```
+
+And by exit IP, which is this project's standard:
+
+```
+no tunnel                                    {tester-own}
+oracle prefixes IN scope                     {germany-1}
+oracle prefixes OUT of scope                 {tester-own}
+scope with one unparseable prefix            {germany-1}   (whole scope dropped)
+no scopes at all                             {germany-1}
+```
+
+**The composition case, which nobody had seen.** A selected app's
+out-of-scope datagram falls through to `record_direct`. Under the old
+port key that would have exempted the port for five seconds *including
+the in-scope destinations* — a game scoped to its own servers would have
+gone out in the clear behind one telemetry packet. Staged as one socket
+sending to an out-of-scope address and then, 800ms later from the same
+source port, to an in-scope one:
+
+```
+t+172.886s  10.66.0.4:51952 -> 4.2.2.6:443   out of scope, in the clear
+   (and 51954, 51956, ... 8 of 8 present)
+            10.66.0.4:51952 -> 4.2.2.5:443   in scope, 0 of 8 on the wire
+```
+
+The out-of-scope leg is present, so the port really did earn a Direct
+verdict; the in-scope leg is absent, so that verdict did not answer for
+it. **The trap `gaming-mode.md` §5.3 warned about is spent.** Its
+counterfactual is not hypothetical — it is claim 1's before-run above,
+the same cache and the same key, leaking on the same rig an hour
+earlier.
+
+#### The gap, stated plainly
+
+**The IPv6 inversion did not occur, but the credit cannot be assigned.**
+A scoped app whose prefix list is v4-only did not put a single IPv6
+packet on the wire (0 of 5 attempts), while the same probe before Custom
+mode put 20 there. But every measurement in this session ran over
+**WireGuard** (below), and `wireguard.exe` arms its own kill-switch —
+and `SelectedAppsIpv6Block` blocks `ALE_AUTH_CONNECT_V6` for the whole
+app path anyway, which the scope branch's author already flagged. The
+failure mode is ruled out; **which filter ruled it out is not
+established.**
+
+The timing is at least consistent with a local block rather than a
+dropped packet: the control failed with `actively refused` after
+~2100ms, the scoped attempts with `WSAEACCES` in 2–10ms.
+
+**`prefixComplete: false` was verified in source, not on a rig, and it
+cannot be otherwise.** The flag never reaches the service: the client
+refuses to *build* a scope for a list the server will not vouch for
+(`canRouteByDestination` → `scopesForGame` returns `[]`). On the wire
+that case is indistinguishable from "no scope sent", which is the last
+row of the exit-IP table above and is carried in full.
+
+### Only WireGuard could be measured, and that is a finding
+
+Every route was tried. Three of four could not activate on this guest,
+all three by missing a **fixed helper timeout**, not by anything to do
+with the tunnel:
+
+```
+reality27  Xray started but its network adapter (neoconnect0) never appeared
+           (ADAPTER_WAIT is 10s, xray.rs:41)
+ikev227    could not create the VPN entry: powershell did not finish within 15s
+ovpn27     connects, but split_tunnel_active never comes true inside 90s
+wg27 / wg  ACTIVATED t+45.7s / t+34.8s, selected app exit IP {germany-1}
+```
+
+The same guest blew `dns::clear()`'s 15s PowerShell budget on **every
+single disconnect**, falling back to the registry each time:
+
+```
+17:49:24 | clear the tunnel DNS rule | PowerShell removal failed
+         (powershell did not finish within 15s), falling back to the registry
+```
+
+The 0928 entry said that fallback "is not going anywhere" after watching
+it blow the budget three times. On a machine this slow it is not a
+fallback, it is the only path that ever runs. That is a slow rig — but a
+customer on a cheap laptop with an antivirus mid-scan is the same
+machine, and three of our four engines are one slow minute away from
+refusing to connect. **Not fixed here, not measured against a real
+customer machine, written down because nothing else records it.**
+
+The redirect loop is engine-independent, so the two leak fixes are
+proven where they live. But they were exercised under one transport, and
+that is the honest scope of these numbers.
+
+### Rig traps, all hit for real this session
+
+- **The RunMRU trap is real and worse than written.** Typing
+  `powershell -ExecutionPolicy Bypass -File Z:/boot2.ps1` into the Run
+  box produced, after autocompletion,
+  `...ecutionPolicy Bypass -File C:/Users/Public/rig-fix6c.ps1` — a
+  stale script from a previous session, selected and one Enter from
+  running. **What works: a `.cmd` shim at a short, space-free name
+  nothing has ever run**, so there is nothing to complete to, plus a
+  screenshot of the box before pressing Enter. Never type a command
+  whose prefix an old entry shares.
+- **Do not use a bare Shift to wake the guest's display.** Five of them
+  is the Sticky Keys shortcut, and its prompt steals the focus of
+  whatever you were typing into. Use Ctrl.
+- **This guest lags input by 30–170 seconds.** Win+R, Start and
+  Ctrl+Alt+Del all appeared to do nothing and all had in fact landed; a
+  later screenshot showed the Start menu, a Run dialog and a security
+  screen stacked up from keys sent minutes apart. Screenshot after every
+  step and wait far longer than feels sane. A guest that looks dead is
+  worth checking with `showvminfo | GuestAdditionsRunLevel` before
+  touching anything.
+- **`nictrace` can go quiet mid-run.** One capture recorded 14922
+  packets in its second minute and then essentially nothing for the next
+  24 — no error anywhere, a 28 MB file, and every probe destination
+  reading 0. That reads *exactly* like a fix working. It was caught only
+  because a row expected to be `> 0` was also 0. **Bucket a capture by
+  minute before believing any zero in it**, and keep runs short.
+- **Design a capture test so it does not need phase markers.** The
+  re-run gave every probe destination exactly one use in the whole run,
+  so the total count to that address is the answer. The first attempt
+  lost four rows to `INCONCLUSIVE` when the markers went missing with
+  the capture.
+- **A bash heredoc in this harness silently eats one backslash of a
+  leading UNC path.** `. "\\VBOXSVR\vmx\lib.ps1"` arrived as
+  `. "\VBOXSVR\..."` and the script died on line 16. Write PowerShell
+  files with a real file-writing tool, or verify with `cat -A`.
+- The elevated runner registers itself as a logon task, so a guest that
+  has to be reset comes back with the job channel already up. Worth
+  keeping — it is the difference between one Win+R fight and one per
+  reboot.
+
+### What is still not proven
+
+- **Every number here is WireGuard.** The other three engines could not
+  be brought up on this guest at all.
+- **Which filter stops a scoped app's IPv6** — the per-app WFP block, or
+  WireGuard's own kill-switch. Needs a rig where a non-WireGuard route
+  activates.
+- **The exhaustion path of the leave-alone cache** — the
+  out-of-synthetic-ports fail-open, the third call site `72c8978`
+  changed. It needs the synthetic port range full, and the 0824 entry's
+  note that it "has not been thought through as a rig procedure yet"
+  still stands.
+- **Scoping under a real prefix-complete profile.** The scope here was
+  synthetic because no seeded profile is prefix-complete. Nothing about
+  a publisher's actual list — its size, its churn, whether §5.4's
+  refusal fires in practice — has been exercised.
+- The unattributable-UDP refusal has not been measured **under load**,
+  which `redirect.rs` asks for at the point it accepts the extra table
+  walks.
