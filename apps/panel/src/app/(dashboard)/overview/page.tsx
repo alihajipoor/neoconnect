@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { Users, CreditCard, ShieldCheck } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchList } from "@/lib/api";
 import { getSession } from "@/lib/session";
 import type { AdminUser, Customer, SubscriptionPlan } from "@/lib/types";
 import { StatCard } from "@/components/dashboard/stat-card";
@@ -21,8 +21,15 @@ export default async function OverviewPage() {
 
   const isSuperAdmin = session?.role === "SUPERADMIN";
 
+  // `take=1` because this card needs a count, not customers. /customers
+  // is windowed now, so the old `customers.length` would print whichever
+  // page size came back -- a headline "100 customers" that looks entirely
+  // plausible and is just the default take. The real number rides in the
+  // X-Total-Count header, which `apiFetchList` reads as `total`, so this
+  // asks for the smallest page the route will serve and throws the one
+  // row away.
   const [customers, plans, admins] = await Promise.all([
-    apiFetch<Customer[]>("/customers"),
+    apiFetchList<Customer>("/customers?take=1"),
     apiFetch<SubscriptionPlan[]>("/plans"),
     isSuperAdmin ? apiFetch<AdminUser[]>("/admins") : Promise.resolve(null),
   ]);
@@ -36,7 +43,12 @@ export default async function OverviewPage() {
         <p className="text-sm text-muted-foreground">What&apos;s happening across Neoxify right now.</p>
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <StatCard label="Customers" value={customers.length} icon={Users} accent="primary" />
+        <StatCard
+          label="Customers"
+          value={customers.total.toLocaleString()}
+          icon={Users}
+          accent="primary"
+        />
         <StatCard
           label="Active plans"
           value={`${activePlans} / ${plans.length}`}

@@ -2,8 +2,9 @@ import Link from "next/link";
 import { requireStaff } from "@/lib/session";
 import { notFound } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Mail, Users } from "lucide-react";
-import { apiFetch } from "@/lib/api";
-import type { Customer, Invoice, Subscription, SubscriptionPlan } from "@/lib/types";
+import { apiFetch, apiFetchList } from "@/lib/api";
+import type { Customer, InvoiceListRow, Subscription, SubscriptionPlan } from "@/lib/types";
+import { Pager, pageWindow } from "@/components/dashboard/pager";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SubscriptionsPanel } from "./subscriptions-panel";
@@ -19,21 +20,41 @@ import { SubscriptionsPanel } from "./subscriptions-panel";
  */
 export default async function CustomerDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  // The window belongs to the invoice list -- it is the only thing on
+  // this page the API pages. A long-standing customer on a monthly plan
+  // has more invoices than fit on one card.
+  searchParams: Promise<{ take?: string; skip?: string }>;
 }) {
   await requireStaff();
   const { id } = await params;
+  const { take: takeParam, skip: skipParam } = await searchParams;
+  // 20 rather than the API's default 100: this is a card inside a page,
+  // not a table that owns the screen.
+  const { take, skip } = pageWindow({ take: takeParam, skip: skipParam }, 20);
 
   const customer = await apiFetch<Customer>(`/customers/${id}`).catch(() => null);
   if (!customer) notFound();
 
   // Fetched together: the page is useless without the subscriptions, and
   // serially awaiting three independent requests just makes it slower.
+  const invoiceQuery = new URLSearchParams({
+    customerId: id,
+    take: String(take),
+  });
+  if (skip > 0) invoiceQuery.set("skip", String(skip));
+
   const [subscriptions, plans, invoices] = await Promise.all([
+    // Not windowed on the API, and does not need to be: one customer's
+    // subscriptions are bounded by the customer.
     apiFetch<Subscription[]>(`/subscriptions?customerId=${encodeURIComponent(id)}`).catch(() => []),
     apiFetch<SubscriptionPlan[]>("/plans").catch(() => []),
-    apiFetch<Invoice[]>(`/invoices?customerId=${encodeURIComponent(id)}`).catch(() => []),
+    apiFetchList<InvoiceListRow>(`/invoices?${invoiceQuery.toString()}`).catch(() => ({
+      items: [],
+      total: 0,
+    })),
   ]);
 
   return (
@@ -90,14 +111,24 @@ export default async function CustomerDetailPage({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Invoices</CardTitle>
+          <CardTitle className="text-base">
+            Invoices
+            {/* The count next to the title, because the card shows a
+                window now: without it, "3 invoices" is what an operator
+                would tell a customer who has thirty. */}
+            {invoices.total > 0 && (
+              <span className="ml-2 text-sm font-normal text-muted-foreground tabular-nums">
+                {invoices.total.toLocaleString()}
+              </span>
+            )}
+          </CardTitle>
         </CardHeader>
-        <CardContent>
-          {invoices.length === 0 ? (
+        <CardContent className="flex flex-col gap-3">
+          {invoices.items.length === 0 ? (
             <p className="text-sm text-muted-foreground">Nothing billed yet.</p>
           ) : (
             <div className="flex flex-col gap-1.5">
-              {invoices.map((invoice) => (
+              {invoices.items.map((invoice) => (
                 <div
                   key={invoice.id}
                   className="flex items-center justify-between gap-3 rounded-lg border border-white/8 bg-card/40 px-3 py-2"
@@ -111,6 +142,12 @@ export default async function CustomerDetailPage({
               ))}
             </div>
           )}
+          <Pager
+            total={invoices.total}
+            take={take}
+            skip={skip}
+            basePath={`/customers/${id}`}
+          />
         </CardContent>
       </Card>
     </div>
