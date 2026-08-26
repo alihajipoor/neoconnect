@@ -47,11 +47,14 @@ const RIOT: RunningApp[] = [
   }),
 ];
 
+/** Mirrors the seeded `valorant` row. `UnrealCEFSubProcess.exe` was in it
+ * until 2026-08-25 and was dropped as a generic Unreal Engine name; this
+ * fixture follows the row so the "missing" expectation below keeps
+ * describing what the product actually does. */
 const VALORANT_PROFILE = {
   processNames: [
     "VALORANT.exe",
     "VALORANT-Win64-Shipping.exe",
-    "UnrealCEFSubProcess.exe",
     "RiotClientServices.exe",
     "vgc.exe",
     "vgm.exe",
@@ -134,7 +137,7 @@ describe("resolveGameApps", () => {
     // Vanguard runs as a service with no window, so the running-app
     // list does not carry it. That is a real gap and the customer is
     // told which programs it is, not just how many.
-    expect(resolved.missing).toEqual(["UnrealCEFSubProcess.exe", "vgc.exe", "vgm.exe"]);
+    expect(resolved.missing).toEqual(["vgc.exe", "vgm.exe"]);
     expect(resolved.found.map((f) => f.name)).toEqual([
       "VALORANT.exe",
       "VALORANT-Win64-Shipping.exe",

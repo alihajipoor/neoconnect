@@ -216,6 +216,70 @@ export interface CatalogueProblem {
   problem: string;
 }
 
+/** The executable-name rules on their own, callable without a whole entry.
+ *
+ * Extracted on 2026-08-25 so that the three hand-written profiles in
+ * `game-profiles.ts` can be held to exactly the same denylist as the bulk
+ * catalogue. Until now they could not be: `validateCatalogue` refuses a
+ * reserved slug, and those three rows own all three reserved slugs, so
+ * passing them through it would have reported the reservation as the
+ * problem. The result was that the rows which predate this list were the
+ * only rows never checked against it -- and they were shipping `Agent.exe`
+ * and `UnrealCEFSubProcess.exe`, both of which this function rejects.
+ *
+ * One list, one set of rules, both callers. Returns a problem string per
+ * offending name; an empty array means clean. */
+export function validateProcessNames(processNames: readonly string[]): string[] {
+  const problems: string[] = [];
+
+  if (!Array.isArray(processNames) || processNames.length === 0) {
+    return ["processNames is empty -- an entry with no executables supports nothing"];
+  }
+
+  const seenName = new Set<string>();
+  for (const name of processNames) {
+    if (typeof name !== "string" || name.trim().length === 0) {
+      problems.push("processNames contains an empty entry");
+      continue;
+    }
+    if (/[\\/]/.test(name)) {
+      // Bare filenames only -- and note that path-qualifying a generic name
+      // is not an escape hatch from the denylist below, because the client's
+      // `curatedNames()` strips a path back to its basename before matching.
+      problems.push(`processNames entry ${JSON.stringify(name)} is a path, not a bare filename`);
+      continue;
+    }
+    if (!/\.exe$/i.test(name)) {
+      problems.push(`processNames entry ${JSON.stringify(name)} does not end in .exe`);
+      continue;
+    }
+    if (!BARE_EXE.test(name)) {
+      problems.push(`processNames entry ${JSON.stringify(name)} is not a valid Windows filename`);
+      continue;
+    }
+    const lower = name.toLowerCase();
+    if (GENERIC_NAMES.has(lower) || GENERIC_UE_SHIPPING.test(name)) {
+      // Hard failure, not a warning. See GENERIC_NAMES above: this name
+      // would resolve against whatever unrelated program happens to be
+      // running under it, and route that instead of the game.
+      problems.push(
+        `processNames entry ${JSON.stringify(name)} is a generic name shared with ` +
+          "software that is not this game; it would route whatever else is running " +
+          "under that name. Use a specific name or drop the entry.",
+      );
+      continue;
+    }
+    // Case-insensitively, because Windows is. Reported as a problem for a
+    // human to resolve rather than silently de-duplicated: the publisher's
+    // own casing is preserved in the data, so which spelling to keep is a
+    // decision somebody should make on purpose.
+    if (seenName.has(lower)) problems.push(`processNames lists ${JSON.stringify(name)} twice`);
+    seenName.add(lower);
+  }
+
+  return problems;
+}
+
 /** Every reason this catalogue must not be seeded.
  *
  * Returns problems rather than throwing on the first one, because when a
@@ -255,47 +319,7 @@ export function validateCatalogue(entries: readonly CatalogueEntry[]): Catalogue
       add("displayName is missing or empty");
     }
 
-    if (!Array.isArray(entry.processNames) || entry.processNames.length === 0) {
-      add("processNames is empty -- an entry with no executables supports nothing");
-    } else {
-      const seenName = new Set<string>();
-      for (const name of entry.processNames) {
-        if (typeof name !== "string" || name.trim().length === 0) {
-          add("processNames contains an empty entry");
-          continue;
-        }
-        if (/[\\/]/.test(name)) {
-          add(`processNames entry ${JSON.stringify(name)} is a path, not a bare filename`);
-          continue;
-        }
-        if (!/\.exe$/i.test(name)) {
-          add(`processNames entry ${JSON.stringify(name)} does not end in .exe`);
-          continue;
-        }
-        if (!BARE_EXE.test(name)) {
-          add(`processNames entry ${JSON.stringify(name)} is not a valid Windows filename`);
-          continue;
-        }
-        const lower = name.toLowerCase();
-        if (GENERIC_NAMES.has(lower) || GENERIC_UE_SHIPPING.test(name)) {
-          // Hard failure, not a warning. See GENERIC_NAMES above: this name
-          // would resolve against whatever unrelated program happens to be
-          // running under it, and route that instead of the game.
-          add(
-            `processNames entry ${JSON.stringify(name)} is a generic name shared with ` +
-              "software that is not this game; it would route whatever else is running " +
-              "under that name. Use a specific name or drop the entry.",
-          );
-          continue;
-        }
-        // Case-insensitively, because Windows is. Reported as a problem for a
-        // human to resolve rather than silently de-duplicated: the publisher's
-        // own casing is preserved in the data, so which spelling to keep is a
-        // decision somebody should make on purpose.
-        if (seenName.has(lower)) add(`processNames lists ${JSON.stringify(name)} twice`);
-        seenName.add(lower);
-      }
-    }
+    for (const problem of validateProcessNames(entry.processNames)) add(problem);
 
     // The safety pair. Neither may be set from here at all -- not merely not
     // set to `true` -- because the two are one statement and a bulk entry is

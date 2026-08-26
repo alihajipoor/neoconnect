@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   RESERVED_SLUGS,
   catalogueEntries,
   toSeedRow,
   validateCatalogue,
+  validateProcessNames,
   type CatalogueEntry,
 } from "../../../prisma/catalogue";
 
@@ -204,6 +207,76 @@ describe("game catalogue", () => {
         ok({ slug: "another", processNames: ["nope"] }),
       ]);
       expect(problems.length).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  /** The two names that shipped anyway.
+   *
+   * `Agent.exe` and `UnrealCEFSubProcess.exe` were in the hand-written `wow`
+   * and `valorant` rows, which predate `generic-names.json` and were never
+   * run through it. They were removed on 2026-08-25 and added to the
+   * denylist. This suite exists so that neither can return -- by hand, by a
+   * regenerated tier, or by somebody path-qualifying one in the belief that
+   * a full path makes it specific. It does not: the client strips a path
+   * back to its basename before matching.
+   *
+   * `Agent.exe` is the one that mattered. It is the Blizzard Update Agent
+   * and it is also the name a great deal of enterprise monitoring, backup
+   * and MDM software runs under, so a customer picking World of Warcraft on
+   * a work laptop would have put their employer's agent on the tunnel. */
+  describe("the two generic names that predated the denylist", () => {
+    const problemsFor = (name: string) => validateProcessNames([name]);
+
+    it.each([
+      ["Agent.exe", "wow"],
+      ["UnrealCEFSubProcess.exe", "valorant"],
+    ])("rejects %s, which used to ship in the %s row", (name) => {
+      expect(problemsFor(name)).toEqual([expect.stringMatching(/generic name shared with/)]);
+    });
+
+    it("rejects them however they are cased", () => {
+      for (const name of ["agent.exe", "AGENT.EXE", "unrealcefsubprocess.exe"]) {
+        expect(problemsFor(name)).toEqual([expect.stringMatching(/generic name shared with/)]);
+      }
+    });
+
+    it("does not let a full path smuggle one back in", () => {
+      // Rejected as a path before the denylist is even consulted, which is
+      // the right order: the client strips it to `agent.exe` anyway, so a
+      // full path is not a way to make a generic name specific.
+      expect(problemsFor(String.raw`C:\Battle.net\Agent.exe`)).toEqual([
+        expect.stringMatching(/is a path, not a bare filename/),
+      ]);
+    });
+
+    it("would reject them inside a whole entry too, not just on their own", () => {
+      const problems = validateCatalogue([
+        {
+          slug: "example-game",
+          displayName: "Example Game",
+          processNames: ["Example.exe", "Agent.exe"],
+        } as CatalogueEntry,
+      ]);
+      expect(problems).toEqual([
+        { slug: "example-game", problem: expect.stringMatching(/generic name shared with/) },
+      ]);
+    });
+
+    it("no longer appears anywhere in the shipped catalogue", () => {
+      const shipped = entries.flatMap((e) => e.processNames.map((n) => n.toLowerCase()));
+      expect(shipped).not.toContain("agent.exe");
+      expect(shipped).not.toContain("unrealcefsubprocess.exe");
+    });
+
+    it("is gone from the hand-written rows too", () => {
+      // Read as source rather than by seeding, because seeding needs a
+      // database. The point is only that the strings are not in the file.
+      const source = readFileSync(join(__dirname, "../../../prisma/game-profiles.ts"), "utf8");
+      // Both names still appear in that file's prose, explaining why they
+      // were removed -- so match the quoted form the seed array would use,
+      // which is the only form that would actually ship.
+      expect(source).not.toContain('"Agent.exe"');
+      expect(source).not.toContain('"UnrealCEFSubProcess.exe"');
     });
   });
 });

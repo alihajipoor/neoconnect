@@ -2,6 +2,7 @@
   "$comment": "Executable names that must NEVER appear in a catalogue entry. Shared by the validator (catalogue/index.ts, which fails the seed) and the generator (tools/build-steam-tier.mjs, which filters them out). See the header comment in catalogue/index.ts for why this is a correctness rule and not tidiness.",
   "reason": "The desktop client resolves a catalogue name against every RUNNING process and adds the full path of whatever matched. A name shared with unrelated software therefore routes that unrelated software. The worst case is not a missing game -- it is a customer picking Minecraft and silently putting their employer's Java VPN client on the tunnel.",
   "names": [
+    "agent.exe",
     "androidemulatorex.exe",
     "aow_exe.exe",
     "app.exe",
@@ -83,11 +84,13 @@
     "uninstall.exe",
     "uninstaller.exe",
     "unity.exe",
+    "unrealcefsubprocess.exe",
     "update.exe",
     "updater.exe",
     "vcredist_x64.exe",
     "webhelper.exe",
     "windows10universal.exe"
   ],
+  "$note_on_the_two_that_shipped": "agent.exe and unrealcefsubprocess.exe were added on 2026-08-25, after they were found already shipping in the hand-written wow and valorant rows -- those rows predate this list and were never run through validateCatalogue. agent.exe is the dangerous one: it is the Blizzard Update Agent's name, and it is also the name used by a great deal of enterprise monitoring, backup and MDM software. The client adds the full path of whatever is running under a matched name, so a customer picking World of Warcraft on a work laptop would have put their employer's agent on the tunnel. unrealcefsubprocess.exe is Unreal Engine's embedded-browser helper and is shared by every UE title that ships one, so it identifies an engine rather than a game. Neither name can be rescued by path-qualifying it: the validator rejects a path where a bare filename belongs (index.ts), and the client's curatedNames() strips any path back to its basename before matching. Dropping them costs WoW's patcher and VALORANT's in-game browser pane -- neither carries gameplay traffic.",
   "$note_on_anticheat": "battleye.exe and easyanticheat.exe stay denied because no source names either and they were speculative. BEService.exe and BEService_x64.exe came off this list once BattlEye's own FAQ was read directly: they are real, first-party, and used only by games, so they ship in the battleye-anti-cheat row rather than being repeated across every BattlEye title."
 }
