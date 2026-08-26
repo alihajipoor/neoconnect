@@ -949,10 +949,13 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
     // down first -- so this lookup lands in the seconds where the
     // engine's DNS servers are gone and the adapter's own are not back.
     // Measured on the test rig: toggling Custom mode on a live OpenVPN
-    // connection failed with "could not resolve de1.neoxify.site: No
+    // connection failed with "could not resolve <node hostname>: No
     // such host is known", on a machine whose DNS was working before and
     // after. One retry loop is the difference between Custom mode
     // working on OpenVPN and not.
+    //
+    // The real hostname was here until 2026-08-26 and is redacted per
+    // docs/node-address-hygiene.md -- this repository is public.
     let deadline = std::time::Instant::now() + RESOLVE_RETRY_FOR;
     let mut last = String::new();
     loop {
