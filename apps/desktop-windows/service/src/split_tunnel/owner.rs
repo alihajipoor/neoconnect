@@ -212,6 +212,39 @@ impl Selection {
     /// [`ExitPlacement::Fallback`], worked out against the session's
     /// egress at the moment somebody asks, with the traffic carried
     /// either way.
+    ///
+    /// # The group rule, which is the ban-safety half
+    ///
+    /// A preference is keyed on an executable and a game is routinely
+    /// several of them -- `Rust.exe` is the EAC wrapper Steam launches
+    /// and `RustClient.exe` is the game; `SeaOfThieves.exe` is a shim
+    /// and `SoTGame.exe` is the binary. [`neoconnect_ipc::AppExit::group`]
+    /// says which game an entry belongs to, and this enforces two things
+    /// about it that no caller has to remember:
+    ///
+    /// * **A group whose members are not all selected gets no
+    ///   preference at all**, rather than the part that happens to be
+    ///   selected. The dropped member is not carried, so when it starts
+    ///   it appears from the customer's own address while its siblings
+    ///   appear from the exit -- one account, two source addresses, at
+    ///   the same instant. That is the account-sharing signature
+    ///   `docs/design/ban-safety.md` mechanism 4 describes, and it is
+    ///   the one this product could manufacture rather than merely fail
+    ///   to prevent. Placing what was found and hoping the rest follows
+    ///   is the failure, not a smaller version of the feature.
+    /// * **A group naming two exits is dropped whole.** Belt as well as
+    ///   braces: `SplitTunnelConfig::validate` refuses such a config
+    ///   outright, so nothing that comes through the pipe reaches here.
+    ///   This type is also built directly, and a rule this expensive to
+    ///   get wrong should not depend on which constructor was used.
+    ///
+    /// Both fail toward *no preference*, which carries the game on the
+    /// session's exit exactly as every application was carried before
+    /// any of this existed. Never toward a split.
+    ///
+    /// An entry with no group keeps the per-entry rule above: it is a
+    /// preference for one executable, claiming nothing about a game,
+    /// which is what an app that predates the field meant by it.
     pub fn with_exits<I, S, E>(paths: I, mode: SplitTunnelMode, scopes: S, exits: E) -> Self
     where
         I: IntoIterator<Item = String>,
@@ -231,9 +264,38 @@ impl Selection {
                     built.insert(app, built_scope);
                 }
             }
+            // Materialised because the group rule needs two passes:
+            // whether a group is whole cannot be known while still
+            // reading its members.
+            let exits: Vec<neoconnect_ipc::AppExit> = exits.into_iter().collect();
+            let mut broken: Vec<String> = Vec::new();
+            for (i, exit) in exits.iter().enumerate() {
+                let Some(group) = exit.group.as_deref() else { continue };
+                if broken.iter().any(|b| b == group) {
+                    continue;
+                }
+                // A member that was not selected is not carried, so
+                // where it goes is not ours to say -- and the rest of
+                // the group must not be placed on the strength of it.
+                if !paths.contains(&exit.app.to_lowercase()) {
+                    broken.push(group.to_string());
+                    continue;
+                }
+                // Two exits for one game. Refused at the wire; refused
+                // again here, because this constructor has other
+                // callers.
+                if exits.iter().skip(i + 1).any(|other| {
+                    other.group.as_deref() == Some(group) && other.exit != exit.exit
+                }) {
+                    broken.push(group.to_string());
+                }
+            }
             for exit in exits {
                 let app = exit.app.to_lowercase();
                 if !paths.contains(&app) {
+                    continue;
+                }
+                if exit.group.as_deref().is_some_and(|g| broken.iter().any(|b| b == g)) {
                     continue;
                 }
                 chosen.insert(app, exit.exit);
@@ -2611,7 +2673,24 @@ mod audit_tests {
     const OTHER: &str = r"C:\Games\other.exe";
 
     fn exit_of(app: &str, exit: &str) -> neoconnect_ipc::AppExit {
-        neoconnect_ipc::AppExit { app: app.to_string(), exit: exit.to_string() }
+        neoconnect_ipc::AppExit { app: app.to_string(), exit: exit.to_string(), group: None }
+    }
+
+    fn grouped(app: &str, exit: &str, group: &str) -> neoconnect_ipc::AppExit {
+        neoconnect_ipc::AppExit {
+            app: app.to_string(),
+            exit: exit.to_string(),
+            group: Some(group.to_string()),
+        }
+    }
+
+    fn with_groups(apps: &[&str], exits: Vec<neoconnect_ipc::AppExit>) -> Selection {
+        Selection::with_exits(
+            apps.iter().map(|a| (*a).to_string()),
+            SplitTunnelMode::OnlySelected,
+            Vec::new(),
+            exits,
+        )
     }
 
     fn preferring(apps: &[&str], exits: &[(&str, &str)], mode: SplitTunnelMode) -> Selection {
@@ -2709,6 +2788,174 @@ mod audit_tests {
             selection.placement(OTHER, Some("finland-1")),
             ExitPlacement::NoPreference
         );
+    }
+
+    // ---- exit groups: a game's binaries go together or nowhere ------
+    //
+    // `docs/design/ban-safety.md` mechanism 4. Rust's launch target is
+    // `Rust.exe`, the EAC wrapper; the game is `RustClient.exe`. One
+    // account's connections arriving from two source addresses at the
+    // same instant is the account-sharing signature publishers look
+    // for, and it is the one mechanism in that document Neoxify could
+    // manufacture rather than merely fail to prevent.
+
+    const RUST_WRAPPER: &str = r"C:\Rust\Rust.exe";
+    const RUST_CLIENT: &str = r"C:\Rust\RustClient.exe";
+    const SOT: &str = r"C:\SoT\SoTGame.exe";
+
+    #[test]
+    fn a_whole_group_lands_on_one_exit() {
+        let selection = with_groups(
+            &[RUST_WRAPPER, RUST_CLIENT],
+            vec![
+                grouped(RUST_WRAPPER, "germany-1", "rust"),
+                grouped(RUST_CLIENT, "germany-1", "rust"),
+            ],
+        );
+        assert_eq!(selection.preferred_exit(RUST_WRAPPER), Some("germany-1"));
+        assert_eq!(selection.preferred_exit(RUST_CLIENT), Some("germany-1"));
+        // And both report the same placement, which is the customer-
+        // visible form of the same fact.
+        for app in [RUST_WRAPPER, RUST_CLIENT] {
+            assert_eq!(selection.placement(app, Some("germany-1")), ExitPlacement::OnPreferred);
+        }
+    }
+
+    /// The hard case, and the one that must not be answered with "place
+    /// the ones you found and hope".
+    ///
+    /// A launcher is running while the game is not -- which is the
+    /// ordinary state of a machine at the moment somebody adds a game,
+    /// since names are resolved against *running* processes. The
+    /// unselected binary is not carried at all, so when it starts it
+    /// leaves from the customer's own address while its sibling leaves
+    /// from the exit. The honest outcome is no per-game exit for that
+    /// game: it is carried on the session's exit like everything else,
+    /// which is safe.
+    #[test]
+    fn a_partly_selected_group_gets_no_preference_at_all() {
+        let selection = with_groups(
+            // Only the wrapper is selected. The client sent both,
+            // because the group is what the catalogue says it is.
+            &[RUST_WRAPPER],
+            vec![
+                grouped(RUST_WRAPPER, "germany-1", "rust"),
+                grouped(RUST_CLIENT, "germany-1", "rust"),
+            ],
+        );
+        assert_eq!(
+            selection.preferred_exit(RUST_WRAPPER),
+            None,
+            "placing the half of a game that happens to be running is the split"
+        );
+        assert!(!selection.has_exits());
+        assert_eq!(
+            selection.placement(RUST_WRAPPER, Some("finland-1")),
+            ExitPlacement::NoPreference
+        );
+        // Fail toward the safe behaviour, never toward dropping
+        // traffic: the game is still carried.
+        assert!(selection.should_tunnel(RUST_WRAPPER));
+    }
+
+    /// One incomplete group must not cost a different game its
+    /// preference. All-or-nothing is per game, not per config.
+    #[test]
+    fn a_partly_selected_group_does_not_disturb_a_whole_one() {
+        let selection = with_groups(
+            &[RUST_WRAPPER, SOT],
+            vec![
+                grouped(RUST_WRAPPER, "germany-1", "rust"),
+                grouped(RUST_CLIENT, "germany-1", "rust"),
+                grouped(SOT, "turkey-1", "sea-of-thieves"),
+            ],
+        );
+        assert_eq!(selection.preferred_exit(RUST_WRAPPER), None);
+        assert_eq!(selection.preferred_exit(SOT), Some("turkey-1"));
+    }
+
+    /// Belt as well as braces. `SplitTunnelConfig::validate` refuses a
+    /// config that puts one game on two exits, so nothing arriving
+    /// through the pipe reaches here -- but this type is constructed
+    /// directly too, and a rule whose cost is a customer's account
+    /// should not depend on which door the caller came through.
+    #[test]
+    fn a_group_naming_two_exits_is_dropped_whole() {
+        let selection = with_groups(
+            &[RUST_WRAPPER, RUST_CLIENT],
+            vec![
+                grouped(RUST_WRAPPER, "germany-1", "rust"),
+                grouped(RUST_CLIENT, "turkey-1", "rust"),
+            ],
+        );
+        assert_eq!(selection.preferred_exit(RUST_WRAPPER), None);
+        assert_eq!(
+            selection.preferred_exit(RUST_CLIENT),
+            None,
+            "neither half of a split group may be honoured -- honouring either IS the split"
+        );
+        assert!(selection.should_tunnel(RUST_WRAPPER) && selection.should_tunnel(RUST_CLIENT));
+    }
+
+    /// Two games on two exits is the feature. Ban-safety mechanism 5 is
+    /// the argument for it: a restriction on a shared address hits
+    /// every customer on that address and support cannot lift it.
+    #[test]
+    fn two_whole_groups_may_name_two_different_exits() {
+        let selection = with_groups(
+            &[RUST_WRAPPER, RUST_CLIENT, SOT],
+            vec![
+                grouped(RUST_WRAPPER, "germany-1", "rust"),
+                grouped(RUST_CLIENT, "germany-1", "rust"),
+                grouped(SOT, "turkey-1", "sea-of-thieves"),
+            ],
+        );
+        assert_eq!(selection.preferred_exit(RUST_CLIENT), Some("germany-1"));
+        assert_eq!(selection.preferred_exit(SOT), Some("turkey-1"));
+    }
+
+    /// An entry with no group is what an app that predates the field
+    /// sends, and it means a preference for one executable that claims
+    /// nothing about a game. The old per-entry rule still applies to
+    /// it: dropped when its app is not selected, honoured when it is,
+    /// and never dragging anything else down with it.
+    #[test]
+    fn an_ungrouped_preference_keeps_the_per_entry_rule() {
+        let selection = with_groups(
+            &[RUST_WRAPPER, SOT],
+            vec![
+                exit_of(RUST_WRAPPER, "germany-1"),
+                exit_of(RUST_CLIENT, "germany-1"),
+                grouped(SOT, "turkey-1", "sea-of-thieves"),
+            ],
+        );
+        assert_eq!(selection.preferred_exit(RUST_WRAPPER), Some("germany-1"));
+        assert_eq!(selection.preferred_exit(SOT), Some("turkey-1"));
+    }
+
+    /// The fail-open rule composed with the group rule, which is the
+    /// combination the design promises and the one worth pinning: an
+    /// exit that is not live must not drop traffic, and must not break
+    /// the group apart either. Both binaries stay carried and both
+    /// report the same `Fallback` naming the same exit -- so the app
+    /// can offer to reconnect the game as a whole rather than half of
+    /// it.
+    #[test]
+    fn an_unavailable_exit_keeps_the_group_together() {
+        let selection = with_groups(
+            &[RUST_WRAPPER, RUST_CLIENT],
+            vec![
+                grouped(RUST_WRAPPER, "turkey-1", "rust"),
+                grouped(RUST_CLIENT, "turkey-1", "rust"),
+            ],
+        );
+        for app in [RUST_WRAPPER, RUST_CLIENT] {
+            assert!(selection.should_tunnel(app), "fail open: the game keeps working");
+            assert_eq!(
+                selection.placement(app, Some("germany-1")),
+                ExitPlacement::Fallback { preferred: "turkey-1".to_string() }
+            );
+        }
     }
 
     #[test]

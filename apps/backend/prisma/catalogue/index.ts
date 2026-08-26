@@ -154,6 +154,90 @@ export function catalogueEntries(): CatalogueEntry[] {
 }
 
 // ---------------------------------------------------------------------------
+// Exit groups
+// ---------------------------------------------------------------------------
+
+/** One executable that more than one catalogue entry claims. */
+export interface SharedProcessName {
+  /** Lowercased, because Windows filenames are compared that way. */
+  name: string;
+  /** Every slug that lists it, in catalogue order. */
+  slugs: string[];
+}
+
+/** The executables that belong to more than one game.
+ *
+ * # Why this is computed rather than forbidden
+ *
+ * An entry's `processNames` is a game's binaries, and that makes a
+ * catalogue row **the group** for per-game exit selection: the desktop
+ * client places all of a game's binaries on one exit or none of them,
+ * because a game's connections arriving from two source addresses at
+ * the same instant is the account-sharing signature
+ * (`docs/design/ban-safety.md` mechanism 4).
+ *
+ * A name in two rows is where that breaks down, and it is not an error
+ * in the data. `RiotClientServices.exe`, `vgc.exe` and `vgm.exe` really
+ * do belong to both VALORANT and League of Legends; `Battle.net.exe`
+ * really is both the Battle.net entry and World of Warcraft;
+ * `hl2.exe` really is eleven Source titles. Forbidding it would mean
+ * deleting true facts about how those games start.
+ *
+ * What it means instead is that **those games cannot be given different
+ * exits.** One process cannot leave from two places, so honouring one
+ * game's preference would place the shared binary away from the other
+ * game that also runs it. The client resolves that by withholding the
+ * preference from every game in the disagreement, and this is how the
+ * shape of the problem can be seen and pinned by a test rather than
+ * discovered by a customer.
+ *
+ * Sorted by name so the output is stable enough to diff.
+ */
+export function sharedProcessNames(entries: readonly CatalogueEntry[]): SharedProcessName[] {
+  const bySlug = new Map<string, string[]>();
+  for (const entry of entries) {
+    if (!Array.isArray(entry.processNames)) continue;
+    for (const name of entry.processNames) {
+      if (typeof name !== "string" || !name) continue;
+      const key = name.toLowerCase();
+      const slot = bySlug.get(key);
+      if (!slot) bySlug.set(key, [entry.slug]);
+      else if (!slot.includes(entry.slug)) slot.push(entry.slug);
+    }
+  }
+  return [...bySlug.entries()]
+    .filter(([, slugs]) => slugs.length > 1)
+    .map(([name, slugs]) => ({ name, slugs }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The games that cannot be given an exit independently of each other.
+ *
+ * Every slug that shares at least one executable with another slug,
+ * mapped to the slugs it is entangled with. A client holding these two
+ * games at once must give them the same exit or neither.
+ *
+ * Not transitive on purpose: A sharing with B and B sharing with C does
+ * not stop A and C differing, because no single process is claimed by
+ * both. The rule is about one executable being asked to leave from two
+ * places, and that is a pairwise fact.
+ */
+export function entangledSlugs(entries: readonly CatalogueEntry[]): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const shared of sharedProcessNames(entries)) {
+    for (const slug of shared.slugs) {
+      let slot = out.get(slug);
+      if (!slot) {
+        slot = new Set<string>();
+        out.set(slug, slot);
+      }
+      for (const other of shared.slugs) if (other !== slug) slot.add(other);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 

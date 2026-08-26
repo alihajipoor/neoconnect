@@ -310,8 +310,137 @@ contradict, and one it defers:
   fine; one game's launcher and client on two exits is the two-source-IP
   signature. Preferences are keyed on the executable, so a game whose
   launcher and client are separate binaries needs *both* pointed at the
-  same exit. **The catalogue must emit them as a group.** This is the
-  sharpest open item in the client half.
+  same exit. **Built — see §5.1.** It was the sharpest open item in the
+  client half.
+### 5.1 Exit groups: a game's binaries go to one exit, or to none
+
+The catalogue already emitted the group and the client threw it away.
+
+`GameProfile.processNames` **is** the group — one row is one game, and
+the catalogue's own note says so: *"One row therefore lists both, and the
+client routes whichever are running."* Nothing was missing from the data.
+What happened was that `CustomModeCard.addGame` resolved a profile's
+names against running processes and appended the resulting paths to one
+undifferentiated `SplitTunnelSettings.apps` list, at which point the fact
+that `Rust.exe` and `RustClient.exe` are one game no longer existed
+anywhere in the client. So the fix adds no catalogue field. It stops
+discarding the one that was already there.
+
+**Where the group lives now:** `SplitTunnelSettings.games`, a list of
+`GameExitGroup { slug, displayName, names, exit }`. `names` is the
+*catalogue's* list, not the paths that resolved — membership and
+completeness are derived against the live `apps` selection every time
+they are asked for. That is deliberate in both directions: a customer who
+starts the missing binary and adds the game again gets a whole group with
+no stale record to correct, and a customer who removes one binary by hand
+loses the preference for the whole game rather than keeping a record
+claiming it is whole.
+
+**The exit is on the group and nowhere else.** There is no per-application
+exit field anywhere in the client's persisted state, so a customer cannot
+put a game's launcher and its client on two exits by hand — there is
+nowhere to write it. That is the structural half of item 4, and it is
+worth more than a warning, because a warning does not cover a state the
+app persists and reloads.
+
+#### The three rules, and they all fail toward *no preference*
+
+`exitsForGames(groups, apps)` is the only producer of an `AppExit` in this
+client. It takes the whole group list and the whole selection, so there is
+no call shape that can hand it a single executable.
+
+1. **No exit chosen, nothing emitted.** The overwhelmingly common case,
+   and unchanged behaviour.
+
+2. **A partial group gets no preference at all.** This is the hard case
+   and the one that must not be answered with "place the ones you found
+   and hope". `curatedNames()` resolves against *running* processes, so a
+   launcher is routinely up while the game is not — which is the ordinary
+   state of a machine at the moment somebody adds a game — and Vanguard's
+   `vgc.exe` runs as a windowless service `vpn_list_running_apps` filters
+   out entirely. Placing `Rust.exe` on Germany and letting `RustClient.exe`
+   start later is the two-source-IP split, and **it does not need a second
+   exit to happen**: the unselected binary is not carried at all, so it
+   reaches the game's servers from the customer's own address in Iran
+   while its sibling reaches them from the node.
+
+3. **A binary claimed by two games that want different exits withholds
+   both.** Not hypothetical: `RiotClientServices.exe`, `vgc.exe` and
+   `vgm.exe` are each in both VALORANT and League of Legends,
+   `Battle.net.exe` is in both the Battle.net row and World of Warcraft,
+   and **61 executable names in the shipped catalogue appear in more than
+   one entry** (`hl2.exe` in eleven Source titles, `dowser.exe` in eight
+   Paradox-launcher titles). One process cannot leave from two places, so
+   honouring either game places the shared binary away from the other game
+   that also runs it — the same split with a second account attached.
+   Withholding both is the only answer that splits neither.
+   `sharedProcessNames()` and `entangledSlugs()` in
+   `prisma/catalogue/index.ts` are the same computation, exported so the
+   shape of the problem is pinned by a test rather than discovered by a
+   customer.
+
+Rule 3 is pairwise, not transitive. A sharing with B and B sharing with C
+does not stop A and C differing, because no single process is claimed by
+both, and the rule is about one executable being asked to leave from two
+places.
+
+#### What is structurally prevented, and what is only enforced
+
+| | |
+|---|---|
+| A customer hand-splitting a game | **Structural.** No per-application exit field exists to write one in. |
+| The client emitting a subset of a group | **Structural.** `exitsForGames` iterates a group's own membership; there is no partial path through it. |
+| A config that names two exits for one group | **Refused** at `SplitTunnelConfig::validate`, whoever sent it. |
+| One application named twice with two exits | **Refused** at the same place — the same contradiction with the group filed off. |
+| A group whose members are not all selected | **Dropped whole** by `Selection::with_exits`, independently of the client. |
+| A game whose catalogue row lost half its binaries | **CI failure**, `scripts/check-exit-groups.sh`. |
+| A game only partly added to Custom mode | **Warned, not prevented** — see below. |
+
+The last row is the honest one. A partly-added game is still *carried*,
+because refusing to carry it would take a working game away, and the split
+it creates is the pre-existing behaviour of Custom mode rather than
+something exit selection introduced. What changed is that the card now
+says so, permanently, on the row rather than once in a notice the customer
+scrolled past — `settings.customGameSplit` / `…SplitBody`, in en and fa.
+
+#### Why `validate` refuses rather than failing open
+
+Every other check on `exits` fails open, and §4.3 explains why: an
+unsatisfiable preference is the ordinary case, and refusing would reject
+the whole `SetSplitTunnel` and take the customer's app selection down with
+it. A config naming two exits for one game is not unsatisfiable — it is
+**self-contradictory**. No live egress, present or future, satisfies it,
+and honouring any part of it is the signature itself. This client cannot
+produce one, so one arriving means a sender that is broken or is not us,
+and the safe reading of either is to act on none of it.
+
+#### Composition with the two leak fixes
+
+Unchanged, and for the same structural reason §4 gives. `preferred_exit`
+still takes an `image_path`; the group rule runs entirely inside
+`Selection::with_exits`, which is construction, not the packet path;
+`decide` is still untouched; `FlowKey` still has no exit component and now
+no group component either — a group is a fact about an application and a
+catalogue row, never about a flow. The tests that pin all three still
+pass unmodified, which is the evidence rather than the claim.
+
+#### Costs, stated
+
+- **A game with a windowless binary may never qualify for a per-game
+  exit.** VALORANT's group includes `vgc.exe`, which the running-app list
+  filters out, so VALORANT's group will normally be partial and will
+  normally get no preference. That is the honest answer — nobody can say
+  where a process they cannot see will egress — and it is a gap in
+  process enumeration, not a reason to relax the rule.
+- **No `optional: true` on a catalogue name.** It is the obvious escape
+  hatch and it is the `prefixComplete` failure exactly: an operator
+  marking a binary optional is writing a plausible subset, and a
+  completeness claim nobody can re-derive is a completeness claim that
+  will silently rot.
+- **Most of the catalogue pays nothing.** 1,203 of 1,483 entries are a
+  single executable, so for 81% of games a whole group is one running
+  process.
+
 - **Region defaults near the player** (mechanism 7). Region/entitlement
   mismatch is publisher-documented and is triggered by apparent region,
   not by the address being a datacenter address. A picker that invites a
@@ -339,6 +468,17 @@ contradict, and one it defers:
   two different exits, one gets `OnPreferred` and the other `Fallback`.
   That is the feature's ceiling until §2.4 is built, and it is reported
   rather than hidden.
+- **No exit vocabulary exists on the client yet, so no picker is built.**
+  `GameExitGroup.exit` is `null` for every group this client creates. The
+  backend deliberately withholds a relay's exit identity — `RouteOption`
+  carries the *entry* and its own comment says customers never need to
+  know which server backs a relay's egress leg — so the only handle
+  available is a route id, and a route id is not an exit: two routes can
+  share one, which would report `Fallback` for a game that is in fact on
+  the exit it asked for. Reporting a mismatch nobody established is the
+  thing `Unknown` exists to avoid, so the client sends no `egress` and
+  every placement reads `Unknown`. That is the honest state, and it is
+  §8's open question in its client-side form.
 - **Nothing here verifies the node.** The service reports which exit the
   client *dialled* and whether interception is live. Whether that is the
   address the far end sees is a fact about the node, and the only ground
@@ -370,6 +510,13 @@ answer fakes a total failure), and `urllib` cannot speak SOCKS.
 | 5 | Custom mode on, no session started | `egress: null`, every preference `unknown` |
 | 6 | Preferences configured, dead-socket UDP burst | 0 datagrams on the vNIC capture; `refused_unattributed` climbs |
 | 7 | Preferences configured, one port to two peers | leave-alone verdict for one peer does not answer for the other |
+| 8 | Multi-binary game added at its launcher, then fully started | while partial: no preference, both placements `noPreference`; after re-adding with everything running: **one** exit IP for every binary |
+| 9 | Two games sharing a binary, two exits | neither honoured; every binary of both reports `noPreference` and one exit IP |
+
+Row 8 is the one that cannot be faked by a unit test. The assertion is
+not the placement string — it is `curl -4` from a socket pinned as
+`Rust.exe` and again as `RustClient.exe`, and **the two answers being
+byte-identical**. Two different answers is the ban risk, live.
 
 Cases 6 and 7 are the leak-fix regressions and must be run **on an
 unfixed build first** — the discipline `claude/split-tunnel-rig-verification`

@@ -3,7 +3,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   canRouteByDestination,
+  exitsForGames,
+  gameExitGroup,
+  groupMembers,
+  isWholeGroup,
   scopesForGame,
+  unresolvedNames,
   curatedNames,
   hasCuratedApps,
   isSelectableAppPath,
@@ -412,5 +417,273 @@ describe("rankGames over the shipped catalogue", () => {
     // Five keystrokes over the real catalogue, generously bounded -- the
     // point is to catch an accidental O(n^2), not to benchmark the machine.
     expect(performance.now() - started).toBeLessThan(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Exit groups
+// ---------------------------------------------------------------------------
+//
+// `docs/design/ban-safety.md` mechanism 4: a game's connections arriving
+// from two different source addresses at the same instant is the
+// account-sharing signature publishers look for, and it is the one
+// mechanism in that document Neoxify could MANUFACTURE rather than
+// merely fail to prevent. `prefixComplete` closes the destination-prefix
+// route to it. These close the exit-selection route.
+//
+// The games below are the shipped catalogue's, not invented fixtures:
+// `rust` really is `Rust.exe` (the EAC wrapper Steam launches) plus
+// `RustClient.exe`, and `RiotClientServices.exe`, `vgc.exe` and
+// `vgm.exe` really do belong to both `valorant` and
+// `league-of-legends`.
+
+const RUST = {
+  slug: "rust",
+  displayName: "Rust",
+  processNames: ["Rust.exe", "RustClient.exe"],
+};
+const SOT = {
+  slug: "sea-of-thieves",
+  displayName: "Sea of Thieves",
+  processNames: ["SeaOfThieves.exe", "SoTGame.exe"],
+};
+const RUST_WRAPPER = String.raw`C:\Steam\common\Rust\Rust.exe`;
+const RUST_CLIENT = String.raw`C:\Steam\common\Rust\RustClient.exe`;
+const SOT_SHIM = String.raw`C:\Games\SoT\SeaOfThieves.exe`;
+const SOT_GAME = String.raw`C:\Games\SoT\SoTGame.exe`;
+
+describe("gameExitGroup", () => {
+  it("takes the group straight from the catalogue's own list", () => {
+    // The whole design decision in one assertion: a GameProfile already
+    // IS the group, so nothing new had to be added to the catalogue for
+    // this feature. `processNames` is one game's binaries and the
+    // catalogue says so in its own words.
+    const group = gameExitGroup(RUST, "germany-1");
+    expect(group.slug).toBe("rust");
+    expect(group.names).toEqual(["Rust.exe", "RustClient.exe"]);
+    expect(group.exit).toBe("germany-1");
+  });
+
+  it("defaults to no preference, which is what every game had before", () => {
+    expect(gameExitGroup(RUST).exit).toBeNull();
+  });
+});
+
+describe("exitsForGames", () => {
+  it("puts every binary of a resolved game on one exit", () => {
+    const { exits, withheld } = exitsForGames(
+      [gameExitGroup(RUST, "germany-1")],
+      [RUST_WRAPPER, RUST_CLIENT],
+    );
+    expect(withheld).toEqual([]);
+    expect(exits).toEqual([
+      { app: RUST_WRAPPER, exit: "germany-1", group: "rust" },
+      { app: RUST_CLIENT, exit: "germany-1", group: "rust" },
+    ]);
+    // One exit across the whole group. Stated as a set rather than
+    // read off the rows above, because the property that matters is
+    // "one", not "these two rows in this order".
+    expect(new Set(exits.map((e) => e.exit)).size).toBe(1);
+  });
+
+  it("withholds the exit entirely when only part of a game is selected", () => {
+    // THE hard case. Names are resolved against RUNNING processes, so a
+    // launcher can be up while the game is not -- which is the ordinary
+    // state of a machine at the moment somebody adds a game. Placing
+    // `Rust.exe` on Germany and letting `RustClient.exe` start later and
+    // go wherever it goes is exactly the two-source-IP split, and it
+    // does not need a second exit to happen: the unselected binary is
+    // not carried at all, so it leaves from the customer's own address.
+    const { exits, withheld } = exitsForGames(
+      [gameExitGroup(RUST, "germany-1")],
+      [RUST_WRAPPER],
+    );
+    expect(exits).toEqual([]);
+    expect(withheld).toEqual([
+      {
+        slug: "rust",
+        displayName: "Rust",
+        reason: "partial",
+        missing: ["RustClient.exe"],
+      },
+    ]);
+  });
+
+  it("does not let one partial game cost another game its exit", () => {
+    // All-or-nothing is per game. Two games on two exits is the
+    // feature, and ban-safety mechanism 5 is the argument for it: a
+    // restriction on a shared address hits every customer on it.
+    const { exits, withheld } = exitsForGames(
+      [gameExitGroup(RUST, "germany-1"), gameExitGroup(SOT, "turkey-1")],
+      [RUST_WRAPPER, SOT_SHIM, SOT_GAME],
+    );
+    expect(withheld.map((w) => w.slug)).toEqual(["rust"]);
+    expect(exits).toEqual([
+      { app: SOT_SHIM, exit: "turkey-1", group: "sea-of-thieves" },
+      { app: SOT_GAME, exit: "turkey-1", group: "sea-of-thieves" },
+    ]);
+  });
+
+  it("withholds both games when they share a binary and disagree", () => {
+    // Real data, not a hypothetical: `RiotClientServices.exe`,
+    // `vgc.exe` and `vgm.exe` are in both Riot profiles, and 61
+    // executable names in the shipped catalogue appear in more than one
+    // entry. Honouring VALORANT here would place the Riot client away
+    // from League, which is the same split with a second account
+    // attached -- so neither is honoured.
+    const riotClient = String.raw`C:\Riot Games\Riot Client\RiotClientServices.exe`;
+    const valorant = String.raw`C:\Riot Games\VALORANT\live\VALORANT.exe`;
+    const league = String.raw`C:\Riot Games\League of Legends\LeagueClient.exe`;
+    const { exits, withheld } = exitsForGames(
+      [
+        gameExitGroup(
+          { slug: "valorant", displayName: "VALORANT", processNames: ["VALORANT.exe", "RiotClientServices.exe"] },
+          "germany-1",
+        ),
+        gameExitGroup(
+          { slug: "league-of-legends", displayName: "League of Legends", processNames: ["LeagueClient.exe", "RiotClientServices.exe"] },
+          "turkey-1",
+        ),
+      ],
+      [riotClient, valorant, league],
+    );
+    expect(exits).toEqual([]);
+    expect(withheld.map((w) => w.slug).sort()).toEqual(["league-of-legends", "valorant"]);
+    const first = withheld[0];
+    expect(first.reason).toBe("conflict");
+    if (first.reason === "conflict") {
+      expect(first.withGames).toEqual(["League of Legends"]);
+      expect(first.sharedApps).toEqual([riotClient]);
+    }
+  });
+
+  it("places both games when they share a binary and agree", () => {
+    // There is no split when there is nothing to split, and the shared
+    // binary is named once rather than twice.
+    const riotClient = String.raw`C:\Riot Games\Riot Client\RiotClientServices.exe`;
+    const valorant = String.raw`C:\Riot Games\VALORANT\live\VALORANT.exe`;
+    const league = String.raw`C:\Riot Games\League of Legends\LeagueClient.exe`;
+    const { exits, withheld } = exitsForGames(
+      [
+        gameExitGroup(
+          { slug: "valorant", displayName: "VALORANT", processNames: ["VALORANT.exe", "RiotClientServices.exe"] },
+          "germany-1",
+        ),
+        gameExitGroup(
+          { slug: "league-of-legends", displayName: "League of Legends", processNames: ["LeagueClient.exe", "RiotClientServices.exe"] },
+          "germany-1",
+        ),
+      ],
+      [riotClient, valorant, league],
+    );
+    expect(withheld).toEqual([]);
+    expect(exits.filter((e) => e.app === riotClient)).toHaveLength(1);
+    expect(exits.map((e) => e.app).sort()).toEqual([valorant, league, riotClient].sort());
+    expect(new Set(exits.map((e) => e.exit)).size).toBe(1);
+  });
+
+  it("emits nothing for a game with no exit chosen", () => {
+    const { exits, withheld } = exitsForGames(
+      [gameExitGroup(RUST)],
+      [RUST_WRAPPER, RUST_CLIENT],
+    );
+    expect(exits).toEqual([]);
+    // Not withheld either: nothing was asked for, so there is nothing
+    // to report not having got.
+    expect(withheld).toEqual([]);
+  });
+
+  it("never gives an exit to an app that belongs to no game", () => {
+    // Added by hand with Browse. Which game it is cannot be known, so
+    // no group can be whole around it and no preference can attach.
+    const byHand = String.raw`C:\Tools\thing.exe`;
+    const { exits } = exitsForGames(
+      [gameExitGroup(RUST, "germany-1")],
+      [RUST_WRAPPER, RUST_CLIENT, byHand],
+    );
+    expect(exits.map((e) => e.app)).not.toContain(byHand);
+  });
+
+  it("carries every entry's group, so the service can hold the same rule", () => {
+    // The group is what lets `SplitTunnelConfig::validate` refuse a
+    // config that splits a game and lets `Selection::with_exits` drop a
+    // group it cannot see whole. An entry without one claims nothing
+    // about a game, and this client must never produce one.
+    const { exits } = exitsForGames(
+      [gameExitGroup(RUST, "germany-1"), gameExitGroup(SOT, "turkey-1")],
+      [RUST_WRAPPER, RUST_CLIENT, SOT_SHIM, SOT_GAME],
+    );
+    expect(exits).toHaveLength(4);
+    expect(exits.every((e) => typeof e.group === "string" && e.group.length > 0)).toBe(true);
+  });
+
+  it("matches case-insensitively, because Windows paths are", () => {
+    const { exits, withheld } = exitsForGames(
+      [gameExitGroup(RUST, "germany-1")],
+      [String.raw`c:\steam\common\rust\RUST.EXE`, String.raw`c:\steam\common\rust\rustclient.exe`],
+    );
+    expect(withheld).toEqual([]);
+    expect(exits).toHaveLength(2);
+  });
+});
+
+describe("groupMembers / unresolvedNames / isWholeGroup", () => {
+  it("derives completeness from the live selection, not from a stored flag", () => {
+    // Why `GameExitGroup` stores the catalogue's NAMES rather than the
+    // paths that resolved when the game was added: a customer who
+    // starts the missing binary and adds the game again gets a whole
+    // group with no stale record to correct, and a customer who removes
+    // one binary by hand loses the preference for the whole game rather
+    // than keeping a record claiming it is whole.
+    const group = gameExitGroup(RUST, "germany-1");
+    expect(isWholeGroup(group, [RUST_WRAPPER])).toBe(false);
+    expect(unresolvedNames(group, [RUST_WRAPPER])).toEqual(["RustClient.exe"]);
+    expect(isWholeGroup(group, [RUST_WRAPPER, RUST_CLIENT])).toBe(true);
+    expect(unresolvedNames(group, [RUST_WRAPPER, RUST_CLIENT])).toEqual([]);
+    expect(groupMembers(group, [RUST_WRAPPER, RUST_CLIENT, SOT_GAME])).toEqual([
+      RUST_WRAPPER,
+      RUST_CLIENT,
+    ]);
+  });
+});
+
+describe("the shipped catalogue's multi-binary games", () => {
+  // The group rule is only worth anything if the catalogue actually
+  // states the groups. These are the games whose launcher and client
+  // are separate binaries with first-party evidence behind the pairing,
+  // and a future edit that drops half of one would silently return that
+  // game to being splittable.
+  const catalogue = JSON.parse(
+    readFileSync(join(__dirname, "../../../backend/prisma/catalogue/curated.json"), "utf8"),
+  ) as { games: { slug: string; processNames: string[] }[] };
+  const bySlug = new Map(catalogue.games.map((g) => [g.slug, g.processNames]));
+
+  it.each([
+    ["rust", ["Rust.exe", "RustClient.exe"]],
+    ["sea-of-thieves", ["SeaOfThieves.exe", "SoTGame.exe"]],
+    ["dead-by-daylight", ["DeadByDaylight.exe", "DeadByDaylight-Win64-Shipping.exe"]],
+    ["ark-survival-evolved", ["ShooterGame_BE.exe", "ShooterGame.exe"]],
+    ["ark-survival-ascended", ["ArkAscended_BE.exe", "ArkAscended.exe"]],
+    ["lost-ark", ["LOSTARK.exe", "Launch_Game.exe", "LostArkLauncher.exe"]],
+  ])("keeps %s's binaries in one row", (slug, expected) => {
+    const names = bySlug.get(slug);
+    expect(names, `${slug} is missing from the curated catalogue`).toBeDefined();
+    for (const name of expected) expect(names).toContain(name);
+  });
+
+  it("groups a whole multi-binary game the client can then place", () => {
+    // End to end against the shipped data rather than a fixture: take
+    // the catalogue row, resolve it against processes named exactly as
+    // it names them, and require one exit across the lot.
+    const names = bySlug.get("dead-by-daylight")!;
+    const paths = names.map((n) => [String.raw`C:\Games\DBD`, n].join("\\"));
+    const group = gameExitGroup(
+      { slug: "dead-by-daylight", displayName: "Dead by Daylight", processNames: names },
+      "germany-1",
+    );
+    const { exits, withheld } = exitsForGames([group], paths);
+    expect(withheld).toEqual([]);
+    expect(exits).toHaveLength(names.length);
+    expect(new Set(exits.map((e) => e.exit))).toEqual(new Set(["germany-1"]));
   });
 });
