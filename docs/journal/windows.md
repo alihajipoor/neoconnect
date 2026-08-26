@@ -11728,3 +11728,214 @@ and no reason. That state has a string now.
 has been checked against a running game. An entry means "we will route
 these executables if they are running", and the UI now says exactly that
 in both languages.
+
+---
+
+## 2026-08-26 -- The list endpoints had no bounds, and compression was hiding it
+
+**Status:** in source, unit-tested, **never run against a database or a
+browser**
+**Touches:** `apps/backend/src/common/pagination.ts` (new), nine list
+routes across `apps/backend/src/modules/**`, and the panel pages that
+read them. Branch `claude/bound-list-endpoints`.
+
+The 0825 entry left two facts next to each other: `GET /gaming/profiles`
+had no `where: { isActive }` and no `take`, and backend-wide there were
+66 `findMany` calls against 2 `take` clauses. This is that audit, and
+the fixes it produced.
+
+**Compression is not a bound, and it is worth being precise about why.**
+The 7.2x it bought is real and stays. But a route with no `take` reads
+every row, holds the whole result in memory, and serialises all of it
+before the compressor sees a byte -- the saving is on the last hop only.
+It also masks growth: the wire number stops moving while the query
+behind it keeps getting slower.
+
+### The audit: 40 of the 66 were already bounded
+
+- **19 bounded by a key** -- one customer, one subscription, one node.
+- **19 bounded by a small operator-controlled set** -- nodes, plans,
+  routes, admins, protocol configs, resolvers, integrations.
+- **2 already had a `take`** -- `GET /client-attempts` (the pattern
+  everything else now follows) and `GET /support/tickets`, whose
+  hard-coded `take: 200` and absent `skip` meant the 201st ticket was
+  simply unreachable.
+
+That leaves **26 unbounded**. Eight are admin list routes and are fixed.
+One has to return everything and is bounded a different way. The other
+seventeen are internal, and the reason they are still open is below --
+it is not the same problem.
+
+### The convention
+
+`common/pagination.ts`. The constraint that shapes it: there are shipped
+desktop clients that cannot be updated in step with the server, so a
+list route may not change what its body *looks* like.
+
+- The body stays a **bare JSON array**. No `{ items, total }` envelope.
+- Paging is **opt-in** via `take`/`skip`, with a per-route default and a
+  cap the caller cannot raise.
+- The row count travels in an **`X-Total-Count` header**.
+
+**The header is the load-bearing part, not a nicety.** The panel's
+overview dashboard printed `customers.length` from the unpaginated list
+as its headline "Customers" figure. A default window without a real
+count would have turned that card into the page size -- a number that
+looks right, that nothing in the UI would flag, and that this project
+has shipped the equivalent of before. The overview now asks for
+`?take=1` and reads the header: it wants a count, not rows.
+
+### `GET /gaming/profiles`: 668,780 -> 35,792 B
+
+Three separate bounds, worth keeping distinct because only one of them
+stays a bound as the catalogue grows:
+
+1. **`take`/`skip`**, default 100, cap 500.
+2. **`isActive`**, defaulting to active-only. A separate bug from
+   returning all of them. `all` is still reachable, because a game
+   nothing lists is a game nobody can turn back on -- the panel has a
+   filter for it.
+3. **A named projection.** `notes` (a provenance string on all 1,480
+   rows), `processNames` and `destinationCidrs` are edit-form fields no
+   cell of the table renders. The form fetches the single row it is
+   editing from `GET /gaming/profiles/:id`, which already existed.
+
+Measured against the seed catalogue, not a socket (see below):
+
+| | identity | gzip |
+|---|---|---|
+| before: every column, every row | 668,780 | 104,077 |
+| projection only, all 1,480 rows | 542,751 | 84,883 |
+| projection + active + `take=100` | **35,792** | **5,848** |
+| projection + `take=500` (the cap) | 182,945 | 28,624 |
+
+18.7x on identity, 17.8x on gzip at the default. Even at the cap it is
+3.7x better than before.
+
+### `GET /customer/gaming-profile` must return everything -- say so
+
+The desktop client matches catalogue names against the processes running
+on the machine, with no network in the loop. It needs the whole
+catalogue to recognise a game at all, so a `take` there is not a smaller
+answer, it is a silently wrong one for every game past the boundary.
+
+Checked whether the payload could at least be slimmed. **It cannot**:
+`GamingModeCard` computes `redirectable` from `hostnames.length`,
+`gaming.ts` reads `excludeHostnames` and `canaryHostname`, `game-apps.ts`
+reads `processNames`, `destinationCidrs` and `prefixComplete`, and
+`GamePicker` reads `publisher` and `iconKey`. Every field is used by a
+shipped client. Mobile does not call this route at all.
+
+So it is bounded by revalidation instead: an ETag from a cheap aggregate
+over `_count` and `max(updatedAt)` of the active rows, mixed with the
+customer's own identity because two customers on one catalogue hold
+different entitlements. An unchanged catalogue costs a 304 with no body
+instead of 373,954 B. The tag is computed from the aggregate rather than
+by hashing the response, because **building the response is the cost
+being avoided** -- a 304 issued after assembling the payload saves the
+wire and none of the work, and a test asserts the catalogue query never
+runs on that path.
+
+**Honest limit: no shipped client benefits from this yet.** The desktop
+app fetches through `@tauri-apps/plugin-http`, which is reqwest -- no
+HTTP cache, no automatic `If-None-Match`. It is inert for them rather
+than harmful, since a caller that sends no validator always gets its
+200. Making it pay off is a client change: store the `ETag` beside the
+30 s cache in `lib/customer.ts` and send it back. **That is a
+desktop-owned file and was deliberately not touched.**
+
+### The seventeen still open, and why a `take` is the wrong fix
+
+They are cron sweeps, boot backfills, gRPC re-asserts and per-request
+fan-outs -- `sweepQuota`, `sweepExpiry`, the two warning sweeps, the
+referral sweep, the overdue-invoice sweep, `provisionAll`'s backfill,
+`reprovisionPlan`, `reapplyRateLimits`, the announcement recipient list,
+the WireGuard address scan, `rewriteIssuedEndpoints`, the route-delete
+fan-out, and the agent gateway's three.
+
+**A `take` on any of them silently drops work.** A sweep that expires
+100 of 300 due subscriptions leaves 200 live and reports success. These
+need batching loops with a cursor, not a cap, and that is a behaviour
+change per site rather than one convention -- deliberately not bundled
+into this pass.
+
+What *was* safe there is the projection. Four sweeps in
+`usage.service.ts` used `include: { customer: true }`, which read every
+candidate's `passwordHash`, `tokenVersion`, `emailVerificationCode` and
+`passwordResetCode` into memory to use one field: the address to send
+to. Narrowed, with no behaviour change.
+
+Sharpest of the remaining, if someone picks this up: `routes.service.ts`
+`create` and `remove` fan out `provisionAll`/teardown across every
+matching subscription **inside one synchronous HTTP request**, each
+issuing an agent command. That is an operational cliff, not a payload
+one.
+
+### A `take` bounds the response, not the scan -- the indexes are missing
+
+Worth writing down because it is the obvious next thing and it is not
+done. Every one of these routes orders by a column, and Postgres has to
+produce that order before it can hand back the first `take` rows. Of the
+eight tables now paged, exactly **two** carry an index the ordering can
+use:
+
+- `SupportTicket` -- `@@index([status, lastMessageAt])`, and the route
+  orders by `[status, lastMessageAt]`. Matches.
+- `GameProfile` -- `@@index([isActive, sortOrder])`, and the route filters
+  on `isActive` and orders by `sortOrder`. Matches.
+
+The other six do not. `Customer` orders by `createdAt desc` with no index
+on `createdAt`; the same is true of `Subscription`, `PaymentTransaction`,
+`Voucher` and `ProtocolUser`, and `Invoice` orders by `issuedAt` with
+indexes only on `customerId` and `status`. So `?skip=0&take=100` still
+sorts the whole table, and the `count()` beside it is a second pass.
+
+That is not a reason to hold the window -- bounding the response, the
+memory and the serialisation is worth having on its own, and it is what
+makes the *client* side of this cheap. But **the query cost is not yet
+bounded**, and anyone reading "18.7x" should not read it as "18.7x less
+database work". The fix is five one-column indexes and one composite,
+which is a migration, and no Postgres was reachable to write or exercise
+one against.
+
+### Not proven
+
+**No database was reached.** Docker Desktop's engine was hung from an
+earlier agent, same as on 0825. So:
+
+- The byte figures are from the payload reconstructed out of
+  `prisma/catalogue/*.json` through the same projections the services
+  select -- not from a socket. The reconstruction lands the customer
+  payload at 373,953 B against the 373,954 B measured on the wire on
+  0825, one byte apart, which is what makes the other rows in that table
+  trustworthy.
+- **The 304 mechanism itself *was* observed**, over a real socket: a
+  throwaway Nest app with the same handler shape and the same
+  compression middleware answered 200 with 65,883 B cold, 304 with 0 B
+  on a matching `If-None-Match`, and 200 again on a stale tag. Worth
+  checking rather than assuming -- returning `undefined` from a handler
+  after `res.status(304)` could just as easily have produced a 200 with
+  an empty body, which would have looked fine and been a bug. The same
+  probe confirmed `X-Total-Count` survives `@Res({ passthrough: true })`
+  and the compressor, under both identity and gzip, and that the default
+  window and the cap both apply on the wire (100 rows by default, 500
+  for `?take=100000`). **What has never run is the aggregate behind the
+  tag**, because that needs Postgres.
+- No query plan was checked. `count()` on the same `where` as the page
+  is a second scan; on `game_profiles` there is an
+  `@@index([isActive, sortOrder])` for it to use and on `customers`
+  there is not.
+- The `$transaction([findMany, count])` pairs have never run against
+  Postgres.
+- **Nothing was opened in a browser.** The panel compiles, lints and
+  builds from a forced turbo run, and that is all it proves. The pager
+  ranges, the `X-Total-Count` round trip through `apiFetchList`, and the
+  edit dialog's fetch-on-open have not been seen working against a
+  running backend.
+
+Backend suite went 477 -> 576 tests and 47 -> 56 suites; the whole
+workspace passes `turbo run lint typecheck build test --force`, 16 of 16
+tasks. Those tests are unit tests over the arguments handed to Prisma.
+Each bound was reverted individually and the matching tests watched to
+fail -- the `take`, the `isActive` filter, the projection, and the 304 --
+so they discriminate rather than merely pass.
