@@ -54,6 +54,13 @@ function capturingPrisma() {
         return Promise.resolve(args.create);
       },
     },
+    // The bulk catalogue is upserted in chunks inside a transaction, which
+    // this stub did not have when it was written -- back then the seed was
+    // three hand-written rows and nothing else. Settling the promises is
+    // the whole of what the real client does here that matters to us: the
+    // upserts above still record every row, so the invariants below now
+    // cover all 1,480 catalogue entries rather than only the three.
+    $transaction: (operations: Promise<unknown>[]) => Promise.all(operations),
   };
   // The seed is typed against the real PrismaClient; this stub implements
   // the one method it touches.
@@ -114,8 +121,21 @@ describe("seeded game catalogue", () => {
     calls = cap.calls;
   });
 
-  it("seeds the three curated profiles, keyed by slug", () => {
-    expect(calls.map((c) => c.where.slug)).toEqual(["wow", "valorant", "league-of-legends"]);
+  it("seeds the three curated profiles first, keyed by slug", () => {
+    // First, and in this order, because `sortOrder` starts the bulk
+    // catalogue at 1000 deliberately to leave these three in front of it.
+    expect(calls.slice(0, 3).map((c) => c.where.slug)).toEqual([
+      "wow",
+      "valorant",
+      "league-of-legends",
+    ]);
+  });
+
+  it("then seeds the bulk catalogue behind them", () => {
+    // Guards the reverse of the above: if the bulk seed ever stopped
+    // running, every invariant below would still pass over three rows and
+    // report nothing wrong.
+    expect(calls.length).toBeGreaterThan(1_000);
   });
 
   describe("the prefixComplete invariant", () => {
