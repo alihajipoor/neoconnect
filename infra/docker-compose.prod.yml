@@ -77,6 +77,12 @@ services:
       NOWPAYMENTS_IPN_SECRET: ${NOWPAYMENTS_IPN_SECRET:-}
       PLISIO_API_KEY: ${PLISIO_API_KEY:-}
       CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?CREDENTIALS_ENCRYPTION_KEY is required}
+      # Optional, unlike the line above: absent, the backend derives one
+      # from CREDENTIALS_ENCRYPTION_KEY, and absent both it simply mints
+      # no exit handles and clients offer no per-game exit picker. A
+      # required-variable guard here would take the whole stack down over
+      # a feature that degrades cleanly.
+      EXIT_HANDLE_SECRET: ${EXIT_HANDLE_SECRET:-}
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
       # Lifts the GitHub API limit on the release lookups behind
       # /api/updates from 60 requests an hour per IP to 5,000. Optional:
