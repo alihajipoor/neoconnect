@@ -334,6 +334,16 @@ impl Engines {
         self.split_tunnel.complaint()
     }
 
+    /// Applications the customer selected while they were already
+    /// running, and which are still running.
+    ///
+    /// `&mut self` because answering re-checks which of them are still
+    /// alive, so the notice clears itself the moment the customer
+    /// restarts one. See `SplitTunnel::restart_needed`.
+    pub fn split_tunnel_restart_needed(&mut self) -> Vec<String> {
+        self.split_tunnel.restart_needed()
+    }
+
     /// Proves the tunnel carries traffic, over the path selected apps
     /// use. See `SplitTunnel::probe` for why the app cannot check this
     /// for itself once Custom mode is on.
