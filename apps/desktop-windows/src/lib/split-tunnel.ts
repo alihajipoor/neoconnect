@@ -262,7 +262,25 @@ export async function saveSplitTunnel(settings: SplitTunnelSettings): Promise<vo
  * lifetime, so it can restart underneath a running app and come back
  * knowing nothing. Re-sending is cheap and removes the whole class of
  * "Custom mode silently stopped applying". */
-export async function pushSplitTunnel(settings: SplitTunnelSettings): Promise<void> {
+export async function pushSplitTunnel(
+  settings: SplitTunnelSettings,
+  /** The exit the tunnel that is about to carry -- or is already
+   * carrying -- this traffic actually leaves from, named with the same
+   * opaque handle a `GameExitGroup` holds.
+   *
+   * `null` is the honest default and the value every caller sends
+   * before a connection exists. It is not "unknown, assume fine": the
+   * service reports a preference it cannot compare as `Unknown`, never
+   * as a match, and naming an egress here while nothing is established
+   * would be asserting a fact nobody checked.
+   *
+   * Only the connect path, once a candidate has actually come up,
+   * passes one. The service knows which adapter is up and which address
+   * is on it; it does not know and cannot work out which node the far
+   * end egresses from, and on a relayed route those are different
+   * machines. */
+  egress: string | null = null,
+): Promise<void> {
   await invoke("vpn_set_split_tunnel", {
     enabled: settings.enabled,
     apps: settings.apps,
@@ -285,6 +303,16 @@ export async function pushSplitTunnel(settings: SplitTunnelSettings): Promise<vo
     // asks `exitsForGames` for the same answer when the selection
     // changes, which is when they are.
     exits: exitsForGames(settings.games, settings.apps).exits,
+    // The other half of the comparison, and the reason it travels with
+    // the selection rather than separately: two values that have to
+    // agree should not be able to arrive out of step.
+    //
+    // Re-sent on every push, so it is *replaced* rather than merged --
+    // which is what the service does with it. A push naming none means
+    // this client is not asserting an egress now, and keeping the last
+    // one would report a stale exit for a tunnel that may have been
+    // rebuilt against a different node entirely.
+    egress,
   });
 }
 

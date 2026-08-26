@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AppWindow, FolderOpen, Gamepad2, ListChecks, X } from "lucide-react";
+import { AppWindow, FolderOpen, Gamepad2, ListChecks, MapPin, X } from "lucide-react";
 import { RunningAppPicker } from "./RunningAppPicker";
 import { GamePicker } from "./GamePicker";
 import { useI18n } from "../lib/i18n";
@@ -20,6 +20,14 @@ import {
   type SplitTunnelSettings,
 } from "../lib/split-tunnel";
 import { getGamingProfile, type GameProfileSummary } from "../lib/customer";
+import { loadSnapshot } from "../lib/credential-cache";
+import { exitOptions, hasExitVocabulary, type ExitOption } from "../lib/exit-options";
+import {
+  fetchExitPlacements,
+  gamePlacement,
+  type AppPlacement,
+} from "../lib/exit-placement";
+import type { RouteOption } from "../lib/types";
 import {
   curatedNames,
   exitsForGames,
@@ -55,6 +63,24 @@ export function CustomModeCard() {
    * the picker: a row that would add nothing must not be offered. */
   const [games, setGames] = useState<GameProfileSummary[] | null>(null);
   const [pickingGame, setPickingGame] = useState(false);
+  /** The routes this subscription can reach, read from the offline
+   * snapshot rather than fetched.
+   *
+   * The snapshot is what the connect path already dials on when the
+   * control plane is unreachable, and this screen has the same
+   * requirement for the same reason: a customer in Iran whose API is
+   * filtered must still be able to see and change where their games go.
+   * An empty list simply means no exit picker, which is the state that
+   * shipped before exits had names. */
+  const [routes, setRoutes] = useState<RouteOption[]>([]);
+  /** Where the service says each selected program is actually leaving
+   * from, or `null` while it has not answered.
+   *
+   * Null is not "no preference" and is not rendered as one. The helper
+   * is a Windows service with its own lifetime and can be restarting;
+   * saying "no preference" for a game the customer chose an exit for
+   * would tell them their choice was lost. */
+  const [placements, setPlacements] = useState<AppPlacement[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -70,10 +96,104 @@ export function CustomModeCard() {
       if (cancelled || !result.ok) return;
       setGames(result.data.games.filter(hasCuratedApps));
     });
+    // The cached answer, not a fresh request. Everything the picker
+    // needs -- which routes exist and which of them are the same exit --
+    // was already saved the last time the app talked to the control
+    // plane, and asking again would make the screen depend on a network
+    // the customer may not have.
+    void loadSnapshot().then((snapshot) => {
+      if (!cancelled && snapshot) setRoutes(snapshot.routes);
+    });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  /** Re-asks the service where things are leaving from.
+   *
+   * Its own round trip rather than something on the status poll, which
+   * runs continuously -- this answer costs a walk of the whole
+   * selection, so it is asked when a screen showing it opens or
+   * changes, which is when somebody is looking at it.
+   *
+   * A failure leaves `placements` null, which renders as "not
+   * established" rather than as a match or a mismatch. */
+  function refreshPlacements() {
+    void fetchExitPlacements().then(
+      (result) => setPlacements(result.apps),
+      () => setPlacements(null),
+    );
+  }
+
+  useEffect(() => {
+    refreshPlacements();
+    // The customer connects from the dashboard, so the interesting
+    // change happens while this screen is not in front. Re-asking on
+    // focus catches it without polling for something that changes once
+    // a session.
+    const onFocus = () => refreshPlacements();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  /** The exits this customer can choose between, grouped so that two
+   * routes ending on one machine read as one place. */
+  const exits = exitOptions(routes);
+
+  /** What to call an exit in the list.
+   *
+   * A direct route is dialled at the machine it leaves from, so its
+   * node name names the exit. A relay is dialled somewhere else
+   * entirely, and its node name is the *entry* -- borrowing it would
+   * tell a customer their traffic appears from Iran when it appears
+   * from Germany. So an exit reached only through relays is named as
+   * what it is: somewhere reached through those relays, without a
+   * claim about where it is. That is the same thing the location list
+   * has always said, and a smaller claim beats a wrong one.
+   */
+  function exitLabel(option: ExitOption): string {
+    const base = option.hidden
+      ? t("settings.customExitHidden", {
+          via: option.routes.map((r) => r.location.nodeName).join(", "),
+        })
+      : option.directNames.join(", ");
+    // Said, never enforced. A preference for an exit having a bad hour
+    // is the ordinary case, and refusing it would take the customer's
+    // whole selection down over something that fixes itself.
+    return option.online ? base : `${base} ${t("settings.customExitDown")}`;
+  }
+
+  /** The badge on a game's row. Four answers, and the fourth is the
+   * point: with nothing intercepting there is no match and no mismatch
+   * to report, and saying either would be asserting something nobody
+   * checked. */
+  function placementBadge(placement: { placement: string }): { text: string; className: string } {
+    switch (placement.placement) {
+      case "onPreferred":
+        return { text: t("settings.customExitOnPreferred"), className: "bg-highlight/15 text-highlight" };
+      case "fallback":
+        return { text: t("settings.customExitFallback"), className: "bg-warning/15 text-warning" };
+      case "unknown":
+        return { text: t("settings.customExitUnknown"), className: "bg-white/8 text-muted-foreground" };
+      default:
+        return { text: t("settings.customExitNoPreference"), className: "bg-white/8 text-muted-foreground" };
+    }
+  }
+
+  /** Records a customer's choice of exit for one game.
+   *
+   * On the group, which is the only place it can be written. There is
+   * no per-application exit field anywhere in this client's state, so
+   * this cannot put a game's launcher and its client on two exits
+   * however the screen is driven -- see `GameExitGroup`.
+   */
+  async function chooseExit(slug: string, exit: string | null) {
+    if (!settings) return;
+    await apply({
+      ...settings,
+      games: settings.games.map((game) => (game.slug === slug ? { ...game, exit } : game)),
+    });
+  }
 
   async function apply(next: SplitTunnelSettings) {
     setSettings(next);
@@ -82,10 +202,18 @@ export function CustomModeCard() {
     // an app while connected should stop having it routed, not wait for
     // a reconnect to find out whether it worked.
     try {
+      // No egress named. This screen has no idea which route a live
+      // session landed on -- the connect path does, and it re-sends the
+      // selection with one attached the moment a candidate comes up.
+      // Naming one here would be guessing, and the service reports a
+      // preference it cannot compare as unknown, which is true.
       await pushSplitTunnel(next);
     } catch {
       // The service may not be running yet; connect re-sends anyway.
     }
+    // The selection just changed, so which programs the service can
+    // answer for changed with it.
+    refreshPlacements();
   }
 
   /** Shared by both pickers, so a program chosen from the running list
@@ -463,15 +591,113 @@ export function CustomModeCard() {
                 ))
             : null}
 
+          {/* Where each game leaves from, and where it actually is.
+
+              Only under "only these apps": the other direction names
+              the programs that are deliberately NOT carried, so they
+              have no egress and a preference for one would be an
+              invention. And only when the route list can name an exit
+              at all -- an older backend, or one with no handle secret
+              configured, gives this client no exit vocabulary, and the
+              honest response to that is to offer no choice rather than
+              a choice built out of route ids that would report a
+              mismatch for a game sitting exactly where it was put. */}
+          {settings.mode === "onlySelected" && settings.games.length > 0 && hasExitVocabulary(routes) ? (
+            <div className="flex flex-col gap-2 rounded-lg border border-white/8 bg-white/[0.03] p-2.5">
+              <div className="flex items-center gap-1.5">
+                <MapPin className="size-3.5 text-primary" />
+                <p className="text-xs font-semibold">{t("settings.customExitTitle")}</p>
+              </div>
+              <p className="text-[11px] text-muted-foreground">{t("settings.customExitHint")}</p>
+
+              <ul className="flex flex-col gap-1.5">
+                {settings.games.map((game) => {
+                  const placement = gamePlacement(game, settings.apps, placements);
+                  const badge = placement ? placementBadge(placement) : null;
+                  // A saved choice the route list no longer offers --
+                  // a plan change, or a server that rotated the key
+                  // these handles are minted under. Kept as an option
+                  // rather than silently dropped: a select whose value
+                  // matches nothing renders blank, and a customer would
+                  // read that as their choice having been forgotten
+                  // when what actually happened is that it can no
+                  // longer be honoured.
+                  const chosenIsGone =
+                    typeof game.exit === "string" &&
+                    game.exit.length > 0 &&
+                    !exits.some((option) => option.exit === game.exit);
+                  return (
+                    <li
+                      key={game.slug}
+                      className="flex flex-col gap-1.5 rounded-md border border-white/8 bg-white/[0.04] px-2.5 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="truncate text-[13px] font-semibold">{game.displayName}</p>
+                        {badge ? (
+                          <span
+                            className={[
+                              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                              badge.className,
+                            ].join(" ")}
+                          >
+                            {badge.text}
+                          </span>
+                        ) : null}
+                      </div>
+                      <select
+                        aria-label={t("settings.customExitFor", { game: game.displayName })}
+                        value={game.exit ?? ""}
+                        onChange={(event) => void chooseExit(game.slug, event.target.value || null)}
+                        className="w-full rounded-md border border-white/10 bg-surface px-2 py-1.5 text-[12px] outline-none focus:border-primary/60"
+                      >
+                        <option value="">{t("settings.customExitNone")}</option>
+                        {exits.map((option) => (
+                          <option key={option.exit} value={option.exit}>
+                            {exitLabel(option)}
+                          </option>
+                        ))}
+                        {chosenIsGone ? (
+                          <option value={game.exit ?? ""}>{t("settings.customExitGone")}</option>
+                        ) : null}
+                      </select>
+                      {/* Said on the row, and only when it is true.
+
+                          `unknown` is the one that must not be dressed
+                          up. Nothing is intercepting, so there is no
+                          match and no mismatch -- and a badge that read
+                          "on your exit" here would be the same claim as
+                          a "Connected" indicator nothing checked. */}
+                      {placement?.placement === "unknown" ? (
+                        <p className="text-[10px] text-muted-foreground">
+                          {t("settings.customExitUnknownHint")}
+                        </p>
+                      ) : null}
+                      {placement?.placement === "fallback" ? (
+                        <p className="text-[10px] text-warning">
+                          {t("settings.customExitFallbackHint", { game: game.displayName })}
+                        </p>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+
+              {/* The ceiling, stated rather than discovered. One session
+                  carries one tunnel and therefore leaves from one exit,
+                  so two games wanting two exits means one of them is on
+                  the other's. A picker that implied otherwise would be
+                  selling something the service cannot deliver. */}
+              <p className="text-[11px] text-muted-foreground">{t("settings.customExitOneAtATime")}</p>
+            </div>
+          ) : null}
+
           {/* A game that asked for an exit and did not get one.
 
-              Inert on today's data in the way `scopesForGame` is: no
-              screen sets `GameExitGroup.exit` yet, because this client
-              has no exit vocabulary to offer -- the backend
-              deliberately withholds a relay's exit identity, so there
-              is nothing honest to put in a picker. The rule and its
-              copy are here so that whoever builds that picker cannot
-              ship the split by forgetting to say it happened. */}
+              Both cases fail toward no preference, which is safe: the
+              game is carried on the session's exit like everything
+              else. Said out loud because a customer who asked for
+              something and silently did not get it has been told the
+              smaller half of what happened. */}
           {exitsForGames(settings.games, settings.apps).withheld.map((held) => (
             <p key={held.slug} className="text-[11px] text-muted-foreground">
               {held.reason === "partial"

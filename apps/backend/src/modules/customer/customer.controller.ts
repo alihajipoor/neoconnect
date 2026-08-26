@@ -294,6 +294,10 @@ export class CustomerController {
     return this.routesService.listAvailableForPlan(
       plan.protocolsAllowed,
       plan.allowedRoutes.map((r) => r.id),
+      // Salts each option's opaque exit handle. Taken from the verified
+      // token rather than the path, so one customer can never be handed
+      // another's handles and the two views can never be joined.
+      customer.sub,
     );
   }
 

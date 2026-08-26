@@ -105,6 +105,14 @@ exist, never silently overwritten.
    generated, otherwise `CREDENTIALS_ENCRYPTION_KEY` won't match what
    encrypted the restored `ProtocolUser.credentialsJson` rows and every
    read will throw.
+
+   `EXIT_HANDLE_SECRET` matters for a smaller reason and is worth
+   restoring for the same one: it names the exits a customer sends
+   individual games to, and a fresh value renames all of them. Nothing
+   breaks and nothing is misreported — a client holding an old name
+   simply finds no live session matches it, so it says the game is on
+   another exit, which is true — but every customer who set a per-game
+   exit has to set it again.
 5. Re-point DNS/TLS if the new box has a different IP (re-run certbot via
    the panel menu's nginx/TLS step if needed).
 6. Every agent node needs to reconnect: their gRPC stream will retry

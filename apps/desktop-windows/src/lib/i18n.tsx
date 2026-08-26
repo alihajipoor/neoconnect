@@ -324,6 +324,47 @@ const en = {
     "{game} uses the same exit as the rest of your traffic. Not all of its programs are added ({names}), and Neoxify will not put part of a game on an exit of its own.",
   "settings.customGameExitConflict":
     "{game} and {others} run the same program, so they cannot use different exits. Until they are set to match, both use the same exit as the rest of your traffic.",
+  // The picker itself.
+  //
+  // Two things it has to say and cannot leave to be inferred:
+  //
+  // * an exit is not a server. Two of the servers in the location list
+  //   can be one exit -- the fast one and the stealthy one on the same
+  //   machine, or a relay whose far end is a machine you can also reach
+  //   directly -- and a customer who thinks they have spread two games
+  //   across two places has spread nothing.
+  // * only one is live at a time. This is a preference applied when you
+  //   connect, not two connections at once, and a screen that let that
+  //   be assumed would be selling something the product cannot do.
+  "settings.customExitTitle": "Where each game leaves from",
+  "settings.customExitHint":
+    "Choose where a game should appear from. Some of the servers in your list are the same exit as each other, so they are shown here once.",
+  "settings.customExitFor": "Exit for {game}",
+  "settings.customExitNone": "Same as the rest of your traffic",
+  // A relayed route is dialled at one machine and leaves from another,
+  // so the name in the location list is the entry and says nothing
+  // about where this traffic appears from. Neoxify does not publish
+  // which server backs a relay's exit -- a fleet that can be listed is
+  // a fleet that gets labelled as a VPN, and ours is not listed. So the
+  // honest label is what it is reached through, and no claim about
+  // where it is.
+  "settings.customExitHidden": "Exit reached through {via}",
+  "settings.customExitDown": "(not reachable right now)",
+  "settings.customExitGone": "The exit you chose, which is not available now",
+  // The four answers. The fourth is the one that earns its place: with
+  // nothing being carried there is no match and no mismatch, and saying
+  // either would be the same as a "Connected" indicator nothing
+  // checked.
+  "settings.customExitOnPreferred": "On your exit",
+  "settings.customExitFallback": "On another exit",
+  "settings.customExitUnknown": "Not established",
+  "settings.customExitNoPreference": "No preference",
+  "settings.customExitUnknownHint":
+    "Neoxify says where a game leaves from only while it is actually carrying that game's traffic. Connect, start the game, and come back.",
+  "settings.customExitFallbackHint":
+    "{game} is going through the exit this connection uses, not the one you chose. It still works. To move it, switch server on the main screen and connect again.",
+  "settings.customExitOneAtATime":
+    "One connection leaves from one exit. If two games are set to different exits, whichever one this connection uses gets it and the other goes with it.",
   // Destination scoping, said out loud in both directions.
   //
   // "Uses VPN" is now two different promises and the customer cannot
@@ -937,6 +978,24 @@ const fa: Record<TranslationKey, string> = {
     "{game} از همان محل خروجی استفاده می‌کند که بقیهٔ ترافیک شما از آن استفاده می‌کند. همهٔ برنامه‌های آن اضافه نشده‌اند ({names})، و نئوکسیفای بخشی از یک بازی را روی محل خروج جداگانه قرار نمی‌دهد.",
   "settings.customGameExitConflict":
     "{game} و {others} یک برنامهٔ مشترک را اجرا می‌کنند، پس نمی‌توانند از دو محل خروج متفاوت استفاده کنند. تا وقتی محل خروج هر دو یکسان نشود، هر دو از همان محل خروجی استفاده می‌کنند که بقیهٔ ترافیک شما از آن استفاده می‌کند.",
+  "settings.customExitTitle": "هر بازی از کجا خارج می‌شود",
+  "settings.customExitHint":
+    "انتخاب کنید که هر بازی از کجا دیده شود. بعضی از سرورهای فهرست شما محل خروج یکسانی دارند، پس اینجا یک‌بار نشان داده می‌شوند.",
+  "settings.customExitFor": "محل خروج برای {game}",
+  "settings.customExitNone": "مانند بقیهٔ ترافیک شما",
+  "settings.customExitHidden": "محل خروجی که از طریق {via} در دسترس است",
+  "settings.customExitDown": "(اکنون در دسترس نیست)",
+  "settings.customExitGone": "محل خروجی که انتخاب کرده‌اید و اکنون در دسترس نیست",
+  "settings.customExitOnPreferred": "روی محل خروج انتخابی شما",
+  "settings.customExitFallback": "روی محل خروج دیگری",
+  "settings.customExitUnknown": "مشخص نشده است",
+  "settings.customExitNoPreference": "بدون ترجیح",
+  "settings.customExitUnknownHint":
+    "نئوکسیفای فقط زمانی می‌گوید یک بازی از کجا خارج می‌شود که واقعاً ترافیک آن بازی را عبور دهد. متصل شوید، بازی را اجرا کنید و دوباره به این صفحه بازگردید.",
+  "settings.customExitFallbackHint":
+    "{game} از محل خروجی عبور می‌کند که این اتصال از آن استفاده می‌کند، نه از محلی که شما انتخاب کرده‌اید. بازی همچنان کار می‌کند. برای جابه‌جایی، در صفحهٔ اصلی سرور را عوض کنید و دوباره متصل شوید.",
+  "settings.customExitOneAtATime":
+    "هر اتصال از یک محل خروج خارج می‌شود. اگر برای دو بازی دو محل خروج متفاوت انتخاب شده باشد، هر کدام که این اتصال از آن استفاده کند همان را می‌گیرد و بازی دیگر نیز از همان عبور می‌کند.",
   "settings.customAppScoped": "فقط سرورهای بازی",
   "settings.customAppScopedHint":
     "فقط ترافیک این برنامه به سرورهای خودِ بازی از VPN عبور می‌کند. بقیه‌ی کارهای آن از اینترنت معمولی شما استفاده می‌کند.",
