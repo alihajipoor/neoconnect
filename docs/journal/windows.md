@@ -11571,3 +11571,160 @@ for when evidence hardens — including that it must key on the route's
 **exit** node, not its entry, because a relayed route shows the publisher
 the exit's address and `listAvailableForPlan` deliberately never exposes
 it.
+
+---
+
+## 2026-08-25 — Gaming Mode finished: five branches on main, and what "finished" turned out to mean
+
+**Status:** done, on `main`
+**Touches:** `apps/backend/**`, `apps/desktop-windows/src/**` (no `service/src/engines/**`, no mobile)
+
+Merged in order: `split-tunnel-destination-scope`,
+`split-tunnel-rig-verification`, `gaming-prefix-completeness`,
+`game-catalogue-scale`, `ban-safety-monitor`.
+
+**The merge hazard is real and it bit.** Every branch compiled and
+tested green on its own. The combination did not, and `tsc` could not
+see it: `game-catalogue-prefixes.spec.ts` stubs Prisma with only
+`gameProfile.upsert`, because when it was written the seed was three
+hand-written rows. `game-catalogue-scale` then added `seedCatalogue`,
+which upserts 1,480 rows inside `prisma.$transaction`. Ten tests died on
+"prisma.$transaction is not a function". If you merge branches that
+touch one seam here, run the suite on the *merged* tree — a green branch
+proves nothing about the combination.
+
+Three non-journal conflicts, all in files two branches had appended to.
+`game-apps.ts` and `game-apps.test.ts` collided only on the trailing
+brace of a function each branch had added at the end: kept both sides,
+added the missing `}`. `game-catalogue.spec.ts` was an add/add of two
+genuinely different suites under one filename — split into
+`game-catalogue.spec.ts` (guards on the shipped catalogue) and
+`game-catalogue-prefixes.spec.ts` (the seed's prefixComplete invariant)
+rather than concatenated, because their helpers and imports are disjoint
+and one file would have buried that.
+
+**`Agent.exe` was the find.** It shipped in the hand-written `wow` row.
+It is the Blizzard Update Agent, and it is also what a great deal of
+enterprise monitoring, backup and MDM software runs under — and the
+client adds the full path of whatever is running under a matched name.
+A customer picking World of Warcraft on a work laptop would have put
+their employer's agent on the tunnel, silently, with the UI reporting
+success. `UnrealCEFSubProcess.exe` in the `valorant` row is the same
+class: it names Unreal Engine's browser helper, so it identifies an
+engine rather than a game.
+
+Neither could be rescued by path-qualifying. The validator rejects a
+path where a bare filename belongs, and `curatedNames()` strips a path
+back to its basename before matching, so a full path would be reduced to
+the generic name again. Both dropped, both added to the denylist.
+
+**Why they survived the denylist landing, which is the part worth
+remembering:** `validateCatalogue` refuses a reserved slug, and the three
+hand-written rows own all three reserved slugs — so they were the only
+rows that could never be passed through the list built to catch them.
+The executable-name rules are now `validateProcessNames()`, and the seed
+runs the hand-written rows through it too. A gate that structurally
+cannot see the oldest data is not a gate.
+
+**Nothing compressed the API.** 374 KB of catalogue JSON, measured on
+the wire at **373,954 B identity -> 51,742 B gzip, 7.2x**, going
+uncompressed to customers on the networks least able to pay for it. No
+middleware in `main.ts`, and no nginx config anywhere in the tree — the
+proxy is configured on the host by hand, which is why a rule written
+there would not survive a rebuild and could not be reviewed. It is in
+the app now. It also helps `GET /gaming/profiles` (an unpaginated
+superset of the customer payload), `GET /customer/protocol-users`
+(repeated OpenVPN PEM blobs, which gzip collapses) and the five
+inline-CSS invoice documents. The brand PNGs are declined by mime-db,
+and there is no SSE, no streaming and no hand-set `Content-Length`
+anywhere in the backend for it to break.
+
+**Decision — the DNS half is a DEAD BRANCH, kept and labelled, not
+removed.** Recorded here because a future session will otherwise pick it
+up as a loose end, which is the thing the label exists to stop.
+
+Two separate facts, and keeping them apart matters. DNS steering cannot
+reach a game's own servers *by construction* — a game handed its server
+as a literal `IP:port` never performs a lookup a resolver could answer.
+Separately, the node side is not being built. **The second is what makes
+the code dead, not the first**, because the first does not kill the
+mechanism: DNS + SNI steering would still work for the hostname-based
+launcher/login/store tier, which is exactly what the `wow` row's eleven
+measured hostnames are for, and reaching that tier is what Gaming Mode
+is *for* now that it is understood as an access product rather than a
+latency one. The premise is unbuilt, not wrong.
+
+Kept rather than deleted because deleting means dropping
+`GamingResolver` and `GamingResolverToken` — a destructive migration
+against a live database with beta users on it, to remove one indexed
+query on a path that already returns early. **No Postgres was reachable
+in this session** (Docker Desktop's engine was hung from an earlier
+agent), so that migration could not be exercised, and an untested
+destructive migration is a worse thing to put on main than a clearly
+labelled dormant branch. The reasoning and the revival conditions are in
+`gaming.module.ts`; `gaming.service.ts` points at it from the return
+site so it is found without opening the module.
+
+**Search did not hold up at 1,480, and only the real data showed it.**
+Typing `cs` did not rank Counter-Strike badly — it returned it **not at
+all**. `cs` is not a prefix of "counter strike 2", not a prefix of
+either of its words, and not a substring of "counterstrike2", so the
+game scored in no band and was dropped. `cod` put Codename CURE above
+Call of Duty; `gta` returned nothing for Grand Theft Auto V. An empty
+result tells the customer their game is not supported, which is the one
+conclusion this picker must never produce by accident. There is an
+acronym band now, below the exact-prefix band so CS2D still wins `cs`
+honestly, and the ranking tests read the real catalogue from the
+backend's data files — the six-game fixture is what missed this.
+
+**Confidence grades: deliberately NOT surfaced per row.** The catalogue
+carries first-party / corroborated / unverified, and they reach the
+database in `notes`, which never travels to a client. Marking the single
+unverified row would have implied the other 1,479 are verified, and they
+are not. Provenance of a *name* is not evidence that routing the game
+works, and **nothing in this catalogue has ever been tested against a
+running install**. So the honest statement is global and it sits on the
+picker at the moment somebody chooses: each entry lists the programs
+Neoxify would route while they are running, and none has been tested
+against a running game.
+
+**"yet" came back.** It was deleted from `gaming.noResolver` earlier the
+same day with a comment forbidding its return, and it was still sitting
+in `customGameWholeApp`, `customGameEmpty` and `listEmpty` doing
+identical work — implying a complete server address list was coming for
+games that were *measured* not to be able to have one. A test now pins
+the five capability keys where the word is a promise. "No conversations
+yet" is untouched: that empty state genuinely fills.
+
+**Two Persian strings said something different from their English.**
+`gaming.ipUnchanged` — the anti-lie the whole feature hangs on — read as
+"the services are obtained from Neoxify's server", which says we supply
+the services rather than that we reach them from our address. And
+`accountRiskBody` narrowed "your location" to «کشور»: a player who named
+their city, ISP or timezone would have complied with the Persian and
+violated the English, in the string about the highest-severity way an
+account is lost. Register was already clean throughout — no «تو»
+anywhere, no informal endings.
+
+**The card could render nothing at all.** With the catalogue loaded, the
+mode available and no game redirectable, every branch in
+`GamingModeCard` was false and the customer got a card with no button
+and no reason. That state has a string now.
+
+**Open, and deliberately not done here:**
+
+- Latin `VPN` appears in eleven split-tunnel strings where the mode
+  switch says «وی‌پی‌ان». A real inconsistency, but it reaches well
+  beyond gaming and wants one pass that can take all of it.
+- `GET /gaming/profiles` (admin) has no `where: { isActive }` and no
+  `take`, so it returns every column of every catalogue row — a superset
+  of the 374 KB customer payload, on a route the panel calls on page
+  load. Compressed now, still unpaginated.
+- Across the backend: 66 `findMany` calls and 2 `take` clauses.
+- The seed's new hand-written-row validation was proven by mutation, not
+  by a real seed run. No database was reachable to run one.
+
+**Not proven, and it cannot be from here:** no entry in this catalogue
+has been checked against a running game. An entry means "we will route
+these executables if they are running", and the UI now says exactly that
+in both languages.
