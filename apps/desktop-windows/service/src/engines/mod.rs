@@ -334,6 +334,13 @@ impl Engines {
         self.split_tunnel.complaint()
     }
 
+    /// Where each selected application's traffic is leaving from. See
+    /// `SplitTunnel::exit_placements` for what this does and does not
+    /// claim.
+    pub fn exit_placements(&self) -> (Option<String>, Vec<neoconnect_ipc::AppPlacement>) {
+        self.split_tunnel.exit_placements()
+    }
+
     /// Proves the tunnel carries traffic, over the path selected apps
     /// use. See `SplitTunnel::probe` for why the app cannot check this
     /// for itself once Custom mode is on.

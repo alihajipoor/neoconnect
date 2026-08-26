@@ -12176,3 +12176,173 @@ reassures. Making the Persian reassuring fails it.
   `clean-base` with its CPU cap reset. The repair path in particular has
   never been timed end to end — 735s is derived from constants that a
   test checks, not from a stopwatch.
+
+---
+
+## 2026-08-26 — Per-game exits: the routing was the easy half, and it was not the blocker
+
+**Status:** in source, unproven on a machine
+**Branch:** `claude/per-game-exit`, off `main` at `c3dea0e`
+
+`gaming-ip-reputation.md` gap 6 says "one exit for all selected apps —
+**architectural**". I went to find out whether that word was earned. It
+is, and not for the reason the sentence implies.
+
+### The feasibility answer, because it is the useful part
+
+**The routing layer is not the blocker.** Every onward socket the relay
+creates is pinned through `proxy::TunnelInterface`, which is two atomics
+holding one interface index and one source address. Turning that into a
+table keyed by exit, with `Origin` carrying the key, is a few hundred
+mechanical lines. I did not write them, because there would be nothing
+to put in the table.
+
+**`Origin.upstream` is not the seam and is not a vestige.** It looked
+like a per-flow egress override waiting for a user. It is live — the DNS
+branch sets it — and it means "dial this address instead of the one the
+app asked for". That is the *destination*. The egress is chosen
+elsewhere. Anyone reaching for it as the multi-exit hook will spend a
+day finding that out.
+
+**The blocker is `session::Slot`, and everything under it.** `Slot` is a
+newtype over a single `Option<Active>` in a private module with no
+setter that empties it; the only way out is `Slot::end`, which takes the
+`SplitTunnel` by `&mut` and stops it, so that ending a session and
+stopping interception cannot become two operations. That shape exists
+because of the 2026-08-23 field bug. With two engines up, ending either
+tears down interception for both. Below it: fixed adapter, service and
+config-file names for all four engines; Xray's hardcoded
+`198.18.0.1/30`; one `PASSIVE_METRIC = 9999` so two passive defaults are
+an unresolved tie; a process-global `TUNNEL_DNS` mutex and a single
+`.`-namespace NRPT rule; a machine-wide IPv6 WFP block held as one
+`Option`; one WinDivert loop pinned to one `(index, address)` with one
+excluded node address; a janitor that kills by image name under
+`exe_dir`; and rival-VPN detection that would report our own second
+adapter as somebody else's VPN.
+
+And `claude/split-tunnel-rig-verification` already found **three of four
+engines could not activate inside their timeouts on a slow guest**.
+Concurrency makes that worse, not better.
+
+**When it is wanted, do not build two engines.** Build one Xray engine
+with several inbounds. `build_config_for` emits a single-element
+`outbounds` array; xray-core selects outbounds by routing rules keyed on
+`inboundTag`, which is the mechanism *already proven at the node* (the
+`ProtocolConfig.inboundTag` work, 11 of 12 relay routes confirmed by
+exit IP). Client side: N loopback SOCKS inbounds, each tagged to its own
+exit, and the relay dials the inbound instead of pinning to an adapter.
+Costs: Xray only — the other three protocols get one exit, which is a
+gap to state and not a protocol to drop — and the relay has to learn
+SOCKS5, which it does not speak.
+
+### What shipped instead
+
+Per-game exit *preference*. `SplitTunnelConfig` grew `exits` and
+`egress`; the customer names an exit per game, the client connects there
+on activation, and `Request::SplitTunnelExits` reports per application
+whether it landed on the exit that was asked for.
+
+### How it composes with the two leak fixes — the part worth reading
+
+**`decide` is unchanged.** Not adjusted, unchanged, and that is
+structural rather than lucky. `should_tunnel` and `destination_scope`
+both answer *whether* a packet is carried. An exit answers *where* an
+already-carried flow leaves from — it cannot narrow, widen, or flip a
+carry decision either way. One live egress means nothing to select
+between, so the packet path never asks. Neither leak fix can regress
+through a path that does not exist.
+
+Two things still had to be written down, because both are how the
+*next* version breaks them.
+
+**`preferred_exit` takes an `image_path`**, exactly as
+`destination_scope` does, and for the same reason. A packet with no
+owner has no application and so can never acquire a preference. The trap
+in the multi-exit version is to hand an unattributed datagram a *default
+exit* and send it there — and choosing where to send a packet means
+having already decided to carry it, which is the fire-and-forget leak
+(13 of 15 on one rig run, 14 on the next). **Exit selection must sit
+strictly downstream of the carry decision.** `Origin` is built only
+after `selected` is true; that is the correct attachment point for a
+future `Origin.exit`, and it is already where the code puts it.
+
+**`FlowKey` must not grow an exit component.** The leave-alone cache
+records "this flow is not carried", which is a fact about an application
+and a peer and is true whichever exit the session is on. Adding an exit
+would multiply what a chatty socket produces and push the table toward
+its overflow path for a distinction that does not exist. That key is now
+load-bearing for **three** features rather than two.
+
+### Fail-open on the new axis, in three places
+
+An `egress` matching no preference is not a validation error — refusing
+would reject the whole `SetSplitTunnel` and take the customer's app
+selection down with it, over a preference that is merely unsatisfiable
+right now, which is the ordinary case every time they connect somewhere
+else. An application whose exit is not live is carried on the live one.
+The mismatch is reported as `Fallback` naming what was asked for.
+
+### Four answers, and why `Unknown` is one of them
+
+`NoPreference | OnPreferred | Fallback | Unknown`. With no live session
+there is nothing to compare against: `OnPreferred` would claim a match
+nobody established and `Fallback` a mismatch nobody established.
+`exit_placements` reports an egress **only while a session is actually
+intercepting** — without that gate this is a status surface reporting a
+request as an observation, which is the "Connected" indicator bug in a
+new costume.
+
+### The bit the client half has to get right
+
+Ban-safety mechanism 3 is all-or-nothing per game: two games on two
+exits is fine, one game's launcher and client on two exits is the
+two-source-IP signature. Preferences are keyed on the executable, so a
+game whose launcher and client are separate binaries needs **both**
+pointed at the same exit. **The catalogue must emit them as a group.**
+That is the sharpest open item and it is not in this branch.
+
+Mechanism 5 is the argument *for* the feature: a restriction on a shared
+address hits every user of it and support cannot lift it, so spreading
+gaming traffic across exits shrinks the blast radius. Automatic
+selection from reputation data is deliberately absent — separate
+decision, separate evidence problem, and `AppExit`'s own note says so.
+
+### Gaps
+
+- **Nothing has run on a machine.** 328 Rust tests, 16/16 turbo. Unit
+  tests prove routing logic and nothing else. `docs/design/per-game-exits.md`
+  §7 has the rig procedure; every row asserts an exit IP matching the
+  chosen node, not a status string, and cases 6 and 7 must be run on an
+  unfixed build first — the unfixed build's own counters read `escaped=0`
+  straight through a leak of 25 datagrams.
+- **One honoured preference per session.** Two games wanting two exits
+  gets one `OnPreferred` and one `Fallback`. Reported, not hidden.
+- **`OnlySelected` only.** Under `AllExcept` the named apps are the
+  uncarried ones, so they have no egress to prefer — the same rule
+  `with_scopes` applies, for the same reason.
+- **Nothing here verifies the node.** The service reports which exit the
+  client *dialled*. Whether that is the address the far end sees is a
+  fact about the node.
+- **§5.5's `failClosed` is still unbuilt**, and §5.4 says a filter must
+  not change mid-session. The same applies to an exit: switching one
+  mid-session is an impossible-travel signature. Today an exit changes
+  only by reconnecting, which is a session boundary — but a future
+  "switch exit without dropping" feature reintroduces it.
+- **Open question for the owner:** does a subscription get more than one
+  exit at a time? Everything above works with the exits a customer
+  already has; the concurrent version needs the backend to issue
+  several, which is a commercial decision.
+
+Six mutations were applied and reverted to prove the tests discriminate
+— collapsing `Unknown` into `OnPreferred`, reporting a mismatch as
+satisfied, letting exits weaken the unattributed-UDP refusal, dropping
+the live-session gate, re-keying the leave-alone cache on the source
+port, and keeping preferences under `AllExcept`. Each went red in the
+right places, and the cache mutation took five pre-existing tests down
+with mine, which is the shape you want.
+
+**Gotcha for the next session:** `pnpm turbo run lint typecheck build
+test --force` failed two backend auth tests on the first run and passed
+all 477 on the second, with nothing changed between them. Sixteen tasks
+under contention; treat a lone backend test failure as a flake to be
+re-run before it is investigated.

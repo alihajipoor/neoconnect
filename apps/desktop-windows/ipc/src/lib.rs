@@ -107,6 +107,22 @@ pub enum Request {
     /// correctly leaves by the ordinary route and correctly reports the
     /// tunnel as bypassed.
     ProbeSplitTunnel,
+    /// Where each selected application's traffic is actually leaving
+    /// from, against where the customer asked for it to leave from.
+    ///
+    /// Its own request rather than another field on `Status`, for two
+    /// reasons. The status poll runs continuously and this answer costs
+    /// a walk of the selection; and the two questions have different
+    /// shapes -- `Status` reports facts about one tunnel, this reports
+    /// one fact per application, and folding a list into that response
+    /// would make every poll carry it.
+    ///
+    /// Answered by the service because the app cannot answer it
+    /// honestly. The app knows which exit it *asked* for; only the
+    /// service knows whether a session is intercepting at all, and
+    /// "what I requested" reported as "where your game is" is the
+    /// class of claim this product does not make.
+    SplitTunnelExits,
     /// The applications running right now, for choosing from a list
     /// instead of hunting through Program Files.
     ///
@@ -592,6 +608,135 @@ pub struct SplitTunnelConfig {
     /// much of it.
     #[serde(default)]
     pub scopes: Vec<AppScope>,
+    /// Which exit each application's traffic should leave from, for the
+    /// applications the customer has an opinion about.
+    ///
+    /// A *preference*, not an instruction the service can always
+    /// honour. One session carries one tunnel and therefore has one
+    /// egress -- see `docs/design/per-game-exits.md` for why two at
+    /// once is an engine-layer change and not a routing one -- so an
+    /// application whose preferred exit is not the live one is carried
+    /// on the live one anyway, and reported as such. A game that keeps
+    /// working from the wrong address beats a game that stops.
+    ///
+    /// Additive on exactly the terms `scopes` is: an older app sends
+    /// none and gets what it had, and a newer app talking to an older
+    /// service has these ignored and gets the same. Neither direction
+    /// changes what is carried -- only what the customer can be told
+    /// about where it goes.
+    #[serde(default)]
+    pub exits: Vec<AppExit>,
+    /// The exit the tunnel about to carry this traffic actually leaves
+    /// from, named by the same identifiers [`AppExit::exit`] uses.
+    ///
+    /// # Why the client supplies it
+    ///
+    /// The service knows which adapter is up and which address is on
+    /// it. It does not know, and cannot work out, which *node* the
+    /// far end of that tunnel egresses from -- and on a relayed route
+    /// the two are different machines. The client dialled the route
+    /// and is the only side that holds that fact.
+    ///
+    /// # Why it must name the egress and not the entry
+    ///
+    /// A relayed route presents the **exit** node's address to whatever
+    /// the customer connects to; the relay's address is never seen by
+    /// the far end. An identifier taken from the entry would therefore
+    /// be silently wrong for precisely the routes where the customer's
+    /// choice of exit matters most.
+    ///
+    /// # Why it lives here
+    ///
+    /// Because `SetSplitTunnel` is re-sent on every connect, and
+    /// because this and `exits` are two halves of one comparison. The
+    /// same argument `SplitTunnel::set_selection` already makes for
+    /// taking the whole config rather than its fields: values that
+    /// have to agree should not travel separately.
+    ///
+    /// `None` means the client did not say. That is reported as an
+    /// unknown placement, never as a match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<String>,
+}
+
+/// The exit one selected application's traffic should leave from.
+///
+/// # Why an opaque identifier
+///
+/// The service never resolves this to an address, a node or a route.
+/// It compares it, by equality, against the egress the client named for
+/// the live tunnel -- and that is the whole of what it does with it.
+/// Keeping it opaque is what stops the service from acquiring an
+/// opinion about which exits exist, which is the backend's fact and
+/// changes without the service being told.
+///
+/// It also keeps a node address out of this protocol. The identifier
+/// the backend chooses is a name, not a location.
+///
+/// # Why this is not automatic
+///
+/// `docs/design/ban-safety.md` records that a publisher restriction on
+/// a shared address hits every user of it and support cannot lift it,
+/// which is an argument for spreading gaming traffic across exits
+/// rather than concentrating it on whichever one is currently clean.
+/// That argument says the customer should be able to choose. It does
+/// **not** say the service should choose for them: selecting an exit
+/// from reputation data is a separate decision with its own evidence
+/// problem, and nothing here does it.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppExit {
+    /// The executable this applies to, spelled exactly as it appears in
+    /// [`SplitTunnelConfig::apps`]. A preference naming an application
+    /// that is not selected is dropped rather than refused: it
+    /// describes no traffic, so there is nothing to get wrong.
+    pub app: String,
+    /// The exit's identifier, as the backend spells it.
+    pub exit: String,
+}
+
+/// Where one selected application's traffic is leaving from, against
+/// where the customer asked for it to leave from.
+///
+/// Four answers rather than a boolean, and the discipline is the same
+/// one [`AppScope`]'s `Scoped` follows: every fact that is genuinely
+/// different gets its own answer, because collapsing two of them is
+/// how a status surface starts lying.
+///
+/// In particular [`Self::Unknown`] must not be folded into either of
+/// its neighbours. Reporting it as `OnPreferred` claims a match that
+/// was never established, and reporting it as `Fallback` claims a
+/// mismatch that was never established. Neither is a thing this
+/// product says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "placement", rename_all = "camelCase")]
+pub enum ExitPlacement {
+    /// The customer named no exit for this application. It is carried
+    /// on whatever the session's exit is, which is what every
+    /// application did before this existed.
+    NoPreference,
+    /// The customer's choice and the live egress are the same.
+    OnPreferred,
+    /// The customer asked for one exit and the session leaves from
+    /// another. The application is **still carried** -- this is the
+    /// fail-open answer, not a refusal -- and the customer is told
+    /// which exit they asked for so the app can offer to reconnect
+    /// there.
+    Fallback { preferred: String },
+    /// A preference exists and there is nothing to compare it against:
+    /// no session is intercepting, or the client named no egress for
+    /// the one that is.
+    Unknown { preferred: String },
+}
+
+/// One application's answer, for the list [`Request::SplitTunnelExits`]
+/// returns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPlacement {
+    pub app: String,
+    #[serde(flatten)]
+    pub placement: ExitPlacement,
 }
 
 /// The destinations one selected application's traffic is narrowed to.
@@ -666,6 +811,14 @@ pub const MAX_SCOPE_PREFIXES: usize = 512;
 /// produce, and the shape of the message is the one thing the service
 /// does hold a sender to.
 const MAX_PREFIX_LEN: usize = 64;
+
+/// The longest an exit identifier may be.
+///
+/// The service only ever compares these for equality, so the bound is
+/// about what arrives over IPC and is held by a LocalSystem service,
+/// not about what a name can express. Generous for anything the
+/// backend would call a node.
+const MAX_EXIT_ID_LEN: usize = 64;
 
 impl SplitTunnelConfig {
     /// Checks the selection before the service acts on it.
@@ -742,6 +895,51 @@ impl SplitTunnelConfig {
                 if destination.chars().any(|c| c.is_control()) {
                     return Err(reject("scopes", "contains control characters"));
                 }
+            }
+        }
+
+        // The same split as `scopes` above, and it lands differently
+        // because an exit identifier is opaque.
+        //
+        // Shape is refused here: a name longer than any node has, or
+        // one with a control character in it, is a message this client
+        // cannot produce, so refusing it says a sender is broken.
+        //
+        // *Meaning* is not checked at all, and cannot be. The service
+        // holds no list of exits -- which ones exist is the backend's
+        // fact and changes without the service being told -- so there
+        // is no such thing here as an identifier that is well-formed
+        // and wrong. An exit that is not the live one is not an error;
+        // it is `ExitPlacement::Fallback`, decided later, with the
+        // application's traffic carried either way.
+        if self.exits.len() > MAX_SELECTED_APPS {
+            return Err(reject("exits", "names more applications than can be selected"));
+        }
+        for exit in &self.exits {
+            // Not held to the `.exe`/absolute rules `apps` is held to,
+            // for the reason `scopes` is not: an entry naming an
+            // application that was not selected is dropped rather than
+            // refused, so no reading of a wrong path here can change
+            // what is carried.
+            if exit.app.is_empty() || exit.app.len() > 32_767 {
+                return Err(reject("exits", "names no application"));
+            }
+            if exit.app.chars().any(|c| c.is_control()) {
+                return Err(reject("exits", "contains control characters"));
+            }
+            if exit.exit.is_empty() || exit.exit.len() > MAX_EXIT_ID_LEN {
+                return Err(reject("exits", "names no exit"));
+            }
+            if exit.exit.chars().any(|c| c.is_control()) {
+                return Err(reject("exits", "contains control characters"));
+            }
+        }
+        if let Some(egress) = &self.egress {
+            if egress.is_empty() || egress.len() > MAX_EXIT_ID_LEN {
+                return Err(reject("egress", "names no exit"));
+            }
+            if egress.chars().any(|c| c.is_control()) {
+                return Err(reject("egress", "contains control characters"));
             }
         }
         Ok(())
@@ -835,6 +1033,24 @@ pub enum Response {
         /// claim. See `engines::dns::TunnelDns`.
         #[serde(default)]
         tunnel_dns_unprotected: bool,
+    },
+    /// Where each selected application's traffic is leaving from.
+    ///
+    /// One entry per selected application, including the ones the
+    /// customer expressed no preference for -- so the app renders the
+    /// whole list from this answer alone and never has to fill a gap
+    /// from what it remembers asking for.
+    ExitPlacements {
+        /// The exit this session actually leaves from, as the client
+        /// named it on `SetSplitTunnel`.
+        ///
+        /// `None` when nothing is intercepting, or when the client
+        /// named none. Deliberately not remembered across a session:
+        /// an egress asserted while no session is carrying traffic is
+        /// a claim about a tunnel that is not there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        egress: Option<String>,
+        apps: Vec<AppPlacement>,
     },
     /// What the repair found and what it did about it.
     ///
@@ -1917,5 +2133,115 @@ mod split_tunnel_mode_tests {
         let legacy: SplitTunnelConfig =
             serde_json::from_str(r#"{"enabled":true,"apps":[]}"#).unwrap();
         assert_eq!(legacy.mode, SplitTunnelMode::OnlySelected);
+    }
+}
+
+#[cfg(test)]
+mod app_exit_tests {
+    use super::*;
+
+    fn config(edit: impl FnOnce(&mut SplitTunnelConfig)) -> SplitTunnelConfig {
+        let mut c = SplitTunnelConfig {
+            enabled: true,
+            mode: SplitTunnelMode::OnlySelected,
+            apps: vec![r"C:\Games\game.exe".to_string()],
+            scopes: Vec::new(),
+            exits: vec![AppExit {
+                app: r"C:\Games\game.exe".to_string(),
+                exit: "germany-1".to_string(),
+            }],
+            egress: Some("germany-1".to_string()),
+        };
+        edit(&mut c);
+        c
+    }
+
+    #[test]
+    fn a_well_formed_preference_is_accepted() {
+        assert!(config(|_| {}).validate().is_ok());
+    }
+
+    /// An older app sends neither `exits` nor `egress` and must still
+    /// parse into the behaviour it was written against: one tunnel, one
+    /// exit, nobody with a preference.
+    #[test]
+    fn an_older_app_that_omits_exits_still_parses() {
+        let parsed: SplitTunnelConfig = serde_json::from_str(
+            r#"{"enabled":true,"apps":["C:\\Games\\game.exe"],"mode":"onlySelected","scopes":[]}"#,
+        )
+        .expect("the new fields must default");
+        assert!(parsed.exits.is_empty());
+        assert!(parsed.egress.is_none());
+        assert!(parsed.validate().is_ok());
+    }
+
+    /// The other direction of the skew: a newer app sends `exits` to an
+    /// older service, whose `SplitTunnelConfig` has no such field. Serde
+    /// ignores unknown fields by default, so the older service reads the
+    /// selection it understands and carries every app on its one exit --
+    /// which is a narrowing of what the customer asked for, never a
+    /// change to what is carried.
+    #[test]
+    fn a_newer_app_talking_to_an_older_service_is_uneventful() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OlderConfig {
+            enabled: bool,
+            apps: Vec<String>,
+        }
+        let wire = serde_json::to_string(&config(|_| {})).expect("serialises");
+        let older: OlderConfig =
+            serde_json::from_str(&wire).expect("an older service must still parse this");
+        assert!(older.enabled);
+        assert_eq!(older.apps.len(), 1);
+    }
+
+    #[test]
+    fn refuses_a_preference_whose_shape_this_client_could_not_produce() {
+        // Shape is refused; meaning is not checked at all. See the
+        // validation's own note for why an exit identifier has no
+        // "well-formed but wrong" case.
+        assert!(config(|c| c.exits[0].exit = String::new()).validate().is_err());
+        assert!(config(|c| c.exits[0].exit = "a".repeat(MAX_EXIT_ID_LEN + 1))
+            .validate()
+            .is_err());
+        assert!(config(|c| c.exits[0].exit = "germany\n1".into()).validate().is_err());
+        assert!(config(|c| c.exits[0].app = String::new()).validate().is_err());
+        assert!(config(|c| c.egress = Some(String::new())).validate().is_err());
+        assert!(config(|c| c.egress = Some("germany\u{7}1".into())).validate().is_err());
+        assert!(config(|c| c.exits = (0..MAX_SELECTED_APPS + 1)
+            .map(|i| AppExit { app: format!(r"C:\g{i}.exe"), exit: "e".into() })
+            .collect())
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn an_exit_that_is_not_the_live_one_is_not_a_validation_error() {
+        // The fail-open rule, at the earliest point it could be broken.
+        // Refusing here would reject the whole `SetSplitTunnel` request
+        // and take the customer's app selection down with it -- over a
+        // preference that is merely unsatisfiable right now, which is
+        // the ordinary case every time they connect somewhere else.
+        assert!(config(|c| c.egress = Some("finland-1".into())).validate().is_ok());
+    }
+
+    #[test]
+    fn a_placement_keeps_its_four_answers_apart_on_the_wire() {
+        // The tag is what the app branches on, so the four must not
+        // collapse into each other in JSON either.
+        let round = |p: ExitPlacement| {
+            let text = serde_json::to_string(&p).expect("serialises");
+            let back: ExitPlacement = serde_json::from_str(&text).expect("round-trips");
+            assert_eq!(back, p);
+            text
+        };
+        assert!(round(ExitPlacement::NoPreference).contains("noPreference"));
+        assert!(round(ExitPlacement::OnPreferred).contains("onPreferred"));
+        let fallback = round(ExitPlacement::Fallback { preferred: "turkey-1".into() });
+        assert!(fallback.contains("fallback") && fallback.contains("turkey-1"));
+        let unknown = round(ExitPlacement::Unknown { preferred: "turkey-1".into() });
+        assert!(unknown.contains("unknown"));
+        assert_ne!(fallback, unknown, "unknown must not be spelled as a mismatch");
     }
 }

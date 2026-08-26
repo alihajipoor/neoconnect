@@ -562,6 +562,14 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                 Err(message) => Response::Error { message },
             }
         }
+        // Reads the selection and one field beside it; touches nothing
+        // and starts nothing, so it does not call `begin_operation` the
+        // way the probe above does.
+        Request::SplitTunnelExits => {
+            let engines = engines.lock().await;
+            let (egress, apps) = engines.exit_placements();
+            Response::ExitPlacements { egress, apps }
+        }
         Request::SetSplitTunnel { config } => match config.validate() {
             // The result matters now: turning Custom mode on or off
             // rebuilds the live tunnel, and a rebuild that fails must
