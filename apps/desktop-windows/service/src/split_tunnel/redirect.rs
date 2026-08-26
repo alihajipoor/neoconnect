@@ -4036,4 +4036,167 @@ mod tests {
         });
         super::super::divert::compile_filter(&filter).expect("the filter must compile");
     }
+
+    /// The half of "select a game that is already running" that already
+    /// worked, pinned so it keeps working.
+    ///
+    /// A SYN deliberately skips the leave-alone cache, so a verdict
+    /// recorded against this port while the program was unselected
+    /// cannot answer for a connection opened after the customer chose
+    /// it. Without this test the UDP fix below would look like the only
+    /// thing carrying a running app's traffic, and a regression here
+    /// would hide behind it.
+    #[test]
+    fn a_new_tcp_connection_from_a_process_that_predates_its_selection_is_carried() {
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+
+        // Before selection: this program is not chosen, so a packet of
+        // its live connection is left alone and that verdict is cached.
+        let unselected =
+            Selection::new([r"C:\Games\other.exe".to_string()], SplitTunnelMode::OnlySelected);
+        let mid = tcp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            443,
+            TCP_FLAG_ACK,
+        );
+        let parsed = parse(&mid).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &unselected, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct,
+            "the control: an unselected program's mid-connection packet is left alone"
+        );
+
+        // The customer now selects it, without restarting it, and it
+        // opens a new connection from the same port.
+        let selected = Selection::new([me], SplitTunnelMode::OnlySelected);
+        let syn = tcp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            443,
+            TCP_FLAG_SYN,
+        );
+        let parsed = parse(&syn).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selected, &mut owner, &redirect, 5, &stats);
+        assert!(
+            matches!(verdict, Verdict::Redirect { .. }),
+            "a connection opened after the app was selected must be carried even though the \
+             process predates the selection, got {verdict:?}"
+        );
+    }
+
+    /// The same question over UDP, which is where it was answered
+    /// wrongly.
+    ///
+    /// UDP has no SYN, so nothing tells `decide` that a datagram opens a
+    /// new flow -- the leave-alone cache is consulted for every one of
+    /// them. A verdict recorded against this exact flow while the app
+    /// was unselected therefore kept answering after the customer
+    /// selected it, for up to `DIRECT_VERDICT_TTL`. For a game already
+    /// talking to its server on a fixed 4-tuple that is the whole
+    /// conversation, and five seconds of a match is not nothing.
+    ///
+    /// Reverting `forget_direct` to a no-op fails this and passes the
+    /// two beside it, which is what makes it a test of the fix rather
+    /// than of the feature.
+    #[test]
+    fn selecting_a_running_app_takes_effect_on_its_next_datagram() {
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+
+        let unselected =
+            Selection::new([r"C:\Games\other.exe".to_string()], SplitTunnelMode::OnlySelected);
+        let datagram =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(203, 0, 113, 9), port, 8686);
+        let parsed = parse(&datagram).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &unselected, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct,
+            "the control: an unselected program's datagram is left alone, and cached"
+        );
+
+        // The customer selects the running game. This is everything
+        // `SplitTunnel::set_selection` does to the flow tables.
+        let selected = Selection::new([me], SplitTunnelMode::OnlySelected);
+        nat.forget_direct();
+
+        // The very next datagram: same socket, same peer, same 4-tuple.
+        let parsed = parse(&datagram).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selected, &mut owner, &redirect, 5, &stats);
+        assert!(
+            matches!(verdict, Verdict::Redirect { .. }),
+            "the datagram after the customer selected this app must be carried, not answered \
+             from a verdict recorded before they chose it, got {verdict:?}"
+        );
+    }
+
+    /// The constraint the fix above must not break.
+    ///
+    /// Clearing the leave-alone cache sends the next packet of every
+    /// flow back through `decide`, which is where an unattributable UDP
+    /// datagram meets `Selection::verdict_for_unattributed`. That
+    /// refusal is a shipped leak fix, confirmed against packet captures,
+    /// and it has to survive a selection change: "the customer clicked
+    /// something" must never become a route by which a datagram nobody
+    /// can attribute gets carried.
+    ///
+    /// It survives by construction -- `decide` calls `record_direct`
+    /// only when the owner is known, so the cache never held an
+    /// unattributed verdict and clearing it cannot release one -- but
+    /// "by construction" is exactly what this file has repeatedly turned
+    /// out to be wrong about, so it is asserted instead.
+    #[test]
+    fn clearing_the_cache_on_a_selection_change_does_not_carry_an_unattributed_datagram() {
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection =
+            Selection::new([r"C:\Games\game.exe".to_string()], SplitTunnelMode::OnlySelected);
+
+        let port = dead_udp_port(&mut owner);
+        let datagram =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(203, 0, 113, 9), port, 8686);
+        let parsed = parse(&datagram).expect("a well-formed packet");
+
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Drop,
+            "an unattributable datagram to a public address is refused"
+        );
+        let refused_before = stats.refused_unattributed.load(Ordering::Relaxed);
+        assert!(
+            refused_before > 0,
+            "the row that had to be non-zero: this datagram was actually refused"
+        );
+
+        // A selection change, with everything it now does to the tables.
+        nat.forget_direct();
+
+        let parsed = parse(&datagram).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Drop,
+            "a selection change must not turn a refused datagram into a carried one"
+        );
+        assert!(
+            stats.refused_unattributed.load(Ordering::Relaxed) > refused_before,
+            "the refusal must still be counted after the cache was cleared"
+        );
+    }
 }

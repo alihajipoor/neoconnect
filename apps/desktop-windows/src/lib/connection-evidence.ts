@@ -89,6 +89,20 @@ export type VpnStatus = {
    * machine's lookups alone, and a session that succeeded is `false`
    * too. It is a complaint channel, not a green light. */
   tunnelDnsUnprotected?: boolean;
+  /** Applications the customer selected while they were already open,
+   * as bare file names.
+   *
+   * Custom mode routes what a program connects to *after* it is
+   * selected. Connections it already held cannot be moved -- a live TCP
+   * connection is a socket to the real destination -- so this is the
+   * list the UI turns into "close it and open it again".
+   *
+   * Facts, not a sentence: the wording is in `i18n.tsx` in both
+   * languages, because the customers this feature exists for read
+   * Persian.
+   *
+   * Empty, or absent from an older service, means nothing to say. */
+  splitTunnelRestartNeeded?: string[];
   health:
     | { state: "alive"; age_secs: number }
     | { state: "stale"; age_secs: number }

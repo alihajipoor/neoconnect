@@ -395,7 +395,7 @@ export function Dashboard({
   onBrowsePlans: () => void;
   onOpenSettings: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [me, setMe] = useState<Customer | null>(null);
@@ -507,6 +507,10 @@ export function Dashboard({
   // engine tried. `false` is "nothing was reported", not "DNS is
   // protected" -- see VpnStatus.tunnelDnsUnprotected.
   const [tunnelDnsUnprotected, setTunnelDnsUnprotected] = useState(false);
+  // Applications the customer selected while they were already open.
+  // Named rather than counted, because someone with six things selected
+  // has to know which one to close -- see VpnStatus.splitTunnelRestartNeeded.
+  const [restartNeeded, setRestartNeeded] = useState<string[]>([]);
   /** VPN mode or gaming mode.
    *
    * Read before anything else on the screen, because it changes what
@@ -622,6 +626,7 @@ export function Dashboard({
     setSplitTunnelActive(Boolean(status.splitTunnelActive));
     setSplitTunnelProblem(status.splitTunnelProblem ?? null);
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
+    setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
     setIpv6Blocked(Boolean(status.ipv6Blocked));
     return stateFromStatus(status);
   }
@@ -988,6 +993,7 @@ export function Dashboard({
         setSplitTunnelActive(Boolean(status.splitTunnelActive));
         setSplitTunnelProblem(status.splitTunnelProblem ?? null);
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
+    setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
         setIpv6Blocked(Boolean(status.ipv6Blocked));
         fromStatus = stateFromStatus(status);
         statusMissesRef.current = 0;
@@ -2090,6 +2096,20 @@ export function Dashboard({
                           instead. */}
                       {isTunnelUp(connectionState) && tunnelDnsUnprotected ? (
                         <p className="mt-1 text-xs text-destructive">{t("dash.tunnelDnsUnforced")}</p>
+                      ) : null}
+
+                      {/* Not an error, and deliberately not styled as
+                          one: nothing has gone wrong, the customer has
+                          simply got less than they would assume from
+                          silence. The list is the service's -- the app
+                          does not decide what is running -- and the
+                          sentence around it is local, so it arrives in
+                          the customer's own language rather than as
+                          English prose over the pipe. */}
+                      {restartNeeded.length > 0 ? (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {t("dash.splitTunnelRestartNeeded", { apps: restartNeeded.join(language === "fa" ? "، " : ", ") })}
+                        </p>
                       ) : null}
                     </div>
 

@@ -31,8 +31,12 @@
 //! would not be acceptable if any part of the config were caller-supplied
 //! text.
 
-use std::ffi::OsStr;
+use std::ffi::{c_void, OsStr};
+use std::path::Path;
 use std::process::Child;
+
+use windows_sys::Win32::Foundation::FreeLibrary;
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use neoconnect_ipc::OpenvpnProfile;
 
@@ -152,8 +156,56 @@ fn ensure_adapter(engines: &Engines) -> Result<(), String> {
         return Ok(());
     }
 
+    match create_adapter(engines, &tapctl) {
+        Ok(()) => Ok(()),
+        // The one failure worth a second attempt, and the reason is a
+        // driver that is not there rather than a call that was too slow.
+        //
+        // `tapctl create --hwid wintun` asks the PnP subsystem for a
+        // device whose driver is in the driver store. On a machine that
+        // has never run a Wintun-based VPN, nothing has put it there --
+        // and tapctl does not install it. It fails with `DiInstallDevice
+        // failed, error 0xe0000203` and prints nothing, which this
+        // function has always reported as "tapctl returned nothing".
+        //
+        // Measured on a clean Windows 11 guest against `main`: the
+        // failure arrives in **6.7 seconds**. That is the whole point.
+        // [`ADAPTER_CREATE_BUDGET`] is sixty, so no budget was ever
+        // reached and no budget could ever have helped -- this is an
+        // error returned promptly, not a slow call being cut off. It
+        // looked like the same first-run timeout the other engines had
+        // because it appeared in the same run and on the same kind of
+        // machine, and it is not.
+        //
+        // What made it invisible: Xray's `wintun.dll` installs the
+        // driver on first use, so the moment a customer connects with
+        // REALITY once, OpenVPN works for ever after. Every developer
+        // machine, and every rig guest that had run Xray, was in that
+        // state. The rig runs that measured the budgets above put
+        // `reality` before `ovpn` deliberately to get past this, which
+        // recorded the dependency without removing it -- and nothing in
+        // the product enforces that order, because a customer picks a
+        // protocol, not an installation sequence. A customer whose
+        // network only passes OpenVPN never runs Xray at all.
+        Err(e) if looks_like_a_missing_driver(&e) => {
+            install_wintun_driver(engines)
+                // The original failure, not this one. If the driver
+                // could not be installed then the connect failed for the
+                // reason it first said it did, and replacing that with a
+                // message about a DLL would send whoever reads it after
+                // the wrong thing.
+                .map_err(|why| format!("{e} (and the Wintun driver could not be installed: {why})"))?;
+            create_adapter(engines, &tapctl)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// One `tapctl create`, with the budget and the empty-output check.
+fn create_adapter(engines: &Engines, tapctl: &Path) -> Result<(), String> {
+    let _ = engines;
     let created = run_hidden_capture_within(
-        &tapctl,
+        tapctl,
         &[
             OsStr::new("create"),
             OsStr::new("--hwid"),
@@ -173,6 +225,120 @@ fn ensure_adapter(engines: &Engines) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Whether a `tapctl create` failure is the one a driver install fixes.
+///
+/// Deliberately narrow. The retry below installs a network driver, which
+/// is not something to do speculatively on every failure -- a budget
+/// overrun, a refusal, or a name collision are all real failures that a
+/// driver install would not touch and would only delay.
+///
+/// Two shapes qualify, and they are the same event seen from two sides:
+/// tapctl printing nothing (what this function's caller turns into
+/// "returned nothing"), and the SetupAPI code itself if it ever reaches
+/// us. `0xe0000203` is `ERROR_NO_DRIVER_SELECTED` -- PnP looked for a
+/// driver for the `wintun` hardware id and there was not one.
+fn looks_like_a_missing_driver(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("returned nothing") || m.contains("0xe0000203") || m.contains("no driver")
+}
+
+/// Puts the Wintun driver in the driver store, by asking the Wintun DLL
+/// we already ship to create an adapter and then closing it.
+///
+/// # Why this, rather than installing a driver package
+///
+/// `wintun.dll` carries the driver inside it and installs it on first
+/// use -- that is how Xray gets one without the installer ever shipping
+/// an `.inf`. So the driver is already on the customer's disk; nothing
+/// here downloads or adds anything the product did not already have. All
+/// this does is trigger the same install Xray would have triggered, at
+/// the moment OpenVPN needs it instead of whenever the customer happens
+/// to choose REALITY.
+///
+/// The adapter created here is a throwaway with its own name, closed
+/// immediately. It is deliberately **not** `ADAPTER_NAME`: OpenVPN's
+/// adapter is created by `tapctl` and left in place between sessions,
+/// and two different mechanisms creating a device with one name is how
+/// you get an orphan that neither of them will clean up.
+///
+/// # The FFI
+///
+/// Two functions, both taking and returning pointers and integers.
+/// There is no struct in this interface, which is the whole reason it is
+/// safe to bind by hand -- `ras.rs` is this project's scar from a packed
+/// struct whose wrong layout matched on size and corrupted memory
+/// anyway, and none of that risk is present here.
+fn install_wintun_driver(engines: &Engines) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let dll = engines.engine_path("wintun.dll")?;
+
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    type CreateAdapter = unsafe extern "system" fn(*const u16, *const u16, *const u8) -> *mut c_void;
+    type CloseAdapter = unsafe extern "system" fn(*mut c_void);
+
+    let dll_wide = wide(dll.as_os_str());
+    // SAFETY: `dll_wide` is a NUL-terminated wide string that outlives
+    // the call. A failure returns null and is checked.
+    let module = unsafe { LoadLibraryW(dll_wide.as_ptr()) };
+    if module.is_null() {
+        return Err(format!(
+            "could not load {} ({})",
+            dll.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // SAFETY: `module` is a live module handle and both names are
+    // NUL-terminated. A missing export returns null and is checked
+    // before it is transmuted to a function pointer.
+    let create = unsafe { GetProcAddress(module, c"WintunCreateAdapter".as_ptr() as *const u8) };
+    let close = unsafe { GetProcAddress(module, c"WintunCloseAdapter".as_ptr() as *const u8) };
+    let (Some(create), Some(close)) = (create, close) else {
+        // SAFETY: `module` came from LoadLibraryW and is not used again.
+        unsafe { FreeLibrary(module) };
+        return Err("wintun.dll does not export the adapter functions".into());
+    };
+    // SAFETY: these are the documented signatures of the two exports,
+    // neither of which passes a struct by value.
+    let create: CreateAdapter = unsafe { std::mem::transmute(create) };
+    // SAFETY: as above.
+    let close: CloseAdapter = unsafe { std::mem::transmute(close) };
+
+    let name = wide(std::ffi::OsStr::new(DRIVER_INSTALL_ADAPTER));
+    let kind = wide(std::ffi::OsStr::new("Neoxify"));
+    // SAFETY: both strings are NUL-terminated and outlive the call; a
+    // null GUID asks Wintun to choose one, which is what we want for a
+    // device that exists for a few milliseconds.
+    let adapter = unsafe { create(name.as_ptr(), kind.as_ptr(), std::ptr::null()) };
+    let outcome = if adapter.is_null() {
+        Err(format!("Wintun would not create an adapter ({})", std::io::Error::last_os_error()))
+    } else {
+        // SAFETY: `adapter` is a live handle from `create` and is not
+        // used again. Closing it removes the device; the driver it
+        // installed on the way stays in the driver store, which is the
+        // entire purpose of this function.
+        unsafe { close(adapter) };
+        Ok(())
+    };
+
+    // SAFETY: `module` came from LoadLibraryW and nothing above holds a
+    // pointer into it past this point -- the two function pointers are
+    // not used again.
+    unsafe { FreeLibrary(module) };
+    outcome
+}
+
+/// The name of the throwaway adapter created only to install the driver.
+///
+/// Distinct from [`ADAPTER_NAME`] and from Xray's `neoconnect0`, so that
+/// a device this function fails to close cannot be mistaken for -- or
+/// collide with -- an adapter either engine actually uses.
+const DRIVER_INSTALL_ADAPTER: &str = "Neoxify-DriverSetup";
 
 /// Removes the Wintun adapter this engine attaches to.
 ///
@@ -529,6 +695,59 @@ mod tests {
     #[test]
     fn uses_the_shared_wintun_driver() {
         assert!(build_config(&profile(), false).unwrap().contains("windows-driver wintun"));
+    }
+
+    /// The failure that earns a driver install, and the ones that do not.
+    ///
+    /// Measured on a clean Windows 11 guest against `main`: OpenVPN as
+    /// the **first** protocol on a machine with no Wintun driver failed
+    /// in 6.7s with exactly the message asserted below, while the same
+    /// call on the same guest minutes later -- after Xray had installed
+    /// the driver -- connected in 11.8s with an exit IP at the node.
+    ///
+    /// The negative half is the half that matters. Installing a network
+    /// driver is not a reasonable response to any failure that is not
+    /// this one: a budget overrun means the machine is slow, a name
+    /// collision means the adapter is already there, and a refusal means
+    /// something else is wrong. Retrying those behind a driver install
+    /// would turn one clear failure into a slower, stranger one.
+    #[test]
+    fn only_a_missing_driver_earns_a_second_attempt() {
+        assert!(
+            looks_like_a_missing_driver(
+                "could not create the OpenVPN network adapter (tapctl returned nothing)"
+            ),
+            "the message the rig actually produced has to be recognised"
+        );
+        assert!(
+            looks_like_a_missing_driver("DiInstallDevice failed, error 0xe0000203"),
+            "SetupAPI's own code for 'no driver selected', if it ever reaches us"
+        );
+
+        // The control rows: real failures that a driver install cannot
+        // help, and must not be retried behind one.
+        for other in [
+            "could not create the OpenVPN network adapter: timed out after 60s",
+            "could not create the OpenVPN network adapter: access is denied",
+            "could not list network adapters: the system cannot find the file specified",
+        ] {
+            assert!(
+                !looks_like_a_missing_driver(other),
+                "{other:?} must not trigger a driver install"
+            );
+        }
+    }
+
+    /// The throwaway adapter must not share a name with anything real.
+    ///
+    /// Two mechanisms creating a device with one name is how an orphan
+    /// appears that neither of them will clean up -- and this product
+    /// has already shipped a leftover adapter a customer could only
+    /// remove by hand.
+    #[test]
+    fn the_driver_install_adapter_collides_with_nothing() {
+        assert_ne!(DRIVER_INSTALL_ADAPTER, ADAPTER_NAME);
+        assert_ne!(DRIVER_INSTALL_ADAPTER, "neoconnect0");
     }
 
     #[test]
