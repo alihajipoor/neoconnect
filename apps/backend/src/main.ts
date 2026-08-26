@@ -3,6 +3,7 @@ import { NestFactory } from "@nestjs/core";
 import { ValidationPipe } from "@nestjs/common";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
+import compression from "compression";
 import { AppModule } from "./app.module";
 
 // Prisma returns BigInt for our byte-counter columns (dataCapBytes,
@@ -48,6 +49,38 @@ async function bootstrap() {
   // infra/docker-compose.prod.yml, so nginx is the only way in and the hop
   // count is always exactly one.
   app.set("trust proxy", 1);
+
+  // gzip, because the largest thing this API serves is the game catalogue
+  // and a large share of these customers are on censored Iranian networks
+  // where bandwidth is the scarcest thing they have. Measured on the
+  // catalogue payload: 374 KB raw, 52 KB gzipped -- a 7x reduction that
+  // was sitting unclaimed on exactly the connections that could least
+  // afford to pay for it.
+  //
+  // It belongs here rather than in nginx. There is no nginx config in this
+  // repository at all -- infra/docker-compose.prod.yml publishes the
+  // backend on 127.0.0.1:4000 and the proxy in front of it is configured
+  // on the host by hand -- so a compression rule written there would not
+  // survive a rebuild and could not be reviewed. In the app it ships with
+  // the code, and it is what a fresh install gets.
+  //
+  // threshold: anything smaller than this costs more in CPU and in the
+  // Content-Encoding round trip than it saves. 1 KB is the library
+  // default and is the right call for an API whose small responses are
+  // mostly a few hundred bytes of JSON.
+  //
+  // filter: the default already declines anything marked
+  // Content-Encoding, and honours `x-no-compression`. It is kept rather
+  // than replaced because the one thing that must NOT be compressed here
+  // is the brand logo endpoint (modules/brand/logo.ts), which serves
+  // already-compressed PNG bytes -- and compression's default filter
+  // declines image/png on its own via mime-db's compressible flag.
+  //
+  // No BREACH concern in the sense that usually stops people: this API is
+  // token-authenticated with a bearer header, not cookie-authenticated,
+  // so there is no secret automatically attached to a cross-site request
+  // for an attacker to compress alongside chosen plaintext.
+  app.use(compression({ threshold: 1024 }));
 
   app.useGlobalPipes(
     new ValidationPipe({
