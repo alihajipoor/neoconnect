@@ -1088,6 +1088,29 @@ pub enum Response {
         /// packet vanished. One did, for a tester, for three sessions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         split_tunnel_problem: Option<String>,
+        /// Applications the customer selected while they were already
+        /// running, and which are still running, as bare file names.
+        ///
+        /// Custom mode routes the connections a program makes *after* it
+        /// is selected. The ones it already had cannot be moved -- a
+        /// live TCP connection is a socket to the real destination, and
+        /// rewriting half of one is not a redirect -- so a customer who
+        /// selects a game that is already open gets part of what they
+        /// asked for and no indication of which part. Silence there is
+        /// the app making a claim it has not verified, which is the
+        /// thing this product does not do.
+        ///
+        /// Names rather than a flag, because someone with six
+        /// applications selected has to know which one to restart. A
+        /// **fact**, not a sentence: the app renders it in the
+        /// customer's own language. `split_tunnel_problem` beside it
+        /// sends English prose and is a known gap; this field
+        /// deliberately does not widen it.
+        ///
+        /// Empty is the ordinary answer, including for everyone who
+        /// selected their game before opening it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        split_tunnel_restart_needed: Vec<String>,
         /// Whether this session is holding a machine-wide IPv6 block.
         ///
         /// Reported because the customer has to be told, and because it

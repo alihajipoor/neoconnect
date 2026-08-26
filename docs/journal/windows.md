@@ -12498,3 +12498,207 @@ anyone reports that mutation as "structurally impossible".
 
 342 Rust, 213 vitest, 491 jest, 16/16 turbo. Turbo passed on the first
 run this time; the two-flaky-auth-tests note above still stands.
+
+---
+
+## 2026-08-26 — the first-connect bug was two bugs, and only one of them was fixed
+
+**Status:** bug 1 confirmed on `main` and fixed, fix only partly proven; bug 2 fixed, rig proof not obtained
+**Touches:** `apps/desktop-windows/{ipc,service,src-tauri,src}/**`
+**Branch:** `claude/split-tunnel-running-process` (off `c3dea0e`)
+
+Addresses redacted per `docs/node-address-hygiene.md`.
+
+### Bug 1: the reported half is fixed, and a different half was hiding behind it
+
+The 0928 report was "on a fresh Windows 11 guest all three testable
+protocols failed to connect", with `xray.log` naming one cause: wintun
+installs itself on first use and is slower than the service waits. The
+engine work raised Xray's ceiling to 60s and OpenVPN's `tapctl` budget to
+60s, and proved three protocols connecting on a clean guest.
+
+**That fix holds.** Re-confirmed here on a guest restored to `clean-base`,
+freshly installed, service hash-checked on the running process: REALITY
+connected in 9.4s with an exit IP at the node. The reported bug is fixed,
+and it is now fixed twice.
+
+**But OpenVPN as the *first* protocol on a virgin machine still fails,
+and not for the reported reason.** The engine session's own runs put
+`reality` before `ovpn` deliberately — its entry says so, and calls the
+ordering "a workaround, not a fix". Nobody had asked what happens without
+the workaround. Asked:
+
+```
+  B  ovpn first, no wintun driver   error at  6.7s   exit IP: not the node
+  C  reality                        ok    at  9.4s   exit IP: the node
+  D  ovpn again, driver now present ok    at 11.8s   exit IP: the node
+```
+
+B and D are the same call, same machine, minutes apart; the only
+difference is whether the driver is in the store. B's message is
+`could not create the OpenVPN network adapter (tapctl returned nothing)`,
+which a customer reads as a broken build.
+
+**The number that settles the mechanism is 6.7 seconds.**
+`ADAPTER_CREATE_BUDGET` is sixty. No budget was reached, so no budget
+could ever have helped: this is an error returned promptly, not a slow
+call cut off. It resembled the timeout bug because it appeared in the
+same run on the same kind of machine, and it is a different first-run
+cost. **A failure that looks like a known one, in the same run as the
+known one, is the easiest kind to file under the wrong cause** — and this
+one had been, twice.
+
+Driver-store state was captured before and after every row, and it is
+what makes the rows mean anything: `NO` on the virgin machine, `NO` still
+after B failed, `YES` after C. `pnputil` names the installer:
+`wintun.inf`, WireGuard LLC, 0.14.0.0.
+
+### The fix, and exactly how far it is proven
+
+`ensure_adapter` now recognises that one failure and asks the Wintun DLL
+the installer already ships to create a throwaway adapter and close it —
+which installs the driver — then retries `tapctl`.
+
+Re-run on a second guest restored to `clean-base`, fixed service hash
+verified on the running process (`CC1AC841BA6BB109`):
+
+```
+  B  ovpn first, no wintun driver   ok at 70.8s   exit IP: NOT the node
+  C  reality                        ok at 34.7s   exit IP: the node
+  D  ovpn again                     ok at 16.2s   exit IP: the node
+```
+
+**Proven: the driver install works, and it is mine.** The store went `NO`
+to `YES` across row B with `xray.log` **absent** — Xray never ran, so
+nothing else could have installed it. `tapctl create` then succeeded where
+it had errored, OpenVPN opened `Neoxify-OpenVPN`, set its address,
+installed `0.0.0.0/1` and `128.0.0.0/1`, and logged `Initialization
+Sequence Completed`. The throwaway adapter left nothing behind: the final
+adapter list is `Ethernet` and `Neoxify-OpenVPN` and nothing else.
+
+**Not proven, and stated plainly: the customer's first OpenVPN connect
+still did not carry traffic.** Eight exit-IP probes over 32s all returned
+the customer's own address, and the next `status` said
+`connected:false, protocol:null, health:down` with the adapter
+`Disconnected`. The tunnel came up and the session was gone within about
+thirty seconds. **Whether the driver install causes that is not
+established.** `main`'s own journal already records an unexplained "engine
+ends its session shortly after a successful connect, OpenVPN logging
+Initialization Sequence Completed" — that was on a guest a dozen cycles
+deep and this was a fresh one, which makes them different experiments
+rather than the same one answered. One run cannot separate them, and this
+one does not.
+
+**What the fix is still worth, as narrowly as it deserves.** Before it,
+OpenVPN-first on a virgin machine failed at 6.7s and *kept* failing —
+every later attempt too, for ever, unless the customer happened to try
+REALITY. After it, the first attempt installs the driver and the retry is
+row D: 16.2s, exit IP at the node. The failure shape changes from "this
+protocol never works" to "the first connect is slow and the second one
+works", which is the shape the original report described for Xray.
+
+**Two things about it are wrong and known.** 70.8s is past the app's 45s
+`REPLY_TIMEOUT`, so even a fully working version of this is reported to
+the customer as a failure. And doing a driver install immediately before
+the connect it is for is the suspicious part of the one bad measurement.
+**Both point the same way: the install belongs at service start, off the
+connect path** — where nothing is waiting on it, and where the connect
+path is then byte-for-byte the one row D already proves. That is the
+recommendation. It is not built here because it needs its own clean-guest
+run to mean anything, and claiming it without one is the mistake this
+entry is otherwise about.
+
+### Bug 2: what could be routed, what cannot, and what the app now admits
+
+"Selecting an already-running game does not route it" is two facts with
+different answers, and the sentence covers for the fixable one.
+
+**New TCP connections from a running process were already carried.** A
+SYN skips the leave-alone cache by design, so a connection opened after
+the customer chooses is decided against the new selection whatever the
+process's age. Pinned with a test, so the UDP fix below cannot hide a
+regression in it.
+
+**New UDP flows were not, for up to five seconds.** UDP has no SYN, so
+`Nat::lookup` consults the cache for every datagram, and a `Direct`
+verdict recorded while the app was unselected went on answering for the
+same 4-tuple until `DIRECT_VERDICT_TTL` lapsed. A game already talking to
+its server on one fixed 4-tuple is exactly that case: the customer clicks
+and, for five seconds, nothing happens. `set_selection` now clears the
+cache.
+
+**Clearing it cannot re-open either leak, and the reason is structural
+rather than careful.** `decide` calls `record_direct` only `if
+known_owner`, so the table has never held a verdict about an unattributed
+flow — there is nothing in it for a selection change to release, and a
+datagram nobody can attribute goes back to `verdict_for_unattributed` and
+is refused as before. Both recorded rules hold: `FlowKey` grows nothing
+(forgetting one application's flows would need a component; the whole
+table goes instead), and nothing here sits upstream of the carry decision
+— it throws a cache away, it decides nothing.
+
+**Established connections still cannot move, and now the app says so.** A
+live TCP connection is a socket to the real destination; rewriting half of
+one breaks it rather than redirecting it. What was wrong was the silence.
+The status poll now carries the bare file names of applications that were
+already running when they were selected and still are, and the app builds
+the sentence from `i18n.tsx` in both languages. Facts over the wire, not
+prose: `split_tunnel_problem` beside it sends English to customers who
+read Persian, and that gap should not be widened.
+
+It is deliberately self-clearing — the pids are re-checked *with* their
+image, because Windows reuses pids and a warning a customer has already
+acted on is worse than none — and silent when Custom mode is off, when the
+app is deselected, and for everyone who opened their game after choosing
+it.
+
+**The rig proof for this was not obtained.** `nxwatch.cs` and `R2.ps1` are
+written and staged in the share: two byte-identical copies at two paths,
+both started *before* either is selected, each opening a brand-new
+connection per round so nothing is pooled into an established one, with
+the unselected copy as the row that has to come back the customer's own.
+The guest's console wedged before it ran. So bug 2 rests on tests that
+were mutated to check they discriminate, and on nothing from the wire —
+a weaker claim than bug 1's, and not presented as the same kind of thing.
+
+### Rig traps, all hit for real
+
+- **A lost key-up leaves a modifier logically held, and every hotkey
+  afterwards silently does nothing.** Win+R stopped opening Run and
+  Ctrl+Shift+Enter stopped elevating, while input *was* arriving — a lone
+  Win tap still moved focus to Start. Sending every modifier's break code
+  (`9d aa b8 e0 db e0 dc`) fixed it instantly. This reads exactly like a
+  wedged guest and is not one; send the releases before concluding
+  anything about the console.
+- **The guest console wedged twice with the OS perfectly healthy**:
+  `LoggedInUsers` still updating, guest properties advancing, and the
+  taskbar clock frozen minutes behind. `setvideomodehint` did not recover
+  it either time. A power-cycle did.
+- **An elevated `cmd` left open by a finished shim holds focus**, and the
+  next Run-dialog attempt types into it instead. Its marker file had no
+  `SHIM-EXIT` line, which is how it was caught — write one, and read it
+  before assuming what launched.
+- **The host disk filled twice** (475G, down to 101M and then 673M free),
+  and it surfaced as `failed to build archive ... (os error 112)` from
+  cargo rather than as anything mentioning disk. A release Tauri build is
+  about 7GB per worktree and there are twenty-odd worktrees.
+
+### Open
+
+- **The recommended shape of the bug-1 fix is unbuilt**: install the
+  driver at service start rather than on the connect path. It needs one
+  clean guest to be worth anything.
+- **Why row B's OpenVPN session ended within thirty seconds of coming
+  up.** Not established, and it may be the pre-existing item on `main`
+  rather than anything this branch introduced.
+- **`REPLY_TIMEOUT` (45s) against a first connect that legitimately needs
+  more.** The app tells the customer a connect failed while the service is
+  still succeeding at it. Raising it is not obviously right — the customer
+  is staring at a button — which is why it is written down rather than
+  changed.
+- **Bug 2 has no wire evidence.** `R2.ps1` is staged and ready to run.
+- **The test-count baselines in circulation disagree.** This tree gives
+  306 Rust before this branch's nine tests, 185 vitest, 477 jest and 16/16
+  turbo — matching what the merge entry above recorded for `c3dea0e`, not
+  the "342 Rust / 213 vitest / 491 jest" quoted to this session. Worth
+  settling before someone reads a lower number as a regression.

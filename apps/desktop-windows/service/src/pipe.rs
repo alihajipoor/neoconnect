@@ -448,6 +448,12 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                     // protected", because nothing anywhere reads this
                     // field that way.
                     tunnel_dns_unprotected: false,
+                    // Same reason once more. The list is derived from
+                    // the live selection and a process scan, both of
+                    // which are behind the lock, so an empty list here
+                    // is "not asserting anything" -- and the next poll,
+                    // a second later, carries the real answer.
+                    split_tunnel_restart_needed: Vec::new(),
                 };
             };
             let (connected, protocol, health) = engines.status();
@@ -455,6 +461,7 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             let split_tunnel_problem = engines.split_tunnel_complaint();
             let ipv6_blocked = engines.ipv6_blocked();
             let tunnel_dns_unprotected = engines.tunnel_dns_unprotected();
+            let split_tunnel_restart_needed = engines.split_tunnel_restart_needed();
             Response::State {
                 connected,
                 protocol,
@@ -463,6 +470,7 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                 split_tunnel_problem,
                 ipv6_blocked,
                 tunnel_dns_unprotected,
+                split_tunnel_restart_needed,
             }
         }
         // Nothing here touches the machine, so there is no reason for

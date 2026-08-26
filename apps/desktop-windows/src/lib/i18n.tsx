@@ -210,6 +210,20 @@ const en = {
   // which part is not covered.
   "dash.tunnelDnsUnforced":
     "Your traffic is going through the VPN, but Neoxify couldn't send this device's DNS lookups through it. Your internet provider's DNS can still answer, and on a filtered network those answers are often wrong — so some sites may still not open. Disconnect and reconnect to try again; if it keeps happening, use Repair network.",
+  // Shown when the customer selected an application that was already
+  // open. Custom mode routes the connections a program makes *after* it
+  // is selected; the ones it already held cannot be moved, because a
+  // live TCP connection is a socket to the real destination and
+  // rewriting half of one breaks it rather than redirecting it.
+  //
+  // Both halves are stated, in that order, and the wording deliberately
+  // does not round either of them off. "Some of its traffic is already
+  // going through" would be reassurance the app cannot back up, and
+  // saying only "restart it" would imply nothing is routed until they
+  // do. What is covered and what is not are the two facts a customer
+  // needs in order to decide whether to bother.
+  "dash.splitTunnelRestartNeeded":
+    "{apps} was already open when you selected it. Connections it makes from now on go through the VPN, but the ones it already had do not — those cannot be moved without breaking them. Close it and open it again to route all of its traffic.",
   "voucher.title": "Have a voucher?",
   "voucher.subtitle": "Enter a code to activate a plan without paying.",
   "voucher.placeholder": "Enter your code",
@@ -864,6 +878,8 @@ const fa: Record<TranslationKey, string> = {
     "بخشی از ترافیک شما از طریق IPv6 و بیرون از VPN ارسال می‌شود. نشانی IPv6 شما برای شبکه‌تان دیده می‌شود. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، به پشتیبانی اطلاع دهید.",
   "dash.tunnelDnsUnforced":
     "ترافیک شما از VPN عبور می‌کند، اما Neoxify نتوانست درخواست‌های DNS این دستگاه را از داخل آن بفرستد. سرویس‌دهنده اینترنت شما همچنان می‌تواند به این درخواست‌ها پاسخ بدهد و روی شبکه فیلترشده این پاسخ‌ها اغلب نادرست هستند — بنابراین ممکن است بعضی سایت‌ها همچنان باز نشوند. اتصال را قطع و دوباره وصل کنید؛ اگر باز هم تکرار شد، از «ترمیم شبکه» استفاده کنید.",
+  "dash.splitTunnelRestartNeeded":
+    "‏{apps} پیش از انتخاب شما باز بود. اتصال‌هایی که از این پس برقرار می‌کند از VPN عبور می‌کنند، اما اتصال‌هایی که از قبل داشته عبور نمی‌کنند — این‌ها را نمی‌توان بدون قطع شدن جابه‌جا کرد. برای اینکه همه ترافیک آن از VPN عبور کند، برنامه را ببندید و دوباره باز کنید.",
   "voucher.title": "کد هدیه دارید؟",
   "voucher.subtitle": "با وارد کردن کد، بدون پرداخت اشتراک فعال کنید.",
   "voucher.placeholder": "کد خود را وارد کنید",

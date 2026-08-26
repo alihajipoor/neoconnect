@@ -307,6 +307,57 @@ impl Nat {
         tables.direct.insert(key, Instant::now());
     }
 
+    /// Throws away every leave-alone verdict, so the next packet of
+    /// each flow is decided again from scratch.
+    ///
+    /// # Why a selection change needs this
+    ///
+    /// A verdict in here says "this flow belongs to an application we
+    /// are not carrying". That is a statement about the customer's
+    /// choice, and the moment they change their choice it may simply be
+    /// false -- but nothing expires it early, by design: see
+    /// [`DIRECT_VERDICT_TTL`], which is deliberately not refreshed by
+    /// use precisely so a stale verdict cannot be kept alive forever.
+    ///
+    /// For TCP that costs nothing, because a connection opens with a
+    /// SYN and `decide` makes a SYN skip this cache outright. UDP has no
+    /// SYN. A game already talking to its server on one 4-tuple keeps
+    /// hitting the same key, so the verdict recorded while it was
+    /// unselected answered for every datagram until the TTL lapsed --
+    /// the customer clicked, and for the next five seconds nothing
+    /// happened. Five seconds of a match is not nothing.
+    ///
+    /// # Why clearing everything is the right shape
+    ///
+    /// The alternative is to forget only the flows belonging to the
+    /// application that changed, and that cannot be done from here: the
+    /// cache does not record who owns a flow, and teaching it would mean
+    /// adding a component to [`FlowKey`] -- which is load-bearing for
+    /// three separate features and must not grow one.
+    ///
+    /// Clearing the lot instead is cheap in the only way that matters.
+    /// It costs a re-decision per live flow, and a re-decision is a hash
+    /// lookup in a snapshot the loop already holds. It happens when a
+    /// customer clicks something, not on the packet path.
+    ///
+    /// # What it cannot do
+    ///
+    /// It cannot cause a leak, and the reason is structural rather than
+    /// careful. `decide` only calls [`Nat::record_direct`] when the
+    /// owning image is known, so this table never holds a verdict about
+    /// an unattributed flow. There is nothing in here for a selection
+    /// change to release, and a datagram nobody can attribute goes back
+    /// to `Selection::verdict_for_unattributed` and is refused exactly
+    /// as it was before. A test asserts that rather than trusting it.
+    ///
+    /// It also does not move an established connection. Nothing here
+    /// does -- see `SplitTunnel::set_selection` for what the customer is
+    /// told about the half that cannot be moved.
+    pub fn forget_direct(&self) {
+        let mut tables = self.tables.lock().unwrap();
+        tables.direct.clear();
+    }
+
     /// Starts redirecting a flow, assigning it a synthetic source port.
     ///
     /// Returns `None` when no port is free, which the caller must treat
