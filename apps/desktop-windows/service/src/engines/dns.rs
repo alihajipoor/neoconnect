@@ -218,162 +218,295 @@ pub(super) fn clear_reporting() -> DnsCleared {
 /// What is *added* is verification that does not depend on the thing
 /// being verified: the count is re-read from the registry after the
 /// delete rather than believed from the deleter's own report.
-fn clear_within(budget: std::time::Duration) -> DnsCleared {
-    let mut cleared = DnsCleared::default();
+/// One tag's worth of NRPT rules, and where to look for them.
+///
+/// Exists because there are two disjoint sets -- the tunnel's `.` rule
+/// and Gaming mode's namespace-scoped ones -- and the teardown for them
+/// is the same teardown. It was previously written twice, and the second
+/// copy is why `clear_gaming` still carried the unconditional-PowerShell
+/// defect after `clear` was fixed: the fix landed in one copy and there
+/// was nothing to make the other follow. One implementation with a tag,
+/// so a correction cannot land in half of it again.
+///
+/// `root` and `paths` are fields rather than constants so the ordering
+/// below can be proved under HKCU, where a test needs no elevation and
+/// cannot touch the real policy table -- the same reason
+/// [`remove_tagged_rules`] and [`count_tagged_rules`] take a root.
+struct Sweep<'a> {
+    root: &'a winreg::RegKey,
+    paths: &'a [&'a str],
+    /// The `Comment` value that marks a rule as this sweep's.
+    tag: &'a str,
+    /// What the cleanup log calls this operation.
+    what: &'static str,
+}
 
-    // Look before spawning anything.
-    match registry_rule_count(NRPT_COMMENT) {
-        // Nothing of ours in either location. This is the answer on
-        // every connect and at every service start, and it is now
-        // reached without a process.
-        Ok(0) => return cleared,
-        Ok(_) => {}
-        // "Could not look" is not "there is nothing", and the two must
-        // never be collapsed -- that is how a rule survives a disconnect
-        // and takes the machine's DNS with it. Fall through to the
-        // cmdlets, which are then the only witness available.
-        Err(e) => {
-            crate::cleanup_log::note(
-                "clear the tunnel DNS rule",
-                &format!("the DNS policy registry could not be read ({e}); asking the cmdlets instead"),
-            );
-            return clear_with_cmdlets(budget, cleared);
+impl Sweep<'_> {
+    fn tunnel(root: &winreg::RegKey) -> Sweep<'_> {
+        Sweep {
+            root,
+            paths: &NRPT_REGISTRY_PATHS,
+            tag: NRPT_COMMENT,
+            what: "clear the tunnel DNS rule",
         }
     }
 
-    // There is at least one, and this is where it lives. In-process, so
-    // no budget applies and nothing can wedge; and it reaches the Group
-    // Policy location, which the cmdlets cannot.
-    match clear_registry_rules() {
-        Ok(n) if n > 0 => {
-            crate::cleanup_log::note(
-                "clear the tunnel DNS rule",
-                &format!("removed {n} rule(s) from the registry"),
-            );
-            // The registry was edited behind the DNS client's back, so
-            // it has to be told. Only when something actually went:
-            // there is nothing to reload when the table was already as
-            // the DNS client believes it to be.
-            poke_resolver();
-            cleared.removed = n;
-        }
-        // Counted a moment ago and gone now. Nothing to do and nothing
-        // to complain about -- but nothing was removed by us either.
-        Ok(_) => {}
-        Err(e) => {
-            crate::cleanup_log::note(
-                "clear the tunnel DNS rule",
-                &format!("the registry removal failed ({e}); falling back to the cmdlets"),
-            );
-            return clear_with_cmdlets(budget, cleared);
+    fn gaming(root: &winreg::RegKey) -> Sweep<'_> {
+        Sweep {
+            root,
+            paths: &NRPT_REGISTRY_PATHS,
+            tag: GAMING_NRPT_COMMENT,
+            what: "clear the gaming DNS rules",
         }
     }
 
-    // Verified by re-reading, not by trusting the delete that just ran.
-    match registry_rule_count(NRPT_COMMENT) {
-        Ok(0) => cleared,
-        // Still there. Whatever the registry delete did, it did not
-        // finish the job, so the cmdlets get their turn after all --
-        // which is the case that justifies keeping them at all.
-        Ok(left) => {
-            crate::cleanup_log::note(
-                "clear the tunnel DNS rule",
-                &format!("{left} rule(s) of ours are still in the registry; asking the cmdlets"),
-            );
-            clear_with_cmdlets(budget, cleared)
+    /// The clear itself, against whichever cmdlet budget its caller
+    /// closes over.
+    ///
+    /// `cmdlets` is injected rather than called directly for two
+    /// reasons. The connect/disconnect path and the repair path have
+    /// genuinely different tolerances for a slow helper, and before the
+    /// split they shared one that suited the first and quietly broke the
+    /// second -- see [`REPAIR_CMDLET_BUDGET`]. And a test can see
+    /// *whether* the closure ran: the claim this function makes is not
+    /// about what the registry returns, it is that on the ordinary call
+    /// no process is spawned at all, and a spy is the only way to assert
+    /// the absence of a spawn without timing it.
+    ///
+    /// # Why the registry is asked first
+    ///
+    /// This used to spawn PowerShell unconditionally and treat the
+    /// registry as a fallback. That is the wrong way round, and the rig
+    /// proved it: the 0825 verification run watched this blow its 15s
+    /// budget on *every single disconnect*, not occasionally. Giving it
+    /// longer would have been giving it more time to be slow in.
+    ///
+    /// Two facts settle the order.
+    ///
+    /// **The registry is the store, not a workaround.** NRPT rules live
+    /// in the two keys in [`NRPT_REGISTRY_PATHS`],
+    /// `Add-DnsClientNrptRule` writes to the first of them, and the
+    /// sweep below reads both. That makes what is read here a strict
+    /// *superset* of what `Get-DnsClientNrptRule` can enumerate -- the
+    /// Group Policy location is invisible to that cmdlet, which is the
+    /// documented reason the sweep exists at all. So a zero from the
+    /// registry is not a guess that the cmdlets would have said zero
+    /// too; it is a better-informed answer than the cmdlets could give.
+    ///
+    /// **On most calls there is nothing to remove.** The tunnel sweep
+    /// runs at service start, on every disconnect, *and* at the top of
+    /// [`apply`] on every connect; the gaming sweep runs at service
+    /// start, at service stop, at uninstall, from the idle watchdog and
+    /// on every disarm. Only a teardown that follows a matching arm has
+    /// a rule to clear. Every other call was paying a PowerShell start
+    /// plus two CDXML/CIM module loads to be told what an in-process
+    /// registry read answers in microseconds. That is the "called when
+    /// it has nothing to do" half of the defect.
+    ///
+    /// The measured half, from the rig -- a 4-vCPU Windows 11 guest, a
+    /// fresh process per row, the spread across two runs at different
+    /// levels of contention:
+    ///
+    /// ```text
+    ///   powershell -NoProfile -Command 1                          4.4 -  6.5s
+    ///   Get-DnsClientNrptRule | Measure-Object                     9.6 - 66.7s
+    ///   the script below, which runs Get-DnsClientNrptRule TWICE  11.5 - 71.3s
+    ///   the registry enumeration this now does instead            32 - 237ms
+    ///   the registry delete that replaces Remove-DnsClientNrptRule  48 - 64ms
+    ///   poke_resolver(), which is still needed either way          0.7 - 0.9s
+    /// ```
+    ///
+    /// Three orders of magnitude, and the cheap side is also the side
+    /// that sees more. That is the whole argument.
+    ///
+    /// Nothing is given up by the reordering. The cmdlets' only unique
+    /// contribution was telling the DNS client its policy changed, and
+    /// [`poke_resolver`] already does that on the registry path -- it
+    /// has to, because that path has always been able to run alone.
+    ///
+    /// What is *added* is verification that does not depend on the thing
+    /// being verified: the count is re-read from the registry after the
+    /// delete rather than believed from the deleter's own report.
+    fn clear_within<F>(&self, cmdlets: F) -> DnsCleared
+    where
+        F: FnOnce(&Self, DnsCleared) -> DnsCleared,
+    {
+        let mut cleared = DnsCleared::default();
+
+        // Look before spawning anything.
+        match count_tagged_rules(self.root, self.paths, self.tag) {
+            // Nothing of ours in either location. This is the answer on
+            // every connect and at every service start, and it is now
+            // reached without a process.
+            Ok(0) => return cleared,
+            Ok(_) => {}
+            // "Could not look" is not "there is nothing", and the two
+            // must never be collapsed -- that is how a rule survives a
+            // disconnect and takes the machine's DNS with it. Fall
+            // through to the cmdlets, which are then the only witness
+            // available.
+            Err(e) => {
+                crate::cleanup_log::note(
+                    self.what,
+                    &format!("the DNS policy registry could not be read ({e}); asking the cmdlets instead"),
+                );
+                return cmdlets(self, cleared);
+            }
         }
-        Err(e) => {
-            cleared.unverified = Some(e);
-            cleared
+
+        // There is at least one, and this is where it lives. In-process,
+        // so no budget applies and nothing can wedge; and it reaches the
+        // Group Policy location, which the cmdlets cannot.
+        match remove_tagged_rules(self.root, self.paths, self.tag) {
+            Ok(n) if n > 0 => {
+                crate::cleanup_log::note(
+                    self.what,
+                    &format!("removed {n} rule(s) from the registry"),
+                );
+                // The registry was edited behind the DNS client's back,
+                // so it has to be told. Only when something actually
+                // went: there is nothing to reload when the table was
+                // already as the DNS client believes it to be.
+                poke_resolver();
+                cleared.removed = n;
+            }
+            // Counted a moment ago and gone now. Nothing to do and
+            // nothing to complain about -- but nothing was removed by us
+            // either.
+            Ok(_) => {}
+            Err(e) => {
+                crate::cleanup_log::note(
+                    self.what,
+                    &format!("the registry removal failed ({e}); falling back to the cmdlets"),
+                );
+                return cmdlets(self, cleared);
+            }
         }
+
+        // Verified by re-reading, not by trusting the delete that just
+        // ran.
+        match count_tagged_rules(self.root, self.paths, self.tag) {
+            Ok(0) => cleared,
+            // Still there. Whatever the registry delete did, it did not
+            // finish the job, so the cmdlets get their turn after all --
+            // which is the case that justifies keeping them at all.
+            Ok(left) => {
+                crate::cleanup_log::note(
+                    self.what,
+                    &format!("{left} rule(s) of ours are still in the registry; asking the cmdlets"),
+                );
+                cmdlets(self, cleared)
+            }
+            Err(e) => {
+                cleared.unverified = Some(e);
+                cleared
+            }
+        }
+    }
+
+    /// The cmdlet removal, for when the registry could not answer or
+    /// could not finish.
+    ///
+    /// This is the old `clear_within` body, unchanged in what it does
+    /// and moved only in when it runs. It is no longer the ordinary
+    /// path, and the budget it is given is the caller's.
+    fn clear_with_cmdlets(
+        &self,
+        budget: std::time::Duration,
+        mut cleared: DnsCleared,
+    ) -> DnsCleared {
+        // Removal and verification in a single invocation, because this
+        // runs with the `Engines` lock held on every connect and
+        // disconnect: a second PowerShell spawn would double the latency
+        // of the common case to guard against the rare one.
+        let tag = self.tag;
+        let script = format!(
+            "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{tag}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
+             (Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{tag}' }} | Measure-Object).Count"
+        );
+        // The only verified-clean answer. Anything else says the cmdlets
+        // did not do the job, which changes what the sweep below means
+        // but not whether it runs.
+        let cmdlets_reported_clean = match powershell(&script, budget) {
+            Ok(out) if out.trim() == "0" => true,
+            Ok(out) => {
+                crate::cleanup_log::note(
+                    self.what,
+                    &format!("PowerShell removal left {:?} rule(s) behind, falling back to the registry", out.trim()),
+                );
+                false
+            }
+            Err(e) => {
+                crate::cleanup_log::note(
+                    self.what,
+                    &format!("PowerShell removal failed ({e}), falling back to the registry"),
+                );
+                false
+            }
+        };
+
+        match remove_tagged_rules(self.root, self.paths, self.tag) {
+            // Nothing of ours in either location. On the normal path
+            // this is the expected answer and says the cmdlets and the
+            // registry agree; on the fallback path it says the
+            // verification was wrong or unavailable rather than the
+            // removal. Clean either way, and nothing to tell the DNS
+            // client about.
+            Ok(0) => {
+                // The cmdlets are the only witness that anything went,
+                // and on this arm they either said "none left" (nothing
+                // to report) or could not be believed (nothing to report
+                // either, but not the same thing).
+                if !cmdlets_reported_clean {
+                    cleared.unverified =
+                        Some("the DNS cmdlets did not confirm the removal; the registry held no rules of ours".into());
+                }
+            }
+            Ok(n) => {
+                // Always recorded. Rules found here after a clean cmdlet
+                // report are the interesting case -- they are rules
+                // Get-DnsClientNrptRule does not enumerate, which in
+                // practice means the Group Policy location -- and a
+                // support conversation needs to know which of the two
+                // happened.
+                crate::cleanup_log::note(
+                    self.what,
+                    &if cmdlets_reported_clean {
+                        format!("removed {n} rule(s) from the registry that the cmdlets did not report")
+                    } else {
+                        format!("removed {n} rule(s) directly from the registry")
+                    },
+                );
+                // Only when something actually went. The poke is two
+                // process spawns on a path that runs on every connect
+                // and every disconnect with the `Engines` lock held, and
+                // there is nothing to reload when the registry was
+                // already as the DNS client believes it to be.
+                poke_resolver();
+                // `+=`, not `=`. This function can be entered with rules
+                // already removed by the registry pass in
+                // `clear_within`, and `repair` reports this number to a
+                // customer -- a second removal overwriting the first
+                // would understate what was actually cleaned off their
+                // machine.
+                cleared.removed += n;
+            }
+            Err(e) => {
+                crate::cleanup_log::note(self.what, &format!("registry fallback failed: {e}"));
+                cleared.unverified = Some(e);
+            }
+        }
+        cleared
     }
 }
 
-/// The cmdlet removal, for when the registry could not answer or could
-/// not finish.
-///
-/// This is the old `clear_within` body, unchanged in what it does and
-/// moved only in when it runs. It is no longer the ordinary path, and
-/// the budget it is given is the caller's.
-fn clear_with_cmdlets(budget: std::time::Duration, mut cleared: DnsCleared) -> DnsCleared {
-    // Removal and verification in a single invocation, because this
-    // runs with the `Engines` lock held on every connect and
-    // disconnect: a second PowerShell spawn would double the latency of
-    // the common case to guard against the rare one.
-    let script = format!(
-        "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
-         (Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }} | Measure-Object).Count"
-    );
-    // The only verified-clean answer. Anything else says the cmdlets
-    // did not do the job, which changes what the sweep below means but
-    // not whether it runs.
-    let cmdlets_reported_clean = match powershell(&script, budget) {
-        Ok(out) if out.trim() == "0" => true,
-        Ok(out) => {
-            crate::cleanup_log::note(
-                "clear the tunnel DNS rule",
-                &format!("PowerShell removal left {:?} rule(s) behind, falling back to the registry", out.trim()),
-            );
-            false
-        }
-        Err(e) => {
-            crate::cleanup_log::note(
-                "clear the tunnel DNS rule",
-                &format!("PowerShell removal failed ({e}), falling back to the registry"),
-            );
-            false
-        }
-    };
+/// The tunnel sweep against the real policy table.
+fn clear_within(budget: std::time::Duration) -> DnsCleared {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
 
-    match clear_registry_rules() {
-        // Nothing of ours in either location. On the normal path this is
-        // the expected answer and says the cmdlets and the registry
-        // agree; on the fallback path it says the verification was wrong
-        // or unavailable rather than the removal. Clean either way, and
-        // nothing to tell the DNS client about.
-        Ok(0) => {
-            // The cmdlets are the only witness that anything went, and
-            // on this arm they either said "none left" (nothing to
-            // report) or could not be believed (nothing to report
-            // either, but not the same thing).
-            if !cmdlets_reported_clean {
-                cleared.unverified =
-                    Some("the DNS cmdlets did not confirm the removal; the registry held no rules of ours".into());
-            }
-        }
-        Ok(n) => {
-            // Always recorded. Rules found here after a clean cmdlet
-            // report are the interesting case -- they are rules
-            // Get-DnsClientNrptRule does not enumerate, which in
-            // practice means the Group Policy location -- and a support
-            // conversation needs to know which of the two happened.
-            crate::cleanup_log::note(
-                "clear the tunnel DNS rule",
-                &if cmdlets_reported_clean {
-                    format!("removed {n} rule(s) from the registry that the cmdlets did not report")
-                } else {
-                    format!("removed {n} rule(s) directly from the registry")
-                },
-            );
-            // Only when something actually went. The poke is two
-            // process spawns on a path that runs on every connect and
-            // every disconnect with the `Engines` lock held, and there
-            // is nothing to reload when the registry was already as the
-            // DNS client believes it to be.
-            poke_resolver();
-            // `+=`, not `=`. This function can be entered with rules
-            // already removed by the registry pass in `clear_within`,
-            // and `repair` reports this number to a customer -- a
-            // second removal overwriting the first would understate
-            // what was actually cleaned off their machine.
-            cleared.removed += n;
-        }
-        Err(e) => {
-            crate::cleanup_log::note("clear the tunnel DNS rule", &format!("registry fallback failed: {e}"));
-            cleared.unverified = Some(e);
-        }
-    }
-    cleared
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    Sweep::tunnel(&hklm).clear_within(|sweep, cleared| sweep.clear_with_cmdlets(budget, cleared))
 }
 
 /// How many NRPT rules of ours exist right now, without removing any.
@@ -454,30 +587,6 @@ fn count_tagged_rules(root: &winreg::RegKey, paths: &[&str], tag: &str) -> Resul
 /// under a rule that is now gone is exactly the residue being chased.
 pub(super) fn flush_and_reload() {
     poke_resolver();
-}
-
-/// Deletes every NRPT rule carrying our comment from the registry
-/// directly, returning how many were removed.
-///
-/// This is the path that still works when PowerShell does not -- or
-/// when its cmdlets claim success while the rule sits there, which is
-/// exactly what the Group Policy location looks like from
-/// `Get-DnsClientNrptRule`. Both locations, every time. Matching is on
-/// the `Comment` value only, so rules belonging to anything else on the
-/// machine are never touched.
-fn clear_registry_rules() -> Result<u32, String> {
-    clear_registry_rules_tagged(NRPT_COMMENT)
-}
-
-fn clear_registry_rules_tagged(tag: &str) -> Result<u32, String> {
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-    use winreg::RegKey;
-
-    remove_tagged_rules(
-        &RegKey::predef(HKEY_LOCAL_MACHINE),
-        &NRPT_REGISTRY_PATHS,
-        tag,
-    )
 }
 
 /// The removal itself, against whichever root it is given.
@@ -653,56 +762,38 @@ fn scoped_namespace(namespace: &str) -> Result<String, String> {
 /// Namespace-scoped rules land in the same two registry locations the
 /// `.` rule does, so the sweep is given both -- which is what §14
 /// instrument #7 asks to be proved.
+///
+/// "Same shape as `clear`" is now literally true rather than a
+/// resemblance: both go through [`Sweep::clear_within`]. Until this
+/// change it was a copy of `clear`'s *old* body and still spawned
+/// PowerShell unconditionally -- so on a machine where gaming mode had
+/// never been armed, service start, service stop, uninstall and every
+/// tick of the idle watchdog each paid a `Get-DnsClientNrptRule` (9.6s
+/// to 66.7s on the rig's guest, run twice in the one script) to be told
+/// there was nothing to remove. Three of those five callers hold the
+/// `Engines` lock.
+///
+/// The `Err`/`Ok(0)` distinction matters more here than for the tunnel,
+/// not less. Gaming installs one rule per namespace, so an unreadable
+/// policy table read as a clean zero strands a *set* of suffix rules
+/// pointed at a DoH stub that stops listening the moment the session
+/// ends -- and the customer's symptom is that some specific games stop
+/// resolving while everything else works, which is the hardest possible
+/// thing to trace back to here.
+///
+/// `HELPER_BUDGET`, not `REPAIR_CMDLET_BUDGET`, on the rare path that
+/// still reaches the cmdlets: the longer budget is justified only by its
+/// caller -- a one-shot repair the customer started and is waiting on,
+/// with no `status` poll behind it. Gaming mode applies and clears on
+/// the session path, where there is one, so it takes the same 15s bound
+/// as every other helper that runs with the `Engines` lock held.
 pub fn clear_gaming() {
-    let script = format!(
-        "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{GAMING_NRPT_COMMENT}' }} | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
-         (Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{GAMING_NRPT_COMMENT}' }} | Measure-Object).Count"
-    );
-    // `HELPER_BUDGET`, not `REPAIR_CMDLET_BUDGET`: that longer budget is
-    // justified only by its caller -- a one-shot repair the customer
-    // started and is waiting on, with no `status` poll behind it. Gaming
-    // mode applies and clears on the session path, where there is, so it
-    // takes the same 15s bound as every other helper that runs with the
-    // `Engines` lock held.
-    let cmdlets_reported_clean = match powershell(&script, super::HELPER_BUDGET) {
-        Ok(out) if out.trim() == "0" => true,
-        Ok(out) => {
-            crate::cleanup_log::note(
-                "clear the gaming DNS rules",
-                &format!(
-                    "PowerShell removal left {:?} rule(s) behind, falling back to the registry",
-                    out.trim()
-                ),
-            );
-            false
-        }
-        Err(e) => {
-            crate::cleanup_log::note(
-                "clear the gaming DNS rules",
-                &format!("PowerShell removal failed ({e}), falling back to the registry"),
-            );
-            false
-        }
-    };
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
 
-    match clear_registry_rules_tagged(GAMING_NRPT_COMMENT) {
-        Ok(0) => {}
-        Ok(n) => {
-            crate::cleanup_log::note(
-                "clear the gaming DNS rules",
-                &if cmdlets_reported_clean {
-                    format!("removed {n} rule(s) from the registry that the cmdlets did not report")
-                } else {
-                    format!("removed {n} rule(s) directly from the registry")
-                },
-            );
-            poke_resolver();
-        }
-        Err(e) => crate::cleanup_log::note(
-            "clear the gaming DNS rules",
-            &format!("registry fallback failed: {e}"),
-        ),
-    }
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let _ = Sweep::gaming(&hklm)
+        .clear_within(|sweep, cleared| sweep.clear_with_cmdlets(super::HELPER_BUDGET, cleared));
 }
 
 /// Which of `namespaces` are **not** in the registry right now.
@@ -1149,6 +1240,146 @@ mod tests {
             ),
             Ok(0)
         );
+
+        let _ = hkcu.delete_subkey_all(ROOT);
+    }
+
+    /// A `Sweep` over a private HKCU tree, with a closure that records
+    /// whether the cmdlet path was reached.
+    ///
+    /// Returns `(reached_the_cmdlets, cleared)`. The closure is a spy
+    /// and does nothing else: what is under test is *when* it runs, and
+    /// running the real cmdlet path in a unit test would spawn
+    /// PowerShell -- which is the very thing these tests exist to
+    /// establish does not happen.
+    fn sweep_spy(paths: &[&str], tag: &str) -> (bool, DnsCleared) {
+        use std::cell::Cell;
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let reached = Cell::new(false);
+        let sweep = Sweep {
+            root: &hkcu,
+            paths,
+            tag,
+            what: "a test sweep",
+        };
+        let cleared = sweep.clear_within(|_, cleared| {
+            reached.set(true);
+            cleared
+        });
+        (reached.get(), cleared)
+    }
+
+    /// Trap #7's other half, and the defect `clear_gaming` still had
+    /// after `clear` was fixed.
+    ///
+    /// The gaming sweep runs at service start, at service stop, at
+    /// uninstall, from the idle watchdog and on every disarm -- and on a
+    /// machine where gaming mode was never armed, every one of those
+    /// finds nothing. Until this test the code spawned PowerShell to be
+    /// told so, twice per script, at 9.6-66.7s a call on the rig's
+    /// guest, with the `Engines` lock held on three of the five callers.
+    ///
+    /// Asserting on the *absence of a spawn* is the whole point, and it
+    /// cannot be done by timing: a fast machine passes a timing test
+    /// with the spawn still there. The spy closure makes it a fact
+    /// rather than a measurement. Invert the ordering in
+    /// [`Sweep::clear_within`] -- call `cmdlets` before looking at the
+    /// registry, which is what this function used to do -- and this
+    /// fails on the first assertion.
+    #[test]
+    fn a_registry_that_says_zero_reaches_no_cmdlet_for_either_tag() {
+        const LOCAL: &str = r"Software\Neoxify\nrpt-sweep-empty\local";
+        const POLICY: &str = r"Software\Neoxify\nrpt-sweep-empty\policy";
+        const ROOT: &str = r"Software\Neoxify\nrpt-sweep-empty";
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let _ = hkcu.delete_subkey_all(ROOT);
+
+        // Both locations exist and hold rules -- but none of them ours,
+        // which is what a machine running some other VPN looks like.
+        for path in [LOCAL, POLICY] {
+            let (parent, _) = hkcu.create_subkey(path).expect("should create the test key");
+            let (theirs, _) = parent.create_subkey("{theirs}").expect("should create a rule");
+            theirs
+                .set_value("Comment", &"Some other VPN")
+                .expect("should tag the rule");
+        }
+
+        for tag in [NRPT_COMMENT, GAMING_NRPT_COMMENT] {
+            let (reached, cleared) = sweep_spy(&[LOCAL, POLICY], tag);
+            assert!(
+                !reached,
+                "{tag}: a verified-empty registry still spawned the cmdlets"
+            );
+            assert_eq!(cleared.removed, 0);
+            assert!(cleared.unverified.is_none(), "{tag}: reported unverified");
+        }
+
+        // And the neighbour's rules are all still there.
+        for path in [LOCAL, POLICY] {
+            let parent = hkcu.open_subkey_with_flags(path, KEY_READ).unwrap();
+            let left: Vec<String> = parent.enum_keys().filter_map(Result::ok).collect();
+            assert_eq!(left, vec!["{theirs}".to_string()], "{path} was disturbed");
+        }
+
+        let _ = hkcu.delete_subkey_all(ROOT);
+    }
+
+    /// The distinction that must not collapse, proved at the sweep
+    /// rather than at the counter.
+    ///
+    /// [`an_unreadable_policy_table_is_an_error_rather_than_a_clean_zero`]
+    /// proves `count_tagged_rules` returns `Err`. That is necessary and
+    /// not sufficient: a sweep is free to `unwrap_or(0)` it, and one
+    /// that did would return silently having removed nothing -- which
+    /// for gaming mode strands a whole set of suffix rules pointed at a
+    /// DoH stub that stops listening when the session ends, and presents
+    /// as "some games stopped resolving" with nothing pointing here.
+    ///
+    /// So this asserts on the consequence: when the registry cannot be
+    /// read, the cmdlets are reached, because they are then the only
+    /// witness available. Replace the `Err` arm in
+    /// [`Sweep::clear_within`] with `Ok(0)`-like behaviour and this
+    /// fails for both tags.
+    #[test]
+    fn a_registry_that_cannot_be_read_reaches_the_cmdlets_for_either_tag() {
+        for tag in [NRPT_COMMENT, GAMING_NRPT_COMMENT] {
+            let (reached, _) = sweep_spy(
+                &[
+                    r"Software\Neoxify\nrpt-sweep-no-such-key\local",
+                    r"Software\Neoxify\nrpt-sweep-no-such-key\policy",
+                ],
+                tag,
+            );
+            assert!(
+                reached,
+                "{tag}: an unreadable policy table was treated as a clean zero"
+            );
+        }
+    }
+
+    /// One location absent is ordinary; the other one being empty is a
+    /// real, verified zero and must still spawn nothing.
+    ///
+    /// The Group Policy key does not exist on a machine that is not
+    /// domain-joined, which is most of them. If a missing location
+    /// counted as "could not look", the cheap path would never be taken
+    /// on the machines it was written for.
+    #[test]
+    fn a_missing_group_policy_location_is_still_a_verified_zero() {
+        const LOCAL: &str = r"Software\Neoxify\nrpt-sweep-partial\local";
+        const ROOT: &str = r"Software\Neoxify\nrpt-sweep-partial";
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let _ = hkcu.delete_subkey_all(ROOT);
+        let (_, _) = hkcu.create_subkey(LOCAL).expect("should create the test key");
+
+        for tag in [NRPT_COMMENT, GAMING_NRPT_COMMENT] {
+            let (reached, _) = sweep_spy(
+                &[LOCAL, r"Software\Neoxify\nrpt-sweep-partial\policy"],
+                tag,
+            );
+            assert!(!reached, "{tag}: an absent Group Policy key forced a spawn");
+        }
 
         let _ = hkcu.delete_subkey_all(ROOT);
     }
