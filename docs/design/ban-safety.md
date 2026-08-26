@@ -203,6 +203,27 @@ them; writing a plausible subset is precisely the failure.
 
 **The rule, stated once:** the whole prefix set or none of it.
 
+**The same mechanism has a second route, and it is now closed too.**
+Per-game exit selection lets a customer name an exit per game, and
+preferences are keyed on the *executable*. A game is routinely several of
+them — `Rust.exe` is the EAC wrapper Steam launches and `RustClient.exe`
+is the game; `SeaOfThieves.exe` is a shim and `SoTGame.exe` is the
+binary; VALORANT is the Riot client, the game and two Vanguard binaries —
+so nothing guaranteed a game's binaries named one exit. Worse, the
+binaries are resolved against *running* processes, so a game is routinely
+only part-selected, and the part that is not selected is not carried at
+all: it reaches the game's servers from the customer's own address while
+its siblings reach them from the node. That is this mechanism exactly,
+with no second exit required.
+
+The gate is that **a catalogue row is the group**, and a group goes to
+one exit or to none. Enforced at four layers — the client cannot express
+a per-application exit, `exitsForGames` emits a group whole or not at
+all, `SplitTunnelConfig::validate` refuses a config that splits one, and
+`Selection::with_exits` drops a group it cannot see whole — with
+`scripts/check-exit-groups.sh` failing the build if any of them is
+relaxed. Full design in `docs/design/per-game-exits.md` §5.1.
+
 ### 5. Shared-exit collateral — the second one Neoxify could create
 
 **Verified for one publisher, and under-appreciated.**

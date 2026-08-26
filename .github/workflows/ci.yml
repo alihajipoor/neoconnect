@@ -118,6 +118,17 @@ jobs:
       - name: Destination-routing completeness gate is intact
         run: bash scripts/check-prefix-completeness.sh
 
+      # The other route to the same banned account, and the one this
+      # product's own feature opened. Per-game exit selection is keyed on
+      # the executable and a game is routinely several of them -- Rust is
+      # its EAC wrapper plus RustClient.exe -- so without something
+      # holding a game's binaries together, its launcher and its client
+      # can land on two exits and the account presents from two source
+      # addresses at once. A catalogue row IS that group, and this checks
+      # the rule is still enforced in all six places it has to be.
+      - name: A game's binaries go to one exit or to none
+        run: bash scripts/check-exit-groups.sh
+
   desktop:
     name: Desktop client tests
     # The only Windows runner here, and the only reason this job exists:

@@ -2904,7 +2904,7 @@ mod tests {
             [me.clone()],
             SplitTunnelMode::OnlySelected,
             Vec::new(),
-            [neoconnect_ipc::AppExit { app: me, exit: exit.to_string() }],
+            [neoconnect_ipc::AppExit { app: me, exit: exit.to_string(), group: None }],
         )
     }
 
@@ -3017,6 +3017,7 @@ mod tests {
             [neoconnect_ipc::AppExit {
                 app: r"C:\Games\game.exe".to_string(),
                 exit: "germany-1".to_string(),
+                group: Some("a-game".to_string()),
             }],
         );
 

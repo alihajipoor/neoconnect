@@ -1602,6 +1602,7 @@ mod tests {
             exits: vec![neoconnect_ipc::AppExit {
                 app: r"C:\Games\game.exe".to_string(),
                 exit: "germany-1".to_string(),
+                group: Some("a-game".to_string()),
             }],
             egress: Some("germany-1".to_string()),
         });
