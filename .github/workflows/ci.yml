@@ -107,6 +107,17 @@ jobs:
       - name: Panel offers every plan feature the schema has
         run: bash scripts/check-feature-drift.sh
 
+      # The same class of silence again, but this one costs a customer their
+      # game account rather than a feature. A game routed by destination
+      # prefix must have its whole prefix set or none of it: World of
+      # Warcraft holds Home and World open at once, so a partial list splits
+      # one account across two source addresses at the same instant, which
+      # is the account-sharing signature. `prefixComplete` is the gate that
+      # forbids that, and it lived in four files as prose with nothing that
+      # would go red if one of them changed.
+      - name: Destination-routing completeness gate is intact
+        run: bash scripts/check-prefix-completeness.sh
+
   desktop:
     name: Desktop client tests
     # The only Windows runner here, and the only reason this job exists:
