@@ -210,6 +210,29 @@ export interface Invoice {
   paymentTransaction?: { provider: string } | null;
 }
 
+/** What `GET /invoices` returns, which is less than an `Invoice`.
+ *
+ * The list route selects a projection (`INVOICE_LIST_FIELDS` in
+ * `apps/backend/src/modules/invoices/invoices.service.ts`) rather than the
+ * whole row: the periods, the due/paid timestamps, the line items and the
+ * three foreign keys are none of them on screen in the table, and
+ * `lineItemsJson` in particular is an unbounded blob per row.
+ *
+ * Typed separately rather than as a `Pick<Invoice, ...>` so that a field
+ * added to one is not silently assumed to be on the other. Anything that
+ * needs a whole invoice reads `GET /invoices/:id` and gets an `Invoice`. */
+export interface InvoiceListRow {
+  id: string;
+  invoiceNumber: string;
+  planNameSnapshot: string;
+  amountUsd: string;
+  currency: string;
+  status: InvoiceStatus;
+  issuedAt: string;
+  customer: { email: string };
+  paymentTransaction: { provider: string } | null;
+}
+
 export interface InvoiceSummary {
   since: string;
   invoiceCount: number;
@@ -449,6 +472,38 @@ export interface GameProfile {
   sortOrder: number;
   isActive: boolean;
   notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One row of `GET /gaming/profiles`, which is narrower than a
+ * `GameProfile`.
+ *
+ * The catalogue is 1,480 games and the list route now selects
+ * `PROFILE_LIST_FIELDS` (`apps/backend/src/modules/gaming/gaming.service.ts`)
+ * instead of whole rows: `notes` is free text an operator wrote for
+ * themselves and `processNames`/`destinationCidrs` belong to the per-game
+ * private exit, which is not built and which nothing on the table shows.
+ * Three list-shaped columns per row across a page is a lot of JSON for
+ * fields nobody reads.
+ *
+ * The consequence to remember is that this type is **not enough to edit
+ * from**. The form dialog re-fetches `GET /gaming/profiles/:id` for a
+ * whole `GameProfile`, because pre-filling a form from a row that is
+ * missing three fields and then saving it writes blanks over real values. */
+export interface GameProfileListRow {
+  id: string;
+  slug: string;
+  displayName: string;
+  iconKey: string | null;
+  publisher: string | null;
+  hostnames: string[];
+  excludeHostnames: string[];
+  destinationAsn: string | null;
+  prefixComplete: boolean;
+  canaryHostname: string | null;
+  sortOrder: number;
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
