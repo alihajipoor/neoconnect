@@ -18,17 +18,41 @@ import { invoke } from "@tauri-apps/api/core";
  * sends the traffic they wanted hidden out in the clear. */
 export type SplitTunnelMode = "onlySelected" | "allExcept";
 
+/** The destinations one chosen application's traffic is narrowed to.
+ *
+ * Only ever built from a catalogue game whose prefix list the server
+ * vouches for as complete -- see `canRouteByDestination`. There is no
+ * way for a customer to type one of these in, and deliberately so: a
+ * hand-written prefix list is a partial prefix list, and a partial list
+ * splits a game's own connections across two source addresses. */
+export type AppScope = {
+  /** The executable this narrows, spelled exactly as it appears in
+   * `apps`. */
+  app: string;
+  /** CIDR prefixes, IPv4 and IPv6 alike. */
+  destinations: string[];
+};
+
 export type SplitTunnelSettings = {
   enabled: boolean;
   /** Absolute paths to executables, as the picker returned them. */
   apps: string[];
   mode: SplitTunnelMode;
+  /** Per-app destination narrowing, for the apps that have any.
+   *
+   * Sparse: an app absent from here is carried in full, which is what
+   * this feature has always done and what every app added by hand will
+   * keep doing. Kept alongside `apps` rather than inside it so that an
+   * older build reading this file sees a selection it fully
+   * understands, and a scope it simply ignores. */
+  scopes: AppScope[];
 };
 
 export const EMPTY_SPLIT_TUNNEL: SplitTunnelSettings = {
   enabled: false,
   apps: [],
   mode: "onlySelected",
+  scopes: [],
 };
 
 /** Matches the service's own cap, so an over-long list is refused here
@@ -48,6 +72,49 @@ function getStore(): Promise<Store> {
 
 const KEY = "settings";
 
+/** Reads stored scopes, taking each one whole or not at all.
+ *
+ * The all-or-nothing rule is the point. Everywhere else in this file a
+ * malformed entry is filtered out and the rest kept, because a missing
+ * app in a list of apps costs the customer a re-pick. A missing
+ * *prefix* in a scope costs something else entirely: the app is still
+ * carried, but now to only part of the address space it should reach,
+ * so the game's own connections leave by two different paths from two
+ * different addresses. Dropping the whole scope returns the app to
+ * being carried in full, which is the state this feature shipped in for
+ * a year and is safe by definition. */
+function readScopes(stored: unknown): AppScope[] {
+  if (!Array.isArray(stored)) return [];
+  const out: AppScope[] = [];
+  for (const entry of stored) {
+    if (!entry || typeof entry !== "object") continue;
+    const { app, destinations } = entry as Partial<AppScope>;
+    if (typeof app !== "string" || !app) continue;
+    if (!Array.isArray(destinations) || destinations.length === 0) continue;
+    if (!destinations.every((d) => typeof d === "string" && d.length > 0)) continue;
+    out.push({ app, destinations });
+  }
+  return out;
+}
+
+/** The scopes that still describe a chosen app.
+ *
+ * Removing an app has to remove its scope with it. Left behind, the
+ * scope is inert today -- the service drops scopes naming an app that
+ * is not selected -- but it would come back to life the moment the
+ * customer re-added that app by hand, silently narrowing a selection
+ * they made expecting the ordinary behaviour. */
+export function scopesFor(apps: string[], scopes: AppScope[]): AppScope[] {
+  const chosen = new Set(apps.map((a) => a.toLowerCase()));
+  return scopes.filter((s) => chosen.has(s.app.toLowerCase()));
+}
+
+/** Whether this chosen app is narrowed to particular destinations. */
+export function scopeOf(settings: SplitTunnelSettings, path: string): AppScope | undefined {
+  const lowered = path.toLowerCase();
+  return settings.scopes.find((s) => s.app.toLowerCase() === lowered);
+}
+
 export async function loadSplitTunnel(): Promise<SplitTunnelSettings> {
   try {
     const store = await getStore();
@@ -63,6 +130,14 @@ export async function loadSplitTunnel(): Promise<SplitTunnelSettings> {
       // and the only safe reading is the behaviour that file was saved
       // under.
       mode: stored.mode === "allExcept" ? "allExcept" : "onlySelected",
+      // Read at least as defensively as `apps`, and for a sharper
+      // reason. A malformed entry here does not merely fail
+      // validation -- a scope that survives with half its prefixes is
+      // exactly the partial list that splits a game across two source
+      // addresses. So an entry is taken whole or not at all: any
+      // non-string destination and the entire scope is dropped, which
+      // returns that app to being carried in full.
+      scopes: readScopes(stored.scopes),
     };
   } catch {
     return EMPTY_SPLIT_TUNNEL;
@@ -93,6 +168,13 @@ export async function pushSplitTunnel(settings: SplitTunnelSettings): Promise<vo
     enabled: settings.enabled,
     apps: settings.apps,
     mode: settings.mode,
+    // Filtered on the way out as well as when an app is removed. The
+    // service ignores a scope naming an app it was not given, so this
+    // is belt and braces -- but the two lists disagreeing is precisely
+    // the kind of thing that is harmless until one day it is not, and
+    // this is the last place either of them can be checked against the
+    // other.
+    scopes: scopesFor(settings.apps, settings.scopes),
   });
 }
 

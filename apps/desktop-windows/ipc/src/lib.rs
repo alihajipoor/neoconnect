@@ -529,6 +529,59 @@ pub struct SplitTunnelConfig {
     /// paths rather than process ids, because a modern application is
     /// several processes and the set changes while it runs.
     pub apps: Vec<String>,
+    /// Which destinations each app's traffic is carried *to*, for the
+    /// apps that have an answer. Absent from an older app, and absent
+    /// per-app for every app the client cannot answer for -- both of
+    /// which mean the same thing and the thing this feature has always
+    /// done: carry all of that application's traffic.
+    ///
+    /// Additive on purpose. An older app sends no `scopes` and gets the
+    /// behaviour it was written against; a newer app talking to an
+    /// older service has its scopes ignored and gets the same. Neither
+    /// direction is a silent change of what is carried, only of how
+    /// much of it.
+    #[serde(default)]
+    pub scopes: Vec<AppScope>,
+}
+
+/// The destinations one selected application's traffic is narrowed to.
+///
+/// # Why an app may be scoped at all
+///
+/// Selecting a game today carries *everything* it sends -- its patcher,
+/// its telemetry, its store page. A gaming accelerator carries the game
+/// server traffic and leaves the rest alone, which is both faster and
+/// less of the customer's traffic moved onto an address they did not
+/// ask to appear from.
+///
+/// # Why a partial list is refused rather than approximated
+///
+/// This list is only ever sent when the catalogue states it covers the
+/// publisher's **whole** announced space. A partial list is worse than
+/// none: a game holding two connections at once -- World of Warcraft
+/// keeps its Home and World connections open together -- would get one
+/// of them carried and the other not, presenting one account from two
+/// source addresses at the same instant. That is the account-sharing
+/// signature, and it gets people banned.
+///
+/// The client refuses to send a scope it cannot vouch for, and the
+/// service refuses to build one it cannot fully parse -- see
+/// `split_tunnel::owner::Scope::new`, which returns `None` if a single
+/// prefix is unreadable rather than scoping to the rest. Two
+/// independent refusals, because one of them being wrong is a ban.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppScope {
+    /// The executable this narrows, spelled exactly as it appears in
+    /// [`SplitTunnelConfig::apps`]. A scope naming an app that is not
+    /// selected is dropped rather than refused: it says nothing about
+    /// traffic and there is nothing to get wrong.
+    pub app: String,
+    /// CIDR prefixes, IPv4 and IPv6 mixed freely. Kept as text on the
+    /// wire because that is what the catalogue holds and what a person
+    /// edits in the panel; parsed once, at the service, where being
+    /// unparseable has a defined and safe answer.
+    pub destinations: Vec<String>,
 }
 
 /// The most applications one customer can select.
@@ -537,6 +590,32 @@ pub struct SplitTunnelConfig {
 /// bound on a list that arrives over IPC and is held in memory by a
 /// LocalSystem service.
 const MAX_SELECTED_APPS: usize = 64;
+
+/// The most prefixes one application may be scoped to.
+///
+/// A bound on memory and on parse time, not a statement about what a
+/// publisher announces. Riot's whole announced space is a few dozen
+/// prefixes and Blizzard's is under two hundred, so this has room to
+/// spare -- but the list arrives over IPC and is turned into sorted
+/// ranges by a LocalSystem service, and an unbounded one is a way to
+/// make that service do arbitrary work.
+///
+/// A list that exceeds it is **not** truncated. Truncating would
+/// manufacture exactly the partial prefix list this feature refuses to
+/// act on -- see [`AppScope`] -- so the whole scope is dropped and the
+/// application's traffic is carried in full, as it was before. That
+/// dropping happens in the service, in `Scope::new`, which is the one
+/// place a scope can come into existence.
+pub const MAX_SCOPE_PREFIXES: usize = 512;
+
+/// The longest a single prefix may be as text.
+///
+/// A fully spelled-out IPv6 prefix is 39 characters plus `/128`, so 64
+/// is generous. Unlike the prefix *count*, an over-long string is
+/// refused rather than dropped: it is not a list this client could
+/// produce, and the shape of the message is the one thing the service
+/// does hold a sender to.
+const MAX_PREFIX_LEN: usize = 64;
 
 impl SplitTunnelConfig {
     /// Checks the selection before the service acts on it.
@@ -571,6 +650,48 @@ impl SplitTunnelConfig {
             }
             if !app.to_lowercase().ends_with(".exe") {
                 return Err(reject("apps", "must name an executable"));
+            }
+        }
+
+        // Shape is refused here; meaning is failed open later.
+        //
+        // The split is deliberate and it is the whole safety argument
+        // for this field. A malformed *message* -- a scope naming
+        // nothing, a prefix with a control character in it, more scopes
+        // than there can be applications -- is something this client
+        // cannot produce, so refusing it says a sender is broken.
+        //
+        // A prefix that is merely *unusable* -- not valid CIDR, or a
+        // list longer than the service will hold -- is refused nowhere.
+        // It must not be, because refusing rejects the entire
+        // `SetSplitTunnel` request, and that would take the customer's
+        // existing app selection down with it over a catalogue entry
+        // they never chose. Those are dropped in `Scope::new` instead,
+        // where dropping means the application's traffic is carried in
+        // full, exactly as it was before scopes existed.
+        if self.scopes.len() > MAX_SELECTED_APPS {
+            return Err(reject("scopes", "narrows more applications than can be selected"));
+        }
+        for scope in &self.scopes {
+            // Not held to the `.exe`/absolute rules above. A scope whose
+            // app matches nothing in `apps` is dropped rather than
+            // refused -- see `AppScope::app` -- so there is no reading
+            // of a wrong path here that changes what is carried, and
+            // duplicating the path rules would only add a second place
+            // for them to drift.
+            if scope.app.is_empty() || scope.app.len() > 32_767 {
+                return Err(reject("scopes", "names no application"));
+            }
+            if scope.app.chars().any(|c| c.is_control()) {
+                return Err(reject("scopes", "contains control characters"));
+            }
+            for destination in &scope.destinations {
+                if destination.is_empty() || destination.len() > MAX_PREFIX_LEN {
+                    return Err(reject("scopes", "has a destination that is not a prefix"));
+                }
+                if destination.chars().any(|c| c.is_control()) {
+                    return Err(reject("scopes", "contains control characters"));
+                }
             }
         }
         Ok(())

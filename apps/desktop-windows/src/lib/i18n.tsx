@@ -262,6 +262,26 @@ const en = {
   "settings.customGameNone":
     "None of the programs for {game} are running, so nothing was added. Start the game or its launcher, then add it again.",
   "settings.customGameEmpty": "Neoxify has no program list for any game yet.",
+  // Destination scoping, said out loud in both directions.
+  //
+  // "Uses VPN" is now two different promises and the customer cannot
+  // tell which one they got by looking. Someone whose game is scoped
+  // will open its launcher, see their real IP, and conclude the feature
+  // is broken -- so the narrower promise has to be the one that is
+  // stated, not the one that is inferred.
+  //
+  // The second string is the more important one. It is what an
+  // incomplete address list produces, it is the common case today, and
+  // "the whole application is carried" is a bigger claim than "only its
+  // servers are" -- overstating it is the kind of quiet inaccuracy this
+  // app exists to refuse.
+  "settings.customAppScoped": "Game servers only",
+  "settings.customAppScopedHint":
+    "Only this program's traffic to the game's own servers goes through the VPN. Everything else it does keeps your normal connection.",
+  "settings.customGameScoped":
+    "Only {game}'s own game servers go through the VPN; the rest of what it does keeps your normal connection.",
+  "settings.customGameWholeApp":
+    "Everything these programs do goes through the VPN, because Neoxify does not yet have a complete server address list for this game.",
   // Android picks from the installed-app list rather than a file
   // dialog, so these have no Windows counterpart.
   //
@@ -811,6 +831,13 @@ const fa: Record<TranslationKey, string> = {
   "settings.customGameNone":
     "هیچ‌کدام از برنامه‌های {game} در حال اجرا نیست، پس چیزی اضافه نشد. بازی یا لانچرش را اجرا کنید و دوباره اضافه کنید.",
   "settings.customGameEmpty": "هنوز برای هیچ بازی‌ای فهرست برنامه‌ها وجود ندارد.",
+  "settings.customAppScoped": "فقط سرورهای بازی",
+  "settings.customAppScopedHint":
+    "فقط ترافیک این برنامه به سرورهای خودِ بازی از VPN عبور می‌کند. بقیه‌ی کارهای آن از اینترنت معمولی شما استفاده می‌کند.",
+  "settings.customGameScoped":
+    "فقط ترافیک {game} به سرورهای خودش از VPN عبور می‌کند؛ بقیه‌ی کارهای آن از اینترنت معمولی شما استفاده می‌کند.",
+  "settings.customGameWholeApp":
+    "همه‌ی ترافیک این برنامه‌ها از VPN عبور می‌کند، چون نئوکسیفای هنوز فهرست کامل نشانی سرورهای این بازی را ندارد.",
   "dash.offlineTitle": "در حال حاضر به Neoxify دسترسی نیست — همچنان می‌توانید متصل شوید.",
   "dash.offlineHint":
     "از سرورهای ذخیره‌شده استفاده می‌شود. مصرف داده و تاریخ انقضا آخرین بار در {when} به‌روز شده و ممکن است دقیق نباشد.",
