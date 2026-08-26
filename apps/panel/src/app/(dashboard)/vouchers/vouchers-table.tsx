@@ -2,7 +2,7 @@
 
 import { Copy, MoreHorizontal, Plus, Ticket } from "lucide-react";
 import { toast } from "sonner";
-import type { SubscriptionPlan, Voucher } from "@/lib/types";
+import type { SubscriptionPlan, VoucherListRow } from "@/lib/types";
 import { deleteVoucher } from "./actions";
 import { VoucherFormDialog } from "./voucher-form-dialog";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
@@ -27,7 +27,7 @@ export function VouchersTable({
   vouchers,
   plans,
 }: {
-  vouchers: Voucher[];
+  vouchers: VoucherListRow[];
   plans: SubscriptionPlan[];
 }) {
   return (
@@ -150,7 +150,7 @@ export function VouchersTable({
 }
 
 /** Redemptions used against whatever limit applies. */
-function usageLabel(voucher: Voucher) {
+function usageLabel(voucher: VoucherListRow) {
   if (voucher.maxRedemptions === null) return `${voucher.redeemedCount} / ∞`;
   return `${voucher.redeemedCount} / ${voucher.maxRedemptions}`;
 }
@@ -162,7 +162,7 @@ function usageLabel(voucher: Voucher) {
  * and used up happen on their own. Collapsing them into "inactive"
  * would make an exhausted batch look like a mistake.
  */
-function StatusBadge({ voucher }: { voucher: Voucher }) {
+function StatusBadge({ voucher }: { voucher: VoucherListRow }) {
   if (!voucher.isActive) return <Badge variant="outline">Off</Badge>;
   if (voucher.expiresAt && new Date(voucher.expiresAt) <= new Date()) {
     return <Badge variant="outline">Expired</Badge>;

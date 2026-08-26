@@ -258,6 +258,35 @@ export interface PaymentSettings {
   updatedAt: string;
 }
 
+/** One row of `GET /vouchers`, which is narrower than a whole voucher.
+ *
+ * The list route selects `VOUCHER_LIST_FIELDS` (in
+ * `apps/backend/src/modules/vouchers/vouchers.service.ts`), and the
+ * omission that matters is `recipientEmail`: it is a customer's address,
+ * written only by the reseller programme, and the operator's table has
+ * never had a column for it. `issuedByAdminId`, `createdAt` and
+ * `updatedAt` are gone for the duller reason that no cell shows them.
+ *
+ * Typed separately rather than as a `Pick<Voucher, ...>` so a field added
+ * to one is not silently assumed to be on the other. Anything that needs
+ * a whole voucher -- create and update both return one -- gets a
+ * `Voucher`. */
+export interface VoucherListRow {
+  id: string;
+  code: string;
+  planId: string;
+  plan: Pick<SubscriptionPlan, "id" | "name"> & {
+    durationDays?: number;
+    priceUsd?: string;
+  };
+  maxRedemptions: number | null;
+  redeemedCount: number;
+  expiresAt: string | null;
+  isActive: boolean;
+  note: string | null;
+  _count?: { redemptions: number };
+}
+
 /** A code that grants a plan without payment.
  *
  * The three kinds the operator asked for are two independent limits
@@ -305,6 +334,33 @@ export interface SupportMessage {
   fromAdmin: boolean;
   body: string;
   createdAt: string;
+}
+
+/** One row of `GET /support/tickets`, which is narrower than a whole
+ * ticket.
+ *
+ * The list route selects `TICKET_LIST_FIELDS` (in
+ * `apps/backend/src/modules/support/support.service.ts`). The omission
+ * to know about is `customerLastReadAt`: that is the *customer's* unread
+ * marker, read by the app to decide whether to show a dot on their side.
+ * The operator's rail draws its own dot from `status` and has never
+ * touched it, so nothing here loses a feature -- but if a "they have not
+ * read your reply" indicator is ever wanted, it needs the field putting
+ * back on the projection rather than inferring one. `customerId`,
+ * `createdAt` and `updatedAt` are gone because no row shows them;
+ * `lastMessageAt` is the timestamp the rail renders and sorts on.
+ *
+ * The open conversation still arrives whole from
+ * `GET /support/tickets/:id` as a `SupportTicket`. */
+export interface SupportTicketListRow {
+  id: string;
+  subject: string;
+  status: SupportTicketStatus;
+  lastMessageAt: string;
+  /** Always present on a list row -- the projection selects it, and a
+   * ticket cannot exist without a customer. */
+  customer: Pick<Customer, "id" | "email">;
+  _count: { messages: number };
 }
 
 export interface SupportTicket {
