@@ -136,6 +136,43 @@ describe("what the strings are allowed to claim", () => {
     expect(fa["gaming.noResolver"]).not.toContain("هنوز");
   });
 
+  /** The DNS warning has to say both halves, and neither may drift.
+   *
+   * The tunnel is up when this shows -- the engines were made to bring
+   * it up rather than refuse the connect -- so the string must not read
+   * as "you are not connected". The lookups are NOT pinned to it, so it
+   * must not read as "you are protected" either. A customer in Iran who
+   * reads only the first clause still has to come away knowing which
+   * part is not covered, because the missing rule is what lets their
+   * ISP answer with a poisoned address for exactly the sites they
+   * connected to reach. See engines::dns::TunnelDns. */
+  it("says both halves of the unforced-DNS warning, in both languages", () => {
+    // The good half: traffic is going through the VPN.
+    expect(en["dash.tunnelDnsUnforced"]).toMatch(/through the VPN/i);
+    expect(fa["dash.tunnelDnsUnforced"]).toContain("از VPN عبور می‌کند");
+
+    // The bad half: DNS is not, and the provider can still answer.
+    expect(en["dash.tunnelDnsUnforced"]).toMatch(/DNS/);
+    expect(en["dash.tunnelDnsUnforced"]).toMatch(/internet provider/i);
+    expect(fa["dash.tunnelDnsUnforced"]).toContain("DNS");
+    expect(fa["dash.tunnelDnsUnforced"]).toContain("سرویس‌دهنده اینترنت");
+
+    // And what to do about it, in both.
+    expect(en["dash.tunnelDnsUnforced"]).toMatch(/reconnect/i);
+    expect(fa["dash.tunnelDnsUnforced"]).toContain("دوباره وصل");
+
+    // Never a reassurance. This string exists because something is not
+    // covered; a "protected"/"secure"/"safe" in it would be the exact
+    // dishonest state this product refuses to report.
+    expect(en["dash.tunnelDnsUnforced"]).not.toMatch(/(protected|secure|safe|encrypted)/i);
+    expect(fa["dash.tunnelDnsUnforced"]).not.toContain("محافظت");
+    expect(fa["dash.tunnelDnsUnforced"]).not.toContain("امن");
+
+    // Formal «شما», the register the rest of this dictionary uses.
+    expect(fa["dash.tunnelDnsUnforced"]).toContain("شما");
+    expect(fa["dash.tunnelDnsUnforced"]).not.toMatch(/تو/);
+  });
+
   it("tells the customer what a catalogue entry actually is", () => {
     // The catalogue runs to 1,480 entries and nothing in it has been tested
     // against a running game. A long list reads as a compatibility list

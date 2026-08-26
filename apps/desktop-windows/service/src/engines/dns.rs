@@ -34,11 +34,138 @@ const NRPT_COMMENT: &str = "Neoxify tunnel DNS";
 /// sweep only their own.
 const GAMING_NRPT_COMMENT: &str = "Neoxify gaming DNS";
 
+/// What happened to the tunnel's own DNS rule on the session that is up
+/// right now.
+///
+/// Three states rather than two, and the third is why this type exists.
+/// Xray used to fail the whole connect when the rule would not install
+/// and IKEv2 used to log and carry on, with neither comment
+/// acknowledging the other -- an inconsistency rather than a decision.
+/// Both are wrong in Iran for opposite reasons: refusing takes away a
+/// tunnel from someone who may have no other protocol that connects,
+/// and carrying on silently leaves the ISP's resolver answering first,
+/// with a poisoned address, for exactly the domains the customer
+/// connected in order to reach.
+///
+/// So the tunnel comes up and the complaint is carried in `status`, the
+/// way `split_tunnel_problem` and `ipv6_blocked` already are. The app
+/// then says what is and is not protected instead of guessing from the
+/// protocol name.
+///
+/// [`NotRequested`] must never be reported as a problem. It is the
+/// ordinary state for WireGuard, which installs its own DNS, and for
+/// any Custom-mode tunnel, which deliberately leaves the machine's
+/// lookups alone -- and this product's rule is that the app never
+/// reports a state nothing verified, in either direction.
+///
+/// [`NotRequested`]: TunnelDns::NotRequested
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum TunnelDns {
+    /// No rule was asked for. Not a complaint.
+    #[default]
+    NotRequested,
+    /// Asked for and installed: every lookup on this machine goes to
+    /// the tunnel's resolver.
+    Forced,
+    /// Asked for and refused, carrying why. The tunnel may well be
+    /// carrying traffic; the machine's lookups are not pinned to it.
+    Unforced(String),
+}
+
+impl TunnelDns {
+    /// Whether the customer has to be told something is not protected.
+    pub fn unprotected(&self) -> bool {
+        matches!(self, Self::Unforced(_))
+    }
+
+    /// Why, for the cleanup log and a support conversation. Never shown
+    /// to the customer -- it is English and it names cmdlets.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Unforced(e) => Some(e),
+            Self::NotRequested | Self::Forced => None,
+        }
+    }
+}
+
+/// A courier, and only a courier.
+///
+/// The two engines that install this rule do it from free functions
+/// several frames below any `Engines` value -- `xray::configure_adapter`
+/// is called from both `install_routes` and `prepare_passive`, and
+/// neither has one -- so there is nowhere to return the answer to.
+/// `Engines::connect_inner` collects it from here at the end of the
+/// connect and keeps it on the session, and **that field, not this
+/// static, is what `status` reports.**
+///
+/// The distinction is load-bearing rather than tidy. A process-global
+/// that `status` read directly is shared by every `Engines` in the
+/// process, which is one on a customer's machine and several in a test
+/// run -- and it produced exactly the failure this project distrusts
+/// most: two tests that passed alone and failed together, because one
+/// reset the state the other was reading. Per-session state cannot do
+/// that, on a customer's machine either.
+///
+/// Nothing has to remember to reset it. [`clear`] is the teardown and
+/// runs at service start, on every disconnect, and as the first thing
+/// [`apply`] does -- so a stale answer cannot be picked up by the next
+/// connect, and no call site can forget to clear one.
+static TUNNEL_DNS: std::sync::Mutex<TunnelDns> = std::sync::Mutex::new(TunnelDns::NotRequested);
+
+fn record_tunnel_dns(state: TunnelDns) {
+    if let Ok(mut slot) = TUNNEL_DNS.lock() {
+        *slot = state;
+    }
+}
+
+/// What the last `force` on this process reported, for
+/// `Engines::connect_inner` to collect onto the session.
+pub(super) fn tunnel_dns() -> TunnelDns {
+    TUNNEL_DNS
+        .lock()
+        .map(|slot| slot.clone())
+        // A poisoned lock means a panic while this was held. Claiming
+        // "forced" would be asserting something nothing verified, and
+        // claiming "unforced" would put a warning in front of a
+        // customer whose DNS is probably fine. Neither is honest, so
+        // this says only that nothing is being asserted.
+        .unwrap_or(TunnelDns::NotRequested)
+}
+
+/// Installs the tunnel's DNS rule and reports what happened.
+///
+/// **Returns no error on purpose.** This is the single entry point both
+/// engines use, and its type is the mechanism that keeps them
+/// consistent: there is no `Result` here for a caller to `?`, so
+/// "refuse the connect because the DNS rule would not install" is not
+/// an option either engine can take unilaterally again. See
+/// [`TunnelDns`] for why that is the decision.
+///
+/// The failure is not swallowed -- it goes to the cleanup log for
+/// support and into the status poll for the customer.
+pub fn force(resolver: &str) -> TunnelDns {
+    let state = match apply(resolver) {
+        Ok(()) => TunnelDns::Forced,
+        Err(e) => {
+            crate::cleanup_log::note(
+                "force the tunnel's DNS",
+                &format!("{e}; the tunnel is up and the machine's lookups are not pinned to it"),
+            );
+            TunnelDns::Unforced(e)
+        }
+    };
+    record_tunnel_dns(state.clone());
+    state
+}
+
 /// Routes every name through `resolver` for the life of the tunnel.
 ///
 /// Namespace "." matches every name. Existing rules of ours are cleared
 /// first so reconnecting cannot stack duplicates.
-pub fn apply(resolver: &str) -> Result<(), String> {
+///
+/// Private: [`force`] is what engines call, so that the choice about
+/// what a failure means is made once here rather than once per engine.
+fn apply(resolver: &str) -> Result<(), String> {
     clear();
     let script = format!(
         "Add-DnsClientNrptRule -Namespace '.' -NameServers '{resolver}' -Comment '{NRPT_COMMENT}' -ErrorAction Stop"
@@ -55,10 +182,13 @@ pub fn apply(resolver: &str) -> Result<(), String> {
     // slowest of those four readings are past the app's own 45s
     // deadline. The rule this installs is what stops an ISP resolver
     // answering first, which in Iran means answering with a poisoned
-    // address -- so failing the connect over it is not obviously wrong.
-    // IKEv2 takes the opposite view for the same call (see the note by
-    // `dns::apply` in `ikev2::connect`) and neither comment acknowledges
-    // the other. That disagreement is real and is not settled here.
+    // address.
+    //
+    // What happens when it expires is settled now, and not here: the
+    // caller is [`force`], the tunnel comes up either way, and the
+    // customer is told their lookups are not pinned. Xray used to fail
+    // the connect and IKEv2 used to log and continue; see [`TunnelDns`]
+    // for why neither was right.
     powershell(&script, super::CMDLET_BUDGET)
         .map(|_| ())
         .map_err(|e| format!("could not force tunnel DNS: {e}"))
@@ -109,6 +239,12 @@ const NRPT_REGISTRY_PATHS: [&str; 2] = [
 /// [`clear_within`]. The cmdlets are what runs when the registry could
 /// not answer.
 pub fn clear() {
+    // The rule is going away, so what this service can claim about the
+    // machine's lookups goes with it. Reset here rather than at the
+    // callers because this runs at service start, on every disconnect
+    // and as the first thing `apply` does -- which makes it the one
+    // place a stale complaint cannot survive.
+    record_tunnel_dns(TunnelDns::NotRequested);
     let _ = clear_within(super::HELPER_BUDGET);
 }
 
@@ -1356,6 +1492,35 @@ mod tests {
                 "{tag}: an unreadable policy table was treated as a clean zero"
             );
         }
+    }
+
+    /// The honesty guard on the new status field, in the direction that
+    /// actually costs something.
+    ///
+    /// `NotRequested` is the ordinary state for WireGuard, which
+    /// installs its own DNS, and for every Custom-mode tunnel, which
+    /// deliberately leaves the machine's lookups alone. Neither is a
+    /// complaint, and reporting one would put a red line about poisoned
+    /// answers in front of a customer whose DNS is fine -- this
+    /// product's rule that the app never reports a state nothing
+    /// verified cuts in both directions.
+    ///
+    /// `Forced` is not a complaint either. Only a rule that was asked
+    /// for and refused is.
+    #[test]
+    fn only_a_rule_that_was_asked_for_and_refused_is_a_complaint() {
+        assert!(!TunnelDns::NotRequested.unprotected());
+        assert!(!TunnelDns::Forced.unprotected());
+        assert!(TunnelDns::Unforced("powershell did not finish".into()).unprotected());
+
+        // The detail is for the log, never for the customer -- but it
+        // has to survive to reach the log at all.
+        assert_eq!(TunnelDns::NotRequested.detail(), None);
+        assert_eq!(TunnelDns::Forced.detail(), None);
+        assert_eq!(
+            TunnelDns::Unforced("powershell did not finish".into()).detail(),
+            Some("powershell did not finish")
+        );
     }
 
     /// One location absent is ordinary; the other one being empty is a

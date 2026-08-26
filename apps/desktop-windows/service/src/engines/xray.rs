@@ -361,7 +361,17 @@ fn configure_adapter(tun_ip: Ipv4Addr) -> Result<(), String> {
 
     // The adapter's own resolver is only a preference; this is what makes
     // it the only answer. See apply_tunnel_dns.
-    super::dns::apply(TUN_DNS)?;
+    //
+    // Not `?`, and it no longer can be: `dns::force` returns no error.
+    // This used to fail the whole connect, and the rig watched it do
+    // exactly that -- `could not force tunnel DNS: powershell did not
+    // finish within 15s`, on a tunnel Xray's own log shows was already
+    // carrying traffic. IKEv2 took the opposite view for the same call
+    // and neither comment acknowledged the other. The tunnel comes up
+    // now and the complaint is carried in `status`; `dns::TunnelDns`
+    // has the argument, which is about poisoned answers in Iran rather
+    // than about tidiness.
+    super::dns::force(TUN_DNS);
 
     Ok(())
 }

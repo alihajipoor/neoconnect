@@ -186,6 +186,54 @@ mod tests {
         assert_eq!(parsed["connected"], false);
     }
 
+    /// The whole wire path for the DNS complaint, over a real pipe.
+    ///
+    /// Xray used to fail the connect when the tunnel's DNS rule would
+    /// not install and IKEv2 used to log it and carry on, and neither
+    /// comment acknowledged the other. Both bring the tunnel up now and
+    /// the complaint rides the status poll instead -- which is only
+    /// true if the field actually reaches the app, so this asserts on
+    /// the JSON rather than on the Rust value.
+    ///
+    /// Both directions, because both can be wrong. A machine with
+    /// nothing to complain about must serialise `false`: a field that
+    /// defaulted to `true` would put a red warning about poisoned DNS
+    /// in front of every customer on every poll.
+    #[tokio::test]
+    async fn the_status_poll_carries_whether_the_tunnel_s_dns_was_forced() {
+        let name = r"\\.\pipe\neoconnect-test-dns-complaint";
+        let engines = start_server(name).await;
+
+        let reply = round_trip(name, r#"{"type":"status"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(
+            parsed["tunnel_dns_unprotected"], false,
+            "a session with no complaint reported one"
+        );
+
+        // The session's own field, not a process-global: these tests
+        // run in parallel and an earlier draft of this shared one static
+        // between them, which passed alone and failed together.
+        engines
+            .lock()
+            .await
+            .set_dns_state_for_test(crate::engines::dns::TunnelDns::Unforced(
+                "powershell did not finish within 35s".into(),
+            ));
+        let reply = round_trip(name, r#"{"type":"status"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(
+            parsed["tunnel_dns_unprotected"], true,
+            "a tunnel whose DNS rule could not be installed did not say so"
+        );
+
+        // The reason stays on this side of the pipe. It is English and
+        // it names cmdlets; the customer's wording is in the app's
+        // dictionary, in both languages.
+        assert!(parsed.get("tunnel_dns_problem").is_none());
+        assert!(!reply.contains("powershell"));
+    }
+
     /// The failure this file's per-request locking exists for.
     ///
     /// A rapid `setSplitTunnel` + `connect` burst left
@@ -391,12 +439,22 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                     // this says "we are not asserting one" rather than
                     // guessing from the protocol name.
                     ipv6_blocked: false,
+                    // Same reason again, and the same rule. Whether an
+                    // engine asked for the tunnel's DNS rule and was
+                    // refused is a fact about the live session, and the
+                    // session is behind the lock. `false` here is "we
+                    // are not asserting a problem", which is the honest
+                    // answer -- and it is never read as "DNS is
+                    // protected", because nothing anywhere reads this
+                    // field that way.
+                    tunnel_dns_unprotected: false,
                 };
             };
             let (connected, protocol, health) = engines.status();
             let split_tunnel_active = engines.split_tunnel_running();
             let split_tunnel_problem = engines.split_tunnel_complaint();
             let ipv6_blocked = engines.ipv6_blocked();
+            let tunnel_dns_unprotected = engines.tunnel_dns_unprotected();
             Response::State {
                 connected,
                 protocol,
@@ -404,6 +462,7 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                 split_tunnel_active,
                 split_tunnel_problem,
                 ipv6_blocked,
+                tunnel_dns_unprotected,
             }
         }
         // Nothing here touches the machine, so there is no reason for
