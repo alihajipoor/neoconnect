@@ -693,6 +693,38 @@ pub struct AppExit {
     pub app: String,
     /// The exit's identifier, as the backend spells it.
     pub exit: String,
+    /// The game this executable belongs to, opaque like [`Self::exit`].
+    ///
+    /// # Why a preference needs one
+    ///
+    /// A preference is keyed on an executable and a game is routinely
+    /// several of them -- Rust is `Rust.exe`, the EAC wrapper Steam
+    /// launches, plus `RustClient.exe`; VALORANT is the Riot client,
+    /// the game, and Vanguard's `vgc.exe` and `vgm.exe`. Without
+    /// something tying those together, nothing in this protocol can
+    /// tell a config that places a whole game from one that places its
+    /// launcher and leaves its client behind, and the second is the
+    /// account-sharing signature `docs/design/ban-safety.md` mechanism
+    /// 4 describes: one game's connections arriving from two source
+    /// addresses at the same instant.
+    ///
+    /// With it, two rules become enforceable here rather than trusted:
+    /// [`SplitTunnelConfig::validate`] refuses a config that names two
+    /// exits for one group, and `Selection::with_exits` drops a group
+    /// whose members are not all selected instead of placing the part
+    /// it can see.
+    ///
+    /// # Why `Option`
+    ///
+    /// Additivity, on exactly the terms the field it sits beside
+    /// follows. An older app sends `{app, exit}` and still parses;
+    /// its preferences are then read as this protocol always read
+    /// them, one executable at a time, which is what that app meant.
+    /// This client never sends `None`: an ungrouped preference claims
+    /// nothing about a game and is the shape that must not be
+    /// expressible on the screen that produces these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// Where one selected application's traffic is leaving from, against
@@ -820,6 +852,14 @@ const MAX_PREFIX_LEN: usize = 64;
 /// backend would call a node.
 const MAX_EXIT_ID_LEN: usize = 64;
 
+/// The longest a group identifier may be.
+///
+/// This client sends a catalogue slug, which the seed constrains to
+/// lowercase kebab-case; the longest one shipped today is well under
+/// half of this. Bounded for the reason every other string here is:
+/// what arrives over IPC is held by a LocalSystem service.
+const MAX_EXIT_GROUP_LEN: usize = 64;
+
 impl SplitTunnelConfig {
     /// Checks the selection before the service acts on it.
     ///
@@ -932,6 +972,61 @@ impl SplitTunnelConfig {
             }
             if exit.exit.chars().any(|c| c.is_control()) {
                 return Err(reject("exits", "contains control characters"));
+            }
+            if let Some(group) = &exit.group {
+                if group.is_empty() || group.len() > MAX_EXIT_GROUP_LEN {
+                    return Err(reject("exits", "names no game"));
+                }
+                if group.chars().any(|c| c.is_control()) {
+                    return Err(reject("exits", "contains control characters"));
+                }
+            }
+        }
+
+        // A group is one exit or it is none.
+        //
+        // This is the one rule in this function that refuses *meaning*
+        // rather than shape, and it is deliberate. Everything above
+        // fails open because an unsatisfiable preference is the
+        // ordinary case -- a customer connects somewhere else and the
+        // exit they named is simply not live, which is
+        // `ExitPlacement::Fallback` and not an error.
+        //
+        // A config that names two exits for **one game** is a different
+        // thing entirely. It is not unsatisfiable, it is
+        // self-contradictory: there is no live egress, present or
+        // future, that satisfies it, and honouring any part of it would
+        // put one game's launcher and its client on two addresses --
+        // which is the account-sharing signature that gets a customer's
+        // account restricted, not a feature that quietly does less.
+        // `docs/design/ban-safety.md` calls that the one mechanism
+        // Neoxify could manufacture rather than merely fail to prevent.
+        //
+        // Refusing costs the sender its whole `SetSplitTunnel`, and
+        // that is the right price: this client cannot produce such a
+        // config -- `exitsForGames` emits a group's binaries together or
+        // not at all -- so one arriving means a sender that is broken
+        // or is not us, and the safe reading of either is to act on
+        // none of it.
+        for (i, exit) in self.exits.iter().enumerate() {
+            for other in self.exits.iter().skip(i + 1) {
+                if exit.exit == other.exit {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (&exit.group, &other.group) {
+                    if a == b {
+                        return Err(reject("exits", "puts one game on two exits"));
+                    }
+                }
+                // And the same contradiction arriving without a group:
+                // one executable cannot leave from two places, so a
+                // config saying it does describes nothing that could be
+                // carried out. Compared case-insensitively because
+                // Windows paths are, and because the selection is
+                // lowercased once at construction.
+                if exit.app.to_lowercase() == other.app.to_lowercase() {
+                    return Err(reject("exits", "puts one application on two exits"));
+                }
             }
         }
         if let Some(egress) = &self.egress {
@@ -2149,6 +2244,7 @@ mod app_exit_tests {
             exits: vec![AppExit {
                 app: r"C:\Games\game.exe".to_string(),
                 exit: "germany-1".to_string(),
+                group: Some("a-game".to_string()),
             }],
             egress: Some("germany-1".to_string()),
         };
@@ -2159,6 +2255,171 @@ mod app_exit_tests {
     #[test]
     fn a_well_formed_preference_is_accepted() {
         assert!(config(|_| {}).validate().is_ok());
+    }
+
+    /// One game's binaries, on one exit, accepted -- and the group
+    /// travels.
+    ///
+    /// The whole point of the field is that the service can tell this
+    /// config apart from one that places `Rust.exe` and leaves
+    /// `RustClient.exe` somewhere else, so a round trip that dropped
+    /// the group would take the distinction with it.
+    #[test]
+    fn a_whole_game_on_one_exit_is_accepted_and_keeps_its_group() {
+        let whole = config(|c| {
+            c.apps = vec![r"C:\Rust\Rust.exe".into(), r"C:\Rust\RustClient.exe".into()];
+            c.exits = vec![
+                AppExit {
+                    app: r"C:\Rust\Rust.exe".into(),
+                    exit: "germany-1".into(),
+                    group: Some("rust".into()),
+                },
+                AppExit {
+                    app: r"C:\Rust\RustClient.exe".into(),
+                    exit: "germany-1".into(),
+                    group: Some("rust".into()),
+                },
+            ];
+        });
+        assert!(whole.validate().is_ok());
+
+        let wire = serde_json::to_string(&whole).expect("serialises");
+        assert!(wire.contains(r#""group":"rust""#), "{wire}");
+        let back: SplitTunnelConfig = serde_json::from_str(&wire).expect("round-trips");
+        assert_eq!(back.exits[0].group.as_deref(), Some("rust"));
+        assert_eq!(back.exits[1].group.as_deref(), Some("rust"));
+    }
+
+    /// The configuration this whole field exists to make impossible.
+    ///
+    /// `Rust.exe` is the EAC wrapper Steam launches and `RustClient.exe`
+    /// is the game; putting them on two exits presents one account from
+    /// two source addresses at the same instant, which is the
+    /// account-sharing signature -- `docs/design/ban-safety.md`
+    /// mechanism 4, the one failure this product could manufacture
+    /// rather than merely fail to prevent.
+    ///
+    /// Refused outright rather than half-honoured. Honouring either
+    /// half is the split; ignoring both silently would leave the sender
+    /// believing something that is not true about where a customer's
+    /// game appears from.
+    #[test]
+    fn a_game_split_across_two_exits_is_refused() {
+        let split = config(|c| {
+            c.apps = vec![r"C:\Rust\Rust.exe".into(), r"C:\Rust\RustClient.exe".into()];
+            c.exits = vec![
+                AppExit {
+                    app: r"C:\Rust\Rust.exe".into(),
+                    exit: "germany-1".into(),
+                    group: Some("rust".into()),
+                },
+                AppExit {
+                    app: r"C:\Rust\RustClient.exe".into(),
+                    exit: "turkey-1".into(),
+                    group: Some("rust".into()),
+                },
+            ];
+        });
+        assert!(split.validate().is_err(), "one game, two exits, must not be accepted");
+    }
+
+    /// Two games on two exits is the feature, not the failure.
+    ///
+    /// Ban-safety mechanism 5 is the argument *for* it: a restriction on
+    /// a shared address hits every customer on that address and support
+    /// cannot lift it, so spreading gaming traffic shrinks the blast
+    /// radius. The rule is all-or-nothing per game, not one exit
+    /// overall.
+    #[test]
+    fn two_games_on_two_exits_is_accepted() {
+        let spread = config(|c| {
+            c.apps = vec![r"C:\Rust\Rust.exe".into(), r"C:\SoT\SoTGame.exe".into()];
+            c.exits = vec![
+                AppExit {
+                    app: r"C:\Rust\Rust.exe".into(),
+                    exit: "germany-1".into(),
+                    group: Some("rust".into()),
+                },
+                AppExit {
+                    app: r"C:\SoT\SoTGame.exe".into(),
+                    exit: "turkey-1".into(),
+                    group: Some("sea-of-thieves".into()),
+                },
+            ];
+        });
+        assert!(spread.validate().is_ok());
+    }
+
+    /// The same contradiction with the group filed off.
+    ///
+    /// A hand-written config could name one executable twice with two
+    /// exits and no group at all. There is no live egress that satisfies
+    /// it, so it describes nothing that could be carried out, and it is
+    /// refused for that alone -- the group rule is not the only thing
+    /// standing here.
+    #[test]
+    fn one_application_named_twice_with_two_exits_is_refused() {
+        let contradictory = config(|c| {
+            c.exits = vec![
+                AppExit { app: r"C:\Games\game.exe".into(), exit: "germany-1".into(), group: None },
+                AppExit { app: r"c:\games\GAME.exe".into(), exit: "turkey-1".into(), group: None },
+            ];
+        });
+        assert!(
+            contradictory.validate().is_err(),
+            "Windows paths are case-insensitive; two spellings are one executable"
+        );
+    }
+
+    /// Repeating an executable with the *same* exit is not a
+    /// contradiction. Two games that share a binary and agree about
+    /// where it goes -- `RiotClientServices.exe` belongs to both
+    /// VALORANT and League of Legends -- split nothing.
+    #[test]
+    fn one_application_named_twice_with_one_exit_is_accepted() {
+        let agreed = config(|c| {
+            c.exits = vec![
+                AppExit {
+                    app: r"C:\Games\game.exe".into(),
+                    exit: "germany-1".into(),
+                    group: Some("valorant".into()),
+                },
+                AppExit {
+                    app: r"C:\Games\game.exe".into(),
+                    exit: "germany-1".into(),
+                    group: Some("league-of-legends".into()),
+                },
+            ];
+        });
+        assert!(agreed.validate().is_ok());
+    }
+
+    /// A group identifier is held to the same shape rules as an exit
+    /// identifier, and for the same reason: this is what arrives over
+    /// IPC at a LocalSystem service.
+    #[test]
+    fn refuses_a_group_whose_shape_this_client_could_not_produce() {
+        assert!(config(|c| c.exits[0].group = Some(String::new())).validate().is_err());
+        assert!(config(|c| c.exits[0].group = Some("a".repeat(MAX_EXIT_GROUP_LEN + 1)))
+            .validate()
+            .is_err());
+        assert!(config(|c| c.exits[0].group = Some("ru\u{7}st".into())).validate().is_err());
+    }
+
+    /// An older app sends `{app, exit}` with no group and must still
+    /// parse -- additivity on exactly the terms `exits` itself follows.
+    /// Its preferences are then read one executable at a time, which is
+    /// what that app meant by them.
+    #[test]
+    fn an_older_app_that_omits_the_group_still_parses() {
+        let parsed: SplitTunnelConfig = serde_json::from_str(
+            r#"{"enabled":true,"apps":["C:\\Games\\game.exe"],"mode":"onlySelected",
+                 "exits":[{"app":"C:\\Games\\game.exe","exit":"germany-1"}]}"#,
+        )
+        .expect("the group must default");
+        assert_eq!(parsed.exits.len(), 1);
+        assert!(parsed.exits[0].group.is_none());
+        assert!(parsed.validate().is_ok());
     }
 
     /// An older app sends neither `exits` nor `egress` and must still
@@ -2210,7 +2471,11 @@ mod app_exit_tests {
         assert!(config(|c| c.egress = Some(String::new())).validate().is_err());
         assert!(config(|c| c.egress = Some("germany\u{7}1".into())).validate().is_err());
         assert!(config(|c| c.exits = (0..MAX_SELECTED_APPS + 1)
-            .map(|i| AppExit { app: format!(r"C:\g{i}.exe"), exit: "e".into() })
+            .map(|i| AppExit {
+                app: format!(r"C:\g{i}.exe"),
+                exit: "e".into(),
+                group: Some(format!("g{i}")),
+            })
             .collect())
         .validate()
         .is_err());

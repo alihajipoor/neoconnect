@@ -279,6 +279,37 @@ const en = {
   "settings.customGameNone":
     "None of the programs for {game} are running, so nothing was added. Start the game or its launcher, then add it again.",
   "settings.customGameEmpty": "Neoxify has no program list for any game.",
+  // A game that is only partly added, said again and kept on screen.
+  //
+  // `customGameMissing` above says it once, in the notice, at the moment
+  // the game is added -- and the customer who added a game from its
+  // launcher screen is exactly the customer who scrolled past that
+  // sentence and never saw it again. This one stays.
+  //
+  // It is not a tidiness message. A program that is not on the list is
+  // not carried, so when it starts it reaches the game's servers from
+  // the customer's own address while the rest of the game reaches them
+  // through the tunnel: one account, two source addresses, at the same
+  // instant. `docs/design/ban-safety.md` mechanism 4 -- the one failure
+  // this product could manufacture rather than merely fail to prevent.
+  //
+  // Written as what happens, not as a warning about what might. The
+  // customer is told the mechanism because the mechanism is what tells
+  // them which of the two fixes to reach for.
+  "settings.customGameSplit": "Only part of {game} is added",
+  "settings.customGameSplitBody":
+    "Not added: {names}. Those keep your normal connection, so if one starts while the rest of {game} is going through Neoxify, the game reaches its servers from two addresses at the same time. Publishers read that as account sharing. Start every part of the game, then add it again.",
+  // Why a game did not get the exit it was given.
+  //
+  // Both are inert on today's data, in the way `customGameScoped` is:
+  // no screen sets a per-game exit yet. They exist so that whoever
+  // builds that picker cannot ship a silently withheld preference,
+  // which would be the app deciding something on the customer's behalf
+  // and not saying so.
+  "settings.customGameExitPartial":
+    "{game} uses the same exit as the rest of your traffic. Not all of its programs are added ({names}), and Neoxify will not put part of a game on an exit of its own.",
+  "settings.customGameExitConflict":
+    "{game} and {others} run the same program, so they cannot use different exits. Until they are set to match, both use the same exit as the rest of your traffic.",
   // Destination scoping, said out loud in both directions.
   //
   // "Uses VPN" is now two different promises and the customer cannot
@@ -883,6 +914,13 @@ const fa: Record<TranslationKey, string> = {
   "settings.customGameNone":
     "هیچ‌کدام از برنامه‌های {game} در حال اجرا نیست، پس چیزی اضافه نشد. بازی یا لانچرش را اجرا کنید و دوباره اضافه کنید.",
   "settings.customGameEmpty": "برای هیچ بازی‌ای فهرست برنامه‌ها وجود ندارد.",
+  "settings.customGameSplit": "فقط بخشی از {game} اضافه شده است",
+  "settings.customGameSplitBody":
+    "اضافه نشده: {names}. این‌ها از اینترنت معمولی شما استفاده می‌کنند؛ پس اگر یکی از آن‌ها در حالی اجرا شود که بقیهٔ {game} از نئوکسیفای عبور می‌کند، بازی هم‌زمان از دو نشانی متفاوت به سرورهایش وصل می‌شود. ناشران این را اشتراک‌گذاری حساب می‌دانند. همهٔ بخش‌های بازی را اجرا کنید و بازی را دوباره اضافه کنید.",
+  "settings.customGameExitPartial":
+    "{game} از همان محل خروجی استفاده می‌کند که بقیهٔ ترافیک شما از آن استفاده می‌کند. همهٔ برنامه‌های آن اضافه نشده‌اند ({names})، و نئوکسیفای بخشی از یک بازی را روی محل خروج جداگانه قرار نمی‌دهد.",
+  "settings.customGameExitConflict":
+    "{game} و {others} یک برنامهٔ مشترک را اجرا می‌کنند، پس نمی‌توانند از دو محل خروج متفاوت استفاده کنند. تا وقتی محل خروج هر دو یکسان نشود، هر دو از همان محل خروجی استفاده می‌کنند که بقیهٔ ترافیک شما از آن استفاده می‌کند.",
   "settings.customAppScoped": "فقط سرورهای بازی",
   "settings.customAppScopedHint":
     "فقط ترافیک این برنامه به سرورهای خودِ بازی از VPN عبور می‌کند. بقیه‌ی کارهای آن از اینترنت معمولی شما استفاده می‌کند.",

@@ -1,5 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
+import { exitsForGames, groupMembers, type GameExitGroup } from "./game-apps";
 
 /** Custom mode: route only the chosen applications through the tunnel.
  *
@@ -33,6 +34,33 @@ export type AppScope = {
   destinations: string[];
 };
 
+/** Which exit one chosen application's traffic should leave from.
+ *
+ * Path-keyed like `AppScope`, because that is what the service matches
+ * on -- but unlike a scope it is **never built from a path**. The only
+ * producer is `exitsForGames`, which emits every binary of one game or
+ * none of them, and `group` carries the game it came from so the
+ * service can hold the same rule independently.
+ *
+ * There is deliberately no per-application exit anywhere in this
+ * client's persisted state. A customer cannot put a game's launcher and
+ * its client on two exits because there is no field in which to say it.
+ * `docs/design/ban-safety.md` mechanism 4: one game's connections
+ * arriving from two source addresses at the same instant is the
+ * account-sharing signature. */
+export type AppExit = {
+  /** The executable, spelled exactly as it appears in `apps`. */
+  app: string;
+  /** The exit identifier, as the backend spells it. Opaque here and
+   * opaque in the service, which only ever compares it for equality. */
+  exit: string;
+  /** The catalogue slug of the game this binary belongs to. Always
+   * present from this client: an entry with no group is a preference
+   * for one executable that claims nothing about a game, which is
+   * exactly what must not be expressible. */
+  group: string;
+};
+
 export type SplitTunnelSettings = {
   enabled: boolean;
   /** Absolute paths to executables, as the picker returned them. */
@@ -46,6 +74,21 @@ export type SplitTunnelSettings = {
    * older build reading this file sees a selection it fully
    * understands, and a scope it simply ignores. */
   scopes: AppScope[];
+  /** The games behind the chosen paths, and the exit each one should
+   * leave from.
+   *
+   * Kept because `apps` alone has forgotten it. A game is routinely
+   * several binaries -- Rust is its EAC wrapper plus `RustClient.exe`,
+   * VALORANT is the Riot client plus the game plus two Vanguard
+   * binaries -- and once a game's resolved paths are flattened into one
+   * list, nothing can put those binaries on one exit together because
+   * nothing knows they belong together any more.
+   *
+   * Sparse and additive on exactly the terms `scopes` is: apps added by
+   * hand are in no group and simply have no preference, and an older
+   * build reading this file sees a selection it fully understands and a
+   * group list it ignores. */
+  games: GameExitGroup[];
 };
 
 export const EMPTY_SPLIT_TUNNEL: SplitTunnelSettings = {
@@ -53,6 +96,7 @@ export const EMPTY_SPLIT_TUNNEL: SplitTunnelSettings = {
   apps: [],
   mode: "onlySelected",
   scopes: [],
+  games: [],
 };
 
 /** Matches the service's own cap, so an over-long list is refused here
@@ -97,6 +141,58 @@ function readScopes(stored: unknown): AppScope[] {
   return out;
 }
 
+/** Reads stored game groups, taking each one whole or not at all.
+ *
+ * The same all-or-nothing rule `readScopes` follows, for a sharper
+ * version of the same reason. A scope that survives with half its
+ * prefixes splits one game across two paths. A **group** that survives
+ * with half its executable names is worse: it would read as complete,
+ * and a complete group is exactly what earns a per-game exit. The
+ * binaries the truncated read dropped would then be carried somewhere
+ * else entirely while the group reported itself whole.
+ *
+ * So a malformed entry drops the whole group, which returns that game
+ * to having no exit preference -- the state every game was in before
+ * this existed, and safe by definition. */
+export function readGames(stored: unknown): GameExitGroup[] {
+  if (!Array.isArray(stored)) return [];
+  const out: GameExitGroup[] = [];
+  const seen = new Set<string>();
+  for (const entry of stored) {
+    if (!entry || typeof entry !== "object") continue;
+    const { slug, displayName, names, exit } = entry as Partial<GameExitGroup>;
+    if (typeof slug !== "string" || !slug) continue;
+    if (typeof displayName !== "string" || !displayName) continue;
+    if (!Array.isArray(names) || names.length === 0) continue;
+    if (!names.every((n) => typeof n === "string" && n.length > 0)) continue;
+    // `null` and a string are the two things this may be. Anything else
+    // is a file this build did not write, and reading an unknown value
+    // as an exit identifier would name an exit nobody chose.
+    if (exit !== null && (typeof exit !== "string" || exit.length === 0)) continue;
+    // One row per game. A duplicate slug would put one game in two
+    // groups, which is the split this whole feature refuses, arriving
+    // through the store file.
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    out.push({ slug, displayName, names: [...names], exit: exit ?? null });
+  }
+  return out;
+}
+
+/** The groups that still have a chosen app in them.
+ *
+ * A game whose every binary the customer removed is not a game they
+ * chose any more, and leaving the group behind would silently reapply
+ * its exit the day they re-added one of those binaries by hand.
+ *
+ * A group that loses *some* of its binaries is deliberately kept. It is
+ * now partial, and `exitsForGames` withholds its exit for that reason
+ * and says so -- which is the honest outcome, and better than
+ * forgetting the customer ever chose an exit for that game. */
+export function gamesFor(apps: string[], games: GameExitGroup[]): GameExitGroup[] {
+  return games.filter((game) => groupMembers(game, apps).length > 0);
+}
+
 /** The scopes that still describe a chosen app.
  *
  * Removing an app has to remove its scope with it. Left behind, the
@@ -138,6 +234,9 @@ export async function loadSplitTunnel(): Promise<SplitTunnelSettings> {
       // non-string destination and the entire scope is dropped, which
       // returns that app to being carried in full.
       scopes: readScopes(stored.scopes),
+      // Whole or not at all, and for a sharper reason than `scopes`.
+      // See `readGames`.
+      games: readGames(stored.games),
     };
   } catch {
     return EMPTY_SPLIT_TUNNEL;
@@ -175,6 +274,17 @@ export async function pushSplitTunnel(settings: SplitTunnelSettings): Promise<vo
     // this is the last place either of them can be checked against the
     // other.
     scopes: scopesFor(settings.apps, settings.scopes),
+    // Derived, never stored. `exitsForGames` is the only producer of an
+    // `AppExit` in this client and it emits a game's binaries together
+    // or not at all, so there is no path from here to a config that
+    // puts one game's launcher and its client on two exits.
+    //
+    // What it withholds is not reported from here -- this function is
+    // called before every connect and a notice raised here would fire
+    // at a moment the customer is not looking at the screen. The card
+    // asks `exitsForGames` for the same answer when the selection
+    // changes, which is when they are.
+    exits: exitsForGames(settings.games, settings.apps).exits,
   });
 }
 

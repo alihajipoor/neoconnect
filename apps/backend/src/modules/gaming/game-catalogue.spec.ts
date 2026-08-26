@@ -3,6 +3,8 @@ import { join } from "node:path";
 import {
   RESERVED_SLUGS,
   catalogueEntries,
+  entangledSlugs,
+  sharedProcessNames,
   toSeedRow,
   validateCatalogue,
   validateProcessNames,
@@ -277,6 +279,163 @@ describe("game catalogue", () => {
       // which is the only form that would actually ship.
       expect(source).not.toContain('"Agent.exe"');
       expect(source).not.toContain('"UnrealCEFSubProcess.exe"');
+    });
+  });
+});
+
+/** A catalogue row is the group for per-game exit selection.
+ *
+ * `docs/design/ban-safety.md` mechanism 4: one game's connections arriving
+ * from two source addresses at the same instant is the account-sharing
+ * signature publishers look for, and it is the only mechanism in that
+ * document Neoxify could MANUFACTURE rather than merely fail to prevent.
+ * Per-game exit preferences are keyed on the executable, so what stops a
+ * game's launcher and its client landing on two exits is that they are in
+ * one row and the client places a row whole or not at all.
+ *
+ * That makes these rows load-bearing in a way they were not before. A future
+ * edit that drops `RustClient.exe` from the Rust entry does not merely lose
+ * coverage -- it silently returns Rust to being splittable, because the
+ * client would then believe a group containing only the EAC wrapper is
+ * complete. Nothing else in this repo would go red.
+ *
+ * The pairs below are the ones with first-party evidence behind them,
+ * recorded in each entry's own `source` and `notes`. */
+describe("exit groups", () => {
+  const bulk = catalogueEntries();
+
+  /** The three hand-written rows, read out of the seed's source.
+   *
+   * They have to be here. `catalogueEntries()` deliberately excludes the
+   * reserved slugs and `catalogue/index.ts` deliberately has no import back
+   * into the seed, so a collision analysis over the bulk tier alone cannot
+   * see the sharpest real case there is: `RiotClientServices.exe`, `vgc.exe`
+   * and `vgm.exe` are in both VALORANT and League of Legends, and both of
+   * those live in `game-profiles.ts`. A customer's client receives all 1,483
+   * rows in one payload and has no such split, so analysing only the bulk
+   * tier would be measuring a set nothing actually uses.
+   *
+   * Parsed from source rather than seeded because seeding needs a database,
+   * and the assertion is about what the file says. */
+  function reservedProfiles(): CatalogueEntry[] {
+    const source = readFileSync(join(__dirname, "../../../prisma/game-profiles.ts"), "utf8");
+    const out: CatalogueEntry[] = [];
+    for (const slug of RESERVED_SLUGS) {
+      const at = source.indexOf(`slug: "${slug}"`);
+      if (at < 0) throw new Error(`${slug} is no longer in game-profiles.ts`);
+      const names = source.slice(at).match(/processNames:\s*\[([^\]]*)\]/);
+      if (!names) throw new Error(`${slug} has no processNames in game-profiles.ts`);
+      out.push({
+        slug,
+        displayName: slug,
+        processNames: [...names[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]),
+      });
+    }
+    return out;
+  }
+
+  const entries = [...bulk, ...reservedProfiles()];
+  const bySlug = new Map(entries.map((e) => [e.slug, e.processNames.map((n) => n.toLowerCase())]));
+
+  it("the seed parser found the hand-written rows it claims to", () => {
+    // If this regex ever silently matches nothing, every collision
+    // assertion below turns green by measuring a smaller catalogue.
+    // Fail here instead, where the message says what happened.
+    expect(bySlug.get("valorant")).toContain("vgc.exe");
+    expect(bySlug.get("wow")).toContain("battle.net.exe");
+    expect(entries.length).toBe(bulk.length + RESERVED_SLUGS.length);
+  });
+
+  describe("multi-binary games keep both halves in one row", () => {
+    it.each([
+      // Valve's launch config names only the EAC wrapper; RustClient.exe
+      // is Facepunch's own name for the game without it.
+      ["rust", ["rust.exe", "rustclient.exe"]],
+      // SeaOfThieves.exe is a root shim; SoTGame.exe is the real binary.
+      ["sea-of-thieves", ["seaofthieves.exe", "sotgame.exe"]],
+      ["dead-by-daylight", ["deadbydaylight.exe", "deadbydaylight-win64-shipping.exe"]],
+      // BattlEye's own FAQ confirms a [Game]_BE.exe makes its own
+      // network connections, so it is not a mere shim to ignore.
+      ["ark-survival-evolved", ["shootergame_be.exe", "shootergame.exe"]],
+      ["ark-survival-ascended", ["arkascended_be.exe", "arkascended.exe"]],
+      ["lost-ark", ["lostark.exe", "launch_game.exe", "lostarklauncher.exe"]],
+      ["fortnite", ["fortniteclient-win64-shipping.exe", "fortnitelauncher.exe"]],
+    ])("%s", (slug, expected) => {
+      const names = bySlug.get(slug);
+      // Named in the failure rather than left as `undefined is not
+      // defined`, because the interesting case is a slug that was
+      // renamed and the message is the only thing that would say so.
+      if (!names) throw new Error(`${slug} is missing from the catalogue`);
+      for (const name of expected) expect(names).toContain(name);
+    });
+  });
+
+  describe("sharedProcessNames", () => {
+    it("finds an executable two entries both claim", () => {
+      const shared = sharedProcessNames([
+        { slug: "a", displayName: "A", processNames: ["Shared.exe", "OnlyA.exe"] },
+        { slug: "b", displayName: "B", processNames: ["shared.exe"] },
+        { slug: "c", displayName: "C", processNames: ["OnlyC.exe"] },
+      ]);
+      expect(shared).toEqual([{ name: "shared.exe", slugs: ["a", "b"] }]);
+    });
+
+    it("reports the real entanglements the client has to resolve", () => {
+      // Not a hypothetical. These three binaries genuinely belong to
+      // both Riot titles, so a customer who activates VALORANT and
+      // League with different exits is asking one process to leave from
+      // two places. The client withholds the preference from both
+      // rather than picking a winner, and this is the data that makes
+      // that path reachable.
+      const shared = new Map(sharedProcessNames(entries).map((s) => [s.name, s.slugs]));
+      for (const name of ["riotclientservices.exe", "vgc.exe", "vgm.exe"]) {
+        expect(shared.get(name)?.sort()).toEqual(["league-of-legends", "valorant"]);
+      }
+      // And a cross-tier one, which is the case somebody adding a
+      // launcher entry would not think about: the Battle.net launcher is
+      // a catalogue row in its own right AND a member of the World of
+      // Warcraft group.
+      expect(shared.get("battle.net.exe")?.sort()).toEqual(["battle-net", "wow"]);
+      // Inside the generated tier too, so this is not a curated-data
+      // quirk: eleven Source titles run under one `hl2.exe`.
+      expect((shared.get("hl2.exe") ?? []).length).toBeGreaterThan(5);
+    });
+
+    it("is not rare enough to treat as an edge case", () => {
+      // The number is not the assertion -- it will drift as the
+      // generated tier is rebuilt. That it is dozens rather than a
+      // handful is, because it is what makes the conflict rule worth
+      // having code for at all.
+      expect(sharedProcessNames(entries).length).toBeGreaterThan(20);
+    });
+  });
+
+  describe("entangledSlugs", () => {
+    it("names the games that cannot be given different exits", () => {
+      const entangled = entangledSlugs(entries);
+      expect(entangled.get("valorant")).toContain("league-of-legends");
+      expect(entangled.get("league-of-legends")).toContain("valorant");
+    });
+
+    it("leaves an unentangled game free to differ", () => {
+      // Most of the catalogue. 81% of entries are a single executable
+      // and the great majority collide with nothing.
+      const entangled = entangledSlugs(entries);
+      expect(entangled.has("sea-of-thieves")).toBe(false);
+    });
+
+    it("is pairwise, not transitive", () => {
+      // A shares with B and B shares with C, but no single process is
+      // claimed by both A and C -- so A and C may still differ. The
+      // rule is about one executable being asked to leave from two
+      // places, which is a fact about a pair.
+      const entangled = entangledSlugs([
+        { slug: "a", displayName: "A", processNames: ["ab.exe"] },
+        { slug: "b", displayName: "B", processNames: ["ab.exe", "bc.exe"] },
+        { slug: "c", displayName: "C", processNames: ["bc.exe"] },
+      ]);
+      expect([...(entangled.get("a") ?? [])]).toEqual(["b"]);
+      expect([...(entangled.get("c") ?? [])]).toEqual(["b"]);
     });
   });
 });

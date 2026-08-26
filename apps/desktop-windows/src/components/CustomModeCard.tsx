@@ -6,6 +6,7 @@ import { GamePicker } from "./GamePicker";
 import { useI18n } from "../lib/i18n";
 import {
   appName,
+  gamesFor,
   isEffective,
   listRunningApps,
   loadSplitTunnel,
@@ -19,7 +20,17 @@ import {
   type SplitTunnelSettings,
 } from "../lib/split-tunnel";
 import { getGamingProfile, type GameProfileSummary } from "../lib/customer";
-import { curatedNames, hasCuratedApps, resolveGameApps, scopesForGame } from "../lib/game-apps";
+import {
+  curatedNames,
+  exitsForGames,
+  gameExitGroup,
+  hasCuratedApps,
+  isWholeGroup,
+  resolveGameApps,
+  scopesForGame,
+  unresolvedNames,
+  type GameExitGroup,
+} from "../lib/game-apps";
 import { Button, Card } from "../components/ui";
 
 /** Custom mode: pick the apps that go through the VPN, leave the rest
@@ -86,7 +97,7 @@ export function CustomModeCard() {
    * one that happened to be listed routes half of it -- which looks
    * exactly like the feature not working. The file picker passes a
    * single path; the app picker passes the whole group. */
-  async function addPaths(picked: string[], gameScopes: AppScope[] = []) {
+  async function addPaths(picked: string[], gameScopes: AppScope[] = [], game?: GameExitGroup) {
     if (!settings) return;
     // Compared case-insensitively because Windows paths are, and the
     // picker's casing does not always match what a running process
@@ -116,7 +127,23 @@ export function CustomModeCard() {
       ...settings.scopes,
       ...gameScopes.filter((s) => chosen.has(s.app.toLowerCase())),
     ];
-    await apply({ ...settings, apps, scopes: scopesFor(apps, scopes) });
+    // The group the paths came from, kept rather than flattened away.
+    //
+    // This is the whole fix for a real ban risk: a game is routinely
+    // several binaries -- Rust is its EAC wrapper plus `RustClient.exe`
+    // -- and once a game's paths are merged into one undifferentiated
+    // `apps` list, nothing can put those binaries on one exit together
+    // because nothing knows they belong together any more. See
+    // `GameExitGroup` and `docs/design/ban-safety.md` mechanism 4.
+    //
+    // Re-adding a game replaces its group rather than adding a second
+    // one, so a customer who adds Rust at the launcher, starts it, and
+    // adds it again ends up with one whole group and not two partial
+    // ones.
+    const games = game
+      ? [...settings.games.filter((g) => g.slug !== game.slug), game]
+      : settings.games;
+    await apply({ ...settings, apps, scopes: scopesFor(apps, scopes), games: gamesFor(apps, games) });
     return true;
   }
 
@@ -168,7 +195,11 @@ export function CustomModeCard() {
     // the gate, and the code is ready for the day a list is finished.
     const gameScopes = scopesForGame(game, resolved.paths);
     const scoped = gameScopes.length > 0;
-    const added = await addPaths(resolved.paths, gameScopes);
+    // Built from the profile, so a group's members can only ever be the
+    // catalogue's own list for one game. No exit is chosen here --
+    // `null` is "no preference", which is what every application had
+    // before per-game exits existed.
+    const added = await addPaths(resolved.paths, gameScopes, gameExitGroup(game));
     // A refusal above already said why -- the cap, or nothing new. It
     // must not be followed by a sentence claiming a count was added.
     if (!added) return;
@@ -374,7 +405,17 @@ export function CustomModeCard() {
                       // by hand later, silently narrowing a selection
                       // they made expecting the ordinary behaviour.
                       const apps = settings.apps.filter((a) => a !== path);
-                      void apply({ ...settings, apps, scopes: scopesFor(apps, settings.scopes) });
+                      // And the group goes when its last binary does,
+                      // for the same reason. A group that lost only
+                      // some of its binaries is kept and becomes
+                      // partial, which withholds its exit and says so
+                      // -- see the warning above the list.
+                      void apply({
+                        ...settings,
+                        apps,
+                        scopes: scopesFor(apps, settings.scopes),
+                        games: gamesFor(apps, settings.games),
+                      });
                     }}
                     className="press flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
                   >
@@ -384,6 +425,66 @@ export function CustomModeCard() {
               ))}
             </ul>
           )}
+
+          {/* Games that are only partly added, named.
+
+              This is not tidiness. A binary that is not on the list is
+              not carried, so when it starts it reaches the game's
+              servers from the customer's own address while the rest of
+              the game reaches them through Neoxify -- one account,
+              two source addresses, at the same instant, which is the
+              account-sharing signature publishers look for
+              (`docs/design/ban-safety.md` mechanism 4). The card said
+              which programs were missing at the moment the game was
+              added; it did not keep saying it, and the customer who
+              added a game at its launcher screen is exactly the
+              customer who never saw that sentence again.
+
+              Only for games added from the catalogue, because that is
+              the only place this client knows what a whole game is. */}
+          {settings.mode === "onlySelected"
+            ? settings.games
+                .filter((game) => !isWholeGroup(game, settings.apps))
+                .map((game) => (
+                  <div
+                    key={game.slug}
+                    className="rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-2"
+                  >
+                    <p className="text-xs font-medium text-destructive">
+                      {t("settings.customGameSplit", { game: game.displayName })}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      {t("settings.customGameSplitBody", {
+                        game: game.displayName,
+                        names: unresolvedNames(game, settings.apps).join(", "),
+                      })}
+                    </p>
+                  </div>
+                ))
+            : null}
+
+          {/* A game that asked for an exit and did not get one.
+
+              Inert on today's data in the way `scopesForGame` is: no
+              screen sets `GameExitGroup.exit` yet, because this client
+              has no exit vocabulary to offer -- the backend
+              deliberately withholds a relay's exit identity, so there
+              is nothing honest to put in a picker. The rule and its
+              copy are here so that whoever builds that picker cannot
+              ship the split by forgetting to say it happened. */}
+          {exitsForGames(settings.games, settings.apps).withheld.map((held) => (
+            <p key={held.slug} className="text-[11px] text-muted-foreground">
+              {held.reason === "partial"
+                ? t("settings.customGameExitPartial", {
+                    game: held.displayName,
+                    names: held.missing.join(", "),
+                  })
+                : t("settings.customGameExitConflict", {
+                    game: held.displayName,
+                    others: held.withGames.join(", "),
+                  })}
+            </p>
+          ))}
 
           {notice ? <p className="text-xs text-destructive">{notice}</p> : null}
 
