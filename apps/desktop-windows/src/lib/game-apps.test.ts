@@ -687,3 +687,118 @@ describe("the shipped catalogue's multi-binary games", () => {
     expect(new Set(exits.map((e) => e.exit))).toEqual(new Set(["germany-1"]));
   });
 });
+
+/** The first test in this repo tied to a real install rather than a fixture.
+ *
+ * Everything above this point invents its own `RunningApp`s, which means
+ * it proves the resolver is self-consistent and nothing about whether the
+ * catalogue's names are TRUE. The catalogue header says so outright: "Not
+ * one of these entries has been tested against the game actually
+ * running."
+ *
+ * On 2026-08-26 one of them finally was. Steam was installed on the
+ * `Neoxify-Test2` rig from Valve's own signed installer, launched, and
+ * allowed to reach its login window; the list below is verbatim what the
+ * SERVICE reported over `listRunningApps` -- the same call the picker
+ * makes, answered by the elevated side that can actually read a process's
+ * image path. The Steam rows are the interesting ones and the rest are
+ * kept exactly as captured, because a resolver that only sees the answer
+ * is not being asked a real question.
+ *
+ * What this pins, and why each part earns its place:
+ *
+ * * `steamwebhelper.exe` resolves, at a path nobody would have guessed
+ *   (`bin\cef\cef.win64\`). Its catalogue note calls it "the weakest name
+ *   here" -- Valve names the process in client update notes but never
+ *   prints the string with a `.exe` suffix, and it is in no enumerable
+ *   package. It is also where most of the client's traffic goes. It was
+ *   right.
+ * * `SteamService.exe` resolves from a DIFFERENT install root
+ *   (`Common Files\Steam`), which is the case a basename match has to get
+ *   right and a path guess would not.
+ * * `steamchina.exe` and `streaming_client.exe` resolve to nothing, and
+ *   that is correct rather than a defect: one is the Chinese client and
+ *   the other only exists during Remote Play. They must land in `missing`
+ *   and must not quietly vanish -- a name reported as not-found is the
+ *   whole reason listing two plausible spellings is safe.
+ */
+describe("the steam-client row against a real Steam install (rig, 2026-08-26)", () => {
+  // Verbatim from the service's own listRunningApps on the rig.
+  const OBSERVED: RunningApp[] = [
+    app("C:\\Program Files (x86)\\Steam\\steam.exe", { name: "Steam" }),
+    app("C:\\Program Files (x86)\\Common Files\\Steam\\steamservice.exe", {
+      name: "Steam Client Service",
+    }),
+    app("C:\\Program Files (x86)\\Steam\\bin\\cef\\cef.win64\\steamwebhelper.exe", {
+      name: "Steam Client WebHelper",
+    }),
+    app("C:\\Windows\\explorer.exe", { name: "Windows Explorer" }),
+    app("C:\\Users\\neoxify\\AppData\\Local\\Microsoft\\OneDrive\\OneDrive.exe", {
+      name: "Microsoft OneDrive",
+    }),
+    app(
+      "C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26070.9-0\\MsMpEng.exe",
+      { name: "Antimalware Service Executable" },
+    ),
+  ];
+
+  /** The shipped row, read from the catalogue rather than retyped, so
+   * that editing `curated.json` and forgetting this test fails here. */
+  const steamRow = (() => {
+    const raw = readFileSync(
+      join(__dirname, "../../../backend/prisma/catalogue/curated.json"),
+      "utf8",
+    ) as string;
+    const games = (JSON.parse(raw) as { games: { slug: string; processNames: string[] }[] }).games;
+    const row = games.find((g) => g.slug === "steam-client");
+    if (!row) throw new Error("curated.json no longer has a steam-client row");
+    return row;
+  })();
+
+  it("still names the three executables that were observed running", () => {
+    // Guards the direction that matters: dropping one of these from the
+    // catalogue would silently stop routing part of a running Steam.
+    const lower = steamRow.processNames.map((n) => n.toLowerCase());
+    expect(lower).toContain("steam.exe");
+    expect(lower).toContain("steamservice.exe");
+    expect(lower).toContain("steamwebhelper.exe");
+  });
+
+  it("resolves each one to the real path it was observed at", () => {
+    const resolved = resolveGameApps(steamRow, OBSERVED);
+    expect(resolved.paths).toEqual(
+      expect.arrayContaining([
+        "C:\\Program Files (x86)\\Steam\\steam.exe",
+        "C:\\Program Files (x86)\\Common Files\\Steam\\steamservice.exe",
+        "C:\\Program Files (x86)\\Steam\\bin\\cef\\cef.win64\\steamwebhelper.exe",
+      ]),
+    );
+    expect(resolved.paths).toHaveLength(3);
+  });
+
+  it("reports the two that legitimately were not running, by name", () => {
+    const resolved = resolveGameApps(steamRow, OBSERVED);
+    const missing = resolved.missing.map((n) => n.toLowerCase());
+    expect(missing).toContain("steamchina.exe");
+    expect(missing).toContain("streaming_client.exe");
+  });
+
+  it("routes nothing that is not Steam", () => {
+    // The half of Custom mode that costs a customer their privacy rather
+    // than their game: selecting Steam must not put Defender, OneDrive or
+    // Explorer on the tunnel.
+    const resolved = resolveGameApps(steamRow, OBSERVED);
+    for (const path of resolved.paths) {
+      expect(path.toLowerCase()).toContain("steam");
+    }
+  });
+
+  it("hands the split tunnel only paths its wire format accepts", () => {
+    // The real reason this matters: one rejected path fails the whole
+    // SetSplitTunnel request, taking the customer's existing selection
+    // with it. Note `Program Files (x86)` has parentheses and spaces.
+    for (const path of resolveGameApps(steamRow, OBSERVED).paths) {
+      expect(isSelectableAppPath(path)).toBe(true);
+    }
+  });
+});
