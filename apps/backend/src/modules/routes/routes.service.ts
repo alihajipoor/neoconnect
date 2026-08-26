@@ -1,10 +1,12 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { Protocol } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { generateCredentials } from "../protocol-users/generate-credentials";
 import { CreateRouteDto } from "./dto/create-route.dto";
+import { exitHandleMinter } from "./exit-handle";
 
 // Only Xray's REALITY variant has a real provisioner/credential
 // generator today (see generate-credentials.ts) -- an exit leg on any
@@ -30,6 +32,7 @@ export class RoutesService {
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
     private readonly protocolUsersService: ProtocolUsersService,
+    private readonly config: ConfigService,
   ) {}
 
   /** Gives every existing customer who is entitled to this route a
@@ -88,8 +91,26 @@ export class RoutesService {
    * would return the raw Route row as-is, which contains
    * `uplinkCredentialsJson` (the relay's shared exit-node secret). That
    * must never reach a customer; only the fields a location picker
-   * actually needs are selected here. */
-  async listAvailableForPlan(protocolsAllowed: Protocol[], allowedRouteIds: string[]) {
+   * actually needs are selected here.
+   *
+   * Each option also carries an `exit`: an opaque, per-customer name for
+   * the machine that route's traffic finally leaves from, so a client
+   * can tell two routes that share one exit from two that do not. It is
+   * a keyed digest and never a node id, name or address --
+   * `exit-handle.ts` has the reasoning, and `docs/node-address-hygiene.md`
+   * has the measurement it rests on. `customerId` is the salt, which is
+   * why it is a required argument rather than an option: a handle minted
+   * without one would be the same string for every customer, and that is
+   * the single property it must not have. */
+  async listAvailableForPlan(protocolsAllowed: Protocol[], allowedRouteIds: string[], customerId: string) {
+    // Minted once for the whole list so every route in one response is
+    // named under the same key -- which is what makes "these two routes
+    // are the same exit" answerable by string equality on the client.
+    const exitHandle = exitHandleMinter(
+      this.config.get<string>("security.exitHandleSecret"),
+      customerId,
+    );
+
     const routes = await this.prisma.route.findMany({
       where: {
         isEnabled: true,
@@ -111,9 +132,16 @@ export class RoutesService {
         name: true,
         exitProtocolConfigId: true,
         uplinkAssertedAt: true,
+        // Only ever fed to the HMAC below -- never returned. See
+        // exit-handle.ts for why the node's own identity must not leave
+        // this process.
+        exitProtocolConfig: { select: { nodeId: true } },
         entryProtocolConfig: {
           select: {
             protocol: true,
+            // Same: the direct-route case, where the machine the traffic
+            // leaves from is the one it was dialled at.
+            nodeId: true,
             // Without this the picker cannot tell one VLESS+TLS route
             // from another: the TCP and WebSocket variants share a
             // protocol, so both rendered as "Stealth HTTPS" and the list
@@ -128,11 +156,34 @@ export class RoutesService {
       orderBy: { name: "asc" },
     });
 
-    return routes.map(({ exitProtocolConfigId, uplinkAssertedAt, entryProtocolConfig, ...route }) => ({
+    return routes.map(
+      ({ exitProtocolConfigId, exitProtocolConfig, uplinkAssertedAt, entryProtocolConfig, ...route }) => ({
       ...route,
       protocol: entryProtocolConfig.protocol,
       transport: entryProtocolConfig.transport,
       isRelay: exitProtocolConfigId !== null,
+      // Which machine this route's traffic finally leaves from, named so
+      // that it can be compared and nothing else.
+      //
+      // A relayed route egresses at its exit leg; a direct route egresses
+      // at the node it was dialled at. Both are the address the far end
+      // actually sees, which is the fact a customer choosing an exit is
+      // choosing between -- and it is deliberately *not* the route id,
+      // because two routes ending on one machine are one exit and
+      // comparing route ids would call that a mismatch.
+      //
+      // Opaque, keyed and salted per customer: see exit-handle.ts. Null
+      // when this deployment has configured no secret, which the client
+      // reads as "no exit vocabulary" and handles by offering no picker.
+      //
+      // A *preference*, not an entitlement to two exits at once. One
+      // session carries one tunnel and therefore one exit; naming an
+      // exit per game decides where the client connects when that game
+      // is activated. Nothing here implies two can be live together --
+      // see docs/design/per-game-exits.md section 2 for why that is an
+      // engine change and section 8 for the commercial question it
+      // waits on.
+      exit: exitHandle(exitProtocolConfig?.nodeId ?? entryProtocolConfig.nodeId),
       location: { region: entryProtocolConfig.node.region, nodeName: entryProtocolConfig.node.name },
       // The address the client dials, so the app can measure its own
       // latency to each option rather than showing a number measured
@@ -159,7 +210,8 @@ export class RoutesService {
         exitProtocolConfigId !== null && !uplinkIsFresh(uplinkAssertedAt)
           ? "OFFLINE"
           : entryProtocolConfig.node.status,
-    }));
+      }),
+    );
   }
 
   async get(id: string) {

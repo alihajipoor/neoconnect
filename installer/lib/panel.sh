@@ -79,6 +79,12 @@ EOF
   ensure_env_key "CUSTOMER_JWT_ACCESS_TTL" "15m"
   ensure_env_key "CUSTOMER_JWT_REFRESH_TTL" "7d"
   ensure_env_key "CREDENTIALS_ENCRYPTION_KEY" "$(openssl rand -hex 32)"
+  # Its own secret rather than reusing the line above, so that this one
+  # can be rotated -- at the cost of every saved per-game exit choice --
+  # without touching the key every stored credential blob is sealed
+  # under. Generated here so a fresh install serves exit handles without
+  # anybody having to know the variable exists.
+  ensure_env_key "EXIT_HANDLE_SECRET" "$(openssl rand -hex 32)"
   ensure_env_key "STRIPE_SECRET_KEY" ""
   ensure_env_key "STRIPE_WEBHOOK_SECRET" ""
   ensure_env_key "NOWPAYMENTS_API_KEY" ""

@@ -148,6 +148,28 @@ export interface VerifyResult {
 export interface RouteOption {
   id: string;
   name: string;
+  /** An opaque name for the machine this route's traffic finally leaves
+   * from, or `null` from a backend that mints none.
+   *
+   * The one thing it is for: telling whether two routes are the same
+   * exit. Two routes on one node share it -- a WireGuard route and a
+   * stealth route on germany-1, or a relay through Iran whose exit leg
+   * is germany-1 and a direct German route -- and a route id gets every
+   * one of those cases wrong, which is why per-game exits had no
+   * vocabulary until this existed.
+   *
+   * Keyed and salted per customer on the server, so it can be compared
+   * and nothing else: it cannot be turned back into an address, a
+   * hostname or a node id, and the same exit is a different string for
+   * a different customer. That is deliberate -- an enumerable fleet is
+   * what earns an operator the `is_vpn` label, and Neoxify's exits
+   * measure clean today precisely because nothing of ours is
+   * machine-readable (`docs/node-address-hygiene.md`).
+   *
+   * Optional so an older backend that mints none still works: the app
+   * then has no exit vocabulary, offers no picker, and reports every
+   * placement as unknown -- which is exactly what it did before. */
+  exit?: string | null;
   protocol: Protocol;
   /** How the protocol is carried. Needed to name the route: VLESS+TLS is
    * sold as two different things depending on it, and without this the

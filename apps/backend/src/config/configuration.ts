@@ -73,6 +73,25 @@ export default () => ({
     // encryption (see modules/protocol-users/credentials-crypto.ts) --
     // 32 raw bytes, hex-encoded (64 hex chars).
     credentialsEncryptionKey: process.env.CREDENTIALS_ENCRYPTION_KEY,
+    // HMAC key behind the opaque per-customer exit handles the location
+    // list carries (see modules/routes/exit-handle.ts). Any high-entropy
+    // string; it is never compared against anything a client sends, only
+    // used to mint.
+    //
+    // Falls back to CREDENTIALS_ENCRYPTION_KEY, under its own derivation
+    // label, so that a deployment which has not set the new variable
+    // still serves handles rather than silently shipping a dead feature.
+    // Safe as key reuse goes -- the derived key is domain-separated and
+    // the base secret is one no deployment can rotate casually anyway,
+    // since rotating it would strand every stored credential blob -- and
+    // stability is what a saved per-game preference depends on.
+    //
+    // With neither set, every exit handle is null: the client gets no
+    // exit vocabulary and reports every placement as unknown, which is
+    // the behaviour that shipped before handles existed. An unkeyed
+    // handle would be the same string for every customer, which is the
+    // one property this must never have, so absent beats improvised.
+    exitHandleSecret: process.env.EXIT_HANDLE_SECRET ?? process.env.CREDENTIALS_ENCRYPTION_KEY,
   },
   integrations: {
     // Shared secret machine callers present as X-Service-Token. Currently

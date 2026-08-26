@@ -26,7 +26,13 @@ import {
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
-import { isEffective, loadSplitTunnel, pushSplitTunnel } from "../lib/split-tunnel";
+import {
+  isEffective,
+  loadSplitTunnel,
+  pushSplitTunnel,
+  type SplitTunnelSettings,
+} from "../lib/split-tunnel";
+import { exitOfRoute } from "../lib/exit-options";
 import { gamingDisarm, loadGaming, saveGaming, type AppMode } from "../lib/gaming";
 import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
 import { refreshConnectionConfig } from "../lib/connection-config";
@@ -1340,9 +1346,22 @@ export function Dashboard({
       // whether the tunnel comes up passively or takes the default
       // route -- a decision that cannot be changed afterwards.
       let customMode = false;
+      // Kept past the try so the success path can send the same
+      // selection again with an egress attached. Re-reading the store
+      // there instead would open a window in which the customer changes
+      // their selection mid-connect and the second push overwrites the
+      // first with something they no longer have on screen.
+      let splitTunnelSettings: SplitTunnelSettings | null = null;
       try {
         const settings = await loadSplitTunnel();
+        // No egress named, and that is not a placeholder. Nothing is
+        // established yet, and the ladder below may well settle
+        // somewhere other than its first pick -- so any exit named here
+        // would be a guess. The service reports a preference it cannot
+        // compare as `unknown`, which is the truthful answer for the
+        // seconds this covers.
         await pushSplitTunnel(settings);
+        splitTunnelSettings = settings;
         customMode = isEffective(settings);
       } catch {
         // A failure here means Custom mode does not apply to this
@@ -1543,6 +1562,33 @@ export function Dashboard({
           // calling it "protected".
           if (verdict === "connected" || verdict === "unverified") {
             publishObserved(intent, verdict);
+            // Which exit this session actually leaves from, sent now
+            // that a route has come up rather than guessed before one
+            // had.
+            //
+            // Taken from the route the ladder LANDED on, not the one
+            // that was on screen. Those come apart routinely -- nothing
+            // pinned, the ladder orders by speed, and the app could show
+            // one server while connecting to another -- and an egress
+            // taken from the intended route would tell a customer their
+            // game is on the exit they chose while it is somewhere else.
+            //
+            // `exitOfRoute` resolves it through the route's own exit
+            // handle, which is the only thing that survives a relay: a
+            // relayed route is dialled at the entry and leaves from the
+            // exit leg, and naming the entry would be silently wrong for
+            // exactly the routes where the customer's choice matters
+            // most.
+            //
+            // Best-effort. A failure here costs an honest `unknown`
+            // placement, and failing the connection over a reporting
+            // detail would be out of all proportion.
+            if (splitTunnelSettings) {
+              await pushSplitTunnel(
+                splitTunnelSettings,
+                exitOfRoute(routes, candidate.routeId),
+              ).catch(() => undefined);
+            }
             const movedFromShown = Boolean(shownRouteId) && candidate.routeId !== shownRouteId;
             if (index > 0 || movedFromShown) {
               // Compared against what was on screen when Connect was
