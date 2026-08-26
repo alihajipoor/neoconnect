@@ -1,0 +1,45 @@
+{
+  "_readme": [
+    "Adverse reputation flags that are already known, understood and accepted.",
+    "scripts/check-exit-reputation.py exits 1 on any adverse flag NOT listed here,",
+    "so adding an entry is a deliberate human decision and that is the point:",
+    "somebody has to look at a new flag once before it becomes background noise.",
+    "",
+    "Keyed by node NAME, never by address -- this file is committed and this",
+    "repository is public (docs/node-address-hygiene.md).",
+    "",
+    "Before accepting a flag, read docs/design/ban-safety.md. Accepting is for",
+    "flags that are a property of the range rather than of our traffic. A flag",
+    "that reflects what our own customers are doing is an incident, not a",
+    "baseline entry.",
+    "",
+    "Removing a node from the fleet? Delete its entry, or the next reviewer will",
+    "think a flag is still accepted when the node it belonged to is gone."
+  ],
+  "measuredOn": "2026-08-25",
+  "measuredBy": "docs/research/gaming-ip-reputation.md, re-confirmed by scripts/check-exit-reputation.py",
+  "accepted": {
+    "de1": [
+      "ipapi.is:is_abuser"
+    ],
+    "tr1": [
+      "ipapi.is:is_abuser"
+    ],
+    "fr1": [
+      "proxycheck.io:proxy"
+    ],
+    "fi1": [
+      "proxycheck.io:proxy"
+    ],
+    "sg1": [
+      "proxycheck.io:proxy"
+    ]
+  },
+  "why": {
+    "de1": "ipapi.is:is_abuser -- LightNode / Kaopu Cloud (AS154177). A control address in the same /24, measured in docs/research/gaming-ip-reputation.md, carries the same flag, which points at the range rather than at our traffic. Accepted as a range property, NOT as harmless: docs/node-enumerability-remediation.md section 4 is the open action, and the first step there is re-checking that control. If the control ever comes back clean while de1 does not, this entry must be removed and treated as an incident.",
+    "tr1": "ipapi.is:is_abuser -- same finding, same operator. Note the two feeds disagree on tr1's ASN: ipapi.is says AS154177 LIGHT NODE LIMITED, ip-api.com says AS2914 NTT America with org 'Light Node Limited' and hosting=false. Sub-allocated space. The hosting=false reading is the best ASN-type posture in the fleet.",
+    "fr1": "proxycheck.io:proxy=yes type=VPN risk=66 -- a prefix verdict on Linode/Akamai (AS63949), not a behavioural one. The panel host, which has never carried a tunnel, measures identically on Hetzner; so does an unrelated neighbour address in each range. proxycheck is scoring the range. The four other feeds all read clean.",
+    "fi1": "proxycheck.io:proxy=yes type=VPN risk=66 -- same, on Hetzner (AS24940).",
+    "sg1": "proxycheck.io:proxy=yes type=VPN risk=66 -- same, on Linode/Akamai (AS63949)."
+  }
+}

@@ -185,7 +185,9 @@ shares it), 8443 (Trojan), the Shadowsocks port you chose, 51820/udp
 - `packages/proto` — agent<->backend wire contract (protobuf)
 - `installer/` — bash installer + management menu for VPS nodes
 - `infra/docker-compose.yml` — local Postgres + Redis for development
-- `scripts/` — repo-wide checks run by CI
+- `scripts/` — repo-wide checks run by CI, plus the ban-safety exit
+  reputation monitor (`check-exit-reputation.py`, run monthly by hand —
+  see `docs/design/ban-safety.md`)
 - `brand/` — store-listing art, and the script that renders it from the
   mark's own geometry (see `brand/README.md`)
 
@@ -329,4 +331,25 @@ startup.
 pnpm turbo run lint typecheck build test   # everything, TS side
 cd agent && go vet ./... && go test ./...  # agent
 bash scripts/check-installer-drift.sh      # installer covers every env var
+bash scripts/check-prefix-completeness.sh  # the gate that stops Gaming Mode
+                                           # splitting one account across two
+                                           # source addresses
 ```
+
+## Ban safety
+
+Gaming Mode's whole premise is that using it does not get a player banned,
+so the properties that make that true are engineered rather than assumed.
+`docs/design/ban-safety.md` is the model: every mechanism that could end
+with a banned account, the evidence level behind each, and the operating
+rules. Two of them have teeth in this repository:
+
+- `scripts/check-prefix-completeness.sh` runs in CI and fails when the
+  destination-routing completeness gate is weakened. A partial prefix list
+  splits a game's simultaneous connections across two source addresses,
+  which is the account-sharing signature — it is worse than not routing.
+- `scripts/check-exit-reputation.py` is run by hand, monthly and after
+  every node install, and fails when an exit starts carrying a VPN or proxy
+  label. It reads the node list from the panel database, queries only free
+  public feeds, writes a dated artifact to the gitignored `var/`, and
+  redacts node addresses from its own output.
