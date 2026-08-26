@@ -554,9 +554,15 @@ const en = {
   // dial that never happened.
   "gaming.needsPlan": "Gaming mode needs an active plan.",
   "gaming.notInPlan": "Your plan does not include gaming mode.",
-  "gaming.noResolver": "Gaming mode is not available on your server yet.",
+  // "yet" was removed on 2026-08-25 and must not come back. It promised a
+  // thing that is not being built: no Neoxify server offers this
+  // redirection and none is planned, so "yet" was the app telling a paying
+  // customer to wait for something nobody intends to ship. The second
+  // sentence says plainly that this is not an outage, because a customer
+  // who reads "not available" as "down right now" will keep retrying.
+  "gaming.noResolver": "Gaming mode is not available on your server.",
   "gaming.noResolverBody":
-    "Nothing on this computer is being redirected, and turning this on would not change that. Custom mode, under Custom, does not need this and works today.",
+    "This is not a temporary outage. No Neoxify server offers this redirection, so nothing on this computer is being redirected and turning this on would not change that. Custom mode, under Custom, does not need it and works today.",
   "gaming.profileFailed": "Neoxify could not load the game list.",
   "gaming.retry": "Try again",
   "gaming.loading": "Loading games...",
@@ -1002,9 +1008,10 @@ const fa: Record<TranslationKey, string> = {
   "gaming.armFailed": "حالت بازی روشن نشد.",
   "gaming.needsPlan": "حالت بازی به یک اشتراک فعال نیاز دارد.",
   "gaming.notInPlan": "اشتراک شما شامل حالت بازی نمی‌شود.",
-  "gaming.noResolver": "حالت بازی هنوز روی سرور شما در دسترس نیست.",
+  // «هنوز» حذف شد — به en توضیح داده شده است.
+  "gaming.noResolver": "حالت بازی روی سرور شما در دسترس نیست.",
   "gaming.noResolverBody":
-    "هیچ ترافیکی روی این رایانه هدایت نمی‌شود و روشن کردن این گزینه هم آن را تغییر نمی‌دهد. «حالت سفارشی» به این نیاز ندارد و همین حالا کار می‌کند.",
+    "این یک اختلال موقت نیست. هیچ سروری در نئوکسیفای این هدایت را ارائه نمی‌کند، بنابراین هیچ ترافیکی روی این رایانه هدایت نمی‌شود و روشن کردن این گزینه هم آن را تغییر نمی‌دهد. «حالت سفارشی» به این نیاز ندارد و همین حالا کار می‌کند.",
   "gaming.profileFailed": "نئوکسیفای نتوانست فهرست بازی‌ها را بارگیری کند.",
   "gaming.retry": "تلاش دوباره",
   "gaming.loading": "در حال بارگذاری بازی‌ها...",
