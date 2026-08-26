@@ -2,10 +2,15 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "prisma",
+    // The catalogue is JSON so its diffs are reviewable; the seed imports it
+    // directly, and tsc copies it into dist-seed alongside the compiled
+    // output so `prisma:seed:prod` finds it where the require expects it.
+    "resolveJsonModule": true,
     "outDir": "dist-seed"
   },
   "include": [
     "prisma/seed.ts",
-    "prisma/game-profiles.ts"
+    "prisma/game-profiles.ts",
+    "prisma/catalogue/index.ts"
   ]
 }

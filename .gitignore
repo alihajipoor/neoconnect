@@ -26,3 +26,8 @@ go.work.sum
 # Python bytecode from brand/make_store_art.py, imported by
 # website/scripts/make-og-image.py. Generated, never useful in a diff.
 __pycache__/
+
+# Cached Steam appinfo responses for the game-catalogue generator. Regenerable
+# from the network; committing them would add thousands of files that nobody
+# reads to make one JSON that everybody does.
+apps/backend/prisma/catalogue/tools/.appinfo-cache/

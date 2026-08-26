@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Search, X } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import type { GameProfileSummary } from "../lib/customer";
+import { GAME_PAGE_SIZE, rankGames } from "../lib/game-apps";
 import { Button } from "./ui";
 
 /** Pick a game from the operator's curated list.
@@ -59,15 +60,22 @@ export function GamePicker({
 
   // Matched on the two things a person actually reads. Searching the
   // hostname list as well would make "www" match everything.
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return games;
-    return games.filter(
-      (g) =>
-        g.displayName.toLowerCase().includes(needle) ||
-        (g.publisher ?? "").toLowerCase().includes(needle),
-    );
-  }, [games, query]);
+  //
+  // Ranked rather than merely filtered, which a list of three did not need
+  // and a list of a thousand does: a plain `includes` puts every game whose
+  // name happens to contain "cs" above Counter-Strike, and the customer
+  // concludes their game is missing. Cheap enough to run on every keystroke
+  // -- it is a few thousand string comparisons -- so there is no debounce to
+  // make the field feel laggy.
+  const matches = useMemo(() => rankGames(games, query), [games, query]);
+
+  // Only the first page is rendered. The catalogue runs to well over a
+  // thousand rows, and mounting all of them inside a backdrop-blurred card
+  // is the kind of thing that makes a picker feel broken on the low-end
+  // machines a lot of these customers have. The count below says how many
+  // matched, so a truncated list never reads as "my game is not there".
+  const shown = matches.slice(0, GAME_PAGE_SIZE);
+  const hidden = matches.length - shown.length;
 
   // Rendered into the body rather than where it sits in the tree.
   // `position: fixed` is measured against the nearest ancestor with a
@@ -141,6 +149,17 @@ export function GamePicker({
                 </li>
               );
             })}
+            {hidden > 0 ? (
+              // Stated rather than left to be inferred. A list that just stops
+              // reads as "my game is not supported", which is the one
+              // conclusion this picker must not accidentally produce.
+              <li
+                aria-live="polite"
+                className="px-2.5 py-2 text-center text-[10px] text-muted-foreground"
+              >
+                {t("gaming.searchMore", { count: hidden })}
+              </li>
+            ) : null}
           </ul>
         )}
 

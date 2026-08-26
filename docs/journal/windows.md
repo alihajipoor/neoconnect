@@ -11332,3 +11332,170 @@ for every publisher measured.
 
 **Do not weaken `canRouteByDestination` to make any of this usable.** It
 is refusing exactly what it should refuse.
+
+## 2026-08-25 — Game catalogue at scale: 1,480 entries, and the sources that did not survive checking
+
+Branch `claude/game-catalogue-scale`. The ask was ExitLag-scale coverage.
+What shipped is 1,480 rows whose executable names come from Valve's and
+publishers' own launch definitions — plus a validator that fails the seed
+on the class of entry that would look like support and route nothing.
+
+### The source decision, because it is the whole thing
+
+**PCGamingWiki is unusable and it is worth writing down so nobody spends
+the afternoon again.** Three independent reasons: its content licence is
+CC BY-NC-SA 3.0 and the **NonCommercial** clause does not survive contact
+with a paid product (ShareAlike would reach anything derived from it
+besides); executable names are **not a structured field there at all** —
+its cargo tables cover config and save-game paths, `.exe` names appear
+only incidentally in article prose, and its VALORANT article contains
+zero; and its `cargoquery` endpoint stopped serving anonymous requests on
+2026-08-23 and now wants an attributable bot account.
+
+What works instead: **Steam's `config.launch[].executable`**, via the
+public `api.steamcmd.net` mirror of `appinfo`. That is not a description
+of a game, it is the command Valve's own client runs — first-party, and
+anyone can re-run `prisma/catalogue/tools/build-steam-tier.mjs` and diff
+it. Responses cache under `tools/.appinfo-cache/` (gitignored), so a
+re-run after a filter change costs no network.
+
+And **Blizzard has an unauthenticated product-config API** that defines
+every game's launch binary: `patch.battle.net:1119/{product}/versions` →
+ProductConfig hash → `cdn.blizzard.com/tpr/configs/data/...`, returning
+`binaries.game.relative_path` and `shortcut_target_path`. Every Blizzard
+and Battle.net-distributed Call of Duty row came from there. It is the
+highest-grade source found anywhere in this work.
+
+### Ranking had a hole that lost Dota 2
+
+First cut ranked by SteamSpy owner estimates alone. That silently dropped
+**Dota 2, Rainbow Six Siege, The Finals, Marvel Rivals and Delta Force** —
+SteamSpy's `all` pages simply do not contain them — and it opened the
+picker on Half-Life and Counter-Strike 1.6, because lifetime owners is not
+the same question as what people play. Fixed by unioning **Valve's own
+`GetMostPlayedGames`** first, then SteamSpy's two-week list, then owners.
+
+Second filter bug, same shape: dropping every `ownsdlc`-gated launch entry
+lost **Rainbow Six Siege entirely**, because all eight of its entries are
+gated by *edition* DLC rather than being editor tools. The rule is now
+relative — gated entries are dropped only if an ungated one exists.
+
+### The rule with the widest blast radius
+
+The client resolves a catalogue name against every **running** process and
+adds that process's real path. So a name shared with software that is not
+the game **routes that software**. `javaw.exe` for Minecraft Java puts a
+customer's employer VPN client, IDE and build tools on the tunnel, with
+the UI reporting success. `Update.exe` is the same failure with a wider
+net — Squirrel ships it with every Electron app.
+
+`prisma/catalogue/generic-names.json` is an 86-name denylist and the
+validator **fails the seed** on one, not warns. It caught one of my own
+entries mid-work, which is the argument for having it.
+
+Two things worth remembering about the line it draws:
+
+- **First-party provenance does not make a name specific.** Wargaming's
+  own Defender article names `cef_browser_process.exe`; it is still every
+  CEF-embedding app on the machine.
+- Names shared between **games** are fine — `hl2.exe` really is the
+  process each Source game runs under. The line is "shared with something
+  that is not a game".
+
+**`Agent.exe` in the pre-existing `wow` row is on the wrong side of that
+line** and is left alone rather than regressed. Same for
+`UnrealCEFSubProcess.exe` in the `valorant` row. Both are generic; both
+predate this work; somebody should decide about them on purpose.
+
+### "First-party" grades the source, not the truth
+
+Amazon's own support article names `LostArkLauncher.exe`, which appears in
+**no observed install** — their articles are templated across titles. So
+where a publisher page and an observed install disagree, **ship both**: a
+name that does not exist reports as not-found and costs nothing, whereas
+dropping the real one leaves the game outside the tunnel with nothing
+said. Same precedent as League's two LCU renderer spellings. Recorded as a
+rule in `curated.json` rather than left to case-by-case judgement.
+
+Related: BattlEye's `<Game>_BE.exe` convention is a **hint, never an
+inference** — their FAQ says "often named", and Destiny 2 breaks it with
+`destiny2launcher.exe`. Do not generate `_BE` names. ARK: Survival
+Ascended keeps its pair only because Valve's launch config observes both.
+
+Two earlier research passes disagreed about whether BattlEye's FAQ names
+`BEService.exe`. It was read directly: **it does**, in both the Common
+Files path and the per-game directory. It ships as its own row rather than
+repeated across forty titles, because that is what it is — one shared
+Windows service.
+
+### Not shipped, deliberately
+
+- **Every Android emulator, and therefore Free Fire, PUBG Mobile, CODM,
+  Mobile Legends, Clash of Clans and Clash Royale.** These have no PC
+  executable; they run inside an emulator, and a process-name tunnel
+  routes the whole emulator or nothing. Worse, the VirtualBox-derived
+  emulators default to user-mode NAT (attributable) but expose a
+  **bridged-adapter toggle** — NetEase documents one in MuMu, LDPlayer and
+  Nox have equivalents — and bridged mode goes through a kernel NDIS
+  lightweight filter where packets leave at the miniport with **no owning
+  user-mode PID**. One settings flip and the game silently leaves the
+  tunnel while the app says connected. Free Fire is the most-blocked title
+  in the OONI data (76%), so this omission is the expensive one.
+- **Every EA title** — Apex Legends, Battlefield, The Sims 4, EA SPORTS
+  FC. EA publishes no per-game executable name anywhere; their guidance is
+  literally to find the `.exe` yourself. Same for **every Ubisoft title
+  except Rainbow Six**, which was recovered from Valve's data.
+- Apex, Elden Ring and Lost Ark's launch configs contain **only Easy
+  Anti-Cheat's `start_protected_game.exe`**. Lost Ark is filled in from
+  `LOSTARK.exe` (the LOA Logs evidence in the research doc); the other two
+  are gaps. The generator lists 96 such titles under `needsCuration` in
+  `steam-tier.json`.
+- **HoYoverse anti-cheat is kernel drivers** (`mhyprot2.sys`,
+  `HoYoKProtect.sys`) — unmatchable by a process-name engine. Activision
+  publishes no filename for Ricochet at all. None invented.
+
+### For whoever measures next
+
+**The emulator question is settled by one rig session and nothing less.**
+Per emulator, in **both** NAT and bridged mode: which PID owns the guest's
+sockets (`netstat -bno` *and* our own owner-table walk), plus a **packet
+capture** — this repo's own history says counters and "no error was
+thrown" produce false passes. Then: can the client detect bridged mode at
+all? If emulators ever ship, they need a **bridged-mode guard**, not just
+the right exe name.
+
+Vendor-named candidates to test, kept so the research is not lost:
+`HD-Player.exe` and `Bluestacks.exe`; LDPlayer's `Ld9BoxHeadless.exe` /
+`LdVBoxHeadless.exe` / `LdBoxHeadless.exe`; NetEase's `MuMuVMMSVC.exe`;
+Google Play Games' `crosvm.exe`. GameLoop installs under
+**`TxGameAssistant`**, not "GameLoop" — renamed product, unrenamed paths.
+`HD-Frontend.exe`, `HD-Agent.exe` and `NoxVMSVC.exe` have **no source** —
+drop them.
+
+### Payload
+
+`/customer/gaming-profile` now serialises **374 KB raw, 52 KB gzipped**,
+measured over a real HTTP round trip in
+`game-catalogue-delivery.spec.ts` — which also pins that `processNames`
+survives the `select`, since that field silently vanishing is a bug this
+endpoint has already had once.
+
+**Nothing in this repo gzips it.** There is no compression middleware in
+`main.ts` and no nginx config in the tree, so unless the reverse proxy on
+the box is doing it, 374 KB is what ships — on links that MCI throttles
+below 1 Mbps. Two of the three components that fetch it (`CustomModeCard`,
+`GamingModeCard`) mount together on Settings, so it was being pulled
+twice back to back; `getGamingProfile` now shares one in-flight request
+and caches 30s. **The compression question is still open and is the
+cheapest remaining win.** After that, a slim list endpoint (slug, name,
+publisher) with process names fetched per selected game would cut the
+default payload by roughly an order of magnitude.
+
+### Unverified
+
+Not one entry has been tested against a running game. A row means "we will
+route these executables if they are running" and nothing more, and the UI
+must not be allowed to imply otherwise. `cargo check --workspace
+--all-targets` is clean and all 16 turbo tasks pass (455 backend tests,
+158 desktop) — that means it compiles and the data is well-formed, which
+is not the same claim.

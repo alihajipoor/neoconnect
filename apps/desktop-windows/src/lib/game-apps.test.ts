@@ -6,6 +6,8 @@ import {
   hasCuratedApps,
   isSelectableAppPath,
   resolveGameApps,
+  GAME_PAGE_SIZE,
+  rankGames,
 } from "./game-apps";
 import type { RunningApp } from "./split-tunnel";
 
@@ -252,5 +254,85 @@ describe("scopesForGame", () => {
     expect(
       scopesForGame({ destinationCidrs: ["137.221.64.0/24"], prefixComplete: true }, []),
     ).toEqual([]);
+  });
+});
+
+describe("rankGames", () => {
+  const games = [
+    { displayName: "Counter-Strike 2", publisher: "Valve" },
+    { displayName: "Dota 2", publisher: "Valve" },
+    { displayName: "Docs and Screenshots", publisher: "Nobody" },
+    { displayName: "Apex Legends", publisher: "Electronic Arts" },
+    { displayName: "Dead by Daylight", publisher: "Behaviour Interactive" },
+    { displayName: "Among Us", publisher: "Innersloth" },
+  ];
+
+  it("returns the catalogue untouched for an empty query", () => {
+    expect(rankGames(games, "").map((g) => g.displayName)).toEqual(
+      games.map((g) => g.displayName),
+    );
+    expect(rankGames(games, "   ").map((g) => g.displayName)).toEqual(
+      games.map((g) => g.displayName),
+    );
+  });
+
+  it("puts a name that starts with the query first", () => {
+    // The whole reason this is ranked rather than filtered: "do" appears in
+    // "Dota 2" and in "Docs and Screenshots", and a plain filter would order
+    // them by accident of catalogue position.
+    expect(rankGames(games, "dota")[0].displayName).toBe("Dota 2");
+  });
+
+  it("matches a word inside the name ahead of a bare substring", () => {
+    // "strike" is the second word of Counter-Strike, not its start.
+    expect(rankGames(games, "strike")[0].displayName).toBe("Counter-Strike 2");
+    expect(rankGames(games, "legends")[0].displayName).toBe("Apex Legends");
+  });
+
+  it("ignores punctuation and case", () => {
+    expect(rankGames(games, "COUNTER STRIKE")[0].displayName).toBe("Counter-Strike 2");
+    expect(rankGames(games, "counter-strike")[0].displayName).toBe("Counter-Strike 2");
+  });
+
+  it("finds a game when the spaces are left out", () => {
+    // People type names the way they say them, not the way a publisher
+    // styles them.
+    expect(rankGames(games, "counterstrike")[0].displayName).toBe("Counter-Strike 2");
+    expect(rankGames(games, "deadbydaylight")[0].displayName).toBe("Dead by Daylight");
+  });
+
+  it("matches on publisher, but below every name match", () => {
+    const valve = rankGames(games, "valve").map((g) => g.displayName);
+    expect(valve).toEqual(["Counter-Strike 2", "Dota 2"]);
+  });
+
+  it("drops entries that match nothing", () => {
+    expect(rankGames(games, "zzzznotagame")).toEqual([]);
+  });
+
+  it("keeps catalogue order inside one score band", () => {
+    // Ties must not reshuffle: the server orders curated entries and online
+    // titles first, and that ordering is the product decision.
+    const two = rankGames(games, "2").map((g) => g.displayName);
+    expect(two).toEqual(["Counter-Strike 2", "Dota 2"]);
+  });
+
+  it("stays responsive on a catalogue of realistic size", () => {
+    // The picker mounts GAME_PAGE_SIZE rows, but it ranks all of them on
+    // every keystroke. Guard the thing that would actually regress: ranking
+    // a full catalogue must stay far below a frame.
+    const big = Array.from({ length: 2_000 }, (_, i) => ({
+      displayName: `Game Number ${i}`,
+      publisher: `Publisher ${i % 50}`,
+    }));
+    const started = performance.now();
+    for (let i = 0; i < 10; i += 1) rankGames(big, "game numb");
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(rankGames(big, "game number 1999")).toHaveLength(1);
+  });
+
+  it("mounts a bounded number of rows", () => {
+    expect(GAME_PAGE_SIZE).toBeGreaterThan(20);
+    expect(GAME_PAGE_SIZE).toBeLessThanOrEqual(100);
   });
 });
