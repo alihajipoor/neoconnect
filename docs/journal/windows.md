@@ -12346,3 +12346,155 @@ test --force` failed two backend auth tests on the first run and passed
 all 477 on the second, with nothing changed between them. Sixteen tasks
 under contention; treat a lone backend test failure as a flake to be
 re-run before it is investigated.
+
+## 2026-08-26 — Exit groups: the catalogue was already emitting them, the client was throwing them away
+
+Branch `claude/per-game-exit-groups`, off `claude/per-game-exit`. Closes
+the sharpest open item that branch wrote down for itself.
+
+### The thing worth knowing before anything else
+
+The whole fix was **one field the client had discarded**, not a field
+the catalogue was missing.
+
+`GameProfile.processNames` already *is* the group. One row is one game;
+`catalogue/index.ts` says so in its own words — "One row therefore lists
+both, and the client routes whichever are running." Every multi-binary
+game in the task brief was already grouped correctly: `rust` carries
+`Rust.exe` **and** `RustClient.exe`, `sea-of-thieves` carries both, ARK
+carries both `_BE` binaries, `lost-ark` carries all three.
+
+What happened was `CustomModeCard.addGame` resolving a profile against
+running processes and appending the resulting paths to one
+undifferentiated `SplitTunnelSettings.apps` list. At that instant the
+fact that `Rust.exe` and `RustClient.exe` are one game existed **nowhere
+in the client**. So the first hour spent looking for a catalogue field to
+add was the wrong hour. Check what the data already says before adding to
+it.
+
+### The live risk is not the one the feature introduced
+
+Per-game exits made this urgent, but the split does **not** need two
+exits to happen and is live today with none.
+
+Names resolve against **running** processes. A customer opens Rust, gets
+as far as the EAC wrapper, and adds the game: `Rust.exe` resolves,
+`RustClient.exe` does not. `Rust.exe` goes on the tunnel.
+`RustClient.exe` starts thirty seconds later and is **not in the split
+tunnel at all**, so it reaches Facepunch from the customer's own address
+in Iran while its sibling reaches them from the node. One account, two
+source addresses, at the same instant — mechanism 4, in the shipped
+product, with the exit feature switched off.
+
+That is why the rule is "a partial group gets **no** preference", not
+"place what you found". And it is why the card now carries a permanent
+warning naming the missing binaries rather than saying it once in a
+notice that scrolls away.
+
+### 61 shared executables, and it is not a curated-data quirk
+
+`RiotClientServices.exe`, `vgc.exe` and `vgm.exe` are each in **both**
+Riot profiles. `Battle.net.exe` is in both the standalone `battle-net`
+row and `wow`. `hl2.exe` is in eleven Source titles, `dowser.exe` in
+eight Paradox-launcher ones, `ShooterGame_BE.exe` in two ARKs.
+
+So "give VALORANT Germany and League Turkey" is a state a customer can
+reach and it asks one process to leave from two places. Neither game
+gets its preference — honouring either places the shared binary away
+from the other game that also runs it, which is the same split with a
+second account attached. The rule is **pairwise, not transitive**: A
+sharing with B and B sharing with C does not stop A and C differing,
+because no single process is claimed by both.
+
+`sharedProcessNames()` and `entangledSlugs()` are exported from
+`prisma/catalogue/index.ts` so this is pinned by a test rather than
+rediscovered. **Trap:** `catalogueEntries()` excludes the three reserved
+slugs, so a collision analysis over it alone cannot see the Riot case at
+all — the spec has to merge the hand-written rows back in, and there is a
+guard test that fails if that parser silently matches nothing.
+
+### Structural where it could be, enforced where it could not
+
+| | |
+|---|---|
+| Customer hand-splits a game | **Impossible.** No per-application exit field exists in the client's persisted state. |
+| Client emits a subset of a group | **Impossible.** `exitsForGames` iterates a group's own membership; there is no partial path through it. |
+| A config names two exits for one group | **Refused** at `validate`, whoever sent it. |
+| A group's members are not all selected | **Dropped whole** by `Selection::with_exits`. |
+| A catalogue row loses half a game | **CI failure**, `scripts/check-exit-groups.sh`. |
+| A game only partly added to Custom mode | **Warned only** — it is still carried, because refusing to carry it takes a working game away. |
+
+`validate` **refusing** is the one departure from this feature's
+fail-open discipline and it is deliberate. Every other check fails open
+because an unsatisfiable preference is the ordinary case and rejecting
+takes the customer's app selection down with it. Two exits for one game
+is not unsatisfiable — it is self-contradictory, no live egress present
+or future satisfies it, and honouring any part of it *is* the signature.
+
+### The group stores names, not paths
+
+`GameExitGroup.names` is the catalogue's list; membership and
+completeness are derived against the live `apps` selection every time
+they are asked. Both directions matter: start the missing binary and add
+the game again and the group is whole with no stale record to correct;
+remove one binary by hand and the preference goes for the whole game
+rather than a record surviving that claims it is whole.
+
+The obvious escape hatch — `optional: true` on a catalogue name, so
+VALORANT could qualify despite windowless `vgc.exe` — was **refused**. It
+is the `prefixComplete` failure exactly: an operator marking a binary
+optional is writing a plausible subset, and a completeness claim nobody
+can re-derive silently rots.
+
+### No picker, and that is the honest answer
+
+`GameExitGroup.exit` is `null` for every group this client creates,
+because **this client has no exit vocabulary**. `RouteOption` is the
+entry side and its own comment says the backend withholds a relay's exit
+identity on purpose. A route id is the only handle available and a route
+id is not an exit: two routes can share one, so a game genuinely on the
+exit it asked for would report `Fallback`. That is the mismatch nobody
+established which `Unknown` exists to refuse. So no `egress` is sent and
+every placement reads `Unknown`.
+
+**This is §8's open question in its client-side form**, and it is the
+owner's: until a subscription's exits are named by the backend in a way
+the client can hold, there is nothing honest to put in a picker. The
+recommendation is that the identifier be an *exit* identifier and not a
+route id, precisely so `OnPreferred` can be true rather than merely
+likely.
+
+### Costs and gaps
+
+- **VALORANT will normally get no per-game exit.** Its group includes
+  `vgc.exe`, which runs windowless and `vpn_list_running_apps` filters
+  out, so the group is normally partial. That is a gap in process
+  enumeration, not a reason to relax the rule — and it is the same
+  recorded gap from 2026-08-25, now with a second consequence.
+- **Most of the catalogue pays nothing.** 1,203 of 1,483 entries are one
+  executable, so for 81% of games a whole group is one running process.
+- **Nothing has run on a machine.** `per-game-exits.md` §7 rows 8 and 9
+  are the procedure. Row 8's assertion is not a status string: `curl -4`
+  from a socket pinned as `Rust.exe`, again as `RustClient.exe`, and the
+  two answers required to be **byte-identical**. Two different answers is
+  the ban risk, live.
+
+### Discrimination
+
+Nine mutations applied and reverted. Placing a partial group anyway (2
+red), first-game-wins on a conflict (1), dropping either `validate`
+refusal (1 each), placing the part of a group the service can see (2),
+halving Rust's catalogue row (**red in all three layers** — drift script,
+jest, vitest), growing a per-application exit field (drift script), and
+both leak fixes: an exit preference weakening the ownerless-UDP refusal
+(2, including `redirect`'s own guard) and the leave-alone cache no longer
+keying on the peer (6, five of them pre-existing).
+
+**Gotcha:** re-keying `FlowKey` by *removing* its fields does not
+compile, so that mutation proves nothing about the tests. The
+behavioural version — leave the struct alone and have the *read* site
+zero the destination — is the one that goes red. Worth knowing before
+anyone reports that mutation as "structurally impossible".
+
+342 Rust, 213 vitest, 491 jest, 16/16 turbo. Turbo passed on the first
+run this time; the two-flaky-auth-tests note above still stands.
