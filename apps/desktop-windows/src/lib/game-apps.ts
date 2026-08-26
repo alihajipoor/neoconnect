@@ -1,5 +1,5 @@
 import type { GameProfileSummary } from "./customer";
-import type { RunningApp } from "./split-tunnel";
+import type { AppExit, RunningApp } from "./split-tunnel";
 
 /** Turning the server's curated executable list into a Custom-mode
  * selection.
@@ -230,6 +230,283 @@ export function scopesForGame(
   if (!canRouteByDestination(profile)) return [];
   const destinations = profile.destinationCidrs ?? [];
   return paths.map((app) => ({ app, destinations }));
+}
+
+// ---------------------------------------------------------------------------
+// Exit groups: a game's binaries go to one exit, or to none
+// ---------------------------------------------------------------------------
+
+/** One catalogue game the customer added, kept as a group.
+ *
+ * # Why this exists at all
+ *
+ * `docs/design/ban-safety.md` mechanism 4 is the one failure Neoxify
+ * could *manufacture* rather than merely fail to prevent: a game's
+ * connections arriving from two different source addresses at the same
+ * instant is the account-sharing signature publishers look for. The
+ * `prefixComplete` gate stops that arriving by destination prefix. This
+ * stops the same thing arriving by exit selection.
+ *
+ * A game is routinely several binaries and the split is systematic --
+ * an anti-cheat wrapper or a launcher starts, then spawns the game.
+ * Rust is `Rust.exe` (the EAC wrapper Steam launches) plus
+ * `RustClient.exe`; Sea of Thieves is `SeaOfThieves.exe` plus
+ * `SoTGame.exe`; VALORANT is the Riot client, the game and Vanguard's
+ * `vgc.exe`/`vgm.exe`. Per-game exit *preferences* are keyed on the
+ * executable, so without a group nothing at all guarantees a game's
+ * binaries name the same exit.
+ *
+ * # Why no new catalogue field
+ *
+ * A `GameProfile` already **is** the group: `processNames` is one
+ * game's binaries and the catalogue's own note says so ("One row
+ * therefore lists both, and the client routes whichever are running").
+ * The information was never missing from the catalogue -- it was
+ * discarded here, by a game's resolved paths being flattened into one
+ * undifferentiated `apps` list. So this records the grouping the
+ * catalogue already stated rather than inventing a second one.
+ *
+ * # What it stores, and what it deliberately does not
+ *
+ * `names` is the catalogue's list, not the resolved paths. Membership
+ * and completeness are then *derived* against the live `apps`
+ * selection rather than remembered from the moment the game was added.
+ * That matters in both directions: a customer who later starts the
+ * missing binary and re-adds the game gets a whole group without any
+ * stale record having to be corrected, and a customer who removes one
+ * binary by hand loses the preference for the whole game rather than
+ * keeping a record that says the group is whole when it is not.
+ */
+export interface GameExitGroup {
+  /** The catalogue slug. The group's identity, and what travels to the
+   * service as `AppExit.group`. Opaque there. */
+  slug: string;
+  /** For copy. Kept locally because the catalogue needs the network and
+   * a customer in Iran may not have it when this screen renders. */
+  displayName: string;
+  /** Every executable name the catalogue lists for this game. */
+  names: string[];
+  /** The exit identifier the customer chose for this game, or `null`
+   * for "no preference", which is what every application had before
+   * this existed.
+   *
+   * On the group and **never on an application**. That is the
+   * structural half of the safety argument: there is no field anywhere
+   * in this client's state that can hold a per-executable exit, so a
+   * customer cannot put `Rust.exe` and `RustClient.exe` on two exits by
+   * hand, whatever a future screen offers them. */
+  exit: string | null;
+}
+
+/** Build a group from a catalogue profile.
+ *
+ * The only constructor, so a group's `names` can only ever be the
+ * catalogue's own list for one slug. */
+export function gameExitGroup(
+  profile: Pick<GameProfileSummary, "slug" | "displayName" | "processNames">,
+  exit: string | null = null,
+): GameExitGroup {
+  return {
+    slug: profile.slug,
+    displayName: profile.displayName,
+    names: curatedNames(profile),
+    exit,
+  };
+}
+
+/** The selected paths that belong to this group.
+ *
+ * Matched on the filename, because that is all the catalogue has and
+ * the full path is what the selection is made of. Note this is *not*
+ * the weak matching `resolveGameApps` refuses: nothing here decides
+ * what to route. The paths were already selected; this only asks which
+ * game they came from. */
+export function groupMembers(group: GameExitGroup, apps: readonly string[]): string[] {
+  const wanted = new Set(group.names.map((n) => baseName(n)));
+  return apps.filter((app) => wanted.has(baseName(app)));
+}
+
+/** The group's executable names with nothing selected to match them.
+ *
+ * Non-empty means the group is **partial**, which is the hard case:
+ * `resolveGameApps` resolves against *running* processes, so a launcher
+ * may be running while the game is not, and Vanguard's `vgc.exe` runs
+ * as a windowless service that `vpn_list_running_apps` filters out
+ * entirely. A group is therefore routinely part-present. */
+export function unresolvedNames(group: GameExitGroup, apps: readonly string[]): string[] {
+  const have = new Set(apps.map((app) => baseName(app)));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of group.names) {
+    const key = baseName(name);
+    if (!key || have.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
+/** Whether every one of this game's binaries is in the selection. */
+export function isWholeGroup(group: GameExitGroup, apps: readonly string[]): boolean {
+  return group.names.length > 0 && unresolvedNames(group, apps).length === 0;
+}
+
+/** Why a game the customer chose an exit for did not get one.
+ *
+ * Reported rather than swallowed. The game still works -- it is carried
+ * on the session's exit like everything else -- but a customer who
+ * asked for something and silently did not get it has been told the
+ * smaller half of what happened, and this is a screen about where their
+ * traffic appears from. */
+export type ExitWithheld =
+  | {
+      slug: string;
+      displayName: string;
+      /** Some of this game's binaries are not in the selection, so
+       * where they will appear from is not ours to say. */
+      reason: "partial";
+      /** The names with nothing to match them, for the copy. */
+      missing: string[];
+    }
+  | {
+      slug: string;
+      displayName: string;
+      /** This game shares a binary with another chosen game and the two
+       * name different exits. */
+      reason: "conflict";
+      /** The other games, by display name. */
+      withGames: string[];
+      /** The executables both games run. */
+      sharedApps: string[];
+    };
+
+export interface ExitSelection {
+  /** What goes on the wire. Every entry carries its group. */
+  exits: AppExit[];
+  /** The games that asked for an exit and did not get one, and why. */
+  withheld: ExitWithheld[];
+}
+
+/** Turn the customer's per-game choices into per-application wire
+ * entries -- all of a game's binaries, or none of them.
+ *
+ * **The only way this client produces an `AppExit`.** It takes the
+ * whole group list and the whole selection, so there is no call shape
+ * that can hand it a single executable, and it emits a group's members
+ * by iterating that group's own membership. "Place the ones you found
+ * and hope" is not a state this function can reach.
+ *
+ * Three rules, and every one of them fails toward *no preference*,
+ * which is the safe behaviour: the game is carried on the session's
+ * exit exactly as it was before any of this existed.
+ *
+ *  1. **No exit chosen, nothing emitted.** Unchanged behaviour.
+ *
+ *  2. **A partial group gets no preference at all.** If a binary is not
+ *     in the selection, it is not carried, so when it starts it will
+ *     appear from the customer's own address while its siblings appear
+ *     from the exit -- which is the two-source-IP split arriving
+ *     without any second exit being involved. Placing the launcher on
+ *     an exit and hoping the game follows is exactly the failure this
+ *     function exists to refuse.
+ *
+ *  3. **A binary claimed by two games that want different exits
+ *     withholds both.** Not hypothetical and not rare: `vgc.exe`,
+ *     `vgm.exe` and `RiotClientServices.exe` each belong to both
+ *     VALORANT and League of Legends, `Battle.net.exe` to both the
+ *     Battle.net entry and World of Warcraft, and 61 executable names
+ *     in the shipped catalogue appear in more than one profile.
+ *     Honouring one game would place the shared binary away from the
+ *     other game it also runs, which is the same split with a second
+ *     account attached. Withholding both is the only answer that splits
+ *     neither.
+ *
+ * A binary two games share while they agree on the exit is fine and is
+ * emitted once. There is no split when there is nothing to split.
+ */
+export function exitsForGames(
+  groups: readonly GameExitGroup[],
+  apps: readonly string[],
+): ExitSelection {
+  const withheld: ExitWithheld[] = [];
+
+  // Rules 1 and 2, per group and in isolation.
+  const wanted: { group: GameExitGroup; exit: string; members: string[] }[] = [];
+  for (const group of groups) {
+    const exit = group.exit;
+    if (typeof exit !== "string" || exit.length === 0) continue;
+    const missing = unresolvedNames(group, apps);
+    const members = groupMembers(group, apps);
+    if (missing.length > 0 || members.length === 0) {
+      withheld.push({
+        slug: group.slug,
+        displayName: group.displayName,
+        reason: "partial",
+        missing,
+      });
+      continue;
+    }
+    wanted.push({ group, exit, members });
+  }
+
+  // Rule 3, which needs every group at once. Built as
+  // path -> the groups claiming it, so a three-way disagreement drops
+  // all three rather than resolving pairwise into an arbitrary winner.
+  const claims = new Map<string, { slug: string; exit: string; path: string }[]>();
+  for (const entry of wanted) {
+    for (const member of entry.members) {
+      const key = member.toLowerCase();
+      const claim = { slug: entry.group.slug, exit: entry.exit, path: member };
+      const slot = claims.get(key);
+      if (slot) slot.push(claim);
+      else claims.set(key, [claim]);
+    }
+  }
+
+  /** slug -> the other slugs it disagrees with, and over which paths. */
+  const conflicts = new Map<string, { others: Set<string>; paths: Set<string> }>();
+  for (const claimants of claims.values()) {
+    if (new Set(claimants.map((c) => c.exit)).size < 2) continue;
+    for (const claimant of claimants) {
+      let slot = conflicts.get(claimant.slug);
+      if (!slot) {
+        slot = { others: new Set<string>(), paths: new Set<string>() };
+        conflicts.set(claimant.slug, slot);
+      }
+      slot.paths.add(claimant.path);
+      for (const other of claimants) {
+        if (other.slug !== claimant.slug) slot.others.add(other.slug);
+      }
+    }
+  }
+
+  const nameOf = new Map(groups.map((g) => [g.slug, g.displayName]));
+  const exits: AppExit[] = [];
+  const emitted = new Set<string>();
+  for (const entry of wanted) {
+    const clash = conflicts.get(entry.group.slug);
+    if (clash) {
+      withheld.push({
+        slug: entry.group.slug,
+        displayName: entry.group.displayName,
+        reason: "conflict",
+        withGames: [...clash.others].map((slug) => nameOf.get(slug) ?? slug),
+        sharedApps: [...clash.paths],
+      });
+      continue;
+    }
+    for (const member of entry.members) {
+      const key = member.toLowerCase();
+      // Two games that agree may both claim one binary. Emitting it
+      // twice would say the same thing twice; emitting it once under
+      // either group says it once and means the same.
+      if (emitted.has(key)) continue;
+      emitted.add(key);
+      exits.push({ app: member, exit: entry.exit, group: entry.group.slug });
+    }
+  }
+
+  return { exits, withheld };
 }
 
 /** How many catalogue rows a picker mounts at once.
