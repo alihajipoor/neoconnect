@@ -271,7 +271,9 @@ use windivert_sys::{WinDivertFlags, WinDivertLayer};
 
 use super::divert::{recalculate_checksums, Handle};
 use super::flows::{Nat, Origin, Verdict};
-use super::owner::{Family, OwnerLookup, Selection, SharedSelection, Transport, Unattributed};
+use super::owner::{
+    Family, OwnerLookup, Scoped, Selection, SharedSelection, Transport, Unattributed,
+};
 use super::proxy::OwnSockets;
 
 /// The largest packet WinDivert will hand over.
@@ -1659,7 +1661,31 @@ fn handle_ipv6(
     // family; UDP has no in-band way to say so, which is the gap the
     // `tunnelled` branch below already states.
     let tunnelled = match owner_image {
-        Some(image) => selection.should_tunnel(image),
+        // The destination axis, on the family where "tunnelled" means
+        // *blocked* -- there is no v6 proxy to carry it to, so a
+        // selected app's IPv6 is stopped and the app retries over IPv4,
+        // which is carried. See the module header.
+        //
+        // That inversion is exactly why `Scoped` has three answers and
+        // not two. A publisher's prefix list is usually IPv4-only, and
+        // reading "no v6 prefixes" as "not in scope" would let a scoped
+        // game's IPv6 to its own game server out in the clear while its
+        // IPv4 to the same server went through the tunnel. One account,
+        // two source addresses, at the same instant -- the precise
+        // thing `prefixComplete` exists to prevent, reintroduced by the
+        // other family. `Unscoped` therefore keeps the block, and only
+        // a scope that positively answers for IPv6 may lift it.
+        //
+        // `OutOfScope` does lift it: a scoped game's IPv6 to its
+        // telemetry is none of this feature's business, exactly as an
+        // unselected application's is.
+        Some(image) => {
+            selection.should_tunnel(image)
+                && !matches!(
+                    selection.destination_scope(image, IpAddr::V6(parsed.destination)),
+                    Scoped::OutOfScope
+                )
+        }
         None => match selection
             .verdict_for_unattributed(parsed.transport, IpAddr::V6(parsed.destination))
         {
@@ -1936,7 +1962,27 @@ fn decide(
         )),
     };
     let selected = match owner_image {
-        Some(image) => !is_own && selection.should_tunnel(image),
+        // Two questions, in this order: is this application's traffic
+        // ours, and is this packet of it going somewhere we carry.
+        //
+        // The second can only ever narrow the first, which is what
+        // makes it safe to bolt onto a decision this load-bearing. An
+        // application the customer did not select cannot be pulled into
+        // the tunnel by a scope, because `should_tunnel` has already
+        // said no and `&&` never revisits that.
+        //
+        // `Scoped::Unscoped` -- no scope, an unusable one, or one with
+        // nothing to say about IPv4 -- leaves the answer exactly as it
+        // was before scopes existed. See `Selection::destination_scope`
+        // for why every uncertainty lands there and not on a refusal.
+        Some(image) => {
+            !is_own
+                && selection.should_tunnel(image)
+                && !matches!(
+                    selection.destination_scope(image, IpAddr::V4(parsed.destination)),
+                    Scoped::OutOfScope
+                )
+        }
         // A port with no owner this loop can see. In `OnlySelected`
         // that used to mean "leave it alone", and leaving it alone was
         // the leak: 15 datagrams from 15 short-lived sockets, 13 out in
@@ -2040,6 +2086,21 @@ fn decide(
         // afterwards, and the DNS branch above, which carries a lookup
         // whoever makes it, never ran. The query went to whichever
         // resolver the network supplied. See `Tables::direct`.
+        //
+        // That flow key is also what lets a *scoped* application reach
+        // this line at all. `docs/design/gaming-mode.md` §5.3 lists it
+        // as a trap -- "a per-destination policy must not call
+        // `record_direct`" -- and that was true when it was written,
+        // because the cache was keyed on `(transport, source port)`.
+        // One out-of-scope packet would then have exempted the whole
+        // port for five seconds, game-server traffic included, and a
+        // game scoped to its servers would have been carried for
+        // whichever destination it happened to reach first. Keyed on
+        // the flow, "this app does not send *here* through the tunnel"
+        // is all it says, and the same port's next packet to a
+        // destination that *is* in scope is decided on its own merits.
+        // The trap is spent; the note stays because the shape of this
+        // key is now load-bearing for two features rather than one.
         if known_owner {
             nat.record_direct(
                 parsed.transport,
@@ -2631,6 +2692,318 @@ mod tests {
             "TCP must keep failing open"
         );
         assert_eq!(stats.refused_unattributed.load(Ordering::Relaxed), 0);
+    }
+
+    /// A selection where this test binary is the chosen application,
+    /// narrowed to `destinations`.
+    ///
+    /// The current executable, because that is the only image the owner
+    /// lookup will attribute a socket opened here to -- the same trick
+    /// the attribution tests above use.
+    fn scoped_selection(destinations: &[&str]) -> Selection {
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        Selection::with_scopes(
+            [me.clone()],
+            SplitTunnelMode::OnlySelected,
+            [neoconnect_ipc::AppScope {
+                app: me,
+                destinations: destinations.iter().map(|d| d.to_string()).collect(),
+            }],
+        )
+    }
+
+    #[test]
+    fn a_scoped_app_is_carried_to_its_own_servers_and_left_alone_elsewhere() {
+        // The feature, in one test: the same application, the same
+        // socket, two destinations, two different answers.
+        //
+        // Both halves matter. Carrying the in-scope destination is what
+        // the customer bought; leaving the out-of-scope one alone is
+        // what makes this different from selecting the app outright,
+        // and it is the half that would silently do nothing if the new
+        // clause were dropped.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection = scoped_selection(&["203.0.113.0/24"]);
+
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+
+        // In scope: a game server.
+        let carried = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            8686,
+        );
+        let parsed = parse(&carried).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats);
+        assert!(
+            matches!(verdict, Verdict::Redirect { .. }),
+            "a scoped app's traffic to a destination in its scope must be carried, \
+             got {verdict:?}"
+        );
+
+        // Out of scope: the same program's telemetry. Left alone, and
+        // emphatically **not** refused -- that is the unattributable
+        // case, and this packet has a perfectly good owner.
+        let direct = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(198, 51, 100, 9),
+            port,
+            8686,
+        );
+        let parsed = parse(&direct).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats);
+        assert_eq!(
+            verdict,
+            Verdict::Direct,
+            "a scoped app's traffic outside its scope keeps the ordinary connection"
+        );
+        assert_eq!(
+            stats.refused_unattributed.load(Ordering::Relaxed),
+            0,
+            "out of scope is not the same fact as unattributable and must not be counted as one"
+        );
+    }
+
+    #[test]
+    fn an_out_of_scope_verdict_does_not_answer_for_a_destination_in_scope() {
+        // Where destination scoping meets the leave-alone cache, and
+        // the reason this feature could not have been built before that
+        // cache was re-keyed.
+        //
+        // The out-of-scope packet above records a Direct verdict. Keyed
+        // on `(transport, source port)` -- as it was until the flow
+        // fix -- that verdict would answer for every destination the
+        // port reached for the next five seconds, game servers
+        // included, and a game scoped to its servers would have been
+        // carried only to whichever destination it happened to reach
+        // first. Keyed on the flow, it says only what is true about
+        // that one peer.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection = scoped_selection(&["203.0.113.0/24"]);
+
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+
+        // Out of scope first, so its verdict is the one in the cache.
+        let telemetry = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(198, 51, 100, 9),
+            port,
+            8686,
+        );
+        let parsed = parse(&telemetry).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct
+        );
+
+        // Same port, same instant, a destination that *is* in scope.
+        let server = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            8686,
+        );
+        let parsed = parse(&server).expect("a well-formed packet");
+        let verdict = decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats);
+        assert!(
+            matches!(verdict, Verdict::Redirect { .. }),
+            "the out-of-scope verdict must not have answered for the game server, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn an_app_with_no_usable_scope_is_carried_in_full() {
+        // Every way the new axis can fail to answer, and all of them
+        // land on the behaviour this feature had before it existed.
+        // This is the fail-open direction, and it is the one a customer
+        // whose game stopped working would be reporting.
+        let redirect = sample_redirect();
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+
+        // Absent scope, unparseable scope, and a scope for a family
+        // this packet is not on -- a v6-only list asked about IPv4.
+        let cases: Vec<(&str, Selection)> = vec![
+            ("no scope at all", Selection::new([me.clone()], SplitTunnelMode::OnlySelected)),
+            ("a scope that will not parse", scoped_selection(&["203.0.113.0/24", "garbage"])),
+            ("an empty scope", scoped_selection(&[])),
+            ("a v6-only scope asked about IPv4", scoped_selection(&["2001:db8::/32"])),
+        ];
+
+        for (why, selection) in cases {
+            let mut owner = OwnerLookup::new();
+            let nat = Nat::new();
+            let stats = Stats::default();
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+            let port = socket.local_addr().unwrap().port();
+            // An address no plausible scope would contain, so a scope
+            // that wrongly applied would show up as Direct here.
+            let packet = udp_packet(
+                Ipv4Addr::new(192, 168, 1, 20),
+                Ipv4Addr::new(198, 51, 100, 9),
+                port,
+                8686,
+            );
+            let parsed = parse(&packet).expect("a well-formed packet");
+            let verdict = decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats);
+            assert!(
+                matches!(verdict, Verdict::Redirect { .. }),
+                "with {why} the app must be carried in full as before, got {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scope_cannot_pull_in_an_app_the_customer_did_not_choose() {
+        // The second axis narrows and never widens. A scope naming an
+        // unselected application is dropped when the selection is
+        // built, and even if one survived, `should_tunnel` is asked
+        // first and `&&` never revisits it.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let selection = Selection::with_scopes(
+            [r"C:\Games\game.exe".to_string()],
+            SplitTunnelMode::OnlySelected,
+            [neoconnect_ipc::AppScope {
+                app: me,
+                destinations: vec!["203.0.113.0/24".to_string()],
+            }],
+        );
+
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            8686,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Direct,
+            "an unselected app must stay unselected however its scope reads"
+        );
+    }
+
+    #[test]
+    fn scoping_does_not_reopen_the_unattributable_datagram() {
+        // The two axes must not be collapsed. A packet with no owner
+        // has no application and therefore no scope, so it goes to
+        // `verdict_for_unattributed` and comes back refused exactly as
+        // it did before scopes existed.
+        //
+        // Getting this wrong in the obvious way -- treating "no scope
+        // matched" as "out of scope, pass it through" -- would reinstate
+        // the 13-of-15 fire-and-forget leak while every scope test
+        // above still passed.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection = scoped_selection(&["203.0.113.0/24"]);
+
+        let port = dead_udp_port(&mut owner);
+
+        // In scope, which is the interesting case: if a scope could
+        // speak for a packet with no owner, this is where it would.
+        let packet = udp_packet(
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(203, 0, 113, 9),
+            port,
+            8686,
+        );
+        let parsed = parse(&packet).expect("a well-formed packet");
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Drop,
+            "an unattributable datagram is still refused when scopes are in play"
+        );
+        assert_eq!(stats.refused_unattributed.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_scoped_apps_ipv6_is_blocked_in_scope_and_passed_outside_it() {
+        // The same rule on the family where "carried" means *blocked*:
+        // there is no v6 proxy, so a selected app's IPv6 is stopped and
+        // the app retries over IPv4, which is carried.
+        //
+        // In scope, that block must survive. Out of scope, it must lift
+        // -- a scoped game's telemetry over IPv6 is none of this
+        // feature's business, exactly as an unselected app's is.
+        let mut owner = OwnerLookup::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection = scoped_selection(&["2001:db8:6ec5::/48"]);
+        let mut reset = None;
+
+        let socket = std::net::UdpSocket::bind("[::]:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+
+        // Not port 53: the DNS branch blocks a v6 lookup before the
+        // selection is consulted at all, and would answer this without
+        // the scope being reached.
+        let in_scope = ipv6_udp_packet("2001:db8:6ec5::1", port, 8686);
+        let leg = handle_ipv6(&in_scope, &redirect, &selection, &mut owner, &stats, &mut reset);
+        assert!(
+            matches!(leg, Some(Leg::Swallowed)),
+            "a scoped app's IPv6 to a destination in scope must still be blocked so it \
+             retries over IPv4, got {leg:?}"
+        );
+
+        let out_of_scope = ipv6_udp_packet("2001:db8:dead::1", port, 8686);
+        let leg =
+            handle_ipv6(&out_of_scope, &redirect, &selection, &mut owner, &stats, &mut reset);
+        assert!(
+            leg.is_none(),
+            "a scoped app's IPv6 outside its scope goes out as any unselected app's would, \
+             got {leg:?}"
+        );
+        assert_eq!(
+            stats.refused_unattributed.load(Ordering::Relaxed),
+            0,
+            "an attributed packet outside its scope is not an unattributable one"
+        );
+    }
+
+    #[test]
+    fn a_v4_only_scope_does_not_let_ipv6_out_in_the_clear() {
+        // The trap that makes `Scoped` three answers rather than two.
+        //
+        // Publisher prefix lists are usually IPv4-only. Reading "no v6
+        // prefixes" as "not in scope" would pass a scoped game's IPv6
+        // to its own game server straight through, while its IPv4 to
+        // the same server went through the tunnel -- one account, two
+        // source addresses, at the same instant. That is precisely the
+        // thing `prefixComplete` exists to prevent, arriving by the
+        // family nobody was looking at.
+        let mut owner = OwnerLookup::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection = scoped_selection(&["203.0.113.0/24"]);
+        let mut reset = None;
+
+        let socket = std::net::UdpSocket::bind("[::]:0").expect("bind");
+        let port = socket.local_addr().unwrap().port();
+
+        let packet = ipv6_udp_packet("2001:db8:6ec5::1", port, 8686);
+        let leg = handle_ipv6(&packet, &redirect, &selection, &mut owner, &stats, &mut reset);
+        assert!(
+            matches!(leg, Some(Leg::Swallowed)),
+            "a scope that says nothing about IPv6 must leave the v6 block exactly as it was, \
+             got {leg:?}"
+        );
     }
 
     /// A minimal IPv6 UDP packet. Sized to what `parse_v6` reads rather
