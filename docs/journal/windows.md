@@ -11871,6 +11871,42 @@ matching subscription **inside one synchronous HTTP request**, each
 issuing an agent command. That is an operational cliff, not a payload
 one.
 
+### The support rail was already lying, and the window found it
+
+Not a bug this change introduced -- one it uncovered, which is the more
+useful kind.
+
+The inbox's status tabs filtered client-side over whatever array the
+layout had fetched, and `GET /support/tickets` orders unfiltered results
+`status asc, lastMessageAt desc`. `SupportTicketStatus` is declared
+`OPEN, ANSWERED, RESOLVED`, so the 200-row window the route already
+capped at was OPEN-heavy by construction: past 200 conversations, the
+Resolved tab would find almost none and render as an empty inbox rather
+than a truncated one. The badge had the same shape of fault --
+`openCount` was `tickets.filter(...).length`, a page size wearing a
+total's clothes, the identical failure to the overview dashboard's
+customer count.
+
+Each status is now its own server-filtered page and each count is an
+`X-Total-Count` total.
+
+**Gotcha for anyone who next tries to drive a panel filter from the
+URL:** App Router does not hand a `layout` its `searchParams`, and it
+encodes them into the *page* segment's cache key -- so a filter click
+refetches the page and reuses the cached layout. A URL-driven rail would
+show the list it was built with while a different tab looked selected.
+Moving the fetch down into the page fixes the data and breaks what the
+two-pane layout exists for: a dynamic-segment change remounts the
+subtree, so the rail loses its scroll position on every thread click.
+Three bounded per-status fetches from the layout is what actually works
+here.
+
+The cost, stated plainly: the rail can hold up to 600 rows where it held
+200. They are five-field rows against the whole ticket the old query
+returned. It still has no pager -- ticket #201 of a status is as
+unreachable as it was -- but it now says so instead of implying
+otherwise.
+
 ### A `take` bounds the response, not the scan -- the indexes are missing
 
 Worth writing down because it is the obvious next thing and it is not
