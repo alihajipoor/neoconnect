@@ -124,7 +124,6 @@ describe("response compression", () => {
     expect(gzipped.encoding).toBe("gzip");
 
     const ratio = plain.bytes / gzipped.bytes;
-    // eslint-disable-next-line no-console
     console.log(
       `catalogue on the wire: ${plain.bytes} B identity -> ${gzipped.bytes} B gzip ` +
         `(${ratio.toFixed(1)}x smaller, ${(plain.bytes - gzipped.bytes) / 1024 | 0} KB saved)`,
