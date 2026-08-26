@@ -404,6 +404,16 @@ export class GamingService {
       // Entitled, but there is no node serving this. Say exactly that. The
       // client must not dress it up as a network failure: nothing was
       // dialled, so "could not reach the server" would be false.
+      //
+      // THIS IS THE PRODUCTION PATH, ALWAYS. Nothing sets
+      // `GamingResolver.confirmedAt`, so `usableResolver()` cannot return a
+      // row and every customer lands here. Everything past this point --
+      // the token minting, the DoH URL, the resolver block in the payload
+      // -- is a DEAD BRANCH kept on purpose, not work left half-done.
+      // Read the "DEAD BRANCH" section of gaming.module.ts before treating
+      // any of it as a loose end; it records why DNS steering cannot reach
+      // a game's own servers, why the node side is not being built, and
+      // what would have to exist to revive it.
       return { version: 1, entitled: true, unavailableReason: "noResolver", resolver: null, games };
     }
 
