@@ -134,7 +134,7 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
 /// before "the service is still stopping" becomes "the service is never
 /// stopping". A minute is generous for the first and still short of the
 /// second.
-const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(45);
+pub(super) const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(45);
 
 /// How often the service manager is asked whether it has gone yet.
 const TUNNEL_SERVICE_POLL: Duration = Duration::from_millis(250);

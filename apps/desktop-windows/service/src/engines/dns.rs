@@ -273,7 +273,7 @@ pub fn clear() {
 /// `repair` is a one-shot operation the customer deliberately started
 /// and is waiting on; there is no `status` poll behind it whose latency
 /// this would become.
-const REPAIR_CMDLET_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+pub(super) const REPAIR_CMDLET_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What one NRPT clear did, for the caller that has to say so.
 ///

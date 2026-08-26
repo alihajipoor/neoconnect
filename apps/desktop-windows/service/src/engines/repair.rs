@@ -871,6 +871,82 @@ mod tests {
     use super::*;
     use neoconnect_ipc::RepairStep;
 
+    /// The arithmetic `REPAIR_TIMEOUT` claims, recomputed from the
+    /// constants rather than copied from a comment.
+    ///
+    /// This exists because the last version of that comment was wrong
+    /// and nothing noticed. It derived 195s as "nine steps, each bounded
+    /// by the fifteen-second helper budget" -- true of the step *list*,
+    /// and false of the call graph, which makes 37 bounded spawns and
+    /// then sits in three SCM poll loops that spawn nothing. A comment
+    /// cannot be falsified by a compiler; this can.
+    ///
+    /// The counts below are the itemisation, by step, of
+    /// `repair::run`'s worst case -- engine slot empty (the CLI case,
+    /// and the most expensive `disconnect` arm), both adapters present,
+    /// NRPT rules that survive the registry pass, a stranded WireGuard
+    /// service, a RAS entry present:
+    ///
+    /// ```text
+    ///   survey         5 helper                     is_connected, 2x Get-NetRoute,
+    ///                                               netsh show rule, entry_present
+    ///   step_tunnel   13 helper                     wireguard.exe, rasdial,
+    ///                                               Remove-VpnConnection, netsh delete,
+    ///                                               2x Get-NetRoute, 2x Remove-NetRoute,
+    ///                                               2x poke_resolver pair, 1 NRPT cmdlet
+    ///   step_engines   0                            ToolHelp only
+    ///   step_dns       4 helper + 1 REPAIR_CMDLET   2x poke_resolver pair, 1 NRPT cmdlet
+    ///   step_routes    6 helper
+    ///   step_firewall  2 helper
+    ///   step_wfp       0                            WFP API, no budget of any kind
+    ///   step_wireguard 1 helper
+    ///   step_ras       3 helper
+    ///   step_flush     2 helper                     poke_resolver pair
+    ///                 --------------------------
+    ///                 36 helper + 1 REPAIR_CMDLET + 3 SCM waits
+    /// ```
+    ///
+    /// If a budget moves, this fails until `REPAIR_WORST_CASE` is
+    /// updated -- and `vpn.rs`'s own test then fails until the app's
+    /// deadline is raised to cover it. That chain is the whole point.
+    #[test]
+    fn the_repair_deadline_is_derived_from_the_budgets_it_claims_to_cover() {
+        const HELPER_SPAWNS: u64 = 36;
+        const NRPT_CMDLET_SPAWNS: u64 = 1;
+        const SERVICE_STOP_WAITS: u64 = 3;
+
+        let helper = super::super::HELPER_BUDGET.as_secs();
+        let nrpt = dns::REPAIR_CMDLET_BUDGET.as_secs();
+        let service_stop = wireguard::TUNNEL_SERVICE_GONE_WITHIN.as_secs();
+
+        let process_budget = HELPER_SPAWNS * helper + NRPT_CMDLET_SPAWNS * nrpt;
+        let blocking = SERVICE_STOP_WAITS * service_stop;
+        let worst = process_budget + blocking;
+
+        assert_eq!(process_budget, 600, "the spawn budget moved: {helper}s x {HELPER_SPAWNS} + {nrpt}s");
+        assert_eq!(blocking, 135, "the service-stop wait moved: {service_stop}s x {SERVICE_STOP_WAITS}");
+        assert_eq!(worst, 735);
+
+        assert!(
+            neoconnect_ipc::REPAIR_WORST_CASE.as_secs() >= worst,
+            "the shared worst case ({}s) no longer covers what this pass can cost ({worst}s)",
+            neoconnect_ipc::REPAIR_WORST_CASE.as_secs()
+        );
+    }
+
+    /// Nine steps, and the old comment's arithmetic assumed one bounded
+    /// spawn each. Pinned so that reading `ALL_STEPS.len()` is never
+    /// mistaken for the spawn count again.
+    #[test]
+    fn the_step_count_is_not_the_spawn_count() {
+        assert_eq!(ALL_STEPS.len(), 9);
+        assert!(
+            neoconnect_ipc::REPAIR_WORST_CASE.as_secs()
+                > ALL_STEPS.len() as u64 * super::super::HELPER_BUDGET.as_secs(),
+            "the deadline is back to nine helper budgets, which is what was wrong before"
+        );
+    }
+
     fn step(id: &str, outcome: RepairOutcome) -> RepairStep {
         RepairStep { id: id.into(), label: id.into(), outcome }
     }

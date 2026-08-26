@@ -26,6 +26,56 @@ use serde::{Deserialize, Serialize};
 /// sides can't disagree about it.
 pub const PIPE_NAME: &str = r"\\.\pipe\neoconnect-service";
 
+/// The longest a full repair pass can still be legitimately working.
+///
+/// Here rather than in either crate alone because it is a contract
+/// between them: the service decides how long its pass can take and the
+/// app decides how long to wait for the answer, and the last time those
+/// two numbers were kept apart the app's was less than half the
+/// service's. A test on each side asserts against this one, so raising a
+/// budget in the service fails a test until this is updated, and the
+/// app's deadline cannot silently fall below it.
+///
+/// **Derived from the code, and only from the code.** Every spawn on
+/// `engines::repair::run`'s call graph is bounded by one of three
+/// constants, and the pass makes at most 37 of them:
+///
+/// ```text
+///   36 x HELPER_BUDGET (15s)                                540s
+///    1 x dns::REPAIR_CMDLET_BUDGET (60s)                     60s
+///                                        process budget     600s
+///    3 x wireguard::TUNNEL_SERVICE_GONE_WITHIN (45s),
+///        which are SCM poll loops and spawn nothing          135s
+///                                                  total    735s
+/// ```
+///
+/// The 45s waits are counted because they are wall-clock the caller
+/// spends whether or not a process is involved -- a deadline derived
+/// from spawns alone would abandon a repair that was sitting in one of
+/// them. `service::engines::repair` carries the per-step itemisation
+/// this sum comes from, and a test there recomputes it from the
+/// constants themselves.
+///
+/// Two terms deliberately **not** in it, because including them would
+/// be arithmetic on things the code does not bound:
+///
+///  * **Timeout overshoot.** A spawn that expires costs its budget plus
+///    up to `REAP_BUDGET` and two pipe drains -- pessimally ~7s each,
+///    ~261s over 37 spawns. That requires all 37 children to ignore a
+///    kill. It is slack this number does not carry, and it is the reason
+///    the constant below is rounded up rather than set to 735 exactly.
+///  * **`InstalledRoutes::remove`**, one `route.exe` per route at 15s
+///    each. The count is runtime data, not a constant, so there is no
+///    honest number to add.
+///
+/// It is a **backstop, not a tuning knob** -- the lesson the engine
+/// budgets taught, written down in `docs/journal/windows.md` on
+/// 2026-08-26. A clean machine's ten spawns measure 3-5s in total on a
+/// developer workstation and about 48s on a constrained guest. This
+/// number is what the code *permits*, so that a repair which is still
+/// working is never reported as a hang.
+pub const REPAIR_WORST_CASE: std::time::Duration = std::time::Duration::from_secs(735);
+
 /// Requests the app can make of the service. One JSON object per line.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
