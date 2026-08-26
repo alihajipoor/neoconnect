@@ -1,11 +1,13 @@
-import { Body, Controller, Delete, Get, Param, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Post, Query, Res, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { AdminRole } from "@prisma/client";
+import type { Response } from "express";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { CurrentAdmin } from "../../common/decorators/current-admin.decorator";
 import { AuthenticatedAdmin } from "../auth/types";
+import { listWindow, sendPage } from "../../common/pagination";
 import { ResellersService } from "./resellers.service";
 import { GenerateVoucherDto, ResendVoucherDto, SetBalanceDto } from "./dto/reseller.dto";
 
@@ -33,10 +35,20 @@ export class ResellerController {
     return this.resellers.myBalances(admin.sub);
   }
 
+  /** Paged per common/pagination.ts. Still a bare array, still scoped to
+   * the caller's own codes; `X-Total-Count` says how many of those there
+   * are, which is the figure a reseller's "codes issued" tally needs and
+   * the one a page length cannot give. */
   @Get("vouchers")
   @ApiOperation({ summary: "Codes I have issued, newest first" })
-  vouchers(@CurrentAdmin() admin: AuthenticatedAdmin) {
-    return this.resellers.myVouchers(admin.sub);
+  async vouchers(
+    @CurrentAdmin() admin: AuthenticatedAdmin,
+    @Res({ passthrough: true }) res: Response,
+    @Query("take") take?: string,
+    @Query("skip") skip?: string,
+  ) {
+    const window = listWindow({ take, skip }, { defaultTake: 100, maxTake: 500 });
+    return sendPage(res, await this.resellers.myVouchers(admin.sub, window));
   }
 
   @Post("vouchers")

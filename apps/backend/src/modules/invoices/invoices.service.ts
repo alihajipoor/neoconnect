@@ -3,6 +3,7 @@ import { InvoiceStatus, Prisma } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import { PrismaService } from "../../prisma/prisma.service";
+import type { ListWindow, Page } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import { invoiceIssuedEmail, invoiceOverdueEmail } from "../email/templates";
 
@@ -21,6 +22,33 @@ const INVOICE_DOCUMENT_PURPOSE = "invoice-document";
  * a forwarded email does not hand out a permanent link. The invoice
  * remains available in the app regardless. */
 const INVOICE_LINK_TTL = "60d";
+
+/** Exactly the columns a row of the operator's invoice table renders.
+ *
+ * `lineItemsJson` is the notable omission: it is the biggest column on
+ * the model and the list shows a single total, not a breakdown. The
+ * printable document reads the whole invoice through
+ * `GET /invoices/:id`, which is one row rather than a page of them. */
+const INVOICE_LIST_FIELDS = {
+  id: true,
+  invoiceNumber: true,
+  planNameSnapshot: true,
+  amountUsd: true,
+  currency: true,
+  status: true,
+  issuedAt: true,
+  customer: { select: { email: true } },
+  paymentTransaction: { select: { provider: true } },
+} satisfies Prisma.InvoiceSelect;
+
+/** One `where` for the list and its count, so a filter can never be
+ * applied to the page but not to the total it is reported against. */
+function whereFor(filters: { customerId?: string; status?: InvoiceStatus }): Prisma.InvoiceWhereInput {
+  return {
+    ...(filters.customerId ? { customerId: filters.customerId } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+  };
+}
 
 @Injectable()
 export class InvoicesService {
@@ -174,16 +202,47 @@ export class InvoicesService {
    * opens it to do: find a specific person's invoice. */
   list(filters: { customerId?: string; status?: InvoiceStatus } = {}) {
     return this.prisma.invoice.findMany({
-      where: {
-        ...(filters.customerId ? { customerId: filters.customerId } : {}),
-        ...(filters.status ? { status: filters.status } : {}),
-      },
+      where: whereFor(filters),
       include: {
         customer: { select: { email: true } },
         paymentTransaction: { select: { provider: true } },
       },
       orderBy: { issuedAt: "desc" },
     });
+  }
+
+  /** The operator's invoice list, paged and projected.
+   *
+   * Split from `list` above rather than parameterised into it, because
+   * the two have genuinely different requirements. `list` serves
+   * `GET /customer/invoices`, where the result is bounded by the one
+   * customer it belongs to and the full row is what a client may already
+   * be reading. This one serves `GET /invoices`, where both filters are
+   * optional -- so the default query was every invoice ever issued,
+   * ordered newest first, growing by a row per customer per billing
+   * period and never shrinking.
+   *
+   * The projection drops `lineItemsJson`, the largest column on the
+   * model, along with the period bounds and the two foreign keys. None
+   * of them appears in a cell of the panel's table; the document view
+   * fetches the single invoice it renders from `GET /invoices/:id`.
+   */
+  async listPage(
+    filters: { customerId?: string; status?: InvoiceStatus },
+    window: ListWindow,
+  ): Promise<Page<Prisma.InvoiceGetPayload<{ select: typeof INVOICE_LIST_FIELDS }>>> {
+    const where = whereFor(filters);
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.invoice.findMany({
+        where,
+        select: INVOICE_LIST_FIELDS,
+        orderBy: { issuedAt: "desc" },
+        take: window.take,
+        skip: window.skip,
+      }),
+      this.prisma.invoice.count({ where }),
+    ]);
+    return { items, total };
   }
 
   async get(id: string) {
