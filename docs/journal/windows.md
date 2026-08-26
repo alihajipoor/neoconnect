@@ -11216,3 +11216,119 @@ that is the honest scope of these numbers.
 - The unattributable-UDP refusal has not been measured **under load**,
   which `redirect.rs` asks for at the point it accepts the extra table
   walks.
+
+## 2026-08-25 — Destination scoping has no data, and cannot get any
+
+**Status:** research landed on `claude/gaming-prefix-completeness`, not
+merged. `prefixComplete` stays `false` on all three profiles;
+`SplitTunnelConfig.scopes` stays inert. **Nothing live was touched** — no
+node, no route, no release.
+**Touches:** `docs/research/gaming-destination-prefixes.md` (new),
+`apps/backend/prisma/game-profiles.ts` (comments only, no data change),
+`apps/backend/src/modules/gaming/game-catalogue.spec.ts` (new).
+
+### The answer is no, and it is not a "not yet"
+
+The open item was "`destinationCidrs` reaches the client and has no
+consumer". Scoping has since been built, so the remaining gate was data.
+There is no data to be had. **A publisher-ASN prefix list cannot be
+complete for any game in the catalogue**, and the reason generalises past
+these three.
+
+Publishers keep their **game servers** on their own ASN and their
+**control plane** — login, entitlements, client config, patch/version
+negotiation, session brokering — plus **voice** somewhere else. So a
+publisher-ASN filter carries the half that does not need tunnelling and
+misses the half that does. Worse: the control plane is where the
+*account* lives, so the publisher-ASN boundary is the maximally wrong
+split. It manufactures the two-source-IP signature the flag exists to
+prevent, rather than merely failing to prevent it.
+
+### Blizzard: four disqualifiers, and the first one is the profile's own critical host
+
+`*.actual.battle.net` — the port-1119 Battle.net service connection, the
+one the seed file already singles out in `excludeHostnames` — is on
+**Google Cloud AS396982**, not AS57976. That is the connection carrying
+WoW's realm addresses to the client as literals. An AS57976 filter would
+route the realm connection and not the connection that brokered it.
+
+Then: login (`oauth.battle.net`) is AWS; in-game **voice is Vivox, i.e.
+Unity/Multiplay AS35028**, which breaks *silently* while the game still
+connects; and `eu.actual.battle.net` answered from **8 different Google
+/16s within minutes**, so there is nothing stable to enumerate anyway.
+Two of twenty resolvable hostnames are in AS57976, and both are things
+you would leave direct — a CDN and a telemetry sink.
+
+Checked so nobody re-checks it: Blizzard's other two ASNs (AS32163,
+AS55497) announce **zero** prefixes. AS57976 is the whole in-house
+footprint.
+
+### Riot: the lead from the 2026-08-25 entry was right, and stronger than stated
+
+It was an inference; it is now measured. **One** of 22 Riot hostnames is
+in AS6507 (`prod.euw1.lol.riotgames.com`). Login, entitlements, client
+config and the whole VALORANT control plane carry explicit
+`.cdn.cloudflare.net` CNAMEs into AS13335 — proof of Cloudflare
+*proxying*, not merely Cloudflare-hosted space. The carried-forward
+consequence is unchanged: a Riot profile's missing half is exit-IP
+reputation, not routing.
+
+### The control that makes it a pattern rather than three coincidences
+
+Ran Valve deliberately as the best possible case — Valve owns AS32590 and
+its own content network, 45 IPv4 prefixes. **Zero of twelve** Steam
+hostnames resolved into it, `login.steampowered.com` included. Three
+publishers, three own-ASNs, three times the account surface lives
+elsewhere.
+
+### Gotchas worth the next person's time
+
+- **`cdn.cloudflare.steamstatic.com` resolves to Akamai.** Names are not
+  evidence. Resolve everything, including things whose name tells you the
+  answer.
+- **Blizzard publishes its CDN list machine-readably** at
+  `http://us.patch.battle.net:1119/<product>/cdns` — first-party and one
+  HTTP request. It shows `level3.blizzard.com` (Akamai, despite the name)
+  as the *primary* EU path and the AS57976 CDN as `fallback=1`.
+- **Blizzard's current firewall article contains no hostnames, addresses
+  or ports at all.** The only current first-party port list is a 2020
+  forum post by a verified CS agent who says the information was removed
+  from the article. Absence of documentation is not absence of endpoints.
+- **`git checkout <path>` to undo a test mutation discarded the real
+  edits with it.** Copy the file aside first; a mutation check is worth
+  running, but not at the cost of the work.
+
+### What this did not establish
+
+Whether WoW's realm/world sockets (TCP 3724) are wholly inside AS57976.
+It cannot be established from outside a live session — realm addresses
+arrive as literals, so no resolver sees them and Blizzard documents none.
+One address from the earlier sweep (`37.244.62.99`) is in AS57976. That
+gap does not weaken the verdict, since four disqualifiers already stand,
+but it is the measurement anyone reviving this would have to take, and it
+needs a packet capture from a real WoW login.
+
+All lookups were made **from Germany**, across three independent
+resolvers. For the decisive finding that is not a limitation: the design
+doc's §2.2 sweep already recorded the same hosts from four Iranian
+networks, and mapping those recorded addresses to their origin AS puts
+them in the same third-party space — `eu.actual.battle.net` even returned
+the identical address to an Iranian probe and to this machine.
+
+### The guard, and what it cannot do
+
+`game-catalogue.spec.ts` asserts the seed's invariants: a profile
+claiming completeness must carry a parseable non-empty list, both keys
+must be refreshed together on re-seed, and today's three must not claim
+completeness. Verified by mutation — flipping `wow` to `true` fails two
+tests, and adding a plausible subset with host bits set
+(`137.221.64.1/24`) fails three.
+
+It **cannot** detect that a once-correct list has gone stale. Only
+re-measurement does that, and §6 of the research doc is the procedure —
+including the shortcut that saves most of the hour: resolve the *login*
+hostname first, because it has been on third-party edge infrastructure
+for every publisher measured.
+
+**Do not weaken `canRouteByDestination` to make any of this usable.** It
+is refusing exactly what it should refuse.
