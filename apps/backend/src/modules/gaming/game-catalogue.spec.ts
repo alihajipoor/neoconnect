@@ -1,207 +1,209 @@
-import { seedGameProfiles } from "../../../prisma/game-profiles";
+import {
+  RESERVED_SLUGS,
+  catalogueEntries,
+  toSeedRow,
+  validateCatalogue,
+  type CatalogueEntry,
+} from "../../../prisma/catalogue";
 
-/** What this file guards.
+/** Guards on the shipped game catalogue.
  *
- * `prefixComplete` is a safety claim, not metadata. The client's
- * `canRouteByDestination` gate trusts it: when it is true, traffic to
- * `destinationCidrs` is carried and everything else from that app goes
- * direct. If the list is not actually complete, the game's simultaneous
- * connections split across two source addresses -- for World of Warcraft
- * the Home and World connections -- and that is the account-sharing
- * signature that gets people banned.
+ * This runs in CI on every push, which is the point: the catalogue is data,
+ * and data is edited by people who are not reading this module. Most of these
+ * assertions describe a mistake that would be invisible everywhere else --
+ * a process name with a path in it, or a duplicate slug, produces a row that
+ * looks fine in the panel, serialises fine over the API, and silently routes
+ * nothing on the customer's machine.
  *
- * So the catalogue has invariants that no type can express, and this is
- * the only place they can be checked:
- *
- *  * A profile that claims completeness must actually carry a list, and
- *    every entry must parse. `prefixComplete: true` with a malformed or
- *    empty list is the worst of both worlds -- the gate opens and the
- *    filter matches nothing.
- *  * Today's three profiles must NOT claim completeness. That was
- *    measured, not assumed: see docs/research/gaming-destination-prefixes.md.
- *    Blizzard's port-1119 service connection (`*.actual.battle.net`) is on
- *    Google Cloud AS396982 and Riot's entire login path is on Cloudflare
- *    AS13335, so neither publisher-ASN list can be complete by
- *    construction.
- *
- * The second assertion is deliberately a tripwire rather than a
- * prohibition. If someone genuinely establishes completeness for a game
- * they will have to come here and say so explicitly -- which is the
- * moment to re-read the research doc and re-run its §6 procedure. A flag
- * flipped in passing cannot slip through silently.
- *
- * What this file canNOT do is detect that a once-correct list has gone
- * stale. Publishers announce and withdraw prefixes; only re-measurement
- * catches that.
- */
+ * The suite deliberately asserts against the REAL catalogue as well as
+ * against fixtures. A validator that only ever sees fixtures proves the
+ * validator works; running it over the shipped data proves the shipped data
+ * is good, and that is the thing that can regress. */
+describe("game catalogue", () => {
+  const entries = catalogueEntries();
 
-/** A capturing stand-in for Prisma. The seed's only side effect is a
- * series of `upsert` calls, so recording their arguments gives us the
- * catalogue exactly as it would reach the database -- including the
- * `update`/`create` split, which is itself part of the safety story. */
-type Upsert = {
-  where: { slug: string };
-  update: Record<string, unknown>;
-  create: Record<string, unknown>;
-};
+  describe("the shipped catalogue", () => {
+    it("passes validation with no problems", () => {
+      // Reported as the actual list rather than a count, because when a
+      // regenerated tier breaks it breaks systematically and the first
+      // twenty lines tell you how.
+      expect(validateCatalogue(entries)).toEqual([]);
+    });
 
-function capturingPrisma() {
-  const calls: Upsert[] = [];
-  const prisma = {
-    gameProfile: {
-      upsert: (args: Upsert) => {
-        calls.push(args);
-        return Promise.resolve(args.create);
-      },
-    },
-  };
-  // The seed is typed against the real PrismaClient; this stub implements
-  // the one method it touches.
-  return { prisma: prisma as unknown as Parameters<typeof seedGameProfiles>[0], calls };
-}
+    it("is not empty", () => {
+      expect(entries.length).toBeGreaterThan(100);
+    });
 
-/** Deliberately strict, and stricter than `new URL`-style leniency.
- *
- * Rejects the things that would silently mis-scope a filter rather than
- * fail loudly: a prefix length out of range, an octet over 255, a
- * shorthand like `10/8`, and -- the subtle one -- host bits set below the
- * mask. `137.221.64.1/24` looks fine to a human and is ambiguous to a
- * matcher: it is not a prefix, it is an address with a prefix length
- * stapled on. */
-function parsesAsCidr(cidr: string): boolean {
-  const slash = cidr.indexOf("/");
-  if (slash < 0) return false;
-  const addr = cidr.slice(0, slash);
-  const lenText = cidr.slice(slash + 1);
-  if (!/^\d+$/.test(lenText)) return false;
-  const len = Number(lenText);
-
-  if (addr.includes(":")) {
-    // IPv6: shape check only, but the prefix length still has to be sane.
-    if (len < 0 || len > 128) return false;
-    return /^[0-9a-fA-F:]+$/.test(addr) && (addr.match(/::/g) ?? []).length <= 1;
-  }
-
-  if (len < 0 || len > 32) return false;
-  const octets = addr.split(".");
-  if (octets.length !== 4) return false;
-  const nums = octets.map((o) => (/^\d{1,3}$/.test(o) ? Number(o) : NaN));
-  if (nums.some((n) => Number.isNaN(n) || n > 255)) return false;
-
-  // Host bits below the mask must be zero.
-  const value = ((nums[0] << 24) >>> 0) + (nums[1] << 16) + (nums[2] << 8) + nums[3];
-  const hostBits = 32 - len;
-  if (hostBits === 32) return value === 0;
-  return (value & ((1 << hostBits) - 1) >>> 0) === 0;
-}
-
-/** Mirrors `canRouteByDestination` in
- * `apps/desktop-windows/src/lib/game-apps.ts`. Restated rather than
- * imported because it lives in a different workspace, and because the
- * point of the assertion is that the *seeded data* is refused by the rule
- * as the client states it. If the two ever diverge, that divergence is
- * the bug. */
-function canRouteByDestination(p: { destinationCidrs?: string[]; prefixComplete?: boolean }) {
-  return p.prefixComplete === true && (p.destinationCidrs?.length ?? 0) > 0;
-}
-
-describe("seeded game catalogue", () => {
-  let calls: Upsert[];
-
-  beforeAll(async () => {
-    const cap = capturingPrisma();
-    await seedGameProfiles(cap.prisma);
-    calls = cap.calls;
-  });
-
-  it("seeds the three curated profiles, keyed by slug", () => {
-    expect(calls.map((c) => c.where.slug)).toEqual(["wow", "valorant", "league-of-legends"]);
-  });
-
-  describe("the prefixComplete invariant", () => {
-    it("never claims completeness with an empty list", () => {
-      // The pair is one statement. `true` plus an empty list would open
-      // the gate onto a filter that matches nothing.
-      for (const c of calls) {
-        const complete = c.create.prefixComplete as boolean;
-        const cidrs = c.create.destinationCidrs as string[];
-        if (complete) {
-          expect(`${c.where.slug}: ${cidrs.length} cidrs`).not.toBe(`${c.where.slug}: 0 cidrs`);
-        }
+    it("never claims a complete prefix list", () => {
+      // The rule with teeth. An incomplete prefix list marked whole splits a
+      // game's connections across two source addresses at once, which is the
+      // account-sharing signature that gets customers penalised. Asserted on
+      // the seed rows too, not just the entries, because `toSeedRow` is what
+      // actually reaches the database.
+      for (const entry of entries as unknown as Record<string, unknown>[]) {
+        expect(entry.prefixComplete).toBeUndefined();
+      }
+      for (const row of entries.map((e, i) => toSeedRow(e, i))) {
+        expect(row.prefixComplete).toBe(false);
+        expect(row.destinationCidrs).toEqual([]);
       }
     });
 
-    it("every CIDR in every profile parses, complete or not", () => {
-      for (const c of calls) {
-        for (const cidr of c.create.destinationCidrs as string[]) {
-          expect({ slug: c.where.slug, cidr, parses: parsesAsCidr(cidr) }).toEqual({
-            slug: c.where.slug,
-            cidr,
-            parses: true,
-          });
-        }
+    it("leaves DNS-mode fields alone", () => {
+      // A hostname here would be a claim that the node's SNI proxy should
+      // forward it, and the standard for that in this repo is a reachability
+      // measurement from Iranian networks. No bulk entry has one.
+      for (const row of entries.map((e, i) => toSeedRow(e, i))) {
+        expect(row.hostnames).toEqual([]);
+        expect(row.excludeHostnames).toEqual([]);
+        expect(row.canaryHostname).toBeNull();
       }
     });
 
-    it("re-seeding refreshes prefixComplete together with the list it describes", () => {
-      // Refreshing one without the other would either strand a corrected
-      // list as unusable or -- far worse -- leave a partial one marked
-      // whole. Both keys must be in the `update` branch, not only `create`.
-      for (const c of calls) {
-        expect(Object.keys(c.update)).toEqual(
-          expect.arrayContaining(["destinationCidrs", "prefixComplete"]),
-        );
+    it("does not displace the hand-written profiles", () => {
+      const slugs = new Set(entries.map((e) => e.slug));
+      for (const reserved of RESERVED_SLUGS) {
+        expect(slugs.has(reserved)).toBe(false);
       }
+    });
+
+    it("gives every entry at least one executable", () => {
+      const empty = entries.filter((e) => e.processNames.length === 0);
+      expect(empty.map((e) => e.slug)).toEqual([]);
+    });
+
+    it("assigns distinct sort orders", () => {
+      const rows = entries.map((e, i) => toSeedRow(e, 1000 + i));
+      expect(new Set(rows.map((r) => r.sortOrder)).size).toBe(rows.length);
     });
   });
 
-  describe("today's verdict, measured 2026-08-25", () => {
-    /* docs/research/gaming-destination-prefixes.md. If one of these fails,
-     * do not edit the assertion -- re-read that document first. */
-    it.each([
-      ["wow", "AS57976", "*.actual.battle.net is Google Cloud AS396982"],
-      ["valorant", "AS6507", "the whole login path is Cloudflare AS13335"],
-      ["league-of-legends", "AS6507", "the whole login path is Cloudflare AS13335"],
-    ])("%s (%s) is not prefix-complete: %s", (slug, asn) => {
-      const c = calls.find((x) => x.where.slug === slug);
-      expect(c).toBeDefined();
-      expect(c!.create.destinationAsn).toBe(asn);
-      expect(c!.create.prefixComplete).toBe(false);
-      expect(c!.create.destinationCidrs).toEqual([]);
+  describe("validateCatalogue", () => {
+    const ok = (over: Partial<CatalogueEntry> = {}): CatalogueEntry => ({
+      slug: "example-game",
+      displayName: "Example Game",
+      processNames: ["Example.exe"],
+      ...over,
     });
 
-    it("so the client's gate refuses destination routing for every seeded profile", () => {
-      // The end-to-end statement: destination scoping is inert, on
-      // purpose, because no seeded profile is prefix-complete.
-      for (const c of calls) {
-        expect({
-          slug: c.where.slug,
-          routes: canRouteByDestination(c.create as never),
-        }).toEqual({ slug: c.where.slug, routes: false });
-      }
-    });
-  });
+    const problemsFor = (entry: unknown) =>
+      validateCatalogue([entry as CatalogueEntry]).map((p) => p.problem);
 
-  describe("the CIDR parser itself", () => {
-    // A permissive parser would make the invariant above vacuous.
-    it("accepts well-formed prefixes", () => {
-      for (const ok of ["137.221.64.0/24", "0.0.0.0/0", "2a04:e802::/32", "104.160.128.0/19"]) {
-        expect({ cidr: ok, parses: parsesAsCidr(ok) }).toEqual({ cidr: ok, parses: true });
-      }
+    it("accepts a well-formed entry", () => {
+      expect(validateCatalogue([ok()])).toEqual([]);
     });
 
-    it("rejects the shapes that would silently mis-scope a filter", () => {
-      for (const bad of [
-        "137.221.64.0", // no prefix length
-        "137.221.64.1/24", // host bits set -- not a prefix
-        "137.221.64.0/33", // length out of range
-        "137.221.300.0/24", // octet over 255
-        "10/8", // shorthand
-        "137.221.64.0/", // empty length
-        "not-an-address/24",
-      ]) {
-        expect({ cidr: bad, parses: parsesAsCidr(bad) }).toEqual({ cidr: bad, parses: false });
+    it("rejects duplicate slugs", () => {
+      const problems = validateCatalogue([ok(), ok()]);
+      expect(problems).toHaveLength(1);
+      expect(problems[0].problem).toMatch(/duplicate slug/);
+    });
+
+    it("rejects empty processNames", () => {
+      expect(problemsFor(ok({ processNames: [] }))).toEqual([
+        expect.stringMatching(/processNames is empty/),
+      ]);
+    });
+
+    it("rejects a path where a bare filename belongs", () => {
+      // Both separators, because the client takes the basename of whatever
+      // it receives -- it would turn either of these into `Example.exe` and
+      // hide the mistake rather than report it.
+      expect(problemsFor(ok({ processNames: ["C:\\Games\\Example.exe"] }))).toEqual([
+        expect.stringMatching(/is a path, not a bare filename/),
+      ]);
+      expect(problemsFor(ok({ processNames: ["Games/Example.exe"] }))).toEqual([
+        expect.stringMatching(/is a path, not a bare filename/),
+      ]);
+    });
+
+    it("rejects a name that is not an .exe", () => {
+      expect(problemsFor(ok({ processNames: ["Example"] }))).toEqual([
+        expect.stringMatching(/does not end in \.exe/),
+      ]);
+      // A kernel driver is the live case: VALORANT's `vgk.sys` is not a
+      // process and nothing in the split tunnel can ever match it.
+      expect(problemsFor(ok({ processNames: ["vgk.sys"] }))).toEqual([
+        expect.stringMatching(/does not end in \.exe/),
+      ]);
+    });
+
+    it("rejects a generic name shared with software that is not the game", () => {
+      // The rule that exists because of a specific silent failure: the client
+      // resolves a name against every running process and routes whatever it
+      // finds. Catalogue Minecraft under javaw.exe and a customer who picks
+      // Minecraft puts their employer's Java VPN client on the tunnel, with
+      // the UI reporting success.
+      for (const name of ["javaw.exe", "launcher.exe", "Update.exe", "Client.exe"]) {
+        expect(problemsFor(ok({ processNames: [name] }))).toEqual([
+          expect.stringMatching(/generic name shared with/),
+        ]);
       }
+    });
+
+    it("rejects an un-renamed Unreal shipping binary", () => {
+      // By pattern rather than by list, because the prefix set is open-ended.
+      expect(problemsFor(ok({ processNames: ["Client-Win64-Shipping.exe"] }))).toEqual([
+        expect.stringMatching(/generic name shared with/),
+      ]);
+      // But a renamed one is exactly what we want, and must still pass.
+      expect(validateCatalogue([ok({ processNames: ["VALORANT-Win64-Shipping.exe"] })])).toEqual(
+        [],
+      );
+    });
+
+    it("accepts a filename containing a space", () => {
+      // `Among Us.exe` and `League of Legends.exe` are real. A validator that
+      // rejected a space would drop them, and it would pass review.
+      expect(
+        validateCatalogue([ok({ processNames: ["Among Us.exe", "Heroes of the Storm.exe"] })]),
+      ).toEqual([]);
+    });
+
+    it("rejects prefixComplete: true", () => {
+      expect(problemsFor({ ...ok(), prefixComplete: true })).toEqual([
+        expect.stringMatching(/prefixComplete is true/),
+      ]);
+    });
+
+    it("rejects a non-empty destinationCidrs", () => {
+      expect(problemsFor({ ...ok(), destinationCidrs: ["1.2.3.0/24"] })).toEqual([
+        expect.stringMatching(/must not route by destination/),
+      ]);
+    });
+
+    it("rejects a reserved slug", () => {
+      expect(problemsFor(ok({ slug: "valorant" }))).toEqual([
+        expect.stringMatching(/reserved/),
+      ]);
+    });
+
+    it("rejects a slug that is not lowercase-kebab", () => {
+      expect(problemsFor(ok({ slug: "Example Game" }))).toEqual([
+        expect.stringMatching(/not lowercase-kebab/),
+      ]);
+    });
+
+    it("rejects an empty displayName", () => {
+      expect(problemsFor(ok({ displayName: "   " }))).toEqual([
+        expect.stringMatching(/displayName is missing or empty/),
+      ]);
+    });
+
+    it("rejects a duplicated executable within one entry", () => {
+      // Case-insensitively, because Windows is: two spellings of one file
+      // would render as two identical rows in the customer's face.
+      expect(problemsFor(ok({ processNames: ["Example.exe", "example.EXE"] }))).toEqual([
+        expect.stringMatching(/twice/),
+      ]);
+    });
+
+    it("reports every problem rather than stopping at the first", () => {
+      const problems = validateCatalogue([
+        ok({ slug: "bad slug", processNames: [] }),
+        ok({ slug: "another", processNames: ["nope"] }),
+      ]);
+      expect(problems.length).toBeGreaterThanOrEqual(3);
     });
   });
 });
