@@ -13460,3 +13460,112 @@ than everything, and do the joining on the host.
 * Do not call `Get-Process` per connection per sample on this guest — a
   run that did took over 25 minutes and never finished. One process
   snapshot per sample, joined by PID, is the same data in seconds.
+
+## 2026-08-26 — The guards were catching the clumsy form only
+
+Branch `claude/exit-group-guard`, off `claude/integration-0932`
+(9137eee). Note that is **not** `main`: main is 77f5df2 and does not
+contain `check-exit-groups.sh` or `docs/design/per-game-exits.md` at
+all. 9137eee is 31 commits ahead of main and contains it, so it is a
+fast-forward, but anyone branching off literal `main` to work on the
+exit-group guard will find no guard there.
+
+### The finding, which generalises
+
+`check-exit-groups.sh` asserted "no per-application exit in persisted
+state" by grepping `SplitTunnelSettings` for `^\s*exits\s*:`. Adding
+`appExits?: AppExit[]` passes it, passes `tsc`, and passes all 218
+vitest tests. Optional-and-additive is how such a field actually
+arrives, and nothing at all goes red.
+
+**The part worth remembering: a runtime test cannot fix this.** Types
+are erased, so a test can only reflect over a *value* — and an
+optional field is absent from values by definition. Reflection sees
+exactly the fields the regression does not add. Reaching for "a test
+that reflects over the persisted shape" feels like the rigorous
+answer and is structurally incapable of catching the realistic
+regression. The compiler is the only instrument that sees an optional
+field.
+
+So the rule is now a type (`split-tunnel.invariants.ts`) and the
+shell script's job is reduced to asserting that the type assertions
+still exist and that the package still has a `tsc` step to run them.
+
+The sharpest evidence that shell was the wrong instrument: a field
+called `perBinaryRouting?: { path: string; exit: string }[]` has no
+"exit" in its *name*, so even the strengthened grep still reports
+"ok". Only the compiler catches it. Any name-based check loses to
+someone picking a different name, and they will not be being
+adversarial — they will just be naming their field.
+
+### The same question, asked of the sibling script
+
+`check-prefix-completeness.sh`'s four invariants, against the
+*additive* form rather than deletion: three failed, and one was
+already breached in shipped code.
+
+* **Invariant 2 was a `grep -c` with `-lt 1`.** Two write paths
+  exist; `updateProfile` wrote `prefixComplete: dto.prefixComplete`
+  uncoerced. `undefined` in a Prisma `update` means "leave the column
+  alone", so **a PATCH that shortened `destinationCidrs` left a stale
+  `true` over a list nobody had vouched for since.** The guard's own
+  error text forbids "unchanged" and it was passing it. One coerced
+  site satisfies a file-wide count forever, and a commented-out line
+  satisfies it too.
+* **Invariant 4 was substring presence**, with no relation to control
+  flow. `if (profile.trusted) return true;` above the real return
+  leaves both required strings in place. Now: one return, no `||`.
+* **Invariant 3's awk failed *open*.** `destinationCidrs: SOME_CONST`
+  matched neither inline branch, fell through to the multi-line
+  branch, and counted the quotes in the following lines —
+  `canaryHostname` and `notes` — reporting **two prefixes that do not
+  exist**. A profile claiming completeness over an identifier passed
+  clean. Also, a slug written as an identifier never starts a record,
+  so that profile's fields merge into the one above it: hidden, and
+  its claim misattributed.
+* **A second seed source was never opened at all.**
+  `game-profiles.ts` calls `seedCatalogue()`, which upserts ~1,480
+  bulk rows built in `catalogue/index.ts`. The script checked three
+  hand-written profiles and ignored ~500x that surface.
+
+The pattern across all of them: **every invariant was a positive
+presence assertion over text, and presence-based checks catch
+deletion and nothing else.**
+
+### Decision recorded: what a PATCH does to a completeness claim
+
+Not blanket `?? false` on update. Completeness is a claim about a
+*particular* prefix list, so changing the list re-states the claim or
+drops it to false; a PATCH that does not touch the list leaves it
+alone. Blanket-resetting would make an operator re-assert
+completeness after every rename, and a safety gate people route
+around is not a safety gate. Both paths additionally refuse
+`prefixComplete: true` with an empty list — every other layer already
+refused it and only the API could still write it.
+
+### Not structurally enforced, stated plainly
+
+* **Invariant 1 (schema default) cannot see an added sibling.**
+  `prefixCompleteOverride Boolean @default(true)` is invisible to a
+  check that asserts one line exists. Guarding it means enumerating a
+  shape nobody has proposed.
+* **`readScopes` never re-consults `prefixComplete`.** A scope
+  persisted while a profile was complete survives that profile being
+  downgraded to `prefixComplete: false`. Defensible — scopes can only
+  ever be built from a vouched game — but it is a real staleness path
+  and nothing checks it.
+* **`game-catalogue-prefixes.spec.ts` hand-duplicates
+  `canRouteByDestination`** rather than importing it, because it is
+  cross-workspace. Its own comment says divergence is the bug; nothing
+  detects divergence. A bypass added to the client leaves this copy
+  asserting the old rule.
+* **The per-game exit is still only proven offline.** Everything here
+  is structural. Nothing in this session put a packet on a wire.
+
+### Numbers
+
+351 Rust (unchanged — no Rust touched, so `FlowKey`, the carry
+ordering and both leak fixes are untouched by construction), 222
+vitest (was 218), 596 jest (was 590), turbo 17/17 (was 16 — added a
+`typecheck` script to `apps/desktop-windows`, which previously only
+ran `tsc` as a side effect of `build`).
