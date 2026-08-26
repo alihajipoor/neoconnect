@@ -101,7 +101,7 @@ const TUN_GATEWAY: &str = "198.18.0.1/30";
 /// are usually LAN or ISP addresses that stop being reachable once the
 /// default route moves, so the tunnel needs one that works from
 /// anywhere.
-const TUN_DNS: &str = "1.1.1.1";
+pub(super) const TUN_DNS: &str = "1.1.1.1";
 
 /// Which proxy the generated config dials out through.
 ///
@@ -318,7 +318,14 @@ fn build_config_for(outbound: &Outbound, passive: bool) -> String {
 /// the resolvers the physical link advertises are no longer reachable,
 /// so leaving them in place means every lookup fails even once packets
 /// flow -- which reads to a user as "the internet is down".
-fn configure_adapter(tun_ip: Ipv4Addr) -> Result<(), String> {
+///
+/// `passive` reaches here only to be handed to
+/// `dns::machine_wide_rule_wanted`. The answer is currently the same in
+/// both modes, so threading it changes no behaviour -- it is threaded so
+/// that the two engines ask the same named question in the same shape,
+/// which is what stopped being true the last time one of them was
+/// edited alone.
+fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
     let netsh = PathBuf::from(r"C:\Windows\System32\netsh.exe");
     let name_arg = format!("name={ADAPTER_NAME}");
 
@@ -371,7 +378,22 @@ fn configure_adapter(tun_ip: Ipv4Addr) -> Result<(), String> {
     // now and the complaint is carried in `status`; `dns::TunnelDns`
     // has the argument, which is about poisoned answers in Iran rather
     // than about tidiness.
-    super::dns::force(TUN_DNS);
+    //
+    // Unconditional, including in Custom mode, and that is deliberate
+    // rather than an oversight -- which is what it looked like, because
+    // this call is reached from `prepare_passive` as well as
+    // `install_routes` while IKEv2 gated the same call on `!passive`.
+    // Xray was the one that had it right: in Custom mode the redirect
+    // only carries lookups it can see, and `filter_for` excludes every
+    // RFC1918 address, so without this rule a router-supplied resolver
+    // is never redirected. IKEv2 matches this now.
+    //
+    // The condition is named rather than written out, so the two
+    // engines cannot drift apart again the way they just did.
+    // `dns::machine_wide_rule_wanted` carries the whole argument.
+    if super::dns::machine_wide_rule_wanted(passive) {
+        super::dns::force(TUN_DNS);
+    }
 
     Ok(())
 }
@@ -494,7 +516,9 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
     // route to a next hop that isn't on the interface silently goes
     // nowhere. `configure_adapter` asks for the address; `wait_for_address`
     // is what establishes that the stack finished giving it.
-    configure_adapter(tun_gateway)?;
+    // `false`: this function *is* the full-tunnel branch -- `mod.rs`
+    // picks between it and `prepare_passive` on the same flag.
+    configure_adapter(tun_gateway, false)?;
     wait_for_address(tun_gateway)?;
 
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
@@ -520,7 +544,9 @@ pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
         .next()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
-    configure_adapter(tun_gateway)?;
+    // `true`: this function is the Custom-mode branch. The DNS rule is
+    // still installed -- see `dns::machine_wide_rule_wanted`.
+    configure_adapter(tun_gateway, true)?;
     // Custom mode installs no routes, so the silent-next-hop failure
     // does not apply here -- but `split_tunnel::start` runs immediately
     // after this returns and waits ten seconds for this adapter to hold
