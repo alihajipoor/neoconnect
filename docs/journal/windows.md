@@ -11728,3 +11728,276 @@ and no reason. That state has a string now.
 has been checked against a running game. An entry means "we will route
 these executables if they are running", and the UI now says exactly that
 in both languages.
+
+---
+
+## 2026-08-26 — Emulators: cancelled mid-flight, and what the rig proved first
+
+The owner ruled the whole category out while this was in progress — *"I
+dont really care about emulator games i just want the pc games"* — so no
+emulator code, catalogue row or bridged-mode guard shipped, and none
+should be revived without him asking. What follows is only the part that
+cost measurement time and would cost it again.
+
+**Nothing was installed on the rig.** No emulator was ever fetched; the
+work stopped at establishing whether one *could* run there. It cannot.
+
+### The rig cannot host an Android emulator at all, and this is measured
+
+Every emulator in scope (LDPlayer, Nox, MEmu, MuMu, BlueStacks) needs
+VT-x. `Neoxify-Test2` is itself a VirtualBox guest, so that means nested
+virtualisation. Both halves were measured:
+
+* **With `--nested-hw-virt off`** (the snapshot default), the guest reports
+  `VMMonitorModeExtensions=False`, `VirtualizationFirmwareEnabled=False`,
+  `SecondLevelAddressTranslationExtensions=False`, and `systeminfo` agrees:
+  *VM Monitor Mode Extensions: No*. No VT-x, so no emulator.
+* **With `--nested-hw-virt on`** (and 8192 MB, on a host with 17 GB free),
+  the guest **wedges during logon**. It boots far enough for Guest
+  Additions to answer — `GuestAdditionsRunLevel=2`, IP, MAC and OS version
+  all reported — and then stops: `LoggedInUsers` stays `0`, every guest
+  property freezes at one timestamp and does not advance across three
+  probes 20 s apart, and the framebuffer is the 2367-byte black PNG.
+  `setvideomodehint` at three different resolutions did not recover it and
+  the reported screenshot size never changed from 800x600, which is how
+  this differs from the ordinary blanked-framebuffer trap.
+
+**The control that makes that mean something:** restoring `clean-base`
+(which reverts the hardware config with it) and booting the identical
+guest with nested virt off reached `LoggedInUsers=1` in about 100 s, and
+the elevated runner came up normally. Same disk, same snapshot, same
+session — the only difference was the nested-virt flag.
+
+So: **emulator process ownership is not measurable on this rig.** A real
+machine, or a host with working nested VT-x, would settle it. Do not
+repeat the nested-virt attempt here expecting a different answer.
+
+### One thing that did get measured, and it is worth keeping
+
+VirtualBox's own NAT back end **is** attributable, which is the half of
+the bridged-mode question that has a cheap answer. With the guest driving
+150 s of TCP connects to a pinned address, the **host's** socket table
+attributed them to a real user-mode process — `VBoxNetNAT.exe`, pid
+41288, 22 ESTABLISHED rows across 28 samples — while the guest's own
+pktmon capture recorded 2236 packets to that address as the non-zero
+control.
+
+Two caveats that matter more than the headline:
+
+* This is the `natnetwork` back end, served by a separate host process.
+  Emulators use **per-VM NAT**, where the sockets belong to the VM process
+  itself. Same conclusion (user-mode, attributable), different PID —
+  do not quote `VBoxNetNAT.exe` as an emulator process name.
+* **1117 of the 1139 sampled rows had no owner at all** — `pid=0`,
+  reported as `Idle`. They were all `TimeWait`. Windows drops the owning
+  PID once a socket enters TimeWait, so an owner lookup that samples
+  connection state rather than live flows will attribute a small minority
+  of what it sees. That is a property of the lookup, not of NAT, and it is
+  worth remembering anywhere in this product that reasons from
+  `Get-NetTCPConnection` owners.
+
+`VBoxManage debugvm <vm> statistics --pattern "*/Devices/*/Bytes*"`
+returned nothing and summed to 0 — it was meant as an independent traffic
+witness and it is not one. The pktmon capture carried that job instead.
+
+### Research that would otherwise be redone
+
+Gathered but **not verified on hardware**, so it is recorded as leads, not
+findings:
+
+* The intuitive detector does not work. VirtualBox's bridged LWF
+  (`oracle_VBoxNetLwf`, service `VBoxNetLwf`) is bound and `Enabled` on
+  every ethernet adapter at all times, on a machine whose only VM is in
+  NAT mode — checked directly on this host. It is an *install* signal, not
+  a *mode* signal, and anything gated on it would fire on every machine
+  that ever installed one of these.
+* The mode does live in the VM config, but a naive read gets it wrong
+  twice: a `<BridgedInterface>` element **moves into `<DisabledModes>`**
+  rather than being deleted when the mode changes, so substring matching
+  false-positives; and snapshots carry their own `<Network>` block, so the
+  query has to be scoped to `/VirtualBox/Machine/Hardware/Network`.
+  Absence of any child element means NAT.
+* Vendors rename the filter (`Ld9BoxNetLwf`, `MuMuVMMNetLwf`,
+  `MEmuNetLwf`), but all keep Oracle's `HelpText`, so enumerating
+  `HKLM\SYSTEM\CurrentControlSet\Control\Network\{4D36E974-...}\*\Ndi`
+  and matching `NDIS6 Bridged Networking` is rename-proof. Nox ships
+  Oracle's driver unrenamed; BlueStacks ships no network driver at all and
+  has no bridged mode.
+* **The load-bearing unknown**: nobody established whether LDPlayer's
+  bridge toggle rewrites the VM config or does the bridging entirely in
+  its filter. If it is the latter, a config parse reads "NAT" on a bridged
+  instance and the guard is worse than useless. That is the first thing to
+  settle if this ever comes back.
+
+---
+
+## 2026-08-26 — Custom mode meets a real application, and it routes it
+
+The catalogue header has said the same thing since it landed: *"Not one of
+these entries has been tested against the game actually running."* That is
+no longer true of one row, and the headline is good news.
+
+**Selecting a catalogue entry really does route the programs it names.**
+Proven with a control pair rather than a status string, because
+`split_tunnel_active: true` is the service agreeing with itself and this
+project has already shipped an `escaped=0` counter off a build that leaked
+25 datagrams.
+
+### The proof, and why it is a proof
+
+Two copies of `curl.exe` at two paths, byte-identical (hash-compared in
+the run), fetched the same address-reporting endpoint seconds apart on the
+same machine with one tunnel up:
+
+| | exit address |
+|---|---|
+| baseline, no tunnel | the customer's own |
+| **selected** `selcurl.exe` | **the node's** |
+| **unselected** `ctlcurl.exe` | the customer's own |
+| after teardown | the customer's own again |
+
+Same bytes, same instant, same machine — the *only* difference was whether
+the path was in the selection. A one-sided "it showed the node address"
+would not have distinguished this from a full tunnel carrying everything;
+the unselected half is what makes the selected half mean anything.
+
+Capture control, taken at the vNIC outside the service: 20081 lines, of
+which **2687 packets to and from the node** — the row that had to be
+non-zero, and was.
+
+### The catalogue was right about Steam, including the name it doubted
+
+Steam was installed from Valve's own signed installer (Authenticode
+verified in the run), launched, and allowed to reach its login window. No
+Steam account was used and none is possible here — see the gaps below.
+
+The `steam-client` row names five executables. Three were running and
+**all three resolved**, through the service's own `listRunningApps` — the
+same call the picker makes:
+
+* `steam.exe` → `C:\Program Files (x86)\Steam\`
+* `SteamService.exe` → `C:\Program Files (x86)\Common Files\Steam\` — a
+  **different install root**, which is exactly the case a basename match
+  gets right and a hardcoded path would not
+* `steamwebhelper.exe` → `C:\Program Files (x86)\Steam\bin\cef\cef.win64\`
+
+That last one is the point. Its own note called it *"the weakest name
+here"*: Valve names the process in client update notes but never prints
+the string with a `.exe` suffix, and it is in no enumerable package. It
+was right, at a path nobody would have guessed, and it is where most of
+the client's traffic goes.
+
+`steamchina.exe` and `streaming_client.exe` resolved to nothing. That is
+correct, not a defect — one is the Chinese client, the other exists only
+during Remote Play — and both are reported as *missing by name*, which is
+the behaviour that makes listing two plausible spellings safe.
+
+**Nothing Steam-related was running that the row does not name**, and six
+`steamwebhelper` processes all shared one image name, so the CEF fan-out
+needs no extra entry. The same assumption is what Discord's row rests on.
+
+One trap worth recording: an earlier pass reported `SteamService.exe` as
+not running, and it was a **sampling race** — the process is transient and
+had exited between two enumerations seconds apart. A picker that resolves
+at one instant can legitimately miss a name that is genuinely correct.
+
+### A first-run bug, and it is the customer's very first connect
+
+Three protocols failed to connect on a freshly installed 0.9.31, with
+three different-looking messages:
+
+```
+OPENVPN  could not create the OpenVPN network adapter (tapctl returned nothing)
+REALITY  Xray started but its network adapter (neoconnect0) never appeared
+IKEV2    could not create the VPN entry: powershell did not finish within 15s
+```
+
+`xray.log` says what actually happened, and it is not three problems:
+
+```
+Failed to find matching adapter name: Element not found. (Code 0x00000490)
+Installing driver 0.14
+Extracting driver
+Installing driver
+```
+
+The wintun driver is installed **on first use**, and installing it takes
+longer than the service is willing to wait. The retry, with the driver now
+in the driver store, connected immediately and every time after. So on a
+clean machine the customer's **first** connect fails with a message that
+sounds like a broken build, and the second one works. Nobody would find
+that by testing on a developer machine, because the driver is already
+there. Not fixed here — the fix belongs in `service/`, which this session
+did not own.
+
+### Steam's own traffic did go into the tunnel — and the leak audit did not finish
+
+Separate from the control pair, and worth keeping apart from it because
+it is weaker evidence. With only Steam selected and the tunnel up, a
+capture attributed by `pktmon` component put one of Steam's own CDN
+addresses (Fastly, `199.232.x.x`) **on component 42, "Xray Tunnel"** —
+plaintext on the tunnel adapter is what correctly-routed traffic looks
+like, since the encryption happens on the way out to the node. So Steam
+traffic demonstrably entered the tunnel.
+
+**What was not established is the negative**: that *no* Steam traffic
+also went around it. That needs every external destination on the
+physical adapter attributed to the process that owned it, and two
+attempts to do that both died on the guest rather than returning a
+wrong answer. The first sampled `Get-NetTCPConnection` and then called
+`Get-Process` once per connection per sample — thousands of calls, over
+25 minutes, never finished. The second fixed that (one process snapshot
+per sample, joined by PID) and still stalled: it collected its samples,
+found exactly one Steam-owned remote, and then took over half an hour
+on a `curl` with `--max-time 20` and an `etl2txt` conversion. The guest
+was by then unresponsive enough that any number it produced would have
+been suspect.
+
+So: **Steam is routed. Whether Steam is *only* routed is open.** It is
+recorded as open rather than assumed either way, because a capture that
+dies quietly reads exactly like a clean pass, and one already has here.
+The next attempt should capture for ~20 s with a `pktmon` filter rather
+than everything, and do the joining on the host.
+
+### What is NOT proven, stated plainly
+
+* **No actual game was played.** Steam is a real, multi-process, network-
+  making application and a genuine catalogue row, but it is a launcher.
+  Two independent reasons no title could be added: **no Steam game can be
+  installed without a Steam account, free-to-play included**, and creating
+  accounts or entering credentials is out of bounds; and the rig guest has
+  no GPU acceleration and no VT-x, so a 3D title would not render even if
+  it were installed. Old School RuneScape was identified as the one
+  catalogued title with an official standalone installer needing no
+  account — it has a real launcher/client pair (`oslaunch.exe`,
+  `osclient.exe`) which is exactly the catalogue's central untested claim
+  — but it was not reached before the session ended. **That is the single
+  highest-value thing left.**
+* **Anti-cheat was never exercised.** Whether EAC, BattlEye or Vanguard
+  object to a split tunnel, or to a VM at all, remains unknown.
+* **Whether a game keeps working while routed** — matchmaking, voice,
+  patching — is untested.
+
+### Rig notes earned the hard way
+
+* **Nested VT-x wedges this guest at logon.** Measured with a control; see
+  the emulator entry above.
+* `listRunningApps` returns **17** entries on this guest and does **not**
+  group Steam's three binaries into one product, despite `RunningApp.paths`
+  existing for that purpose — Steam shows as three separate rows. The
+  catalogue row is what makes them one thing to a customer.
+* **pktmon attributes packets to a COMPONENT, not a process**, and the
+  component numbering matters: `pktmon component list` gave comp 1 =
+  the physical adapter, comp 42 = "Xray Tunnel". A plaintext destination
+  on comp 42 is correct routing; the same address on comp 1 is a leak.
+  Counting an address across the whole file cannot tell those apart, and
+  the first attempt to do so produced a number that looked like a leak and
+  meant nothing. It was reported as indeterminate rather than as a result.
+* **Established connections are not redirected.** Selecting an app that is
+  already running and already connected leaves its existing sockets where
+  they are. Every measurement here therefore arms the selection *before*
+  starting the application. This is worth telling customers: choosing a
+  game that is already running may need the game restarted.
+* Do not call `Get-Process` per connection per sample on this guest — a
+  run that did took over 25 minutes and never finished. One process
+  snapshot per sample, joined by PID, is the same data in seconds.
