@@ -200,7 +200,7 @@ export function CustomModeCard() {
     const picked = await open({
       multiple: false,
       directory: false,
-      filters: [{ name: "Programs", extensions: ["exe"] }],
+      filters: [{ name: t("settings.customFileFilter"), extensions: ["exe"] }],
     });
     if (typeof picked !== "string") return;
     await addPaths([picked]);
