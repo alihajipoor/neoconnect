@@ -587,6 +587,13 @@ pub fn proxy_reachable(ip: &str, port: u16, timeout: Duration) -> Result<(), Str
 mod tests {
     use super::*;
 
+    // `203.0.113.10` below -- and the `[203, 0, 113, 10]` byte array it
+    // is assembled from -- is an RFC 5737 stand-in. A real node's exit
+    // address was here until 2026-08-26, written as separate octets
+    // inside a synthetic DNS answer, which is a form no dotted-quad grep
+    // finds. Redacted per docs/node-address-hygiene.md; this repository
+    // is public.
+
     fn policy(namespaces: &[&str], excludes: &[&str]) -> Policy {
         Policy::new(
             "https://example.invalid/dns-query",
@@ -744,11 +751,11 @@ mod tests {
         packet.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // A IN
         packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // TTL
         packet.extend_from_slice(&[0x00, 0x04]); // RDLENGTH
-        packet.extend_from_slice(&[172, 236, 143, 200]);
+        packet.extend_from_slice(&[203, 0, 113, 10]);
 
         assert_eq!(
             extract_a_records(&packet),
-            vec![Ipv4Addr::new(172, 236, 143, 200)]
+            vec![Ipv4Addr::new(203, 0, 113, 10)]
         );
     }
 
