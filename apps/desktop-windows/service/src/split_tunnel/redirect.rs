@@ -274,7 +274,7 @@ use super::flows::{Nat, Origin, Verdict};
 use super::owner::{
     Family, OwnerLookup, Scoped, Selection, SharedSelection, Transport, Unattributed,
 };
-use super::proxy::OwnSockets;
+use super::proxy::{ExitRelays, OwnSockets};
 
 /// The largest packet WinDivert will hand over.
 const MAX_PACKET: usize = 65_575;
@@ -708,6 +708,19 @@ pub struct Redirect {
     /// probe and a firewall wait -- seconds, on the path where this
     /// matters most.
     pub activated: Instant,
+    /// The concurrent exits the running engine offers.
+    ///
+    /// Empty for every session that does not use them, which is all of
+    /// them on WireGuard, OpenVPN and IKEv2 and most of them on Xray.
+    /// Empty means the whole feature costs one length check per
+    /// carried packet and changes nothing else.
+    ///
+    /// Carried on the redirect rather than passed to [`decide`]
+    /// separately for the reason `activated` is: two sessions can
+    /// overlap for a moment during a failover, and an exit table
+    /// reached through a global would let the outgoing session's
+    /// indices answer for the incoming one's flows.
+    pub exits: Arc<ExitRelays>,
 }
 
 impl Redirect {
@@ -1778,6 +1791,52 @@ fn handle_packet(
     }
 }
 
+/// Which concurrent exit a flow leaves from, once it is already being
+/// carried.
+///
+/// # The signature is the enforcement
+///
+/// This takes an `image_path`, exactly as `Selection::preferred_exit`
+/// and `Selection::destination_scope` do, and that is load-bearing
+/// rather than convenient. An exit preference belongs to an
+/// application. A packet nobody can be shown to have sent has no
+/// application, so in [`decide`] the only call is behind
+/// `owner_image.and_then(..)` -- there is no image to pass, so there is
+/// no exit to acquire, and giving one to an unattributed datagram would
+/// mean first writing a call that does not typecheck today.
+///
+/// That matters more here than anywhere else in this feature.
+/// `docs/design/per-game-exits.md` §4.1 names it as *the* trap in the
+/// concurrent version: the temptation is to give an ownerless datagram
+/// a default exit and send it there, and **deciding where to send a
+/// packet requires having already decided to carry it**. That decision
+/// is the fire-and-forget UDP leak `verdict_for_unattributed` exists to
+/// refuse -- 13 of 15 datagrams in the clear on one rig run, 14 on the
+/// next.
+///
+/// The other half of the ordering is positional and is asserted by
+/// test: every `return` in [`decide`] that refuses, drops or leaves a
+/// packet alone comes *before* the only `Origin` that reads this.
+///
+/// # Fail-open, on both of its two axes
+///
+/// * **No exits live.** The ordinary case, and the one the length
+///   check makes free: every flow takes the session's tunnel adapter,
+///   which is what every flow did before this existed.
+/// * **A preference naming an exit this engine did not bring up.** Also
+///   the session's adapter. `ExitPlacement::Fallback` reports it, and a
+///   game that keeps working from the wrong address beats a game that
+///   stops.
+fn exit_for(image_path: &str, selection: &Selection, exits: &ExitRelays) -> Option<u8> {
+    // Checked first so a session with no concurrent exits -- which is
+    // every WireGuard, OpenVPN and IKEv2 session, and most Xray ones --
+    // never lowercases a path or touches the preference map.
+    if exits.is_empty() {
+        return None;
+    }
+    exits.index_of(selection.preferred_exit(image_path)?)
+}
+
 fn decide(
     parsed: &Parsed,
     nat: &Nat,
@@ -2010,6 +2069,24 @@ fn decide(
             // Answered by a resolver reached through the tunnel, not by
             // the one the network handed out.
             upstream: Some(std::net::SocketAddrV4::new(redirect.dns_resolver, DNS_PORT)),
+            // A lookup is carried whoever made it -- including a
+            // datagram with no owner this loop can see, which is the
+            // one case in this function where a packet is carried
+            // without an application behind it. That is exactly the
+            // packet that must never acquire an exit: a preference
+            // belongs to an application, and inventing one for a
+            // datagram nobody can be shown to have sent is the
+            // fire-and-forget leak with a destination attached.
+            //
+            // So every lookup takes the session's own exit, including
+            // one made by a game that named a different one. That is a
+            // real limit and it is the honest side of it: a resolver
+            // reached through the session's exit answers with what that
+            // exit's network sees, which is the same answer this
+            // client has always given. A per-game resolver would be a
+            // second feature with its own evidence problem -- see
+            // `docs/design/per-game-exits.md` §4.1.
+            exit: None,
         };
         return match nat.redirect(parsed.transport, origin) {
             Some(nat_port) => {
@@ -2112,6 +2189,10 @@ fn decide(
         return Verdict::Direct;
     }
 
+    // Past every `return` above, so this line is reached only for a
+    // packet that has already been decided to be carried. See
+    // `exit_for` for why that ordering is the safety property and not
+    // an accident of layout.
     let origin = Origin {
         addr: parsed.destination,
         port: parsed.destination_port,
@@ -2119,6 +2200,7 @@ fn decide(
         client_port: parsed.source_port,
         interface_id,
         upstream: None,
+        exit: owner_image.and_then(|image| exit_for(image, selection, &redirect.exits)),
     };
     match nat.redirect(parsed.transport, origin) {
         Some(nat_port) => {
@@ -3609,6 +3691,7 @@ mod tests {
             client_port: 51234,
             interface_id: 12,
             upstream: None,
+            exit: None,
         };
         let nat_port = nat.redirect(Transport::Tcp, origin).unwrap();
 
@@ -3704,6 +3787,7 @@ mod tests {
             carry_dns: true,
             local_interface: 5,
             activated: Instant::now(),
+            exits: Arc::new(ExitRelays::default()),
         });
 
         assert!(filter.contains("ip.DstAddr != 203.0.113.7"));
@@ -3730,6 +3814,7 @@ mod tests {
             carry_dns: true,
             local_interface: 5,
             activated: Instant::now(),
+            exits: Arc::new(ExitRelays::default()),
         }
     }
 
@@ -4090,7 +4175,7 @@ mod tests {
         // fills.
         let stats = Arc::new(Stats::default());
         let relays =
-            proxy::start(nat.clone(), tunnel, stats.clone()).expect("relays must start");
+            proxy::start(nat.clone(), tunnel, stats.clone(), Arc::new(ExitRelays::default())).expect("relays must start");
         let mut allowance =
             firewall::Allowance::install(&[local_addr], relays.tcp_port, relays.udp_port)
                 .expect("the inbound allowance must install");
@@ -4122,6 +4207,7 @@ mod tests {
                 dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
                 // Overwritten by `start`; see ACTIVATION_GRACE.
                 activated: Instant::now(),
+                exits: Arc::new(ExitRelays::default()),
             },
             nat,
             selection,
@@ -4175,6 +4261,7 @@ mod tests {
             carry_dns: true,
             local_interface: 5,
             activated: Instant::now(),
+            exits: Arc::new(ExitRelays::default()),
         });
         super::super::divert::compile_filter(&filter).expect("the filter must compile");
     }
@@ -4339,6 +4426,212 @@ mod tests {
         assert!(
             stats.refused_unattributed.load(Ordering::Relaxed) > refused_before,
             "the refusal must still be counted after the cache was cleared"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Concurrent exits.
+    //
+    // The invariant these hold is stated once, here, because every test
+    // below is a different way of failing it:
+    //
+    //   **Exit selection sits strictly downstream of the carry
+    //   decision.** A packet acquires an exit only after something has
+    //   already decided to carry it. Choosing where to send a packet
+    //   presupposes having decided to send it, so an exit reachable
+    //   before the carry decision *is* a decision to carry -- which is
+    //   the fire-and-forget UDP leak `verdict_for_unattributed` exists
+    //   to refuse, rebuilt with a destination attached.
+    // -----------------------------------------------------------------
+
+    /// A live exit table with a preference that matches, so every test
+    /// below runs against the configuration in which the feature is
+    /// actually doing something. An empty table would pass these by not
+    /// having the code path at all.
+    fn redirect_with_exits(exits: &[(&str, u16)]) -> Redirect {
+        let table = ExitRelays::default();
+        table.set(exits.iter().map(|(name, port)| ((*name).to_string(), *port)).collect());
+        Redirect { exits: Arc::new(table), ..sample_redirect() }
+    }
+
+    fn selection_placing(app: &str, exit: &str) -> Selection {
+        Selection::with_exits(
+            [app.to_string()],
+            SplitTunnelMode::OnlySelected,
+            Vec::new(),
+            vec![neoconnect_ipc::AppExit {
+                app: app.to_string(),
+                exit: exit.to_string(),
+                group: Some("a-game".to_string()),
+            }],
+        )
+    }
+
+    /// The trap `docs/design/per-game-exits.md` section 4.1 names,
+    /// driven through the real `decide` with a real dead socket.
+    ///
+    /// A datagram nobody can be shown to have sent must be dropped, and
+    /// it must be dropped *without* an exit having been chosen for it.
+    /// The second half is what a `Verdict::Drop` assertion alone does
+    /// not prove, so the flow table is checked as well: an exit is only
+    /// ever written into an `Origin`, and an `Origin` is only ever built
+    /// for a packet already decided to be carried, so no entry in the
+    /// table is the evidence that no exit was chosen.
+    #[test]
+    fn an_unattributed_datagram_never_acquires_an_exit() {
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = redirect_with_exits(&[("germany-1", 41080)]);
+        let stats = Stats::default();
+        let selection = selection_placing(r"C:\Games\game.exe", "germany-1");
+
+        let port = dead_udp_port(&mut owner);
+        let datagram =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(203, 0, 113, 9), port, 8686);
+        let parsed = parse(&datagram).expect("a well-formed packet");
+
+        assert_eq!(
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats),
+            Verdict::Drop,
+            "an ownerless datagram must be refused whether or not exits are live"
+        );
+        assert!(
+            stats.refused_unattributed.load(Ordering::Relaxed) > 0,
+            "and refused for the right reason -- the counter is the evidence"
+        );
+        assert_eq!(
+            nat.origin(Transport::Udp, parsed.source_port),
+            None,
+            "no Origin may exist for it, which is what proves no exit was chosen"
+        );
+    }
+
+    /// The refusal must be the same decision with exits configured and
+    /// without.
+    ///
+    /// Stated separately from the test above because they fail
+    /// differently: that one catches an exit being attached to a
+    /// refused packet, this one catches the refusal itself being
+    /// weakened -- a `verdict_for_unattributed` that started answering
+    /// `Carry` because an exit was available would pass nothing here
+    /// and everything there.
+    #[test]
+    fn a_live_exit_table_does_not_change_what_is_refused() {
+        let mut owner = OwnerLookup::new();
+        let stats = Stats::default();
+        let selection = selection_placing(r"C:\Games\game.exe", "germany-1");
+
+        let port = dead_udp_port(&mut owner);
+        let datagram =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(203, 0, 113, 9), port, 8686);
+
+        let mut verdicts = Vec::new();
+        for redirect in [sample_redirect(), redirect_with_exits(&[("germany-1", 41080)])] {
+            let nat = Nat::new();
+            let parsed = parse(&datagram).expect("a well-formed packet");
+            verdicts.push(decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats));
+        }
+        assert_eq!(verdicts[0], verdicts[1], "the refusal must not depend on exits existing");
+        assert_eq!(verdicts[0], Verdict::Drop);
+    }
+
+    /// A name lookup is carried whoever made it -- including with no
+    /// owner at all -- so it is the one packet in `decide` that reaches
+    /// an `Origin` without an application behind it. It must therefore
+    /// take the session's own exit and never a game's.
+    #[test]
+    fn a_carried_lookup_takes_the_session_exit_and_not_a_games() {
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = redirect_with_exits(&[("germany-1", 41080)]);
+        let stats = Stats::default();
+        let selection = selection_placing(r"C:\Games\game.exe", "germany-1");
+
+        let port = dead_udp_port(&mut owner);
+        let query =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(1, 1, 1, 1), port, DNS_PORT);
+        let parsed = parse(&query).expect("a well-formed packet");
+
+        let Verdict::Redirect { nat_port } =
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats)
+        else {
+            panic!("a lookup is carried whoever made it");
+        };
+        let origin = nat.origin(Transport::Udp, nat_port).expect("the flow was recorded");
+        assert_eq!(
+            origin.exit, None,
+            "a lookup with no owner must never acquire an exit -- see the DNS branch"
+        );
+    }
+
+    /// The other side of the same rule: a packet that *is* attributed
+    /// to a selected application with a live preference does get the
+    /// exit, or the feature does nothing at all.
+    ///
+    /// Without this, the three tests above are all satisfied by a build
+    /// that never sets an exit under any circumstances.
+    #[test]
+    fn a_carried_flow_from_a_placed_game_takes_its_exit() {
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = redirect_with_exits(&[("turkey-1", 41080), ("germany-1", 41081)]);
+        let stats = Stats::default();
+
+        let image = std::env::current_exe().expect("this test binary has a path");
+        let image = image.to_string_lossy().to_string();
+        let selection = selection_placing(&image, "germany-1");
+
+        // A real socket owned by this process, so the owner lookup can
+        // actually attribute it -- `dead_udp_port` in reverse.
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let port = socket.local_addr().unwrap().port();
+
+        let datagram =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(203, 0, 113, 9), port, 27015);
+        let parsed = parse(&datagram).expect("a well-formed packet");
+
+        let Verdict::Redirect { nat_port } =
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats)
+        else {
+            panic!("a selected application's traffic is carried");
+        };
+        let origin = nat.origin(Transport::Udp, nat_port).expect("the flow was recorded");
+        assert_eq!(
+            origin.exit,
+            Some(1),
+            "the flow must take the index of the exit it asked for, not the first in the table"
+        );
+    }
+
+    /// A preference naming an exit the engine did not bring up is not
+    /// an error and does not stop the traffic. It is carried on the
+    /// session's own exit, and reported as `Fallback` elsewhere.
+    #[test]
+    fn a_preference_for_an_exit_that_is_not_live_still_carries_the_flow() {
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = redirect_with_exits(&[("turkey-1", 41080)]);
+        let stats = Stats::default();
+
+        let image = std::env::current_exe().expect("this test binary has a path");
+        let image = image.to_string_lossy().to_string();
+        let selection = selection_placing(&image, "germany-1");
+
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let port = socket.local_addr().unwrap().port();
+        let datagram =
+            udp_packet(Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(203, 0, 113, 9), port, 27015);
+        let parsed = parse(&datagram).expect("a well-formed packet");
+
+        let Verdict::Redirect { nat_port } =
+            decide(&parsed, &nat, &selection, &mut owner, &redirect, 5, &stats)
+        else {
+            panic!("an unsatisfiable preference must never stop the traffic");
+        };
+        assert_eq!(
+            nat.origin(Transport::Udp, nat_port).unwrap().exit,
+            None,
+            "and it falls back to the session's own exit rather than to another game's"
         );
     }
 }

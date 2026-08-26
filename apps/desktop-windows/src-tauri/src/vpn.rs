@@ -479,10 +479,52 @@ pub fn repair_command_line() -> String {
     }
 }
 
+/// One concurrent exit, as the frontend supplies it: credentials the
+/// customer already holds for another route, paired with the identifier
+/// their per-game preferences name it by.
+///
+/// The identifier is the client's own vocabulary and is never resolved
+/// to a node by the service -- see [`neoconnect_ipc::ExitProfile`].
+#[derive(Debug, Deserialize)]
+pub struct ExitPayload {
+    exit: String,
+    payload: ProtocolUserPayload,
+}
+
 #[tauri::command]
-pub async fn vpn_connect(payload: ProtocolUserPayload) -> Result<(), String> {
+/// `exits` is the additional exits to carry at the same time, for
+/// per-game exit selection. Optional so every existing caller keeps the
+/// signature it was written against -- the same additive rule the wire
+/// protocol follows. Absent means one exit for everything, which is
+/// what this command has always done.
+pub async fn vpn_connect(
+    payload: ProtocolUserPayload,
+    exits: Option<Vec<ExitPayload>>,
+) -> Result<(), String> {
     let profile = payload.into_profile()?;
-    call_expecting_ok(&Request::Connect { profile }).await
+    // Dropped here rather than sent and ignored, because the service
+    // would drop them anyway and this is the layer that can say why.
+    // `carries_concurrent_exits` is the single definition of which
+    // protocols can do this; the UI must not offer the choice where it
+    // is false, and this is the belt for when it does.
+    let exits = if profile.carries_concurrent_exits() {
+        exits
+            .unwrap_or_default()
+            .into_iter()
+            // Truncated rather than refused, matching every other place
+            // this ceiling is applied on the way in: a fourth game's
+            // preference must not cost the customer their connection.
+            .take(neoconnect_ipc::MAX_CONCURRENT_EXITS)
+            .map(|e| {
+                e.payload
+                    .into_profile()
+                    .map(|profile| neoconnect_ipc::ExitProfile { exit: e.exit, profile })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    call_expecting_ok(&Request::Connect { profile, exits }).await
 }
 
 #[tauri::command]

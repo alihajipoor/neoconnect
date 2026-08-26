@@ -358,6 +358,47 @@ export function isWholeGroup(group: GameExitGroup, apps: readonly string[]): boo
  * asked for something and silently did not get it has been told the
  * smaller half of what happened, and this is a screen about where their
  * traffic appears from. */
+/** How many exits one session may carry at the same time.
+ *
+ * The owner's number: *"they cant choose more than 3 apps at the same
+ * time"*, read as three **games** rather than three executables,
+ * because a game is routinely several binaries and they all leave from
+ * one exit or from none. What is counted is therefore distinct exits,
+ * which is the same number as distinct placed games.
+ *
+ * Must agree with `MAX_CONCURRENT_EXITS` in
+ * `apps/desktop-windows/ipc/src/lib.rs`, which is where the service
+ * enforces the same ceiling. Two constants rather than one because the
+ * wire between them carries no schema, and a mismatch surfaces as
+ * `SetSplitTunnel` being refused for a selection the picker allowed --
+ * so `the ceiling matches the service` in the tests pins them together.
+ */
+export const MAX_CONCURRENT_EXITS = 3;
+
+/** Whether the customer may still place another game on its own exit.
+ *
+ * The picker asks this **before** offering an exit, which is the point:
+ * a limit a customer meets as an error after choosing is a limit that
+ * was not stated. Placing a game on an exit another placed game already
+ * uses is always allowed and does not consume a place, because it costs
+ * no extra concurrent exit.
+ *
+ * `exit` is the exit being considered, when there is one. Omitted, this
+ * answers the more general "is there room for a new exit at all".
+ */
+export function canPlaceAnotherGame(
+  groups: readonly GameExitGroup[],
+  exit?: string | null,
+): boolean {
+  const chosen = new Set(
+    groups
+      .map((group) => group.exit)
+      .filter((value): value is string => typeof value === "string" && value.length > 0),
+  );
+  if (typeof exit === "string" && chosen.has(exit)) return true;
+  return chosen.size < MAX_CONCURRENT_EXITS;
+}
+
 export type ExitWithheld =
   | {
       slug: string;
@@ -378,6 +419,15 @@ export type ExitWithheld =
       withGames: string[];
       /** The executables both games run. */
       sharedApps: string[];
+    }
+  | {
+      slug: string;
+      displayName: string;
+      /** More than [[MAX_CONCURRENT_EXITS]] distinct exits were chosen,
+       * so none of them is honoured. */
+      reason: "overCeiling";
+      /** How many distinct exits were asked for, for the copy. */
+      chosen: number;
     };
 
 export interface ExitSelection {
@@ -481,10 +531,47 @@ export function exitsForGames(
   }
 
   const nameOf = new Map(groups.map((g) => [g.slug, g.displayName]));
+
+  // Rule 4: no more than MAX_CONCURRENT_EXITS distinct exits, and over
+  // the ceiling **none** of them is honoured.
+  //
+  // Counted after rules 1-3, because a group they already withheld is
+  // not asking for an exit any more and must not use up one of the
+  // three. Counted over distinct exits rather than over groups: three
+  // games all on Germany is one concurrent exit, and four games across
+  // three exits is three.
+  //
+  // Withheld whole rather than trimmed, for the reason every other rule
+  // here drops whole. Trimming means choosing which games keep their
+  // exit, and the only basis available is the order the customer
+  // happened to add them in -- which they were never told was
+  // load-bearing. The card would then show one game placed and another
+  // not, with nothing on screen explaining which rule chose. Refusing
+  // all of them is a state the copy can actually describe, and the
+  // picker prevents it being reached in the first place -- see
+  // canPlaceAnotherGame.
+  const survivors = wanted.filter((entry) => !conflicts.has(entry.group.slug));
+  const distinctExits = new Set(survivors.map((entry) => entry.exit));
+  const overCeiling = distinctExits.size > MAX_CONCURRENT_EXITS;
+
   const exits: AppExit[] = [];
   const emitted = new Set<string>();
   for (const entry of wanted) {
     const clash = conflicts.get(entry.group.slug);
+    // The conflict reason first, and it is not merely an ordering
+    // preference: a conflicted group was already excluded from the
+    // count above, so it is not one of the exits that broke the
+    // ceiling. Reporting it as "over the limit" would name the wrong
+    // rule and point the customer at the wrong fix.
+    if (!clash && overCeiling) {
+      withheld.push({
+        slug: entry.group.slug,
+        displayName: entry.group.displayName,
+        reason: "overCeiling",
+        chosen: distinctExits.size,
+      });
+      continue;
+    }
     if (clash) {
       withheld.push({
         slug: entry.group.slug,

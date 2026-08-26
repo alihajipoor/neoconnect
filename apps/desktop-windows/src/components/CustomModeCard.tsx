@@ -31,6 +31,8 @@ import type { RouteOption } from "../lib/types";
 import {
   curatedNames,
   exitsForGames,
+  canPlaceAnotherGame,
+  MAX_CONCURRENT_EXITS,
   gameExitGroup,
   hasCuratedApps,
   isWholeGroup,
@@ -651,11 +653,38 @@ export function CustomModeCard() {
                         className="w-full rounded-md border border-white/10 bg-surface px-2 py-1.5 text-[12px] outline-none focus:border-primary/60"
                       >
                         <option value="">{t("settings.customExitNone")}</option>
-                        {exits.map((option) => (
-                          <option key={option.exit} value={option.exit}>
-                            {exitLabel(option)}
-                          </option>
-                        ))}
+                        {/* The ceiling, met before it is hit rather
+                            than after. An exit that would be a fourth
+                            is offered but disabled and says why, so a
+                            customer sees the limit while they are
+                            choosing instead of discovering it as a
+                            preference that silently did not apply.
+
+                            Asked per option, not once, because an exit
+                            another placed game already uses costs no
+                            extra concurrent exit and stays choosable --
+                            which is also how a customer gets out of the
+                            limit without unpicking anything. */}
+                        {exits.map((option) => {
+                          const room = canPlaceAnotherGame(
+                            settings.games.filter((g) => g.slug !== game.slug),
+                            option.exit,
+                          );
+                          return (
+                            <option
+                              key={option.exit}
+                              value={option.exit}
+                              disabled={!room}
+                            >
+                              {room
+                                ? exitLabel(option)
+                                : t("settings.customExitAtLimit", {
+                                    label: exitLabel(option),
+                                    limit: String(MAX_CONCURRENT_EXITS),
+                                  })}
+                            </option>
+                          );
+                        })}
                         {chosenIsGone ? (
                           <option value={game.exit ?? ""}>{t("settings.customExitGone")}</option>
                         ) : null}
@@ -682,12 +711,26 @@ export function CustomModeCard() {
                 })}
               </ul>
 
-              {/* The ceiling, stated rather than discovered. One session
-                  carries one tunnel and therefore leaves from one exit,
-                  so two games wanting two exits means one of them is on
-                  the other's. A picker that implied otherwise would be
-                  selling something the service cannot deliver. */}
-              <p className="text-[11px] text-muted-foreground">{t("settings.customExitOneAtATime")}</p>
+              {/* The ceiling and the protocol limit, both stated rather
+                  than discovered.
+
+                  This notice used to say one session leaves from one
+                  exit, and for WireGuard, OpenVPN and IKEv2 it still
+                  does -- each is one engine, one adapter and one peer.
+                  On the Xray-carried protocols the engine now runs
+                  several tagged inbounds and can carry up to
+                  MAX_CONCURRENT_EXITS at once.
+
+                  Both halves are said because the customer cannot tell
+                  which one they are getting by looking, and a screen
+                  that named only the better half would be selling
+                  something their protocol may not deliver. */}
+              <p className="text-[11px] text-muted-foreground">
+                {t("settings.customExitConcurrent", { limit: String(MAX_CONCURRENT_EXITS) })}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                {t("settings.customExitXrayOnly")}
+              </p>
             </div>
           ) : null}
 
@@ -705,10 +748,16 @@ export function CustomModeCard() {
                     game: held.displayName,
                     names: held.missing.join(", "),
                   })
-                : t("settings.customGameExitConflict", {
-                    game: held.displayName,
-                    others: held.withGames.join(", "),
-                  })}
+                : held.reason === "conflict"
+                  ? t("settings.customGameExitConflict", {
+                      game: held.displayName,
+                      others: held.withGames.join(", "),
+                    })
+                  : t("settings.customGameExitOverCeiling", {
+                      game: held.displayName,
+                      chosen: String(held.chosen),
+                      limit: String(MAX_CONCURRENT_EXITS),
+                    })}
             </p>
           ))}
 
