@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use neoconnect_ipc::{SplitTunnelConfig, SplitTunnelMode};
+use neoconnect_ipc::{AppPlacement, SplitTunnelConfig, SplitTunnelMode};
 
 use crate::adapters;
 use crate::engines::ipv6_block;
@@ -101,6 +101,19 @@ pub fn running_without_the_lock() -> bool {
 pub struct SplitTunnel {
     enabled: bool,
     selection: SharedSelection,
+    /// What the client said the tunnel it is bringing up leaves from.
+    ///
+    /// Held rather than derived because it cannot be derived: the
+    /// service can see which adapter is up and which address is on it,
+    /// and neither of those says which node the far end egresses from.
+    /// On a relayed route they are different machines and the egress is
+    /// the one the far end sees.
+    ///
+    /// Kept separately from the selection because it describes the
+    /// *session*, not the customer's choices, and because it is only
+    /// ever reported alongside a live session -- see
+    /// [`SplitTunnel::exit_placements`].
+    egress: Option<String>,
     active: Option<Active>,
     /// How many times [`SplitTunnel::stop`] has been called.
     ///
@@ -811,6 +824,7 @@ impl SplitTunnel {
         Self {
             enabled: false,
             selection: SharedSelection::default(),
+            egress: None,
             active: None,
             #[cfg(test)]
             stops: std::sync::atomic::AtomicU32::new(0),
@@ -844,8 +858,14 @@ impl SplitTunnel {
     /// message itself.
     pub fn set_selection(&mut self, config: SplitTunnelConfig) {
         self.enabled = config.enabled;
+        // Replaced, never merged into what was there. A config that
+        // names no egress means the client is not asserting one now --
+        // which is a different fact from the one it asserted last time,
+        // and keeping the old value would report a stale exit for a
+        // tunnel that may well have been rebuilt against another node.
+        self.egress = config.egress;
         *self.selection.write().unwrap_or_else(|e| e.into_inner()) =
-            Selection::with_scopes(config.apps, config.mode, config.scopes);
+            Selection::with_exits(config.apps, config.mode, config.scopes, config.exits);
 
         // The redirect loop reads the selection per decision and so
         // needs nothing here. The WFP filters are a fixed set installed
@@ -865,6 +885,41 @@ impl SplitTunnel {
         // this module makes.
         active.ipv6_apps = None;
         active.ipv6_apps = install_ipv6_app_block(&self.selection, &log_dir, &active.log_path);
+    }
+
+    /// Where each selected application's traffic is leaving from.
+    ///
+    /// # The one rule this function exists to enforce
+    ///
+    /// The egress is reported **only while a session is actually
+    /// intercepting**. Not while Custom mode is switched on in
+    /// settings, not because the client named one on the last
+    /// `SetSplitTunnel`, and not because a tunnel is up -- because
+    /// none of those is a selected application's traffic leaving from
+    /// anywhere.
+    ///
+    /// Without that coupling this is a status surface that reports a
+    /// request as an observation, which is the exact shape of the
+    /// "Connected" indicator that told customers they were protected
+    /// while nothing flowed. When there is no live session every
+    /// application with a preference comes back
+    /// [`ExitPlacement::Unknown`], which is the honest answer and is
+    /// deliberately not the same answer as "on the exit you asked
+    /// for".
+    ///
+    /// # What it still does not prove
+    ///
+    /// That the egress the client named is the address the far end
+    /// sees. Nothing on this machine can establish that -- it is a
+    /// fact about the node, and the only ground truth for it is an
+    /// exit-IP check made through the tunnel. This reports which exit
+    /// the client dialled and whether interception is live; it does
+    /// not verify the node.
+    pub fn exit_placements(&self) -> (Option<String>, Vec<AppPlacement>) {
+        let live = if self.is_running() { self.egress.as_deref() } else { None };
+        let placements =
+            self.selection.read().unwrap_or_else(|e| e.into_inner()).placements(live);
+        (live.map(str::to_string), placements)
     }
 
     /// Whether Custom mode should shape how the next tunnel is brought
@@ -1475,6 +1530,8 @@ mod tests {
             mode: SplitTunnelMode::OnlySelected,
             apps,
             scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
         }
     }
 
@@ -1522,6 +1579,62 @@ mod tests {
     const IDX: u32 = 20;
     fn addr() -> Ipv4Addr {
         Ipv4Addr::new(10, 66, 0, 2)
+    }
+
+    #[test]
+    fn an_egress_is_not_reported_while_nothing_is_intercepting() {
+        // The rule `exit_placements` exists to enforce, and the one a
+        // status surface gets wrong by default.
+        //
+        // The client named an exit and chose a game. Nothing is
+        // running: no session has been started, so no selected
+        // application's traffic is leaving from anywhere. Reporting
+        // "germany-1" here would be reporting a request as an
+        // observation -- the same class of claim as a "Connected"
+        // indicator that nothing checked, which is the bug this
+        // product's rules were written around.
+        let mut split = SplitTunnel::new();
+        split.set_selection(SplitTunnelConfig {
+            enabled: true,
+            mode: SplitTunnelMode::OnlySelected,
+            apps: vec![r"C:\Games\game.exe".to_string()],
+            scopes: Vec::new(),
+            exits: vec![neoconnect_ipc::AppExit {
+                app: r"C:\Games\game.exe".to_string(),
+                exit: "germany-1".to_string(),
+            }],
+            egress: Some("germany-1".to_string()),
+        });
+
+        assert!(!split.is_running());
+        let (egress, placements) = split.exit_placements();
+        assert_eq!(egress, None, "no session means no egress to report");
+        assert_eq!(placements.len(), 1);
+        assert_eq!(
+            placements[0].placement,
+            neoconnect_ipc::ExitPlacement::Unknown { preferred: "germany-1".to_string() },
+            "a preference with nothing to compare it against is unknown, not satisfied"
+        );
+    }
+
+    #[test]
+    fn a_config_that_names_no_egress_clears_the_last_one() {
+        // Replaced rather than merged. The client not naming an egress
+        // is a statement -- "I am not asserting one now" -- and keeping
+        // the previous value would report a stale exit for a tunnel
+        // that may have been rebuilt against a different node entirely.
+        let mut split = SplitTunnel::new();
+        let with_egress = |egress: Option<&str>| SplitTunnelConfig {
+            enabled: true,
+            mode: SplitTunnelMode::OnlySelected,
+            apps: vec![r"C:\Games\game.exe".to_string()],
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: egress.map(str::to_string),
+        };
+        split.set_selection(with_egress(Some("germany-1")));
+        split.set_selection(with_egress(None));
+        assert_eq!(split.egress, None);
     }
 
     #[test]
