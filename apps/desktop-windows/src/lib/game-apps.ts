@@ -185,9 +185,15 @@ export function hasCuratedApps(profile: Pick<GameProfileSummary, "processNames">
 /** Whether this profile's address list may be used to route by
  * destination.
  *
- * Always false today for a second reason as well -- the split tunnel
- * has no destination-based routing at all, it matches on process --
- * but the rule encoded here is the one that survives that being built.
+ * This is now load-bearing rather than advisory. The split tunnel does
+ * route by destination, so a `true` here is what puts a game's prefix
+ * list on the wire and narrows what is carried; a `false` sends no
+ * scope at all and the game's programs are carried in full, exactly as
+ * they were before any of this existed.
+ *
+ * It is still false for every seeded profile, because no catalogue
+ * entry has a finished prefix list yet. That is the data being the
+ * gate, which is where the gate belongs.
  *
  * A **partial** prefix list is worse than none. A game that holds two
  * connections at once (World of Warcraft keeps Home and World open
@@ -201,4 +207,132 @@ export function canRouteByDestination(
   profile: Pick<GameProfileSummary, "destinationCidrs" | "prefixComplete">,
 ): boolean {
   return profile.prefixComplete === true && (profile.destinationCidrs?.length ?? 0) > 0;
+}
+
+/** The scopes to attach to a game's programs, which is usually none.
+ *
+ * The single place this client decides to narrow anything, extracted
+ * from the screen that calls it so the rule above can be proven by a
+ * test rather than by reading a component. That is not tidiness: the
+ * cost of `canRouteByDestination` being bypassed is not a broken
+ * screen, it is a customer's game account presenting from two source
+ * addresses at once, and a rule that important should not live
+ * somewhere only an end-to-end test can reach.
+ *
+ * Returns `[]` for every profile whose prefix list the server will not
+ * vouch for as complete -- which today is every profile there is -- and
+ * an empty list means the programs are carried in full, exactly as they
+ * were before scoping existed. */
+export function scopesForGame(
+  profile: Pick<GameProfileSummary, "destinationCidrs" | "prefixComplete">,
+  paths: string[],
+): { app: string; destinations: string[] }[] {
+  if (!canRouteByDestination(profile)) return [];
+  const destinations = profile.destinationCidrs ?? [];
+  return paths.map((app) => ({ app, destinations }));
+}
+
+/** How many catalogue rows a picker mounts at once.
+ *
+ * Not a limit on what is searchable -- the whole catalogue is always
+ * ranked, and the caller is expected to say how many matches were not
+ * shown. It is a limit on DOM nodes. The catalogue runs to well over a
+ * thousand entries, and mounting all of them inside a backdrop-blurred
+ * card is what makes a picker feel broken on the low-end machines a lot
+ * of these customers have.
+ */
+export const GAME_PAGE_SIZE = 60;
+
+/** Lowercased, punctuation flattened to single spaces.
+ *
+ * So "counter-strike", "Counter Strike" and "COUNTER STRIKE" are one
+ * search rather than three, and somebody typing a name the way they say
+ * it finds the game whatever the publisher's styling is.
+ */
+function normaliseForSearch(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** What a game has to match on. */
+export interface SearchableGame {
+  displayName: string;
+  publisher?: string | null;
+}
+
+/** Rank a catalogue against a search box.
+ *
+ * A plain `includes` filter was fine for three games and is actively
+ * misleading for a thousand: typing "cs" puts every title that happens to
+ * contain those two letters above Counter-Strike, and the customer
+ * concludes their game is not supported. So matches are scored and the
+ * best ones come first.
+ *
+ * The bands, strongest first:
+ *
+ *   0. the name starts with what was typed
+ *   1. the initials of the name start with it -- the acronym band, so
+ *      "cs" finds Counter-Strike, "cod" finds Call of Duty and "gta"
+ *      finds Grand Theft Auto V
+ *   2. a word in the name starts with it -- so "strike" finds
+ *      Counter-Strike and "legends" finds Apex Legends
+ *   3. the name contains it anywhere
+ *   4. the name contains it once spaces are removed on both sides, which
+ *      is how "counterstrike" and "deadbydaylight" find their games
+ *   5. the publisher contains it, so "blizzard" lists Blizzard's catalogue
+ *
+ * Band 1 was added on 2026-08-25 after the ranking was run against the
+ * real 1,480-entry catalogue rather than against a fixture, which is the
+ * only way it showed up. Typing "cs" did not merely rank Counter-Strike
+ * badly -- it did not return it **at all**, because "cs" is not a prefix
+ * of "counter strike 2", is not a prefix of either of its words, and does
+ * not appear in "counterstrike2" as a substring. The customer's
+ * conclusion from an empty result is that their game is not supported,
+ * which is the one thing this picker must never say by accident. "cod"
+ * and "gta" failed the same way. An acronym is how people type a game
+ * whose full name they know perfectly well.
+ *
+ * It sits below band 0 rather than above it because a name that really
+ * does start with the query is the better answer: for "cs", CS2D is a
+ * genuine hit and stays first, with Counter-Strike 2 immediately behind
+ * it. Skipped for a query containing a space, where the letters are
+ * words rather than initials.
+ *
+ * Ties keep the server's order, which puts the curated entries and the
+ * online titles first. An empty query returns the catalogue untouched.
+ *
+ * Cheap enough to run on every keystroke -- a few thousand string
+ * comparisons -- so no debounce is needed to keep the field responsive.
+ */
+export function rankGames<T extends SearchableGame>(games: readonly T[], query: string): T[] {
+  const needle = normaliseForSearch(query);
+  if (!needle) return [...games];
+
+  const squashedNeedle = needle.replace(/ /g, "");
+  const scored: { game: T; score: number; index: number }[] = [];
+
+  // An acronym only means something when the query is a run of letters with
+  // no spaces and more than one of them: "a" would match half the catalogue
+  // and "call of duty" is words, not initials.
+  const wantsAcronym = needle.length > 1 && !needle.includes(" ");
+
+  games.forEach((game, index) => {
+    const name = normaliseForSearch(game.displayName);
+    const words = name.split(" ");
+    let score: number;
+    if (name.startsWith(needle)) score = 0;
+    else if (wantsAcronym && words.map((word) => word.charAt(0)).join("").startsWith(needle))
+      score = 1;
+    else if (words.some((word) => word.startsWith(needle))) score = 2;
+    else if (name.includes(needle)) score = 3;
+    else if (name.replace(/ /g, "").includes(squashedNeedle)) score = 4;
+    else if (normaliseForSearch(game.publisher ?? "").includes(needle)) score = 5;
+    else return;
+    scored.push({ game, score, index });
+  });
+
+  scored.sort((a, b) => a.score - b.score || a.index - b.index);
+  return scored.map((s) => s.game);
 }

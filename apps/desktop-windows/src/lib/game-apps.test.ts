@@ -1,10 +1,16 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   canRouteByDestination,
+  scopesForGame,
   curatedNames,
   hasCuratedApps,
   isSelectableAppPath,
   resolveGameApps,
+  GAME_PAGE_SIZE,
+  rankGames,
+  type SearchableGame,
 } from "./game-apps";
 import type { RunningApp } from "./split-tunnel";
 
@@ -44,11 +50,14 @@ const RIOT: RunningApp[] = [
   }),
 ];
 
+/** Mirrors the seeded `valorant` row. `UnrealCEFSubProcess.exe` was in it
+ * until 2026-08-25 and was dropped as a generic Unreal Engine name; this
+ * fixture follows the row so the "missing" expectation below keeps
+ * describing what the product actually does. */
 const VALORANT_PROFILE = {
   processNames: [
     "VALORANT.exe",
     "VALORANT-Win64-Shipping.exe",
-    "UnrealCEFSubProcess.exe",
     "RiotClientServices.exe",
     "vgc.exe",
     "vgm.exe",
@@ -131,7 +140,7 @@ describe("resolveGameApps", () => {
     // Vanguard runs as a service with no window, so the running-app
     // list does not carry it. That is a real gap and the customer is
     // told which programs it is, not just how many.
-    expect(resolved.missing).toEqual(["UnrealCEFSubProcess.exe", "vgc.exe", "vgm.exe"]);
+    expect(resolved.missing).toEqual(["vgc.exe", "vgm.exe"]);
     expect(resolved.found.map((f) => f.name)).toEqual([
       "VALORANT.exe",
       "VALORANT-Win64-Shipping.exe",
@@ -207,5 +216,201 @@ describe("canRouteByDestination", () => {
     expect(
       canRouteByDestination({ destinationCidrs: ["137.221.64.0/24"], prefixComplete: true }),
     ).toBe(true);
+  });
+});
+
+describe("scopesForGame", () => {
+  const PATHS = [String.raw`C:\Games\game.exe`, String.raw`C:\Games\launcher.exe`];
+
+  /** The same rule as above, at the point where it actually decides
+   * what goes on the wire. `canRouteByDestination` being right is worth
+   * nothing if the one caller forgets to ask it, and that caller used
+   * to be a branch inside a React component where no test could see it. */
+  it("sends no scope for an incomplete prefix list", () => {
+    // The common case, and the case every seeded profile is in today.
+    // No scope means the game's programs are carried in full, exactly
+    // as they were before destination scoping existed.
+    expect(
+      scopesForGame({ destinationCidrs: ["104.160.128.0/19"], prefixComplete: false }, PATHS),
+    ).toEqual([]);
+  });
+
+  it("sends no scope when the server said nothing about completeness", () => {
+    expect(scopesForGame({ destinationCidrs: ["104.160.128.0/19"] }, PATHS)).toEqual([]);
+    expect(scopesForGame({}, PATHS)).toEqual([]);
+  });
+
+  it("sends no scope for an empty list called complete", () => {
+    expect(scopesForGame({ destinationCidrs: [], prefixComplete: true }, PATHS)).toEqual([]);
+  });
+
+  it("narrows every program of the game when the list is complete", () => {
+    // All of them, not just the executable that happens to be first. A
+    // launcher left carrying everything while the game is scoped is
+    // the same product talking from two addresses, which is the thing
+    // the rule exists to stop.
+    const destinations = ["137.221.64.0/24", "137.221.104.0/22"];
+    expect(scopesForGame({ destinationCidrs: destinations, prefixComplete: true }, PATHS)).toEqual([
+      { app: PATHS[0], destinations },
+      { app: PATHS[1], destinations },
+    ]);
+  });
+
+  it("has nothing to narrow when no program was resolved", () => {
+    expect(
+      scopesForGame({ destinationCidrs: ["137.221.64.0/24"], prefixComplete: true }, []),
+    ).toEqual([]);
+  });
+});
+
+describe("rankGames", () => {
+  const games = [
+    { displayName: "Counter-Strike 2", publisher: "Valve" },
+    { displayName: "Dota 2", publisher: "Valve" },
+    { displayName: "Docs and Screenshots", publisher: "Nobody" },
+    { displayName: "Apex Legends", publisher: "Electronic Arts" },
+    { displayName: "Dead by Daylight", publisher: "Behaviour Interactive" },
+    { displayName: "Among Us", publisher: "Innersloth" },
+  ];
+
+  it("returns the catalogue untouched for an empty query", () => {
+    expect(rankGames(games, "").map((g) => g.displayName)).toEqual(
+      games.map((g) => g.displayName),
+    );
+    expect(rankGames(games, "   ").map((g) => g.displayName)).toEqual(
+      games.map((g) => g.displayName),
+    );
+  });
+
+  it("puts a name that starts with the query first", () => {
+    // The whole reason this is ranked rather than filtered: "do" appears in
+    // "Dota 2" and in "Docs and Screenshots", and a plain filter would order
+    // them by accident of catalogue position.
+    expect(rankGames(games, "dota")[0].displayName).toBe("Dota 2");
+  });
+
+  it("matches a word inside the name ahead of a bare substring", () => {
+    // "strike" is the second word of Counter-Strike, not its start.
+    expect(rankGames(games, "strike")[0].displayName).toBe("Counter-Strike 2");
+    expect(rankGames(games, "legends")[0].displayName).toBe("Apex Legends");
+  });
+
+  it("ignores punctuation and case", () => {
+    expect(rankGames(games, "COUNTER STRIKE")[0].displayName).toBe("Counter-Strike 2");
+    expect(rankGames(games, "counter-strike")[0].displayName).toBe("Counter-Strike 2");
+  });
+
+  it("finds a game when the spaces are left out", () => {
+    // People type names the way they say them, not the way a publisher
+    // styles them.
+    expect(rankGames(games, "counterstrike")[0].displayName).toBe("Counter-Strike 2");
+    expect(rankGames(games, "deadbydaylight")[0].displayName).toBe("Dead by Daylight");
+  });
+
+  it("matches on publisher, but below every name match", () => {
+    const valve = rankGames(games, "valve").map((g) => g.displayName);
+    expect(valve).toEqual(["Counter-Strike 2", "Dota 2"]);
+  });
+
+  it("drops entries that match nothing", () => {
+    expect(rankGames(games, "zzzznotagame")).toEqual([]);
+  });
+
+  it("keeps catalogue order inside one score band", () => {
+    // Ties must not reshuffle: the server orders curated entries and online
+    // titles first, and that ordering is the product decision.
+    const two = rankGames(games, "2").map((g) => g.displayName);
+    expect(two).toEqual(["Counter-Strike 2", "Dota 2"]);
+  });
+
+  it("stays responsive on a catalogue of realistic size", () => {
+    // The picker mounts GAME_PAGE_SIZE rows, but it ranks all of them on
+    // every keystroke. Guard the thing that would actually regress: ranking
+    // a full catalogue must stay far below a frame.
+    const big = Array.from({ length: 2_000 }, (_, i) => ({
+      displayName: `Game Number ${i}`,
+      publisher: `Publisher ${i % 50}`,
+    }));
+    const started = performance.now();
+    for (let i = 0; i < 10; i += 1) rankGames(big, "game numb");
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(rankGames(big, "game number 1999")).toHaveLength(1);
+  });
+
+  it("mounts a bounded number of rows", () => {
+    expect(GAME_PAGE_SIZE).toBeGreaterThan(20);
+    expect(GAME_PAGE_SIZE).toBeLessThanOrEqual(100);
+  });
+});
+
+/** Ranking against the catalogue that actually ships.
+ *
+ * Separate from the fixture tests above, and worth the awkwardness of
+ * reaching across the workspace to read the backend's data files, because
+ * the fixtures did not catch the bug that mattered. A six-game fixture
+ * cannot tell you that typing "cs" returns nothing at all -- for that you
+ * need the real thousand-and-a-half names, with their sequels, their
+ * regional duplicates and their punctuation.
+ *
+ * These assert customer intent rather than exact positions: that the game
+ * somebody meant is on the first page they can see, not that it is at any
+ * particular index. Pinning indices would fail on every catalogue
+ * regeneration and teach the next reader to delete the test. */
+describe("rankGames over the shipped catalogue", () => {
+  const root = join(__dirname, "../../../backend/prisma/catalogue");
+  const read = (file: string) =>
+    (JSON.parse(readFileSync(join(root, file), "utf8")) as { games: SearchableGame[] }).games;
+
+  // Curated first, then the Steam tier -- the order `catalogueEntries()`
+  // produces, because ties keep the server's order and that ordering is a
+  // product decision.
+  const catalogue = [...read("curated.json"), ...read("steam-tier.json")];
+
+  it("is the size the picker was built for", () => {
+    expect(catalogue.length).toBeGreaterThan(1_400);
+  });
+
+  /** Where a title lands among what the picker would actually mount. */
+  const rankOf = (query: string, name: string) =>
+    rankGames(catalogue, query)
+      .slice(0, GAME_PAGE_SIZE)
+      .findIndex((g) => g.displayName === name);
+
+  it.each([
+    ["cs", "Counter-Strike 2"],
+    ["cod", "Call of Duty"],
+    ["gta", "Grand Theft Auto V (Legacy)"],
+  ])("finds %s -> %s on the first page", (query, name) => {
+    // Every one of these returned the game far down the list or, for "cs",
+    // not at all, before the acronym band existed.
+    expect(rankOf(query, name)).toBeGreaterThanOrEqual(0);
+  });
+
+  it("still prefers a name that genuinely starts with the query", () => {
+    // CS2D is a real game and a real prefix hit. The acronym band must not
+    // demote it to promote the more famous title.
+    const top = rankGames(catalogue, "cs").map((g) => g.displayName);
+    expect(top[0]).toBe("CS2D");
+    expect(top.indexOf("Counter-Strike 2")).toBeLessThan(GAME_PAGE_SIZE);
+  });
+
+  it("puts the exact title first when one is typed in full", () => {
+    for (const name of ["Counter-Strike 2", "Dota 2", "Fortnite", "Rocket League"]) {
+      expect(rankGames(catalogue, name)[0]?.displayName).toBe(name);
+    }
+  });
+
+  it("does not flood the first page from a single letter", () => {
+    // A one-character query is a keystroke on the way to a real one. It must
+    // stay cheap and must not be treated as an acronym.
+    expect(rankGames(catalogue, "c").length).toBeLessThan(catalogue.length);
+  });
+
+  it("ranks the whole catalogue faster than a frame", () => {
+    const started = performance.now();
+    for (const q of ["c", "co", "cou", "coun", "count"]) rankGames(catalogue, q);
+    // Five keystrokes over the real catalogue, generously bounded -- the
+    // point is to catch an accidental O(n^2), not to benchmark the machine.
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });

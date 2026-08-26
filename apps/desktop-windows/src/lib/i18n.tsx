@@ -230,6 +230,10 @@ const en = {
   "settings.customModeExceptHint": "Everything goes through the VPN except the apps you choose.",
   "settings.customNoAppsExcept": "No apps chosen yet, so everything is going through the VPN. Add one to leave it out.",
   "settings.customPickRunning": "Choose from running apps",
+  // Also the filter label in the native Windows file dialog, which is why
+  // it exists as a key at all -- it was hardcoded English, so a Persian
+  // customer clicked a Persian button and got an English dropdown.
+  "settings.customFileFilter": "Programs",
   "settings.customPickFile": "Browse for a program",
   "settings.customRunningTitle": "Running apps",
   "settings.customRunningEmpty": "Nothing to show. Try browsing for the program instead.",
@@ -253,15 +257,43 @@ const en = {
   // routed as VALORANT.
   "settings.customPickGame": "Add a game",
   "settings.customGameTitle": "Add a game's programs",
+  // Not "Neoxify knows which programs each game uses". It does not know:
+  // the list is harvested from publisher metadata and none of it has been
+  // checked against a running install. The picker says so too, and the two
+  // strings sit on the same card, so they must not contradict each other.
   "settings.customGameHint":
-    "Neoxify knows which programs each game uses. Start the game or its launcher first: Neoxify adds the ones it can see running, by their full path.",
+    "Neoxify has a list of the programs each game is expected to use. Start the game or its launcher first: Neoxify adds the ones it can see running, by their full path.",
   "settings.customGameParts": "{count} programs",
   "settings.customGameAdded": "Added {count} of {total} programs for {game}.",
   "settings.customGameMissing":
     "Not running, so not added: {names}. Start them and add the game again, or use Browse.",
   "settings.customGameNone":
     "None of the programs for {game} are running, so nothing was added. Start the game or its launcher, then add it again.",
-  "settings.customGameEmpty": "Neoxify has no program list for any game yet.",
+  "settings.customGameEmpty": "Neoxify has no program list for any game.",
+  // Destination scoping, said out loud in both directions.
+  //
+  // "Uses VPN" is now two different promises and the customer cannot
+  // tell which one they got by looking. Someone whose game is scoped
+  // will open its launcher, see their real IP, and conclude the feature
+  // is broken -- so the narrower promise has to be the one that is
+  // stated, not the one that is inferred.
+  //
+  // The second string is the more important one. It is what an
+  // incomplete address list produces, it is the common case today, and
+  // "the whole application is carried" is a bigger claim than "only its
+  // servers are" -- overstating it is the kind of quiet inaccuracy this
+  // app exists to refuse.
+  "settings.customAppScoped": "Game servers only",
+  "settings.customAppScopedHint":
+    "Only this program's traffic to the game's own servers goes through the VPN. Everything else it does keeps your normal connection.",
+  "settings.customGameScoped":
+    "Only {game}'s own game servers go through the VPN; the rest of what it does keeps your normal connection.",
+  // No "yet". A complete publisher address list was measured to be
+  // unbuildable -- the account surface lives outside the publisher's own
+  // ASN for every publisher checked -- so this is what the product does,
+  // not a stage it is passing through.
+  "settings.customGameWholeApp":
+    "Everything these programs do goes through the VPN. Neoxify does not have a complete list of this game's server addresses, and routing part of one is worse than routing none.",
   // Android picks from the installed-app list rather than a file
   // dialog, so these have no Windows counterpart.
   //
@@ -526,6 +558,13 @@ const en = {
   // all, so it says so in the warning chrome rather than sitting there
   // looking enabled -- the same defect class as the Custom-mode empty
   // state.
+  // The card used to render NOTHING in this state: no button, no empty
+  // state, no explanation, because `canAdd` was false and nothing was
+  // chosen. An app that goes quiet rather than saying what happened is the
+  // failure this project keeps finding, and it is worse here than a bad
+  // sentence would be.
+  "gaming.noneRedirectable":
+    "No game on the list can have its launcher redirected, so there is nothing to add here. Custom mode, under Custom, routes a game's own programs and does not need this.",
   "gaming.noGames": "No games chosen, so gaming mode does nothing. Add one below.",
   "gaming.noGamesDash": "No games chosen, so gaming mode does nothing. Pick one in Settings first.",
   "gaming.armFailed": "Gaming mode could not be turned on.",
@@ -534,9 +573,15 @@ const en = {
   // dial that never happened.
   "gaming.needsPlan": "Gaming mode needs an active plan.",
   "gaming.notInPlan": "Your plan does not include gaming mode.",
-  "gaming.noResolver": "Gaming mode is not available on your server yet.",
+  // "yet" was removed on 2026-08-25 and must not come back. It promised a
+  // thing that is not being built: no Neoxify server offers this
+  // redirection and none is planned, so "yet" was the app telling a paying
+  // customer to wait for something nobody intends to ship. The second
+  // sentence says plainly that this is not an outage, because a customer
+  // who reads "not available" as "down right now" will keep retrying.
+  "gaming.noResolver": "Gaming mode is not available on your server.",
   "gaming.noResolverBody":
-    "Nothing on this computer is being redirected, and turning this on would not change that. Custom mode, under Custom, does not need this and works today.",
+    "This is not a temporary outage. No Neoxify server offers this redirection, so nothing on this computer is being redirected and turning this on would not change that. Custom mode, under Custom, does not need it and works today.",
   "gaming.profileFailed": "Neoxify could not load the game list.",
   "gaming.retry": "Try again",
   "gaming.loading": "Loading games...",
@@ -554,8 +599,23 @@ const en = {
   "gaming.applies": "Changes take effect straight away while gaming mode is on.",
   "gaming.pickerTitle": "Choose a game",
   "gaming.search": "Search games",
+  // What a catalogue row is, said once, at the moment somebody is about to
+  // choose one. The list runs to 1,480 entries and a long list reads as a
+  // compatibility list -- as though somebody tested these. Nobody has: an
+  // entry is a claim about which programs would be routed, and nothing
+  // more. Not one of them has been checked against a running install.
+  "gaming.pickerMeaning":
+    "Each entry lists the programs Neoxify would route while they are running. None has been tested against a running game.",
   "gaming.searchEmpty": "No game matches that.",
-  "gaming.listEmpty": "No games are on the list yet.",
+  // Two different facts, because one string could not tell the truth about
+  // both. With 1,480 entries and 60 mounted, the overflow line renders on
+  // first open before anything is typed -- and "1420 more match, keep
+  // typing" was wrong twice over there: nothing had been typed, and those
+  // rows had not matched anything. `{count}` is pre-formatted by the
+  // caller so the digits are the reader's own.
+  "gaming.searchMore": "{count} more games match. Keep typing to narrow it down.",
+  "gaming.listMore": "Showing the first {shown} of {count} games. Type to find yours.",
+  "gaming.listEmpty": "No games are on the list.",
   "gaming.cancel": "Cancel",
   "gaming.tooMany": "You can choose up to {max} games.",
   "gaming.games": "Games",
@@ -791,6 +851,7 @@ const fa: Record<TranslationKey, string> = {
   "settings.customModeExceptHint": "همه چیز از VPN رد می‌شود، به‌جز برنامه‌هایی که انتخاب می‌کنید.",
   "settings.customNoAppsExcept": "هنوز برنامه‌ای انتخاب نشده، پس همه چیز از VPN رد می‌شود. برای کنار گذاشتن یکی، آن را اضافه کنید.",
   "settings.customPickRunning": "از برنامه‌های باز انتخاب کنید",
+  "settings.customFileFilter": "برنامه‌ها",
   "settings.customPickFile": "جست‌وجوی برنامه",
   "settings.customRunningTitle": "برنامه‌های در حال اجرا",
   "settings.customRunningEmpty": "چیزی برای نمایش نیست. به‌جایش برنامه را جست‌وجو کنید.",
@@ -803,14 +864,21 @@ const fa: Record<TranslationKey, string> = {
   "settings.customPickGame": "افزودن یک بازی",
   "settings.customGameTitle": "افزودن برنامه‌های یک بازی",
   "settings.customGameHint":
-    "نئوکسیفای می‌داند هر بازی از چه برنامه‌هایی استفاده می‌کند. اول بازی یا لانچرش را اجرا کنید: نئوکسیفای برنامه‌هایی را که در حال اجرا ببیند، با مسیر کاملشان اضافه می‌کند.",
+    "نئوکسیفای فهرستی از برنامه‌هایی دارد که انتظار می‌رود هر بازی از آن‌ها استفاده کند. اول بازی یا لانچرش را اجرا کنید: نئوکسیفای برنامه‌هایی را که در حال اجرا ببیند، با مسیر کاملشان اضافه می‌کند.",
   "settings.customGameParts": "{count} برنامه",
   "settings.customGameAdded": "{count} برنامه از {total} برنامه‌ی {game} اضافه شد.",
   "settings.customGameMissing":
     "این‌ها در حال اجرا نبودند و اضافه نشدند: {names}. آن‌ها را اجرا کنید و بازی را دوباره اضافه کنید، یا از «جست‌وجوی برنامه» استفاده کنید.",
   "settings.customGameNone":
     "هیچ‌کدام از برنامه‌های {game} در حال اجرا نیست، پس چیزی اضافه نشد. بازی یا لانچرش را اجرا کنید و دوباره اضافه کنید.",
-  "settings.customGameEmpty": "هنوز برای هیچ بازی‌ای فهرست برنامه‌ها وجود ندارد.",
+  "settings.customGameEmpty": "برای هیچ بازی‌ای فهرست برنامه‌ها وجود ندارد.",
+  "settings.customAppScoped": "فقط سرورهای بازی",
+  "settings.customAppScopedHint":
+    "فقط ترافیک این برنامه به سرورهای خودِ بازی از VPN عبور می‌کند. بقیه‌ی کارهای آن از اینترنت معمولی شما استفاده می‌کند.",
+  "settings.customGameScoped":
+    "فقط ترافیک {game} به سرورهای خودش از VPN عبور می‌کند؛ بقیه‌ی کارهای آن از اینترنت معمولی شما استفاده می‌کند.",
+  "settings.customGameWholeApp":
+    "همه‌ی ترافیک این برنامه‌ها از وی‌پی‌ان عبور می‌کند. نئوکسیفای فهرست کامل نشانی سرورهای این بازی را ندارد، و عبور دادن بخشی از آن بدتر از عبور ندادن است.",
   "dash.offlineTitle": "در حال حاضر به Neoxify دسترسی نیست — همچنان می‌توانید متصل شوید.",
   "dash.offlineHint":
     "از سرورهای ذخیره‌شده استفاده می‌شود. مصرف داده و تاریخ انقضا آخرین بار در {when} به‌روز شده و ممکن است دقیق نباشد.",
@@ -951,32 +1019,35 @@ const fa: Record<TranslationKey, string> = {
   "gaming.offHint":
     "در حال حاضر هیچ ترافیکی هدایت نمی‌شود. برای عبور دادن لانچر، ورود و به‌روزرسانی بازی‌هایی که انتخاب کرده‌اید، آن را روشن کنید.",
   "gaming.arming": "در حال آماده‌سازی...",
-  "gaming.armingHint": "قواعد بازی‌هایی که انتخاب کرده‌اید در حال نصب است.",
+  "gaming.armingHint": "قواعد بازی‌هایی که انتخاب کرده‌اید در حال نصب هستند.",
   "gaming.active": "حالت بازی روشن است",
   "gaming.activeHint":
     "لانچر، ورود و به‌روزرسانی بازی‌هایی که انتخاب کرده‌اید از نئوکسیفای عبور می‌کند و این سرویس‌ها نشانی نئوکسیفای را می‌بینند. اتصال خودِ بازی از تونل عبور داده نمی‌شود.",
   "gaming.partial": "حالت بازی روشن است، اما تأیید نشده",
   "gaming.partialHint":
     "حالت بازی روشن است، اما نئوکسیفای نتوانست تأیید کند که ترافیک بازی شما به آن می‌رسد.",
-  "gaming.unknown": "الان نمی‌توان گفت",
+  "gaming.unknown": "در حال حاضر نمی‌توان گفت",
   "gaming.unknownHint":
-    "نئوکسیفای نتوانست از سرویس کمکی بپرسد چه چیزی نصب شده است، پس نمی‌تواند بگوید حالت بازی روشن است یا نه.",
+    "نئوکسیفای نتوانست از سرویس کمکی بپرسد که چه قواعدی نصب شده است، پس نمی‌تواند بگوید حالت بازی روشن است یا نه.",
   "gaming.pathDirect": "اتصال بازی: از تونل عبور نمی‌کند",
   "gaming.ipUnchanged":
-    "سرویس‌هایی که هدایت می‌شوند از سرور نئوکسیفای گرفته می‌شوند و نشانی آن را می‌بینند. باقی چیزها روی این رایانه، از جمله خودِ بازی، با اتصال معمولی و نشانی خودتان باقی می‌مانند.",
+    "نئوکسیفای از سرور خودش به سرویس‌هایی که هدایت می‌شوند وصل می‌شود، پس آن‌ها نشانی نئوکسیفای را می‌بینند. بقیه‌ی ترافیک این رایانه، از جمله خودِ بازی، با اتصال معمولی و نشانی خودتان باقی می‌ماند.",
   "gaming.noSpeedClaim":
     "نئوکسیفای پینگ را اندازه نمی‌گیرد و اتصال سریع‌تری وعده نمی‌دهد. این حالت برای دسترسی به یک سرویس است، نه برای سرعت.",
   "gaming.turnOn": "روشن کردن",
   "gaming.turnOff": "خاموش کردن",
+  "gaming.noneRedirectable":
+    "هیچ بازی‌ای در فهرست نیست که بتوان لانچر آن را هدایت کرد، پس چیزی برای افزودن وجود ندارد. «حالت سفارشی» برنامه‌های خودِ بازی را عبور می‌دهد و به این نیاز ندارد.",
   "gaming.noGames": "هیچ بازی‌ای انتخاب نشده است، پس حالت بازی هیچ کاری نمی‌کند. از پایین یکی اضافه کنید.",
   "gaming.noGamesDash":
     "هیچ بازی‌ای انتخاب نشده است، پس حالت بازی هیچ کاری نمی‌کند. ابتدا در تنظیمات یک بازی انتخاب کنید.",
   "gaming.armFailed": "حالت بازی روشن نشد.",
   "gaming.needsPlan": "حالت بازی به یک اشتراک فعال نیاز دارد.",
   "gaming.notInPlan": "اشتراک شما شامل حالت بازی نمی‌شود.",
-  "gaming.noResolver": "حالت بازی هنوز روی سرور شما در دسترس نیست.",
+  // «هنوز» حذف شد — به en توضیح داده شده است.
+  "gaming.noResolver": "حالت بازی روی سرور شما در دسترس نیست.",
   "gaming.noResolverBody":
-    "هیچ ترافیکی روی این رایانه هدایت نمی‌شود و روشن کردن این گزینه هم آن را تغییر نمی‌دهد. «حالت سفارشی» به این نیاز ندارد و همین حالا کار می‌کند.",
+    "این یک اختلال موقت نیست. هیچ سروری در نئوکسیفای این هدایت را ارائه نمی‌کند، بنابراین هیچ ترافیکی روی این رایانه هدایت نمی‌شود و روشن کردن این گزینه هم آن را تغییر نمی‌دهد. «حالت سفارشی» به این نیاز ندارد و همین حالا کار می‌کند.",
   "gaming.profileFailed": "نئوکسیفای نتوانست فهرست بازی‌ها را بارگیری کند.",
   "gaming.retry": "تلاش دوباره",
   "gaming.loading": "در حال بارگذاری بازی‌ها...",
@@ -992,15 +1063,19 @@ const fa: Record<TranslationKey, string> = {
   "gaming.applies": "تا وقتی حالت بازی روشن است، تغییرات بلافاصله اعمال می‌شود.",
   "gaming.pickerTitle": "انتخاب بازی",
   "gaming.search": "جست‌وجوی بازی",
+  "gaming.pickerMeaning":
+    "هر مورد فهرست برنامه‌هایی است که قرار است نئوکسیفای، تا زمانی که در حال اجرا باشند، مسیرشان را عوض کند. هیچ‌کدام روی بازی در حال اجرا آزمایش نشده است.",
   "gaming.searchEmpty": "هیچ بازی‌ای با این عبارت پیدا نشد.",
-  "gaming.listEmpty": "هنوز هیچ بازی‌ای در فهرست نیست.",
+  "gaming.searchMore": "{count} بازی دیگر هم‌خوانی دارد. برای محدود کردن نتایج، نوشتن را ادامه دهید.",
+  "gaming.listMore": "{shown} بازی از {count} بازی نمایش داده شده است. برای یافتن بازی خود بنویسید.",
+  "gaming.listEmpty": "هیچ بازی‌ای در فهرست نیست.",
   "gaming.cancel": "انصراف",
   "gaming.tooMany": "حداکثر {max} بازی می‌توانید انتخاب کنید.",
   "gaming.games": "بازی‌ها",
   "gaming.resolver": "سرور نام",
   "gaming.accountRisk": "مراقب حساب بازی‌تان باشید",
   "gaming.accountRiskBody":
-    "حساب‌ها معمولاً به این دلیل از دست نمی‌روند که سازنده‌ی بازی فیلترشکن را تشخیص داده است؛ به این دلیل از دست می‌روند که خودِ بازیکن به پشتیبانی گفته است. یک بازیکن پس از آنکه در یک تیکت پشتیبانی به موقعیت مکانی‌اش اشاره کرد، هفت سال پیشرفتش را از دست داد. اگر با پشتیبانی یک بازی تماس گرفتید، فقط به آنچه می‌پرسند پاسخ دهید و از خودتان درباره‌ی کشور یا استفاده از فیلترشکن چیزی نگویید.",
+    "حساب‌ها معمولاً به این دلیل از دست نمی‌روند که سازنده‌ی بازی فیلترشکن را تشخیص داده است؛ به این دلیل از دست می‌روند که خودِ بازیکن به پشتیبانی گفته است. یک بازیکن پس از آنکه در یک تیکت پشتیبانی به موقعیت مکانی‌اش اشاره کرد، هفت سال پیشرفتش را از دست داد. اگر با پشتیبانی یک بازی تماس گرفتید، فقط به آنچه می‌پرسند پاسخ دهید و از خودتان درباره‌ی موقعیت مکانی یا استفاده از فیلترشکن چیزی نگویید.",
 
   "common.loading": "در حال بارگذاری...",
 
@@ -1026,7 +1101,11 @@ const fa: Record<TranslationKey, string> = {
   "disclosure.accept": "می‌پذیرم و ادامه می‌دهم",
 };
 
-const DICTIONARIES: Record<Language, Record<TranslationKey, string>> = { en, fa };
+/** Exported for the honesty tests in `i18n.test.ts`, which assert things
+ * the type system cannot: that a Persian string is actually Persian, that
+ * placeholders survived translation, and that no string in either language
+ * makes a speed claim this product has measured to be false. */
+export const DICTIONARIES: Record<Language, Record<TranslationKey, string>> = { en, fa };
 
 const STORE_FILE = "settings.json";
 const STORE_KEY = "language";

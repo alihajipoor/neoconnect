@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Search, X } from "lucide-react";
 import { useI18n } from "../lib/i18n";
 import type { GameProfileSummary } from "../lib/customer";
+import { GAME_PAGE_SIZE, rankGames } from "../lib/game-apps";
 import { Button } from "./ui";
 
 /** Pick a game from the operator's curated list.
@@ -52,22 +53,36 @@ export function GamePicker({
    * is a different fact from a search matching nothing. */
   emptyLabel?: string;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [query, setQuery] = useState("");
+
+  // Grouped digits in the reader's own numerals. Four figures is where a
+  // bare String(n) starts to read as a serial number rather than a count.
+  const format = useMemo(() => {
+    const nf = new Intl.NumberFormat(language === "fa" ? "fa-IR" : "en-US");
+    return (n: number) => nf.format(n);
+  }, [language]);
 
   const already = new Set(chosen);
 
   // Matched on the two things a person actually reads. Searching the
   // hostname list as well would make "www" match everything.
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return games;
-    return games.filter(
-      (g) =>
-        g.displayName.toLowerCase().includes(needle) ||
-        (g.publisher ?? "").toLowerCase().includes(needle),
-    );
-  }, [games, query]);
+  //
+  // Ranked rather than merely filtered, which a list of three did not need
+  // and a list of a thousand does: a plain `includes` puts every game whose
+  // name happens to contain "cs" above Counter-Strike, and the customer
+  // concludes their game is missing. Cheap enough to run on every keystroke
+  // -- it is a few thousand string comparisons -- so there is no debounce to
+  // make the field feel laggy.
+  const matches = useMemo(() => rankGames(games, query), [games, query]);
+
+  // Only the first page is rendered. The catalogue runs to well over a
+  // thousand rows, and mounting all of them inside a backdrop-blurred card
+  // is the kind of thing that makes a picker feel broken on the low-end
+  // machines a lot of these customers have. The count below says how many
+  // matched, so a truncated list never reads as "my game is not there".
+  const shown = matches.slice(0, GAME_PAGE_SIZE);
+  const hidden = matches.length - shown.length;
 
   // Rendered into the body rather than where it sits in the tree.
   // `position: fixed` is measured against the nearest ancestor with a
@@ -101,6 +116,15 @@ export function GamePicker({
             className="w-full rounded-lg border border-white/8 bg-white/[0.03] py-1.5 pe-2 ps-8 text-xs outline-none placeholder:text-muted-foreground focus:border-white/20"
           />
         </div>
+
+        {/* What a row in this list is, and is not. A catalogue of 1,480
+            entries reads as a compatibility list -- as though each one had
+            been tried -- and none of them has. Said here, once, at the
+            moment somebody is choosing, rather than buried in a settings
+            screen they will never open. */}
+        <p className="text-[10px] leading-relaxed text-muted-foreground">
+          {t("gaming.pickerMeaning")}
+        </p>
 
         {shown.length === 0 ? (
           <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
@@ -141,6 +165,31 @@ export function GamePicker({
                 </li>
               );
             })}
+            {hidden > 0 ? (
+              // Stated rather than left to be inferred. A list that just stops
+              // reads as "my game is not supported", which is the one
+              // conclusion this picker must not accidentally produce.
+              //
+              // Two strings, because one could not be true in both states.
+              // On first open nothing has been typed and nothing has
+              // "matched" -- the other 1,420 rows are simply the rest of the
+              // catalogue -- so telling somebody to "keep typing to narrow it
+              // down" is wrong twice over. Numbers are localised here rather
+              // than interpolated raw: `t()` substitutes with String(), which
+              // would put Latin digits inside a right-to-left sentence and no
+              // thousands separator in either language.
+              <li
+                aria-live="polite"
+                className="px-2.5 py-2 text-center text-[10px] text-muted-foreground"
+              >
+                {query.trim()
+                  ? t("gaming.searchMore", { count: format(hidden) })
+                  : t("gaming.listMore", {
+                      shown: format(shown.length),
+                      count: format(matches.length),
+                    })}
+              </li>
+            ) : null}
           </ul>
         )}
 

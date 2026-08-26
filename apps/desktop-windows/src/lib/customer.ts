@@ -1,4 +1,5 @@
 import { apiRequest } from "./api";
+import type { ApiResult } from "./api";
 import type {
   AppLinks,
   Customer,
@@ -116,8 +117,51 @@ export interface GamingProfileResponse {
   games: GameProfileSummary[];
 }
 
-export const getGamingProfile = () =>
-  apiRequest<GamingProfileResponse>("/customer/gaming-profile");
+/** Cached because this payload got big and three components want it.
+ *
+ * The catalogue is now roughly 1,500 games and about 370 KiB of JSON.
+ * `CustomModeCard` and `GamingModeCard` are both mounted on the Settings
+ * screen and each fetch on mount, and `GamingStatusPanel` fetches again on
+ * the Dashboard -- so without this, opening Settings pulled the whole
+ * catalogue twice, back to back, on a connection that in Iran is often
+ * throttled to under 1 Mbps. That is a second of dead UI bought for
+ * nothing.
+ *
+ * Deliberately small and dumb rather than a query library: a timestamp, the
+ * last good response, and the in-flight promise so two components mounting
+ * in the same tick share one request instead of racing.
+ *
+ * Failures are NOT cached. `loadProfile` doubles as the "Try again" handler
+ * behind a load failure, and a cached error would make that button do
+ * nothing at all. */
+const GAMING_PROFILE_TTL_MS = 30_000;
+let gamingProfileCache: { at: number; value: ApiResult<GamingProfileResponse> } | null = null;
+let gamingProfileInFlight: Promise<ApiResult<GamingProfileResponse>> | null = null;
+
+export function getGamingProfile(): Promise<ApiResult<GamingProfileResponse>> {
+  const fresh = gamingProfileCache && Date.now() - gamingProfileCache.at < GAMING_PROFILE_TTL_MS;
+  if (fresh && gamingProfileCache) return Promise.resolve(gamingProfileCache.value);
+  if (gamingProfileInFlight) return gamingProfileInFlight;
+
+  gamingProfileInFlight = apiRequest<GamingProfileResponse>("/customer/gaming-profile")
+    .then((result) => {
+      if (result.ok) gamingProfileCache = { at: Date.now(), value: result };
+      return result;
+    })
+    .finally(() => {
+      gamingProfileInFlight = null;
+    });
+  return gamingProfileInFlight;
+}
+
+/** Throw the cached catalogue away.
+ *
+ * For the cases where the answer can legitimately change out from under the
+ * TTL -- a plan redeemed, a different customer signing in -- so that
+ * entitlement is never shown from a previous session. */
+export function clearGamingProfileCache(): void {
+  gamingProfileCache = null;
+}
 
 /** Whether support is open, plus this customer's own conversations. */
 export const getSupportOverview = () => apiRequest<SupportOverview>("/customer/support");

@@ -10781,6 +10781,959 @@ unexecuted.
 
 ---
 
+## 2026-08-25 — Per-app destination scoping, and the leak fix that had to land first
+
+**Status:** in source, unproven on a machine
+**Touches:** `apps/desktop-windows/{ipc,service,src-tauri,src}/**`
+**Branch:** `claude/split-tunnel-destination-scope`, off `main` at `38f5ccd`, pushed, not merged
+
+`destinationCidrs` and `prefixComplete` have reached the client since
+`0090c7b` with nothing consuming them. They have a consumer now:
+`SplitTunnelConfig` grew an optional `scopes`, and the redirect loop
+narrows a selected app to the destinations its publisher announces.
+
+### The shape of it
+
+One clause on the `selected` computation in `decide`, and the mirror of
+it in `handle_ipv6`. Everything else is construction-time filtering, in
+`Selection::with_scopes` and `Scope::new`, so that the hot path has one
+question to ask and no special cases to remember.
+
+`Scope::new` returns `Option<Scope>` and there is **no other
+constructor**. A scope exists only if every prefix parsed; one bad entry
+and the whole thing is `None`, which reads as "carry this app in full".
+That is the `prefixComplete` rule made structural rather than
+remembered — a partial list splits WoW's Home and World across two
+source addresses, and §5.4 of `gaming-mode.md` says refuse rather than
+approximate. The client refuses too (`scopesForGame`, gated on
+`canRouteByDestination`); two independent refusals, because one of them
+being wrong is a ban rather than a bug.
+
+### How it composes with the two leak fixes — the part worth reading
+
+**It is not the unattributable case, and the signatures enforce that.**
+`destination_scope` takes an `image_path`, so it can only be asked about
+a packet whose owner is known. A packet with no owner has no app and
+therefore no scope; it still goes to `verdict_for_unattributed` and
+still comes back `Refuse`. Collapsing the two — treating "no scope
+matched" as "out of scope, pass it through" — would reinstate the
+13-of-15 fire-and-forget leak while every scope test still passed. There
+is a test for exactly that mutation.
+
+**Destination scoping could not have been built before `72c8978`.** The
+out-of-scope verdict falls through to `record_direct`. Keyed on
+`(transport, source port)` — as `Tables.direct` was until that commit —
+one telemetry packet would have exempted the port for five seconds
+*including the game servers*, and a game scoped to its servers would
+have been carried only to whichever destination it reached first.
+`gaming-mode.md` §5.3 lists `record_direct` as a trap for a
+per-destination policy for precisely this reason. **That trap is
+spent**, and the note in `decide` now records that the flow key is
+load-bearing for two features instead of one. Anyone tempted to re-key
+that cache should read it.
+
+### Why `Scoped` has three answers
+
+Because IPv6 inverts. There is no v6 proxy, so a *carried* app's IPv6 is
+**blocked** and the app retries over IPv4. Publisher prefix lists are
+usually v4-only, and reading "no v6 prefixes" as "not in scope" would
+pass a scoped game's IPv6 to its own game server straight through while
+its IPv4 to the same server went through the tunnel — one account, two
+source addresses, at the same instant. The exact thing `prefixComplete`
+exists to prevent, arriving by the family nobody was looking at.
+`Unscoped` therefore restores whatever the caller was already doing,
+which is "carry" on v4 and "block" on v6. Every uncertainty — missing
+list, unparseable list, over-long list, wrong family — lands there.
+
+### Gaps, stated
+
+* **The WFP per-app IPv6 block does not know about scopes.**
+  `SelectedAppsIpv6Block` blocks `ALE_AUTH_CONNECT_V6` for the whole
+  app path, so a scoped app's out-of-scope IPv6 is blocked by the
+  filter before `handle_ipv6` ever sees it. Not a leak — the app falls
+  back to IPv4 and goes out direct, which is what out-of-scope means —
+  but it does mean the v6 out-of-scope arm mostly fires only when the
+  filter failed to install. Narrowing it would need per-app-per-prefix
+  filters in `ipv6_block.rs`, which was out of scope for this change.
+* **Nothing is scoped today.** No seeded profile is prefix-complete
+  (Blizzard and Riot both ship `destinationCidrs: []`,
+  `prefixComplete: false` on purpose), so `has_scopes()` is false on
+  every machine until a list is finished. The data is the gate.
+* **§5.6 still stands.** The design doc says route mode must not ship
+  before the four `claude/split-tunnel-latency` fixes are merged *and*
+  verified on the rig. This lands the mechanism; it does not discharge
+  that.
+* §5.2 suggested a single `destinations: Option<DestinationFilter>`.
+  This is per-app instead, because two scoped games with different
+  publishers would union into one filter and mis-scope both.
+* §5.5's per-profile `failClosed` is not built. This fails **open** on
+  the new axis throughout, deliberately: a game that keeps working
+  unprotected beats a game that stops.
+
+### Verified
+
+`cargo build -p neoconnect-service` links; `cargo check --workspace
+--all-targets` clean, no warnings from these files; `cargo test
+--workspace` 17/38/**237** pass, 0 failed; `tsc --noEmit` clean;
+`vitest run` **157** passed in 13 files; `pnpm turbo run lint typecheck
+build test --force` 16/16 successful.
+
+**Ten mutations, each caught by the test written for it** — the part
+that says the tests discriminate rather than merely pass:
+
+| mutation | fails |
+|---|---|
+| drop the v4 scope clause | scoped-app carry/leave-alone, out-of-scope cache |
+| drop the v6 scope clause | v6 blocked-in-scope/passed-outside |
+| unknown family reads as out-of-scope | family-coverage, v4-only-scope-vs-IPv6 |
+| `Scope::new` narrows to what parsed | refuses-unless-all-parsed, selection filtering, carried-in-full |
+| drop the range merge | overlapping-prefixes |
+| out-of-scope refused like unattributable | scoped-app carry/leave-alone, out-of-scope cache |
+| **leave-alone cache re-keyed on the port** | **the three existing `flows` leak tests + `a_left_alone_port_does_not_take_a_name_lookup_with_it` + this feature's out-of-scope cache test** |
+| client ignores `prefixComplete` | both `scopesForGame` refusal tests |
+| scope survives app removal | `scopesFor` |
+| `scopeOf` case-sensitive | `scopeOf` |
+
+The seventh is the one to note: re-keying that cache breaks this feature
+and the earlier leak fix *together*, which is the composition claim
+above shown rather than asserted.
+
+**None of this has run against WinDivert, a packet capture or a
+machine.** Unit tests prove the decision logic and nothing else.
+
+### Rig procedure for whoever runs it next
+
+Custom mode on, one selected app, capture **host-side of the guest's
+vNIC** — counters do not count, this file has recorded false passes from
+them before.
+
+1. **Baseline first.** With a scoped app and no scope applied, confirm
+   all of its traffic reaches the node. A run that shows nothing carried
+   has not exercised the feature and proves nothing.
+2. Force a scope on. No catalogue profile is prefix-complete, so either
+   flip `prefixComplete` on a local seed row or hand-write
+   `split-tunnel.json` with a `scopes` entry. The session log header now
+   says which of the two states it is in — grep for `narrowed to
+   specific destinations`, and if it says `carried in full` the scope
+   was dropped somewhere and the rest of the run is meaningless.
+3. **In scope:** traffic to a prefix in the list must have an exit IP
+   matching the node. Exit IP, not a counter — force IPv4, and remember
+   `urllib` cannot speak SOCKS.
+4. **Out of scope:** traffic from the *same app* to an address outside
+   the list must show the real address. Both halves in one run, or the
+   test says nothing about the narrowing.
+5. **Same-socket discrimination.** From one UDP socket, send to an
+   out-of-scope peer and then to an in-scope peer within five seconds.
+   The second must be carried. This is the flow-key composition and it
+   is the one that would have silently regressed under the old cache.
+6. **The leak fixes must still hold.** Re-run the fire-and-forget rig
+   from the 2026-08-24 entry with a scope active: 15 one-shot datagrams
+   from a selected app, expect 0 plaintext at the vNIC **and** non-zero
+   `refused_unattributed`. Both, not either.
+7. **IPv6.** A scoped app's v6 to an in-scope address must be blocked;
+   to an out-of-scope address it should pass — but see the WFP gap
+   above, which will block it first if the filter installed. Check
+   `netsh wfp show filters` before concluding the loop did it.
+8. LAN sanity throughout: mDNS, SSDP, printers, SMB. If any of that
+   breaks, the guard is wrong and the feature is worse than the gap.
+
+Fresh-worktree trap, again: copy `src-tauri/resources/` in **before** the
+first cargo invocation. Doing it in that order this time meant no
+`windivert-sys` build-script cache to delete afterwards.
+
+---
+
+## 2026-08-25 — the three split-tunnel fixes went to a rig with packet captures; two reproduced first, all three hold
+
+**Status:** done — measured, not argued
+**Touches:** nothing in the repo but this file
+**Branch:** `claude/split-tunnel-rig-verification`
+
+Addresses below are redacted per `docs/node-address-hygiene.md`:
+`{germany-1}` is the node's exit address, `{tester-own}` is this
+machine's own public address. The probe destinations are public
+resolvers and are real.
+
+Three changes had landed source-proven only — `72c8978` (leave-alone
+cache keyed on the flow), `945cfad` (unattributable UDP refused), and
+destination scoping on `claude/split-tunnel-destination-scope`. None had
+been read against a capture. All three now have been.
+
+**The discipline that makes the numbers mean anything:** the two leak
+fixes were reproduced on an *unfixed* build first — same guest, same
+probe binary, same capture point, minutes apart. A build that shows zero
+without that is a machine being observed, not a fix being tested.
+
+### How it was measured
+
+Two service binaries, swapped in and out of one 0.9.31 install, each
+hash-checked on disk before its runs:
+
+| build | commit | sha256 (first 16) | size |
+|---|---|---|---|
+| BEFORE | `522299e` (main before both fixes) | `F5ABA49A9865CD28` | 1678336 |
+| AFTER | `704ed44` (scope branch tip; contains both) | `2CBC4112BDAD732A` | 4974080 |
+
+Capture is a VirtualBox `nictrace` on the guest vNIC — **outside the
+service**, so what is counted is what left the machine. Counters are
+reported only as a cross-check, and this session is one more reason why:
+**the unfixed build's own counters read `escaped=0` straight through a
+leak of 25 datagrams.**
+
+### Claim 2 — unattributable UDP is refused. CONFIRMED.
+
+15 datagrams from sockets closed microseconds after the send, from the
+selected app, against a fresh routable destination per burst. In the
+same capture, 15 more from sockets held open — a real QUIC client's
+shape — as the internal control that the tunnel was carrying this app's
+UDP at all.
+
+```
+                              BEFORE (F5ABA49A)      AFTER (2CBC4112)
+control, pre-activation
+  sockets held open                15 / 15 clear        15 / 15 clear
+  sockets closed at once           15 / 15 clear        15 / 15 clear
+after activation + 3s
+  sockets held open                 0 / 15               0 / 15
+  sockets closed at once           13 / 15  <-- LEAK     0 / 15
+later
+  sockets held open                 0 / 15               0 / 15
+  sockets closed at once           12 / 15  <-- LEAK     0 / 15
+
+selected app exit IP           {germany-1}          {germany-1}
+service counter                escaped=0            escaped=0
+                                                    refused_unattributed=12
+```
+
+**13/15 and 12/15 is the 0928 entry's measurement reproduced exactly**,
+and the held-open rows at 0/15 in the *same* capture are what stop it
+being a story about a tunnel that was not up. After the fix both are 0,
+and `refused_unattributed` moves off zero.
+
+Worth stating precisely: 30 closed-socket datagrams were sent after
+activation on the AFTER build and only 12 were refused. The other 18
+were attributed and carried — `image_for_new_connection` now forces a
+rebuild for UDP, so most short-lived sockets *are* found. The refusal
+arm catches only the residue that genuinely has no row. Nothing escaped
+either way.
+
+### Claim 1 — the leave-alone cache is keyed on the flow. CONFIRMED.
+
+The commit's own named failure, staged literally: an **unselected** app
+sends UDP from a port, then a DNS query leaves the **same port** 800ms
+later. Sockets held open throughout, so the owner is always findable —
+that keeps this test off claim 2's mechanism entirely.
+
+The control is the whole test: the identical DNS query from a *fresh*
+socket, in the same phase, on the same build.
+
+```
+                                        BEFORE            AFTER
+DNS from a fresh socket, no tunnel        6 / 6 clear       6 / 6 clear
+DNS from a fresh socket, Custom mode on   0                 0
+DNS from a port that sent 800ms earlier   6 / 6  <-- LEAK   0
+unselected app's ordinary UDP (direct)    6                 6
+```
+
+The wire shows the mechanism directly, one source port doing both:
+
+```
+t+181.631s  10.66.0.4:50872 -> 208.67.222.123:443   (ordinary datagram)
+t+182.390s  10.66.0.4:50872 -> 9.9.9.11:53          (DNS, IN THE CLEAR)
+```
+
+A lookup that `decide` carries through the tunnel whoever makes it, out
+to a resolver the network supplied, because a verdict about a different
+peer 760ms earlier answered first. The fresh-socket row at 0 in the same
+phase proves the rule was active and that only the prior datagram made
+the difference.
+
+The last row matters too: the unselected app's ordinary UDP is still
+direct, 6 in the clear, **on both builds**. The fix did not over-reach
+into traffic that is supposed to leave.
+
+### Claim 3 — destination scoping. CONFIRMED, with one honest gap.
+
+No before/after is possible here and none is claimed: the feature does
+not exist in the earlier build. What is claimed is that each case does
+what it says on the current one, each with a control in the same capture
+that could have come back the wrong way.
+
+Nothing real is prefix-complete, so the scope was synthetic: three
+adjacent addresses, two in scope and one not, because "adjacent but out
+of scope" is what a range-merge bug gets wrong.
+
+```
+scope = [4.2.2.3/32, 4.2.2.5/32]           plaintext leaving the vNIC
+  4.2.2.3   in scope                          0        (carried)
+  4.2.2.4   out of scope, adjacent            8        (direct -- CONTROL)
+  4.2.2.6   out of scope                      8        (direct -- CONTROL)
+  4.2.2.5   in scope                          0        <-- the key row
+```
+
+And by exit IP, which is this project's standard:
+
+```
+no tunnel                                    {tester-own}
+oracle prefixes IN scope                     {germany-1}
+oracle prefixes OUT of scope                 {tester-own}
+scope with one unparseable prefix            {germany-1}   (whole scope dropped)
+no scopes at all                             {germany-1}
+```
+
+**The composition case, which nobody had seen.** A selected app's
+out-of-scope datagram falls through to `record_direct`. Under the old
+port key that would have exempted the port for five seconds *including
+the in-scope destinations* — a game scoped to its own servers would have
+gone out in the clear behind one telemetry packet. Staged as one socket
+sending to an out-of-scope address and then, 800ms later from the same
+source port, to an in-scope one:
+
+```
+t+172.886s  10.66.0.4:51952 -> 4.2.2.6:443   out of scope, in the clear
+   (and 51954, 51956, ... 8 of 8 present)
+            10.66.0.4:51952 -> 4.2.2.5:443   in scope, 0 of 8 on the wire
+```
+
+The out-of-scope leg is present, so the port really did earn a Direct
+verdict; the in-scope leg is absent, so that verdict did not answer for
+it. **The trap `gaming-mode.md` §5.3 warned about is spent.** Its
+counterfactual is not hypothetical — it is claim 1's before-run above,
+the same cache and the same key, leaking on the same rig an hour
+earlier.
+
+#### The gap, stated plainly
+
+**The IPv6 inversion did not occur, but the credit cannot be assigned.**
+A scoped app whose prefix list is v4-only did not put a single IPv6
+packet on the wire (0 of 5 attempts), while the same probe before Custom
+mode put 20 there. But every measurement in this session ran over
+**WireGuard** (below), and `wireguard.exe` arms its own kill-switch —
+and `SelectedAppsIpv6Block` blocks `ALE_AUTH_CONNECT_V6` for the whole
+app path anyway, which the scope branch's author already flagged. The
+failure mode is ruled out; **which filter ruled it out is not
+established.**
+
+The timing is at least consistent with a local block rather than a
+dropped packet: the control failed with `actively refused` after
+~2100ms, the scoped attempts with `WSAEACCES` in 2–10ms.
+
+**`prefixComplete: false` was verified in source, not on a rig, and it
+cannot be otherwise.** The flag never reaches the service: the client
+refuses to *build* a scope for a list the server will not vouch for
+(`canRouteByDestination` → `scopesForGame` returns `[]`). On the wire
+that case is indistinguishable from "no scope sent", which is the last
+row of the exit-IP table above and is carried in full.
+
+### Only WireGuard could be measured, and that is a finding
+
+Every route was tried. Three of four could not activate on this guest,
+all three by missing a **fixed helper timeout**, not by anything to do
+with the tunnel:
+
+```
+reality27  Xray started but its network adapter (neoconnect0) never appeared
+           (ADAPTER_WAIT is 10s, xray.rs:41)
+ikev227    could not create the VPN entry: powershell did not finish within 15s
+ovpn27     connects, but split_tunnel_active never comes true inside 90s
+wg27 / wg  ACTIVATED t+45.7s / t+34.8s, selected app exit IP {germany-1}
+```
+
+The same guest blew `dns::clear()`'s 15s PowerShell budget on **every
+single disconnect**, falling back to the registry each time:
+
+```
+17:49:24 | clear the tunnel DNS rule | PowerShell removal failed
+         (powershell did not finish within 15s), falling back to the registry
+```
+
+The 0928 entry said that fallback "is not going anywhere" after watching
+it blow the budget three times. On a machine this slow it is not a
+fallback, it is the only path that ever runs. That is a slow rig — but a
+customer on a cheap laptop with an antivirus mid-scan is the same
+machine, and three of our four engines are one slow minute away from
+refusing to connect. **Not fixed here, not measured against a real
+customer machine, written down because nothing else records it.**
+
+The redirect loop is engine-independent, so the two leak fixes are
+proven where they live. But they were exercised under one transport, and
+that is the honest scope of these numbers.
+
+### Rig traps, all hit for real this session
+
+- **The RunMRU trap is real and worse than written.** Typing
+  `powershell -ExecutionPolicy Bypass -File Z:/boot2.ps1` into the Run
+  box produced, after autocompletion,
+  `...ecutionPolicy Bypass -File C:/Users/Public/rig-fix6c.ps1` — a
+  stale script from a previous session, selected and one Enter from
+  running. **What works: a `.cmd` shim at a short, space-free name
+  nothing has ever run**, so there is nothing to complete to, plus a
+  screenshot of the box before pressing Enter. Never type a command
+  whose prefix an old entry shares.
+- **Do not use a bare Shift to wake the guest's display.** Five of them
+  is the Sticky Keys shortcut, and its prompt steals the focus of
+  whatever you were typing into. Use Ctrl.
+- **This guest lags input by 30–170 seconds.** Win+R, Start and
+  Ctrl+Alt+Del all appeared to do nothing and all had in fact landed; a
+  later screenshot showed the Start menu, a Run dialog and a security
+  screen stacked up from keys sent minutes apart. Screenshot after every
+  step and wait far longer than feels sane. A guest that looks dead is
+  worth checking with `showvminfo | GuestAdditionsRunLevel` before
+  touching anything.
+- **`nictrace` can go quiet mid-run.** One capture recorded 14922
+  packets in its second minute and then essentially nothing for the next
+  24 — no error anywhere, a 28 MB file, and every probe destination
+  reading 0. That reads *exactly* like a fix working. It was caught only
+  because a row expected to be `> 0` was also 0. **Bucket a capture by
+  minute before believing any zero in it**, and keep runs short.
+- **Design a capture test so it does not need phase markers.** The
+  re-run gave every probe destination exactly one use in the whole run,
+  so the total count to that address is the answer. The first attempt
+  lost four rows to `INCONCLUSIVE` when the markers went missing with
+  the capture.
+- **A bash heredoc in this harness silently eats one backslash of a
+  leading UNC path.** `. "\\VBOXSVR\vmx\lib.ps1"` arrived as
+  `. "\VBOXSVR\..."` and the script died on line 16. Write PowerShell
+  files with a real file-writing tool, or verify with `cat -A`.
+- The elevated runner registers itself as a logon task, so a guest that
+  has to be reset comes back with the job channel already up. Worth
+  keeping — it is the difference between one Win+R fight and one per
+  reboot.
+
+### What is still not proven
+
+- **Every number here is WireGuard.** The other three engines could not
+  be brought up on this guest at all.
+- **Which filter stops a scoped app's IPv6** — the per-app WFP block, or
+  WireGuard's own kill-switch. Needs a rig where a non-WireGuard route
+  activates.
+- **The exhaustion path of the leave-alone cache** — the
+  out-of-synthetic-ports fail-open, the third call site `72c8978`
+  changed. It needs the synthetic port range full, and the 0824 entry's
+  note that it "has not been thought through as a rig procedure yet"
+  still stands.
+- **Scoping under a real prefix-complete profile.** The scope here was
+  synthetic because no seeded profile is prefix-complete. Nothing about
+  a publisher's actual list — its size, its churn, whether §5.4's
+  refusal fires in practice — has been exercised.
+- The unattributable-UDP refusal has not been measured **under load**,
+  which `redirect.rs` asks for at the point it accepts the extra table
+  walks.
+
+## 2026-08-25 — Destination scoping has no data, and cannot get any
+
+**Status:** research landed on `claude/gaming-prefix-completeness`, not
+merged. `prefixComplete` stays `false` on all three profiles;
+`SplitTunnelConfig.scopes` stays inert. **Nothing live was touched** — no
+node, no route, no release.
+**Touches:** `docs/research/gaming-destination-prefixes.md` (new),
+`apps/backend/prisma/game-profiles.ts` (comments only, no data change),
+`apps/backend/src/modules/gaming/game-catalogue.spec.ts` (new).
+
+### The answer is no, and it is not a "not yet"
+
+The open item was "`destinationCidrs` reaches the client and has no
+consumer". Scoping has since been built, so the remaining gate was data.
+There is no data to be had. **A publisher-ASN prefix list cannot be
+complete for any game in the catalogue**, and the reason generalises past
+these three.
+
+Publishers keep their **game servers** on their own ASN and their
+**control plane** — login, entitlements, client config, patch/version
+negotiation, session brokering — plus **voice** somewhere else. So a
+publisher-ASN filter carries the half that does not need tunnelling and
+misses the half that does. Worse: the control plane is where the
+*account* lives, so the publisher-ASN boundary is the maximally wrong
+split. It manufactures the two-source-IP signature the flag exists to
+prevent, rather than merely failing to prevent it.
+
+### Blizzard: four disqualifiers, and the first one is the profile's own critical host
+
+`*.actual.battle.net` — the port-1119 Battle.net service connection, the
+one the seed file already singles out in `excludeHostnames` — is on
+**Google Cloud AS396982**, not AS57976. That is the connection carrying
+WoW's realm addresses to the client as literals. An AS57976 filter would
+route the realm connection and not the connection that brokered it.
+
+Then: login (`oauth.battle.net`) is AWS; in-game **voice is Vivox, i.e.
+Unity/Multiplay AS35028**, which breaks *silently* while the game still
+connects; and `eu.actual.battle.net` answered from **8 different Google
+/16s within minutes**, so there is nothing stable to enumerate anyway.
+Two of twenty resolvable hostnames are in AS57976, and both are things
+you would leave direct — a CDN and a telemetry sink.
+
+Checked so nobody re-checks it: Blizzard's other two ASNs (AS32163,
+AS55497) announce **zero** prefixes. AS57976 is the whole in-house
+footprint.
+
+### Riot: the lead from the 2026-08-25 entry was right, and stronger than stated
+
+It was an inference; it is now measured. **One** of 22 Riot hostnames is
+in AS6507 (`prod.euw1.lol.riotgames.com`). Login, entitlements, client
+config and the whole VALORANT control plane carry explicit
+`.cdn.cloudflare.net` CNAMEs into AS13335 — proof of Cloudflare
+*proxying*, not merely Cloudflare-hosted space. The carried-forward
+consequence is unchanged: a Riot profile's missing half is exit-IP
+reputation, not routing.
+
+### The control that makes it a pattern rather than three coincidences
+
+Ran Valve deliberately as the best possible case — Valve owns AS32590 and
+its own content network, 45 IPv4 prefixes. **Zero of twelve** Steam
+hostnames resolved into it, `login.steampowered.com` included. Three
+publishers, three own-ASNs, three times the account surface lives
+elsewhere.
+
+### Gotchas worth the next person's time
+
+- **`cdn.cloudflare.steamstatic.com` resolves to Akamai.** Names are not
+  evidence. Resolve everything, including things whose name tells you the
+  answer.
+- **Blizzard publishes its CDN list machine-readably** at
+  `http://us.patch.battle.net:1119/<product>/cdns` — first-party and one
+  HTTP request. It shows `level3.blizzard.com` (Akamai, despite the name)
+  as the *primary* EU path and the AS57976 CDN as `fallback=1`.
+- **Blizzard's current firewall article contains no hostnames, addresses
+  or ports at all.** The only current first-party port list is a 2020
+  forum post by a verified CS agent who says the information was removed
+  from the article. Absence of documentation is not absence of endpoints.
+- **`git checkout <path>` to undo a test mutation discarded the real
+  edits with it.** Copy the file aside first; a mutation check is worth
+  running, but not at the cost of the work.
+
+### What this did not establish
+
+Whether WoW's realm/world sockets (TCP 3724) are wholly inside AS57976.
+It cannot be established from outside a live session — realm addresses
+arrive as literals, so no resolver sees them and Blizzard documents none.
+One address from the earlier sweep (`37.244.62.99`) is in AS57976. That
+gap does not weaken the verdict, since four disqualifiers already stand,
+but it is the measurement anyone reviving this would have to take, and it
+needs a packet capture from a real WoW login.
+
+All lookups were made **from Germany**, across three independent
+resolvers. For the decisive finding that is not a limitation: the design
+doc's §2.2 sweep already recorded the same hosts from four Iranian
+networks, and mapping those recorded addresses to their origin AS puts
+them in the same third-party space — `eu.actual.battle.net` even returned
+the identical address to an Iranian probe and to this machine.
+
+### The guard, and what it cannot do
+
+`game-catalogue.spec.ts` asserts the seed's invariants: a profile
+claiming completeness must carry a parseable non-empty list, both keys
+must be refreshed together on re-seed, and today's three must not claim
+completeness. Verified by mutation — flipping `wow` to `true` fails two
+tests, and adding a plausible subset with host bits set
+(`137.221.64.1/24`) fails three.
+
+It **cannot** detect that a once-correct list has gone stale. Only
+re-measurement does that, and §6 of the research doc is the procedure —
+including the shortcut that saves most of the hour: resolve the *login*
+hostname first, because it has been on third-party edge infrastructure
+for every publisher measured.
+
+**Do not weaken `canRouteByDestination` to make any of this usable.** It
+is refusing exactly what it should refuse.
+
+## 2026-08-25 — Game catalogue at scale: 1,480 entries, and the sources that did not survive checking
+
+Branch `claude/game-catalogue-scale`. The ask was ExitLag-scale coverage.
+What shipped is 1,480 rows whose executable names come from Valve's and
+publishers' own launch definitions — plus a validator that fails the seed
+on the class of entry that would look like support and route nothing.
+
+### The source decision, because it is the whole thing
+
+**PCGamingWiki is unusable and it is worth writing down so nobody spends
+the afternoon again.** Three independent reasons: its content licence is
+CC BY-NC-SA 3.0 and the **NonCommercial** clause does not survive contact
+with a paid product (ShareAlike would reach anything derived from it
+besides); executable names are **not a structured field there at all** —
+its cargo tables cover config and save-game paths, `.exe` names appear
+only incidentally in article prose, and its VALORANT article contains
+zero; and its `cargoquery` endpoint stopped serving anonymous requests on
+2026-08-23 and now wants an attributable bot account.
+
+What works instead: **Steam's `config.launch[].executable`**, via the
+public `api.steamcmd.net` mirror of `appinfo`. That is not a description
+of a game, it is the command Valve's own client runs — first-party, and
+anyone can re-run `prisma/catalogue/tools/build-steam-tier.mjs` and diff
+it. Responses cache under `tools/.appinfo-cache/` (gitignored), so a
+re-run after a filter change costs no network.
+
+And **Blizzard has an unauthenticated product-config API** that defines
+every game's launch binary: `patch.battle.net:1119/{product}/versions` →
+ProductConfig hash → `cdn.blizzard.com/tpr/configs/data/...`, returning
+`binaries.game.relative_path` and `shortcut_target_path`. Every Blizzard
+and Battle.net-distributed Call of Duty row came from there. It is the
+highest-grade source found anywhere in this work.
+
+### Ranking had a hole that lost Dota 2
+
+First cut ranked by SteamSpy owner estimates alone. That silently dropped
+**Dota 2, Rainbow Six Siege, The Finals, Marvel Rivals and Delta Force** —
+SteamSpy's `all` pages simply do not contain them — and it opened the
+picker on Half-Life and Counter-Strike 1.6, because lifetime owners is not
+the same question as what people play. Fixed by unioning **Valve's own
+`GetMostPlayedGames`** first, then SteamSpy's two-week list, then owners.
+
+Second filter bug, same shape: dropping every `ownsdlc`-gated launch entry
+lost **Rainbow Six Siege entirely**, because all eight of its entries are
+gated by *edition* DLC rather than being editor tools. The rule is now
+relative — gated entries are dropped only if an ungated one exists.
+
+### The rule with the widest blast radius
+
+The client resolves a catalogue name against every **running** process and
+adds that process's real path. So a name shared with software that is not
+the game **routes that software**. `javaw.exe` for Minecraft Java puts a
+customer's employer VPN client, IDE and build tools on the tunnel, with
+the UI reporting success. `Update.exe` is the same failure with a wider
+net — Squirrel ships it with every Electron app.
+
+`prisma/catalogue/generic-names.json` is an 86-name denylist and the
+validator **fails the seed** on one, not warns. It caught one of my own
+entries mid-work, which is the argument for having it.
+
+Two things worth remembering about the line it draws:
+
+- **First-party provenance does not make a name specific.** Wargaming's
+  own Defender article names `cef_browser_process.exe`; it is still every
+  CEF-embedding app on the machine.
+- Names shared between **games** are fine — `hl2.exe` really is the
+  process each Source game runs under. The line is "shared with something
+  that is not a game".
+
+**`Agent.exe` in the pre-existing `wow` row is on the wrong side of that
+line** and is left alone rather than regressed. Same for
+`UnrealCEFSubProcess.exe` in the `valorant` row. Both are generic; both
+predate this work; somebody should decide about them on purpose.
+
+### "First-party" grades the source, not the truth
+
+Amazon's own support article names `LostArkLauncher.exe`, which appears in
+**no observed install** — their articles are templated across titles. So
+where a publisher page and an observed install disagree, **ship both**: a
+name that does not exist reports as not-found and costs nothing, whereas
+dropping the real one leaves the game outside the tunnel with nothing
+said. Same precedent as League's two LCU renderer spellings. Recorded as a
+rule in `curated.json` rather than left to case-by-case judgement.
+
+Related: BattlEye's `<Game>_BE.exe` convention is a **hint, never an
+inference** — their FAQ says "often named", and Destiny 2 breaks it with
+`destiny2launcher.exe`. Do not generate `_BE` names. ARK: Survival
+Ascended keeps its pair only because Valve's launch config observes both.
+
+Two earlier research passes disagreed about whether BattlEye's FAQ names
+`BEService.exe`. It was read directly: **it does**, in both the Common
+Files path and the per-game directory. It ships as its own row rather than
+repeated across forty titles, because that is what it is — one shared
+Windows service.
+
+### Not shipped, deliberately
+
+- **Every Android emulator, and therefore Free Fire, PUBG Mobile, CODM,
+  Mobile Legends, Clash of Clans and Clash Royale.** These have no PC
+  executable; they run inside an emulator, and a process-name tunnel
+  routes the whole emulator or nothing. Worse, the VirtualBox-derived
+  emulators default to user-mode NAT (attributable) but expose a
+  **bridged-adapter toggle** — NetEase documents one in MuMu, LDPlayer and
+  Nox have equivalents — and bridged mode goes through a kernel NDIS
+  lightweight filter where packets leave at the miniport with **no owning
+  user-mode PID**. One settings flip and the game silently leaves the
+  tunnel while the app says connected. Free Fire is the most-blocked title
+  in the OONI data (76%), so this omission is the expensive one.
+- **Every EA title** — Apex Legends, Battlefield, The Sims 4, EA SPORTS
+  FC. EA publishes no per-game executable name anywhere; their guidance is
+  literally to find the `.exe` yourself. Same for **every Ubisoft title
+  except Rainbow Six**, which was recovered from Valve's data.
+- Apex, Elden Ring and Lost Ark's launch configs contain **only Easy
+  Anti-Cheat's `start_protected_game.exe`**. Lost Ark is filled in from
+  `LOSTARK.exe` (the LOA Logs evidence in the research doc); the other two
+  are gaps. The generator lists 96 such titles under `needsCuration` in
+  `steam-tier.json`.
+- **HoYoverse anti-cheat is kernel drivers** (`mhyprot2.sys`,
+  `HoYoKProtect.sys`) — unmatchable by a process-name engine. Activision
+  publishes no filename for Ricochet at all. None invented.
+
+### For whoever measures next
+
+**The emulator question is settled by one rig session and nothing less.**
+Per emulator, in **both** NAT and bridged mode: which PID owns the guest's
+sockets (`netstat -bno` *and* our own owner-table walk), plus a **packet
+capture** — this repo's own history says counters and "no error was
+thrown" produce false passes. Then: can the client detect bridged mode at
+all? If emulators ever ship, they need a **bridged-mode guard**, not just
+the right exe name.
+
+Vendor-named candidates to test, kept so the research is not lost:
+`HD-Player.exe` and `Bluestacks.exe`; LDPlayer's `Ld9BoxHeadless.exe` /
+`LdVBoxHeadless.exe` / `LdBoxHeadless.exe`; NetEase's `MuMuVMMSVC.exe`;
+Google Play Games' `crosvm.exe`. GameLoop installs under
+**`TxGameAssistant`**, not "GameLoop" — renamed product, unrenamed paths.
+`HD-Frontend.exe`, `HD-Agent.exe` and `NoxVMSVC.exe` have **no source** —
+drop them.
+
+### Payload
+
+`/customer/gaming-profile` now serialises **374 KB raw, 52 KB gzipped**,
+measured over a real HTTP round trip in
+`game-catalogue-delivery.spec.ts` — which also pins that `processNames`
+survives the `select`, since that field silently vanishing is a bug this
+endpoint has already had once.
+
+**Nothing in this repo gzips it.** There is no compression middleware in
+`main.ts` and no nginx config in the tree, so unless the reverse proxy on
+the box is doing it, 374 KB is what ships — on links that MCI throttles
+below 1 Mbps. Two of the three components that fetch it (`CustomModeCard`,
+`GamingModeCard`) mount together on Settings, so it was being pulled
+twice back to back; `getGamingProfile` now shares one in-flight request
+and caches 30s. **The compression question is still open and is the
+cheapest remaining win.** After that, a slim list endpoint (slug, name,
+publisher) with process names fetched per selected game would cut the
+default payload by roughly an order of magnitude.
+
+### Unverified
+
+Not one entry has been tested against a running game. A row means "we will
+route these executables if they are running" and nothing more, and the UI
+must not be allowed to imply otherwise. `cargo check --workspace
+--all-targets` is clean and all 16 turbo tasks pass (455 backend tests,
+158 desktop) — that means it compiles and the data is well-formed, which
+is not the same claim.
+
+---
+
+## 2026-08-25 — Ban safety is now monitored, and the CT exposure is worse than recorded
+
+**Status:** done, but one item needs an owner decision
+**Touches:** `scripts/**`, `docs/design/ban-safety.md`, `README.md`, `ci.yml`
+**Branch:** `claude/ban-safety-monitor`
+
+Three things landed. What matters for whoever picks this up:
+
+**The prefix gate has teeth now.** `prefixComplete` existed as prose in
+four files — schema default, the API's `?? false`, the seeded profiles,
+and `canRouteByDestination` in the client — and nothing would have gone
+red if any one of them changed. `scripts/check-prefix-completeness.sh`
+runs in CI. All four invariants were mutated and confirmed to fail, then
+reverted. If you are editing `game-profiles.ts` or `game-apps.ts` and
+this check goes red, it is not being fussy: a partial prefix list splits
+WoW's Home and World across two source addresses, which is the
+account-sharing signature.
+
+**The reputation monitor is `scripts/check-exit-reputation.py`.** Run it
+monthly and after every node install. It needs the panel DB, which this
+session could not reach — SSH to the panel host is publickey-denied from
+here — so it was proven against a node list assembled from public CT +
+DNS instead. Numbers reproduce the research file exactly. Exit 1 was
+verified against a live Mullvad relay, not asserted.
+
+**Three findings that are not in any existing doc:**
+
+1. **The CT exposure spans two domains.** `neoxify.com` carries historical
+   node names as well as `neoxify.site`. `docs/node-enumerability-
+   remediation.md` only accounts for the `.site` ones.
+2. **A wildcard cert exists and the nodes are not using it.** Per-node
+   single-name certificates were still being issued *weeks after* the
+   wildcard was. So every ~90-day renewal re-publishes the fleet's names,
+   and §5 of that runbook is genuinely unexecuted at the node level.
+3. **tr1 is not where the research put it.** ipapi.is says AS154177
+   LightNode; ip-api.com says AS2914 NTT America, org "Light Node
+   Limited", `hosting: false`. Sub-allocated space. It is the only exit in
+   the fleet that a feed does not call hosting — the best ASN-type posture
+   we have.
+
+**The whole fleet fell out in about ninety seconds** from two public APIs,
+no account, no probing, nothing touched. That is the enumerability
+mechanism the research measured as *causing* the `is_vpn` label, fully in
+place. The fleet has just not been scraped yet.
+
+**Needs the owner:** `docs/node-enumerability-remediation.md` is still
+unexecuted. It cannot be picked up unilaterally — its central option puts
+the panel's private key on six machines including the Iran relay, and its
+stronger option needs a client release that the users who most need the
+censorship fallback are least able to install.
+
+**Gotcha, and it cost nothing only because the tooling caught it:** I used
+a live node address as the example in a docstring explaining *why node
+addresses must not be committed*. The script's own redaction scan found
+it before the commit. Run a four-form scan — plain, reversed, and both
+dashed spellings — over anything you are about to commit; two of those
+forms survive a plain grep for the address.
+
+**Deliberately not built:** route selection does not avoid the Linode
+exits. The one publisher-vs-provider case that exists anywhere is
+Blizzard against a Linode range in 2019, reactive, resolved within hours.
+No primary source describes a standing hosting-ASN blocklist at any
+publisher. Building a blocker on that would be building on nothing, and
+removing an exit is dropping capability for censored users to solve a
+gaming problem. The design is written down in `docs/design/ban-safety.md`
+for when evidence hardens — including that it must key on the route's
+**exit** node, not its entry, because a relayed route shows the publisher
+the exit's address and `listAvailableForPlan` deliberately never exposes
+it.
+
+---
+
+## 2026-08-25 — Gaming Mode finished: five branches on main, and what "finished" turned out to mean
+
+**Status:** done, on `main`
+**Touches:** `apps/backend/**`, `apps/desktop-windows/src/**` (no `service/src/engines/**`, no mobile)
+
+Merged in order: `split-tunnel-destination-scope`,
+`split-tunnel-rig-verification`, `gaming-prefix-completeness`,
+`game-catalogue-scale`, `ban-safety-monitor`.
+
+**The merge hazard is real and it bit.** Every branch compiled and
+tested green on its own. The combination did not, and `tsc` could not
+see it: `game-catalogue-prefixes.spec.ts` stubs Prisma with only
+`gameProfile.upsert`, because when it was written the seed was three
+hand-written rows. `game-catalogue-scale` then added `seedCatalogue`,
+which upserts 1,480 rows inside `prisma.$transaction`. Ten tests died on
+"prisma.$transaction is not a function". If you merge branches that
+touch one seam here, run the suite on the *merged* tree — a green branch
+proves nothing about the combination.
+
+Three non-journal conflicts, all in files two branches had appended to.
+`game-apps.ts` and `game-apps.test.ts` collided only on the trailing
+brace of a function each branch had added at the end: kept both sides,
+added the missing `}`. `game-catalogue.spec.ts` was an add/add of two
+genuinely different suites under one filename — split into
+`game-catalogue.spec.ts` (guards on the shipped catalogue) and
+`game-catalogue-prefixes.spec.ts` (the seed's prefixComplete invariant)
+rather than concatenated, because their helpers and imports are disjoint
+and one file would have buried that.
+
+**`Agent.exe` was the find.** It shipped in the hand-written `wow` row.
+It is the Blizzard Update Agent, and it is also what a great deal of
+enterprise monitoring, backup and MDM software runs under — and the
+client adds the full path of whatever is running under a matched name.
+A customer picking World of Warcraft on a work laptop would have put
+their employer's agent on the tunnel, silently, with the UI reporting
+success. `UnrealCEFSubProcess.exe` in the `valorant` row is the same
+class: it names Unreal Engine's browser helper, so it identifies an
+engine rather than a game.
+
+Neither could be rescued by path-qualifying. The validator rejects a
+path where a bare filename belongs, and `curatedNames()` strips a path
+back to its basename before matching, so a full path would be reduced to
+the generic name again. Both dropped, both added to the denylist.
+
+**Why they survived the denylist landing, which is the part worth
+remembering:** `validateCatalogue` refuses a reserved slug, and the three
+hand-written rows own all three reserved slugs — so they were the only
+rows that could never be passed through the list built to catch them.
+The executable-name rules are now `validateProcessNames()`, and the seed
+runs the hand-written rows through it too. A gate that structurally
+cannot see the oldest data is not a gate.
+
+**Nothing compressed the API.** 374 KB of catalogue JSON, measured on
+the wire at **373,954 B identity -> 51,742 B gzip, 7.2x**, going
+uncompressed to customers on the networks least able to pay for it. No
+middleware in `main.ts`, and no nginx config anywhere in the tree — the
+proxy is configured on the host by hand, which is why a rule written
+there would not survive a rebuild and could not be reviewed. It is in
+the app now. It also helps `GET /gaming/profiles` (an unpaginated
+superset of the customer payload), `GET /customer/protocol-users`
+(repeated OpenVPN PEM blobs, which gzip collapses) and the five
+inline-CSS invoice documents. The brand PNGs are declined by mime-db,
+and there is no SSE, no streaming and no hand-set `Content-Length`
+anywhere in the backend for it to break.
+
+**Decision — the DNS half is a DEAD BRANCH, kept and labelled, not
+removed.** Recorded here because a future session will otherwise pick it
+up as a loose end, which is the thing the label exists to stop.
+
+Two separate facts, and keeping them apart matters. DNS steering cannot
+reach a game's own servers *by construction* — a game handed its server
+as a literal `IP:port` never performs a lookup a resolver could answer.
+Separately, the node side is not being built. **The second is what makes
+the code dead, not the first**, because the first does not kill the
+mechanism: DNS + SNI steering would still work for the hostname-based
+launcher/login/store tier, which is exactly what the `wow` row's eleven
+measured hostnames are for, and reaching that tier is what Gaming Mode
+is *for* now that it is understood as an access product rather than a
+latency one. The premise is unbuilt, not wrong.
+
+Kept rather than deleted because deleting means dropping
+`GamingResolver` and `GamingResolverToken` — a destructive migration
+against a live database with beta users on it, to remove one indexed
+query on a path that already returns early. **No Postgres was reachable
+in this session** (Docker Desktop's engine was hung from an earlier
+agent), so that migration could not be exercised, and an untested
+destructive migration is a worse thing to put on main than a clearly
+labelled dormant branch. The reasoning and the revival conditions are in
+`gaming.module.ts`; `gaming.service.ts` points at it from the return
+site so it is found without opening the module.
+
+**Search did not hold up at 1,480, and only the real data showed it.**
+Typing `cs` did not rank Counter-Strike badly — it returned it **not at
+all**. `cs` is not a prefix of "counter strike 2", not a prefix of
+either of its words, and not a substring of "counterstrike2", so the
+game scored in no band and was dropped. `cod` put Codename CURE above
+Call of Duty; `gta` returned nothing for Grand Theft Auto V. An empty
+result tells the customer their game is not supported, which is the one
+conclusion this picker must never produce by accident. There is an
+acronym band now, below the exact-prefix band so CS2D still wins `cs`
+honestly, and the ranking tests read the real catalogue from the
+backend's data files — the six-game fixture is what missed this.
+
+**Confidence grades: deliberately NOT surfaced per row.** The catalogue
+carries first-party / corroborated / unverified, and they reach the
+database in `notes`, which never travels to a client. Marking the single
+unverified row would have implied the other 1,479 are verified, and they
+are not. Provenance of a *name* is not evidence that routing the game
+works, and **nothing in this catalogue has ever been tested against a
+running install**. So the honest statement is global and it sits on the
+picker at the moment somebody chooses: each entry lists the programs
+Neoxify would route while they are running, and none has been tested
+against a running game.
+
+**"yet" came back.** It was deleted from `gaming.noResolver` earlier the
+same day with a comment forbidding its return, and it was still sitting
+in `customGameWholeApp`, `customGameEmpty` and `listEmpty` doing
+identical work — implying a complete server address list was coming for
+games that were *measured* not to be able to have one. A test now pins
+the five capability keys where the word is a promise. "No conversations
+yet" is untouched: that empty state genuinely fills.
+
+**Two Persian strings said something different from their English.**
+`gaming.ipUnchanged` — the anti-lie the whole feature hangs on — read as
+"the services are obtained from Neoxify's server", which says we supply
+the services rather than that we reach them from our address. And
+`accountRiskBody` narrowed "your location" to «کشور»: a player who named
+their city, ISP or timezone would have complied with the Persian and
+violated the English, in the string about the highest-severity way an
+account is lost. Register was already clean throughout — no «تو»
+anywhere, no informal endings.
+
+**The card could render nothing at all.** With the catalogue loaded, the
+mode available and no game redirectable, every branch in
+`GamingModeCard` was false and the customer got a card with no button
+and no reason. That state has a string now.
+
+**Open, and deliberately not done here:**
+
+- Latin `VPN` appears in eleven split-tunnel strings where the mode
+  switch says «وی‌پی‌ان». A real inconsistency, but it reaches well
+  beyond gaming and wants one pass that can take all of it.
+- `GET /gaming/profiles` (admin) has no `where: { isActive }` and no
+  `take`, so it returns every column of every catalogue row — a superset
+  of the 374 KB customer payload, on a route the panel calls on page
+  load. Compressed now, still unpaginated.
+- Across the backend: 66 `findMany` calls and 2 `take` clauses.
+- The seed's new hand-written-row validation was proven by mutation, not
+  by a real seed run. No database was reachable to run one.
+
+**Not proven, and it cannot be from here:** no entry in this catalogue
+has been checked against a running game. An entry means "we will route
+these executables if they are running", and the UI now says exactly that
+in both languages.
+
+---
+
 ## 2026-08-26 — the engine activation timeouts: what the budgets were actually bounding
 
 **Status:** done — three confirmed against exit IPs, one refuted

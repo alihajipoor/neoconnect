@@ -12,11 +12,14 @@ import {
   MAX_APPS,
   pushSplitTunnel,
   saveSplitTunnel,
+  scopeOf,
+  scopesFor,
+  type AppScope,
   type SplitTunnelMode,
   type SplitTunnelSettings,
 } from "../lib/split-tunnel";
 import { getGamingProfile, type GameProfileSummary } from "../lib/customer";
-import { curatedNames, hasCuratedApps, resolveGameApps } from "../lib/game-apps";
+import { curatedNames, hasCuratedApps, resolveGameApps, scopesForGame } from "../lib/game-apps";
 import { Button, Card } from "../components/ui";
 
 /** Custom mode: pick the apps that go through the VPN, leave the rest
@@ -83,7 +86,7 @@ export function CustomModeCard() {
    * one that happened to be listed routes half of it -- which looks
    * exactly like the feature not working. The file picker passes a
    * single path; the app picker passes the whole group. */
-  async function addPaths(picked: string[]) {
+  async function addPaths(picked: string[], gameScopes: AppScope[] = []) {
     if (!settings) return;
     // Compared case-insensitively because Windows paths are, and the
     // picker's casing does not always match what a running process
@@ -98,7 +101,22 @@ export function CustomModeCard() {
       setNotice(t("settings.customTooMany", { max: MAX_APPS }));
       return false;
     }
-    await apply({ ...settings, apps: [...settings.apps, ...fresh] });
+    const apps = [...settings.apps, ...fresh];
+    // A scope is attached to each newly added program, never to one
+    // already on the list. Someone who added VALORANT by hand and then
+    // adds it again from the catalogue keeps the whole-application
+    // routing they already had: narrowing a selection the customer
+    // made under different terms, without saying so, is the kind of
+    // quiet change this app does not make.
+    // Only for programs that were actually added. `scopesForGame`
+    // built one per resolved path, and `fresh` is the subset that was
+    // not already on the list.
+    const chosen = new Set(fresh.map((p) => p.toLowerCase()));
+    const scopes = [
+      ...settings.scopes,
+      ...gameScopes.filter((s) => chosen.has(s.app.toLowerCase())),
+    ];
+    await apply({ ...settings, apps, scopes: scopesFor(apps, scopes) });
     return true;
   }
 
@@ -131,7 +149,26 @@ export function CustomModeCard() {
       setNotice(t("settings.customGameNone", { game: game.displayName }));
       return;
     }
-    const added = await addPaths(resolved.paths);
+    // The one gate on destination scoping, and the only place this
+    // client decides to narrow anything.
+    //
+    // `canRouteByDestination` is false unless the server states its
+    // prefix list covers the publisher's whole announced space. A
+    // partial list would route one of a game's simultaneous
+    // connections and not the other -- World of Warcraft holds Home
+    // and World open together -- presenting one account from two
+    // source addresses at the same instant, which is the
+    // account-sharing signature that gets people banned. So a game
+    // whose list is incomplete is added exactly as it always was, with
+    // every one of its programs carried in full.
+    //
+    // Note what this means today: no seeded profile is
+    // prefix-complete, so this branch does not fire for any game
+    // currently in the catalogue. That is deliberate -- the data is
+    // the gate, and the code is ready for the day a list is finished.
+    const gameScopes = scopesForGame(game, resolved.paths);
+    const scoped = gameScopes.length > 0;
+    const added = await addPaths(resolved.paths, gameScopes);
     // A refusal above already said why -- the cap, or nothing new. It
     // must not be followed by a sentence claiming a count was added.
     if (!added) return;
@@ -145,6 +182,15 @@ export function CustomModeCard() {
     if (resolved.missing.length > 0) {
       parts.push(t("settings.customGameMissing", { names: resolved.missing.join(", ") }));
     }
+    // Said at the moment it becomes true, not only on the row. Which
+    // of a game's traffic is carried is the whole difference this
+    // makes, and a customer who is told "added 3 programs" and nothing
+    // else has been told the smaller half of what happened.
+    parts.push(
+      scoped
+        ? t("settings.customGameScoped", { game: game.displayName })
+        : t("settings.customGameWholeApp"),
+    );
     setNotice(parts.join(" "));
   }
 
@@ -154,7 +200,7 @@ export function CustomModeCard() {
     const picked = await open({
       multiple: false,
       directory: false,
-      filters: [{ name: "Programs", extensions: ["exe"] }],
+      filters: [{ name: t("settings.customFileFilter"), extensions: ["exe"] }],
     });
     if (typeof picked !== "string") return;
     await addPaths([picked]);
@@ -291,6 +337,19 @@ export function CustomModeCard() {
                           ? t("settings.customAppBypasses")
                           : t("settings.customAppUsesVpn")}
                       </span>
+                      {/* A second badge, and only when it is true. "Uses
+                          VPN" is now two different promises -- all of
+                          this program's traffic, or only the part going
+                          to its game servers -- and a customer who
+                          checks their IP in the game's launcher while
+                          only the game servers are carried would
+                          otherwise conclude the feature is broken. It
+                          is the same reason the badge beside it exists. */}
+                      {scopeOf(settings, path) ? (
+                        <span className="shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                          {t("settings.customAppScoped")}
+                        </span>
+                      ) : null}
                     </div>
                     {/* The full path is what actually gets matched, so
                         it is shown rather than hidden -- two games can
@@ -298,13 +357,25 @@ export function CustomModeCard() {
                     <p className="truncate text-[10px] text-muted-foreground" dir="ltr">
                       {path}
                     </p>
+                    {scopeOf(settings, path) ? (
+                      <p className="text-[10px] text-muted-foreground">
+                        {t("settings.customAppScopedHint")}
+                      </p>
+                    ) : null}
                   </div>
                   <button
                     type="button"
                     aria-label={`${t("settings.customRemove")} ${appName(path)}`}
-                    onClick={() =>
-                      void apply({ ...settings, apps: settings.apps.filter((a) => a !== path) })
-                    }
+                    onClick={() => {
+                      // The scope goes with the app. Left behind it is
+                      // inert -- the service drops a scope naming an
+                      // app it was not given -- but it would come back
+                      // to life if the customer re-added that program
+                      // by hand later, silently narrowing a selection
+                      // they made expecting the ordinary behaviour.
+                      const apps = settings.apps.filter((a) => a !== path);
+                      void apply({ ...settings, apps, scopes: scopesFor(apps, settings.scopes) });
+                    }}
                     className="press flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
                   >
                     <X className="size-3.5" />

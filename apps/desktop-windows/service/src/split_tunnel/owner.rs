@@ -38,7 +38,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStrExt;
 use std::sync::{Arc, RwLock};
 
-use neoconnect_ipc::SplitTunnelMode;
+use neoconnect_ipc::{SplitTunnelMode, MAX_SCOPE_PREFIXES};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
@@ -124,11 +124,61 @@ pub struct Selection {
     /// path and the answer must not depend on a second lookup somewhere
     /// else that could disagree with it.
     mode: SplitTunnelMode,
+    /// Lowercased path -> where that application's traffic is carried.
+    ///
+    /// Sparse on purpose. An application absent from here is not
+    /// scoped, which is the behaviour this feature has always had, and
+    /// it is absent for every reason there is: the app sent no list,
+    /// the catalogue would not vouch for the list it had, the list did
+    /// not parse, or the mode is one where a scope has no meaning. All
+    /// four failures land on the same safe answer without a caller
+    /// having to remember which is which.
+    scopes: HashMap<String, Scope>,
 }
 
 impl Selection {
     pub fn new<I: IntoIterator<Item = String>>(paths: I, mode: SplitTunnelMode) -> Self {
-        Self { paths: paths.into_iter().map(|p| p.to_lowercase()).collect(), mode }
+        Self::with_scopes(paths, mode, Vec::new())
+    }
+
+    /// The same selection, plus the destinations some of those
+    /// applications are narrowed to.
+    ///
+    /// Everything that could make a scope wrong is filtered out here,
+    /// once, so that the hot path has nothing left to check:
+    ///
+    /// * **Not `OnlySelected`, no scopes at all.** A scope says "carry
+    ///   only this application's traffic to here". Under `AllExcept`
+    ///   the named applications are the ones *not* carried, so there is
+    ///   nothing to narrow and any reading of a scope there would be an
+    ///   invention. Refused rather than guessed at -- and note this is
+    ///   belt as well as braces, since `should_tunnel` never returns
+    ///   true for a named app in that mode anyway.
+    /// * **Scopes naming an application that was not selected are
+    ///   dropped.** They cannot describe traffic, so they can only
+    ///   mislead a later reader.
+    /// * **A scope that will not fully parse is dropped**, by
+    ///   [`Scope::new`] returning `None`. Never narrowed to the part
+    ///   that did parse.
+    pub fn with_scopes<I, S>(paths: I, mode: SplitTunnelMode, scopes: S) -> Self
+    where
+        I: IntoIterator<Item = String>,
+        S: IntoIterator<Item = neoconnect_ipc::AppScope>,
+    {
+        let paths: Vec<String> = paths.into_iter().map(|p| p.to_lowercase()).collect();
+        let mut built = HashMap::new();
+        if matches!(mode, SplitTunnelMode::OnlySelected) {
+            for scope in scopes {
+                let app = scope.app.to_lowercase();
+                if !paths.contains(&app) {
+                    continue;
+                }
+                if let Some(built_scope) = Scope::new(&scope.destinations) {
+                    built.insert(app, built_scope);
+                }
+            }
+        }
+        Self { paths, mode, scopes: built }
     }
 
     pub fn mode(&self) -> SplitTunnelMode {
@@ -183,6 +233,72 @@ impl Selection {
         match self.mode {
             SplitTunnelMode::OnlySelected => self.matches(image_path),
             SplitTunnelMode::AllExcept => !self.matches(image_path),
+        }
+    }
+
+    /// Whether any application is narrowed at all.
+    ///
+    /// The whole cost of this feature for a customer who is not using
+    /// it: one `is_empty` on a map, per packet, in front of everything
+    /// else. Worth having as its own answer because that is the
+    /// overwhelmingly common case -- no shipped catalogue profile is
+    /// prefix-complete today, so this is false on every machine until
+    /// one is.
+    pub fn has_scopes(&self) -> bool {
+        !self.scopes.is_empty()
+    }
+
+    /// Where this application's traffic is carried to, if anywhere in
+    /// particular.
+    ///
+    /// # The second axis, and how it meets the first
+    ///
+    /// [`Self::should_tunnel`] answers "is this application's traffic
+    /// ours". This answers "and is *this packet* of it". They are asked
+    /// in that order and this one can only ever narrow: an application
+    /// the customer did not select is never carried because of a scope,
+    /// and a scope is never consulted for one.
+    ///
+    /// It must not be confused with the unattributed case, and the
+    /// signatures keep them apart. This takes an `image_path`, so it
+    /// can only be asked about a packet whose owner is *known*. A
+    /// packet with no owner has no application and therefore no scope;
+    /// it goes to [`Self::verdict_for_unattributed`] and comes back
+    /// with the same answer it did before this existed. The two are
+    /// genuinely different facts -- "a selected app sent this somewhere
+    /// we do not carry" is ordinary traffic that must keep working,
+    /// while "nobody can be shown to have sent this" is the leak that
+    /// arm was written to close -- and collapsing them would either
+    /// re-open that leak or start dropping a game's telemetry.
+    ///
+    /// # Which way it fails
+    ///
+    /// Open, in the sense that matters: every uncertainty returns
+    /// [`Scoped::Unscoped`], which means "behave exactly as this
+    /// feature did before scopes existed". Missing list, unparseable
+    /// list, list too long, a family the list says nothing about --
+    /// all of them carry the application's traffic as today rather
+    /// than dropping it. A game that keeps working unprotected beats a
+    /// game that stops.
+    ///
+    /// Note that "as today" is per family and is not always "carry":
+    /// for IPv6 a selected application is *blocked*, so that it retries
+    /// over IPv4 and is carried there. `Unscoped` restores whichever of
+    /// those the caller was already doing, which is why this returns
+    /// three answers rather than a bool.
+    pub fn destination_scope(&self, image_path: &str, destination: IpAddr) -> Scoped {
+        // Before the lowercase, so the ordinary machine allocates
+        // nothing here.
+        if self.scopes.is_empty() {
+            return Scoped::Unscoped;
+        }
+        let Some(scope) = self.scopes.get(&image_path.to_lowercase()) else {
+            return Scoped::Unscoped;
+        };
+        match scope.contains(destination) {
+            Some(true) => Scoped::InScope,
+            Some(false) => Scoped::OutOfScope,
+            None => Scoped::Unscoped,
         }
     }
 
@@ -318,6 +434,234 @@ pub enum Unattributed {
     /// redirect loop can otherwise give, and the one that closes the
     /// fire-and-forget leak.
     Refuse,
+}
+
+/// Where a known application's packet falls against that application's
+/// destination scope.
+///
+/// Deliberately not a `bool`. The third answer is the one that keeps
+/// this safe: "this scope has nothing to say about that address" is a
+/// different fact from "that address is not in it", and turning the
+/// first into the second is how a v4-only prefix list would push a
+/// game's IPv6 out of the tunnel while its IPv4 stayed in -- the two
+/// source addresses, one account problem that `prefixComplete` exists
+/// to prevent, arriving by the other family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scoped {
+    /// No usable scope for this application on this address family.
+    /// Whatever the caller was already doing is right; nothing here
+    /// changes it.
+    Unscoped,
+    /// A destination this application's traffic is carried to.
+    InScope,
+    /// A destination it is not. Treated exactly as an unselected
+    /// application's traffic would be -- passed through untouched --
+    /// and **not** as a refusal. This is a game talking to its own
+    /// telemetry or store, which must keep working.
+    OutOfScope,
+}
+
+/// Where one selected application's traffic is carried *to*.
+///
+/// # Why this cannot hold a partial list
+///
+/// A scope only exists if every prefix handed to [`Scope::new`] parsed.
+/// One unreadable entry and the constructor returns `None`, which the
+/// caller turns into "this application is not scoped" -- all of its
+/// traffic carried, exactly as before scopes existed.
+///
+/// That is not defensive tidiness, it is the safety rule. Scoping a
+/// game to *some* of its publisher's address space splits the game's
+/// own connections across two paths: World of Warcraft holds its Home
+/// and World connections open together, and one account appearing from
+/// two source addresses at the same instant is the account-sharing
+/// signature that gets people banned. `docs/design/gaming-mode.md` §5.4
+/// states the rule as "the client must refuse to activate a game
+/// profile whose CIDR list is not prefix-complete rather than activate
+/// a partial one".
+///
+/// The client already refuses -- `canRouteByDestination` in
+/// `game-apps.ts` sends nothing unless the catalogue says the list is
+/// whole. This is the second, independent refusal, and it exists
+/// because the first one being wrong is a ban rather than a bug. There
+/// is deliberately **no** constructor that can build a `Scope` from a
+/// list it did not fully understand, so no future caller can reach for
+/// one in a hurry.
+///
+/// # Shape, and what it costs per packet
+///
+/// Sorted, merged, half-open-free inclusive ranges over the integer
+/// value of the address, searched by bisection. A prefix list is a set
+/// of ranges and nothing about it needs a trie: 512 prefixes is nine
+/// comparisons, and the two families are kept apart so an IPv4 packet
+/// never touches 128-bit arithmetic.
+///
+/// The per-packet cost when nothing is scoped is one `is_empty` on a
+/// map -- see [`Selection::destination_scope`] -- so a customer who has
+/// not added a scoped game pays exactly what they paid before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    /// Inclusive `[start, end]` ranges, sorted by start and merged, so
+    /// the last range starting at or below an address is the only one
+    /// that can contain it.
+    v4: Vec<(u32, u32)>,
+    v6: Vec<(u128, u128)>,
+}
+
+impl Scope {
+    /// Builds a scope, or refuses.
+    ///
+    /// `None` for an empty list and `None` if **any** prefix is
+    /// unreadable -- never a scope over the ones that happened to
+    /// parse. See the type's own note for why that is the whole point.
+    ///
+    /// Also `None` past [`MAX_SCOPE_PREFIXES`], and for the same
+    /// reason rather than as a resource limit: truncating a list to fit
+    /// manufactures precisely the partial scope this refuses to build.
+    pub fn new<I, S>(prefixes: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut v4: Vec<(u32, u32)> = Vec::new();
+        let mut v6: Vec<(u128, u128)> = Vec::new();
+        let mut seen = 0usize;
+        for prefix in prefixes {
+            seen += 1;
+            if seen > MAX_SCOPE_PREFIXES {
+                return None;
+            }
+            match parse_prefix(prefix.as_ref())? {
+                Prefix::V4(start, end) => v4.push((start, end)),
+                Prefix::V6(start, end) => v6.push((start, end)),
+            }
+        }
+        if v4.is_empty() && v6.is_empty() {
+            return None;
+        }
+        merge(&mut v4);
+        merge(&mut v6);
+        Some(Self { v4, v6 })
+    }
+
+    /// Whether this address is one the application's traffic is carried
+    /// to -- or `None` when this scope cannot answer for that family.
+    ///
+    /// The third answer is not indecision, it is the honest reading of
+    /// a v4-only prefix list being asked about an IPv6 packet. Saying
+    /// "not in scope" there would be a guess, and a guess in that
+    /// direction is the two-source-address failure again by a different
+    /// road: the game's IPv4 goes through the tunnel while its IPv6 to
+    /// the very same server goes out direct. `None` means the caller
+    /// falls back to what this feature did before scopes existed, which
+    /// for IPv6 is to block the packet so the application retries over
+    /// IPv4 and is carried there.
+    ///
+    /// A scope always answers for at least one family: [`Scope::new`]
+    /// refuses to build one with no prefixes at all.
+    pub fn contains(&self, destination: IpAddr) -> Option<bool> {
+        match destination {
+            IpAddr::V4(addr) => {
+                if self.v4.is_empty() {
+                    return None;
+                }
+                Some(contains_in(&self.v4, u32::from(addr)))
+            }
+            IpAddr::V6(addr) => {
+                if self.v6.is_empty() {
+                    return None;
+                }
+                Some(contains_in(&self.v6, u128::from(addr)))
+            }
+        }
+    }
+}
+
+/// One parsed prefix, as the inclusive range it covers.
+enum Prefix {
+    V4(u32, u32),
+    V6(u128, u128),
+}
+
+/// `a.b.c.d/len`, `addr`, or an IPv6 equivalent.
+///
+/// A bare address is accepted as a single-host prefix because that is
+/// unambiguous and a catalogue may hold one. Host bits below the prefix
+/// length are **masked off** rather than refused: `10.1.2.3/8` means
+/// `10.0.0.0/8` to every tool a person edits these lists with, and
+/// refusing it would drop a whole publisher's scope over a piece of
+/// notation everything else accepts.
+///
+/// Everything genuinely unreadable -- a bad length, a bad address, a
+/// second slash -- returns `None`, and one `None` refuses the whole
+/// scope.
+fn parse_prefix(text: &str) -> Option<Prefix> {
+    let text = text.trim();
+    let (addr, len) = match text.split_once('/') {
+        Some((addr, len)) => (addr, Some(len)),
+        None => (text, None),
+    };
+    if let Ok(v4) = addr.parse::<Ipv4Addr>() {
+        let bits = match len {
+            Some(len) => len.parse::<u32>().ok().filter(|b| *b <= 32)?,
+            None => 32,
+        };
+        let base = u32::from(v4);
+        // Shifting by the full width is undefined in C and a panic in
+        // debug Rust, so /0 is spelled out rather than computed.
+        let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+        let start = base & mask;
+        return Some(Prefix::V4(start, start | !mask));
+    }
+    let v6 = addr.parse::<Ipv6Addr>().ok()?;
+    let bits = match len {
+        Some(len) => len.parse::<u32>().ok().filter(|b| *b <= 128)?,
+        None => 128,
+    };
+    let base = u128::from(v6);
+    let mask = if bits == 0 { 0 } else { u128::MAX << (128 - bits) };
+    let start = base & mask;
+    Some(Prefix::V6(start, start | !mask))
+}
+
+/// Sorts and merges overlapping or touching ranges.
+///
+/// Merging is what makes the bisection in [`contains_in`] correct and
+/// not merely fast: with overlaps left in, the last range starting at
+/// or below an address is not necessarily the one that contains it, and
+/// the search would answer "no" for an address covered by an earlier,
+/// wider prefix. Publisher lists routinely contain a `/16` and a `/24`
+/// inside it, so this is the normal case rather than a corner.
+fn merge<T: Ord + Copy>(ranges: &mut Vec<(T, T)>) {
+    ranges.sort_unstable();
+    let mut merged: Vec<(T, T)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges.drain(..) {
+        match merged.last_mut() {
+            // `start <= last.1` and not `<` because two prefixes can
+            // abut exactly; leaving them separate is still correct here,
+            // only wider than it needs to be.
+            Some(last) if start <= last.1 => {
+                if end > last.1 {
+                    last.1 = end;
+                }
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    *ranges = merged;
+}
+
+/// Bisection over merged ranges. O(log n) per packet.
+fn contains_in<T: Ord + Copy>(ranges: &[(T, T)], value: T) -> bool {
+    match ranges.binary_search_by(|range| range.0.cmp(&value)) {
+        // A range starts exactly here.
+        Ok(_) => true,
+        // Every range starts above it.
+        Err(0) => false,
+        // The one range that could contain it is the last one starting
+        // at or below it, which is what merging guarantees.
+        Err(next) => value <= ranges[next - 1].1,
+    }
 }
 
 /// Caches the two connection tables and the image path of each process
@@ -998,6 +1342,222 @@ fn image_path(pid: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scope_of(app: &str, destinations: &[&str]) -> neoconnect_ipc::AppScope {
+        neoconnect_ipc::AppScope {
+            app: app.to_string(),
+            destinations: destinations.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
+    const GAME: &str = r"C:\Games\game.exe";
+
+    #[test]
+    fn a_scope_refuses_to_exist_unless_every_prefix_parsed() {
+        // The whole safety rule in one assertion. Scoping a game to the
+        // prefixes that happened to parse is scoping it to a partial
+        // list, and a partial list splits the game's simultaneous
+        // connections across two source addresses -- the
+        // account-sharing signature. There is deliberately no way to
+        // build a `Scope` that holds less than it was asked to.
+        assert!(Scope::new(["203.0.113.0/24", "198.51.100.0/24"]).is_some());
+
+        for bad in [
+            "203.0.113.0/33",     // a length IPv4 does not have
+            "203.0.113.0/",       // no length at all
+            "203.0.113.999/24",   // not an address
+            "not-an-address",     //
+            "203.0.113.0/24/8",   // a second slash
+            "203.0.113.0/-1",     // a negative length
+        ] {
+            assert!(
+                Scope::new(["198.51.100.0/24", bad]).is_none(),
+                "one unreadable prefix ({bad}) must refuse the whole scope, \
+                 never narrow it to the rest"
+            );
+        }
+
+        assert!(Scope::new(Vec::<String>::new()).is_none(), "an empty list is not a scope");
+    }
+
+    #[test]
+    fn a_scope_refuses_a_list_longer_than_it_will_hold() {
+        // Refused rather than truncated, and that distinction is the
+        // same one as above: a truncated list *is* a partial list.
+        let ok: Vec<String> =
+            (0..MAX_SCOPE_PREFIXES).map(|i| format!("10.{}.{}.0/24", i / 256, i % 256)).collect();
+        assert!(Scope::new(&ok).is_some());
+
+        let too_many: Vec<String> = (0..MAX_SCOPE_PREFIXES + 1)
+            .map(|i| format!("10.{}.{}.0/24", i / 256, i % 256))
+            .collect();
+        assert!(
+            Scope::new(&too_many).is_none(),
+            "an over-long list must be refused whole, not cut down to fit"
+        );
+    }
+
+    #[test]
+    fn a_scope_answers_for_the_families_it_covers_and_no_others() {
+        // The third answer is the one that matters. A v4-only list
+        // asked about IPv6 must say "I cannot tell you", not "no" --
+        // saying "no" would let a scoped game's IPv6 out in the clear
+        // while its IPv4 went through the tunnel, which is the two
+        // source addresses problem arriving by the other family.
+        let v4_only = Scope::new(["203.0.113.0/24"]).expect("a scope");
+        assert_eq!(v4_only.contains("203.0.113.7".parse().unwrap()), Some(true));
+        assert_eq!(v4_only.contains("198.51.100.7".parse().unwrap()), Some(false));
+        assert_eq!(
+            v4_only.contains("2001:db8::1".parse().unwrap()),
+            None,
+            "a v4-only list must not claim to know anything about IPv6"
+        );
+
+        let v6_only = Scope::new(["2001:db8::/32"]).expect("a scope");
+        assert_eq!(v6_only.contains("2001:db8::1".parse().unwrap()), Some(true));
+        assert_eq!(v6_only.contains("2001:dead::1".parse().unwrap()), Some(false));
+        assert_eq!(v6_only.contains("203.0.113.7".parse().unwrap()), None);
+
+        let both = Scope::new(["203.0.113.0/24", "2001:db8::/32"]).expect("a scope");
+        assert_eq!(both.contains("203.0.113.7".parse().unwrap()), Some(true));
+        assert_eq!(both.contains("2001:db8::1".parse().unwrap()), Some(true));
+        assert_eq!(both.contains("198.51.100.7".parse().unwrap()), Some(false));
+        assert_eq!(both.contains("2001:dead::1".parse().unwrap()), Some(false));
+    }
+
+    #[test]
+    fn overlapping_prefixes_do_not_hide_each_other() {
+        // The reason `merge` exists, and the bug it prevents. A
+        // publisher list routinely holds a /16 and a /24 inside it.
+        // Bisection finds the last range starting at or below the
+        // address, so with the /24 left sitting inside the /16 as its
+        // own range, an address above the /24 but inside the /16 would
+        // land on the /24, fail its end test, and be reported out of
+        // scope -- a game server excluded from a list that names it.
+        let scope = Scope::new(["10.0.0.0/16", "10.0.5.0/24", "10.0.2.0/24"]).expect("a scope");
+        for addr in ["10.0.0.1", "10.0.2.1", "10.0.5.1", "10.0.9.1", "10.0.255.255"] {
+            assert_eq!(
+                scope.contains(addr.parse().unwrap()),
+                Some(true),
+                "{addr} is inside the /16 and must be in scope"
+            );
+        }
+        assert_eq!(scope.contains("10.1.0.1".parse().unwrap()), Some(false));
+    }
+
+    #[test]
+    fn prefix_notation_a_person_would_actually_write_is_understood() {
+        // Host bits below the length are masked rather than refused.
+        // `10.1.2.3/8` means `10.0.0.0/8` to every tool these lists are
+        // edited with, and refusing it would drop a whole publisher's
+        // scope over notation everything else accepts.
+        let masked = Scope::new(["10.1.2.3/8"]).expect("host bits are masked, not refused");
+        assert_eq!(masked.contains("10.9.9.9".parse().unwrap()), Some(true));
+        assert_eq!(masked.contains("11.0.0.1".parse().unwrap()), Some(false));
+
+        // A bare address is a single host.
+        let host = Scope::new(["203.0.113.7"]).expect("a bare address is a /32");
+        assert_eq!(host.contains("203.0.113.7".parse().unwrap()), Some(true));
+        assert_eq!(host.contains("203.0.113.8".parse().unwrap()), Some(false));
+
+        // /0 is the whole family. Spelled out rather than computed,
+        // because shifting a u32 by 32 is a panic in debug Rust.
+        let everything = Scope::new(["0.0.0.0/0"]).expect("a scope");
+        assert_eq!(everything.contains("1.2.3.4".parse().unwrap()), Some(true));
+        assert_eq!(everything.contains("255.255.255.255".parse().unwrap()), Some(true));
+
+        // Whitespace round an entry, which a hand-edited list has.
+        assert!(Scope::new([" 203.0.113.0/24 "]).is_some());
+    }
+
+    #[test]
+    fn a_selection_only_keeps_scopes_it_can_act_on() {
+        // Four ways a scope fails to apply, all landing on the same
+        // safe answer -- the app is carried in full -- so that no
+        // caller has to remember which is which.
+        let apps = || [GAME.to_string(), r"C:\Chat\chat.exe".to_string()];
+
+        // Naming an app that was not selected.
+        let stray = Selection::with_scopes(
+            apps(),
+            SplitTunnelMode::OnlySelected,
+            [scope_of(r"C:\Other\other.exe", &["203.0.113.0/24"])],
+        );
+        assert!(!stray.has_scopes());
+
+        // A list that will not fully parse.
+        let broken = Selection::with_scopes(
+            apps(),
+            SplitTunnelMode::OnlySelected,
+            [scope_of(GAME, &["203.0.113.0/24", "garbage"])],
+        );
+        assert!(!broken.has_scopes());
+        assert_eq!(
+            broken.destination_scope(GAME, "198.51.100.1".parse().unwrap()),
+            Scoped::Unscoped,
+            "an unparseable list must carry the app in full, not narrow it to what parsed"
+        );
+
+        // An empty list.
+        let empty = Selection::with_scopes(
+            apps(),
+            SplitTunnelMode::OnlySelected,
+            [scope_of(GAME, &[])],
+        );
+        assert!(!empty.has_scopes());
+
+        // The other direction, where a scope has no meaning: the named
+        // apps are the ones *not* carried, so there is nothing to
+        // narrow and any reading of it would be an invention.
+        let except = Selection::with_scopes(
+            apps(),
+            SplitTunnelMode::AllExcept,
+            [scope_of(GAME, &["203.0.113.0/24"])],
+        );
+        assert!(!except.has_scopes());
+
+        // And the one that does apply, so the four above are proven to
+        // be rejections rather than this never working at all.
+        let good = Selection::with_scopes(
+            apps(),
+            SplitTunnelMode::OnlySelected,
+            [scope_of(GAME, &["203.0.113.0/24"])],
+        );
+        assert!(good.has_scopes());
+        assert_eq!(
+            good.destination_scope(GAME, "203.0.113.7".parse().unwrap()),
+            Scoped::InScope
+        );
+        assert_eq!(
+            good.destination_scope(GAME, "198.51.100.7".parse().unwrap()),
+            Scoped::OutOfScope
+        );
+        // A different selected app, with no scope of its own, is
+        // untouched by another app's.
+        assert_eq!(
+            good.destination_scope(r"C:\Chat\chat.exe", "198.51.100.7".parse().unwrap()),
+            Scoped::Unscoped
+        );
+    }
+
+    #[test]
+    fn a_scope_is_matched_case_insensitively_like_every_other_path() {
+        // Windows paths are case-insensitive and the picker's spelling
+        // does not always match what a process reports. A scope that
+        // silently stopped applying because of a capital letter would
+        // present as the game being carried in full -- which is safe,
+        // but is also indistinguishable from the feature not working.
+        let selection = Selection::with_scopes(
+            [GAME.to_string()],
+            SplitTunnelMode::OnlySelected,
+            [scope_of(r"c:\games\GAME.exe", &["203.0.113.0/24"])],
+        );
+        assert!(selection.has_scopes());
+        assert_eq!(
+            selection.destination_scope(r"C:\GAMES\Game.EXE", "203.0.113.7".parse().unwrap()),
+            Scoped::InScope
+        );
+    }
 
     /// The rule, spelled out as a table, because every cell of it is a
     /// decision somebody could reasonably make differently and three of
