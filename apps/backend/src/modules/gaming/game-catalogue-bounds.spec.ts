@@ -142,9 +142,9 @@ describe("GET /gaming/profiles bounds", () => {
     it("filters on the three fields an operator would type into", async () => {
       await service.listProfiles({ search: "blizzard", window: listWindow({}, DEFAULT_LIMITS) });
 
-      const or = argsOf().where.OR;
+      const or = argsOf().where.OR as Record<string, unknown>[];
       expect(or).toHaveLength(3);
-      expect(or.map((clause: any) => Object.keys(clause)[0]).sort()).toEqual([
+      expect(or.map((clause) => Object.keys(clause)[0]).sort()).toEqual([
         "displayName",
         "publisher",
         "slug",
