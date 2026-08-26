@@ -110,6 +110,15 @@ export function GamePicker({
           />
         </div>
 
+        {/* What a row in this list is, and is not. A catalogue of 1,480
+            entries reads as a compatibility list -- as though each one had
+            been tried -- and none of them has. Said here, once, at the
+            moment somebody is choosing, rather than buried in a settings
+            screen they will never open. */}
+        <p className="text-[10px] leading-relaxed text-muted-foreground">
+          {t("gaming.pickerMeaning")}
+        </p>
+
         {shown.length === 0 ? (
           <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
             {query.trim() ? t("gaming.searchEmpty") : (emptyLabel ?? t("gaming.listEmpty"))}

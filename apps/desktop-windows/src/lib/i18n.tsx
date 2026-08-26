@@ -580,6 +580,13 @@ const en = {
   "gaming.applies": "Changes take effect straight away while gaming mode is on.",
   "gaming.pickerTitle": "Choose a game",
   "gaming.search": "Search games",
+  // What a catalogue row is, said once, at the moment somebody is about to
+  // choose one. The list runs to 1,480 entries and a long list reads as a
+  // compatibility list -- as though somebody tested these. Nobody has: an
+  // entry is a claim about which programs would be routed, and nothing
+  // more. Not one of them has been checked against a running install.
+  "gaming.pickerMeaning":
+    "Each entry lists the programs Neoxify would route while they are running. None has been tested against a running game.",
   "gaming.searchEmpty": "No game matches that.",
   "gaming.searchMore": "{count} more match — keep typing to narrow it down.",
   "gaming.listEmpty": "No games are on the list yet.",
@@ -1027,6 +1034,8 @@ const fa: Record<TranslationKey, string> = {
   "gaming.applies": "تا وقتی حالت بازی روشن است، تغییرات بلافاصله اعمال می‌شود.",
   "gaming.pickerTitle": "انتخاب بازی",
   "gaming.search": "جست‌وجوی بازی",
+  "gaming.pickerMeaning":
+    "هر مورد فهرست برنامه‌هایی است که نئوکسیفای تا زمانی که در حال اجرا باشند مسیر آن‌ها را عوض می‌کند. هیچ‌کدام روی بازی در حال اجرا آزمایش نشده است.",
   "gaming.searchEmpty": "هیچ بازی‌ای با این عبارت پیدا نشد.",
   "gaming.searchMore": "{count} مورد دیگر هم‌خوانی دارد — برای محدود‌کردن به تایپ ادامه دهید.",
   "gaming.listEmpty": "هنوز هیچ بازی‌ای در فهرست نیست.",
@@ -1062,7 +1071,11 @@ const fa: Record<TranslationKey, string> = {
   "disclosure.accept": "می‌پذیرم و ادامه می‌دهم",
 };
 
-const DICTIONARIES: Record<Language, Record<TranslationKey, string>> = { en, fa };
+/** Exported for the honesty tests in `i18n.test.ts`, which assert things
+ * the type system cannot: that a Persian string is actually Persian, that
+ * placeholders survived translation, and that no string in either language
+ * makes a speed claim this product has measured to be false. */
+export const DICTIONARIES: Record<Language, Record<TranslationKey, string>> = { en, fa };
 
 const STORE_FILE = "settings.json";
 const STORE_KEY = "language";

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   canRouteByDestination,
@@ -8,6 +10,7 @@ import {
   resolveGameApps,
   GAME_PAGE_SIZE,
   rankGames,
+  type SearchableGame,
 } from "./game-apps";
 import type { RunningApp } from "./split-tunnel";
 
@@ -337,5 +340,77 @@ describe("rankGames", () => {
   it("mounts a bounded number of rows", () => {
     expect(GAME_PAGE_SIZE).toBeGreaterThan(20);
     expect(GAME_PAGE_SIZE).toBeLessThanOrEqual(100);
+  });
+});
+
+/** Ranking against the catalogue that actually ships.
+ *
+ * Separate from the fixture tests above, and worth the awkwardness of
+ * reaching across the workspace to read the backend's data files, because
+ * the fixtures did not catch the bug that mattered. A six-game fixture
+ * cannot tell you that typing "cs" returns nothing at all -- for that you
+ * need the real thousand-and-a-half names, with their sequels, their
+ * regional duplicates and their punctuation.
+ *
+ * These assert customer intent rather than exact positions: that the game
+ * somebody meant is on the first page they can see, not that it is at any
+ * particular index. Pinning indices would fail on every catalogue
+ * regeneration and teach the next reader to delete the test. */
+describe("rankGames over the shipped catalogue", () => {
+  const root = join(__dirname, "../../../backend/prisma/catalogue");
+  const read = (file: string) =>
+    (JSON.parse(readFileSync(join(root, file), "utf8")) as { games: SearchableGame[] }).games;
+
+  // Curated first, then the Steam tier -- the order `catalogueEntries()`
+  // produces, because ties keep the server's order and that ordering is a
+  // product decision.
+  const catalogue = [...read("curated.json"), ...read("steam-tier.json")];
+
+  it("is the size the picker was built for", () => {
+    expect(catalogue.length).toBeGreaterThan(1_400);
+  });
+
+  /** Where a title lands among what the picker would actually mount. */
+  const rankOf = (query: string, name: string) =>
+    rankGames(catalogue, query)
+      .slice(0, GAME_PAGE_SIZE)
+      .findIndex((g) => g.displayName === name);
+
+  it.each([
+    ["cs", "Counter-Strike 2"],
+    ["cod", "Call of Duty"],
+    ["gta", "Grand Theft Auto V (Legacy)"],
+  ])("finds %s -> %s on the first page", (query, name) => {
+    // Every one of these returned the game far down the list or, for "cs",
+    // not at all, before the acronym band existed.
+    expect(rankOf(query, name)).toBeGreaterThanOrEqual(0);
+  });
+
+  it("still prefers a name that genuinely starts with the query", () => {
+    // CS2D is a real game and a real prefix hit. The acronym band must not
+    // demote it to promote the more famous title.
+    const top = rankGames(catalogue, "cs").map((g) => g.displayName);
+    expect(top[0]).toBe("CS2D");
+    expect(top.indexOf("Counter-Strike 2")).toBeLessThan(GAME_PAGE_SIZE);
+  });
+
+  it("puts the exact title first when one is typed in full", () => {
+    for (const name of ["Counter-Strike 2", "Dota 2", "Fortnite", "Rocket League"]) {
+      expect(rankGames(catalogue, name)[0]?.displayName).toBe(name);
+    }
+  });
+
+  it("does not flood the first page from a single letter", () => {
+    // A one-character query is a keystroke on the way to a real one. It must
+    // stay cheap and must not be treated as an acronym.
+    expect(rankGames(catalogue, "c").length).toBeLessThan(catalogue.length);
+  });
+
+  it("ranks the whole catalogue faster than a frame", () => {
+    const started = performance.now();
+    for (const q of ["c", "co", "cou", "coun", "count"]) rankGames(catalogue, q);
+    // Five keystrokes over the real catalogue, generously bounded -- the
+    // point is to catch an accidental O(n^2), not to benchmark the machine.
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });

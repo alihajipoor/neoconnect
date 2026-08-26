@@ -273,12 +273,32 @@ export interface SearchableGame {
  * The bands, strongest first:
  *
  *   0. the name starts with what was typed
- *   1. a word in the name starts with it -- so "strike" finds
+ *   1. the initials of the name start with it -- the acronym band, so
+ *      "cs" finds Counter-Strike, "cod" finds Call of Duty and "gta"
+ *      finds Grand Theft Auto V
+ *   2. a word in the name starts with it -- so "strike" finds
  *      Counter-Strike and "legends" finds Apex Legends
- *   2. the name contains it anywhere
- *   3. the name contains it once spaces are removed on both sides, which
+ *   3. the name contains it anywhere
+ *   4. the name contains it once spaces are removed on both sides, which
  *      is how "counterstrike" and "deadbydaylight" find their games
- *   4. the publisher contains it, so "blizzard" lists Blizzard's catalogue
+ *   5. the publisher contains it, so "blizzard" lists Blizzard's catalogue
+ *
+ * Band 1 was added on 2026-08-25 after the ranking was run against the
+ * real 1,480-entry catalogue rather than against a fixture, which is the
+ * only way it showed up. Typing "cs" did not merely rank Counter-Strike
+ * badly -- it did not return it **at all**, because "cs" is not a prefix
+ * of "counter strike 2", is not a prefix of either of its words, and does
+ * not appear in "counterstrike2" as a substring. The customer's
+ * conclusion from an empty result is that their game is not supported,
+ * which is the one thing this picker must never say by accident. "cod"
+ * and "gta" failed the same way. An acronym is how people type a game
+ * whose full name they know perfectly well.
+ *
+ * It sits below band 0 rather than above it because a name that really
+ * does start with the query is the better answer: for "cs", CS2D is a
+ * genuine hit and stays first, with Counter-Strike 2 immediately behind
+ * it. Skipped for a query containing a space, where the letters are
+ * words rather than initials.
  *
  * Ties keep the server's order, which puts the curated entries and the
  * online titles first. An empty query returns the catalogue untouched.
@@ -293,14 +313,22 @@ export function rankGames<T extends SearchableGame>(games: readonly T[], query: 
   const squashedNeedle = needle.replace(/ /g, "");
   const scored: { game: T; score: number; index: number }[] = [];
 
+  // An acronym only means something when the query is a run of letters with
+  // no spaces and more than one of them: "a" would match half the catalogue
+  // and "call of duty" is words, not initials.
+  const wantsAcronym = needle.length > 1 && !needle.includes(" ");
+
   games.forEach((game, index) => {
     const name = normaliseForSearch(game.displayName);
+    const words = name.split(" ");
     let score: number;
     if (name.startsWith(needle)) score = 0;
-    else if (name.split(" ").some((word) => word.startsWith(needle))) score = 1;
-    else if (name.includes(needle)) score = 2;
-    else if (name.replace(/ /g, "").includes(squashedNeedle)) score = 3;
-    else if (normaliseForSearch(game.publisher ?? "").includes(needle)) score = 4;
+    else if (wantsAcronym && words.map((word) => word.charAt(0)).join("").startsWith(needle))
+      score = 1;
+    else if (words.some((word) => word.startsWith(needle))) score = 2;
+    else if (name.includes(needle)) score = 3;
+    else if (name.replace(/ /g, "").includes(squashedNeedle)) score = 4;
+    else if (normaliseForSearch(game.publisher ?? "").includes(needle)) score = 5;
     else return;
     scored.push({ game, score, index });
   });
