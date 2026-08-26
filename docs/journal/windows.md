@@ -13874,3 +13874,142 @@ truncated stream is worse than no number.
 the matching `infra/` and `.env.example` entries. `installer/` belongs to the
 certificate-issuance session at the moment; this merged clean and touches
 nothing that work does, but it is theirs to know about.
+
+## 2026-08-26 — Concurrent multi-exit: built, and the two blockers that were not there
+
+Branch `claude/concurrent-multi-exit-v2`. `docs/design/per-game-exits.md` section
+2.4 proposed one Xray process with N tagged SOCKS inbounds and called it the
+cheapest real path to concurrency. It is built. Section 10 of that doc is the
+full record; this is what a future session needs that git does not say.
+
+**Both of section 2.4's stated costs turned out to be already paid.** This is
+the finding, and both were cheap to check and expensive to assume.
+
+*"The relay must speak SOCKS5, which it does not today."* The relay in that
+sentence is the **desktop client's own** split-tunnel relay in `proxy.rs`, not
+a relay node. The phrase reads both ways and I nearly planned node work off it.
+A word-boundary search for `socks` across `agent/**`, `apps/backend/**` and
+`installer/**` returns **zero** — every hit is the substring inside
+"shadowsocks". So it was client-side work and **no node was touched**.
+
+*"The backend must be willing to issue several exits on one subscription."*
+It already was. `ProtocolUsersService.provisionAll` provisions a subscription
+on *every* route its plan allows, and its own comment says the client holds
+them all at once for failover. One route is one exit, but a subscription holds
+many routes — the credentials for three concurrent exits were already sitting
+on the customer's machine. Section 8's "open question for the owner" was
+answerable from the code and needed no commercial decision at all.
+
+**The other session's exit handles landed mid-flight and composed cleanly.**
+`main` moved from `da9a04b` to `a892d90` while I was working — salted
+per-customer exit handles plus a picker. That supplied exactly the exit
+*vocabulary* section 6 said did not exist, which is what my half needed to be
+usable. Merge conflict was `i18n.tsx` only, both sides appending keys; kept
+both. Their `settings.customExitOneAtATime` ("one connection leaves from one
+exit") became half-false with my change and is replaced by two strings —
+`customExitConcurrent` and `customExitXrayOnly` — because a string that is
+right on three protocols and wrong on four is worse than two that are each
+right.
+
+**Section 2.3's blocker list turned out not to apply anywhere.** Worth stating
+because the list is long enough to look like it must. `session::Slot` still
+holds one `Active`; still one adapter, one `198.18.0.1/30`, one
+`PASSIVE_METRIC`, one DNS mutex, one IPv6 WFP block, one WinDivert loop, one
+janitor. Adding *inbounds* touches none of them. Only what xray-core does with
+a connection after it arrives changes.
+
+**The feasibility gate that mattered, checked before writing anything:**
+`redirect::filter_for` ends in `not loopback`, so the relay's hop into a
+loopback SOCKS inbound is invisible to the loop that would otherwise capture it
+and feed it back to itself. If that had not been true the whole design was
+dead.
+
+**The hazard that is invisible from the group rules.** A failed SOCKS5 hop must
+**not** fall back to the tunnel adapter. Every other fail-open here is safe
+because it happens to the whole selection at once — an exit is in `ExitRelays`
+or it is not, so every binary of every game moves together. A *per-connection*
+fallback fires for one connection of one binary while its siblings stay on the
+exit, which is the two-source-address ban signature rebuilt at runtime below
+every check that prevents it. So the connection fails and the app retries;
+teardown clears the whole table, which is the atomic transition. This is not
+enforced by a type — it is a decision in `connect_upstream`/`bind_upstream` and
+it is the thing most likely to be "fixed" by a later reader trying to make a
+game stop erroring.
+
+**`Origin.exit`, not `FlowKey`.** The index is into `ExitRelays`, which is
+written at engine start and cleared at engine stop and **never edited between**
+— that is what makes an index meaningful. Preferences are mutable mid-session
+and live on `Selection`; the table says which exits *exist*. Kept separately so
+the index a live flow holds cannot come to mean a different node underneath it.
+
+**`FlowKey`'s guard is now a compile error.** A destructuring with no `..` in
+`flows.rs`. A fifth field reads as `E0027: pattern does not mention field`.
+That form was chosen because the realistic regression — somebody adds `exit`
+because a flow's exit feels like part of its identity — passes every existing
+test, since every existing flow has `None`.
+
+**Mutation results, run on this tree.** Invariant 1: dropping the
+partial-group rule fails `a_partly_selected_group_gets_no_preference_at_all`
+and `a_partly_selected_group_does_not_disturb_a_whole_one`. Invariant 3, twice:
+giving the ownerless DNS branch a default exit fails
+`a_carried_lookup_takes_the_session_exit_and_not_a_games`; moving exit
+selection upstream of the refusal — the literal trap section 4.1 describes —
+turns the ownerless datagram from `Drop` into `Redirect` and fails three tests.
+Invariant 5: an optional `appExits?: AppExit[]` on `SplitTunnelSettings` fails
+three `split-tunnel.invariants.ts` assertions with `Type 'false' does not
+satisfy the constraint 'true'`.
+
+**The ceiling is three and it is counted in exits, not binaries.** Six entries
+across three games is three. Four places enforce it: the picker disables a
+fourth and says why; `exitsForGames` withholds *every* preference over the
+line; `validate` refuses; `ExitRelays::set` truncates. The client layers
+withhold rather than trim because trimming means picking winners by the order
+the customer happened to add games in, and then reporting `OnPreferred` for a
+placement nobody decided.
+
+**Trap that cost real time: Python's default newline translation.** I edited
+Rust and TSX with `open(p,'w')` scripts on Windows, which silently rewrote LF
+files as CRLF. Nothing failed until `connection-evidence.test.ts` — which
+asserts on the *literal source text* of `Dashboard.tsx` — reported a string it
+could plainly see as absent. Use `newline='\n'`, or write bytes. And note that
+this class of failure has nothing to do with the change being made, so it reads
+as a mystery until you look at the file in binary.
+
+**Second trap, same session: `pnpm turbo` exits 0 on a failed task.** The run
+printed `Failed: @neoxify/desktop-windows#typecheck` and returned exit code 0,
+and I nearly took that as green. Grep the output for `Failed:`, do not trust
+`$?`. (This is the third time the journal has a note in the neighbourhood of
+"CI runs turbo, not tsc"; the new part is the exit code.)
+
+**And a flake worth naming, because it wasted a re-run:** one full turbo pass
+reported `@neoxify/backend#test` failing with 4 of 604 in
+`customer-auth.service.spec.ts`. It is bcrypt-bound and that run was sharing
+the machine with a cargo build. Re-run on this branch: 17/17, 604 passed. Same
+on clean `main`, full pipeline: 17/17. Nothing in this branch touches
+`apps/backend` at all, so if that suite fails again under load it is not the
+change under test — check what else is running before believing it.
+
+**Counts on this branch, baseline re-measured rather than trusted:** 355 → 395
+Rust, 244 → 265 vitest. Backend jest and turbo unchanged in scope — no backend
+file was touched by this work.
+
+### Not proven, and it is the part that matters
+
+**Nothing ran on a machine.** No rig time was available; another agent has had
+it. In particular **two exit IPs have never been observed at once**, which is
+the only evidence that would actually settle this. What is proven is that the
+config handed to xray-core names two inbounds, two outbounds and two rules;
+that the relay speaks the protocol those inbounds speak, against a real socket;
+and that a carried flow holds the index of the exit it asked for. Whether
+xray-core then egresses two flows from two nodes is unwatched.
+
+Also unproven: UDP ASSOCIATE against **xray-core's own** socks inbound (tested
+only against a server written for the test — the reply's bound address is the
+field most likely to differ); the load of three concurrent outbounds on a slow
+guest, given that `claude/split-tunnel-rig-verification` saw three of four
+engines miss their activation timeouts; and the free-port race between binding
+a port to discover it and xray-core binding it for real.
+
+Section 7's rig procedure stands unexecuted. Its row 8 — `curl -4` from a
+socket pinned as each of a game's binaries, the two answers required to be
+byte-identical — is still the assertion no unit test can fake.
