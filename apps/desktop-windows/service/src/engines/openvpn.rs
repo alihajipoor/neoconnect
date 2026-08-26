@@ -36,7 +36,10 @@ use std::process::Child;
 
 use neoconnect_ipc::OpenvpnProfile;
 
-use super::{confirm_started, routing, run_hidden_capture, spawn_hidden, write_config, Engines};
+use super::{
+    confirm_started, routing, run_hidden_capture, run_hidden_capture_within, spawn_hidden,
+    write_config, Engines,
+};
 use crate::adapters;
 
 const CONFIG_FILE: &str = "neoconnect.ovpn";
@@ -70,6 +73,60 @@ const UDP_ENCAP_OVERHEAD: u16 = 52;
 /// between them.
 pub const ADAPTER_NAME: &str = "Neoxify-OpenVPN";
 
+/// How long `tapctl.exe create` gets.
+///
+/// Not the ordinary [`super::HELPER_BUDGET`], because this is not an
+/// ordinary helper: it installs a network device, which means the
+/// PnP subsystem, a driver load, and NDIS binding the new adapter into
+/// the stack. The comment above already says "creating an adapter is
+/// slow"; the budget did not act on it, and on a machine where that
+/// sentence is true the connect failed with "could not create the
+/// OpenVPN network adapter" for no reason but the clock.
+///
+/// This is the first connect only -- the adapter is left in place
+/// afterwards, so no later connect pays it -- which is also why a long
+/// budget here costs nothing in the ordinary case.
+const ADAPTER_CREATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What OpenVPN prints when the tunnel is actually up.
+///
+/// Its own words, at the end of its own start-up sequence: the TLS
+/// handshake done, `PUSH_REPLY` received and applied, the adapter
+/// addressed and whatever routes it was told to add added. Nothing
+/// earlier in the log means the tunnel carries anything.
+const TUNNEL_UP_MARK: &str = "Initialization Sequence Completed";
+
+/// How long OpenVPN gets to reach [`TUNNEL_UP_MARK`].
+///
+/// This exists because the service used to return as soon as the process
+/// had survived 1.5s, which is a liveness check and was documented as
+/// one -- but the callers treat it as "connected". Two things went wrong
+/// downstream of that.
+///
+/// **Custom mode failed for a reason that had nothing to do with it.**
+/// `Engines::connect_inner` starts the split tunnel the moment this
+/// returns, and `split_tunnel::start` waits ten seconds for the adapter
+/// to hold an address. On the rig, OpenVPN had not finished its
+/// handshake by then, so Custom mode reported that the tunnel adapter
+/// "never came up with an address" while OpenVPN was still perfectly
+/// well coming up. That is the whole of the `split_tunnel_active` never
+/// arriving.
+///
+/// **And a full tunnel was reported connected before its routes
+/// existed.** The pushed routes arrive with `PUSH_REPLY`; a customer
+/// told "Connected" a second after the process started was told
+/// something the service had not checked, which this project treats as
+/// a product fault rather than a rough edge.
+///
+/// The number is a ceiling on a poll, not a sleep -- a tunnel that comes
+/// up in two seconds returns in two seconds. It is deliberately larger
+/// than the app's own 45s `REPLY_TIMEOUT` would allow a connect to be:
+/// a handshake still in progress at 50s is one the customer has already
+/// been told about, and the point of the ceiling is that the *service*
+/// does not sit on the `Engines` lock for ever, which is what
+/// `abandon_current_operation` and the 50ms poll below are really for.
+const TUNNEL_UP_WITHIN: std::time::Duration = std::time::Duration::from_secs(75);
+
 /// Makes sure a Wintun adapter exists for OpenVPN to attach to.
 ///
 /// openvpn.exe does not create its own adapter the way wireguard.exe
@@ -82,6 +139,10 @@ pub const ADAPTER_NAME: &str = "Neoxify-OpenVPN";
 /// adapter is slow and churns the network stack, and a dormant Wintun
 /// adapter costs nothing. That also makes this a no-op on every
 /// connection after the first.
+///
+/// The creation gets [`ADAPTER_CREATE_BUDGET`] rather than the ordinary
+/// helper budget; the listing keeps the ordinary one, because listing is
+/// a read.
 fn ensure_adapter(engines: &Engines) -> Result<(), String> {
     let tapctl = engines.engine_path("tapctl.exe")?;
 
@@ -91,7 +152,7 @@ fn ensure_adapter(engines: &Engines) -> Result<(), String> {
         return Ok(());
     }
 
-    let created = run_hidden_capture(
+    let created = run_hidden_capture_within(
         &tapctl,
         &[
             OsStr::new("create"),
@@ -100,6 +161,7 @@ fn ensure_adapter(engines: &Engines) -> Result<(), String> {
             OsStr::new("--name"),
             OsStr::new(ADAPTER_NAME),
         ],
+        ADAPTER_CREATE_BUDGET,
     )
     .map_err(|e| format!("could not create the OpenVPN network adapter: {e}"))?;
 
@@ -294,7 +356,72 @@ pub fn connect(
     )
     .map_err(|e| format!("could not start openvpn.exe: {e}"))?;
 
-    confirm_started(child, "OpenVPN", &log_path)
+    let child = confirm_started(child, "OpenVPN", &log_path)?;
+    wait_until_up(child, &log_path)
+}
+
+/// Waits until OpenVPN says its tunnel is up, rather than until it has
+/// merely survived starting.
+///
+/// Polls three things, and every one of them can end the wait:
+///
+/// * the log reaching [`TUNNEL_UP_MARK`] -- success;
+/// * the process exiting -- failure, with its own last words attached,
+///   which is what turns "OpenVPN did not connect" into something a
+///   customer or a support conversation can act on;
+/// * the operation being abandoned -- somebody pressed Disconnect while
+///   this was running, and that must not wait out the ceiling.
+///
+/// Reading the log is how the answer is obtained because it is the only
+/// place OpenVPN states it. The adapter holding an address is a
+/// consequence, not the event: it can be addressed before `PUSH_REPLY`
+/// has been applied, so waiting on the address would go back to
+/// reporting a tunnel that is not yet carrying anything.
+fn wait_until_up(mut child: Child, log_path: &std::path::Path) -> Result<Child, String> {
+    let deadline = std::time::Instant::now() + TUNNEL_UP_WITHIN;
+    loop {
+        let log = std::fs::read_to_string(log_path).unwrap_or_default();
+        if log.contains(TUNNEL_UP_MARK) {
+            return Ok(child);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "OpenVPN stopped before the tunnel came up ({status}): {}",
+                    tail(&log)
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("could not check whether OpenVPN was still running: {e}"));
+            }
+        }
+        if super::abandoned() {
+            let _ = child.kill();
+            super::reap(&mut child);
+            return Err(super::ABANDONED.to_string());
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            super::reap(&mut child);
+            return Err(format!(
+                "OpenVPN did not finish connecting within {}s: {}",
+                TUNNEL_UP_WITHIN.as_secs(),
+                tail(&log)
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// The last few lines of an engine log, for an error message.
+fn tail(log: &str) -> String {
+    let lines: Vec<&str> = log.lines().rev().take(6).collect();
+    if lines.is_empty() {
+        return "no output".to_string();
+    }
+    lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
 }
 
 #[cfg(test)]

@@ -112,10 +112,29 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
 /// How long the tunnel service is given to go away.
 ///
 /// It normally goes in well under a second: `/uninstalltunnelservice`
-/// returned in 0.03s and the stop lands on the next poll. Ten seconds is
-/// room for a machine under load, and short enough that a customer
-/// pressing Connect is not left watching a spinner.
-const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(10);
+/// returned in 0.03s and the stop lands on the next poll. Ten seconds
+/// was chosen as "room for a machine under load", and the rig found the
+/// machine that reading did not cover -- a 4-vCPU guest at a 30% CPU
+/// execution cap took longer than that to stop one service, and the
+/// disconnect came back with the sentence below.
+///
+/// That is worse than a slow disconnect, and the reason is one function
+/// away: `Engines::connect_inner` begins with `self.disconnect()?`. A
+/// teardown that reports failure therefore **fails the next connect
+/// too**, and the customer's second attempt is refused because their
+/// first one was still tidying up. The error even tells them to wait and
+/// try again, which is the right advice for a fault that should not have
+/// been raised.
+///
+/// Forty-five seconds instead. This is not a process budget -- nothing
+/// is spawned, it is an SCM poll -- so the argument about one wedged
+/// child making the service deaf does not apply, and the loop reads
+/// `abandoned()` on every pass so a customer pressing Disconnect ends it
+/// immediately whatever the ceiling says. What is left is only: how long
+/// before "the service is still stopping" becomes "the service is never
+/// stopping". A minute is generous for the first and still short of the
+/// second.
+const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(45);
 
 /// How often the service manager is asked whether it has gone yet.
 const TUNNEL_SERVICE_POLL: Duration = Duration::from_millis(250);
@@ -182,6 +201,13 @@ pub(super) fn clear_tunnel_service() -> Result<(), String> {
         }
         drop(service);
 
+        // With a ceiling this long, a customer who has pressed
+        // Disconnect must not queue behind the rest of it. Reported as
+        // the abandonment rather than as a WireGuard fault, because that
+        // is what happened.
+        if super::abandoned() {
+            return Err(super::ABANDONED.to_string());
+        }
         if Instant::now() >= deadline {
             return Err(format!(
                 "the previous WireGuard tunnel was still shutting down after {}s. \

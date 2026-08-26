@@ -944,10 +944,13 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
     // down first -- so this lookup lands in the seconds where the
     // engine's DNS servers are gone and the adapter's own are not back.
     // Measured on the test rig: toggling Custom mode on a live OpenVPN
-    // connection failed with "could not resolve de1.neoxify.site: No
+    // connection failed with "could not resolve <node hostname>: No
     // such host is known", on a machine whose DNS was working before and
     // after. One retry loop is the difference between Custom mode
     // working on OpenVPN and not.
+    //
+    // The real hostname was here until 2026-08-26 and is redacted per
+    // docs/node-address-hygiene.md -- this repository is public.
     let deadline = std::time::Instant::now() + RESOLVE_RETRY_FOR;
     let mut last = String::new();
     loop {
@@ -1017,6 +1020,78 @@ fn write_config(path: &Path, contents: &str) -> Result<(), String> {
 /// and `disconnect` included -- went unanswered and the customer sat
 /// tunnelled with no way out.
 pub(crate) const HELPER_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long a **PowerShell cmdlet** on the connect path is given, as
+/// opposed to a native helper.
+///
+/// [`HELPER_BUDGET`] is not being weakened: it stays at 15s and every
+/// native helper still takes it. This is a different cost, not the same
+/// cost being slower.
+///
+/// The 15s figure is calibrated on `route.exe`, `netsh`, `sc.exe`,
+/// `ipconfig` and `wireguard.exe` -- processes that start, do one thing
+/// and exit, measured at 0.09s to 1s. A cmdlet out of `DnsClient` or
+/// `VpnClient` pays three things none of those do: PowerShell engine
+/// start, a CDXML module autoload, and a CIM session to
+/// `root\StandardCimv2`.
+///
+/// Measured on the rig -- a 4-vCPU Windows 11 guest -- with a fresh
+/// process per row, which is what the service spawns. The spread is
+/// across two runs at different levels of contention, and the spread is
+/// itself the point:
+///
+/// ```text
+///   powershell -NoProfile -Command 1              4.4 -  6.5s
+///   Get-DnsClientNrptRule | Measure-Object        9.6 - 66.7s
+///   Add-DnsClientNrptRule                        10.0 - 55.1s
+///   Get-VpnConnection -AllUserConnection         41.9 - 72.4s
+///   route.exe print -4, for contrast              5.0s
+/// ```
+///
+/// **This number is therefore not derived from those measurements, and
+/// it would be dishonest to present it as if it were.** The same cmdlet
+/// on the same machine varied seven-fold between runs; no wall-clock
+/// budget bounds that usefully, and picking one that covered the worst
+/// row would be picking a number past the point where the customer has
+/// already been told the connect failed.
+///
+/// What the measurements do establish is the shape of the fix. A budget
+/// cannot make a cmdlet fast, so the accompanying changes make the
+/// connect spawn fewer of them: `ikev2::connect` went from three
+/// PowerShell processes to one -- measured at 111.5s and 14.4s
+/// respectively, in the same run, seven-fold -- and `dns::clear` from
+/// one on every connect and disconnect to none in the ordinary case.
+///
+/// So 15s was never a bound on misbehaviour here; it was a coin toss on
+/// a cmdlet's mood, and the rig watched it come up tails on three
+/// engines out of four.
+///
+/// **What stops this being a licence to raise every budget.** The
+/// deafness this whole mechanism exists to prevent is no longer bounded
+/// by the budget at all: `Status` never queues behind the lock
+/// (`STATUS_LOCK_WAIT` in `pipe::dispatch`, with an unlocked OS-visible
+/// answer behind it), and `Disconnect` waits two seconds and then calls
+/// [`abandon_current_operation`], which [`wait_within`] reads every
+/// 50ms and kills the child on. A budget is still needed -- it is what
+/// turns an *unbounded* wait into a failure -- but it is a backstop now
+/// rather than the thing keeping the service answerable.
+///
+/// What chooses 35 specifically is one number up, not anything below:
+/// the app abandons a request after 45s (`REPLY_TIMEOUT`,
+/// `src-tauri/src/vpn.rs`), so a connect that outlives that is reported
+/// to the customer as a failure whatever the service goes on to do.
+/// 35s is the largest value that still leaves room for the rest of a
+/// connect inside that deadline. It is deliberately **not** enough for
+/// three cmdlets end to end -- there would be no such value -- which is
+/// the point at which "raise the budget" stops being an available fix.
+///
+/// Only two call sites take this, and both are on the connect path with
+/// nothing polling behind them: the IKEv2 entry script and
+/// `dns::apply`. `is_connected` deliberately keeps [`HELPER_BUDGET`]
+/// because it answers `status`, and `entry_present` and `remove_entry`
+/// keep it because they are on the repair path, whose own deadline is
+/// derived from budget arithmetic -- see `REPAIR_TIMEOUT`.
+pub(crate) const CMDLET_BUDGET: std::time::Duration = std::time::Duration::from_secs(35);
 
 /// How often a running child is checked while waiting for it.
 const HELPER_POLL: std::time::Duration = std::time::Duration::from_millis(50);
@@ -1201,9 +1276,22 @@ pub(crate) fn capture_hidden(
 
 /// Runs a short-lived command, hidden, and returns its stdout.
 pub(crate) fn run_hidden_capture(exe: &Path, args: &[&std::ffi::OsStr]) -> io::Result<String> {
+    run_hidden_capture_within(exe, args, HELPER_BUDGET)
+}
+
+/// The same, against a budget the caller chooses.
+///
+/// For the helpers that are not short-lived whatever the name of the
+/// function says -- `tapctl.exe create` installs a network device. See
+/// `openvpn::ADAPTER_CREATE_BUDGET`.
+pub(crate) fn run_hidden_capture_within(
+    exe: &Path,
+    args: &[&std::ffi::OsStr],
+    budget: std::time::Duration,
+) -> io::Result<String> {
     let mut command = Command::new(exe);
     command.args(args);
-    Ok(capture_hidden(command, HELPER_BUDGET)?.stdout)
+    Ok(capture_hidden(command, budget)?.stdout)
 }
 
 /// How long to wait after spawning before deciding the engine is up.
