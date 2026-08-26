@@ -44,7 +44,7 @@ pub const ENTRY_NAME: &str = "Neoxify";
 /// The resolver the nodes push to IKEv2 clients (`dns =` in the swanctl
 /// pool). Named here so the NRPT rule points at something the tunnel
 /// already carries.
-const IKEV2_DNS: &str = "1.1.1.1";
+pub(super) const IKEV2_DNS: &str = "1.1.1.1";
 
 pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
     // The entry is removed first rather than updated --
@@ -206,14 +206,27 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
             // first, with a poisoned address, for exactly the domains
             // they connected to reach.
             //
-            // Full tunnel only. In Custom mode this tunnel is not where
-            // most traffic goes, so pointing the whole machine's lookups
-            // down it would be wrong for every application the customer
-            // did not select. The selected ones still resolve through the
-            // tunnel, because their DNS is redirected with the rest of
-            // their traffic -- the same reasoning as WireGuard dropping
-            // its DNS in passive mode.
-            if !passive {
+            // Both modes, and that is a change. This used to be `if
+            // !passive`, on the reasoning that Custom mode is not where
+            // most traffic goes so the whole machine's lookups should
+            // not point down it -- and that the selected applications
+            // "still resolve through the tunnel, because their DNS is
+            // redirected with the rest of their traffic".
+            //
+            // The second half was wrong, and it is the half the first
+            // half rested on. Custom mode's redirect only sees packets
+            // the WinDivert filter admits, and that filter excludes
+            // every RFC1918 range -- so on any network whose resolver is
+            // the router, which is most of them, the lookup was never
+            // redirected at all. It went to the ISP. Xray had this
+            // right by forcing unconditionally; the two engines
+            // disagreed and, once again, neither comment acknowledged
+            // the other.
+            //
+            // The condition now lives in one place both engines call.
+            // `dns::machine_wide_rule_wanted` carries the full argument,
+            // including why this is not the over-reach it looks like.
+            if super::dns::machine_wide_rule_wanted(passive) {
                 super::dns::force(IKEV2_DNS);
             }
             Ok(())

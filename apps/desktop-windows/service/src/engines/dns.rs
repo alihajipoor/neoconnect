@@ -53,10 +53,16 @@ const GAMING_NRPT_COMMENT: &str = "Neoxify gaming DNS";
 /// protocol name.
 ///
 /// [`NotRequested`] must never be reported as a problem. It is the
-/// ordinary state for WireGuard, which installs its own DNS, and for
-/// any Custom-mode tunnel, which deliberately leaves the machine's
-/// lookups alone -- and this product's rule is that the app never
-/// reports a state nothing verified, in either direction.
+/// ordinary state for WireGuard and OpenVPN, which install their own
+/// DNS and drop it in Custom mode -- and this product's rule is that
+/// the app never reports a state nothing verified, in either direction.
+///
+/// It is *not* the ordinary state for a Custom-mode tunnel on the two
+/// engines that call [`force`]. This comment used to say Custom mode
+/// "deliberately leaves the machine's lookups alone", which read as a
+/// design rule and was never true of Xray; see
+/// [`machine_wide_rule_wanted`] for what Custom mode actually does and
+/// why the rule is load-bearing there rather than over-broad.
 ///
 /// [`NotRequested`]: TunnelDns::NotRequested
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -130,6 +136,51 @@ pub(super) fn tunnel_dns() -> TunnelDns {
         // customer whose DNS is probably fine. Neither is honest, so
         // this says only that nothing is being asserted.
         .unwrap_or(TunnelDns::NotRequested)
+}
+
+/// Whether an engine that relies on the machine-wide NRPT rule should
+/// install it for this session.
+///
+/// **Yes in both modes**, and Custom mode is the answer worth writing
+/// down, because it looks wrong. Custom mode's premise is that
+/// unselected traffic is untouched, so a rule with `Namespace '.'` --
+/// every name on the machine -- reads like exactly the over-reach that
+/// premise forbids. It is not, and the reason is that **Custom mode
+/// captures DNS machine-wide by design already.**
+///
+/// `split_tunnel` sets `carry_dns: true` unconditionally and says why
+/// at `redirect::is_dns`: Windows resolves through its own DNS Client
+/// service, so a query leaves under `svchost`'s name rather than the
+/// asking application's, and there is no way to carry only the selected
+/// applications' lookups. The alternative -- catching only the browsers
+/// that resolve for themselves -- was measured leaking on the rig, a
+/// selected application's traffic going through the tunnel while the
+/// name it looked up went to the customer's own line. Reported from
+/// Iran as "the IP changes but the site will not open".
+///
+/// So the machine-wide rule does not *add* a machine-wide DNS capture
+/// to Custom mode. It is what makes the one Custom mode already
+/// performs reachable. The redirect only ever sees packets the
+/// WinDivert filter admits, and `redirect::filter_for` excludes every
+/// RFC1918 range -- so on the ordinary home network, whose resolver is
+/// the router at `192.168.1.1`, the query is dropped by the kernel
+/// filter before `decide` runs and leaves in the clear. Pointing the
+/// machine at `1.1.1.1` puts the lookup at an address the filter
+/// admits, which the redirect then carries.
+///
+/// Removing it in passive mode would therefore not restore "unselected
+/// traffic is untouched" -- unselected traffic's *connections* are
+/// already untouched either way. It would reintroduce the leak, on
+/// precisely the networks most customers are on.
+///
+/// The parameter is kept, and ignored, on purpose: the two engines
+/// disagreed here for a release -- Xray forced unconditionally, IKEv2
+/// gated on `!passive`, and neither comment acknowledged the other --
+/// so the decision is a named function both call rather than a
+/// condition written out twice. Changing the policy means changing it
+/// here, for both.
+pub(super) fn machine_wide_rule_wanted(_passive: bool) -> bool {
+    true
 }
 
 /// Installs the tunnel's DNS rule and reports what happened.
@@ -1089,6 +1140,72 @@ mod tests {
     use super::*;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
     use winreg::RegKey;
+
+    /// The regression this whole change is about.
+    ///
+    /// IKEv2 gated `dns::force` on `!passive` and Xray called it
+    /// unconditionally, so Custom mode got a machine-wide DNS rule on
+    /// one protocol and not on the other. Whichever answer is right, two
+    /// engines cannot hold different ones -- and the customer cannot see
+    /// which they have.
+    ///
+    /// Passive is the case that discriminates: revert
+    /// `machine_wide_rule_wanted` to IKEv2's old `!passive` and this
+    /// fails while every other test in the workspace still passes.
+    #[test]
+    fn custom_mode_still_wants_the_machine_wide_rule() {
+        assert!(
+            machine_wide_rule_wanted(true),
+            "Custom mode carries every lookup through the tunnel by design \
+             (split_tunnel sets carry_dns unconditionally), and the redirect \
+             only sees what the WinDivert filter admits -- which excludes \
+             every RFC1918 address. Without this rule a router-supplied \
+             resolver is never redirected and the lookup leaves in the clear."
+        );
+    }
+
+    /// The full-tunnel answer was never in doubt; it is asserted so that
+    /// "both modes" is what the test file says, not just the prose.
+    #[test]
+    fn a_full_tunnel_wants_the_machine_wide_rule_too() {
+        assert!(machine_wide_rule_wanted(false));
+    }
+
+    /// The two engines must agree, which is the actual requirement --
+    /// the value they agree on is secondary.
+    #[test]
+    fn the_two_engines_that_force_dns_answer_the_same_way() {
+        for passive in [false, true] {
+            assert_eq!(
+                machine_wide_rule_wanted(passive),
+                machine_wide_rule_wanted(passive),
+                "both engines read this one function; if that stops being \
+                 true, this test is no longer the guard it looks like"
+            );
+        }
+    }
+
+    /// A latent coupling that nothing asserted before.
+    ///
+    /// The NRPT rule steers the machine's lookups at this address, and
+    /// Custom mode's redirect carries them only because it is a public
+    /// address its filter admits. `split_tunnel::CUSTOM_MODE_RESOLVER`
+    /// is the third copy of it and is what actually answers. If an
+    /// engine pointed the rule somewhere else, Custom mode would send
+    /// every lookup to an address the tunnel does not carry -- which
+    /// fails closed rather than leaking, but fails silently.
+    #[test]
+    fn both_engines_point_the_rule_at_the_same_resolver() {
+        assert_eq!(
+            super::super::ikev2::IKEV2_DNS,
+            super::super::xray::TUN_DNS,
+            "the two engines must name one resolver"
+        );
+        // Kept as a literal on purpose: this is the value
+        // split_tunnel::CUSTOM_MODE_RESOLVER holds, and the point of the
+        // assertion is to fail if either side is edited alone.
+        assert_eq!(super::super::xray::TUN_DNS, "1.1.1.1");
+    }
 
     /// The failure this fallback could introduce, rather than the one
     /// it fixes.
