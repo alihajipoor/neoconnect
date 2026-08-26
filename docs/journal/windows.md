@@ -10778,3 +10778,220 @@ this repository is public. It shrinks the future scraping surface, and
 certificate transparency still carries the node hostnames regardless —
 `docs/node-enumerability-remediation.md` is the runbook for that, still
 unexecuted.
+
+---
+
+## 2026-08-26 — the engine activation timeouts: what the budgets were actually bounding
+
+**Status:** done — three confirmed against exit IPs, one refuted
+**Touches:** `apps/desktop-windows/service/src/engines/**`
+**Branch:** `claude/engine-activation-timeouts` (`0bc9857`, `6bd4915`)
+
+The code and the reasoning are in the commit messages. This records the
+things they do not: the environment fact that reframes every budget in
+this service, what is refuted, what is still open, and the rig traps.
+
+Addresses redacted per `docs/node-address-hygiene.md`: `{germany-1}` is
+the node's exit address, `{tester-own}` the guest's own.
+
+### The environment fact
+
+`HELPER_BUDGET`'s comment records these calls as "a PowerShell one-liner
+in 0.25s" and "`Get-VpnConnection` in 0.52s". Both readings are real and
+both were taken on a developer workstation. On a 4-vCPU Windows 11
+guest, **with no CPU cap at all**, a fresh process per row — which is
+what `capture_hidden` spawns:
+
+```
+                                                 run 1      run 2
+  powershell -NoProfile -Command 1                4.4s        -
+  Get-DnsClientNrptRule | Measure-Object          9.6s      66.7s
+  Add-DnsClientNrptRule                          10.0s      55.1s
+  Get-VpnConnection -AllUserConnection           41.9s      72.4s
+  route.exe print -4, for contrast                5.0s        -
+
+  in-process registry read of both NRPT keys     185ms       32ms
+  the registry delete of one rule                 64ms       48ms
+```
+
+Forty to a hundred times the numbers in the comment, and — the part that
+matters — **seven-fold variance between two runs an hour apart on the
+same machine**. A 15s budget sits *inside* that range. It was never
+bounding misbehaviour; it was a coin toss on a cmdlet's mood.
+
+**So no wall-clock number is the fix, and any future one should be
+treated as a backstop rather than a tuning knob.** What worked was
+removing spawns. Keep that ordering in mind before raising anything
+here: `CMDLET_BUDGET` is 35s only because the app abandons the request
+at 45s, and it says so in its own comment.
+
+Second-order: the deafness `HELPER_BUDGET` exists to prevent is no
+longer bounded by the budget anyway. `Status` never queues (it has its
+own lock timeout and an unlocked OS-visible answer), and `Disconnect`
+waits two seconds then sets `ABANDON`, which every wait now reads. That
+is worth knowing before anyone re-derives these numbers from the old
+argument.
+
+### Verdicts
+
+Reproduced on `c6d9b30` first, then measured again on the fixed build —
+same guest restored to `clean-base`, same fresh install, same
+`cpuexecutioncap 60`, ground truth an exit IP retried up to eight times
+over ~90s.
+
+**Xray — CONFIRMED.** The reason 10s could never have worked is in
+Xray's own log on a machine that had never run it: it installs the
+Wintun driver itself on first use, and had not begun creating the
+adapter until 8.5s in. First connect after a fresh install, before and
+after:
+
+```
+  BEFORE  44.4s  "Xray started but its network adapter (neoconnect0) never appeared"
+  AFTER   32.1s  ok -- exit IP {germany-1} at t+37s, inside the app's 45s
+```
+
+**OpenVPN — CONFIRMED in mechanism, NOT in the thing it was aimed at.**
+The connect now returns when OpenVPN logs `Initialization Sequence
+Completed` (41.6s, matching the log timestamp) instead of 1.5s after
+spawn, and the exit IP was `{germany-1}` at t+54.5s. But the failure
+this was meant to fix is `split_tunnel_active` never arriving, and
+**Custom mode was never run** — `E3.ps1` was written for it and there
+was no time. The mechanism is right and the claim is unproven.
+
+**`dns::clear()` — CONFIRMED.** The cleanest row is WireGuard's, because
+WireGuard installs no NRPT rule at all: zero rules existed, and the
+unfixed build spent **thirty seconds of PowerShell** establishing that,
+twice per connect/disconnect cycle, six for six. Disconnect went 17.6s →
+**0.8s** with `cleanup.log` absent entirely — not a faster PowerShell,
+no PowerShell — and the rule count still correct either side. On the
+engine that does install a rule: 1 → 0, disconnect 1.6s.
+
+The unfixed build also said out loud which mechanism was doing the work:
+
+```
+  22:21:28 | PowerShell removal failed (... within 15s), falling back to the registry
+  22:21:48 | PowerShell removal failed (... within 15s), falling back to the registry
+  22:22:29 | PowerShell removal failed (... within 15s), falling back to the registry
+  22:22:30 | removed 1 rule(s) directly from the registry
+```
+
+**IKEv2 — REFUTED.** Collapsing three PowerShell spawns to one is a real
+and large win — 111.5s → 14.4s in one run, 165.8s → 45.3s in another —
+and it still does not connect:
+
+```
+  BEFORE  120.5s  "could not create the VPN entry: powershell did not finish within 15s"
+  AFTER    83.1s  "could not create the VPN entry: powershell did not finish within 35s"
+```
+
+One spawn, still over. (Those two are from the same guest a dozen cycles
+deep. The clean-guest repeat is **not** a usable measurement and is not
+being presented as one: the connect never answered inside the harness's
+300s pipe read, on a guest that was by then failing `screenshotpng` with
+`E_FAIL` — wedging, in the way this rig has wedged before. What it does
+suggest, and no more than suggest, is that the failure mode there is a
+connect that sits on the `Engines` lock for minutes rather than one that
+returns an error.) And the budget cannot go higher, because the app
+gives up at 45s. **PowerShell cannot stay on the IKEv2 connect path**;
+`RasSetEntryPropertiesW` is where entry creation belongs. Not attempted
+here because a wrong struct layout there corrupts memory rather than
+failing, and `ras.rs` is the scar from the last time. Until that is
+done, **IKEv2 is the protocol a slow machine cannot have** — which for
+a customer whose network blocks the others is the whole product.
+
+### The whole fixed build on one clean guest
+
+Restored to `clean-base`, freshly installed, `cpuexecutioncap 60`,
+service image hash-checked on the running process (`9D52FA31ACD1DDA0`):
+
+```
+              connect   reply   exit IP at the node   disconnect   NRPT   cleanup.log
+  wg           18.1s     ok        t+36.5s               0.8s      0->0    absent
+  reality      32.1s     ok        t+37.0s               1.6s      1->0    empty
+  ovpn         41.6s     ok        t+54.5s              13.4s      0->0    absent
+  ikev2       (did not answer -- see above)
+```
+
+Three connects inside the app's 45s deadline, three exit IPs at
+`{germany-1}`, and not one PowerShell note in a cleanup log. The same
+three on the unfixed build, on a guest in the same state, were: an
+adapter that "never appeared", a `tapctl` that "returned nothing", and a
+disconnect that reported the previous tunnel still shutting down.
+
+### Found on the way, not on the list
+
+- **A fourth budget failure the 0825 run never reached.** Running Xray
+  alone on the unfixed build: `could not force tunnel DNS: powershell
+  did not finish within 15s`. That is `dns::apply`, it is fatal, and
+  Xray's log shows the tunnel was **already carrying traffic** when the
+  service killed it. A working tunnel destroyed because a DNS cmdlet was
+  slow.
+- **OpenVPN cannot be the first protocol on a fresh machine.** `tapctl
+  create --hwid wintun` fails with `DiInstallDevice failed, error
+  0xe0000203` — no Wintun driver, because nothing has installed one yet.
+  Xray's `wintun.dll` installs it on first use. The rig runs were
+  reordered to put `reality` before `ovpn`; that is a workaround, not a
+  fix, and nothing in the product enforces that order.
+- **WireGuard's teardown failing the *next* connect.** At 10s the
+  disconnect answered "the previous WireGuard tunnel was still shutting
+  down after 10s", and `connect_inner` begins with `disconnect()?`. 45s
+  now, and the loop reads `abandoned()`.
+
+### Open, and one of them is the owner's call
+
+- **Should a tunnel come up when its DNS rule could not be installed?**
+  Xray says no (`dns::apply` is `?`), IKEv2 says yes (logged and
+  ignored, with a comment arguing that refusing "would take away a
+  working protocol from someone who may have no other one that
+  connects"). Neither comment acknowledges the other. In Iran the
+  missing rule means the ISP resolver answers first, with a poisoned
+  address, for exactly the domains they connected to reach — so neither
+  answer is obviously right and it is not a call to make quietly. A
+  third option exists: bring the tunnel up and carry the complaint in
+  `status`, the way `split_tunnel_problem` already does.
+- **Two engines ending their session shortly after a successful connect,
+  on a guest a dozen cycles deep.** Xray carrying traffic in its own
+  log, OpenVPN logging `Initialization Sequence Completed`, and the
+  session gone by the next status poll. That guest had a ghost
+  `neoconnect0` device by then — visible as Xray naming its own adapter
+  `neoconnect0 1` and removing it as an orphan. **Not established**
+  whether that is the cause; it did not recur on a clean guest, which is
+  a different experiment and does not answer it.
+- **`clear_gaming()` has the identical unconditional-PowerShell defect**
+  and was deliberately left alone: gaming branches were in flight and a
+  conflict there would have cost someone else more than the fix is
+  worth.
+- **`REPAIR_TIMEOUT` (195s) does not match its own code.** Its comment
+  derives it as "nine steps, each bounded by the fifteen-second helper
+  budget"; the pass actually makes 35 bounded spawns, and even a clean
+  machine comes to 225s. Untouched here — no call site given the new
+  budget is on the repair path, so this change does not move it — but it
+  was wrong before and still is.
+
+### Rig traps, all hit for real
+
+- **The RunMRU trap needs more than a fresh `.cmd` name.** `Ctrl+A`
+  alone did not clear the Run box; the stale completion stayed and the
+  typed text mixed into it. Select-all **and** Delete, twice, seconds
+  apart, then screenshot before Enter.
+- **The backslash-eating trap cost a whole row.** A UNC path written
+  through a heredoc arrived as `\VBOXSVR<VT>mx\Epoll.ps1` — a literal
+  vertical tab where `\v` had been. Stage helper scripts to a local path
+  and reference that; never pass UNC through a generated string.
+- **`Stop-Service` returns before the service stops**, and `Copy-Item`
+  over the running binary then throws a *terminating* error that the job
+  runner swallows as a failed job — leaving the old build installed
+  while the log said the swap had begun. Wait, then kill, then retry the
+  copy, then print the hash of the **running** image. A swap that is not
+  hash-checked on the process is not a swap.
+- **One exit-IP probe straight after a connect reports a false
+  failure.** WireGuard read `{tester-own}` at t+33.7s and `{germany-1}`
+  at t+47.2s in the same run. Retry, and print every attempt with its
+  elapsed time.
+- **The guest's clock jumps.** One long run produced negative elapsed
+  times from `Get-Date`. Connect durations here are `Stopwatch`-based
+  and unaffected; anything wall-clock on this guest needs checking.
+- **The elevated runner's heartbeat can stall with the guest still
+  healthy.** Its logon task is what recovers it — a reboot brought it
+  back with no Win+R fight, which is exactly what that registration is
+  for.
