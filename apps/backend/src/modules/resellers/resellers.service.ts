@@ -6,8 +6,9 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { AdminRole } from "@prisma/client";
+import { AdminRole, Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import type { ListWindow, Page } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import { AppLinksService } from "../app-links/app-links.service";
 import { resellerVoucherEmail } from "../email/templates";
@@ -18,6 +19,42 @@ import { randomCode } from "../vouchers/voucher-code";
  * account, which is why one link serves both the brand-new person and
  * the existing customer. */
 const DEFAULT_WEBSITE = "https://neoxify.net";
+
+/** The nine fields myVouchers already hands back, named at the query
+ * instead of after it.
+ *
+ * The mapping below picked these out of a whole row, so everything else
+ * on the table -- `planId`, `note`, `maxRedemptions`, `updatedAt`, and
+ * `issuedByAdminId`, which the WHERE clause has already pinned to the
+ * caller -- was read from Postgres and then thrown away. Keeping the
+ * projection and the mapping in step is the point: adding a column to
+ * Voucher now cannot widen this response, and adding a field to the
+ * mapping without adding it here fails to compile. */
+const RESELLER_VOUCHER_FIELDS = {
+  id: true,
+  code: true,
+  recipientEmail: true,
+  createdAt: true,
+  expiresAt: true,
+  isActive: true,
+  redeemedCount: true,
+  plan: { select: { id: true, name: true } },
+  redemptions: { select: { redeemedAt: true }, take: 1 },
+} satisfies Prisma.VoucherSelect;
+
+/** One row of a reseller's history, as the panel reads it. */
+export interface ResellerVoucherRow {
+  id: string;
+  code: string;
+  plan: { id: string; name: string };
+  recipientEmail: string | null;
+  createdAt: Date;
+  expiresAt: Date | null;
+  isActive: boolean;
+  redeemedCount: number;
+  redeemedAt: Date | null;
+  canRevoke: boolean;
+}
 
 @Injectable()
 export class ResellersService {
@@ -123,21 +160,29 @@ export class ResellersService {
 
   // ------------------------------------------------------------ history
 
-  /** The calling reseller's own codes, newest first.
+  /** The calling reseller's own codes, newest first -- bounded.
    *
    * Scoped on issuedByAdminId, which is the only thing stopping one
-   * reseller seeing -- or revoking -- another's. */
-  async myVouchers(adminUserId: string) {
-    const vouchers = await this.prisma.voucher.findMany({
-      where: { issuedByAdminId: adminUserId },
-      orderBy: { createdAt: "desc" },
-      include: {
-        plan: { select: { id: true, name: true } },
-        redemptions: { select: { redeemedAt: true }, take: 1 },
-      },
-    });
+   * reseller seeing -- or revoking -- another's. That scope is not a
+   * bound, though: a reseller who has been minting codes for a year has
+   * every one of them still on the table, because a code is switched off
+   * rather than deleted. The count is taken over the same WHERE clause,
+   * so it is this reseller's total and never the whole table's. */
+  async myVouchers(adminUserId: string, window: ListWindow): Promise<Page<ResellerVoucherRow>> {
+    const where: Prisma.VoucherWhereInput = { issuedByAdminId: adminUserId };
 
-    return vouchers.map((v) => ({
+    const [vouchers, total] = await this.prisma.$transaction([
+      this.prisma.voucher.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        select: RESELLER_VOUCHER_FIELDS,
+        take: window.take,
+        skip: window.skip,
+      }),
+      this.prisma.voucher.count({ where }),
+    ]);
+
+    const items = vouchers.map((v) => ({
       id: v.id,
       code: v.code,
       plan: v.plan,
@@ -153,6 +198,8 @@ export class ResellersService {
       // offered.
       canRevoke: v.redeemedCount === 0,
     }));
+
+    return { items, total };
   }
 
   // ------------------------------------------------------------- revoke

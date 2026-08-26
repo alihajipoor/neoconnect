@@ -1,12 +1,14 @@
 "use client";
 
-import { MoreHorizontal, Plus } from "lucide-react";
-import type { GameProfile } from "@/lib/types";
+import Link from "next/link";
+import { MoreHorizontal, Plus, Search } from "lucide-react";
+import type { GameProfileListRow } from "@/lib/types";
 import { deleteGameProfile } from "./actions";
 import { GameProfileFormDialog } from "./game-profile-form-dialog";
 import { DeleteConfirm } from "@/components/dashboard/delete-confirm";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   DropdownMenu,
@@ -14,14 +16,38 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
+
+const ACTIVE_FILTERS: { label: string; value: "true" | "false" | "all" }[] = [
+  { label: "Active", value: "true" },
+  { label: "Inactive", value: "false" },
+  { label: "All", value: "all" },
+];
 
 export function GameProfilesTable({
   profiles,
   canManage,
+  query,
+  activeFilter,
 }: {
-  profiles: GameProfile[];
+  profiles: GameProfileListRow[];
   canManage: boolean;
+  query: string;
+  activeFilter: "true" | "false" | "all";
 }) {
+  /** The tabs and the search box both hand off to the URL rather than to
+   * state here, so that one page of 100 rows out of 1,480 is what the
+   * server sends and not what the browser filtered. Filtering in the
+   * browser would search the page an operator happens to be holding and
+   * quietly report "no such game" for the other 1,380. */
+  function filterHref(value: "true" | "false" | "all") {
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    if (value !== "true") params.set("isActive", value);
+    const suffix = params.toString();
+    return suffix ? `/gaming?${suffix}` : "/gaming";
+  }
+
   return (
     <section className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-4">
@@ -44,6 +70,48 @@ export function GameProfilesTable({
           />
         )}
       </div>
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap gap-1.5">
+          {ACTIVE_FILTERS.map((filter) => (
+            <Link
+              key={filter.value}
+              href={filterHref(filter.value)}
+              className={cn(
+                "rounded-lg px-3 py-1.5 text-sm font-medium transition-colors",
+                activeFilter === filter.value
+                  ? "bg-primary/15 text-foreground"
+                  : "text-muted-foreground hover:bg-white/5 hover:text-foreground",
+              )}
+            >
+              {filter.label}
+            </Link>
+          ))}
+        </div>
+        {/* A real GET form, submitted to the same route. It works with
+            JavaScript off, it leaves the search in the URL where it can
+            be sent to somebody, and it deliberately drops `skip` -- a new
+            search starting on page 4 of the previous one shows an empty
+            table for a game that exists. */}
+        <form action="/gaming" method="get" className="flex gap-2 sm:w-96">
+          {activeFilter !== "true" && <input type="hidden" name="isActive" value={activeFilter} />}
+          <div className="relative flex-1">
+            <Search className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              type="search"
+              name="q"
+              defaultValue={query}
+              placeholder="Search name, slug, or publisher"
+              className="pl-9"
+              aria-label="Search games"
+            />
+          </div>
+          <Button type="submit" variant="outline">
+            Search
+          </Button>
+        </form>
+      </div>
+
       <div className="rounded-lg border border-white/8 bg-card/40">
         <Table>
           <TableHeader>
@@ -62,7 +130,15 @@ export function GameProfilesTable({
             {profiles.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={canManage ? 8 : 7} className="py-8 text-center text-muted-foreground">
-                  No games yet.
+                  {/* Searching the whole catalogue and finding nothing is
+                      a different fact from having no games, and an
+                      operator who reads the wrong one goes looking for a
+                      broken list instead of a typo. */}
+                  {query
+                    ? `No games match "${query}".`
+                    : activeFilter === "false"
+                      ? "No inactive games."
+                      : "No games yet."}
                 </TableCell>
               </TableRow>
             ) : (
@@ -125,7 +201,7 @@ export function GameProfilesTable({
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <GameProfileFormDialog
-                            profile={profile}
+                            profile={{ id: profile.id, displayName: profile.displayName }}
                             trigger={
                               <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
                                 Edit

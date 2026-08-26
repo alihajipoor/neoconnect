@@ -24,14 +24,25 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { ResellerBalance, ResellerVoucher } from "@/lib/types";
+import { Pager } from "@/components/dashboard/pager";
 import { generateVoucher, resendVoucher, revokeVoucher } from "./actions";
 
 export function ResellerWorkspace({
   balances,
   vouchers,
+  issuedTotal,
+  take,
+  skip,
 }: {
   balances: ResellerBalance[];
+  /** One page of them, not all of them. */
   vouchers: ResellerVoucher[];
+  /** Every code this reseller has issued, counted by the server over the
+   * same scope it pages -- so it stays right on page four, where
+   * `vouchers.length` would only ever say "one page". */
+  issuedTotal: number;
+  take: number;
+  skip: number;
 }) {
   const [planId, setPlanId] = useState<string>(balances.find((b) => b.balance > 0)?.plan.id ?? "");
   const [email, setEmail] = useState("");
@@ -172,14 +183,27 @@ export function ResellerWorkspace({
 
       <Card className="p-0">
         <div className="border-b border-white/5 p-5">
-          <h2 className="text-base font-semibold">Codes you have issued</h2>
+          <h2 className="text-base font-semibold">
+            Codes you have issued
+            {issuedTotal > 0 && (
+              <span className="ml-2 text-sm font-normal text-muted-foreground tabular-nums">
+                {issuedTotal.toLocaleString()}
+              </span>
+            )}
+          </h2>
           <p className="text-sm text-muted-foreground">
             Deleting an unredeemed code gives the token back.
           </p>
         </div>
 
         {vouchers.length === 0 ? (
-          <p className="p-5 text-sm text-muted-foreground">Nothing yet.</p>
+          <p className="p-5 text-sm text-muted-foreground">
+            {/* Distinguished on the server's total, not on this page
+                being empty: a reseller who lands past the end of their
+                own history should be told to page back, not that they
+                have never issued anything. */}
+            {issuedTotal === 0 ? "Nothing yet." : "Nothing on this page — go back a page."}
+          </p>
         ) : (
           <Table>
             <TableHeader>
@@ -278,6 +302,15 @@ export function ResellerWorkspace({
             </TableBody>
           </Table>
         )}
+
+        <div className="border-t border-white/5 p-5 empty:hidden">
+          <Pager
+            total={issuedTotal}
+            take={take}
+            skip={skip}
+            basePath="/reseller"
+          />
+        </div>
       </Card>
     </div>
   );

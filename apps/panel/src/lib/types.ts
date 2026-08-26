@@ -210,6 +210,29 @@ export interface Invoice {
   paymentTransaction?: { provider: string } | null;
 }
 
+/** What `GET /invoices` returns, which is less than an `Invoice`.
+ *
+ * The list route selects a projection (`INVOICE_LIST_FIELDS` in
+ * `apps/backend/src/modules/invoices/invoices.service.ts`) rather than the
+ * whole row: the periods, the due/paid timestamps, the line items and the
+ * three foreign keys are none of them on screen in the table, and
+ * `lineItemsJson` in particular is an unbounded blob per row.
+ *
+ * Typed separately rather than as a `Pick<Invoice, ...>` so that a field
+ * added to one is not silently assumed to be on the other. Anything that
+ * needs a whole invoice reads `GET /invoices/:id` and gets an `Invoice`. */
+export interface InvoiceListRow {
+  id: string;
+  invoiceNumber: string;
+  planNameSnapshot: string;
+  amountUsd: string;
+  currency: string;
+  status: InvoiceStatus;
+  issuedAt: string;
+  customer: { email: string };
+  paymentTransaction: { provider: string } | null;
+}
+
 export interface InvoiceSummary {
   since: string;
   invoiceCount: number;
@@ -233,6 +256,35 @@ export interface PaymentSettings {
   plisioEnabled: boolean;
   plisioApiKeySet: boolean;
   updatedAt: string;
+}
+
+/** One row of `GET /vouchers`, which is narrower than a whole voucher.
+ *
+ * The list route selects `VOUCHER_LIST_FIELDS` (in
+ * `apps/backend/src/modules/vouchers/vouchers.service.ts`), and the
+ * omission that matters is `recipientEmail`: it is a customer's address,
+ * written only by the reseller programme, and the operator's table has
+ * never had a column for it. `issuedByAdminId`, `createdAt` and
+ * `updatedAt` are gone for the duller reason that no cell shows them.
+ *
+ * Typed separately rather than as a `Pick<Voucher, ...>` so a field added
+ * to one is not silently assumed to be on the other. Anything that needs
+ * a whole voucher -- create and update both return one -- gets a
+ * `Voucher`. */
+export interface VoucherListRow {
+  id: string;
+  code: string;
+  planId: string;
+  plan: Pick<SubscriptionPlan, "id" | "name"> & {
+    durationDays?: number;
+    priceUsd?: string;
+  };
+  maxRedemptions: number | null;
+  redeemedCount: number;
+  expiresAt: string | null;
+  isActive: boolean;
+  note: string | null;
+  _count?: { redemptions: number };
 }
 
 /** A code that grants a plan without payment.
@@ -282,6 +334,33 @@ export interface SupportMessage {
   fromAdmin: boolean;
   body: string;
   createdAt: string;
+}
+
+/** One row of `GET /support/tickets`, which is narrower than a whole
+ * ticket.
+ *
+ * The list route selects `TICKET_LIST_FIELDS` (in
+ * `apps/backend/src/modules/support/support.service.ts`). The omission
+ * to know about is `customerLastReadAt`: that is the *customer's* unread
+ * marker, read by the app to decide whether to show a dot on their side.
+ * The operator's rail draws its own dot from `status` and has never
+ * touched it, so nothing here loses a feature -- but if a "they have not
+ * read your reply" indicator is ever wanted, it needs the field putting
+ * back on the projection rather than inferring one. `customerId`,
+ * `createdAt` and `updatedAt` are gone because no row shows them;
+ * `lastMessageAt` is the timestamp the rail renders and sorts on.
+ *
+ * The open conversation still arrives whole from
+ * `GET /support/tickets/:id` as a `SupportTicket`. */
+export interface SupportTicketListRow {
+  id: string;
+  subject: string;
+  status: SupportTicketStatus;
+  lastMessageAt: string;
+  /** Always present on a list row -- the projection selects it, and a
+   * ticket cannot exist without a customer. */
+  customer: Pick<Customer, "id" | "email">;
+  _count: { messages: number };
 }
 
 export interface SupportTicket {
@@ -449,6 +528,38 @@ export interface GameProfile {
   sortOrder: number;
   isActive: boolean;
   notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One row of `GET /gaming/profiles`, which is narrower than a
+ * `GameProfile`.
+ *
+ * The catalogue is 1,480 games and the list route now selects
+ * `PROFILE_LIST_FIELDS` (`apps/backend/src/modules/gaming/gaming.service.ts`)
+ * instead of whole rows: `notes` is free text an operator wrote for
+ * themselves and `processNames`/`destinationCidrs` belong to the per-game
+ * private exit, which is not built and which nothing on the table shows.
+ * Three list-shaped columns per row across a page is a lot of JSON for
+ * fields nobody reads.
+ *
+ * The consequence to remember is that this type is **not enough to edit
+ * from**. The form dialog re-fetches `GET /gaming/profiles/:id` for a
+ * whole `GameProfile`, because pre-filling a form from a row that is
+ * missing three fields and then saving it writes blanks over real values. */
+export interface GameProfileListRow {
+  id: string;
+  slug: string;
+  displayName: string;
+  iconKey: string | null;
+  publisher: string | null;
+  hostnames: string[];
+  excludeHostnames: string[];
+  destinationAsn: string | null;
+  prefixComplete: boolean;
+  canaryHostname: string | null;
+  sortOrder: number;
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }

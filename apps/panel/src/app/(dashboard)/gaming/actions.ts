@@ -1,8 +1,25 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { apiMutate, type MutationResult } from "@/lib/api";
+import { apiFetch, apiMutate, type MutationResult } from "@/lib/api";
 import type { GameProfile, GamingResolver, PlanFeatureGrant, PlanFeatureKey } from "@/lib/types";
+
+/** The whole row behind a table row, for the edit form.
+ *
+ * `GET /gaming/profiles` stopped returning `notes`, `processNames` and
+ * `destinationCidrs` when the 1,480-row catalogue was bounded, so the
+ * list no longer carries enough to edit from. The form dialog calls this
+ * when it opens and waits for the answer rather than pre-filling from the
+ * row it was handed: a form showing three empty fields that are not
+ * actually empty saves blanks over them on the first Save.
+ *
+ * Deliberately allowed to reject rather than returning a MutationResult.
+ * `apiFetch` redirects to /login on an expired session, which a Server
+ * Action performs properly, and that has to stay possible -- so the
+ * caller catches the rejection and shows the failure instead of a form. */
+export async function getGameProfile(id: string): Promise<GameProfile> {
+  return apiFetch<GameProfile>(`/gaming/profiles/${id}`);
+}
 
 export interface GameProfileInput {
   slug: string;

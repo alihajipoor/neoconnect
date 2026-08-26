@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { Inbox, Search } from "lucide-react";
-import type { SupportTicket, SupportTicketStatus } from "@/lib/types";
+import type { SupportTicketListRow, SupportTicketStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 
@@ -15,27 +15,61 @@ const FILTERS: { value: SupportTicketStatus | "ALL"; label: string }[] = [
   { value: "ALL", label: "All" },
 ];
 
+/** One status's worth of the inbox: the rows that were loaded, and how
+ * many exist behind them.
+ *
+ * `total` comes from the API's `X-Total-Count` and is a count of the
+ * status, not of `items`. The two are different numbers as soon as a
+ * status has more conversations than one window holds, and the badge
+ * this rail draws is the one an operator reads as "how many people are
+ * waiting" -- so it has to be the former. It used to be
+ * `tickets.filter(...).length` over whatever array the layout had
+ * fetched, which is the page size wearing a total's clothes. */
+export interface TicketBucket {
+  items: SupportTicketListRow[];
+  total: number;
+}
+
 /** Defaults to "Needs reply" rather than "All".
  *
  * An inbox that opens on everything makes the operator do the triage a
  * status column already did for them. The one view that matters on
- * opening this page is the set of people still waiting. */
-export function TicketRail({ tickets }: { tickets: SupportTicket[] }) {
+ * opening this page is the set of people still waiting.
+ *
+ * Each tab is its own server-filtered page (see the layout for why they
+ * all arrive together rather than being fetched on click), so switching
+ * tabs picks between lists the database built and never re-filters one
+ * list into three.
+ */
+export function TicketRail({ buckets }: { buckets: Record<SupportTicketStatus, TicketBucket> }) {
   const pathname = usePathname();
   const [filter, setFilter] = useState<SupportTicketStatus | "ALL">("OPEN");
   const [query, setQuery] = useState("");
 
-  const needle = query.trim().toLowerCase();
-  const visible = tickets.filter((ticket) => {
-    if (filter !== "ALL" && ticket.status !== filter) return false;
-    if (!needle) return true;
-    return (
-      ticket.subject.toLowerCase().includes(needle) ||
-      (ticket.customer?.email ?? "").toLowerCase().includes(needle)
-    );
-  });
+  // "All" is the three pages back to back rather than a fourth request:
+  // the API orders an unfiltered list by status first and last activity
+  // second, and the enum is declared OPEN, ANSWERED, RESOLVED -- so
+  // concatenating them in that order reproduces exactly what it would
+  // have returned, and the totals sum to the inbox's own.
+  const bucket: TicketBucket =
+    filter === "ALL"
+      ? {
+          items: [...buckets.OPEN.items, ...buckets.ANSWERED.items, ...buckets.RESOLVED.items],
+          total: buckets.OPEN.total + buckets.ANSWERED.total + buckets.RESOLVED.total,
+        }
+      : buckets[filter];
 
-  const openCount = tickets.filter((t) => t.status === "OPEN").length;
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? bucket.items.filter(
+        (ticket) =>
+          ticket.subject.toLowerCase().includes(needle) ||
+          ticket.customer.email.toLowerCase().includes(needle),
+      )
+    : bucket.items;
+
+  const openCount = buckets.OPEN.total;
+  const loadedShort = bucket.total > bucket.items.length;
 
   return (
     <aside className="flex w-full shrink-0 flex-col gap-3 lg:w-80">
@@ -64,8 +98,8 @@ export function TicketRail({ tickets }: { tickets: SupportTicket[] }) {
           >
             {option.label}
             {option.value === "OPEN" && openCount > 0 && (
-              <span className="ml-1.5 rounded-full bg-primary/25 px-1.5 py-0.5 text-[10px] text-foreground">
-                {openCount}
+              <span className="ml-1.5 rounded-full bg-primary/25 px-1.5 py-0.5 text-[10px] text-foreground tabular-nums">
+                {openCount.toLocaleString()}
               </span>
             )}
           </button>
@@ -77,7 +111,7 @@ export function TicketRail({ tickets }: { tickets: SupportTicket[] }) {
           <div className="flex flex-col items-center gap-2 rounded-lg border border-white/8 bg-card/40 px-4 py-10 text-center">
             <Inbox className="size-5 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">
-              {tickets.length === 0 ? "No conversations yet." : "Nothing matches."}
+              {bucket.total === 0 ? "Nothing here." : "Nothing matches."}
             </p>
           </div>
         ) : (
@@ -115,13 +149,24 @@ export function TicketRail({ tickets }: { tickets: SupportTicket[] }) {
                   </span>
                 </div>
                 <span className="truncate pl-3.5 text-xs text-muted-foreground">
-                  {ticket.customer?.email ?? "Unknown customer"}
+                  {ticket.customer.email}
                 </span>
               </Link>
             );
           })
         )}
       </div>
+
+      {/* Said out loud rather than left to be inferred from a list that
+          simply stops. The search box only looks at what is loaded, so
+          an operator hunting an old conversation needs to know the rail
+          is not the whole of it. */}
+      {loadedShort && (
+        <p className="px-1 text-xs text-muted-foreground tabular-nums">
+          Showing the {bucket.items.length.toLocaleString()} most recent of{" "}
+          {bucket.total.toLocaleString()}. Search covers these only.
+        </p>
+      )}
     </aside>
   );
 }

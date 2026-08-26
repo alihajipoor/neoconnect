@@ -21,7 +21,17 @@ async function bootstrap() {
   // JSON.stringify of the re-parsed object (whitespace/key-order would
   // change the hash). Every other route is unaffected.
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
-    cors: true,
+    // `exposedHeaders` rather than a bare `cors: true`, so a browser can
+    // actually read the one header the list routes add. The paged
+    // endpoints keep returning a bare JSON array and report how many rows
+    // exist in `X-Total-Count` (see common/pagination.ts); by default CORS
+    // hides every response header except a short safelist, so without this
+    // a cross-origin caller would receive the header and be forbidden from
+    // reading it -- and would then have to infer a total from the length of
+    // the page it is holding, which is the exact wrong number.
+    //
+    // Every other CORS default is unchanged from `cors: true`.
+    cors: { exposedHeaders: ["X-Total-Count"] },
     rawBody: true,
   });
 

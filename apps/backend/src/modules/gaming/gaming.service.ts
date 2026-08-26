@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from "@nes
 import { PlanFeatureKey, Prisma, SubscriptionStatus } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../prisma/prisma.service";
+import type { ListWindow, Page } from "../../common/pagination";
 import { CreateGameProfileDto } from "./dto/create-game-profile.dto";
 import { UpdateGameProfileDto } from "./dto/update-game-profile.dto";
 import { CreateGamingResolverDto } from "./dto/create-gaming-resolver.dto";
@@ -90,6 +91,36 @@ export interface GamingProfilePayload {
   }[];
 }
 
+/** What the operator's game *table* renders, and nothing else.
+ *
+ * Named columns rather than a bare `findMany`, so that adding a column to
+ * `GameProfile` cannot silently widen a response again -- which is how
+ * `notes` (operator provenance for all 1,480 rows) ended up on a route
+ * nothing displayed it on.
+ *
+ * `hostnames` and `excludeHostnames` are here because the table renders
+ * their lengths and a Postgres `text[]` has no `_count` to select
+ * instead. They are cheap in practice: three rows in the shipped
+ * catalogue carry any hostnames at all. `processNames`,
+ * `destinationCidrs` and `notes` are deliberately absent -- they are
+ * edit-form fields, and the form loads the single row it is editing. */
+const PROFILE_LIST_FIELDS = {
+  id: true,
+  slug: true,
+  displayName: true,
+  iconKey: true,
+  publisher: true,
+  hostnames: true,
+  excludeHostnames: true,
+  destinationAsn: true,
+  prefixComplete: true,
+  canaryHostname: true,
+  sortOrder: true,
+  isActive: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.GameProfileSelect;
+
 /** The one place a resolver row is turned into something a client may act on.
  *
  * Written as a named projection rather than inline so there is a single
@@ -117,10 +148,65 @@ export class GamingService {
   // Game profiles (admin)
   // -------------------------------------------------------------------------
 
-  listProfiles() {
-    return this.prisma.gameProfile.findMany({
-      orderBy: [{ sortOrder: "asc" }, { displayName: "asc" }],
-    });
+  /** The operator's list of games, one page at a time.
+   *
+   * This route used to be `findMany` with an `orderBy` and nothing else:
+   * every column of every row, active or not, on a route the panel calls
+   * on page load. That was survivable while the catalogue was a dozen
+   * hand-written rows and stopped being survivable at 1,480 -- 668,780 B
+   * of JSON, which is a *superset* of the 373,954 B the customer payload
+   * costs, because it carries `notes`, `processNames`, `destinationCidrs`
+   * and the row ids on top.
+   *
+   * Three things bound it now, and they are worth keeping distinct:
+   *
+   * 1. **The window.** `take`/`skip`, capped, is the only one of the
+   *    three that stays a bound as the catalogue grows.
+   * 2. **The `isActive` filter**, defaulting to active-only. Returning
+   *    deactivated profiles was a separate bug from returning all of
+   *    them: a profile is deactivated to take it out of circulation, and
+   *    the list that decides what an operator sees should say so.
+   *    `"all"` is still reachable, because a game you cannot find is a
+   *    game you cannot reactivate.
+   * 3. **The projection.** The three heaviest columns -- `notes`,
+   *    `processNames`, `destinationCidrs` -- are edit-form fields that no
+   *    cell in the table renders. The form fetches the full row from
+   *    `GET /gaming/profiles/:id` when it opens, which is one request for
+   *    the one row being edited instead of every row on every page load.
+   */
+  async listProfiles(options: {
+    isActive?: boolean;
+    search?: string;
+    window: ListWindow;
+  }): Promise<Page<Prisma.GameProfileGetPayload<{ select: typeof PROFILE_LIST_FIELDS }>>> {
+    const where: Prisma.GameProfileWhereInput = {
+      ...(options.isActive === undefined ? {} : { isActive: options.isActive }),
+      ...(options.search
+        ? {
+            OR: [
+              { displayName: { contains: options.search, mode: "insensitive" } },
+              { slug: { contains: options.search, mode: "insensitive" } },
+              { publisher: { contains: options.search, mode: "insensitive" } },
+            ],
+          }
+        : {}),
+    };
+
+    // Both in one round trip. The count is what lets the panel say
+    // "showing 100 of 1,480" instead of inferring a total from the page
+    // it is holding -- which would read as "100 games" and be wrong.
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.gameProfile.findMany({
+        where,
+        orderBy: [{ sortOrder: "asc" }, { displayName: "asc" }],
+        select: PROFILE_LIST_FIELDS,
+        take: options.window.take,
+        skip: options.window.skip,
+      }),
+      this.prisma.gameProfile.count({ where }),
+    ]);
+
+    return { items, total };
   }
 
   async getProfile(id: string) {
@@ -368,6 +454,38 @@ export class GamingService {
    * behind a version discriminator that would have to be bumped -- which
    * would throw away every customer's cached credentials to ship a feature
    * that has nothing to do with them. */
+  /** A cheap fingerprint of everything `profileForCustomer` would return,
+   * without reading the catalogue.
+   *
+   * This is the bound on the one route that genuinely has to send
+   * everything. The desktop client matches catalogue names against
+   * running processes with no network at all, so it needs the whole list
+   * and a `take` would simply break the feature -- there is no page of a
+   * catalogue that lets a client recognise a game outside it. What can be
+   * avoided is sending the same 1,480 rows again when not one of them has
+   * changed, which is the overwhelmingly common case: the catalogue is
+   * edited by an operator, and a client asks on every app start.
+   *
+   * Derived from an aggregate rather than from the payload, which is the
+   * whole point -- hashing the response would mean building the response,
+   * and the cost being avoided is building it. `_max.updatedAt` moves on
+   * any edit to any active row and `_count` moves on an insert, a delete,
+   * or a profile being switched off, so between them the pair changes
+   * whenever the customer-visible catalogue does.
+   *
+   * The per-customer half is mixed in by the caller, because two
+   * customers on the same catalogue can legitimately hold different
+   * entitlements and different resolvers.
+   */
+  async catalogueFingerprint(): Promise<string> {
+    const aggregate = await this.prisma.gameProfile.aggregate({
+      where: { isActive: true },
+      _max: { updatedAt: true },
+      _count: { _all: true },
+    });
+    return `${aggregate._count._all}:${aggregate._max.updatedAt?.getTime() ?? 0}`;
+  }
+
   async profileForCustomer(customerId: string): Promise<GamingProfilePayload> {
     const games = await this.prisma.gameProfile.findMany({
       where: { isActive: true },

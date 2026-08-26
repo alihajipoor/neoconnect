@@ -4,7 +4,9 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import type { ListWindow, Page } from "../../common/pagination";
 import { normalise, randomCode } from "./voucher-code";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
@@ -14,6 +16,35 @@ import { UpdateVoucherDto } from "./dto/update-voucher.dto";
 // The code alphabet, length and the two helpers now live in
 // ./voucher-code, shared with the reseller programme so both mint
 // identical codes.
+
+/** Exactly the columns the operator's voucher table renders.
+ *
+ * `recipientEmail` is the notable absentee. It is a customer's address,
+ * written only by the reseller programme, and this route is the
+ * operator's view of *every* code in the system -- so an unfiltered
+ * `findMany` here handed back a list of buyers' email addresses to a
+ * screen that has never displayed one. The reseller's own history is
+ * where that field belongs, scoped to the codes they issued.
+ *
+ * `createdAt`/`updatedAt` are gone for the duller reason that no cell
+ * shows them; `issuedByAdminId` because the table draws no distinction
+ * between a code the operator cut and one a reseller did.
+ *
+ * `plan` and `_count` keep the shapes the table already reads -- under a
+ * `select` a relation is a nested `select` rather than an `include`, but
+ * the JSON is identical. */
+const VOUCHER_LIST_FIELDS = {
+  id: true,
+  code: true,
+  planId: true,
+  maxRedemptions: true,
+  redeemedCount: true,
+  expiresAt: true,
+  isActive: true,
+  note: true,
+  plan: { select: { id: true, name: true, durationDays: true, priceUsd: true } },
+  _count: { select: { redemptions: true } },
+} satisfies Prisma.VoucherSelect;
 
 @Injectable()
 export class VouchersService {
@@ -25,14 +56,26 @@ export class VouchersService {
 
   // ---------------------------------------------------------------- admin
 
-  list() {
-    return this.prisma.voucher.findMany({
-      orderBy: { createdAt: "desc" },
-      include: {
-        plan: { select: { id: true, name: true, durationDays: true, priceUsd: true } },
-        _count: { select: { redemptions: true } },
-      },
-    });
+  /** Every code in the system, newest first -- bounded.
+   *
+   * A voucher outlives the campaign it was cut for: they are switched
+   * off rather than deleted, precisely so the record of who redeemed
+   * what survives. That makes this table one that only grows, and it was
+   * being read in full on every load of the vouchers screen. */
+  async list(
+    window: ListWindow,
+  ): Promise<Page<Prisma.VoucherGetPayload<{ select: typeof VOUCHER_LIST_FIELDS }>>> {
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.voucher.findMany({
+        orderBy: { createdAt: "desc" },
+        select: VOUCHER_LIST_FIELDS,
+        take: window.take,
+        skip: window.skip,
+      }),
+      this.prisma.voucher.count(),
+    ]);
+
+    return { items, total };
   }
 
   async create(dto: CreateVoucherDto) {

@@ -9,10 +9,14 @@ import {
   Patch,
   Post,
   Put,
+  Query,
+  Res,
   UseGuards,
 } from "@nestjs/common";
+import type { Response } from "express";
 import { AdminRole } from "@prisma/client";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
+import { listWindow, sendPage } from "../../common/pagination";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
 import { Roles } from "../../common/decorators/roles.decorator";
@@ -45,9 +49,36 @@ export class GamingController {
 
   // ---- Game profiles ------------------------------------------------------
 
+  /** The operator's game list, paged.
+   *
+   * `isActive` defaults to `"true"`. A deactivated profile is one taken
+   * out of circulation, and the panel should not present it alongside the
+   * live ones by default -- but `"all"` and `"false"` exist, because a
+   * profile nothing lists is a profile nobody can turn back on.
+   *
+   * `take`/`skip` and the `X-Total-Count` header follow the convention in
+   * common/pagination.ts. The body is still a bare array, so nothing that
+   * reads this route today has to change to keep working.
+   */
   @Get("profiles")
-  listProfiles() {
-    return this.gaming.listProfiles();
+  async listProfiles(
+    @Res({ passthrough: true }) res: Response,
+    @Query("isActive") isActive?: string,
+    @Query("q") q?: string,
+    @Query("take") take?: string,
+    @Query("skip") skip?: string,
+  ) {
+    // 100 rather than the catalogue's 1,480: it fills a table without a
+    // second request and is 22x less JSON than the whole thing.
+    const window = listWindow({ take, skip }, { defaultTake: 100, maxTake: 500 });
+    return sendPage(
+      res,
+      await this.gaming.listProfiles({
+        isActive: isActive === "all" ? undefined : isActive !== "false",
+        search: q?.trim() || undefined,
+        window,
+      }),
+    );
   }
 
   @Get("profiles/:id")

@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { SupportTicketStatus } from "@prisma/client";
+import { Prisma, SupportTicketStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import type { ListWindow, Page } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import { supportReplyEmail } from "../email/templates";
 import { UpdateSupportSettingsDto } from "./dto/update-support-settings.dto";
@@ -9,6 +10,24 @@ import { UpdateSupportSettingsDto } from "./dto/update-support-settings.dto";
  * -- nobody scrolls past this, and an unbounded include is how one long
  * argument becomes a slow endpoint for everybody. */
 const MAX_MESSAGES = 200;
+
+/** What the inbox rail draws, and nothing more.
+ *
+ * `customerLastReadAt` is the notable omission: it is the *customer's*
+ * unread marker, read by the app to decide whether to show a dot, and
+ * the operator's inbox has never had a use for it. `createdAt` and
+ * `updatedAt` go for the ordinary reason that no row shows them --
+ * `lastMessageAt` is the timestamp the rail renders and the one it
+ * sorts on. The full row still arrives on `GET /support/tickets/:id`,
+ * which is where the open conversation comes from. */
+const TICKET_LIST_FIELDS = {
+  id: true,
+  subject: true,
+  status: true,
+  lastMessageAt: true,
+  customer: { select: { id: true, email: true } },
+  _count: { select: { messages: true } },
+} satisfies Prisma.SupportTicketSelect;
 
 @Injectable()
 export class SupportService {
@@ -145,19 +164,38 @@ export class SupportService {
 
   // ---------------------------------------------------------------- admin
 
-  listTickets(status?: SupportTicketStatus) {
-    return this.prisma.supportTicket.findMany({
-      where: status ? { status } : undefined,
-      // Waiting-on-us first, then most recently active. An inbox sorted
-      // purely by time buries the one thing that needs answering under
-      // conversations already dealt with.
-      orderBy: [{ status: "asc" }, { lastMessageAt: "desc" }],
-      include: {
-        customer: { select: { id: true, email: true } },
-        _count: { select: { messages: true } },
-      },
-      take: 200,
-    });
+  /** The operator's inbox -- paged, where it used to be truncated.
+   *
+   * The old `take: 200` with no `skip` was not a bound so much as a
+   * ceiling: the 201st conversation was simply unreachable, and nothing
+   * said so -- the rail rendered 200 rows and looked complete. The
+   * default stays 200 so today's page is byte-for-byte what it was, but
+   * there is now a `skip` to reach past it and an `X-Total-Count` that
+   * tells the operator the ones beyond exist.
+   *
+   * The count is taken over the same WHERE as the page, so filtering by
+   * status reports that status's total and not the whole inbox's. */
+  async listTickets(
+    status: SupportTicketStatus | undefined,
+    window: ListWindow,
+  ): Promise<Page<Prisma.SupportTicketGetPayload<{ select: typeof TICKET_LIST_FIELDS }>>> {
+    const where: Prisma.SupportTicketWhereInput | undefined = status ? { status } : undefined;
+
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.supportTicket.findMany({
+        where,
+        // Waiting-on-us first, then most recently active. An inbox sorted
+        // purely by time buries the one thing that needs answering under
+        // conversations already dealt with.
+        orderBy: [{ status: "asc" }, { lastMessageAt: "desc" }],
+        select: TICKET_LIST_FIELDS,
+        take: window.take,
+        skip: window.skip,
+      }),
+      this.prisma.supportTicket.count({ where }),
+    ]);
+
+    return { items, total };
   }
 
   async ticket(ticketId: string) {
