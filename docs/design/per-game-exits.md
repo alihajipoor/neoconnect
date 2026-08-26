@@ -1,8 +1,10 @@
 # Per-game exit selection
 
-**Status:** the preference half is built and unit-tested; nothing has run
-on a machine. The concurrent half is **not built** and is described here
-so that the reason is on record rather than rediscovered.
+**Status:** the preference half is built and unit-tested, **and it now
+has a picker** -- see section 9 for the exit identifier that unblocked
+it. Nothing has run on a machine. The concurrent half is **not built**
+and is described here so that the reason is on record rather than
+rediscovered.
 
 **Owner:** Windows session. Touches `ipc/`, `service/src/split_tunnel/**`,
 and two lines each in `service/src/pipe.rs`, `service/src/engines/mod.rs`,
@@ -468,17 +470,12 @@ pass unmodified, which is the evidence rather than the claim.
   two different exits, one gets `OnPreferred` and the other `Fallback`.
   That is the feature's ceiling until §2.4 is built, and it is reported
   rather than hidden.
-- **No exit vocabulary exists on the client yet, so no picker is built.**
-  `GameExitGroup.exit` is `null` for every group this client creates. The
-  backend deliberately withholds a relay's exit identity — `RouteOption`
-  carries the *entry* and its own comment says customers never need to
-  know which server backs a relay's egress leg — so the only handle
-  available is a route id, and a route id is not an exit: two routes can
-  share one, which would report `Fallback` for a game that is in fact on
-  the exit it asked for. Reporting a mismatch nobody established is the
-  thing `Unknown` exists to avoid, so the client sends no `egress` and
-  every placement reads `Unknown`. That is the honest state, and it is
-  §8's open question in its client-side form.
+- ~~**No exit vocabulary exists on the client yet, so no picker is
+  built.**~~ **Resolved -- see section 9.** `RouteOption` now carries an
+  opaque per-customer `exit` handle naming the machine a route egresses
+  from, the client groups routes by it, and the connect path sends the
+  landed route's handle as `egress`. `Unknown` is still reachable and is
+  still the answer whenever nothing is intercepting.
 - **Nothing here verifies the node.** The service reports which exit the
   client *dialled* and whether interception is live. Whether that is the
   address the far end sees is a fact about the node, and the only ground
@@ -533,6 +530,15 @@ reason the table asks for an exit IP in every row.
 
 **Does a subscription get more than one exit at a time?**
 
+**Still open, and deliberately not decided in code.** What section 9
+shipped is *preference*, applied on connect: one session, one tunnel,
+one exit. The API says so (the comment on the field in
+`RoutesService.listAvailableForPlan`), the picker says so on the card
+(`settings.customExitOneAtATime`, en and fa), and nothing in either
+implies two exits can be live together. Whichever way the answer goes,
+nothing here has to be undone -- the concurrent version in section 2.4
+adds engine work, it does not change the identifier.
+
 Everything above is client-side and works with the exits a customer
 already has. The concurrent version in §2.4 needs the backend to issue
 several exits on one subscription, and that is a commercial decision
@@ -540,3 +546,104 @@ about what a plan includes, not a technical one. The recommendation is
 that per-game *preference* ships first regardless, because it delivers
 the customer-visible benefit — pick an exit per game, activate the game,
 land on that exit — without it.
+
+---
+
+## 9. The exit identifier
+
+### 9.1 Why the backend withheld one, and what that turned out to mean
+
+`RoutesService.listAvailableForPlan` never exposed a relay's exit, and
+the code says why in two places rather than one:
+
+* the `select` is explicit rather than an `include`, because a plain
+  `include` returns the raw `Route` row and that row carries
+  `uplinkCredentialsJson` -- **the relay's shared exit-node secret**;
+* the endpoint comment adds that only the *entry* endpoint is published,
+  "per the same reasoning that keeps `uplinkCredentialsJson` out of this
+  response -- and the entry is what the client connects to anyway".
+
+So the withholding was **not** a considered opsec position on naming
+exits. It was one narrow, correct refusal -- a credential -- plus the
+observation that the exit was not needed for the only thing the endpoint
+did, which was drive a location picker. Nothing anywhere argued that a
+customer must not be able to tell two exits apart, because nothing had
+ever wanted to.
+
+That reading matters, because it decides the shape of the answer. Had
+the reason been "never name which machine a relayed route egresses
+from", a plain exit id would have been off the table. Had it been "it was
+simply never needed", a plain exit id would have been fine. The reason
+turned out to be the second -- **and a plain exit id is still the wrong
+answer**, for a reason that comes from somewhere else entirely:
+`docs/node-address-hygiene.md` and the enumerability measurement behind
+it. On identical infrastructure, the operator who publishes its node list
+is flagged `is_vpn` and the operator who does not is clean; Neoxify
+measures clean today precisely because nothing of ours is
+machine-readable. A stable global exit id is a fleet identifier -- anyone
+with two accounts, or anyone aggregating what clients send, could count
+the exits and join sightings of one exit across unrelated customers.
+
+### 9.2 What was built
+
+`RouteOption.exit` -- an **opaque, per-customer, keyed digest** of the
+node a route egresses from:
+
+```
+key    = HMAC-SHA256(EXIT_HANDLE_SECRET, "neoxify:exit-handle:v1")
+handle = base64url(HMAC-SHA256(key, customerId + " " + exitNodeId)[0..16])
+```
+
+The node is `route.exitProtocolConfig.nodeId` for a relayed route and
+`route.entryProtocolConfig.nodeId` for a direct one -- in both cases the
+machine whose address the far end actually sees.
+
+| Property | Why it is needed |
+|---|---|
+| Comparable | "these two games are on the same exit", by string equality, which is the whole of what the client and the service do with it |
+| Stable | a preference saved last month still names the same exit |
+| Not reversible | holds no address, hostname or node id, and cannot be recomputed without the secret |
+| Salted per customer | two customers' handles for one machine differ, so they cannot be joined and the fleet cannot be counted across accounts |
+| Absent by default | no secret configured means `null`, so no picker and every placement `Unknown` -- exactly the behaviour that shipped before |
+
+`EXIT_HANDLE_SECRET` is generated by the installer, falls back to
+`CREDENTIALS_ENCRYPTION_KEY` under its own derivation label so an
+existing deployment is not left with a dead feature, and **must stay
+stable**: rotating it renames every exit. That degrades in the safe
+direction -- a stale handle cannot collide with a fresh one, so it can
+produce `Fallback` and never a false `OnPreferred` -- and costs the
+customer a re-pick.
+
+### 9.3 The client half
+
+* `exit-options.ts` groups the route list by handle. Two protocols on
+  one node, and a relay whose exit leg is a node also reachable
+  directly, all fold into **one** option. An exit reached only through
+  relays is marked `hidden` and is never labelled with the relay's own
+  node name -- that name is the *entry*, and borrowing it would tell a
+  customer their traffic appears from Iran when it appears from Germany.
+* The picker lives on the Custom mode card, writes to
+  `GameExitGroup.exit` and nowhere else, and is offered only under
+  `OnlySelected` and only when the route list can name an exit at all.
+* `Dashboard` sends `egress` **after** a candidate comes up, taken from
+  the route the ladder *landed* on rather than the one on screen -- those
+  come apart routinely, and an egress from the intended route would tell
+  a customer their game is on the exit they chose while it is somewhere
+  else. Every push before that names none.
+* The card shows the four answers unchanged. `Unknown` stays reachable
+  and is what a customer sees before connecting, because the service
+  gates the egress on interception being live.
+
+### 9.4 What is still not proven
+
+The end-to-end path is proven over a real HTTP round trip against a real
+Nest server (`exit-identity-delivery.spec.ts`), including that no exit
+node's address, hostname or id appears in the payload. **No database was
+reachable** for this work, so that spec runs against a Prisma stand-in
+that applies `select` the way Prisma does -- which pins the projection,
+the layer the analogous past bug lived in, but not the query itself.
+
+Nothing has been run on a machine or against a node. Whether two routes
+sharing a handle really egress from one address is a fact about the
+fleet, and section 7's table is still the only thing that would
+establish it.

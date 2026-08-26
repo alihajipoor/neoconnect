@@ -40,7 +40,9 @@ describe("RoutesService.create: one exit per relay entry", () => {
       route: { findFirst, create: jest.fn().mockResolvedValue({ id: "new-route", isEnabled: true }) },
     };
     const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
-    const service = new RoutesService(prisma as never, agentGateway as never, {} as never);
+    const service = new RoutesService(prisma as never, agentGateway as never, {} as never, {
+      get: () => undefined,
+    } as never);
     // backfill re-reads the route with includes the stub does not model;
     // it is not what these tests are about.
     jest.spyOn(service as never as { backfillExistingSubscriptions: () => Promise<void> }, "backfillExistingSubscriptions")

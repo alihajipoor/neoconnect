@@ -131,9 +131,24 @@ describe("pushSplitTunnel", () => {
     expect(invoked).toHaveLength(1);
     const { cmd, payload } = invoked[0];
     expect(cmd).toBe("vpn_set_split_tunnel");
+    // Pinned exactly, and it has to stay exact: the whole assertion is
+    // that a smuggled `appExits` does not reach the service by simply
+    // riding along. Loosening this to a containment check would let
+    // exactly the field this file exists to refuse through.
+    //
+    // `egress` is a legitimate member. It is the one exit the *tunnel*
+    // came up on -- one value for the whole connection, not a value per
+    // application -- and it is a parameter of this function rather than
+    // a field of the settings, so it is not persisted state and cannot
+    // express a per-binary split. Its value semantics are asserted in
+    // `split-tunnel-egress.test.ts`; what is asserted here is only that
+    // the key set is these six and no more.
     expect(Object.keys(payload).sort()).toEqual(
-      ["apps", "enabled", "exits", "mode", "scopes"].sort(),
+      ["apps", "egress", "enabled", "exits", "mode", "scopes"].sort(),
     );
+    // Nothing was established, so the honest answer is none -- and a
+    // per-application exit could never appear here whatever it held.
+    expect(payload.egress).toBeNull();
 
     // Both of Rust's binaries, on the group's one exit -- not the
     // smuggled `nl-2` for either of them.
