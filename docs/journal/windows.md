@@ -11948,3 +11948,231 @@ disconnect that reported the previous tunnel still shutting down.
   healthy.** Its logon task is what recovers it — a reboot brought it
   back with no Win+R fight, which is exactly what that registration is
   for.
+
+---
+
+## 2026-08-26 — the engine budgets on main, and the four defects that came with them
+
+**Status:** merged and green; nothing on this entry has run on a machine
+**Touches:** `apps/desktop-windows/{ipc,service,src-tauri,src}/**`
+**Branch:** `claude/integration-engine-timeouts` → `main`
+
+`claude/engine-activation-timeouts` is on `main`. Its own entry is
+directly above and is the one to read for the measurements; this one
+records the merge, the four things that branch surfaced and did not fix,
+and — the part worth the most to whoever reads this next — which of them
+are proven and which are only argued.
+
+**Nothing here was run on the rig.** The engine branch's claims were
+verified against exit IPs; everything in *this* entry is source-level,
+proved by tests that were mutated to check they discriminate, and
+nothing more. Said plainly because the entry above it earned the right
+to say "confirmed" and this one has not.
+
+### The merge
+
+One conflict, `docs/journal/windows.md`, two Windows sessions appending
+at the same anchor. Both kept. `main` was also missing the `---`
+separator before the 2026-08-25 entry, so the two read as one; restored.
+
+Nothing else conflicted, and `engines/mod.rs` auto-merged — which is the
+dangerous kind, so it was verified rather than trusted. Full suite on
+the merged tree, not on either branch: **306 Rust, 185 vitest, 477 jest,
+18 site renders, 16/16 turbo `--force`**, plus
+`check-prefix-completeness`. Baselines beaten on every one.
+
+Two traps worth writing down because both cost time:
+
+- **A fresh worktree has no Prisma client.** 39 of 47 backend suites
+  failed with `Property 'customer' does not exist on type
+  'PrismaService'` until `npx prisma generate` ran. Nothing to do with
+  the change; it looks exactly like the stub-vs-schema drift this repo
+  has actually had, which is what makes it expensive.
+- **`customers.service.spec.ts` flaked once under `turbo --force` and
+  passed on its own and on the rerun.** 476/477 then 477/477 then
+  477/477. It is argon2-heavy and turbo was running sixteen tasks; the
+  backend is untouched by this branch. Recording it so the next person
+  does not go looking for a cause in the desktop diff.
+
+### `clear_gaming()` had the identical defect
+
+`clear()` stopped spawning PowerShell to be told there was nothing to
+remove. `clear_gaming()` did not, and its callers make it worse: service
+start, service stop, uninstall, the idle watchdog and every disarm. On a
+machine where gaming mode has never been armed — every machine until
+someone turns it on — all five find nothing, and all five were paying a
+script that runs `Get-DnsClientNrptRule` twice. Three of the five hold
+the `Engines` lock.
+
+The interesting part is not the fix, it is **why the fix had to land
+twice**. `clear_gaming` was a copy of `clear`'s old body. Nothing made
+the second copy follow the first, so the correction landed in one of
+them and the bug sat in the other. It is one implementation now —
+`Sweep` carries the tag, the two registry locations and the log label —
+and `clear_registry_rules`/`clear_registry_rules_tagged` went with it.
+
+The cmdlet step is injected as a closure, which is the only way to
+assert the claim being made. The claim is **the absence of a spawn**,
+and timing cannot prove an absence: a fast machine passes a timing test
+with the spawn still there. Three tests, both tags each, run under HKCU
+so they need no elevation. Both mutations were run: returning
+`cmdlets(self, cleared)` from the `Ok(0)` arm fails two, `.or(Ok(0))` on
+the count fails the third.
+
+`Err` stays distinct from `Ok(0)`, and it matters *more* here than for
+the tunnel. Gaming installs one rule per namespace, so an unreadable
+policy table read as a clean zero strands a whole set of suffix rules
+pointed at a DoH stub that stops listening when the session ends. The
+customer's symptom is that a few specific games stop resolving while
+everything else on the machine is fine — the hardest possible shape to
+trace back to a VPN client that is closed.
+
+### `REPAIR_TIMEOUT` was arithmetic over the wrong thing
+
+195s, derived in its own comment as "nine steps, each bounded by the
+fifteen-second helper budget". True of `ALL_STEPS`. False of the call
+graph, which was never counted:
+
+```
+  36 x HELPER_BUDGET (15s)                             540s
+   1 x dns::REPAIR_CMDLET_BUDGET (60s)                  60s
+                                   process budget      600s
+   3 x wireguard::TUNNEL_SERVICE_GONE_WITHIN (45s),
+       SCM poll loops that spawn nothing at all        135s
+                                            total      735s
+```
+
+**A clean machine can already exceed 195s.** `Neoxify-OpenVPN` is
+deliberately never deleted, so any machine that has connected once
+carries it, and that leftover adapter alone brings a
+nothing-is-wrong pass to 240s at full budget. The old number abandoned a
+repair that was working, on a machine whose networking is already broken
+and which had just been half changed.
+
+**The DNS fix made the repair cheaper and the constant still had to go
+up.** A clean pass went 225s → 150s, and the 75s is exactly the two NRPT
+PowerShell spawns the registry-first order removed (15s + 60s). Two
+independent counts of the clean path agreeing to the second is the check
+that the enumeration is complete. The worst case is unchanged, because a
+machine that actually has rules to clear still reaches the cmdlets.
+
+750s now: 735 plus one helper budget of slack for the work on that path
+with **no budget of any kind** — three full WFP filter enumerations, the
+ToolHelp scans, the registry sweeps. Deliberately *not* padded for two
+things, because padding for them would be the same invented arithmetic
+as before: timeout overshoot (a killed child costs its budget plus
+`REAP_BUDGET` and two pipe drains, ~7s, but that needs all 37 children
+to ignore a kill) and `InstalledRoutes::remove`, whose `route.exe` count
+is runtime data.
+
+**It is a number in the ipc crate now rather than a comment, because a
+comment is what failed.** `REPAIR_WORST_CASE` is the contract:
+`engines::repair` recomputes it from the service's own budget constants,
+`vpn.rs` asserts its deadline covers it. Move `HELPER_BUDGET` and the
+service test fails; drop the deadline back to 195s and the app test
+fails. Both mutations run. A second test pins that `ALL_STEPS.len()` is
+not the spawn count, which is the exact mistake the old comment made.
+
+Still a **backstop, not a target** — 3-5s on a workstation, ~48s on the
+constrained guest. A customer should never see 750s.
+
+### Xray and IKEv2 disagreed; neither of them wins
+
+The open question the engine branch left. Xray failed the whole connect
+when its NRPT rule would not install; IKEv2 logged to `stderr` and
+carried on; neither comment acknowledged the other. That is an
+inconsistency, not a decision.
+
+Both answers are defensible and both are bad. Refusing takes a working
+tunnel from someone who may have no other protocol that connects — the
+rig watched Xray do exactly that on a tunnel its own log shows was
+already carrying traffic. Carrying on silently tells that same customer
+they are protected on the one channel that decides whether a site opens
+at all: without the rule the ISP resolver answers first, with a poisoned
+address, for exactly the domains they connected in order to reach.
+
+So the third option: **the tunnel comes up and the complaint rides
+`status`**, the way `split_tunnel_problem` and `ipv6_blocked` already
+do.
+
+Three things about the shape are worth keeping:
+
+- **`dns::force` returns no `Result`.** That is the mechanism rather
+  than a style choice. With no error to `?`, neither engine can
+  unilaterally fail a connect over this again, and the next engine added
+  inherits the decision instead of picking one. `dns::apply` is private
+  behind it.
+- **Three states, not two.** `NotRequested` is the ordinary answer for
+  WireGuard, which installs its own DNS, and for every Custom-mode
+  tunnel, which deliberately leaves the machine's lookups alone.
+  Collapsing it into "not forced" would put a red warning about poisoned
+  DNS in front of customers whose DNS is fine. The rule against
+  reporting unverified states cuts in both directions.
+- **The state is on the session, not in a static.** It was a global
+  first — the engines install the rule from free functions with no
+  `Engines` to hand it back to — and that shape produced two tests that
+  passed alone and failed together, one resetting what the other read.
+  On a customer's machine `Engines` is a singleton, so it would not have
+  shown up in the field until something else held one. The global
+  survives as a courier `connect_inner` reads once.
+
+The wire carries a bool, not a sentence. `split_tunnel_problem` beside
+it sends English prose the app renders raw — an English sentence in a
+Persian interface, in front of the customers this feature exists for.
+**That is a pre-existing gap and it is still there**; it was not widened.
+The new string is in the dictionary in both languages, and a test
+asserts it says both halves in order (traffic is going through the VPN;
+the lookups are not; some sites may still not open) and that it never
+reassures. Making the Persian reassuring fails it.
+
+### Found on the way
+
+- **A node address that no grep in this project would have found.**
+  `gaming/stub.rs` carried singapore-1 twice as separate octets — once
+  as DNS A-record RDATA in a synthetic response, once as
+  `Ipv4Addr::new(...)` arguments. `stub.rs` is not on
+  `docs/node-address-hygiene.md`'s list, so nothing recorded it was
+  there. A sweep that trusts the file list finds five of six.
+- **The tree-wide audit says 58, not the ~16 the doc implies.** Across
+  22 files. **41 of the 58 are invisible to a dotted-quad grep** — 38
+  hostnames, the two octet arrays, and one IPv6. Six were in this
+  session's scope and are redacted; the rest are in files owned by the
+  backend and by other in-flight branches and are listed below rather
+  than taken.
+- **The hygiene doc has no IPv6 row.** `windows.md` carries finland1's
+  IPv6, labelled as such, roughly 8,900 lines above a claim that
+  `docs/**` is clean "in every form checked". The claim is true of the
+  forms that were checked and IPv6 was not one of them. RFC 3849
+  (`2001:db8::/32`) is the row that closes the class rather than the
+  instance.
+- **A real residential address in `client-ip.ts` and
+  `health.controller.spec.ts`**, nine occurrences. Not a node, so the
+  rule as written does not cover it — but its own table has the slot
+  (`192.0.2.228`, "a customer's or tester's own address") and a sibling
+  tester address was redacted to exactly that in `b87c154`. Personal
+  data in a public repo.
+- **`res*.json`, `ch*.json`, `rid*.txt` are tracked**, nine files of
+  check-host.net probe scratch that rode along in `fb95e06`.
+
+### Open
+
+- **The remaining 58.** `ipc/src/lib.rs` (11), `src-tauri/src/vpn.rs`
+  (5), and the backend specs are the bulk. Not taken here because two of
+  those files are dirty in another session's checkout right now, and a
+  redaction conflict is the most annoying kind.
+- **`split_tunnel_problem` is still English over the wire.** The new
+  field went the other way on purpose; the old one should follow.
+- **Xray forces machine-wide DNS in Custom mode and IKEv2 does not.**
+  `configure_adapter` calls `dns::force` from both `install_routes` and
+  `prepare_passive`, so a passive Xray tunnel still points every lookup
+  on the machine down it; IKEv2 gates the same call on `!passive` and
+  explains why. That is a *second* disagreement between the same two
+  engines about the same rule, found while fixing the first, and it is a
+  behaviour change rather than a consistency fix — so it is written down
+  rather than taken.
+- **IKEv2 still cannot connect on a slow machine**, unchanged and
+  refuted above. `RasSetEntryPropertiesW` is the fix.
+- **None of this ran on the rig.** `Neoxify-Test2` is still at
+  `clean-base` with its CPU cap reset. The repair path in particular has
+  never been timed end to end — 735s is derived from constants that a
+  test checks, not from a stopwatch.
