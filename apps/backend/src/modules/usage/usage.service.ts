@@ -157,6 +157,11 @@ export class UsageService {
       // Unlimited subscriptions can never be over cap, so they do not
       // even need fetching.
       where: { status: "ACTIVE", dataCapBytes: { not: null } },
+      // Three columns rather than the row. This sweep reads every capped
+      // active subscription in one go and the comparison it exists to
+      // make needs exactly these; the rest was being pulled into memory
+      // for a filter that never looked at it.
+      select: { id: true, dataCapBytes: true, dataUsedBytes: true },
     });
     const overCap = active.filter((s) => s.dataCapBytes !== null && s.dataUsedBytes >= s.dataCapBytes);
     for (const s of overCap) {
@@ -168,6 +173,7 @@ export class UsageService {
   async sweepExpiry(): Promise<number> {
     const expired = await this.prisma.subscription.findMany({
       where: { status: "ACTIVE", expireAt: { lt: new Date() } },
+      select: { id: true },
     });
     for (const s of expired) {
       await this.expireSubscription(s.id);
@@ -183,7 +189,16 @@ export class UsageService {
     const candidates = await this.prisma.subscription.findMany({
       // No cap, no "running low" -- there is nothing to run low on.
       where: { status: "ACTIVE", lowDataWarningSentAt: null, dataCapBytes: { not: null } },
-      include: { customer: true },
+      // `include: { customer: true }` here meant every candidate's
+      // `passwordHash`, `tokenVersion`, `emailVerificationCode` and
+      // `passwordResetCode` were read into the sweep's memory so it could
+      // use one field: the address to send to.
+      select: {
+        id: true,
+        dataCapBytes: true,
+        dataUsedBytes: true,
+        customer: { select: { email: true } },
+      },
     });
     const nearCap = candidates.filter(
       (s) =>
@@ -206,7 +221,9 @@ export class UsageService {
     const threshold = new Date(now.getTime() + EXPIRY_WARNING_THRESHOLD_DAYS * 24 * 60 * 60 * 1000);
     const soon = await this.prisma.subscription.findMany({
       where: { status: "ACTIVE", expiryWarningSentAt: null, expireAt: { gt: now, lte: threshold } },
-      include: { customer: true },
+      // Same narrowing as the low-data sweep above, and for the same
+      // reason: the only thing wanted off the customer is where to send.
+      select: { id: true, expireAt: true, customer: { select: { email: true } } },
     });
     for (const s of soon) {
       const daysRemaining = Math.max(1, Math.ceil((s.expireAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)));

@@ -3,6 +3,7 @@ import * as argon2 from "argon2";
 import { randomBytes, randomUUID } from "node:crypto";
 import { CustomerStatus, PaymentStatus, Prisma, SubscriptionStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import type { ListWindow, Page } from "../../common/pagination";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
 import { UpdateCustomerDto } from "./dto/update-customer.dto";
@@ -25,8 +26,31 @@ export class CustomersService {
     private readonly agentGateway: AgentGatewayService,
   ) {}
 
-  list() {
-    return this.prisma.customer.findMany({ select: SAFE_SELECT, orderBy: { createdAt: "desc" } });
+  /** Every customer, a page at a time.
+   *
+   * The projection was already safe -- `SAFE_SELECT` keeps `passwordHash`,
+   * `tokenVersion` and the one-time codes out -- but the row count was
+   * the whole table, ordered newest first, on the two panel pages an
+   * operator opens most.
+   *
+   * `total` matters here more than on any other list in this API. The
+   * overview dashboard prints the customer count as a headline figure,
+   * and it used to get it from `customers.length` on the unpaginated
+   * response. A default window without a real count would have turned
+   * that card into "however many rows fit on a page" -- a number that
+   * looks correct, is not, and nothing in the UI would have flagged.
+   */
+  async list(window: ListWindow): Promise<Page<Prisma.CustomerGetPayload<{ select: typeof SAFE_SELECT }>>> {
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.customer.findMany({
+        select: SAFE_SELECT,
+        orderBy: { createdAt: "desc" },
+        take: window.take,
+        skip: window.skip,
+      }),
+      this.prisma.customer.count(),
+    ]);
+    return { items, total };
   }
 
   async get(id: string) {

@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Param, Patch, Post, Query, Res, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { AdminRole, SupportTicketStatus } from "@prisma/client";
+import type { Response } from "express";
 import { SupportService } from "./support.service";
 import { ReplyTicketDto } from "./dto/reply-ticket.dto";
 import { SetTicketStatusDto } from "./dto/set-ticket-status.dto";
@@ -8,6 +9,7 @@ import { UpdateSupportSettingsDto } from "./dto/update-support-settings.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
 import { Roles } from "../../common/decorators/roles.decorator";
+import { listWindow, sendPage } from "../../common/pagination";
 
 /** The operator's side of the conversation.
  *
@@ -35,11 +37,33 @@ export class SupportController {
     return this.supportService.updateSettings(dto);
   }
 
+  /** Paged per common/pagination.ts.
+   *
+   * The default is 200 rather than the convention's usual 100 because
+   * this route already served 200 through a hardcoded `take`, and a page
+   * load that suddenly showed half the inbox would read as conversations
+   * having disappeared. What changes is that the rest are now reachable:
+   * `skip` pages past the ceiling and `X-Total-Count` says how many
+   * there are.
+   *
+   * The rail also filters and counts client-side over whatever it was
+   * given, so its "needs reply" tally is a tally of the page. Passing
+   * `?status=OPEN` is what makes that figure true of the inbox. */
   @Get("tickets")
   @Roles(AdminRole.SUPERADMIN, AdminRole.SUPPORT)
-  list(@Query("status") status?: SupportTicketStatus) {
-    return this.supportService.listTickets(
-      status && Object.values(SupportTicketStatus).includes(status) ? status : undefined,
+  async list(
+    @Res({ passthrough: true }) res: Response,
+    @Query("status") status?: SupportTicketStatus,
+    @Query("take") take?: string,
+    @Query("skip") skip?: string,
+  ) {
+    const window = listWindow({ take, skip }, { defaultTake: 200, maxTake: 500 });
+    return sendPage(
+      res,
+      await this.supportService.listTickets(
+        status && Object.values(SupportTicketStatus).includes(status) ? status : undefined,
+        window,
+      ),
     );
   }
 

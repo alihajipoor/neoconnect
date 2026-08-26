@@ -1,10 +1,43 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
+import type { ListWindow, Page } from "../../common/pagination";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { decryptCredentials, encryptCredentials } from "./credentials-crypto";
 import { CreateProtocolUserDto } from "./dto/create-protocol-user.dto";
 import { rateLimitFor } from "./rate-limit";
 import { generateCredentials } from "./generate-credentials";
+
+/** Every column of ProtocolUser, named.
+ *
+ * Unusually for a list projection this narrows nothing today -- the
+ * route hands back the whole row and `credentialsJson` is the payload
+ * rather than a leak, since decrypting it for an admin is the entire
+ * reason the endpoint exists. Naming the columns anyway is the cheap
+ * half of the lesson this file already carries a scar from: a bare
+ * `findMany` means the next column added to the model joins an
+ * admin-wide response without anyone deciding it should, and the next
+ * column added here is as likely to be a secret as not. */
+const PROTOCOL_USER_LIST_FIELDS = {
+  id: true,
+  subscriptionId: true,
+  routeId: true,
+  nodeId: true,
+  protocolConfigId: true,
+  protocol: true,
+  externalUserId: true,
+  credentialsJson: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.ProtocolUserSelect;
+
+/** A listed ProtocolUser as a caller sees it: the encrypted column is
+ * gone, replaced by the credentials it held. */
+type DecryptedProtocolUser = Omit<
+  Prisma.ProtocolUserGetPayload<{ select: typeof PROTOCOL_USER_LIST_FIELDS }>,
+  "credentialsJson"
+> & { credentials: Record<string, string> };
 
 @Injectable()
 export class ProtocolUsersService {
@@ -15,12 +48,40 @@ export class ProtocolUsersService {
     private readonly agentGateway: AgentGatewayService,
   ) {}
 
-  async list(nodeId?: string) {
-    const users = await this.prisma.protocolUser.findMany({
-      where: nodeId ? { nodeId } : undefined,
-      orderBy: { createdAt: "desc" },
-    });
-    return users.map(withDecryptedCredentials);
+  /** The operator's view of provisioned users -- bounded.
+   *
+   * This is the heaviest list route in the API and the bound matters
+   * more here than anywhere else, because of what the route does: every
+   * row it returns is run through `withDecryptedCredentials`, so an
+   * unfiltered call did an AES-GCM decrypt per customer credential set
+   * and put the plaintext of all of them in one response. There is one
+   * ProtocolUser per subscription per enabled route, so the table is a
+   * multiple of the customer count, not a fraction of it, and `?nodeId`
+   * -- the only filter -- is optional. A page of a hundred is still a
+   * hundred credential sets; there is no version of this route that is
+   * cheap, only one that is bounded.
+   *
+   * The decryption itself is unchanged for the rows that do come back:
+   * an admin fetching credentials to hand to a customer is the reason
+   * this endpoint exists. */
+  async list(
+    nodeId: string | undefined,
+    window: ListWindow,
+  ): Promise<Page<DecryptedProtocolUser>> {
+    const where: Prisma.ProtocolUserWhereInput | undefined = nodeId ? { nodeId } : undefined;
+
+    const [users, total] = await this.prisma.$transaction([
+      this.prisma.protocolUser.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        select: PROTOCOL_USER_LIST_FIELDS,
+        take: window.take,
+        skip: window.skip,
+      }),
+      this.prisma.protocolUser.count({ where }),
+    ]);
+
+    return { items: users.map(withDecryptedCredentials), total };
   }
 
   async get(id: string) {

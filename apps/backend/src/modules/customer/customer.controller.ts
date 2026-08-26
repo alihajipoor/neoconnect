@@ -6,10 +6,15 @@ import {
   Get,
   Header,
   Param,
+  HttpStatus,
   Post,
+  Req,
+  Res,
   ServiceUnavailableException,
   UseGuards,
 } from "@nestjs/common";
+import type { Request, Response } from "express";
+import { createHash } from "node:crypto";
 import { ConfigService } from "@nestjs/config";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { CustomersService } from "../customers/customers.service";
@@ -121,7 +126,54 @@ export class CustomerController {
    * credential. `resolver` is null unless the plan grants the feature AND a
    * node has actually confirmed it is serving one. */
   @Get("gaming-profile")
-  gamingProfile(@CurrentCustomer() customer: AuthenticatedCustomer) {
+  async gamingProfile(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // This is the one list route in the API that has to send everything,
+    // and it is worth being explicit about why so nobody "fixes" it with
+    // a `take`. The desktop client matches catalogue names against the
+    // processes running on the machine, with no network in the loop, so
+    // it needs the whole catalogue to recognise a game at all. A page of
+    // a catalogue is not a smaller answer to that question -- it is a
+    // wrong one, silently, for every game past the page boundary.
+    //
+    // So it is bounded the other way: an unchanged catalogue costs a 304
+    // with no body instead of 373,954 B (51,742 B gzipped, measured on
+    // the wire on 2026-08-25). The validator is computed from an
+    // aggregate over `updatedAt`/`_count` rather than by hashing the
+    // response, because building the response is the cost being avoided.
+    //
+    // Mixed into the tag alongside the catalogue fingerprint: the
+    // customer's entitlement and which resolver they were handed. Both
+    // are per-customer and both change what this returns, so a tag
+    // covering only the catalogue would let a customer whose plan just
+    // started still be served a stale "not entitled".
+    //
+    // No shipped client benefits from this yet -- the desktop app fetches
+    // through `@tauri-apps/plugin-http`, which has no HTTP cache and
+    // sends no `If-None-Match`. It is inert for them rather than harmful:
+    // a caller that sends no validator always gets its 200 and its body.
+    // Making it pay off is a one-line client change, described in the
+    // journal entry for this work.
+    const fingerprint = await this.gamingService.catalogueFingerprint();
+    const identity = `${customer.sub}:${fingerprint}`;
+    const etag = `W/"gaming-${createHash("sha256").update(identity).digest("base64url").slice(0, 27)}"`;
+
+    // Private, because the tag is per-customer: an intermediary caching
+    // this and serving it to somebody else would hand over another
+    // customer's entitlement state. `must-revalidate` rather than a max-age
+    // so a client always asks -- the round trip is the cheap part; the
+    // 374 KB is not.
+    res.setHeader("Cache-Control", "private, no-cache, must-revalidate");
+    res.setHeader("ETag", etag);
+
+    if (req.headers["if-none-match"] === etag) {
+      res.status(HttpStatus.NOT_MODIFIED);
+      return undefined;
+    }
+
     return this.gamingService.profileForCustomer(customer.sub);
   }
 
