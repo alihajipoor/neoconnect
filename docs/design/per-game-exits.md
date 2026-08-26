@@ -2,9 +2,11 @@
 
 **Status:** the preference half is built and unit-tested, **and it now
 has a picker** -- see section 9 for the exit identifier that unblocked
-it. Nothing has run on a machine. The concurrent half is **not built**
-and is described here so that the reason is on record rather than
-rediscovered.
+it. **The concurrent half described in section 2.4 is now built too** --
+see section 10 for what that means and what it does not. Nothing in
+either half has run on a machine: no rig time was available in any of
+the sessions that built them, so every claim below is a unit test or a
+structural argument, never an observed exit IP.
 
 **Owner:** Windows session. Touches `ipc/`, `service/src/split_tunnel/**`,
 and two lines each in `service/src/pipe.rs`, `service/src/engines/mod.rs`,
@@ -102,7 +104,11 @@ under `claude/split-tunnel-rig-verification`, **three of four engines
 could not activate at all within their timeouts on a slow guest**.
 Bringing two up concurrently makes that strictly worse.
 
-### 2.4 The cheapest real path to concurrency, when it is wanted
+#### 2.4 The cheapest real path to concurrency, when it is wanted
+
+> **Built.** This section is kept as the reasoning that led there;
+> section 10 records what it actually became, including the two costs
+> below turning out cheaper than they read here.
 
 Not two engines. **One Xray engine with several inbounds.**
 
@@ -526,9 +532,16 @@ reason the table asks for an exit IP in every row.
 
 ---
 
-## 8. Open question for the owner
+## 8. Open question for the owner -- answered
 
 **Does a subscription get more than one exit at a time?**
+
+> **Yes, and it already did.** `ProtocolUsersService.provisionAll`
+> provisions a subscription on every route its plan allows and the
+> client holds all of them at once, so the credentials for several
+> exits were already on the customer machine before this was asked. No
+> commercial decision turned out to be needed and no backend change was
+> made. See section 10.1. What follows is the question as it stood.
 
 **Still open, and deliberately not decided in code.** What section 9
 shipped is *preference*, applied on connect: one session, one tunnel,
@@ -647,3 +660,264 @@ Nothing has been run on a machine or against a node. Whether two routes
 sharing a handle really egress from one address is a fact about the
 fleet, and section 7's table is still the only thing that would
 establish it.
+
+---
+
+## 10. Concurrent exits, as built
+
+Section 2.4 proposed one Xray process with several tagged inbounds and
+called it "the cheapest real path to concurrency". That is what was
+built. This section records the shape it took, the two questions section
+2.4 left open and how they turned out, and what is still unproven.
+
+### 10.1 The two open questions, answered
+
+**"The relay must speak SOCKS5, which it does not today."** The relay in
+that sentence is the *desktop client's own* split-tunnel relay in
+`service/src/split_tunnel/proxy.rs`, not a relay node — a distinction
+worth stating because the phrase reads both ways and the two answers are
+very different. A survey of `agent/**`, `apps/backend/**` and
+`installer/**` finds **no SOCKS anywhere on the node side**: every match
+is the substring inside "shadowsocks". The node's Xray speaks exactly
+two outbound protocols, `freedom` and `vless`+REALITY, and its inbounds
+are seven fixed tags in a shell-templated config.
+
+So this was **client-side work and needed no node change at all**. It is
+`split_tunnel/socks.rs`: a SOCKS5 client with CONNECT and UDP ASSOCIATE,
+no authentication, IPv4 only, tested against a real socket rather than a
+mock.
+
+**"The backend must be willing to issue several exits on one
+subscription."** It already was, and had been for longer than the
+question was open. `ProtocolUsersService.provisionAll` provisions a
+subscription on **every route its plan allows**, and its own note says
+the client holds all of them at once so it can fail over without asking
+the server. One route is at most one exit, but a subscription holds many
+routes — so the credentials for three concurrent exits were already on
+the customer's machine. Nothing was added to the backend, no endpoint
+was called that was not called before, and no production node was
+touched.
+
+What *was* missing was the vocabulary: no way for a customer to say
+"these two routes are the same place". That is section 9's salted exit
+handle, built in parallel by another session, and the two halves compose
+without either being reshaped.
+
+### 10.2 The shape
+
+One Xray process. The primary outbound stays `outbounds[0]` and stays
+tagged `proxy`, and there is deliberately **no routing rule matching
+`tun-in`** — so everything with no preference, and all DNS, takes
+exactly the path it took before this existed. With no extra exits the
+generated config is byte-identical to the old one, which is asserted
+rather than assumed.
+
+Each additional exit adds three things that only ever address each
+other:
+
+| | |
+|---|---|
+| inbound `exit-N-in` | SOCKS5, `127.0.0.1`, `udp: true`, sniffing off |
+| outbound `exit-N-out` | that exit's node |
+| rule | `inboundTag: [exit-N-in] -> outboundTag: exit-N-out` |
+
+Loopback because the split tunnel's WinDivert filter ends in `not
+loopback`, so the relay's hop into Xray is invisible to the loop that
+would otherwise capture it and feed it back to itself. SOCKS5 because it
+is the one inbound xray-core offers that carries both TCP and UDP and
+lets the caller name a destination per connection — a second TUN inbound
+would need a second adapter, address range and route metric, which is
+the singleton problem 2.3 describes; a dokodemo-door inbound has one
+fixed destination and cannot carry a game to the several addresses it
+talks to.
+
+`udp: true` is not optional. Games are predominantly UDP, and an inbound
+without it accepts the TCP handshake and silently drops every datagram —
+a game that connects, shows a server list and never updates.
+
+### 10.3 What section 2.3's blockers turned into
+
+Nothing. That is the point of the design and it is worth being explicit,
+because the list in 2.3 is long enough to look like it must still apply
+somewhere.
+
+`session::Slot` still holds one `Active`. There is still one adapter,
+one `neoconnect0`, one `198.18.0.1/30`, one `PASSIVE_METRIC`, one
+process-global DNS mutex, one machine-wide IPv6 WFP block, one WinDivert
+loop pinned to one `(interface, address)`, and one janitor killing by
+image name. **None of them is touched.** What changed is only what
+xray-core does with a connection after it arrives, which is what its
+routing table is for.
+
+### 10.4 The routing seam
+
+2.2 identified `TunnelInterface` — two atomics holding one interface
+index and one source address — as the real seam, and predicted that
+making it a table keyed by exit would be "a few hundred lines,
+mechanical, and testable". That turned out to be right in shape and
+wrong in kind: the table is not of interface indices, because a
+concurrent exit is not an adapter.
+
+`proxy::ExitRelays` holds `exit identifier -> loopback port`, written
+when an engine starts and cleared when it stops, never edited in
+between. `flows::Origin` gains `exit: Option<u8>`, an index into it.
+
+An index rather than the identifier because `Origin` is `Copy` and is
+held per live flow; a `String` would make it neither and would allocate
+on the packet path. The index is meaningful only because the table is
+fixed for a session's life — so preferences, which *are* mutable
+mid-session, live on `Selection` and say which exit an application
+wants, while `ExitRelays` says which exits exist. Separately mutable
+precisely so the index a flow holds cannot come to mean a different node
+underneath it.
+
+### 10.5 The invariants, and how each survived
+
+**A game's binaries never split across exits.** Untouched and still
+structural: the group rules live in `Selection::with_exits` and
+`exitsForGames`, both of which are construction rather than the packet
+path. Re-proven by mutation — removing the partial-group rule fails
+`a_partly_selected_group_gets_no_preference_at_all` and
+`a_partly_selected_group_does_not_disturb_a_whole_one`.
+
+One new hazard did appear here and is worth recording because it is
+invisible from the rules above. A SOCKS5 hop that fails **must not fall
+back to the tunnel adapter.** Every other fail-open in this feature is
+safe because it happens to the whole selection at once — an exit is
+either in `ExitRelays` or it is not, so every binary of every game moves
+together. A per-connection fallback is not that: it would fire for one
+connection of one binary while its siblings stayed on the exit, which is
+the two-source-address signature rebuilt at runtime, below every check
+that prevents it. So the connection fails instead, the application
+retries, and if the inbound is genuinely gone the engine's teardown
+clears the whole table and moves every game back together.
+
+**`FlowKey` must not grow another component.** It did not, and the guard
+is now a destructuring with no `..` in `flows.rs`, so a fifth field is a
+compile error (`E0027: pattern does not mention field ...`) rather than
+a test that happens to fail. That is the only instrument that catches
+the mistake in the form it would arrive in: somebody adds `exit` because
+a flow's exit feels like part of its identity, every existing test still
+passes because every existing flow has `None`, and nothing says
+otherwise until a customer's table overflows.
+
+**Exit selection sits strictly downstream of the carry decision.** The
+attachment point is the one 4.1 named: `Origin.exit`, built after every
+`return` in `decide` that refuses, drops or leaves a packet alone.
+`exit_for` takes an `image_path`, so an unattributed packet has no image
+to pass and therefore no exit to acquire.
+
+The one carried packet with no application behind it is a DNS query —
+carried whoever makes it — and it takes `exit: None` explicitly. That is
+a real limit stated plainly: a game's lookups go through the session's
+exit, not the game's. A per-game resolver is a second feature with its
+own evidence problem.
+
+Proven by two mutations. Giving the ownerless DNS branch a default exit
+fails `a_carried_lookup_takes_the_session_exit_and_not_a_games`. Moving
+exit selection upstream of the refusal — the literal trap 4.1 describes
+— turns the ownerless datagram from `Drop` into `Redirect` and fails
+three tests including `an_unattributed_datagram_never_acquires_an_exit`.
+
+**Both leak fixes.** `decide`'s refusal path and the flow-keyed
+leave-alone cache are unchanged. A test asserts the refusal is the same
+verdict with a live exit table and without, which is what catches the
+other direction: a `verdict_for_unattributed` that started answering
+`Carry` because an exit was available.
+
+**No per-application exit in persisted state.** Untouched;
+`split-tunnel.invariants.ts` still holds. Re-proven on this tree by
+adding an optional `appExits?: AppExit[]` to `SplitTunnelSettings`,
+which fails three assertions with `Type 'false' does not satisfy the
+constraint 'true'`.
+
+**Exit handles stay keyed and per-customer salted.** Not weakened,
+because nothing here touches the backend or invents an identifier. The
+handle produced by section 9 travels through `ExitProfile.exit` and
+`AppExit.exit` and is compared for equality; the service never resolves
+it to an address, a node or a route, and no address, hostname, node id,
+ordering or count is added to anything a client receives. The only new
+log line names a loopback port and the destination the *application*
+asked for.
+
+### 10.6 The ceiling
+
+Three, from the owner: *"they cant choose more than 3 apps at the same
+time"*, read as three **games** rather than three executables, because a
+game is routinely several binaries and they all leave from one exit or
+from none. What is counted everywhere is therefore **distinct exits**,
+which is the same number as distinct placed games — six entries across
+three games is three exits and is within the limit.
+
+Four places, and they are not redundant:
+
+| Where | What it does | Why there |
+|---|---|---|
+| The picker | a fourth exit is offered but disabled and says why | a limit met as an error afterwards is a limit that was not stated |
+| `exitsForGames` | over the ceiling, withholds **every** preference | trimming means choosing winners by list position |
+| `SplitTunnelConfig::validate` | refuses | this client cannot produce such a config |
+| `ExitRelays::set` | truncates | the engine is already up; refusing here means a live session with no exits |
+
+The two client layers withhold rather than trim for the same reason
+`validate` refuses rather than failing open: there is no way to honour
+part of it that the app could then report honestly. The wire order is
+the order a customer happened to add games in, which they were never
+told was load-bearing, and reporting `OnPreferred` for games picked by
+list position is a placement nobody decided being reported as one
+somebody did.
+
+An exit another placed game already uses costs no extra concurrent exit
+and stays choosable — which is also how a customer gets out of the limit
+without unpicking anything.
+
+### 10.7 Xray only, stated
+
+A customer using concurrent exits is on one of the Xray-carried
+protocols. WireGuard, OpenVPN and IKEv2 get one exit, and that is a
+**platform gap to state, not a protocol to drop** — every transport
+still matters for a censored network.
+
+Said in three places that must agree:
+`ConnectProfile::carries_concurrent_exits` (the service, which drops
+what it cannot carry), `carriesConcurrentExits` in
+`src/lib/concurrent-exits.ts` (the client, which does not send it), and
+`settings.customExitXrayOnly` in en and fa (the customer, who is told
+which of the two they are getting rather than left to infer it).
+
+`settings.customExitOneAtATime` was removed. It said one connection
+leaves from one exit, which is still true on the other three protocols
+and is no longer true on Xray, and a string that is half wrong is worse
+than two strings that are each right.
+
+### 10.8 What is still unproven
+
+**Nothing has run on a machine.** No rig time was available. The
+section 7 procedure stands unexecuted, and its row 8 — `curl -4` from a
+socket pinned as each of a game's binaries, with the two answers
+required to be byte-identical — is still the assertion that matters
+most and the one no unit test can fake.
+
+Specifically not observed:
+
+- **Two exit IPs at once.** The whole point of the feature, and the
+  claim this document is not making. What is proven is that the config
+  xray-core is handed names two inbounds, two outbounds and two rules,
+  that the relay speaks the protocol those inbounds speak, and that a
+  flow carries the index of the exit it asked for. Whether xray-core
+  then egresses those two flows from two nodes has not been watched.
+- **UDP ASSOCIATE against xray-core itself.** The association is tested
+  against a real socket running a SOCKS5 server written for the test.
+  xray-core's own inbound may differ in ways a hand-written server does
+  not reveal — the reply's bound address, in particular, is the field
+  most likely to surprise.
+- **Three engines' worth of load.** 2.3 notes that under
+  `claude/split-tunnel-rig-verification` three of four engines could not
+  activate at all within their timeouts on a slow guest. This adds
+  inbounds rather than engines, so the comparison is not direct, but
+  three concurrent outbounds to three nodes is more work than one and
+  nobody has measured it.
+- **The free-port race.** Each exit inbound's port is bound and released
+  before xray-core is started, so something can take it in between. It
+  is bounded and loud — Xray refuses to start on a port it cannot bind,
+  and `confirm_started` turns that into a failed connect — but it has
+  not been seen happening.

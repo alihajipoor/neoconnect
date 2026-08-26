@@ -290,7 +290,47 @@ impl Selection {
                     broken.push(group.to_string());
                 }
             }
+            // No more than `MAX_CONCURRENT_EXITS` distinct exits, and if
+            // there are more then **none** of them is honoured.
+            //
+            // Dropped whole rather than trimmed, for the reason every
+            // other rule in this constructor drops whole: trimming
+            // means choosing which games keep their exit, and the only
+            // basis available is the order the entries happen to arrive
+            // in -- which is the order a customer added games in, a
+            // thing they were never told was load-bearing. The app
+            // would then report `OnPreferred` for games picked by list
+            // position, which is a placement nobody decided being
+            // reported as one somebody did.
+            //
+            // Failing toward *no preference* carries every game on the
+            // session's own exit, exactly as every application was
+            // carried before any of this existed. Never toward a split.
+            //
+            // `SplitTunnelConfig::validate` refuses such a config
+            // outright, so nothing arriving through the pipe reaches
+            // here. This constructor is also called directly, and a
+            // rule this expensive to get wrong should not depend on
+            // which one was used -- the same argument the group rule
+            // above makes.
+            let mut distinct: Vec<&str> = Vec::new();
+            for exit in &exits {
+                if !paths.contains(&exit.app.to_lowercase()) {
+                    continue;
+                }
+                if exit.group.as_deref().is_some_and(|g| broken.iter().any(|b| b == g)) {
+                    continue;
+                }
+                if !distinct.iter().any(|e| *e == exit.exit) {
+                    distinct.push(&exit.exit);
+                }
+            }
+            let over_ceiling = distinct.len() > neoconnect_ipc::MAX_CONCURRENT_EXITS;
+
             for exit in exits {
+                if over_ceiling {
+                    break;
+                }
                 let app = exit.app.to_lowercase();
                 if !paths.contains(&app) {
                     continue;
@@ -3119,6 +3159,135 @@ mod audit_tests {
             selection.placement(OTHER, Some("germany-1")),
             ExitPlacement::Fallback { preferred: "finland-1".to_string() }
         );
+    }
+
+
+    // -----------------------------------------------------------------
+    // The three-game ceiling.
+    // -----------------------------------------------------------------
+
+    /// The owner's limit, in the units it was set in: three *games*, not
+    /// three executables. A game is routinely several binaries and they
+    /// all leave from one exit or from none, so what is counted is
+    /// distinct exits.
+    #[test]
+    fn three_games_on_three_exits_is_within_the_ceiling() {
+        let selection = with_groups(
+            &[r"c:\a\launcher.exe", r"c:\a\game.exe", r"c:\b\game.exe", r"c:\c\game.exe"],
+            vec![
+                // Two binaries, one game, one exit -- which is the case
+                // that must not be counted as two.
+                grouped(r"c:\a\launcher.exe", "germany-1", "game-a"),
+                grouped(r"c:\a\game.exe", "germany-1", "game-a"),
+                grouped(r"c:\b\game.exe", "turkey-1", "game-b"),
+                grouped(r"c:\c\game.exe", "finland-1", "game-c"),
+            ],
+        );
+        assert_eq!(selection.preferred_exit(r"c:\a\launcher.exe"), Some("germany-1"));
+        assert_eq!(selection.preferred_exit(r"c:\a\game.exe"), Some("germany-1"));
+        assert_eq!(selection.preferred_exit(r"c:\b\game.exe"), Some("turkey-1"));
+        assert_eq!(selection.preferred_exit(r"c:\c\game.exe"), Some("finland-1"));
+    }
+
+    /// A fourth exit withholds **every** preference rather than the
+    /// fourth one.
+    ///
+    /// Trimming would mean choosing which games keep their exit, and
+    /// the only basis available is the order entries happen to arrive
+    /// in -- the order a customer added games, which they were never
+    /// told was load-bearing. The app would then report `OnPreferred`
+    /// for games picked by list position: a placement nobody decided,
+    /// reported as one somebody did.
+    #[test]
+    fn a_fourth_exit_withholds_every_preference() {
+        let apps = [r"c:\a\game.exe", r"c:\b\game.exe", r"c:\c\game.exe", r"c:\d\game.exe"];
+        let selection = with_groups(
+            &apps,
+            vec![
+                grouped(r"c:\a\game.exe", "germany-1", "game-a"),
+                grouped(r"c:\b\game.exe", "turkey-1", "game-b"),
+                grouped(r"c:\c\game.exe", "finland-1", "game-c"),
+                grouped(r"c:\d\game.exe", "poland-1", "game-d"),
+            ],
+        );
+        for app in apps {
+            assert_eq!(
+                selection.preferred_exit(app),
+                None,
+                "over the ceiling, every game falls back to the session's exit -- \
+                 including the three that would otherwise have fitted"
+            );
+        }
+    }
+
+    /// And it fails toward *no preference*, never toward a split: every
+    /// application is still carried, exactly as it was before exits
+    /// existed.
+    #[test]
+    fn being_over_the_ceiling_never_stops_carrying_an_application() {
+        let apps = [r"c:\a\game.exe", r"c:\b\game.exe", r"c:\c\game.exe", r"c:\d\game.exe"];
+        let selection = with_groups(
+            &apps,
+            vec![
+                grouped(r"c:\a\game.exe", "germany-1", "game-a"),
+                grouped(r"c:\b\game.exe", "turkey-1", "game-b"),
+                grouped(r"c:\c\game.exe", "finland-1", "game-c"),
+                grouped(r"c:\d\game.exe", "poland-1", "game-d"),
+            ],
+        );
+        for app in apps {
+            assert!(selection.should_tunnel(app), "the traffic is still carried");
+        }
+    }
+
+    /// Many binaries, three exits: the ceiling counts exits, so a game
+    /// with a launcher, a client and an anti-cheat service does not eat
+    /// three of the three.
+    #[test]
+    fn many_binaries_across_three_exits_stay_within_the_ceiling() {
+        let apps = [
+            r"c:\a\1.exe",
+            r"c:\a\2.exe",
+            r"c:\a\3.exe",
+            r"c:\b\1.exe",
+            r"c:\b\2.exe",
+            r"c:\c\1.exe",
+        ];
+        let selection = with_groups(
+            &apps,
+            vec![
+                grouped(r"c:\a\1.exe", "germany-1", "game-a"),
+                grouped(r"c:\a\2.exe", "germany-1", "game-a"),
+                grouped(r"c:\a\3.exe", "germany-1", "game-a"),
+                grouped(r"c:\b\1.exe", "turkey-1", "game-b"),
+                grouped(r"c:\b\2.exe", "turkey-1", "game-b"),
+                grouped(r"c:\c\1.exe", "finland-1", "game-c"),
+            ],
+        );
+        assert_eq!(selection.preferred_exit(r"c:\a\3.exe"), Some("germany-1"));
+        assert_eq!(selection.preferred_exit(r"c:\b\2.exe"), Some("turkey-1"));
+        assert_eq!(selection.preferred_exit(r"c:\c\1.exe"), Some("finland-1"));
+    }
+
+    /// Three games all naming the *same* exit is one exit, not three.
+    #[test]
+    fn several_games_sharing_one_exit_cost_one_place() {
+        let apps = [r"c:\a\g.exe", r"c:\b\g.exe", r"c:\c\g.exe", r"c:\d\g.exe"];
+        let selection = with_groups(
+            &apps,
+            vec![
+                grouped(r"c:\a\g.exe", "germany-1", "game-a"),
+                grouped(r"c:\b\g.exe", "germany-1", "game-b"),
+                grouped(r"c:\c\g.exe", "germany-1", "game-c"),
+                grouped(r"c:\d\g.exe", "turkey-1", "game-d"),
+            ],
+        );
+        for app in apps {
+            assert!(
+                selection.preferred_exit(app).is_some(),
+                "four games on two exits is two concurrent exits and is allowed"
+            );
+        }
     }
 
     #[test]

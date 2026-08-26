@@ -324,6 +324,12 @@ const en = {
     "{game} uses the same exit as the rest of your traffic. Not all of its programs are added ({names}), and Neoxify will not put part of a game on an exit of its own.",
   "settings.customGameExitConflict":
     "{game} and {others} run the same program, so they cannot use different exits. Until they are set to match, both use the same exit as the rest of your traffic.",
+  // The ceiling, said in the units the customer chose in: games, not
+  // programs. Every game is named rather than only the ones past the
+  // limit, because nothing here chose which ones those would be -- see
+  // `exitsForGames` rule 4 for why trimming is refused.
+  "settings.customGameExitOverCeiling":
+    "{game} uses the same exit as the rest of your traffic. You have chosen {chosen} different exits and Neoxify can use {limit} at once. Set some of your games to share an exit, and they will all move to the ones you picked.",
   // The picker itself.
   //
   // Two things it has to say and cannot leave to be inferred:
@@ -351,6 +357,10 @@ const en = {
   "settings.customExitHidden": "Exit reached through {via}",
   "settings.customExitDown": "(not reachable right now)",
   "settings.customExitGone": "The exit you chose, which is not available now",
+  // Shown on an exit that would be a fourth. The label is kept so the
+  // customer can still see which exit it is -- the limit is the reason
+  // it cannot be picked, not a reason to hide what it was.
+  "settings.customExitAtLimit": "{label} -- {limit} exits at once is the limit",
   // The four answers. The fourth is the one that earns its place: with
   // nothing being carried there is no match and no mismatch, and saying
   // either would be the same as a "Connected" indicator nothing
@@ -363,8 +373,15 @@ const en = {
     "Neoxify says where a game leaves from only while it is actually carrying that game's traffic. Connect, start the game, and come back.",
   "settings.customExitFallbackHint":
     "{game} is going through the exit this connection uses, not the one you chose. It still works. To move it, switch server on the main screen and connect again.",
-  "settings.customExitOneAtATime":
-    "One connection leaves from one exit. If two games are set to different exits, whichever one this connection uses gets it and the other goes with it.",
+  // Replaced "one connection leaves from one exit", which stopped
+  // being true for the Xray-carried protocols when the engine learned
+  // to run several tagged inbounds. Kept as two sentences in two
+  // strings because they are two different facts and a customer needs
+  // both: how many, and on what.
+  "settings.customExitConcurrent":
+    "Up to {limit} games can leave from {limit} different exits at the same time. A game with no exit chosen, and everything else you route, uses the same exit as the connection itself.",
+  "settings.customExitXrayOnly":
+    "This needs one of the Xray protocols. On WireGuard, OpenVPN or IKEv2 one connection leaves from one exit, so every game goes wherever that connection does -- and Neoxify will say so on the row rather than pretend otherwise.",
   // Destination scoping, said out loud in both directions.
   //
   // "Uses VPN" is now two different promises and the customer cannot
@@ -978,6 +995,8 @@ const fa: Record<TranslationKey, string> = {
     "{game} از همان محل خروجی استفاده می‌کند که بقیهٔ ترافیک شما از آن استفاده می‌کند. همهٔ برنامه‌های آن اضافه نشده‌اند ({names})، و نئوکسیفای بخشی از یک بازی را روی محل خروج جداگانه قرار نمی‌دهد.",
   "settings.customGameExitConflict":
     "{game} و {others} یک برنامهٔ مشترک را اجرا می‌کنند، پس نمی‌توانند از دو محل خروج متفاوت استفاده کنند. تا وقتی محل خروج هر دو یکسان نشود، هر دو از همان محل خروجی استفاده می‌کنند که بقیهٔ ترافیک شما از آن استفاده می‌کند.",
+  "settings.customGameExitOverCeiling":
+    "{game} از همان محل خروجی استفاده می‌کند که بقیهٔ ترافیک شما از آن استفاده می‌کند. شما {chosen} محل خروج متفاوت انتخاب کرده‌اید و نئوکسیفای هم‌زمان می‌تواند {limit} مورد را به کار بگیرد. چند بازی را روی یک محل خروج مشترک بگذارید تا همه به همان‌هایی که انتخاب کرده‌اید منتقل شوند.",
   "settings.customExitTitle": "هر بازی از کجا خارج می‌شود",
   "settings.customExitHint":
     "انتخاب کنید که هر بازی از کجا دیده شود. بعضی از سرورهای فهرست شما محل خروج یکسانی دارند، پس اینجا یک‌بار نشان داده می‌شوند.",
@@ -986,6 +1005,7 @@ const fa: Record<TranslationKey, string> = {
   "settings.customExitHidden": "محل خروجی که از طریق {via} در دسترس است",
   "settings.customExitDown": "(اکنون در دسترس نیست)",
   "settings.customExitGone": "محل خروجی که انتخاب کرده‌اید و اکنون در دسترس نیست",
+  "settings.customExitAtLimit": "{label} — حداکثر {limit} محل خروج هم‌زمان",
   "settings.customExitOnPreferred": "روی محل خروج انتخابی شما",
   "settings.customExitFallback": "روی محل خروج دیگری",
   "settings.customExitUnknown": "مشخص نشده است",
@@ -994,8 +1014,10 @@ const fa: Record<TranslationKey, string> = {
     "نئوکسیفای فقط زمانی می‌گوید یک بازی از کجا خارج می‌شود که واقعاً ترافیک آن بازی را عبور دهد. متصل شوید، بازی را اجرا کنید و دوباره به این صفحه بازگردید.",
   "settings.customExitFallbackHint":
     "{game} از محل خروجی عبور می‌کند که این اتصال از آن استفاده می‌کند، نه از محلی که شما انتخاب کرده‌اید. بازی همچنان کار می‌کند. برای جابه‌جایی، در صفحهٔ اصلی سرور را عوض کنید و دوباره متصل شوید.",
-  "settings.customExitOneAtATime":
-    "هر اتصال از یک محل خروج خارج می‌شود. اگر برای دو بازی دو محل خروج متفاوت انتخاب شده باشد، هر کدام که این اتصال از آن استفاده کند همان را می‌گیرد و بازی دیگر نیز از همان عبور می‌کند.",
+  "settings.customExitConcurrent":
+    "تا {limit} بازی می‌توانند هم‌زمان از {limit} محل خروج متفاوت خارج شوند. بازی‌ای که محل خروجی برایش انتخاب نشده، و بقیهٔ چیزهایی که عبور می‌دهید، از همان محل خروج خودِ اتصال استفاده می‌کنند.",
+  "settings.customExitXrayOnly":
+    "این قابلیت به یکی از پروتکل‌های Xray نیاز دارد. روی وایرگارد، OpenVPN یا IKEv2 هر اتصال فقط از یک محل خروج خارج می‌شود، پس همهٔ بازی‌ها از همان جایی خارج می‌شوند که اتصال از آن خارج می‌شود — و نئوکسیفای همین را روی همان ردیف می‌گوید، نه چیز دیگری.",
   "settings.customAppScoped": "فقط سرورهای بازی",
   "settings.customAppScopedHint":
     "فقط ترافیک این برنامه به سرورهای خودِ بازی از VPN عبور می‌کند. بقیه‌ی کارهای آن از اینترنت معمولی شما استفاده می‌کند.",

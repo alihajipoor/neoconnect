@@ -56,6 +56,7 @@ mod icon;
 mod owner;
 mod proxy;
 mod redirect;
+mod socks;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -114,6 +115,20 @@ pub struct SplitTunnel {
     /// ever reported alongside a live session -- see
     /// [`SplitTunnel::exit_placements`].
     egress: Option<String>,
+    /// The concurrent exits the engine has brought up for this session,
+    /// as identifier -> loopback SOCKS5 port.
+    ///
+    /// On the `SplitTunnel` rather than on [`Active`] because it is
+    /// written by the engine layer, which brings an engine up *before*
+    /// interception starts and tears it down after interception stops.
+    /// A table that only existed while `Active` did would be unwritable
+    /// at both of the moments it has to change.
+    ///
+    /// Empty for every session that does not use concurrent exits --
+    /// every WireGuard, OpenVPN and IKEv2 session, and every Xray
+    /// session where the customer placed no game. Empty is the state in
+    /// which this feature costs one length check per carried packet.
+    exits: Arc<proxy::ExitRelays>,
     active: Option<Active>,
     /// Processes that were already running when the customer selected
     /// them, as `(lowercased image path, pid)`.
@@ -841,6 +856,7 @@ impl SplitTunnel {
             enabled: false,
             selection: SharedSelection::default(),
             egress: None,
+            exits: Arc::new(proxy::ExitRelays::default()),
             active: None,
             pre_existing: Vec::new(),
             #[cfg(test)]
@@ -1166,7 +1182,8 @@ impl SplitTunnel {
         // first -- the firewall allowance and the reachability wait sit
         // between the two.
         let stats = Arc::new(redirect::Stats::default());
-        let relays = match proxy::start(nat.clone(), tunnel.clone(), stats.clone()) {
+        let relays = match proxy::start(nat.clone(), tunnel.clone(), stats.clone(), self.exits.clone())
+        {
             Ok(relays) => relays,
             Err(e) => {
                 let mut route = route;
@@ -1237,6 +1254,7 @@ impl SplitTunnel {
             // interception actually begins -- the route probe and the
             // firewall wait sit between here and there.
             activated: Instant::now(),
+            exits: self.exits.clone(),
         };
 
         // Recorded before anything can go wrong with it: if Custom mode
@@ -1470,6 +1488,29 @@ impl SplitTunnel {
             }
         }
         outcome
+    }
+
+    /// Records the concurrent exits the engine has just brought up.
+    ///
+    /// Called by the engine layer between starting the engine and
+    /// starting interception, so that a table is never half-written
+    /// while the packet path is reading it.
+    pub fn set_exits(&mut self, exits: Vec<(String, u16)>) {
+        self.exits.set(exits);
+    }
+
+    /// Forgets them.
+    ///
+    /// This is what makes the transition back to one exit **atomic**,
+    /// which is the property the whole feature's ban-safety rests on.
+    /// Every carried flow reads the table through the same `Arc`, so
+    /// clearing it moves every game back to the session's own exit in
+    /// one step rather than one connection at a time -- and a game
+    /// whose binaries move at different moments is the two-source-
+    /// address signature `docs/design/ban-safety.md` mechanism 4
+    /// describes.
+    pub fn clear_exits(&mut self) {
+        self.exits.clear();
     }
 
     pub fn stop(&mut self) {
