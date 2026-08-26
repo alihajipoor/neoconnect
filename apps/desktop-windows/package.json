@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
     "build:bundle": "pnpm build:service && pnpm build",
     "build:service": "cargo build --release -p neoconnect-service && node -e \"require('fs').copyFileSync('target/release/neoconnect-service.exe','src-tauri/resources/neoconnect-service.exe')\"",
     "preview": "vite preview",
