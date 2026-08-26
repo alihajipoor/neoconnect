@@ -115,6 +115,16 @@ pub struct SplitTunnel {
     /// [`SplitTunnel::exit_placements`].
     egress: Option<String>,
     active: Option<Active>,
+    /// Processes that were already running when the customer selected
+    /// them, as `(lowercased image path, pid)`.
+    ///
+    /// The connections these hold predate the choice and cannot be moved
+    /// into the tunnel, so this is what `restart_needed` turns into a
+    /// sentence for the customer. Kept on the `SplitTunnel` rather than
+    /// on `Active` because the selection can be edited before a tunnel
+    /// exists, and a notice that appeared only for people who happened
+    /// to select in the other order would be worse than none.
+    pre_existing: Vec<(String, u32)>,
     /// How many times [`SplitTunnel::stop`] has been called.
     ///
     /// Test-only, and it exists because the invariant it checks cannot
@@ -130,6 +140,12 @@ pub struct SplitTunnel {
 
 struct Active {
     redirect: redirect::Running,
+    /// The flow tables the redirect loop decides against.
+    ///
+    /// Held here so a selection change can throw the leave-alone
+    /// verdicts away -- see `set_selection`. It is the same `Arc` the
+    /// loop, the relays and the audit hold; there is one table.
+    nat: Arc<flows::Nat>,
     relays: proxy::Relays,
     /// Held for its Drop: without it the stack accepts none of the
     /// redirected connections. See the firewall module.
@@ -826,6 +842,7 @@ impl SplitTunnel {
             selection: SharedSelection::default(),
             egress: None,
             active: None,
+            pre_existing: Vec::new(),
             #[cfg(test)]
             stops: std::sync::atomic::AtomicU32::new(0),
         }
@@ -864,8 +881,65 @@ impl SplitTunnel {
         // and keeping the old value would report a stale exit for a
         // tunnel that may well have been rebuilt against another node.
         self.egress = config.egress;
+
+        // Taken before the selection is replaced, because "newly
+        // selected" is a difference between two lists and one of them is
+        // about to be gone.
+        let newly_selected: Vec<String> = {
+            let previous = self.selection.read().unwrap_or_else(|e| e.into_inner());
+            config
+                .apps
+                .iter()
+                .filter(|app| !previous.matches(app))
+                .map(|app| app.to_lowercase())
+                .collect()
+        };
+
         *self.selection.write().unwrap_or_else(|e| e.into_inner()) =
             Selection::with_exits(config.apps, config.mode, config.scopes, config.exits);
+
+        // What the customer has to be told, and the one thing this
+        // product must not do by staying quiet.
+        //
+        // A process that was already running when it was selected holds
+        // connections that predate the choice. Those cannot be moved --
+        // a TCP connection is a socket to the real destination, and
+        // rewriting half of a live one is not a redirect -- so the
+        // honest answer is to say so and let the customer restart it.
+        //
+        // Recorded as `(image, pid)` pairs rather than as a flag, so it
+        // clears itself: restart the game and the pid is gone, the
+        // warning goes with it, and nobody is left staring at a notice
+        // about something they have already done. See
+        // `owner::still_running` for why the pid alone is not enough.
+        //
+        // Only ever *added* to on a selection change. A list that was
+        // replaced would forget an app the customer selected two clicks
+        // ago and is still running, which is exactly the case the notice
+        // exists for.
+        // Only while Custom mode is actually on. With the toggle off the
+        // selection is inert -- nothing is being routed, so nothing is
+        // failing to be routed, and telling the customer to restart a
+        // game would be a warning about a state they are not in. A
+        // notice that appears when nothing is wrong is how a customer
+        // learns to ignore the one that matters.
+        if config.enabled {
+            let already_running = owner::pids_running_images(&newly_selected);
+            for entry in already_running {
+                if !self.pre_existing.contains(&entry) {
+                    self.pre_existing.push(entry);
+                }
+            }
+        } else {
+            self.pre_existing.clear();
+        }
+        // Deselecting has to take the warning with it, or a customer who
+        // changed their mind keeps being told to restart something that
+        // is no longer being routed at all.
+        {
+            let selection = self.selection.read().unwrap_or_else(|e| e.into_inner());
+            self.pre_existing.retain(|(image, _)| selection.should_tunnel(image));
+        }
 
         // The redirect loop reads the selection per decision and so
         // needs nothing here. The WFP filters are a fixed set installed
@@ -877,6 +951,18 @@ impl SplitTunnel {
         // six filters per application and a partial edit is a way to
         // get out of step with the list.
         let Some(active) = self.active.as_mut() else { return };
+
+        // The customer's choice has to reach the next packet, not the
+        // next packet after a timer they cannot see. A leave-alone
+        // verdict recorded while an app was unselected would otherwise
+        // keep answering for its UDP flows for `DIRECT_VERDICT_TTL`.
+        //
+        // Strictly downstream of nothing: this throws a cache away, it
+        // does not decide anything. Every flow it forgets is decided
+        // again by `decide`, through the same owner lookup and the same
+        // refusal for anything unattributable. See
+        // `flows::Nat::forget_direct`.
+        active.nat.forget_direct();
         let log_dir = active.log_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         // Dropped first, and deliberately: two overlapping sets would
         // both be live, and the old one names applications that are no
@@ -920,6 +1006,56 @@ impl SplitTunnel {
         let placements =
             self.selection.read().unwrap_or_else(|e| e.into_inner()).placements(live);
         (live.map(str::to_string), placements)
+    }
+
+    /// The applications the customer selected while they were already
+    /// running, and which are still running, as bare executable names.
+    ///
+    /// # What this is telling them
+    ///
+    /// Selecting a program that is already open routes the connections
+    /// it makes *next*, and cannot route the ones it already has. A TCP
+    /// connection is a socket to the real destination: it can be closed,
+    /// but it cannot be moved, and rewriting half of a live one is not a
+    /// redirect. UDP flows already in the leave-alone cache are re-asked
+    /// immediately -- see `set_selection` -- but a socket the game is
+    /// already using is still the socket it is already using.
+    ///
+    /// So the app says "restart it". That is a smaller claim than the
+    /// customer would otherwise assume from silence, and this project's
+    /// rule is that silence must not be the thing making the claim.
+    ///
+    /// # Why names rather than a boolean
+    ///
+    /// A customer with six things selected needs to know which one to
+    /// restart. The bare file name is what they see in the picker and on
+    /// their taskbar; the full path is the service's business and would
+    /// put a `C:\Program Files\...` string into a sentence.
+    ///
+    /// Empty is the ordinary answer, including for every customer who
+    /// selected their game before opening it -- which is the order the
+    /// app's own copy now recommends.
+    pub fn restart_needed(&mut self) -> Vec<String> {
+        // Re-checked rather than remembered, so the notice disappears
+        // the moment the customer acts on it.
+        self.pre_existing = owner::still_running(&self.pre_existing);
+
+        let mut names: Vec<String> = self
+            .pre_existing
+            .iter()
+            .map(|(image, _)| {
+                image
+                    .rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or(image.as_str())
+                    .to_string()
+            })
+            .collect();
+        // One line per program, not one per process: a game with three
+        // helpers is one thing to restart.
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Whether Custom mode should shape how the next tunnel is brought
@@ -1164,6 +1300,7 @@ impl SplitTunnel {
         // and the filters go with it.
         let ipv6_apps = install_ipv6_app_block(&self.selection, log_dir, &log_path);
 
+        let nat_for_active = nat.clone();
         match redirect::start(redirect, nat, self.selection.clone(), stats) {
             Ok(running) => {
                 let logger =
@@ -1226,6 +1363,7 @@ impl SplitTunnel {
 
                 self.active = Some(Active {
                     redirect: running,
+                    nat: nat_for_active,
                     relays,
                     allowance,
                     tunnel,
@@ -1707,5 +1845,164 @@ mod tests {
         // own upstream connections.
         let image = own_image_path();
         assert!(image.to_lowercase().ends_with(".exe"), "got {image}");
+    }
+
+    /// A selection made with the program already open is reported, so
+    /// the app can tell the customer to restart it.
+    ///
+    /// This test binary is the running program, which is the only image
+    /// a test can be certain is running.
+    ///
+    /// Both halves are asserted, and the second is the one that makes
+    /// the first mean anything: an implementation that simply returned
+    /// every selected application would pass the first assertion and
+    /// tell every customer to restart a game they had not yet opened.
+    #[test]
+    fn selecting_a_program_that_is_already_running_says_so() {
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let mut split = SplitTunnel::new();
+
+        assert!(
+            split.restart_needed().is_empty(),
+            "nothing is selected yet, so there is nothing to restart"
+        );
+
+        split.set_selection(SplitTunnelConfig {
+            enabled: true,
+            apps: vec![me.clone()],
+            mode: SplitTunnelMode::OnlySelected,
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        });
+        let needed = split.restart_needed();
+        assert_eq!(
+            needed.len(),
+            1,
+            "the running program the customer just selected must be named, got {needed:?}"
+        );
+        assert!(
+            needed[0].to_lowercase().ends_with(".exe"),
+            "the customer is shown the file name, not the full path, got {needed:?}"
+        );
+
+        // The control. A program that is not running is not something
+        // the customer can usefully restart, and saying so would train
+        // them to ignore the notice.
+        let mut split = SplitTunnel::new();
+        split.set_selection(SplitTunnelConfig {
+            enabled: true,
+            apps: vec![r"C:\Games\not-running.exe".to_string()],
+            mode: SplitTunnelMode::OnlySelected,
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        });
+        assert!(
+            split.restart_needed().is_empty(),
+            "a program that was not running when it was selected needs no restart"
+        );
+    }
+
+    /// With the toggle off, there is nothing to say.
+    ///
+    /// A selection that is not being applied cannot be failing to apply.
+    /// Telling a customer whose Custom mode is switched off to restart
+    /// their game is a warning about a state they are not in, and the
+    /// cost of those is that the warnings which matter get ignored too.
+    #[test]
+    fn a_selection_that_is_switched_off_asks_for_nothing() {
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let mut split = SplitTunnel::new();
+
+        // On first, so there is something to lose.
+        split.set_selection(SplitTunnelConfig {
+            enabled: true,
+            apps: vec![me.clone()],
+            mode: SplitTunnelMode::OnlySelected,
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        });
+        assert_eq!(split.restart_needed().len(), 1, "the row that had to be non-zero");
+
+        // Same list, toggle off.
+        split.set_selection(SplitTunnelConfig {
+            enabled: false,
+            apps: vec![me],
+            mode: SplitTunnelMode::OnlySelected,
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        });
+        assert!(
+            split.restart_needed().is_empty(),
+            "with Custom mode off nothing is being routed, so nothing needs restarting"
+        );
+    }
+
+    /// Deselecting takes the notice with it.
+    ///
+    /// A customer who changed their mind must not keep being told to
+    /// restart something that is no longer being routed at all -- that
+    /// is a warning they cannot act on, about a state that no longer
+    /// exists.
+    #[test]
+    fn deselecting_a_program_stops_asking_for_a_restart() {
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let mut split = SplitTunnel::new();
+
+        split.set_selection(SplitTunnelConfig {
+            enabled: true,
+            apps: vec![me],
+            mode: SplitTunnelMode::OnlySelected,
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        });
+        assert_eq!(split.restart_needed().len(), 1, "the row that had to be non-zero");
+
+        split.set_selection(SplitTunnelConfig {
+            enabled: true,
+            apps: Vec::new(),
+            mode: SplitTunnelMode::OnlySelected,
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        });
+        assert!(
+            split.restart_needed().is_empty(),
+            "an application the customer deselected must not still be asking for a restart"
+        );
+    }
+
+    /// Selecting the same program twice does not name it twice.
+    ///
+    /// The customer edits this list repeatedly -- that is what the
+    /// picker is for -- and every edit re-sends the whole selection. An
+    /// implementation that appended on each one would grow the notice
+    /// every time they touched anything.
+    #[test]
+    fn re_sending_the_same_selection_does_not_repeat_the_notice() {
+        let me = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let mut split = SplitTunnel::new();
+        let config = SplitTunnelConfig {
+            enabled: true,
+            apps: vec![me],
+            mode: SplitTunnelMode::OnlySelected,
+            scopes: Vec::new(),
+            exits: Vec::new(),
+            egress: None,
+        };
+
+        split.set_selection(config.clone());
+        split.set_selection(config.clone());
+        split.set_selection(config);
+
+        assert_eq!(
+            split.restart_needed().len(),
+            1,
+            "three identical edits must produce one name, not three"
+        );
     }
 }

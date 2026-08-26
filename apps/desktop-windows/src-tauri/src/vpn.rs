@@ -667,6 +667,19 @@ pub struct VpnStatus {
     /// documentation in the IPC crate and `engines::dns::TunnelDns`.
     #[serde(rename = "tunnelDnsUnprotected")]
     tunnel_dns_unprotected: bool,
+    /// Applications the customer selected while they were already
+    /// running, as bare file names.
+    ///
+    /// Carried as facts rather than as a sentence, for the same reason
+    /// `tunnel_dns_unprotected` above it is: the customers this feature
+    /// exists for read Persian, and a sentence built in the service
+    /// arrives in a language the app cannot change. The app turns this
+    /// list into wording from `i18n.tsx`.
+    ///
+    /// Empty for everyone who selected their game before opening it,
+    /// which is the order the app's own copy recommends.
+    #[serde(rename = "splitTunnelRestartNeeded")]
+    split_tunnel_restart_needed: Vec<String>,
 }
 
 /// How long to wait for a server to answer before calling it unreachable.
@@ -892,6 +905,7 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_problem,
             ipv6_blocked,
             tunnel_dns_unprotected,
+            split_tunnel_restart_needed,
         } => Ok(VpnStatus {
             connected,
             protocol,
@@ -900,6 +914,7 @@ pub async fn vpn_status() -> Result<VpnStatus, String> {
             split_tunnel_problem,
             ipv6_blocked,
             tunnel_dns_unprotected,
+            split_tunnel_restart_needed,
         }),
         Response::Error { message } => Err(message),
         Response::Ok
