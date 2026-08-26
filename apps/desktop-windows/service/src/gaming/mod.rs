@@ -479,6 +479,14 @@ fn check_canary(session: &Session) -> (bool, Option<String>) {
 mod tests {
     use super::*;
 
+    // The addresses and hostnames in the fixtures below are RFC 5737 and
+    // RFC 2606 stand-ins. A real node's exit address and DoH hostname
+    // were here until 2026-08-26; redacted per
+    // docs/node-address-hygiene.md, because this repository is public.
+    // `203.0.113.10` stands for the one node these fixtures used and
+    // `fi1.example.net` for its hostname -- they are one node, not two,
+    // which is why one substitution covers both.
+
     /// `Unknown` must never be reachable by accident from the same
     /// shape as `Off`, and `Off` must claim nothing.
     #[test]
@@ -507,8 +515,8 @@ mod tests {
     #[test]
     fn arming_with_a_root_namespace_is_refused_before_anything_is_installed() {
         let config = GamingConfig {
-            doh_url: "https://fi1.neoxify.site/dns-query".into(),
-            proxy_ip: "172.236.143.200".into(),
+            doh_url: "https://fi1.example.net/dns-query".into(),
+            proxy_ip: "203.0.113.10".into(),
             proxy_port: 443,
             namespaces: vec![".".into()],
             exclude_hostnames: Vec::new(),
@@ -525,8 +533,8 @@ mod tests {
     fn a_missing_canary_is_a_failed_check_not_a_skipped_one() {
         let session = Session {
             config: GamingConfig {
-                doh_url: "https://fi1.neoxify.site/dns-query".into(),
-                proxy_ip: "172.236.143.200".into(),
+                doh_url: "https://fi1.example.net/dns-query".into(),
+                proxy_ip: "203.0.113.10".into(),
                 proxy_port: 443,
                 namespaces: vec!["blizzard.com".into()],
                 exclude_hostnames: Vec::new(),

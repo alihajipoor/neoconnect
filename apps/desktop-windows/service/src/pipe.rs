@@ -136,6 +136,11 @@ async fn handle_connection(stream: NamedPipeServer, engines: Arc<Mutex<Engines>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `fi1.example.net` in the armGaming fixtures below is an RFC 2606
+    // stand-in. A real node's DoH hostname was here until 2026-08-26;
+    // redacted per docs/node-address-hygiene.md, because this repository
+    // is public. The `proxyIp` beside it was already a placeholder.
     use neoconnect_ipc::{ConnectProfile, WireguardProfile};
     use std::path::PathBuf;
     use tokio::net::windows::named_pipe::ClientOptions;
@@ -289,7 +294,7 @@ mod tests {
     async fn refuses_a_gaming_profile_scoped_to_the_root_namespace() {
         let name = r"\\.\pipe\neoconnect-test-gaming-root";
         start_server(name).await;
-        let request = r#"{"type":"armGaming","config":{"dohUrl":"https://fi1.neoxify.site/dns-query","proxyIp":"1.2.3.4","proxyPort":443,"namespaces":["."]}}"#;
+        let request = r#"{"type":"armGaming","config":{"dohUrl":"https://fi1.example.net/dns-query","proxyIp":"1.2.3.4","proxyPort":443,"namespaces":["."]}}"#;
         let reply = round_trip(name, request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -309,7 +314,7 @@ mod tests {
     async fn refuses_a_gaming_namespace_that_could_reach_the_shell() {
         let name = r"\\.\pipe\neoconnect-test-gaming-injection";
         start_server(name).await;
-        let request = r#"{"type":"armGaming","config":{"dohUrl":"https://fi1.neoxify.site/dns-query","proxyIp":"1.2.3.4","proxyPort":443,"namespaces":["blizzard.com'; calc; #"]}}"#;
+        let request = r#"{"type":"armGaming","config":{"dohUrl":"https://fi1.example.net/dns-query","proxyIp":"1.2.3.4","proxyPort":443,"namespaces":["blizzard.com'; calc; #"]}}"#;
         let reply = round_trip(name, request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
