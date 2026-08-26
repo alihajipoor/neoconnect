@@ -106,6 +106,28 @@ describe("what the strings are allowed to claim", () => {
     expect(offenders).toEqual([]);
   });
 
+  /** Keys describing what the PRODUCT can do, where "yet" is a promise.
+   *
+   * Deliberately a list rather than a blanket ban. "No conversations yet"
+   * is fine -- that empty state fills the moment the customer writes to
+   * support. These are different: they describe capability that is not
+   * being built, and "yet" turns each into a commitment. Every one of
+   * these had the word and it was removed on 2026-08-25. */
+  const NO_PROMISES = [
+    "gaming.noResolver",
+    "gaming.noResolverBody",
+    "gaming.listEmpty",
+    "settings.customGameEmpty",
+    "settings.customGameWholeApp",
+  ] as const;
+
+  it("does not tell the customer to wait for something nobody is building", () => {
+    for (const k of NO_PROMISES) {
+      expect(`${k}: ${en[k]}`).not.toMatch(/\byet\b/i);
+      expect(`${k}: ${fa[k]}`).not.toContain("هنوز");
+    }
+  });
+
   it("never tells a customer to wait for the resolver", () => {
     // "yet" promised a delivery nobody intends to make: no node serves the
     // DNS half of gaming mode and none is planned. See the DEAD BRANCH

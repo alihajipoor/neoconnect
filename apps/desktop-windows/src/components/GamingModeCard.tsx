@@ -163,6 +163,17 @@ export function GamingModeCard() {
         </div>
       ) : null}
 
+      {/* The card must never render nothing. If the catalogue loaded, the
+          mode is otherwise available, and yet no game on it can have its
+          launcher redirected, then there is genuinely nothing to add --
+          and saying so is the whole point. Going silent here would leave
+          a customer looking at a card with no button and no reason. */}
+      {!canAdd && picked.length === 0 && !unavailable && !profileFailed && profile ? (
+        <p className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+          {t("gaming.noneRedirectable")}
+        </p>
+      ) : null}
+
       {canAdd || picked.length > 0 ? (
         <div className="flex flex-col gap-2">
           <p className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">

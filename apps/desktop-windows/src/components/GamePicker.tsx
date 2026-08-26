@@ -53,8 +53,15 @@ export function GamePicker({
    * is a different fact from a search matching nothing. */
   emptyLabel?: string;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [query, setQuery] = useState("");
+
+  // Grouped digits in the reader's own numerals. Four figures is where a
+  // bare String(n) starts to read as a serial number rather than a count.
+  const format = useMemo(() => {
+    const nf = new Intl.NumberFormat(language === "fa" ? "fa-IR" : "en-US");
+    return (n: number) => nf.format(n);
+  }, [language]);
 
   const already = new Set(chosen);
 
@@ -162,11 +169,25 @@ export function GamePicker({
               // Stated rather than left to be inferred. A list that just stops
               // reads as "my game is not supported", which is the one
               // conclusion this picker must not accidentally produce.
+              //
+              // Two strings, because one could not be true in both states.
+              // On first open nothing has been typed and nothing has
+              // "matched" -- the other 1,420 rows are simply the rest of the
+              // catalogue -- so telling somebody to "keep typing to narrow it
+              // down" is wrong twice over. Numbers are localised here rather
+              // than interpolated raw: `t()` substitutes with String(), which
+              // would put Latin digits inside a right-to-left sentence and no
+              // thousands separator in either language.
               <li
                 aria-live="polite"
                 className="px-2.5 py-2 text-center text-[10px] text-muted-foreground"
               >
-                {t("gaming.searchMore", { count: hidden })}
+                {query.trim()
+                  ? t("gaming.searchMore", { count: format(hidden) })
+                  : t("gaming.listMore", {
+                      shown: format(shown.length),
+                      count: format(matches.length),
+                    })}
               </li>
             ) : null}
           </ul>
