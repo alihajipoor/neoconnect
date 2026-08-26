@@ -202,3 +202,80 @@ export function canRouteByDestination(
 ): boolean {
   return profile.prefixComplete === true && (profile.destinationCidrs?.length ?? 0) > 0;
 }
+
+/** How many catalogue rows a picker mounts at once.
+ *
+ * Not a limit on what is searchable -- the whole catalogue is always
+ * ranked, and the caller is expected to say how many matches were not
+ * shown. It is a limit on DOM nodes. The catalogue runs to well over a
+ * thousand entries, and mounting all of them inside a backdrop-blurred
+ * card is what makes a picker feel broken on the low-end machines a lot
+ * of these customers have.
+ */
+export const GAME_PAGE_SIZE = 60;
+
+/** Lowercased, punctuation flattened to single spaces.
+ *
+ * So "counter-strike", "Counter Strike" and "COUNTER STRIKE" are one
+ * search rather than three, and somebody typing a name the way they say
+ * it finds the game whatever the publisher's styling is.
+ */
+function normaliseForSearch(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** What a game has to match on. */
+export interface SearchableGame {
+  displayName: string;
+  publisher?: string | null;
+}
+
+/** Rank a catalogue against a search box.
+ *
+ * A plain `includes` filter was fine for three games and is actively
+ * misleading for a thousand: typing "cs" puts every title that happens to
+ * contain those two letters above Counter-Strike, and the customer
+ * concludes their game is not supported. So matches are scored and the
+ * best ones come first.
+ *
+ * The bands, strongest first:
+ *
+ *   0. the name starts with what was typed
+ *   1. a word in the name starts with it -- so "strike" finds
+ *      Counter-Strike and "legends" finds Apex Legends
+ *   2. the name contains it anywhere
+ *   3. the name contains it once spaces are removed on both sides, which
+ *      is how "counterstrike" and "deadbydaylight" find their games
+ *   4. the publisher contains it, so "blizzard" lists Blizzard's catalogue
+ *
+ * Ties keep the server's order, which puts the curated entries and the
+ * online titles first. An empty query returns the catalogue untouched.
+ *
+ * Cheap enough to run on every keystroke -- a few thousand string
+ * comparisons -- so no debounce is needed to keep the field responsive.
+ */
+export function rankGames<T extends SearchableGame>(games: readonly T[], query: string): T[] {
+  const needle = normaliseForSearch(query);
+  if (!needle) return [...games];
+
+  const squashedNeedle = needle.replace(/ /g, "");
+  const scored: { game: T; score: number; index: number }[] = [];
+
+  games.forEach((game, index) => {
+    const name = normaliseForSearch(game.displayName);
+    let score: number;
+    if (name.startsWith(needle)) score = 0;
+    else if (name.split(" ").some((word) => word.startsWith(needle))) score = 1;
+    else if (name.includes(needle)) score = 2;
+    else if (name.replace(/ /g, "").includes(squashedNeedle)) score = 3;
+    else if (normaliseForSearch(game.publisher ?? "").includes(needle)) score = 4;
+    else return;
+    scored.push({ game, score, index });
+  });
+
+  scored.sort((a, b) => a.score - b.score || a.index - b.index);
+  return scored.map((s) => s.game);
+}

@@ -1,0 +1,507 @@
+{
+  "$comment": "Hand-written catalogue entries. Wins every slug collision against steam-tier.json. Each entry records where its executable names came from and how far they should be trusted. HAND-EDITABLE -- unlike steam-tier.json, this file is not regenerated.",
+  "$rules": [
+    "processNames are BARE filenames. The client resolves them against running processes and takes the real path, so a name that is wrong reports as not-found rather than silently half-routing a game.",
+    "No name may appear in generic-names.json. The validator fails the seed on one, because a generic name routes whatever unrelated software happens to be running under it.",
+    "Where a publisher's own pages disagree on a spelling, list BOTH. Exactly one will ever resolve on a given machine, and guessing wrong leaves part of a game outside the tunnel with nothing said.",
+    "Where a game launches through an anti-cheat wrapper, list the wrapper AND the real binary. The wrapper is what the store launches; the game binary is what carries gameplay traffic.",
+    "Never set prefixComplete or destinationCidrs here. No entry in this file has a researched prefix list.",
+    "\"first-party\" grades the SOURCE, not the truth. A publisher support article can be templated across titles and name a file that is not on disk -- Amazon's Lost Ark article names LostArkLauncher.exe, which no observed install contains. Where a first-party page and an observed install disagree, ship BOTH and say so here. A name that does not exist reports as not-found and costs nothing; dropping the real one leaves the game outside the tunnel with nothing said.",
+    "The BattlEye '<Game>_BE.exe' convention is a hint, never an inference. BattlEye's own FAQ says 'often named', and Destiny 2 breaks it outright with destiny2launcher.exe. Do not generate a _BE name for a title where one was not observed."
+  ],
+  "games": [
+    {
+      "slug": "rust",
+      "displayName": "Rust",
+      "publisher": "Facepunch Studios",
+      "processNames": [
+        "Rust.exe",
+        "RustClient.exe"
+      ],
+      "steamAppIds": [
+        252490
+      ],
+      "confidence": "first-party",
+      "source": "Valve appinfo (rust.exe, observed); Facepunch support (RustClient.exe)",
+      "notes": "Valve's launch config names only rust.exe, the EAC wrapper. RustClient.exe is Facepunch's own name for the game without the EAC wrapper and is not in Valve's data. Both listed: only one of them carries gameplay traffic and which one runs depends on how the customer started it."
+    },
+    {
+      "slug": "ark-survival-evolved",
+      "displayName": "ARK: Survival Evolved",
+      "publisher": "Studio Wildcard",
+      "processNames": [
+        "ShooterGame_BE.exe",
+        "ShooterGame.exe"
+      ],
+      "steamAppIds": [
+        346110
+      ],
+      "confidence": "first-party",
+      "source": "BattlEye FAQ; Steam launch config",
+      "notes": "BattlEye's own FAQ says the BE Launcher executable, often named '[Game name]_BE.exe', needs internet access -- so the _BE binary is genuinely network-making and not merely a shim. Which of the two runs depends on the customer's launch choice."
+    },
+    {
+      "slug": "ark-survival-ascended",
+      "displayName": "ARK: Survival Ascended",
+      "publisher": "Studio Wildcard",
+      "processNames": [
+        "ArkAscended_BE.exe",
+        "ArkAscended.exe"
+      ],
+      "steamAppIds": [
+        2399830
+      ],
+      "confidence": "first-party",
+      "source": "Valve appinfo launch config for app 2399830 (observed)",
+      "notes": "Both ArkAscended_BE.exe and ArkAscended.exe appear as launch targets in Valve's own configuration for this app, so the wrapper/binary pair here is observed rather than inferred from BattlEye's naming convention."
+    },
+    {
+      "slug": "dead-by-daylight",
+      "displayName": "Dead by Daylight",
+      "publisher": "Behaviour Interactive",
+      "processNames": [
+        "DeadByDaylight.exe",
+        "DeadByDaylight-Win64-Shipping.exe"
+      ],
+      "steamAppIds": [
+        381210
+      ],
+      "confidence": "corroborated",
+      "source": "Valve appinfo (shim, observed); Unreal shipping-binary convention (game binary)",
+      "notes": "Valve's launch config names only DeadByDaylight.exe, which is the shim. DeadByDaylight-Win64-Shipping.exe is the Unreal shipping binary and is NOT observed in Valve's data -- it is listed anyway because if it is right it is the process carrying gameplay traffic, and if it is wrong it reports as not-found. The Game Pass build is reported as DeadByDaylight-WinGDK-Shipping.exe but that rests only on SEO-farm pages, so it is deliberately not listed."
+    },
+    {
+      "slug": "sea-of-thieves",
+      "displayName": "Sea of Thieves",
+      "publisher": "Rare",
+      "processNames": [
+        "SeaOfThieves.exe",
+        "SoTGame.exe"
+      ],
+      "steamAppIds": [
+        1172620
+      ],
+      "confidence": "first-party",
+      "source": "Valve appinfo (SeaOfThieves.exe, observed); Rare support articles (SoTGame.exe)",
+      "notes": "Rare's own support pages spell the game binary SoTGame.exe, SotGame.exe and sotgame.exe across three pages. Only one spelling is listed because matching is case-insensitive on both sides, so the casing here is cosmetic; the publisher's own casing is preserved rather than normalised."
+    },
+    {
+      "slug": "world-of-tanks",
+      "displayName": "World of Tanks",
+      "publisher": "Wargaming",
+      "processNames": [
+        "WorldOfTanks.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Wargaming support (firewall/port documentation)",
+      "notes": "Wargaming's own Defender article also names cef_browser_process.exe. That is deliberately NOT listed: first-party provenance does not make a name specific, and every CEF-embedding application on the machine ships it. The RU/CIS fork is now Lesta and ships its own launcher (lgc.exe); whether its game binary is still WorldOfTanks.exe is UNVERIFIED."
+    },
+    {
+      "slug": "world-of-warships",
+      "displayName": "World of Warships",
+      "publisher": "Wargaming",
+      "processNames": [
+        "WorldOfWarships.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Wargaming support (firewall/port documentation)"
+    },
+    {
+      "slug": "world-of-warplanes",
+      "displayName": "World of Warplanes",
+      "publisher": "Wargaming",
+      "processNames": [
+        "WorldOfWarplanes.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Wargaming support (firewall/port documentation)"
+    },
+    {
+      "slug": "lesta-game-center",
+      "displayName": "Lesta Game Center",
+      "publisher": "Lesta Games",
+      "processNames": [
+        "lgc.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Lesta first-party documentation",
+      "notes": "Launcher only. The RU/CIS fork of the Wargaming titles installs through this; the game binaries it launches are UNVERIFIED and deliberately not guessed here."
+    },
+    {
+      "slug": "sudden-attack",
+      "displayName": "Sudden Attack",
+      "publisher": "Nexon",
+      "processNames": [
+        "suddenattack.exe",
+        "EACLaunch.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Nexon support",
+      "notes": "Nexon writes suddenattack.exe lowercase; preserved as they write it. EACLaunch.exe is confirmed network-active by an outbound firewall rule in the same source, but it is a Nexon-wide anti-cheat launcher rather than this title's own binary -- so picking this game may also route another Nexon title that is running. That is a game-to-game overlap, not unrelated software, which is the line this catalogue draws."
+    },
+    {
+      "slug": "crossfire",
+      "displayName": "CrossFire",
+      "publisher": "Smilegate",
+      "processNames": [
+        "crossfire.exe",
+        "patcher_cf.exe"
+      ],
+      "confidence": "corroborated",
+      "source": "four independent regional listings; no vendor citation found",
+      "notes": "The game binary is constant across regions; the launcher name is not (CF_G4box.exe, cfPT_launcher.exe, CFLauncher.exe are all reported regionally). Only the constant binary and the corroborated patcher are listed -- the regional launchers are UNVERIFIED and would each need their own source."
+    },
+    {
+      "slug": "point-blank",
+      "displayName": "Point Blank",
+      "publisher": "Zepetto",
+      "processNames": [
+        "PointBlank.exe",
+        "PBLauncher.exe"
+      ],
+      "confidence": "unverified",
+      "source": "corroborated across two publishers' regional pages; no vendor citation",
+      "notes": "Graded unverified deliberately: two regional operators agree, but neither is the vendor. If either name is wrong the client reports it as not-found."
+    },
+    {
+      "slug": "roblox",
+      "displayName": "Roblox",
+      "publisher": "Roblox Corporation",
+      "processNames": [
+        "RobloxPlayerBeta.exe",
+        "RobloxStudioBeta.exe",
+        "RobloxStudio.exe"
+      ],
+      "confidence": "corroborated",
+      "source": "Roblox Creator Hub (Studio CLI) for the Studio binaries; third-party for the player",
+      "notes": "RobloxStudioBeta.exe and RobloxStudio.exe are BOTH listed because one first-party Roblox document uses both spellings in the same page -- exactly the League renderer case, and exactly one will resolve. RobloxPlayerBeta.exe is third-party only: Roblox's own firewall help articles return 403 to automated fetching, so it could not be confirmed first-party. The Microsoft Store build runs under a different name entirely (Windows10Universal.exe) and is NOT catalogued, because that name is generic -- Store users therefore get no coverage from this entry, which is a real gap."
+    },
+    {
+      "slug": "discord",
+      "displayName": "Discord",
+      "publisher": "Discord Inc.",
+      "processNames": [
+        "Discord.exe",
+        "DiscordPTB.exe",
+        "DiscordCanary.exe"
+      ],
+      "confidence": "corroborated",
+      "source": "Discord release channel naming; corroborated",
+      "notes": "Not a game, and catalogued anyway: OONI measured discord.com confirmed-blocked in Iran on 67% of 12,571 consumer measurements, which makes it the single most-blocked entry in this catalogue. Electron child processes inherit the parent's image name, so no helper entry is needed. Discord's Squirrel updater is named Update.exe and is deliberately NOT listed -- every Electron application on the machine ships that name."
+    },
+    {
+      "slug": "rainbow-six-siege",
+      "displayName": "Tom Clancy's Rainbow Six Siege",
+      "publisher": "Ubisoft",
+      "processNames": [
+        "RainbowSix.exe"
+      ],
+      "steamAppIds": [
+        359550
+      ],
+      "confidence": "first-party",
+      "source": "Valve appinfo launch config for app 359550 (observed)",
+      "notes": "Every launch entry for this app is gated behind an edition DLC, which is why a naive ownsdlc filter loses the title entirely. All eight name the same binary."
+    },
+    {
+      "slug": "battleye-anti-cheat",
+      "displayName": "BattlEye Anti-Cheat",
+      "publisher": "BattlEye Innovations",
+      "processNames": [
+        "BEService.exe",
+        "BEService_x64.exe"
+      ],
+      "confidence": "first-party",
+      "source": "BattlEye FAQ, https://www.battleye.com/support/faq/ (read 2026-08-25)",
+      "notes": "Its own row rather than a name repeated across every BattlEye title, because that is what it is: one Windows service in C:\\Program Files (x86)\\Common Files\\BattlEye, shared by every BattlEye game on the machine. Attaching it to a single game's row would imply it is part of that game and would route it for all the others anyway. Two research passes disagreed about whether the FAQ names these binaries; the page was read directly and it does, in both the Common Files path and the per-game BattlEye directory."
+    },
+    {
+      "slug": "lost-ark",
+      "displayName": "Lost Ark",
+      "publisher": "Amazon Games",
+      "processNames": [
+        "LOSTARK.exe",
+        "Launch_Game.exe",
+        "LostArkLauncher.exe"
+      ],
+      "steamAppIds": [
+        1599340
+      ],
+      "confidence": "corroborated",
+      "source": "docs/research/gaming-providers.md (LOA Logs, snoww/loa-logs NINEVEH_COMPAT_EXE_NAME); Amazon Games support (LostArkLauncher.exe)",
+      "notes": "Valve's launch config for this app names only Easy Anti-Cheat's start_protected_game.exe, so the generated tier could not carry this title at all. LOSTARK.exe is evidenced concretely: LOA Logs copies its own binary to that name specifically so ExitLag will proxy it, which is a third party depending on the name in production. LostArkLauncher.exe comes from Amazon's own support article but appears in no observed install -- Amazon's articles are heavily templated across titles -- so it is listed alongside rather than instead of the observed names. See the first-party-grades-the-source rule above."
+    },
+    {
+      "slug": "path-of-exile-2",
+      "displayName": "Path of Exile 2",
+      "publisher": "Grinding Gear Games",
+      "processNames": [
+        "PathOfExileSteam.exe"
+      ],
+      "steamAppIds": [
+        2694490
+      ],
+      "confidence": "first-party",
+      "source": "Valve appinfo launch config (observed)",
+      "notes": "KNOWN LIMITATION: Path of Exile 1 and Path of Exile 2 ship the same executable filenames and are distinguished only by install folder. A process-name catalogue therefore cannot tell them apart -- selecting either routes whichever is running. Recorded here so nobody later assumes a name match is sufficient. The standalone (non-Steam) client additionally ships a Client.exe backwards-compatibility stub, which is on the generic denylist and is not catalogued."
+    },
+    {
+      "slug": "battle-net",
+      "displayName": "Battle.net",
+      "publisher": "Blizzard Entertainment",
+      "processNames": [
+        "Battle.net.exe",
+        "Battle.net Launcher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25.",
+      "notes": "Agent.exe (the Blizzard Update Agent) is deliberately NOT listed here even though Blizzard's own manifest names it and the pre-existing wow row carries it: Agent.exe is a name shared with a great deal of enterprise software, and this catalogue's rule is that a generic name must not ship. Battle.net Helper.exe, the CEF renderer, is absent from Blizzard's manifest and is not guessed."
+    },
+    {
+      "slug": "steam-client",
+      "displayName": "Steam",
+      "publisher": "Valve",
+      "processNames": [
+        "steam.exe",
+        "steamchina.exe",
+        "SteamService.exe",
+        "steamwebhelper.exe",
+        "streaming_client.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Valve client manifest (media.steampowered.com/client/steam_client_win32) and Valve's own firewall article",
+      "notes": "steamwebhelper.exe is the weakest name here: Valve names the process steamwebhelper in its own client update notes but never prints the string with a .exe suffix, and it is not in any enumerable client package. It is listed because it is where most of the Steam client's network traffic actually goes. Valve's casing SteamService.exe is preserved as they write it."
+    },
+    {
+      "slug": "epic-games-launcher",
+      "displayName": "Epic Games Launcher",
+      "publisher": "Epic Games",
+      "processNames": [
+        "EpicGamesLauncher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Epic developer documentation",
+      "notes": "Epic ships this binary at two different paths (Launcher/Portal/Binaries/Win32 and Launcher/Engine/Binaries/Win64); the client resolves against running processes, so whichever one is live is picked up. EpicWebHelper.exe has zero hits on any Epic domain and is not guessed."
+    },
+    {
+      "slug": "gog-galaxy",
+      "displayName": "GOG Galaxy",
+      "publisher": "GOG.com",
+      "processNames": [
+        "GalaxyClient.exe",
+        "GalaxyClientService.exe",
+        "GalaxyCommunication.exe"
+      ],
+      "confidence": "first-party",
+      "source": "GOG support article 360013537477"
+    },
+    {
+      "slug": "ea-app",
+      "displayName": "EA app",
+      "publisher": "Electronic Arts",
+      "processNames": [
+        "EADesktop.exe",
+        "EALauncher.exe",
+        "EABackgroundService.exe",
+        "Origin.exe",
+        "OriginClientService.exe"
+      ],
+      "confidence": "first-party",
+      "source": "help.ea.com conflicting-programs article (current revision for the EA app binaries; an older revision for the two legacy Origin names)",
+      "notes": "The two Origin names come from a superseded revision of EA's article and are listed for customers still on the legacy client. EA publishes NO per-game executable names at all -- its guidance is literally to find the .exe yourself -- which is why no EA title (Apex Legends, Battlefield, The Sims 4, EA SPORTS FC) appears in this catalogue."
+    },
+    {
+      "slug": "overwatch",
+      "displayName": "Overwatch 2",
+      "publisher": "Blizzard Entertainment",
+      "processNames": [
+        "Overwatch.exe",
+        "Overwatch Launcher.exe",
+        "GameClientApp.exe",
+        "NeacLoader.exe",
+        "OWNeacClient.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25.",
+      "notes": "Product pro. The three extra binaries are NetEase's anti-cheat, named in Blizzard's own uninstall manifest. NeacSafe64.sys is a kernel driver and cannot be matched by a process-name engine at all."
+    },
+    {
+      "slug": "diablo-iv",
+      "displayName": "Diablo IV",
+      "publisher": "Blizzard Entertainment",
+      "processNames": [
+        "Diablo IV.exe",
+        "Diablo IV Launcher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25."
+    },
+    {
+      "slug": "diablo-iii",
+      "displayName": "Diablo III",
+      "publisher": "Blizzard Entertainment",
+      "processNames": [
+        "Diablo III.exe",
+        "Diablo III64.exe",
+        "Diablo III Launcher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25."
+    },
+    {
+      "slug": "diablo-ii-resurrected",
+      "displayName": "Diablo II: Resurrected",
+      "publisher": "Blizzard Entertainment",
+      "processNames": [
+        "D2R.exe",
+        "Diablo II Resurrected Launcher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25."
+    },
+    {
+      "slug": "hearthstone",
+      "displayName": "Hearthstone",
+      "publisher": "Blizzard Entertainment",
+      "processNames": [
+        "Hearthstone.exe",
+        "Hearthstone Launcher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25."
+    },
+    {
+      "slug": "heroes-of-the-storm",
+      "displayName": "Heroes of the Storm",
+      "publisher": "Blizzard Entertainment",
+      "processNames": [
+        "HeroesSwitcher_x64.exe",
+        "HeroesOfTheStorm_x64.exe",
+        "Heroes of the Storm.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25.",
+      "notes": "The switcher is a stub: the networked process is the versioned binary under Versions/Base<number>/. Matching only the shortcut would match something that has already exited, so all three are listed."
+    },
+    {
+      "slug": "starcraft-ii",
+      "displayName": "StarCraft II",
+      "publisher": "Blizzard Entertainment",
+      "processNames": [
+        "SC2Switcher.exe",
+        "SC2Switcher_x64.exe",
+        "SC2_x64.exe",
+        "StarCraft II.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25.",
+      "notes": "Same switcher trap as Heroes of the Storm: the shortcut is not the networked process."
+    },
+    {
+      "slug": "call-of-duty",
+      "displayName": "Call of Duty",
+      "publisher": "Activision",
+      "processNames": [
+        "cod.exe",
+        "cod_bnet.exe",
+        "Call of Duty Launcher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25.",
+      "notes": "Product auks, covering Modern Warfare II/III, Black Ops 6 and current Warzone. Blizzard's manifest launches bootstrapper.exe with cod.exe as its argument; bootstrapper.exe itself is on the generic denylist and is not shipped, so the bootstrap step is NOT covered by this entry. Activision publishes no filename for the Ricochet anti-cheat driver and none is invented here."
+    },
+    {
+      "slug": "call-of-duty-modern-warfare-2019",
+      "displayName": "Call of Duty: Modern Warfare (2019) / Warzone 1.0",
+      "publisher": "Activision",
+      "processNames": [
+        "ModernWarfare.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25. Corroborated by Blizzard support article 306146, which states that for Warzone it would be ModernWarfare.exe."
+    },
+    {
+      "slug": "call-of-duty-black-ops-cold-war",
+      "displayName": "Call of Duty: Black Ops Cold War",
+      "publisher": "Activision",
+      "processNames": [
+        "BlackOpsColdWar.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25."
+    },
+    {
+      "slug": "call-of-duty-black-ops-4",
+      "displayName": "Call of Duty: Black Ops 4",
+      "publisher": "Activision",
+      "processNames": [
+        "BlackOps4.exe",
+        "BlackOps4_dx12.exe",
+        "BlackOps4_boot.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Blizzard product-config API (patch.battle.net/{product}/versions -> ProductConfig), which defines binaries.game.relative_path and shortcut_target_path -- the launch binary definition the Battle.net client itself follows. Read 2026-08-25."
+    },
+    {
+      "slug": "fortnite",
+      "displayName": "Fortnite",
+      "publisher": "Epic Games",
+      "processNames": [
+        "FortniteClient-Win64-Shipping.exe",
+        "FortniteClient-Win64-Shipping_BE.exe",
+        "FortniteClient-Win64-Shipping_EAC.exe",
+        "FortniteLauncher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Epic support article LS-0013",
+      "notes": "The current EOS-era spelling FortniteClient-Win64-Shipping_EAC_EOS.exe is reported third-party only, and Epic's live article still shows the older _EAC form, so only the documented names ship. Iran-relevant: Epic names Iran in two live support articles, and Rocket League's says server access is restricted -- a working tunnel is the precondition here, not the whole answer."
+    },
+    {
+      "slug": "fall-guys",
+      "displayName": "Fall Guys",
+      "publisher": "Epic Games",
+      "processNames": [
+        "FallGuys_client.exe",
+        "FallGuysEACLauncher.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Epic support documentation; FallGuys_client.exe corroborated by Valve appinfo",
+      "notes": "Epic's page renders a fourth binary with its underscores stripped, so the FallGuys_client_game.exe spelling is third-party only and is not shipped."
+    },
+    {
+      "slug": "grand-theft-auto-v-legacy",
+      "displayName": "Grand Theft Auto V (Legacy)",
+      "publisher": "Rockstar Games",
+      "processNames": [
+        "PlayGTAV.exe",
+        "GTA5.exe",
+        "GTAV.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Valve appinfo (PlayGTAV.exe, GTA5.exe, observed); Rockstar launcher error string (GTAV.exe)",
+      "notes": "GTAV.exe and GTA5.exe are both listed because Rockstar's own launcher error text says it was unable to launch GTAV.exe while every folder listing shows GTA5.exe. Exactly one will resolve on a given machine. GTA Online is the same binary."
+    },
+    {
+      "slug": "red-dead-redemption-2",
+      "displayName": "Red Dead Redemption 2",
+      "publisher": "Rockstar Games",
+      "processNames": [
+        "PlayRDR2.exe",
+        "RDR2.exe"
+      ],
+      "confidence": "first-party",
+      "source": "Valve appinfo (PlayRDR2.exe, observed); Rockstar support (RDR2.exe)"
+    },
+    {
+      "slug": "easy-anti-cheat",
+      "displayName": "Easy Anti-Cheat",
+      "publisher": "Epic Games",
+      "processNames": [
+        "EasyAntiCheat_EOS.exe"
+      ],
+      "confidence": "first-party",
+      "source": "dev.epicgames.com Easy Anti-Cheat documentation",
+      "notes": "Its own row for the same reason BattlEye has one: it is a shared service, not part of any single game. The per-game bootstrapper start_protected_game.exe is on the generic denylist -- it is the same filename in every EAC title and it has already exited by the time the game is playing. anticheat_integritytool.exe is a build-time developer tool that is never shipped to players."
+    }
+  ]
+}

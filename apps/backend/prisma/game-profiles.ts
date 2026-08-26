@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { catalogueEntries, toSeedRow, validateCatalogue } from "./catalogue";
 
 /** The curated game catalogue, seeded so a fresh install is not an empty
  * picker.
@@ -250,5 +251,66 @@ export async function seedGameProfiles(prisma: PrismaClient) {
     });
   }
 
-  return profiles.length;
+  return profiles.length + (await seedCatalogue(prisma));
+}
+
+/** Seeds the bulk catalogue from `catalogue/`.
+ *
+ * Separate from the three rows above because it is a different kind of data
+ * and deserves to be read as one. Those three carry measurements -- probed
+ * hostnames, a canary, an exclusion list with a reason beside it. These carry
+ * one fact each: the executables a game runs under. Both are legitimate; only
+ * the first kind can drive DNS mode, and mixing them in one array would blur
+ * a distinction the schema depends on.
+ *
+ * The three hand-written slugs are reserved, so nothing here can displace
+ * them -- `catalogueEntries()` drops any bulk entry that claims one, and
+ * `validateCatalogue` fails the seed if one tries.
+ *
+ * Idempotent by slug, matching the loop above. `sortOrder` is assigned from
+ * position: the curated tier and the online titles come first, so the picker
+ * opens on games somebody might plausibly be here for rather than on
+ * whatever sorts first alphabetically. It starts at 1000 to leave the
+ * hand-written rows (10, 20, 30) and any future measured profile in front. */
+async function seedCatalogue(prisma: PrismaClient): Promise<number> {
+  const entries = catalogueEntries();
+
+  // Checked here rather than only in the test suite, because the seed is the
+  // last point at which a bad entry is still cheap. A malformed process name
+  // that reaches the database reaches every client, and the failure it
+  // produces there -- a game that looks supported and routes nothing -- is
+  // invisible from the server side.
+  const problems = validateCatalogue(entries);
+  if (problems.length > 0) {
+    const shown = problems.slice(0, 20).map((p) => `  ${p.slug}: ${p.problem}`);
+    const rest = problems.length > shown.length ? `\n  ... and ${problems.length - shown.length} more` : "";
+    throw new Error(`Game catalogue failed validation (${problems.length} problems):\n${shown.join("\n")}${rest}`);
+  }
+
+  const rows = entries.map((entry, index) => toSeedRow(entry, 1000 + index));
+
+  // Chunked rather than one `Promise.all` over every row: a thousand
+  // concurrent upserts exhausts the connection pool, and one transaction
+  // holding a thousand statements is a long lock on a table the API reads.
+  const CHUNK = 100;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    await prisma.$transaction(
+      rows.slice(i, i + CHUNK).map((row) =>
+        prisma.gameProfile.upsert({
+          where: { slug: row.slug },
+          // Same rule as above: refresh the operational lists, leave display
+          // fields and `isActive` alone so a redeploy cannot un-hide a game
+          // an operator deliberately switched off.
+          update: {
+            processNames: row.processNames,
+            destinationCidrs: row.destinationCidrs,
+            prefixComplete: row.prefixComplete,
+          },
+          create: row,
+        }),
+      ),
+    );
+  }
+
+  return rows.length;
 }
