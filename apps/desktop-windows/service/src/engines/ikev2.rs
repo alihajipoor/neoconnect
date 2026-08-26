@@ -47,11 +47,12 @@ pub const ENTRY_NAME: &str = "Neoxify";
 const IKEV2_DNS: &str = "1.1.1.1";
 
 pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
-    // Removed first rather than updated. Add-VpnConnection refuses when
-    // the entry exists, and -Force only suppresses the prompt, not the
-    // conflict; a stale entry pointing at a previous server would
-    // otherwise be dialled instead of this one.
-    let _ = remove_entry();
+    // The entry is removed first rather than updated --
+    // Add-VpnConnection refuses when it exists, and -Force only
+    // suppresses the prompt, not the conflict; a stale entry pointing at
+    // a previous server would otherwise be dialled instead of this one.
+    // That removal is now the first line of the script below rather
+    // than a spawn of its own; see the note there.
 
     // Eap, not MSChapv2. Windows rejects MSChapv2 outright for this
     // tunnel type -- "IKEv2 tunnel type only supports Eap and Machine
@@ -93,36 +94,83 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
     // $false` does not mean off; it turns the switch on and leaves
     // $false to bind to whatever parameter comes next, which Windows
     // reports as a nonsensical complaint about L2TP. Off is not
-    // naming it at all.
-    let split = if passive { " -SplitTunneling" } else { "" };
-    let script = format!(
-        "Add-VpnConnection -Name '{name}' -ServerAddress '{server}' \
-         -TunnelType Ikev2 -AuthenticationMethod Eap \
-         -EncryptionLevel Required -AllUserConnection -Force{split} -PassThru | Out-Null",
-        name = ENTRY_NAME,
-        split = split,
-        server = escape_single_quotes(&profile.server),
-    );
-    powershell(&script).map_err(|e| format!("could not create the VPN entry: {e}"))?;
+    // naming it at all. `passive` is what selects it, in `entry_script`.
 
-    // Without this the connection never starts. Windows' out-of-the-box
-    // IKEv2 proposals are 3DES or AES-CBC with SHA1/SHA2 over MODP_1024
-    // -- nothing else -- and a node configured to anything modern
-    // answers every one of them with NO_PROPOSAL_CHOSEN at IKE_SA_INIT.
-    // Pinning the suite here rather than weakening the node is the
-    // right way round: MODP_1024 is 1024-bit Diffie-Hellman, and adding
-    // it server-side would hand it to every client rather than to the
-    // one that needed it.
-    let suite = format!(
-        "Set-VpnConnectionIPsecConfiguration -ConnectionName '{name}' -AllUserConnection \
-         -AuthenticationTransformConstants SHA256128 -CipherTransformConstants AES256 \
-         -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -DHGroup Group14 \
-         -PfsGroup None -Force | Out-Null",
-        name = ENTRY_NAME,
-    );
-    if let Err(e) = powershell(&suite) {
-        let _ = remove_entry();
-        return Err(format!("could not configure the VPN entry's encryption: {e}"));
+    // Without the IPsec configuration the connection never starts.
+    // Windows' out-of-the-box IKEv2 proposals are 3DES or AES-CBC with
+    // SHA1/SHA2 over MODP_1024 -- nothing else -- and a node configured
+    // to anything modern answers every one of them with
+    // NO_PROPOSAL_CHOSEN at IKE_SA_INIT. Pinning the suite here rather
+    // than weakening the node is the right way round: MODP_1024 is
+    // 1024-bit Diffie-Hellman, and adding it server-side would hand it
+    // to every client rather than to the one that needed it.
+    //
+    // # One process, not three
+    //
+    // The removal, the creation and the IPsec configuration used to be
+    // three separate `powershell` spawns. They are one script now, and
+    // the reason is measured rather than tidiness.
+    //
+    // These are `VpnClient` cmdlets: CDXML wrappers over CIM, so every
+    // spawn pays a PowerShell engine start *and* a module autoload *and*
+    // a CIM session before it does any work -- and that cost dominates
+    // the work itself, which is three small edits to a phonebook.
+    //
+    // Measured directly on the rig, a 4-vCPU Windows 11 guest, these
+    // exact three cmdlets against the same phonebook, twice:
+    //
+    //     three spawns (what this used to do)   111.5s      165.8s
+    //     the same three in one spawn            14.4s       45.3s
+    //     worst single spawn of the three        58.5s      126.7s
+    //
+    // Seven-fold and nearly four-fold. The fixed cost is nearly all of
+    // it, and it was being paid three times. Three of those end to end
+    // is not a slow connect, it is a connect that cannot finish inside
+    // the app's own 45s deadline on any machine having a bad minute --
+    // and the rig's IKEv2 attempt failed at exactly the first of them,
+    // "could not create the VPN entry: powershell did not finish
+    // within 15s".
+    //
+    // Note what the second column also says: one spawn took 45.3s in
+    // the worse run, which is past that same deadline. Collapsing three
+    // into one is what makes this work on an ordinary bad day; it does
+    // not make PowerShell an appropriate thing to have on a connect
+    // path. The RAS API this file already binds for dialling
+    // (`RasSetEntryPropertiesW`, see `super::ras`) is where the entry
+    // creation belongs, and it is not attempted here because a wrong
+    // struct layout there corrupts memory rather than failing -- the
+    // 632 arm below is the scar from the last time.
+    //
+    // Collapsing them pays that fixed cost once. Each stage keeps its
+    // own error, because "the entry could not be created" and "its
+    // encryption could not be set" send a support conversation to
+    // different places -- the stage name is written to stderr and read
+    // back below. `[Console]::Error` rather than `Write-Error`, which
+    // `$ErrorActionPreference='Stop'` would turn into a second
+    // exception on the way out.
+    //
+    // The rollback that used to live in Rust lives in the script for the
+    // same reason: doing it out here would be a fourth spawn, on the
+    // failure path, on a machine that is already too slow.
+    let script = entry_script(&escape_single_quotes(&profile.server), passive);
+    // `CMDLET_BUDGET`, not `HELPER_BUDGET`: see the measurements on that
+    // constant. This is the one call on this path whose expiry fails the
+    // connect, and it has no `status` poll behind it.
+    if let Err(e) = powershell_within(&script, super::CMDLET_BUDGET) {
+        // The entry may or may not exist depending on which stage went;
+        // the script removes it itself on the second, and on the first
+        // there is nothing to remove. Belt and braces here would be a
+        // further spawn on a machine that just proved it cannot afford
+        // one.
+        return Err(if let Some(rest) = e.strip_prefix("encryption: ") {
+            format!("could not configure the VPN entry's encryption: {rest}")
+        } else if let Some(rest) = e.strip_prefix("create: ") {
+            format!("could not create the VPN entry: {rest}")
+        } else {
+            // No stage marker, so this is the budget expiring or
+            // PowerShell itself failing rather than a cmdlet refusing.
+            format!("could not create the VPN entry: {e}")
+        });
     }
 
     match dial(&profile.username, &profile.password) {
@@ -267,6 +315,38 @@ fn remove_entry() -> Result<(), String> {
     powershell(&script).map(|_| ())
 }
 
+/// The one script `connect` runs, built where it can be tested.
+///
+/// Extracted for exactly one reason: it is a PowerShell program
+/// assembled by string formatting in another language, it now carries
+/// control flow, and a syntax error in it would fail every IKEv2
+/// connect with a message about PowerShell rather than about the VPN.
+/// The test below parses what this returns.
+///
+/// `server` must already be escaped -- see [`escape_single_quotes`].
+fn entry_script(server: &str, passive: bool) -> String {
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         Remove-VpnConnection -Name '{name}' -AllUserConnection -Force -ErrorAction SilentlyContinue; \
+         try {{ \
+           Add-VpnConnection -Name '{name}' -ServerAddress '{server}' \
+             -TunnelType Ikev2 -AuthenticationMethod Eap \
+             -EncryptionLevel Required -AllUserConnection -Force{split} -PassThru | Out-Null \
+         }} catch {{ [Console]::Error.WriteLine('create: ' + $_.Exception.Message); exit 11 }}; \
+         try {{ \
+           Set-VpnConnectionIPsecConfiguration -ConnectionName '{name}' -AllUserConnection \
+             -AuthenticationTransformConstants SHA256128 -CipherTransformConstants AES256 \
+             -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -DHGroup Group14 \
+             -PfsGroup None -Force | Out-Null \
+         }} catch {{ \
+           Remove-VpnConnection -Name '{name}' -AllUserConnection -Force -ErrorAction SilentlyContinue; \
+           [Console]::Error.WriteLine('encryption: ' + $_.Exception.Message); exit 12 \
+         }}",
+        name = ENTRY_NAME,
+        split = if passive { " -SplitTunneling" } else { "" },
+    )
+}
+
 /// Runs a PowerShell one-liner, hidden and bounded.
 ///
 /// Bounded because every caller here runs with the `Engines` lock held,
@@ -274,9 +354,20 @@ fn remove_entry() -> Result<(), String> {
 /// returned would make the one question a customer must always be able
 /// to ask unanswerable. See [`super::HELPER_BUDGET`].
 fn powershell(script: &str) -> Result<String, String> {
+    powershell_within(script, super::HELPER_BUDGET)
+}
+
+/// The same, against a budget the caller chooses.
+///
+/// Only [`connect`] passes anything else. The three callers that stay on
+/// [`super::HELPER_BUDGET`] stay there deliberately: `is_connected`
+/// answers `status`, where latency is the customer's, and
+/// `entry_present` and `remove_entry` are on the repair path, whose own
+/// deadline is derived from budget arithmetic one layer up.
+fn powershell_within(script: &str, budget: std::time::Duration) -> Result<String, String> {
     let mut command = Command::new("powershell");
     command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
-    let out = super::capture_hidden(command, super::HELPER_BUDGET).map_err(|e| e.to_string())?;
+    let out = super::capture_hidden(command, budget).map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(out.stderr.trim().to_string());
     }
@@ -336,4 +427,58 @@ fn dial_error(code: u32) -> String {
 /// constant, and a config-injection bug here runs as SYSTEM.
 fn escape_single_quotes(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The script is a PowerShell program written by string formatting
+    /// in another language, and it now carries control flow. A stray
+    /// brace in it would fail *every* IKEv2 connect with a message about
+    /// PowerShell, on every machine, healthy or not -- a far worse
+    /// failure than the slow one this shape was adopted to fix.
+    ///
+    /// Balanced braces are checked here because that is what a Rust test
+    /// can check; the script was also put through PowerShell's own
+    /// parser (`Parser::ParseInput`) in both variants when it was
+    /// written, which is what a rig can check and a unit test cannot.
+    #[test]
+    fn the_entry_script_is_structurally_sound_in_both_modes() {
+        for passive in [false, true] {
+            let script = entry_script("vpn.example.net", passive);
+            let opens = script.matches('{').count();
+            let closes = script.matches('}').count();
+            assert_eq!(opens, closes, "unbalanced braces (passive={passive}): {script}");
+            assert!(!script.contains('\n'), "the script must stay one -Command line");
+
+            // Both stages must keep their own marker, because the Rust
+            // side reads them back to decide which error the customer is
+            // shown.
+            assert!(script.contains("[Console]::Error.WriteLine('create: "));
+            assert!(script.contains("[Console]::Error.WriteLine('encryption: "));
+            // And the second stage must still undo the first, which is
+            // the rollback that used to live in Rust.
+            assert_eq!(script.matches("Remove-VpnConnection").count(), 2);
+        }
+    }
+
+    /// `-SplitTunneling` is a `[switch]`: naming it turns it on. Custom
+    /// mode needs it named and a full tunnel needs it absent, and the
+    /// long note in `connect` exists because passing `$false` turns it
+    /// *on* and corrupts the rest of the command line.
+    #[test]
+    fn split_tunneling_is_named_only_for_custom_mode() {
+        assert!(!entry_script("vpn.example.net", false).contains("-SplitTunneling"));
+        assert!(entry_script("vpn.example.net", true).contains("-Force -SplitTunneling"));
+    }
+
+    /// This value arrives from the API and reaches a command line that
+    /// runs as SYSTEM.
+    #[test]
+    fn a_quote_in_a_hostname_cannot_end_the_string_early() {
+        assert_eq!(escape_single_quotes("a'b"), "a''b");
+        let script = entry_script(&escape_single_quotes("evil'; calc; #"), false);
+        assert!(script.contains("'evil''; calc; #'"), "{script}");
+    }
 }

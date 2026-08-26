@@ -38,7 +38,49 @@ pub const ADAPTER_NAME: &str = "neoconnect0";
 /// stack, so it is not instant and not fixed -- polling until it appears
 /// is more reliable than picking a single sleep long enough to "usually"
 /// work.
-const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// Ten seconds was the number, and the rig's 0825 run failed on it:
+/// "Xray started but its network adapter (neoconnect0) never appeared".
+/// It had not failed to appear, it was still being made. The poll was
+/// already the right shape -- what was wrong was a ceiling set to how
+/// long this takes on a healthy machine rather than to how long it is
+/// worth waiting before giving up.
+///
+/// Sixty seconds is chosen against what the ceiling is *for*. It is not
+/// a latency: a tunnel whose adapter arrives in 900ms still returns in
+/// 900ms, and on a healthy machine that is what happens. It is the point
+/// at which "the driver did not create the adapter" becomes the better
+/// explanation than "the driver is still creating the adapter", and
+/// nothing about a Wintun creation that has been running a full minute
+/// suggests it is about to finish. It also stays under the ceiling that
+/// really binds -- see [`ADAPTER_ADDRESSED_WAIT`].
+///
+/// The customer is not left staring at it for a minute in the ordinary
+/// failure either. The poll below reads `abandoned()`, so pressing
+/// Disconnect ends the wait rather than queueing behind it.
+const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long the adapter then gets to actually hold the address that was
+/// just set on it.
+///
+/// A second, shorter wait on a different condition, and the difference
+/// matters. `wait_for_adapter` answers "does this adapter exist"; the
+/// routes installed straight afterwards need something stronger, because
+/// they name [`TUN_GATEWAY`] as their next hop and -- as the note on
+/// `install_routes` already says -- a route to a next hop that is not on
+/// the interface silently goes nowhere. `netsh ... set address`
+/// returning success is not that: it means the request was accepted, not
+/// that the stack has finished plumbing it.
+///
+/// This is the same condition `split_tunnel::wait_for_addressed_adapter`
+/// waits for before pinning a socket, arrived at from the other
+/// direction. On a healthy machine it is satisfied on the first poll.
+///
+/// Fifteen seconds rather than sixty: by this point the adapter
+/// demonstrably exists, so this is waiting on the IP stack rather than
+/// on a driver install, and something that has not taken an address
+/// fifteen seconds after being told to is not going to.
+const ADAPTER_ADDRESSED_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Address for the TUN adapter itself, from the RFC 2544 benchmarking
 /// range. That range is reserved, never routed on the public internet,
@@ -325,21 +367,72 @@ fn configure_adapter(tun_ip: Ipv4Addr) -> Result<(), String> {
 }
 
 /// Waits for Xray's TUN adapter to appear and returns its interface index.
+///
+/// Reads `abandoned()` on every pass: with a ceiling this long, a
+/// customer who has given up and pressed Disconnect must not queue
+/// behind the rest of it.
 fn wait_for_adapter() -> Result<u32, String> {
     let deadline = std::time::Instant::now() + ADAPTER_WAIT;
     loop {
         match adapters::find_by_name(ADAPTER_NAME) {
             Ok(Some(a)) => return Ok(a.index),
+            Ok(None) if super::abandoned() => return Err(super::ABANDONED.to_string()),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
             Ok(None) => {
                 return Err(format!(
-                    "Xray started but its network adapter ({ADAPTER_NAME}) never appeared"
+                    "Xray started but its network adapter ({ADAPTER_NAME}) never appeared \
+                     within {}s",
+                    ADAPTER_WAIT.as_secs()
                 ))
             }
             Err(e) => return Err(format!("could not enumerate network adapters: {e}")),
         }
+    }
+}
+
+/// Waits until the adapter is actually carrying `expected`.
+///
+/// Called after `configure_adapter`, and the only reason it exists is
+/// that the thing which follows -- installing routes whose next hop is
+/// that address -- fails *silently* if it runs too early. See
+/// [`ADAPTER_ADDRESSED_WAIT`].
+fn wait_for_address(expected: Ipv4Addr) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + ADAPTER_ADDRESSED_WAIT;
+    loop {
+        let found = adapters::find_by_name(ADAPTER_NAME)
+            .map_err(|e| format!("could not enumerate network adapters: {e}"))?;
+        let held = found.and_then(|a| a.ipv4);
+        let expired = std::time::Instant::now() >= deadline;
+
+        // The address that was asked for, which is the answer wanted.
+        if held == Some(expected) {
+            return Ok(());
+        }
+        // Any other address, once the deadline has passed. Deliberately
+        // not a failure, and the same concession
+        // `split_tunnel::wait_for_addressed_adapter` makes: `Adapter`
+        // reports the *first* usable IPv4 on the interface, and Windows
+        // can self-assign an APIPA 169.254.x that sorts ahead of the one
+        // netsh just set -- the very thing that once made this adapter
+        // look connected while carrying nothing. Refusing the connect
+        // because the wrong one of two real addresses was reported first
+        // would be this wait inventing a failure.
+        if expired {
+            return match held {
+                Some(_) => Ok(()),
+                None => Err(format!(
+                    "the tunnel adapter ({ADAPTER_NAME}) took no address within {}s, so the \
+                     tunnel's routes would have had no next hop",
+                    ADAPTER_ADDRESSED_WAIT.as_secs()
+                )),
+            };
+        }
+        if super::abandoned() {
+            return Err(super::ABANDONED.to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 }
 
@@ -389,8 +482,10 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
 
     // Before the routes: they name this address as their next hop, and a
     // route to a next hop that isn't on the interface silently goes
-    // nowhere.
+    // nowhere. `configure_adapter` asks for the address; `wait_for_address`
+    // is what establishes that the stack finished giving it.
     configure_adapter(tun_gateway)?;
+    wait_for_address(tun_gateway)?;
 
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
 }
@@ -416,6 +511,14 @@ pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
     configure_adapter(tun_gateway)?;
+    // Custom mode installs no routes, so the silent-next-hop failure
+    // does not apply here -- but `split_tunnel::start` runs immediately
+    // after this returns and waits ten seconds for this adapter to hold
+    // an address before it will pin anything to it. Establishing that
+    // here means the engine hands back something that is ready, rather
+    // than handing back early and leaving the split tunnel to discover
+    // it was not.
+    wait_for_address(tun_gateway)?;
 
     Ok(server_ip)
 }
