@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Res, UseGuards } from "@nestjs/common";
+import type { Response } from "express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { SubscriptionsService } from "./subscriptions.service";
 import { CreateSubscriptionDto } from "./dto/create-subscription.dto";
@@ -12,6 +13,7 @@ import { AdminRole } from "@prisma/client";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { RolesGuard } from "../../common/guards/roles.guard";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { listWindow, sendPage, wholeList } from "../../common/pagination";
 
 @ApiTags("subscriptions")
 @ApiBearerAuth()
@@ -21,13 +23,26 @@ export class SubscriptionsController {
   constructor(private readonly subscriptionsService: SubscriptionsService) {}
 
   @Get()
-  list(@Query("customerId") customerId?: string) {
+  async list(
+    @Res({ passthrough: true }) res: Response,
+    @Query("customerId") customerId?: string,
+    @Query("take") take?: string,
+    @Query("skip") skip?: string,
+  ) {
     // Filtered server-side rather than in the panel: a customer detail
     // page wants one customer's subscriptions, and fetching everyone's
     // to discard all but a few stops working the moment there are
     // enough customers to matter.
-    if (customerId) return this.subscriptionsService.listByCustomer(customerId);
-    return this.subscriptionsService.list();
+    //
+    // The `customerId` branch stays unwindowed on purpose. It is already
+    // bounded by the one customer it names -- a person holds a handful of
+    // subscriptions, not a table of them -- and windowing it would put a
+    // page boundary in front of a list that has no need of one.
+    if (customerId) {
+      return sendPage(res, wholeList(await this.subscriptionsService.listByCustomer(customerId)));
+    }
+    const window = listWindow({ take, skip }, { defaultTake: 100, maxTake: 500 });
+    return sendPage(res, await this.subscriptionsService.list(window));
   }
 
   @Get(":id")

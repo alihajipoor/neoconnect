@@ -1,4 +1,5 @@
-import { Controller, Get, Header, Param, Patch, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, Header, Param, Patch, Query, Res, UseGuards } from "@nestjs/common";
+import type { Response } from "express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { AdminRole, InvoiceStatus } from "@prisma/client";
 import { InvoicesService } from "./invoices.service";
@@ -8,6 +9,7 @@ import { CustomersService } from "../customers/customers.service";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
 import { Roles } from "../../common/decorators/roles.decorator";
+import { listWindow, sendPage } from "../../common/pagination";
 
 @ApiTags("invoices")
 @ApiBearerAuth()
@@ -20,9 +22,18 @@ export class InvoicesController {
     private readonly appLinks: AppLinksService,
   ) {}
 
+  /** Paged. Both filters are optional, so the unwindowed version of this
+   * was "every invoice ever issued" by default. */
   @Get()
-  list(@Query("customerId") customerId?: string, @Query("status") status?: InvoiceStatus) {
-    return this.invoices.list({ customerId, status });
+  async list(
+    @Res({ passthrough: true }) res: Response,
+    @Query("customerId") customerId?: string,
+    @Query("status") status?: InvoiceStatus,
+    @Query("take") take?: string,
+    @Query("skip") skip?: string,
+  ) {
+    const window = listWindow({ take, skip }, { defaultTake: 100, maxTake: 500 });
+    return sendPage(res, await this.invoices.listPage({ customerId, status }, window));
   }
 
   /** Revenue actually collected. `days` defaults to a calendar month's

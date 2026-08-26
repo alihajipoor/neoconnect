@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Ban, ExternalLink, MoreHorizontal, Search } from "lucide-react";
-import type { Invoice, InvoiceStatus, InvoiceSummary } from "@/lib/types";
+import type { InvoiceListRow, InvoiceStatus, InvoiceSummary } from "@/lib/types";
 import { voidInvoice } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -67,7 +67,7 @@ export function InvoicesView({
   activeStatus,
   canVoid,
 }: {
-  invoices: Invoice[];
+  invoices: InvoiceListRow[];
   summary: InvoiceSummary;
   summaryDays: number;
   activeStatus: InvoiceStatus | null;
@@ -75,10 +75,13 @@ export function InvoicesView({
 }) {
   const [query, setQuery] = useState("");
 
-  // Search is client-side on purpose: the operator's actual task is
-  // "find this one person's invoice" in a list already narrowed by
-  // status, and a round trip per keystroke would be slower than
-  // filtering what's on screen.
+  // Search is client-side and searches only the page currently loaded,
+  // which is a real limit now that /invoices is windowed: a customer
+  // whose invoice is on page three is not found by typing their email
+  // here. It stays because narrowing 100 visible rows by eye is the
+  // common task and a round trip per keystroke would be slower -- but
+  // the empty state below has to say "on this page" or it reads as
+  // "that invoice does not exist".
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return invoices;
@@ -152,7 +155,7 @@ export function InvoicesView({
               <TableRow>
                 <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                   {invoices.length > 0
-                    ? "Nothing matches that search."
+                    ? "Nothing on this page matches that search."
                     : activeStatus
                       ? `No ${activeStatus.toLowerCase()} invoices.`
                       : "No invoices yet. One is issued automatically the moment a payment clears."}
@@ -162,7 +165,7 @@ export function InvoicesView({
               visible.map((invoice) => (
                 <TableRow key={invoice.id}>
                   <TableCell className="font-mono text-xs font-medium">{invoice.invoiceNumber}</TableCell>
-                  <TableCell>{invoice.customer?.email ?? "—"}</TableCell>
+                  <TableCell>{invoice.customer.email}</TableCell>
                   <TableCell>{invoice.planNameSnapshot}</TableCell>
                   <TableCell className="text-muted-foreground">
                     {invoice.paymentTransaction
@@ -294,7 +297,7 @@ function Breakdown({
   );
 }
 
-function VoidConfirm({ invoice, trigger }: { invoice: Invoice; trigger: React.ReactNode }) {
+function VoidConfirm({ invoice, trigger }: { invoice: InvoiceListRow; trigger: React.ReactNode }) {
   const [pending, startTransition] = useTransition();
   const router = useRouter();
 

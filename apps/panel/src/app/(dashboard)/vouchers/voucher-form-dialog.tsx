@@ -3,7 +3,7 @@
 import { useState, useTransition, type ReactNode } from "react";
 import { toast } from "sonner";
 import { createVoucher, updateVoucher, type VoucherInput } from "./actions";
-import type { SubscriptionPlan, Voucher } from "@/lib/types";
+import type { SubscriptionPlan, VoucherListRow } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -36,7 +36,7 @@ import {
  * columns in the database. */
 type Usage = "once" | "limited" | "unlimited";
 
-function usageOf(voucher: Voucher | undefined): Usage {
+function usageOf(voucher: VoucherListRow | undefined): Usage {
   if (!voucher || voucher.maxRedemptions === null) return voucher ? "unlimited" : "once";
   return voucher.maxRedemptions === 1 ? "once" : "limited";
 }
@@ -47,8 +47,11 @@ export function VoucherFormDialog({
   trigger,
 }: {
   plans: SubscriptionPlan[];
-  /** Absent when creating. */
-  voucher?: Voucher;
+  /** Absent when creating. The narrow list row rather than a whole
+   * `Voucher` because editing only ever starts from the table, and every
+   * field the form seeds itself from -- plan, limits, expiry, note,
+   * active -- is still on the list projection. */
+  voucher?: VoucherListRow;
   trigger: ReactNode;
 }) {
   const editing = Boolean(voucher);

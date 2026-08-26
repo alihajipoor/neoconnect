@@ -1,6 +1,7 @@
-import { SubscriptionStatus } from "@prisma/client";
+import { SubscriptionStatus, type Subscription } from "@prisma/client";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../prisma/prisma.service";
+import type { ListWindow, Page } from "../../common/pagination";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreateSubscriptionDto } from "./dto/create-subscription.dto";
 
@@ -204,8 +205,25 @@ export class SubscriptionsService {
     }
   }
 
-  list() {
-    return this.prisma.subscription.findMany({ orderBy: { createdAt: "desc" } });
+  /** Every subscription in the system, a page at a time.
+   *
+   * Unbounded before, and it grows faster than the customer base does:
+   * a row is written for every plan a customer ever picked, including
+   * the PENDING ones from checkouts that were abandoned and the
+   * CANCELLED ones from plans since changed. `listByCustomer` below is
+   * the bounded sibling and is what the customer app and the customer
+   * detail page use; this one is the admin-wide list and is the one
+   * that had nothing holding it. */
+  async list(window: ListWindow): Promise<Page<Subscription>> {
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.subscription.findMany({
+        orderBy: { createdAt: "desc" },
+        take: window.take,
+        skip: window.skip,
+      }),
+      this.prisma.subscription.count(),
+    ]);
+    return { items, total };
   }
 
   /** Customer-facing: only this customer's own subscriptions -- used by

@@ -9,6 +9,34 @@ import { ConfigService } from "@nestjs/config";
 import { PaymentSettingsService } from "../payment-settings/payment-settings.service";
 import { StripeProvider } from "./providers/stripe.provider";
 import { InvoicesService } from "../invoices/invoices.service";
+import type { ListWindow, Page } from "../../common/pagination";
+
+/** What a payment row looks like on the list, and nothing else.
+ *
+ * `rawWebhookPayload` is deliberately absent. It is the provider's
+ * webhook body stored verbatim -- Stripe's event object, Plisio's
+ * callback form -- so it is both the largest column on the table and the
+ * one nobody asked for: no panel file reads a payment transaction at
+ * all, and the only caller that has ever needed the raw body is
+ * `reconcile`, which loads the single row it is reconciling through
+ * `get()`. Sending an unfiltered third-party payload to every caller of
+ * a list route is how a field nobody chose to expose ends up exposed.
+ *
+ * The rest are named rather than left to `findMany`'s default so that
+ * adding a column to PaymentTransaction cannot silently widen this
+ * response again. */
+const PAYMENT_LIST_FIELDS = {
+  id: true,
+  customerId: true,
+  subscriptionId: true,
+  provider: true,
+  providerRef: true,
+  amountUsd: true,
+  currency: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.PaymentTransactionSelect;
 
 @Injectable()
 export class BillingService {
@@ -25,8 +53,28 @@ export class BillingService {
     private readonly invoices: InvoicesService,
   ) {}
 
-  list() {
-    return this.prisma.paymentTransaction.findMany({ orderBy: { createdAt: "desc" } });
+  /** Every payment ever taken, newest first -- bounded.
+   *
+   * This table only grows: it gains a row per payment attempt, including
+   * the failed and abandoned ones, and nothing prunes it. Reading all of
+   * it to render a page of an operator's table is the pattern described
+   * in common/pagination.ts, and the count is what lets the panel say
+   * how many there really are rather than inferring a total from the
+   * page it happens to be holding. */
+  async list(
+    window: ListWindow,
+  ): Promise<Page<Prisma.PaymentTransactionGetPayload<{ select: typeof PAYMENT_LIST_FIELDS }>>> {
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.paymentTransaction.findMany({
+        orderBy: { createdAt: "desc" },
+        select: PAYMENT_LIST_FIELDS,
+        take: window.take,
+        skip: window.skip,
+      }),
+      this.prisma.paymentTransaction.count(),
+    ]);
+
+    return { items, total };
   }
 
   async get(id: string) {

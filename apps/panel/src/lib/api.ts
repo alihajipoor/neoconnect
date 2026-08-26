@@ -32,6 +32,55 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   return (await res.json()) as T;
 }
 
+/** One page of a list route, plus how many rows exist behind it.
+ *
+ * The API's list routes return a bare JSON array and report the total in
+ * an `X-Total-Count` header -- see `apps/backend/src/common/pagination.ts`
+ * for why the count is not in the body. `apiFetch` throws the headers
+ * away, so anything that pages has to come through here instead.
+ *
+ * The distinction matters more than it looks. Before these routes were
+ * bounded, the overview dashboard printed `customers.length` as the
+ * customer count; reading a page's length as a total would have turned
+ * that headline figure into the page size, which reads as correct and is
+ * not. `total` is the only honest source for a count.
+ */
+export interface ListPage<T> {
+  items: T[];
+  total: number;
+}
+
+export async function apiFetchList<T>(path: string, init?: RequestInit): Promise<ListPage<T>> {
+  const token = await getAccessToken();
+  if (!token) redirect("/login");
+
+  const res = await fetch(`${backendUrl()}${path}`, {
+    ...init,
+    headers: {
+      ...(init?.headers ?? {}),
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    cache: "no-store",
+  });
+
+  if (res.status === 401) redirect("/login");
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`${init?.method ?? "GET"} ${path} failed (${res.status}): ${body}`);
+  }
+
+  const items = (await res.json()) as T[];
+  // Falls back to the page length only when the header is absent, which
+  // means the route is one that has not been bounded yet -- in that case
+  // the array genuinely is everything and its length genuinely is the
+  // total. It is never a guess at a number the server knows better.
+  const header = res.headers.get("X-Total-Count");
+  const total = header === null ? items.length : Number(header);
+  return { items, total: Number.isFinite(total) ? total : items.length };
+}
+
 export type MutationResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
 /** For Server Actions (form submissions). Never throws on a 4xx from the
