@@ -4,6 +4,7 @@ import {
   RESERVED_SLUGS,
   catalogueEntries,
   entangledSlugs,
+  generatedEntries,
   sharedProcessNames,
   toSeedRow,
   validateCatalogue,
@@ -436,6 +437,159 @@ describe("exit groups", () => {
       ]);
       expect([...(entangled.get("a") ?? [])]).toEqual(["b"]);
       expect([...(entangled.get("c") ?? [])]).toEqual(["b"]);
+    });
+  });
+});
+
+/** Provenance, and the row that proved it was needed.
+ *
+ * Every row in the generated tier comes from one place: the launch config of
+ * one Steam app. That is first-party about how STEAM starts a game and it is
+ * not a report of what is on a customer's disk, and the difference is not
+ * academic. `old-school-runescape` shipped `oslaunch.exe` and `osclient.exe`,
+ * copied faithfully out of Valve's config for app 1343370. A real standalone
+ * Jagex install on the Windows test rig on 2026-08-26 contained neither: that
+ * installer ships `JagexLauncher.exe` under
+ * `%USERPROFILE%\jagexcache\jagexlauncher\bin\`. The sibling `runescape` row
+ * was dead the same way.
+ *
+ * Nothing could see it. The client resolves a name against running processes,
+ * so a name that cannot exist and a game that is not running produce the same
+ * observation -- no match -- and the customer gets a tunnel with nothing on
+ * it and a UI that says it worked. 1,446 generated rows are exposed to that
+ * same class of mismatch.
+ *
+ * So two assertions, and they are different in kind. The first pins the fix
+ * for these two games. The second pins the thing that makes the next one
+ * findable: a generated row that carries no provenance is a row nobody can
+ * audit, and it must not be possible to add one. */
+describe("catalogue provenance", () => {
+  const merged = catalogueEntries();
+  const bySlug = new Map(merged.map((e) => [e.slug, e]));
+
+  describe("the Jagex rows resolve on a standalone install", () => {
+    it.each([
+      ["old-school-runescape", ["oslaunch.exe", "osclient.exe"]],
+      ["runescape", ["runescape.exe"]],
+    ])("%s lists the standalone launcher alongside the Steam names", (slug, steamNames) => {
+      const entry = bySlug.get(slug);
+      if (!entry) throw new Error(`${slug} is missing from the catalogue`);
+      const names = entry.processNames.map((n) => n.toLowerCase());
+
+      // The name a real install actually has. Without it this row resolves
+      // nothing at all on a machine that got the game from Jagex.
+      expect(names).toContain("jagexlauncher.exe");
+
+      // And the Steam names stay. curated.json RULE 2 and RULE 5: where
+      // sources disagree, ship BOTH. A name that is not on the machine
+      // reports as not-found and costs nothing; dropping the one that is
+      // there leaves the game unrouted with nothing said.
+      for (const steam of steamNames) expect(names).toContain(steam);
+    });
+
+    it("is the curated row, not the generated one it displaced", () => {
+      // The mechanism the fix depends on. `steam-tier.json` is regenerated
+      // and must not be hand-edited, so the correction can only live in
+      // curated.json -- and it is only worth anything if curated still wins
+      // the slug collision. If that merge order ever inverts, both rows go
+      // back to the Steam-only names and this is the assertion that says so.
+      for (const slug of ["old-school-runescape", "runescape"]) {
+        const entry = bySlug.get(slug);
+        expect(entry?.source).toMatch(/observed/i);
+        expect(entry?.source).toMatch(/2026-08-26/);
+      }
+      // The generated tier still holds its own version of both rows -- they
+      // are not deleted from it, they are outranked -- and that version is
+      // still Steam-only. This is what the customer would have had.
+      const generatedBySlug = new Map(generatedEntries().map((e) => [e.slug, e]));
+      for (const slug of ["old-school-runescape", "runescape"]) {
+        const names = generatedBySlug.get(slug)?.processNames.map((n) => n.toLowerCase()) ?? [];
+        expect(names.length).toBeGreaterThan(0);
+        expect(names).not.toContain("jagexlauncher.exe");
+      }
+    });
+
+    it("entangles the two Jagex games, which is the true reading", () => {
+      // One launcher really does start both games, so `JagexLauncher.exe` is
+      // in both rows and the two games cannot be given different exits: one
+      // process cannot leave from two places. Recorded here rather than
+      // avoided by putting the launcher in only one row, which would be
+      // choosing a tidier catalogue over a true one.
+      const entangled = entangledSlugs(merged);
+      expect(entangled.get("old-school-runescape")).toContain("runescape");
+      expect(entangled.get("runescape")).toContain("old-school-runescape");
+    });
+  });
+
+  describe("the generated tier says where it came from", () => {
+    const generated = generatedEntries();
+
+    it("has rows to check at all", () => {
+      // Guards every assertion below. If `generatedEntries()` ever returned
+      // nothing, "all of them carry provenance" would be vacuously true and
+      // this suite would go green while proving nothing.
+      expect(generated.length).toBeGreaterThan(1_000);
+    });
+
+    it("carries a source on every single row", () => {
+      // Not a count -- the slugs, because when a regenerated tier loses this
+      // it will lose it on every row at once and the first few names tell
+      // you which rebuild did it.
+      const missing = generated.filter(
+        (e) => typeof e.source !== "string" || e.source.trim().length === 0,
+      );
+      expect(missing.map((e) => e.slug)).toEqual([]);
+    });
+
+    it("says Steam, and says it was not observed", () => {
+      // The two facts that would have made the Jagex row auditable. A
+      // provenance string that only said "Valve" would record where the
+      // name came from without recording what it does not cover.
+      for (const entry of generated) {
+        expect(entry.source).toMatch(/steam/i);
+        expect(entry.source).toMatch(/not observed/i);
+      }
+    });
+
+    it("reaches the operator-facing notes column", () => {
+      // `notes` is where somebody looks when a customer reports a game
+      // doing nothing, and `toSeedRow` is the only thing that puts anything
+      // there. Provenance that stops at the JSON file helps nobody at the
+      // moment it is needed.
+      const row = toSeedRow(generated[0], 0);
+      expect(row.notes).toContain(`source: ${generated[0].source}`);
+    });
+
+    it("holds the shipped file to it, not just the loader", () => {
+      // Read off disk rather than through the import, because the import is
+      // what the rest of this suite already trusts. A hand-edit to the
+      // generated file -- which its own header forbids -- would show up
+      // here.
+      const raw = JSON.parse(
+        readFileSync(join(__dirname, "../../../prisma/catalogue/steam-tier.json"), "utf8"),
+      ) as { games: { slug: string; source?: string }[] };
+      expect(raw.games.filter((g) => !g.source).map((g) => g.slug)).toEqual([]);
+    });
+  });
+
+  describe("validateCatalogue on the source field", () => {
+    const ok = (over: Partial<CatalogueEntry> = {}): CatalogueEntry => ({
+      slug: "example-game",
+      displayName: "Example Game",
+      processNames: ["Example.exe"],
+      ...over,
+    });
+
+    it("accepts a row that carries one", () => {
+      expect(validateCatalogue([ok({ source: "Valve appinfo" })])).toEqual([]);
+    });
+
+    it("rejects a blank one", () => {
+      // Blank satisfies "the field is there" while telling a reader
+      // nothing, which is worse than absent: absent is legible.
+      expect(validateCatalogue([ok({ source: "   " })])).toEqual([
+        { slug: "example-game", problem: expect.stringMatching(/source is present but empty/) },
+      ]);
     });
   });
 });

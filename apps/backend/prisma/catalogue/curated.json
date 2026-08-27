@@ -502,6 +502,37 @@
       "confidence": "first-party",
       "source": "dev.epicgames.com Easy Anti-Cheat documentation",
       "notes": "Its own row for the same reason BattlEye has one: it is a shared service, not part of any single game. The per-game bootstrapper start_protected_game.exe is on the generic denylist -- it is the same filename in every EAC title and it has already exited by the time the game is playing. anticheat_integritytool.exe is a build-time developer tool that is never shipped to players."
+    },
+    {
+      "slug": "old-school-runescape",
+      "displayName": "Old School RuneScape",
+      "publisher": "Jagex Ltd",
+      "processNames": [
+        "JagexLauncher.exe",
+        "oslaunch.exe",
+        "osclient.exe"
+      ],
+      "steamAppIds": [
+        1343370
+      ],
+      "confidence": "first-party",
+      "source": "JagexLauncher.exe OBSERVED on a standalone Jagex install on the Windows test rig, 2026-08-26; oslaunch.exe and osclient.exe from Valve appinfo launch config for app 1343370, NOT observed",
+      "notes": "This row exists because the generated tier's version of it resolved nothing at all. Jagex's own standalone installer -- which is how most players outside Steam get the game -- ships JagexLauncher.exe under %USERPROFILE%\\jagexcache\\jagexlauncher\\bin\\, and neither Steam name is present anywhere in that install. So a customer on the standalone client picked Old School RuneScape and put zero processes on the tunnel, with the UI reporting success. The Steam names are kept: they are Valve's own launch config for the Steam build and are the right answer on a machine that has it. RULE 2/RULE 5 -- a name that does not exist reports as not-found and costs nothing, a missing one leaves the game unrouted with nothing said. No RS3/NXT client binary name is listed for either Jagex row because none was observed on the rig and guessing one would be an invention."
+    },
+    {
+      "slug": "runescape",
+      "displayName": "RuneScape",
+      "publisher": "Jagex Ltd",
+      "processNames": [
+        "JagexLauncher.exe",
+        "RuneScape.exe"
+      ],
+      "steamAppIds": [
+        1343400
+      ],
+      "confidence": "first-party",
+      "source": "JagexLauncher.exe OBSERVED on a standalone Jagex install on the Windows test rig, 2026-08-26; RuneScape.exe from Valve appinfo launch config for app 1343400, NOT observed",
+      "notes": "The same mismatch as the Old School row and found in the same sweep: the standalone Jagex install contains JagexLauncher.exe and does not contain RuneScape.exe, so the generated row resolved nothing. Both names ship. JagexLauncher.exe is deliberately in BOTH Jagex rows -- it really is one launcher for both games, so the two rows are entangled and the client must give them the same exit or neither, which is the correct reading of the fact rather than a data error. The RS3 game client that the launcher spawns was NOT observed and no name is guessed for it, so on a standalone install this row currently routes the launcher only."
     }
   ]
 }
