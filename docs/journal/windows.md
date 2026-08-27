@@ -13874,3 +13874,220 @@ truncated stream is worse than no number.
 the matching `infra/` and `.env.example` entries. `installer/` belongs to the
 certificate-issuance session at the moment; this merged clean and touches
 nothing that work does, but it is theirs to know about.
+
+## 2026-08-26 — Custom mode refuses ping, because it cannot carry one; and the catalogue learns where its names came from
+
+Two defects that the Old School RuneScape run turned up. Both are fixed.
+The ICMP one is measured on the wire; the catalogue one is not the kind
+of thing a wire proves.
+
+### ICMP could never have been carried, and now it is refused
+
+The finding was that a selected application's TCP was fully tunnelled
+while 174 ICMP echo requests left in the clear to ~170 of Jagex's world
+servers. Three questions had to be answered before touching anything,
+and all three came back the same way.
+
+**Does the loop even see ICMP?** No. `redirect::filter_for` gated every
+arm on `(tcp or udp)`, so the driver never handed the loop a ping. No
+logic below the filter could have refused a packet it was never given —
+the leak was upstream of every decision in that file.
+
+**Can an ICMP packet be attributed to a process?** Not by anything this
+service has, and not in time by anything Windows offers. Attribution
+here is `port -> pid` out of `GetExtendedTcpTable` and
+`GetExtendedUdpTable`. **An ICMP packet has no port, and Win32 has no
+ICMP analogue of those tables** — the endpoint tables cover TCP and UDP
+and stop there.
+
+WFP's ALE layers *do* know the process: `FWPM_LAYER_ALE_AUTH_CONNECT_V4`
+matches "first outbound non-error ICMP messages with a unique ICMP type,
+code, and ID", and an ALE flow for ICMP is keyed on the six-tuple
+(src, dst, type, code, protocol, ICMP ID). But WinDivert exposes ALE
+only as its FLOW layer, which the documentation is explicit about:
+*"Flow-related events can be captured, but not blocked nor injected"*,
+and it is mandatory `RECV_ONLY`. So a second handle there could learn a
+pid but could not act on the packet, and the flow event that carries the
+pid is raised **by the very packet** you would have to hold. For a world
+switcher that pings 170 hosts once each, *every* packet is a first
+packet. There is nothing to correlate against in time. Recorded as
+"cannot", not "did not".
+
+**Could the relay carry one if we knew?** No, and this is the cleanest of
+the three. `proxy.rs` is not SOCKS and speaks no wire protocol at all: it
+is a transparent NAT relay. The loop rewrites the destination to the
+relay's port and the source to a synthetic NAT port, and the relay
+recovers the real destination **from that source port alone**
+(`nat.origin(Transport::Tcp, peer.port())`). The entire mechanism is
+keyed on ports. ICMP has none — nothing to rewrite, nothing to look the
+origin up by. `Nat::origin`, `FlowKey` and the firewall rules
+(`protocol=TCP`/`protocol=UDP`) are port-typed all the way down.
+
+So carrying was never on the table and blocking is the honest option.
+What went in:
+
+* `(tcp or udp)` became `(tcp or udp or icmp)` and `(tcp or udp or
+  icmpv6)` in the two outbound clauses — and in **neither** `SrcPort`
+  clause, because there is no return leg for a packet that is never
+  carried. The address exclusions the IPv4 clause already had now apply
+  to ICMP for free, which is why pinging the LAN and the gateway still
+  works.
+* `icmp_echo_request()` refuses echo requests (v4 type 8, v6 type 128)
+  above the family split, above the selection read, above every exit
+  question. `is_icmp()` passes all other ICMP through untouched.
+* `blocked_icmp` in `Stats`, in the summary line.
+
+**`FlowKey` did not grow, and could not have needed to.** The verdict is
+a pure function of the bytes in front of it — no flow, no cache, no key.
+A test asserts the NAT tables are untouched after a refusal.
+
+**The trap, which nearly shipped.** `parse_v6` looks for ports; an
+ICMPv6 header has none; and `handle_ipv6` answers an unparseable packet
+in `AllExcept` mode by **dropping** it. Admitting ICMPv6 to the loop
+without an explicit arm above that would have silently broken path-MTU
+discovery for every customer in that mode. Refusing ping was argued for;
+swallowing Packet Too Big would have been a side effect of a fix, which
+is a different thing. `packet_too_big_survives_all_except_mode` is
+there so it stays fixed.
+
+#### Measured, on the wire
+
+A standalone WinDivert harness (`nxicmp`) opened a NETWORK handle with
+the **exact filter string the shipped `filter_for` produces** — extracted
+by running the shipped function, not retyped — and ran twice on the rig
+with a host-side `nictrace` capture. `observe` re-injects everything;
+`drop` swallows echo requests. Two phases, because a zero in one run
+cannot tell "refused" from "nothing pinged".
+
+| | echo requests the driver handed over | reached the vNIC, public | reached the vNIC, LAN | `ping 8.8.8.8` |
+|---|---|---|---|---|
+| observe | 8 | **8** | 4 | 8 replies, 0% loss |
+| drop | 7 | **1** | 4 | 7 timeouts, 1 reply |
+
+The single survivor in `drop` is fully accounted for: the harness runs a
+40 s window, and the 8th ping was sent after it closed. 7 refused + 1
+after the handle went away = the 8 that were sent, with nothing
+unexplained — and it doubles as the control that says the timeouts were
+the mechanism rather than a sick network.
+
+The gateway column is the other control: **4 of 4 in both phases**. The
+private-range comparisons exclude ICMP exactly as they exclude TCP, so
+pinging the router is untouched.
+
+What this does **not** prove: this was the mechanism in isolation, not
+the shipped service with a live tunnel and a real selection. The filter
+string is the product's; the classifier is a byte-for-byte copy. The
+integration — `redirect::start`, a real `SetSplitTunnel`, a real node —
+was not exercised, because that needs an account past the sign-in wall.
+
+#### The cost, stated in the product rather than only here
+
+It cannot be narrowed to the selected applications, because narrowing it
+needs exactly the attribution that does not exist. **While Custom mode is
+on, ping stops working for everything on the machine.** That is a real
+regression for anything unselected, whose direct ping was correct
+behaviour. It was taken anyway: a visible broken feature the customer was
+warned about beats an invisible address disclosure they were not.
+
+So they are warned, in both languages, in two places:
+
+* `dash.customActive` — the standing Custom-mode line, beside the IPv6
+  sentence and for the same reason: it is a property of the mode, not
+  news about the session, and a counter that climbs from the first
+  second would make a session-keyed warning permanently lit.
+* `settings.customIcmpTitle` / `Body` on the card that turns it on, which
+  says plainly that in-game ping and latency displays will not work and
+  that any figure they do see is not the tunnel's.
+
+### The catalogue names Steam's executables, and now says so
+
+`old-school-runescape` declared `oslaunch.exe` / `osclient.exe` from
+Valve's appinfo. Jagex's own installer ships `JagexLauncher.exe`. The
+row routed nothing, and `runescape` routed nothing either.
+
+Both rows are now in **`curated.json`**, which is hand-editable and wins
+slug collisions, rather than patched into the generated file that the
+next rebuild would overwrite. `JagexLauncher.exe` is listed **alongside**
+the Steam names, which is the precedent RULE 2 and RULE 5 already set for
+League's two renderer spellings: a name that does not exist reports as
+not-found and costs nothing, while a missing one leaves the game
+unrouted with nothing said. The `source` fields say which name was
+observed on a real install and which were not.
+
+Every one of the 1,446 generated rows now carries a per-row `source`
+recording that its names came from Steam appinfo and were not observed
+on disk — emitted by the generator, not hand-added, and asserted by a
+test so a future generated row cannot silently lack it. That fixes
+nothing by itself. It makes the class visible per row instead of being
+the surprise it was here.
+
+**Two consequences worth knowing.** `JagexLauncher.exe` in both rows
+entangles the two games — one launcher really does start both, so they
+cannot be given different exits, and the client will withhold a per-game
+exit preference if a customer tries. That is the true reading, not a
+bug. And a genuine regeneration will drop the two Jagex rows from
+`steam-tier.json`, because the generator skips slugs the curated tier
+owns; nobody should read that diff as a regression.
+
+### A game that resolves nothing now says so, and keeps saying it
+
+The zero-resolution path was not silent — it set a one-line notice. But
+it was wrong about the remedy: *"start the game or its launcher, then add
+it again"* is a loop when the game is already running and the names are
+for a different build. And it was transient, on a card that otherwise
+looked exactly as it had before, which reads as success.
+
+It is now a kept block that **names the executables it looked for**, says
+plainly that Neoxify's names come from the Steam version and other
+installers differ, and offers the running-app picker as a button rather
+than as advice. Naming them is the whole point: it is what lets a
+customer tell "not started yet", which their next action fixes, from
+"these are not my game's names", which no amount of retrying will — and
+it is what turns a dead end into a bug report worth having.
+
+It is cleared on any successful add, so it cannot outlive its own truth
+and sit above a list that now contains the program.
+
+### Re-scan: its own change, and here is why
+
+There is still no re-scan — nothing adds a binary that was not running
+when the game was added. That is real, and it is not this change.
+
+Resolution-at-add-time is not an oversight: paths come from running
+processes because the split tunnel matches on full paths and its wire
+format rejects a bare filename. A re-scan means a background poll plus a
+rule for **adding programs to the routed set that the customer never
+chose**, which is a policy decision, not a bug fix — and it lands in the
+same files as the concurrent multi-exit work, interacts with `MAX_APPS`,
+and has to decide what an auto-added binary means for a game's exit
+group. Do it deliberately or not at all.
+
+The harm it leaves is at least now visible from both sides: the
+persistent partial-resolution warning already named the missing halves,
+and the zero-resolution block completes the pair. A customer whose game
+half-started is told which programs are missing and can re-add.
+
+### Rig notes
+
+* **Arrow keys and Tab do not reach the UAC secure desktop on this
+  guest. `Alt+Y` does.** This is a correction to the "Left then Space"
+  note: 21 Left presses over 180 s never moved focus off `No`, verified
+  by sampling the button fill in a screenshot each time rather than by
+  timing. Two earlier runs **declined their own consent prompt** and
+  reported "the runner did not come up" — which looks nothing like the
+  cause. One `Alt+Y` took it immediately.
+* **Answer UAC by looking, not by timing.** Injected keystrokes arrive
+  tens of seconds late here, so "Left, then Space" is two events with an
+  unknown gap and Space landing first means No. Sample the focused
+  button's fill and only send the accelerator once you can see the
+  dialog.
+* **The guest needs well over 100 s before Win+R will work.** A run
+  started at 100 s found the "Welcome" auto-login screen and reported
+  eight failed Run dialogs. A black-looking failure is the framebuffer;
+  a wallpaper-looking one at mean ~46 is the logon screen.
+* **`WinDivert64.sys` stays loaded between phases**, so re-staging it
+  fails with a sharing violation. A `Copy-Item` over the whole set
+  aborted the second phase entirely and produced no output file at all —
+  copy per file, and let a failure be non-fatal.
+* `nictracefile1` can be switched at runtime with `nictrace1 off` /
+  `on` around it, which is how the two phases got separate captures.
