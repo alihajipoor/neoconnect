@@ -1,3 +1,4 @@
+import { cursoredFindMany } from "../../../test/cursored";
 import { AgentGatewayService } from "./agent-gateway.service";
 import { encryptCredentials } from "../protocol-users/credentials-crypto";
 
@@ -19,9 +20,13 @@ describe("AgentGatewayService reconnect reconciliation", () => {
   ) {
     const prisma = {
       protocolUser: {
-        findMany: jest.fn().mockResolvedValue(
+        // Cursor-aware: the re-assert reads in batches, so a mock that
+        // returns the same page every time would not tell a working
+        // cursor from a broken one. Ids are zero-padded because the
+        // cursor compares strings.
+        findMany: cursoredFindMany(
           users.map((u, i) => ({
-            id: `pu-${i}`,
+            id: `pu-${String(i).padStart(3, "0")}`,
             nodeId: "node-1",
             protocol: u.protocol,
             externalUserId: u.externalUserId,
@@ -118,6 +123,8 @@ describe("AgentGatewayService reconnect reconciliation", () => {
     const [args] = (prisma.protocolUser.findMany as jest.Mock).mock.calls[0] as [
       { where: Record<string, unknown> },
     ];
+    // No `id` key on the first read: the cursor is absent until there
+    // is a batch to continue from.
     expect(args.where).toEqual({ nodeId: "node-1", status: "ACTIVE" });
   });
 

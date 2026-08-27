@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { InvoiceStatus, ReferralRewardReason, SubscriptionStatus } from "@prisma/client";
+import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EmailService } from "../email/email.service";
 import { referralFriendJoinedEmail, referralRewardEmail } from "../email/templates";
@@ -201,15 +202,25 @@ export class ReferralsService {
       return 0;
     }
 
-    const referrers = await this.prisma.customer.findMany({
-      where: { referrals: { some: {} }, status: "ACTIVE" },
-      select: { id: true },
-    });
-
     let granted = 0;
-    for (const referrer of referrers) {
-      granted += await this.sweepOne(referrer.id, settings);
-    }
+    // Not self-draining: a referrer is still an ACTIVE customer with
+    // referrals after their rewards have been granted, so this needs a
+    // real cursor to make progress rather than a drain loop.
+    await forEachBatch({
+      label: "referralSweep",
+      read: (afterId, take) =>
+        this.prisma.customer.findMany({
+          where: { referrals: { some: {} }, status: "ACTIVE", ...after(afterId) },
+          select: { id: true },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (batch) => {
+        for (const referrer of batch) {
+          granted += await this.sweepOne(referrer.id, settings);
+        }
+      },
+    });
     return granted;
   }
 
