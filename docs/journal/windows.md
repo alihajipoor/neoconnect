@@ -14479,3 +14479,260 @@ since nothing was executed. Reputation baseline captured before the work
 (`scripts/check-exit-reputation.py`, artifact under gitignored `var/`):
 no exit labelled `is_vpn` or `is_proxy` on any feed. The property is
 still intact.
+
+---
+
+## 2026-08-26 — The pagination tail: the scan is bounded now, and the sweeps stopped being able to drop rows
+
+**Status:** in source, unit-tested. The indexes were **exercised against a
+real Postgres engine** (PGlite, not Docker — see below); the sweeps and the
+client change were not.
+**Touches:** `apps/backend/prisma/schema.prisma` + a two-file migration,
+`apps/backend/src/common/batching.ts` (new) and eight internal reads,
+`apps/desktop-windows/src/lib/{api,customer}.ts`.
+**Branch:** `claude/backend-scalability-tail`, rebased onto `main` `1b23ef8`.
+
+The 0826 pagination entry ended with three things it had deliberately not
+done and said why for each. This is those three.
+
+### 1. The six missing indexes, and a number that turned out to be smaller than it looked
+
+That entry's own words: *"a `take` bounds the response, not the scan"*, and
+*"anyone reading '18.7x' should not read it as '18.7x less database work'"*.
+Both correct. Six of the eight paged tables had no index on their ordering
+column.
+
+| table | route | index |
+|---|---|---|
+| `customers` | `GET /customers` | `(createdAt DESC)` |
+| `subscriptions` | `GET /subscriptions` | `(createdAt DESC)` |
+| `protocol_users` | `GET /protocol-users` | `(createdAt DESC)` |
+| `payment_transactions` | `GET /billing/payments` | `(createdAt DESC)` |
+| `invoices` | `GET /invoices` | `(issuedAt DESC)` **and** `(status, issuedAt DESC)` |
+| `vouchers` | `GET /vouchers`, `GET /resellers/me/vouchers` | `(createdAt DESC)` **and** `(issuedByAdminId, createdAt DESC)` |
+
+The two composites **replace** the bare `(status)` and `(issuedByAdminId)`
+indexes rather than joining them. An equality on the leading column of a
+btree leaves the rest free to supply the order, so the composite answers
+everything the prefix answered. Keeping both would only add write cost.
+
+**A database was reachable this time, and it changed one of the claims.**
+
+Docker's engine is still hung — `docker version` times out after 40 s, same
+as on 0825 and 0826. So this ran against **PGlite**: Postgres 16 compiled
+to WASM. A real planner and a real btree; *not* the production server, and
+nothing about its row counts or timings transfers. What it can settle is
+which plan Postgres picks, and that is the whole question here.
+
+At 20,000 rows a table, **all six** go from `Limit <- Sort <- Seq Scan` to
+`Limit <- Index Scan`. That is the claim, and it holds.
+
+Then the interesting part. On 200,000 vouchers with one reseller holding a
+quarter of them, `GET /resellers/me/vouchers` goes from **40.92 ms touching
+50,000 rows** to **0.29 ms touching 397**. But the credit belongs to the
+plain `(createdAt DESC)` index — the planner does **not** choose the
+composite at that shape, because walking `createdAt DESC` and filtering
+finds 100 matching rows almost immediately. Sweeping the selectivity:
+
+| admins sharing 20k vouchers | share each | index chosen | rows touched |
+|---|---|---|---|
+| 5 | 20% | `vouchers_createdAt_idx` | 498 |
+| 20 | 5% | `vouchers_createdAt_idx` | 1,998 |
+| 100 | 1% | **`vouchers_issuedByAdminId_createdAt_idx`** | 200 |
+| 500 | 0.2% | **composite** | 40 |
+| 2,000 | 0.05% | **composite** | 10 |
+
+So the composite earns its place — below about 1% selectivity it touches
+exactly the matching rows and nothing else — and dropping the bare
+`(issuedByAdminId)` costs nothing at any selectivity. But **"the composite
+made it 140x faster" would have been false**, and it is exactly the kind of
+number this project has shipped before by measuring the wrong half.
+
+Also measured and **not** fixed: the `count()` beside every page is still a
+`Seq Scan`. The window bounds the page; it does not bound the total. That
+is now a known cost rather than an assumption.
+
+**On the `DESC` in the index definitions: it is documentation, not a
+speed-up.** Postgres scans a btree backwards just as cheaply, and every
+column here is `NOT NULL` so the NULLS FIRST/LAST difference cannot bite.
+It is written the way the query sorts so the two cannot drift apart.
+
+#### The migration is two files, and the reason is not cosmetic
+
+`CREATE INDEX` takes an `ACCESS EXCLUSIVE` lock for the whole build — on
+`customers` and `protocol_users` that is the customer-facing API stalling.
+`CREATE INDEX CONCURRENTLY` does not, but **cannot run inside a
+transaction block**, and a migration script is applied over Postgres'
+simple query protocol, which executes a multi-statement string as one
+implicit transaction. That was **confirmed against the engine**, not
+assumed: the probe answers `CREATE INDEX CONCURRENTLY cannot run inside a
+transaction block`.
+
+The obvious resolution — write the migration with `CONCURRENTLY` and run it
+by hand — breaks fresh installs, because `prisma migrate deploy` would then
+fail on a new node. So:
+
+- **`migration.sql`** — plain `CREATE INDEX ... IF NOT EXISTS`. Prisma runs
+  it; on an empty database it is instant.
+- **`concurrent.sql`** — the same statements with `CONCURRENTLY`, to be run
+  **by hand against production first**. `migrate deploy` afterwards finds
+  every index already there, does nothing, and records the migration. No
+  lock is taken at any point.
+
+Verified against the engine: the migration applies cleanly, lands on
+**exactly** the 87-index set a fresh build of `schema.prisma` produces (no
+drift, nothing missing, nothing extra), and is **idempotent** — which the
+two-file sequence depends on.
+
+**The trap in `concurrent.sql`, written down there too:** a failed
+`CONCURRENTLY` build leaves an **INVALID** index behind. It is unused by
+the planner but still maintained on every write, and `IF NOT EXISTS` will
+skip past it forever. Check `pg_index.indisvalid` before re-running.
+
+**Not applied anywhere live.** Deployment is the owner's.
+
+### 2. The seventeen: eight converted, and the mock that was hiding the problem
+
+`common/batching.ts`, beside `pagination.ts` — one convention for list
+routes, one for internal reads. Converted: the four `usage.service` sweeps,
+`markOverdue`, `reassertProvisionedUsers`, the boot backfill, and the
+referral sweep. All eight grow with the customer base and all eight run
+unattended.
+
+**An explicit `id: { gt: last }`, not Prisma's `cursor`/`skip: 1`.** Half
+these sweeps invalidate their own `where` as they go — `sweepQuota` flips
+ACTIVE to SUSPENDED, `markOverdue` flips ISSUED to OVERDUE — so by the next
+batch the cursor row no longer satisfies the filter it was found under.
+"What does a cursor mean when the cursor row has left the result set" is a
+question this code should not have to be right about; a comparison against
+a value does not raise it. It is also visible in the `where` a unit test
+can assert on, which is what makes the tests discriminate.
+
+Batch size 500, with the reason stated in the file: the bound that matters
+is **memory, not time**, because every one of these loops does per-row I/O
+in its body — an email, a gRPC command, a write. It is the same number as
+`maxTake` on the list routes, so there is one "how many rows is a lot".
+
+A failure is loud. `SweepAbortedError` carries how far it got — *"aborted
+after 1,500 rows in 3 batches"* — because a sweep that dies half way **is**
+partial and the only bad outcome is it being partial quietly.
+
+**`markOverdue` needed three fixes to be correct batched, two of which were
+bugs on their own:**
+
+- its `updateMany` sat between the read and the notify loop, keyed on the
+  whole result. Left there, the first batch's flip changes what later
+  batches see.
+- it did a `customer.findUnique` **per invoice with no `select`**, reading
+  every recipient's `passwordHash`, `tokenVersion` and both one-time codes
+  to use one column. An N+1 and a credential read at once. Now a named
+  join.
+- it read the unprojected invoice row, pulling `lineItemsJson` — the
+  largest column on the model — for every due invoice. Nothing in the
+  overdue email renders it.
+
+It now returns a **count**, not every row it touched, which is the one
+thing a batched sweep must not do. The only caller ever read `.length`.
+
+**The gotcha worth the next session's time.** Four existing specs broke the
+moment the loops became loops, and the reason is instructive: they mocked
+Prisma with `jest.fn().mockResolvedValue(rows)`, which hands back **the
+same page forever**. That mock cannot tell a working cursor from a broken
+one — both look like "the rows came back". `test/cursored.ts` is a double
+that honours `where.id.gt` and `take`. **Any future batched read needs
+it**; a `mockResolvedValue` there is a test that proves nothing.
+
+**Proven by reverting, twice** — this is the part that makes the tests
+worth having:
+
+- replace the cursor with a plain `take` (one batch, then stop): **15 of 26
+  fail**. `sweepExpiry` reports **500 of 637**; the node re-assert creates
+  **500 of 561** users. That is the audit's own sentence, reproduced.
+- keep the loop but drop the cursor from the `where`: **16 of 26 fail**,
+  caught by the guard on the second batch rather than hanging.
+
+**The nine left, and why.** Five are synchronous HTTP fan-outs —
+`reprovisionPlan`, `reapplyRateLimits`, the announcement recipient list,
+and the route create/delete pair. A cursor bounds their memory but **not
+the request**, which is the actual cliff: `routes.remove` issues a
+`DELETE_USER` over gRPC per user inside one HTTP request. The fix is moving
+them onto the sweeps queue, which is a behaviour change per site.
+`rewriteIssuedEndpoints` is the same shape. `reassertConfiguredRoutes` is
+genuinely bounded — routes are a dozen rows on the busiest relay.
+`replayQueuedCommands` needs a **`(createdAt, id)`** cursor, not an `id`
+one: its order is load-bearing and `id` is a random UUID, so cursoring on
+it alone would destroy the ordering the function depends on.
+
+### 3. The client can answer a 304 now
+
+The 0826 entry called this out as its own honest limit: the ETag was inert
+because `@tauri-apps/plugin-http` is reqwest. Worse than inert, in fact —
+`Response.ok` is false for 304, so `apiRequest` would have shown the
+customer **"Request failed (304)"**.
+
+`apiRequest`'s shared body — tokens, the transport-failure sentence, the
+401 refresh-and-retry — is now one helper that both it and a new
+`apiRequestRevalidated` are built on, so two interpretations of a response
+cannot drift. **`ApiResult<T>` is not widened**: ~30 call sites narrow on
+`ok` then read `data`, and a data-less success would make every one of them
+a potential undefined.
+
+Two things the path has to get right, both of which would otherwise have
+looked fine:
+
+- the 304 is checked **before** `!res.ok`, or it falls into the branch that
+  caused the bug.
+- a 304 counts **only when a validator was actually sent**. A 304 to an
+  unconditional request has no cached body behind it; treating it as a hit
+  would be inventing content.
+
+The tag is echoed byte for byte — one value, no list, no `W/` stripping.
+The server compares the whole header with `===`, so any reshaping would
+silently turn every revalidation back into a full download: still
+*correct*, and therefore never visible as a failure. Exactly the class of
+bug this project keeps finding.
+
+**Process memory only, deliberately.** The body and the tag are
+per-customer entitlement state and `clearGamingProfileCache()` has **no
+caller today**, so anything persisted would outlive a sign-out. The cost of
+that choice, stated: a restart still pays the full 374 KB.
+
+**A pre-existing bug this surfaced but did not fix:**
+`clearGamingProfileCache()` being uncalled means signing out and back in as
+a *different* customer within 30 s shows the first customer's entitlements
+from memory. The ETag mixes in the customer id, so the tag cannot produce a
+wrong 304 — the in-memory body is the exposure, and it predates this
+change. Left for its own pass.
+
+### Numbers, and what they rest on
+
+Baseline measured on this tree, not quoted: `main` `a892d90` gave **604
+jest / 244 vitest / 17 turbo**. `main` moved to `1b23ef8` mid-session and
+brought 11 backend and 2 vitest tests with it.
+
+After, on the rebased branch: **641 jest** (60 suites), **261 vitest** (19
+files), **`turbo run lint typecheck build test --force` 17 of 17**.
+
+`turbo` caught what `tsc` did not, again: eleven
+`@typescript-eslint/require-await` errors in the new specs, which
+`npx tsc --noEmit` passes clean. Worth remembering that the "TypeScript"
+job is lint + typecheck + build + test.
+
+**Rust was not touched and `cargo test` was not run.**
+
+### Not proven
+
+- **No production database, and no Docker.** PGlite is a real Postgres
+  engine and settles plan choice, index validity and the transaction
+  question. It says nothing about how long any of this takes on the live
+  box, how large those tables actually are, or how long a `CONCURRENTLY`
+  build will run there.
+- **The sweeps have never run against Postgres.** Their tests are over the
+  arguments handed to Prisma. In particular the `id: { gt }` cursor's
+  interaction with each real `where` is asserted, not executed.
+- **No socket for the 304.** The Tauri plugin is mocked, so the tests show
+  the client does not reshape a tag it was given — not that client and
+  server agree on the wire. The server half *was* observed over a real
+  socket on 0826; the two halves have still never met.
+- **Nothing was opened in a browser**, and no panel page was loaded against
+  a running backend.
