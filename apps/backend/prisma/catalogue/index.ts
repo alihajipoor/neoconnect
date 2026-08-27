@@ -88,8 +88,29 @@ export interface CatalogueEntry {
    * ordering -- an offline game sorts below an online one, because routing a
    * single-player game through a relay buys the customer nothing. */
   online?: boolean;
-  /** Where this entry's executable names came from. Per-entry on the curated
-   * tier; the generated tier shares one batch-level source. */
+  /** Where this entry's executable names came from. Per-entry on BOTH tiers.
+   *
+   * It was batch-level on the generated tier until 2026-08-26, and the day it
+   * stopped being so is worth recording, because a whole class of dead row was
+   * invisible while it was. `old-school-runescape` shipped `oslaunch.exe` and
+   * `osclient.exe`, taken faithfully from Valve's launch config for app
+   * 1343370. Jagex's own standalone installer -- how most players outside
+   * Steam have the game -- ships `JagexLauncher.exe` under
+   * `%USERPROFILE%\jagexcache\jagexlauncher\bin\` and contains neither Steam
+   * name. The row resolved nothing on that machine, the sibling `runescape`
+   * row resolved nothing either, and the client cannot tell "no such process
+   * is running" from "this game was never going to match": both are silence.
+   *
+   * A file-header source could not have said that about a row. A per-row one
+   * does: every generated row now carries the constant in
+   * `tools/build-steam-tier.mjs`, which states that the names describe the
+   * STEAM build and were never observed on disk. That makes a non-Steam
+   * install a known-possible mismatch that a person auditing a suspect row
+   * sees in the row, rather than a surprise. It reaches the operator-facing
+   * `notes` column through `toSeedRow`, exactly as a curated row's does.
+   *
+   * The fix for a row found this way is a curated entry listing both names,
+   * never a swap -- see `curated.json` RULE 2 and RULE 5. */
   source?: string;
   /** How much this entry's names are worth trusting.
    *
@@ -151,6 +172,23 @@ export function catalogueEntries(): CatalogueEntry[] {
   }
 
   return [...bySlug.values()];
+}
+
+/** The generated tier alone, before the curated tier has taken anything from
+ * it.
+ *
+ * Exposed so that a rule which is only true of GENERATED rows can be asserted
+ * on exactly those rows. "Every row came from Valve's appinfo" is such a rule:
+ * it is the defining property of this tier and it is false of the curated one,
+ * so a check over the merged catalogue could only ever state it weakly. It has
+ * to be checkable, because the row that hides behind it -- a faithfully
+ * generated entry whose names exist in no install the customer has -- fails
+ * silently on the customer's machine and nowhere else.
+ *
+ * Not for seeding. `catalogueEntries()` is what the seed uses, and going
+ * around it would resurrect the collisions curated.json exists to win. */
+export function generatedEntries(): CatalogueEntry[] {
+  return [...steamTier.games];
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +439,16 @@ export function validateCatalogue(entries: readonly CatalogueEntry[]): Catalogue
 
     if (typeof entry.displayName !== "string" || entry.displayName.trim().length === 0) {
       add("displayName is missing or empty");
+    }
+
+    // Provenance is optional to CARRY but must not be present-and-useless.
+    // An empty string here would satisfy every "does the row have a source"
+    // check ever written against it while telling a reader nothing, which is
+    // worse than the absent field: absent is legible, blank is a lie of
+    // omission. Both tiers set it -- the curated one per hand-written entry,
+    // the generated one from a constant in `tools/build-steam-tier.mjs`.
+    if (entry.source !== undefined && (typeof entry.source !== "string" || !entry.source.trim())) {
+      add("source is present but empty or not a string");
     }
 
     for (const problem of validateProcessNames(entry.processNames)) add(problem);

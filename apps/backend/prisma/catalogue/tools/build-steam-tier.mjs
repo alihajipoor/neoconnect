@@ -117,6 +117,37 @@ const GENERIC_NAMES = new Set(
 const SHIM_NAMES = new Set(["start_protected_game.exe", "eosbootstrapper.exe"]);
 // (also present in generic-names.json; kept here so `shimmed` can be reported)
 
+/** The provenance stamped on every row this script writes.
+ *
+ * Every generated row's names come from ONE place -- the launch config of
+ * one Steam app -- and that single fact is what made the Jagex bug
+ * invisible. `old-school-runescape` shipped `oslaunch.exe` / `osclient.exe`
+ * straight out of Valve's config for app 1343370, and on 2026-08-26 a real
+ * standalone Jagex install on the Windows test rig was found to contain
+ * neither: it ships `JagexLauncher.exe` under
+ * `%USERPROFILE%\jagexcache\jagexlauncher\bin\`. The row resolved nothing,
+ * and nothing in the data said it might.
+ *
+ * Two properties, in the row itself rather than in a file header, because
+ * the row is what a person reads when a customer reports a game doing
+ * nothing, and because it is what reaches the database through
+ * `toSeedRow`'s operator-facing `notes`:
+ *
+ *   1. these names describe the STEAM build, so a standalone or
+ *      storefront-exclusive install is a known-possible mismatch;
+ *   2. they were never observed on disk. Valve's config is first-party
+ *      about how Steam starts the app; it is not a report of what a
+ *      customer's machine has.
+ *
+ * The same field name the curated tier uses, on purpose: one concept, one
+ * key, so a reader auditing a suspect row does not have to know which tier
+ * it came from to know where to look. Held constant across rows -- the
+ * appid that would make it specific is already in the row next door as
+ * `steamAppId`, and repeating it here would only make the file harder to
+ * diff after a rebuild. */
+const GENERATED_SOURCE =
+  "Valve appinfo config.launch[].executable -- Steam build only, not observed on disk";
+
 /** Steam category ids that mean "this game talks to other people".
  * 1 = Multi-player, 20 = MMO, 36 = Online PvP, 38 = Online Co-op, 49 = PvP.
  * Used for ordering only: routing a strictly offline game through a relay
@@ -373,6 +404,7 @@ async function main() {
         publisher,
         processNames: names,
         steamAppId: Number(item.appid),
+        source: GENERATED_SOURCE,
         online: categories.some((c) => ONLINE_CATEGORIES.has(c)),
       });
     }
