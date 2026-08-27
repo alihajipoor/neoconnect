@@ -185,8 +185,18 @@ const en = {
   "settings.passwordChanged": "Password changed. Any other devices have been signed out.",
   "settings.changing": "Changing...",
   "settings.tooShort": "At least 8 characters.",
+  // The ping sentence is here for the same reason the IPv6 one is: it is
+  // true of Custom mode always rather than news about this session, and
+  // the counter that records it climbs from the first second, so a
+  // warning keyed on it would be permanently lit and therefore unread.
+  //
+  // It says "every app on this computer" because that is the truth and
+  // the narrower claim would be a lie. Nothing can tell which program
+  // sent a ping -- there is no port on one and Windows keeps no ICMP
+  // equivalent of the TCP and UDP endpoint tables -- so the block cannot
+  // be narrowed to the chosen apps. See `redirect::icmp_echo_request`.
   "dash.customActive":
-    "Custom mode: only your chosen apps are going through the VPN. Their IPv6 is blocked rather than sent outside it, so an IPv6-only site will not open for them.",
+    "Custom mode: only your chosen apps are going through the VPN. Their IPv6 is blocked rather than sent outside it, so an IPv6-only site will not open for them. Ping is blocked as well, for every app on this computer: the VPN cannot carry it, and left alone it would hand your real address to every server your game pings. In-game ping and latency numbers will not work while this is on.",
   // The full-tunnel counterpart of the line above, and deliberately the
   // same shape of sentence: what is blocked, why, and what the customer
   // will notice. It is shown whenever the service reports a block is
@@ -245,6 +255,18 @@ const en = {
   "settings.customRemove": "Remove",
   "settings.customApplies": "Applies from your next connection.",
   "settings.customFailOpen": "While the app is switching servers, chosen apps briefly use your normal connection instead of stalling.",
+  // Stated on the card that turns the feature on, because it is a cost
+  // of turning it on and the customer should meet it there rather than
+  // discover it as a broken ping display mid-game.
+  //
+  // Deliberately explicit that this is not per-app. The block cannot be
+  // narrowed to the chosen programs: nothing can attribute a ping to a
+  // program, so narrowing it is not a thing that was skipped, it is a
+  // thing that does not exist. Saying "your chosen apps' ping" would be
+  // a smaller and false claim.
+  "settings.customIcmpTitle": "Ping stops working while Custom mode is on",
+  "settings.customIcmpBody":
+    "The VPN cannot carry ping, so Neoxify blocks it for every app on this computer rather than letting it out around the tunnel. Left alone it would show your real address to every server it reached — and any latency number it produced would be measuring your normal connection, not Neoxify. Games that display a ping figure will show nothing or an error while this is on.",
   "settings.customTooMany": "You can choose up to {max} apps.",
   "settings.customAlready": "That app is already on the list.",
   "settings.customModeOnly": "Only these apps",
@@ -290,8 +312,25 @@ const en = {
   "settings.customGameAdded": "Added {count} of {total} programs for {game}.",
   "settings.customGameMissing":
     "Not running, so not added: {names}. Start them and add the game again, or use Browse.",
-  "settings.customGameNone":
-    "None of the programs for {game} are running, so nothing was added. Start the game or its launcher, then add it again.",
+  // A game that resolved *nothing*, kept on screen rather than said once.
+  //
+  // The old sentence here was honest about the outcome and wrong about
+  // the remedy: it said "start the game and add it again", which is
+  // useless advice when the game is already running and the catalogue is
+  // naming programs that do not exist on this machine. That is not
+  // hypothetical -- Old School RuneScape's row named the two executables
+  // from Valve's appinfo for the Steam build, and Jagex's own installer
+  // ships JagexLauncher.exe instead, so a customer with the game open in
+  // front of them could add it forever and route nothing.
+  //
+  // So it now names what it looked for. A customer who can see that the
+  // names are not their game's can stop trying and use the working path,
+  // and it is the one piece of information that turns a dead end into a
+  // bug report worth having.
+  "settings.customGameNone": "Nothing was added for {game}",
+  "settings.customGameNoneBody":
+    "Neoxify looked for these programs and none of them is running: {names}. If {game} is running right now, then this list is wrong for the way you installed it — Neoxify's names come from the Steam version, and other installers use different ones. Use \"Choose from running apps\" and pick it by hand; that routes it properly.",
+  "settings.customGameNoneAction": "Choose from running apps",
   "settings.customGameEmpty": "Neoxify has no program list for any game.",
   // A game that is only partly added, said again and kept on screen.
   //
@@ -912,7 +951,7 @@ const fa: Record<TranslationKey, string> = {
   "settings.changing": "در حال تغییر...",
   "settings.tooShort": "حداقل ۸ کاراکتر.",
   "dash.customActive":
-    "حالت سفارشی: فقط برنامه‌های انتخابی شما از VPN عبور می‌کنند. IPv6 آن‌ها به جای ارسال بیرون از تونل مسدود می‌شود، بنابراین سایتی که فقط IPv6 دارد برایشان باز نمی‌شود.",
+    "حالت سفارشی: فقط برنامه‌های انتخابی شما از VPN عبور می‌کنند. IPv6 آن‌ها به جای ارسال بیرون از تونل مسدود می‌شود، بنابراین سایتی که فقط IPv6 دارد برایشان باز نمی‌شود. پینگ هم مسدود است، برای همهٔ برنامه‌های این کامپیوتر: تونل نمی‌تواند آن را منتقل کند و اگر مسدود نمی‌شد، نشانی واقعی شما را به هر سروری که بازی‌تان پینگ می‌کند نشان می‌داد. تا وقتی این حالت روشن است، عدد پینگ و تأخیر داخل بازی کار نمی‌کند.",
   "dash.fullTunnelIpv6Blocked":
     "تا زمانی که متصل هستید، IPv6 مسدود است. سرورهای Neoxify فقط IPv4 را منتقل می‌کنند، بنابراین IPv6 به جای ارسال بیرون از VPN همین‌جا متوقف می‌شود. سایتی که فقط IPv6 دارد تا وقتی اتصال را قطع نکنید باز نمی‌شود.",
   "dash.ipv6Escaping":
@@ -942,6 +981,9 @@ const fa: Record<TranslationKey, string> = {
   "settings.customRemove": "حذف",
   "settings.customApplies": "از اتصال بعدی اعمال می‌شود.",
   "settings.customFailOpen": "هنگام تعویض سرور، برنامه‌های انتخابی به‌جای قطع شدن، لحظه‌ای از اینترنت معمولی استفاده می‌کنند.",
+  "settings.customIcmpTitle": "تا وقتی حالت سفارشی روشن است، پینگ کار نمی‌کند",
+  "settings.customIcmpBody":
+    "تونل نمی‌تواند پینگ را منتقل کند، بنابراین نئوکسیفای به‌جای اینکه بگذارد از کنار تونل بیرون برود، آن را برای همهٔ برنامه‌های این کامپیوتر مسدود می‌کند. اگر مسدود نمی‌شد، نشانی واقعی شما را به هر سروری که به آن می‌رسید نشان می‌داد — و هر عدد تأخیری که می‌ساخت، اتصال معمولی شما را اندازه می‌گرفت، نه نئوکسیفای را. بازی‌هایی که عدد پینگ نشان می‌دهند، تا وقتی این حالت روشن است چیزی نشان نمی‌دهند یا خطا می‌دهند.",
   "settings.customTooMany": "حداکثر {max} برنامه می‌توانید انتخاب کنید.",
   "settings.customAlready": "این برنامه از قبل در فهرست است.",
   "settings.customModeOnly": "فقط این برنامه‌ها",
@@ -968,8 +1010,10 @@ const fa: Record<TranslationKey, string> = {
   "settings.customGameAdded": "{count} برنامه از {total} برنامه‌ی {game} اضافه شد.",
   "settings.customGameMissing":
     "این‌ها در حال اجرا نبودند و اضافه نشدند: {names}. آن‌ها را اجرا کنید و بازی را دوباره اضافه کنید، یا از «جست‌وجوی برنامه» استفاده کنید.",
-  "settings.customGameNone":
-    "هیچ‌کدام از برنامه‌های {game} در حال اجرا نیست، پس چیزی اضافه نشد. بازی یا لانچرش را اجرا کنید و دوباره اضافه کنید.",
+  "settings.customGameNone": "چیزی برای {game} اضافه نشد",
+  "settings.customGameNoneBody":
+    "نئوکسیفای دنبال این برنامه‌ها گشت و هیچ‌کدام در حال اجرا نبود: {names}. اگر همین حالا {game} باز است، یعنی این فهرست با نسخه‌ای که شما نصب کرده‌اید نمی‌خواند — نام‌هایی که نئوکسیفای دارد از نسخهٔ استیم گرفته شده و نصب‌کننده‌های دیگر نام‌های دیگری دارند. از «انتخاب از برنامه‌های در حال اجرا» استفاده کنید و خودتان آن را انتخاب کنید؛ این روش درست کار می‌کند.",
+  "settings.customGameNoneAction": "انتخاب از برنامه‌های در حال اجرا",
   "settings.customGameEmpty": "برای هیچ بازی‌ای فهرست برنامه‌ها وجود ندارد.",
   "settings.customGameSplit": "فقط بخشی از {game} اضافه شده است",
   "settings.customGameSplitBody":
