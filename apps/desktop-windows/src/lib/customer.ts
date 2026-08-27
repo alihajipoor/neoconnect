@@ -160,6 +160,18 @@ type GamingProfileEntry = {
 };
 let gamingProfileCache: GamingProfileEntry | null = null;
 let gamingProfileInFlight: Promise<ApiResult<GamingProfileResponse>> | null = null;
+/** Bumped by every clear, so a request that was already on the wire when
+ * the session ended cannot write its answer into the cache afterwards.
+ *
+ * Nulling the cache is not enough on its own. A fetch issued with the
+ * previous customer's bearer token resolves *after* the clear and then
+ * assigns `gamingProfileCache` unconditionally -- so the entitlement the
+ * clear just removed reappears, now on behalf of whoever signed in next.
+ * The 304 branch already guarded against this by identity-checking
+ * `held`; the 200 branch had nothing, because on a full body there is no
+ * `held` to compare. A counter covers both without either branch having
+ * to reason about the other. */
+let gamingProfileGeneration = 0;
 
 /** `held` is the entry `validator` was taken from, so a 304 can be
  * matched against the body it actually stands for. */
@@ -167,6 +179,9 @@ async function loadGamingProfile(
   validator: string | null,
   held: GamingProfileEntry | null,
 ): Promise<ApiResult<GamingProfileResponse>> {
+  // Read before awaiting, compared after: the window this closes is
+  // exactly the duration of that await.
+  const generation = gamingProfileGeneration;
   const result = await apiRequestRevalidated<GamingProfileResponse>("/customer/gaming-profile", validator);
   if (!result.ok) return result;
 
@@ -188,7 +203,13 @@ async function loadGamingProfile(
   }
 
   const value = { ok: true as const, data: result.data };
-  gamingProfileCache = { at: Date.now(), value, etag: result.etag };
+  // The caller that asked still gets its answer; the cache does not.
+  // This request was issued under the previous customer's token, and
+  // writing it here is precisely how their entitlement would be served
+  // to whoever signed in next.
+  if (generation === gamingProfileGeneration) {
+    gamingProfileCache = { at: Date.now(), value, etag: result.etag };
+  }
   return value;
 }
 
@@ -197,10 +218,18 @@ export function getGamingProfile(): Promise<ApiResult<GamingProfileResponse>> {
   if (held && Date.now() - held.at < GAMING_PROFILE_TTL_MS) return Promise.resolve(held.value);
   if (gamingProfileInFlight) return gamingProfileInFlight;
 
-  gamingProfileInFlight = loadGamingProfile(held?.etag ?? null, held).finally(() => {
-    gamingProfileInFlight = null;
+  // `mine` rather than a bare null on settle: a clear can drop the
+  // reference and a new request can take its place while this one is
+  // still open, and an unconditional null would throw *that* request's
+  // sharing away and make the next caller open a third.
+  const mine: Promise<ApiResult<GamingProfileResponse>> = loadGamingProfile(
+    held?.etag ?? null,
+    held,
+  ).finally(() => {
+    if (gamingProfileInFlight === mine) gamingProfileInFlight = null;
   });
-  return gamingProfileInFlight;
+  gamingProfileInFlight = mine;
+  return mine;
 }
 
 /** Throw the cached catalogue away.
@@ -210,9 +239,20 @@ export function getGamingProfile(): Promise<ApiResult<GamingProfileResponse>> {
  * entitlement is never shown from a previous session. The ETag goes with
  * it: the tag mixes in the customer id, and offering a previous
  * customer's validator would ask the server a question about somebody
- * else. */
+ * else.
+ *
+ * The in-flight promise goes too, and that one is not housekeeping. It
+ * is shared: `getGamingProfile` hands the *same* promise to every caller
+ * while a request is open. Leaving it in place means the first thing the
+ * next customer's screen does is await the previous customer's request
+ * and render its answer -- no cache read involved, so nulling the cache
+ * alone would not have stopped it. Dropping the reference does not
+ * cancel the request; the generation counter is what stops its result
+ * from being kept. */
 export function clearGamingProfileCache(): void {
   gamingProfileCache = null;
+  gamingProfileInFlight = null;
+  gamingProfileGeneration += 1;
 }
 
 /** Whether support is open, plus this customer's own conversations. */

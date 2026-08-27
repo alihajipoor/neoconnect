@@ -312,6 +312,21 @@ const en = {
   "settings.customGameAdded": "Added {count} of {total} programs for {game}.",
   "settings.customGameMissing":
     "Not running, so not added: {names}. Start them and add the game again, or use Browse.",
+  // Said when a game the customer was told was incomplete stops being
+  // incomplete. The card carried a warning naming the missing programs
+  // for as long as they were missing; going quiet the moment it is
+  // fixed would leave that warning as the last thing they were told.
+  "settings.customGameCompleted":
+    "{game} is complete now. Neoxify found {names} running and added it, so all of this game is carried together.",
+  // Only when an exit was actually chosen. A group with no preference
+  // gains nothing to announce, and saying an exit now applies when none
+  // was picked would be a claim about routing that is not true.
+  "settings.customGameCompletedExit": "The exit you chose for {game} applies from the next connection.",
+  // The cap, reached by the re-scan rather than by a click. Nothing was
+  // added for this game on purpose: adding the binaries that fit is how
+  // a game ends up split across the tunnel and outside it.
+  "settings.customGameRescanTooMany":
+    "{game} is still incomplete. Adding {names} would pass the {max}-program limit, so nothing was added for it -- part of a game is not worth adding. Remove a program to make room.",
   // A game that resolved *nothing*, kept on screen rather than said once.
   //
   // The old sentence here was honest about the outcome and wrong about
@@ -1010,6 +1025,11 @@ const fa: Record<TranslationKey, string> = {
   "settings.customGameAdded": "{count} برنامه از {total} برنامه‌ی {game} اضافه شد.",
   "settings.customGameMissing":
     "این‌ها در حال اجرا نبودند و اضافه نشدند: {names}. آن‌ها را اجرا کنید و بازی را دوباره اضافه کنید، یا از «جست‌وجوی برنامه» استفاده کنید.",
+  "settings.customGameCompleted":
+    "«{game}» اکنون کامل است. نئوکسیفای {names} را در حال اجرا پیدا کرد و آن را اضافه کرد، بنابراین همهٔ این بازی با هم منتقل می‌شود.",
+  "settings.customGameCompletedExit": "خروجی‌ای که برای «{game}» انتخاب کرده‌اید از اتصال بعدی اعمال می‌شود.",
+  "settings.customGameRescanTooMany":
+    "«{game}» هنوز کامل نیست. افزودن {names} از محدودیت {max} برنامه فراتر می‌رود، بنابراین چیزی برای آن اضافه نشد — بخشی از یک بازی ارزش اضافه‌کردن ندارد. برای باز شدن جا، یک برنامه را حذف کنید.",
   "settings.customGameNone": "چیزی برای {game} اضافه نشد",
   "settings.customGameNoneBody":
     "نئوکسیفای دنبال این برنامه‌ها گشت و هیچ‌کدام در حال اجرا نبود: {names}. اگر همین حالا {game} باز است، یعنی این فهرست با نسخه‌ای که شما نصب کرده‌اید نمی‌خواند — نام‌هایی که نئوکسیفای دارد از نسخهٔ استیم گرفته شده و نصب‌کننده‌های دیگر نام‌های دیگری دارند. از «انتخاب از برنامه‌های در حال اجرا» استفاده کنید و خودتان آن را انتخاب کنید؛ این روش درست کار می‌کند.",
