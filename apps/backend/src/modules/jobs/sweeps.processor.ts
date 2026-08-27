@@ -49,8 +49,8 @@ export class SweepsProcessor extends WorkerHost {
         // prepaid, so invoices are issued already paid and never carry a
         // due date. Only slow-settling crypto leaves one outstanding.
         const overdue = await this.invoicesService.markOverdue();
-        if (overdue.length > 0) {
-          this.logger.log(`invoice overdue sweep: marked ${overdue.length} invoice(s) overdue`);
+        if (overdue > 0) {
+          this.logger.log(`invoice overdue sweep: marked ${overdue} invoice(s) overdue`);
         }
         break;
       }

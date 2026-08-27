@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { AgentCommandType } from "@prisma/client";
+import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
 import { UsageService } from "../usage/usage.service";
@@ -527,9 +528,23 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /** Re-asserts every ACTIVE credential on one node.
+   *
+   * Cursored, and of the internal reads this is the one that most needed
+   * it: it is the half of the re-assert pair that scales with the
+   * customer base -- routes are a dozen rows, provisioned users are one
+   * per customer per route -- and it runs every 60 s per connected node.
+   * It is also not self-draining: a user is still ACTIVE after being
+   * re-asserted, so a `take` here would have re-asserted the same first
+   * page forever and left every customer past it dark on a node that had
+   * just come back. */
   private async reassertProvisionedUsers(nodeId: string, opts: { persist: boolean } = { persist: true }) {
-    const users = await this.prisma.protocolUser.findMany({
-      where: { nodeId, status: "ACTIVE" },
+    let asserted = 0;
+    await forEachBatch({
+      label: `reassertProvisionedUsers(${nodeId})`,
+      read: (afterId, take) =>
+        this.prisma.protocolUser.findMany({
+          where: { nodeId, status: "ACTIVE", ...after(afterId) },
       // For the transport and the inbound tag. Without either, every
       // re-assert after an engine restart rebuilds customers on the
       // wrong inbound -- silently, and for everyone at once, since
@@ -545,33 +560,39 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       // restart on ir1, all five France routes returned "invalid request
       // user id" while Finland kept working, because the re-assert had
       // put every France customer on the default inbounds.
-      include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+          include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (users) => {
+        for (const user of users) {
+          const payload = {
+            protocol: user.protocol,
+            transport: user.protocolConfig.transport,
+            // Omitted entirely when null, so the payload stays
+            // byte-identical to what every non-relay node already
+            // receives.
+            ...(user.protocolConfig.inboundTag ? { inboundTag: user.protocolConfig.inboundTag } : {}),
+            externalUserId: user.externalUserId,
+            credentials: decryptCredentials(user.credentialsJson),
+          };
+          if (opts.persist) {
+            await this.enqueueCommand(nodeId, "CREATE_USER", payload);
+          } else {
+            // Synthetic id: this command has no AgentCommand row, so its
+            // ack is expected to match nothing (see handleCommandAck).
+            // Prefixed so an unmatched ack is recognisable rather than
+            // looking like data loss.
+            this.writeCommand(nodeId, `reassert:${user.id}`, "CREATE_USER", payload);
+          }
+          asserted += 1;
+        }
+      },
     });
-    if (users.length === 0) return;
 
-    for (const user of users) {
-      const payload = {
-        protocol: user.protocol,
-        transport: user.protocolConfig.transport,
-        // Omitted entirely when null, so the payload stays byte-identical
-        // to what every non-relay node already receives.
-        ...(user.protocolConfig.inboundTag ? { inboundTag: user.protocolConfig.inboundTag } : {}),
-        externalUserId: user.externalUserId,
-        credentials: decryptCredentials(user.credentialsJson),
-      };
-      if (opts.persist) {
-        await this.enqueueCommand(nodeId, "CREATE_USER", payload);
-      } else {
-        // Synthetic id: this command has no AgentCommand row, so its ack
-        // is expected to match nothing (see handleCommandAck). Prefixed
-        // so an unmatched ack is recognisable rather than looking like
-        // data loss.
-        this.writeCommand(nodeId, `reassert:${user.id}`, "CREATE_USER", payload);
-      }
-    }
-
+    if (asserted === 0) return;
     const how = opts.persist ? "after reconnect" : "on periodic re-assert";
-    this.logger.log(`Re-asserted ${users.length} provisioned user(s) on node ${nodeId} ${how}`);
+    this.logger.log(`Re-asserted ${asserted} provisioned user(s) on node ${nodeId} ${how}`);
   }
 
   /** Records a command's outcome.

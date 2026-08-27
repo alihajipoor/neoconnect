@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from "@nes
 import { InvoiceStatus, Prisma } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
+import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
@@ -308,39 +309,78 @@ export class InvoicesService {
     };
   }
 
-  /** Flips overdue invoices and reports which ones changed, so the caller
-   * can notify. Only touches ISSUED ones with a due date in the past --
-   * paid and voided invoices are terminal.
+  /** Flips overdue invoices and reports how many changed. Only touches
+   * ISSUED ones with a due date in the past -- paid and voided invoices
+   * are terminal.
    *
    * Expected to do nothing most of the time: almost every invoice here is
    * paid at issue. It exists for slow-settling crypto and, later,
-   * reseller terms. */
-  async markOverdue(now = new Date()) {
-    const due = await this.prisma.invoice.findMany({
-      where: { status: InvoiceStatus.ISSUED, dueAt: { not: null, lt: now } },
-    });
-    if (due.length === 0) return [];
-
-    await this.prisma.invoice.updateMany({
-      where: { id: { in: due.map((i) => i.id) } },
-      data: { status: InvoiceStatus.OVERDUE },
-    });
-
-    for (const invoice of due) {
-      const customer = await this.prisma.customer.findUnique({ where: { id: invoice.customerId } });
-      if (!customer) continue;
-      await this.emailService.sendMail({
-        to: customer.email,
-        ...invoiceOverdueEmail({
-          invoiceNumber: invoice.invoiceNumber,
-          amountUsd: invoice.amountUsd.toString(),
-          currency: invoice.currency,
-          documentUrl: this.documentUrl(invoice.id),
+   * reseller terms. "Most of the time" is not a bound, though: an outage
+   * at a crypto processor makes this the sweep with the most to do
+   * exactly when the system is least healthy, so it is cursored.
+   *
+   * Returns a count rather than the rows. It used to hand back every
+   * invoice it touched, which is the one thing a batched sweep must not
+   * do -- accumulating the full result defeats the memory bound the
+   * batching exists for. The only caller ever read `.length`.
+   *
+   * Three things had to move for the batching to be correct:
+   *
+   * - **The `updateMany` is now inside the batch.** It used to sit
+   *   between the read and the notify loop, keyed on the whole `due`
+   *   array. Left there, the first batch's status flip would change what
+   *   every later batch could see.
+   * - **The customer's address comes from the join**, not from a
+   *   `findUnique` per row. That was an N+1, and it read the whole
+   *   Customer row -- `passwordHash`, `tokenVersion` and both one-time
+   *   codes -- to use one column.
+   * - **The invoice projection is named.** The unprojected read pulled
+   *   `lineItemsJson`, the largest column on the model, for every due
+   *   invoice; nothing in the overdue email renders it.
+   */
+  async markOverdue(now = new Date()): Promise<number> {
+    let marked = 0;
+    await forEachBatch({
+      label: "markOverdue",
+      read: (afterId, take) =>
+        this.prisma.invoice.findMany({
+          where: { status: InvoiceStatus.ISSUED, dueAt: { not: null, lt: now }, ...after(afterId) },
+          select: {
+            id: true,
+            invoiceNumber: true,
+            amountUsd: true,
+            currency: true,
+            customer: { select: { email: true } },
+          },
+          orderBy: { id: "asc" },
+          take,
         }),
-      });
-    }
+      handle: async (batch) => {
+        // Before the emails, so a crash part way through the notify loop
+        // leaves invoices marked overdue and un-notified rather than
+        // notified and still ISSUED -- the second would re-notify the
+        // same customer on every subsequent run.
+        await this.prisma.invoice.updateMany({
+          where: { id: { in: batch.map((i) => i.id) } },
+          data: { status: InvoiceStatus.OVERDUE },
+        });
+        marked += batch.length;
 
-    this.logger.log(`Marked ${due.length} invoice(s) overdue`);
-    return due;
+        for (const invoice of batch) {
+          await this.emailService.sendMail({
+            to: invoice.customer.email,
+            ...invoiceOverdueEmail({
+              invoiceNumber: invoice.invoiceNumber,
+              amountUsd: invoice.amountUsd.toString(),
+              currency: invoice.currency,
+              documentUrl: this.documentUrl(invoice.id),
+            }),
+          });
+        }
+      },
+    });
+
+    if (marked > 0) this.logger.log(`Marked ${marked} invoice(s) overdue`);
+    return marked;
   }
 }

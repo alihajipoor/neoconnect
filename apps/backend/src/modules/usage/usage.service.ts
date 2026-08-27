@@ -1,5 +1,6 @@
 import { forwardRef, Inject, Injectable, Logger } from "@nestjs/common";
 import { Protocol } from "@prisma/client";
+import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { EmailService } from "../email/email.service";
@@ -153,32 +154,54 @@ export class UsageService {
    * single Prisma where-clause, so it's filtered in code after fetching
    * ACTIVE subscriptions -- fine at this data scale. */
   async sweepQuota(): Promise<number> {
-    const active = await this.prisma.subscription.findMany({
-      // Unlimited subscriptions can never be over cap, so they do not
-      // even need fetching.
-      where: { status: "ACTIVE", dataCapBytes: { not: null } },
-      // Three columns rather than the row. This sweep reads every capped
-      // active subscription in one go and the comparison it exists to
-      // make needs exactly these; the rest was being pulled into memory
-      // for a filter that never looked at it.
-      select: { id: true, dataCapBytes: true, dataUsedBytes: true },
+    let suspended = 0;
+    await forEachBatch({
+      label: "sweepQuota",
+      read: (afterId, take) =>
+        this.prisma.subscription.findMany({
+          // Unlimited subscriptions can never be over cap, so they do not
+          // even need fetching.
+          where: { status: "ACTIVE", dataCapBytes: { not: null }, ...after(afterId) },
+          // Three columns rather than the row. The comparison this sweep
+          // exists to make needs exactly these; the rest was being pulled
+          // into memory for a filter that never looked at it.
+          select: { id: true, dataCapBytes: true, dataUsedBytes: true },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (batch) => {
+        const overCap = batch.filter((s) => s.dataCapBytes !== null && s.dataUsedBytes >= s.dataCapBytes);
+        for (const s of overCap) {
+          await this.suspendForQuota(s.id);
+          suspended += 1;
+        }
+      },
     });
-    const overCap = active.filter((s) => s.dataCapBytes !== null && s.dataUsedBytes >= s.dataCapBytes);
-    for (const s of overCap) {
-      await this.suspendForQuota(s.id);
-    }
-    return overCap.length;
+    return suspended;
   }
 
   async sweepExpiry(): Promise<number> {
-    const expired = await this.prisma.subscription.findMany({
-      where: { status: "ACTIVE", expireAt: { lt: new Date() } },
-      select: { id: true },
+    // One `now` for the whole sweep rather than one per batch, so a
+    // subscription cannot fall between two batches' clocks.
+    const now = new Date();
+    let expired = 0;
+    await forEachBatch({
+      label: "sweepExpiry",
+      read: (afterId, take) =>
+        this.prisma.subscription.findMany({
+          where: { status: "ACTIVE", expireAt: { lt: now }, ...after(afterId) },
+          select: { id: true },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (batch) => {
+        for (const s of batch) {
+          await this.expireSubscription(s.id);
+          expired += 1;
+        }
+      },
     });
-    for (const s of expired) {
-      await this.expireSubscription(s.id);
-    }
-    return expired.length;
+    return expired;
   }
 
   /** M16 trigger #3: warns a customer once per billing period when their
@@ -186,32 +209,50 @@ export class UsageService {
    * the "already warned" flag (reset to null on renewal, see
    * BillingService.renewSubscription()) so this fires exactly once. */
   async sweepLowDataWarnings(): Promise<number> {
-    const candidates = await this.prisma.subscription.findMany({
-      // No cap, no "running low" -- there is nothing to run low on.
-      where: { status: "ACTIVE", lowDataWarningSentAt: null, dataCapBytes: { not: null } },
-      // `include: { customer: true }` here meant every candidate's
-      // `passwordHash`, `tokenVersion`, `emailVerificationCode` and
-      // `passwordResetCode` were read into the sweep's memory so it could
-      // use one field: the address to send to.
-      select: {
-        id: true,
-        dataCapBytes: true,
-        dataUsedBytes: true,
-        customer: { select: { email: true } },
+    let warned = 0;
+    await forEachBatch({
+      label: "sweepLowDataWarnings",
+      read: (afterId, take) =>
+        this.prisma.subscription.findMany({
+          // No cap, no "running low" -- there is nothing to run low on.
+          where: {
+            status: "ACTIVE",
+            lowDataWarningSentAt: null,
+            dataCapBytes: { not: null },
+            ...after(afterId),
+          },
+          // `include: { customer: true }` here meant every candidate's
+          // `passwordHash`, `tokenVersion`, `emailVerificationCode` and
+          // `passwordResetCode` were read into the sweep's memory so it
+          // could use one field: the address to send to.
+          select: {
+            id: true,
+            dataCapBytes: true,
+            dataUsedBytes: true,
+            customer: { select: { email: true } },
+          },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (batch) => {
+        const nearCap = batch.filter(
+          (s) =>
+            s.dataCapBytes !== null &&
+            s.dataUsedBytes < s.dataCapBytes &&
+            s.dataCapBytes - s.dataUsedBytes <= LOW_DATA_WARNING_THRESHOLD_BYTES,
+        );
+        for (const s of nearCap) {
+          const remainingGb = Number(s.dataCapBytes! - s.dataUsedBytes) / Number(BYTES_PER_GB);
+          await this.emailService.sendMail({ to: s.customer.email, ...lowDataWarningEmail(remainingGb) });
+          await this.prisma.subscription.update({
+            where: { id: s.id },
+            data: { lowDataWarningSentAt: new Date() },
+          });
+          warned += 1;
+        }
       },
     });
-    const nearCap = candidates.filter(
-      (s) =>
-        s.dataCapBytes !== null &&
-        s.dataUsedBytes < s.dataCapBytes &&
-        s.dataCapBytes - s.dataUsedBytes <= LOW_DATA_WARNING_THRESHOLD_BYTES,
-    );
-    for (const s of nearCap) {
-      const remainingGb = Number(s.dataCapBytes! - s.dataUsedBytes) / Number(BYTES_PER_GB);
-      await this.emailService.sendMail({ to: s.customer.email, ...lowDataWarningEmail(remainingGb) });
-      await this.prisma.subscription.update({ where: { id: s.id }, data: { lowDataWarningSentAt: new Date() } });
-    }
-    return nearCap.length;
+    return warned;
   }
 
   /** M16 trigger #4: same "already warned" shape as above, via
@@ -219,18 +260,40 @@ export class UsageService {
   async sweepExpiryWarnings(): Promise<number> {
     const now = new Date();
     const threshold = new Date(now.getTime() + EXPIRY_WARNING_THRESHOLD_DAYS * 24 * 60 * 60 * 1000);
-    const soon = await this.prisma.subscription.findMany({
-      where: { status: "ACTIVE", expiryWarningSentAt: null, expireAt: { gt: now, lte: threshold } },
-      // Same narrowing as the low-data sweep above, and for the same
-      // reason: the only thing wanted off the customer is where to send.
-      select: { id: true, expireAt: true, customer: { select: { email: true } } },
+    let warned = 0;
+    await forEachBatch({
+      label: "sweepExpiryWarnings",
+      read: (afterId, take) =>
+        this.prisma.subscription.findMany({
+          where: {
+            status: "ACTIVE",
+            expiryWarningSentAt: null,
+            expireAt: { gt: now, lte: threshold },
+            ...after(afterId),
+          },
+          // Same narrowing as the low-data sweep above, and for the same
+          // reason: the only thing wanted off the customer is where to
+          // send.
+          select: { id: true, expireAt: true, customer: { select: { email: true } } },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (batch) => {
+        for (const s of batch) {
+          const daysRemaining = Math.max(
+            1,
+            Math.ceil((s.expireAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)),
+          );
+          await this.emailService.sendMail({ to: s.customer.email, ...expiringSoonEmail(daysRemaining) });
+          await this.prisma.subscription.update({
+            where: { id: s.id },
+            data: { expiryWarningSentAt: new Date() },
+          });
+          warned += 1;
+        }
+      },
     });
-    for (const s of soon) {
-      const daysRemaining = Math.max(1, Math.ceil((s.expireAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)));
-      await this.emailService.sendMail({ to: s.customer.email, ...expiringSoonEmail(daysRemaining) });
-      await this.prisma.subscription.update({ where: { id: s.id }, data: { expiryWarningSentAt: new Date() } });
-    }
-    return soon.length;
+    return warned;
   }
 }
 
