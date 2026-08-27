@@ -100,16 +100,14 @@ function pathsOf(app: RunningApp): string[] {
  * catalogue's spelling of `VALORANT.exe` need not match what the
  * process reports.
  */
-export function resolveGameApps(
-  profile: Pick<GameProfileSummary, "processNames">,
-  running: RunningApp[],
-): GameAppResolution {
-  const wanted = curatedNames(profile);
-  if (wanted.length === 0) return EMPTY_RESOLUTION;
-
-  // filename -> real paths seen running. Built once rather than
-  // scanned per name: a machine can have several hundred processes and
-  // a game several executables.
+/** filename -> real paths seen running.
+ *
+ * Built once rather than scanned per name: a machine can have several
+ * hundred processes and a game several executables. Shared by
+ * `resolveGameApps` and `rescanGameGroups` so the two can never disagree
+ * about what counts as a running match -- they are the add-time and the
+ * after-the-fact halves of one question. */
+function runningByName(running: readonly RunningApp[]): Map<string, string[]> {
   const byName = new Map<string, string[]>();
   for (const app of running) {
     for (const path of pathsOf(app)) {
@@ -124,6 +122,17 @@ export function resolveGameApps(
       }
     }
   }
+  return byName;
+}
+
+export function resolveGameApps(
+  profile: Pick<GameProfileSummary, "processNames">,
+  running: RunningApp[],
+): GameAppResolution {
+  const wanted = curatedNames(profile);
+  if (wanted.length === 0) return EMPTY_RESOLUTION;
+
+  const byName = runningByName(running);
 
   const found: GameAppMatch[] = [];
   const missing: string[] = [];
@@ -349,6 +358,150 @@ export function unresolvedNames(group: GameExitGroup, apps: readonly string[]): 
 /** Whether every one of this game's binaries is in the selection. */
 export function isWholeGroup(group: GameExitGroup, apps: readonly string[]): boolean {
   return group.names.length > 0 && unresolvedNames(group, apps).length === 0;
+}
+
+/** One game's share of a re-scan: what was found for it, and for which
+ * of its catalogue names. */
+export interface GroupRescan {
+  slug: string;
+  displayName: string;
+  /** Newly found paths. None of these is already selected. */
+  paths: string[];
+  /** The catalogue names those paths answer for, for the sentence shown
+   * to the customer -- who was told which programs were missing and is
+   * owed the same specificity when they stop being. */
+  names: string[];
+}
+
+export interface RescanResult {
+  /** Every path to add, deduped, in group order. */
+  paths: string[];
+  /** Groups that become whole once `paths` is applied. */
+  completed: GroupRescan[];
+  /** Groups whose newly found binaries were withheld *entirely* because
+   * adding them would pass the cap. */
+  withheldAtCap: GroupRescan[];
+}
+
+export const EMPTY_RESCAN: RescanResult = { paths: [], completed: [], withheldAtCap: [] };
+
+/** Look again for the binaries a game was missing when it was added.
+ *
+ * # Why this has to exist
+ *
+ * `resolveGameApps` matches against *running* processes, and it runs
+ * once, at the moment the customer clicks a game. Nothing ever looked
+ * again. Two things follow, both seen on the rig:
+ *
+ *   - A game added while its launcher is up gets the launcher and not
+ *     the client, which starts moments later. Before per-game exits
+ *     existed that alone put one game's connections on two source
+ *     addresses -- the ban signature -- with the tunnel behaving exactly
+ *     as designed.
+ *   - A partly resolved group gets no per-game exit at all, which is
+ *     correct (`exitsForGames` refuses to place a partial group), but it
+ *     means the exit the customer chose silently does nothing until
+ *     somebody re-adds the game by hand.
+ *
+ * # The policy, which is the point
+ *
+ * This adds programs, so it has to be defensible about which. It looks
+ * for **names already listed in a game the customer added, and nothing
+ * else** -- `group.names` is the catalogue's own list for a slug the
+ * customer picked. It cannot introduce a program they did not choose;
+ * it finishes a choice they already made. Nothing here consults the
+ * catalogue at large, and a name that is in no added game is invisible
+ * to it.
+ *
+ * A found path always joins **its group**, never the selection loose.
+ * That is structural rather than a rule to remember: membership is
+ * derived by filename against `group.names` (see `groupMembers`), and
+ * every path added here matched one of those names, so it is a member
+ * the moment it lands. The group therefore either becomes whole -- and
+ * its exit preference can finally apply -- or stays incomplete and
+ * keeps getting no exit. There is no third outcome in which a binary is
+ * carried without its game.
+ *
+ * # At the cap
+ *
+ * A game whose newly found binaries do not all fit is withheld whole,
+ * and reported. Adding the ones that fit is the one outcome that must
+ * not happen: it is how a game ends up half-selected, which is the split
+ * this feature exists to prevent. Withholding the game's preference is
+ * the same direction the code already takes for a partial group, and the
+ * same one `addPaths` takes when a batch would overflow.
+ *
+ * A withheld game does not stop a later, smaller one from fitting. Both
+ * outcomes are all-or-nothing per game, which is the property that
+ * matters; making one game's bad luck block another buys nothing.
+ */
+export function rescanGameGroups(
+  groups: readonly GameExitGroup[],
+  apps: readonly string[],
+  running: readonly RunningApp[],
+  max: number,
+): RescanResult {
+  if (groups.length === 0) return EMPTY_RESCAN;
+
+  const byName = runningByName(running);
+  const selected = new Set(apps.map((app) => app.toLowerCase()));
+  let budget = max - apps.length;
+
+  const paths: string[] = [];
+  const completed: GroupRescan[] = [];
+  const withheldAtCap: GroupRescan[] = [];
+
+  for (const group of groups) {
+    // Only the names this group is still missing. A whole group is
+    // skipped outright, which is what keeps the common case free.
+    const missing = unresolvedNames(group, apps);
+    if (missing.length === 0) continue;
+
+    const foundPaths: string[] = [];
+    const foundNames: string[] = [];
+    let unresolvedStill = 0;
+
+    for (const name of missing) {
+      const hits = (byName.get(baseName(name)) ?? []).filter(
+        (path) =>
+          !selected.has(path.toLowerCase()) &&
+          !foundPaths.some((f) => f.toLowerCase() === path.toLowerCase()),
+      );
+      if (hits.length === 0) {
+        unresolvedStill += 1;
+        continue;
+      }
+      foundNames.push(name);
+      foundPaths.push(...hits);
+    }
+
+    if (foundPaths.length === 0) continue;
+
+    const entry: GroupRescan = {
+      slug: group.slug,
+      displayName: group.displayName,
+      paths: foundPaths,
+      names: foundNames,
+    };
+
+    if (foundPaths.length > budget) {
+      withheldAtCap.push(entry);
+      continue;
+    }
+
+    for (const path of foundPaths) {
+      selected.add(path.toLowerCase());
+      paths.push(path);
+    }
+    budget -= foundPaths.length;
+    // Whole only if nothing this group wanted is still unaccounted for.
+    // A group that gained a binary and is still short of another has
+    // moved, but it has not arrived, and saying so would be the lie
+    // this app does not tell.
+    if (unresolvedStill === 0) completed.push(entry);
+  }
+
+  return { paths, completed, withheldAtCap };
 }
 
 /** Why a game the customer chose an exit for did not get one.

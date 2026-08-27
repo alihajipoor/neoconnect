@@ -34,12 +34,17 @@ import {
   gameExitGroup,
   hasCuratedApps,
   isWholeGroup,
+  rescanGameGroups,
   resolveGameApps,
   scopesForGame,
   unresolvedNames,
   type GameExitGroup,
 } from "../lib/game-apps";
 import { Button, Card } from "../components/ui";
+
+/** See the re-scan effect in `CustomModeCard` for why this is 15 s and
+ * why the timer only exists while a game is incomplete. */
+const RESCAN_INTERVAL_MS = 15_000;
 
 /** Custom mode: pick the apps that go through the VPN, leave the rest
  * on the normal connection.
@@ -227,6 +232,132 @@ export function CustomModeCard() {
     // answer for changed with it.
     refreshPlacements();
   }
+
+  /** Looks again for the binaries an added game was missing.
+   *
+   * Runs on mount and then on a timer, but only while at least one added
+   * game is still incomplete -- see the effect below for why that gate
+   * is the whole cost story.
+   *
+   * Scopes are rebuilt from the profile the same way `addGame` does,
+   * rather than left off. A binary added here with no scope while its
+   * siblings carry one would route the same game by two different rules;
+   * that is not the exit split the invariants forbid, but it is still a
+   * game behaving as two things. If the profile is not loaded, or the
+   * game is no longer in the catalogue, no scope is attached -- which is
+   * the same whole-application routing every game had before
+   * destination scoping existed, and is the inclusive direction. */
+  async function rescan(current: SplitTunnelSettings) {
+    let running;
+    try {
+      running = await listRunningApps();
+    } catch {
+      // The service may be down. Nothing to say about it here: this is a
+      // background sweep the customer did not ask for, and a red line
+      // about it would be noise.
+      return;
+    }
+
+    const found = rescanGameGroups(current.games, current.apps, running, MAX_APPS);
+    if (found.paths.length === 0 && found.withheldAtCap.length === 0) return;
+
+    if (found.paths.length > 0) {
+      const apps = [...current.apps, ...found.paths];
+      const added = new Set(found.paths.map((p) => p.toLowerCase()));
+      const fresh: AppScope[] = [];
+      for (const entry of [...found.completed, ...found.withheldAtCap]) {
+        const profile = games?.find((g) => g.slug === entry.slug);
+        if (!profile) continue;
+        for (const scope of scopesForGame(profile, entry.paths)) {
+          if (added.has(scope.app.toLowerCase())) fresh.push(scope);
+        }
+      }
+      const scopes = [...current.scopes, ...fresh];
+      await apply({
+        ...current,
+        apps,
+        scopes: scopesFor(apps, scopes),
+        games: gamesFor(apps, current.games),
+      });
+    }
+
+    // Said only when a game *becomes* whole. The card spent the whole
+    // time until now showing a warning that named the missing programs,
+    // so the moment that stops being true is exactly the moment the
+    // customer is owed a sentence -- otherwise the last thing the app
+    // told them about this game is something that is no longer so.
+    const parts: string[] = [];
+    for (const entry of found.completed) {
+      parts.push(
+        t("settings.customGameCompleted", { game: entry.displayName, names: entry.names.join(", ") }),
+      );
+      const group = current.games.find((g) => g.slug === entry.slug);
+      // Only if they actually chose one. A group with no preference has
+      // nothing to announce, and claiming an exit applies when none was
+      // picked would be a routing claim that is not true.
+      if (group?.exit) parts.push(t("settings.customGameCompletedExit", { game: entry.displayName }));
+    }
+    for (const entry of found.withheldAtCap) {
+      parts.push(
+        t("settings.customGameRescanTooMany", {
+          game: entry.displayName,
+          names: entry.names.join(", "),
+          max: MAX_APPS,
+        }),
+      );
+    }
+    if (parts.length > 0) setNotice(parts.join(" "));
+  }
+
+  /** How often the re-scan looks, and why it is allowed to look at all.
+   *
+   * The gate matters more than the interval: the timer only exists while
+   * some added game is still incomplete. A customer whose games all
+   * resolved -- the normal state, and the state every customer ends up
+   * in -- runs no timer and pays nothing. The sweep also stops itself
+   * the moment the last group becomes whole, because the effect
+   * re-evaluates on `settings` and finds nothing left to wait for.
+   *
+   * Fifteen seconds inside that window. The case being caught is a
+   * launcher that is up when the game is added and a client that starts
+   * moments later, which is tens of seconds; 15 s catches it within a
+   * tick or two while costing four pipe round trips a minute, and only
+   * on a machine that is genuinely mid-launch. `vpn_list_running_apps`
+   * is a named-pipe call to the service plus an `EnumWindows` walk --
+   * cheap, but not free, and this is a gaming machine where the customer
+   * is about to care about every frame.
+   *
+   * Scoped to this card. The re-scan runs while the Settings screen is
+   * open, which is where the warning it answers is rendered; it is not
+   * an app-wide background poll. That is a real limit: add a game and
+   * close Settings immediately and nothing looks again until Settings is
+   * reopened, at which point the mount scan runs at once. Making it
+   * app-wide means putting a process-table poll on the connect path,
+   * which is the part of this client that must stay predictable. */
+  useEffect(() => {
+    if (!settings) return;
+    const incomplete = settings.games.some((game) => !isWholeGroup(game, settings.apps));
+    if (!incomplete) return;
+
+    let cancelled = false;
+    let running = false;
+    const sweep = () => {
+      // One at a time. A slow pipe call must not overlap itself and
+      // apply the same discovery twice.
+      if (running || cancelled) return;
+      running = true;
+      void rescan(settings).finally(() => {
+        running = false;
+      });
+    };
+    sweep();
+    const timer = setInterval(sweep, RESCAN_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, games]);
 
   /** Shared by both pickers, so a program chosen from the running list
    * and the same program found on disk cannot end up on the list twice
