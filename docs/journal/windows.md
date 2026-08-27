@@ -14792,20 +14792,46 @@ while writing the test:
   200 branch had nothing to compare against. Now a generation counter,
   bumped by every clear, guards both writes.
 
-**The same shape elsewhere, and it is the more serious one.**
-`clearSnapshot()` says in its own comment that it is "called on sign-out"
-and was reached from **one of the three** ways a session ends. Delete
-your account or have your session expire and the previous customer's
-WireGuard private keys and route list stayed on disk — and
-`api-endpoints.ts` steers requests using the node hostnames in that
-snapshot, so it outlived the session twice.
+#### SECURITY: sign-out left the previous customer's WireGuard keys on disk
 
-Root cause for both: **there is no auth context in this client.** Session
-state is a screen string in `App.tsx` plus files on disk, so there was no
-single "session ended" moment and every teardown had to be repeated by
-hand at each exit. `lib/session-end.ts` is that moment now; all three
-exits route through it, and sign-in clears too (the auto-sign-in after
-email verification is three call sites that end no prior session).
+Not tidiness. A **credential-retention bug**, and the more serious of the
+two found in this pass — the gaming-profile leak exposed entitlement
+metadata for 30 s of process memory, this one left **private keys on the
+filesystem indefinitely**.
+
+`clearSnapshot()` states in its own comment that it is "called on
+sign-out". It was — from **one of the three** ways a session can end
+(`Dashboard.handleLogout` only). The other two, **delete-account** and
+**session-expiry**, cleared the tokens and nothing else. After either,
+`connection-cache.json` still held the previous customer's
+`protocolUsers[].credentials` — the per-protocol secret blobs, **the
+WireGuard private key among them**, as `credential-cache.ts` says in its
+own header — plus their whole route list, on a shared machine, for the
+next person who signed in.
+
+It outlived the session in a second way: `api-endpoints.ts` steers API
+requests using the node hostnames in that snapshot, so the previous
+customer's node list kept influencing where the *next* customer's
+requests went.
+
+Deleting your account was the worst case. The customer performed the one
+action that means "remove me", the server dutifully revoked every
+credential on every node, and the client kept the private keys.
+
+**Why it happened, because the cause is the reusable part: there is no
+auth context in this client.** Session state is a screen string in
+`App.tsx` plus files on disk. There was never a single "this session is
+over" moment, so teardown was **hand-repeated at each exit** — and an
+exit added later inherited nothing. Both bugs are the same mistake:
+per-exit teardown with no choke point. Any future per-customer state will
+land in the same trap unless it is cleared from `lib/session-end.ts`.
+
+**If you add anything that belongs to one customer — cache, file, token,
+in-memory promise — clear it there, not at the call sites.**
+
+`lib/session-end.ts` is the choke point now; all three exits route
+through it, and sign-in clears too (the auto-sign-in after email
+verification is three call sites that end no prior session).
 
 Deliberately **not** extended to `split-tunnel.json`, `gaming.json` or
 `failover.json`. Each documents keeping itself across sign-out; they are
