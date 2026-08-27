@@ -13460,3 +13460,266 @@ than everything, and do the joining on the host.
 * Do not call `Get-Process` per connection per sample on this guest — a
   run that did took over 25 minutes and never finished. One process
   snapshot per sample, joined by PID, is the same data in seconds.
+
+## 2026-08-26 — A real game ran behind the tunnel. Its own catalogue row routes none of it
+
+Old School RuneScape was installed from Jagex's own installer, launched,
+and run to its terms screen on the rig, with the tunnel up and a packet
+capture taken on the host. The routing works. **The catalogue entry for
+this game does not**, and that is the headline.
+
+### The catalogue names two executables that do not exist
+
+`old-school-runescape` declares exactly `oslaunch.exe` and
+`osclient.exe`. Those came from Valve's appinfo for appid 1343370 — the
+**Steam** build — and nobody had ever compared them with an install.
+
+Jagex's official standalone installer (`oldschool.msi`, Authenticode
+valid, `CN=Jagex Ltd`, 24,018,944 bytes) installs *"OldSchool RuneScape
+Launcher 1.2.7"* and points every shortcut — Start Menu, desktop, all
+three — at
+
+```
+%USERPROFILE%\jagexcache\jagexlauncher\bin\JagexLauncher.exe oldschool
+```
+
+A per-user path inside the profile, and a name that is neither of the
+two. **Neither `oslaunch.exe` nor `osclient.exe` exists anywhere in the
+install.**
+
+That was then run through the *shipped* resolution code rather than a
+re-implementation of it — `curatedNames()` and `resolveGameApps()` from
+`src/lib/game-apps.ts`, against the service's own `listRunningApps`
+reply captured on the guest, which is the same reply the picker is
+handed. With **both** Jagex's `JagexLauncher.exe` and RuneLite running:
+
+```
+### old-school-runescape -- "Old School RuneScape" (Jagex Ltd)
+  curatedNames() -> ["oslaunch.exe","osclient.exe"]
+  found:   []
+  missing: ["oslaunch.exe","osclient.exe"]
+  paths:   []
+```
+
+The sibling row `runescape` -> `RuneScape.exe` resolves to nothing
+either. So a customer who installs this game the only account-free way
+there is, and picks it out of the game picker, selects **zero** binaries
+and gets **nothing** routed. The UI will say the names are missing,
+which is honest, but it is missing them for every install that did not
+come from Steam.
+
+This is a class, not one row: `steam-tier.json` is 1,446 rows generated
+from Steam launch entries, and any title with a non-Steam distribution
+is exposed to the same mismatch. `curated.json`'s 39 hand-written rows
+are not implicated by this evidence.
+
+### The picker itself could not be clicked, and that is worth stating
+
+The desktop app's first screen is a sign-in. There is no test account
+here and creating one or typing credentials is out of bounds, so the
+React picker was never clicked. Everything below the profile — the
+catalogue row, `curatedNames()`, resolution against running processes,
+the full paths, the `SetSplitTunnel` on the real pipe — is the shipped
+code and the real service. The click handler and `vpn.rs`'s
+visible-window filter are the two links not exercised.
+
+### Selecting an application does route it — proven both ways
+
+Two byte-identical copies of the same probe at two paths (hash-compared
+in the run), one selected part-way through and one never:
+
+| phase | selected copy reports | unselected copy reports |
+|---|---|---|
+| A — nothing selected | the customer's own address | the customer's own address |
+| B — one copy selected | **the node's address** | the customer's own address |
+| C — deselected again | the customer's own address | the customer's own address |
+
+The flip is sharp: round 9 at t+95.6 s still the customer, round 10 at
+t+105.9 s the node, with the selection sent at t≈104 s. It reverts at
+t+288 s after the deselect. The unselected half is what makes the
+selected half mean anything — one-sided evidence would not tell this
+apart from a full tunnel.
+
+### The game's own traffic is carried, and the control says so
+
+Old School RuneScape is not reachable through the catalogue, so the
+client that actually ran is **RuneLite** — the open-source OSRS client,
+official signed installer, no account needed to launch. It is not in the
+catalogue either, so it was selected as a running application by path,
+which is the other half of Custom mode and a real customer action.
+
+Measured in the order the product's own notice implies — arm the
+selection *first*, then start the game — with the capture taken on the
+host at the vNIC, outside the service:
+
+| phase | what happened | plaintext on TCP 43594 at the vNIC |
+|---|---|---|
+| D — selected, **then** started | connected to a game world, Established for >100 s | **0** |
+| E — deselected, then started again | connected to a game world | **21** |
+
+Port 43594 is the discriminator: it is the Old School RuneScape client
+protocol and nothing else on that guest speaks it. With the tunnel up,
+everything the tunnel carries leaves that vNIC addressed to the node, so
+a plaintext packet to `:43594` is by construction the game outside the
+tunnel. Zero of them while selected; they come back the moment it is
+deselected.
+
+The game noticed too, which is the nicest corroboration in the run.
+Jagex assigns worlds geographically. Routed through the node, the client
+picked **European** worlds (`81.31.201.x`, `81.31.203.x`). Direct, it
+picked **US** worlds (`8.26.41.x`). The game's own server choice moved
+with the exit.
+
+It renders fine with no GPU acceleration, reached its world list, showed
+*World 545*, and stopped at its own terms-of-use / EULA dialog. That
+dialog was **not** clicked — accepting terms on the owner's behalf is
+out of bounds — so *logging in and playing* is still untested, and the
+reason is a consent gate, not a technical one.
+
+### New: a selected application's ICMP is not carried
+
+This is the find that was not being looked for. During phase D, while
+RuneLite's TCP was fully inside the tunnel, **174 ICMP echo requests
+left the vNIC in the clear**, from the guest's own address, in a
+sequential sweep across Jagex's world-server addresses — one packet per
+world, `81.31.201.x`, `81.31.203.x`, `8.26.41.x`. 200 more in phase E,
+25 before either.
+
+The redirect loop decides on TCP and UDP. ICMP is not in it. So:
+
+* a player whose game is correctly routed still **reveals their real
+  address to roughly 170 Jagex hosts**, every time the world switcher
+  refreshes;
+* the latency numbers the client shows describe the **direct** path, not
+  the tunnel — so the in-game ping display is measuring something the
+  gameplay traffic no longer uses. For a product sold partly on latency,
+  that is worse than a privacy leak: it is the number the customer
+  judges us by.
+
+Attribution here is by destination set, not by PID: nothing else on that
+guest knows those addresses, and RuneLite's world switcher pings every
+world to build its list. Recorded that way rather than claimed stronger.
+Not fixed — it lives in `service/`, which this session did not own.
+
+### The launcher/client pair, as it actually exists
+
+The catalogue's central untested claim was the `oslaunch.exe` ->
+`osclient.exe` pairing. It does not exist:
+
+* **Jagex's standalone launcher never spawns anything.**
+  `JagexLauncher.exe` is a 14 KB stub next to `jvm.dll`, `rt.jar` and
+  `jagexappletviewer.jar` — the whole game runs in that one process.
+  There is no second binary to appear later.
+* **RuneLite does re-exec, at the same path.** `RuneLite.exe` ran for
+  ~160 s and then a second `RuneLite.exe` appeared with the first as its
+  parent, and the parent exited. Because it is the *same* path, the new
+  process matches the same selection entry and is routed with no
+  re-push. The dangerous shape — a child at a path that was never
+  captured — did not occur, so it remains unobserved.
+
+The service's own honesty here was correct in both directions:
+`split_tunnel_restart_needed` named `["runelite.exe","selwatch.exe"]`
+when both were running at selection time, and named only
+`["selwatch.exe"]` when the game had been killed first.
+
+### Sessions that died, and how much of that was mine
+
+Three measurement runs were thrown away before one held. The causes are
+worth separating because two are traps and one is a real defect.
+
+* **Mine.** The service answers a successful connect with
+  `{"status":"ok"}` — no `"connected"`, no `"ok":true`. A success check
+  looking for those spellings decided the connect had failed and issued
+  a **second** connect; the service tore the first session down to build
+  the second, and by the next phase there was no tunnel at all. A phase
+  measured with the tunnel down looks exactly like a total leak.
+* **Real, and intermittent.** On two consecutive single-connect runs the
+  status read `connected:true, protocol:"XRAY",
+  split_tunnel_active:false` and then `connected:false` within 30–60 s.
+  On the next two runs, same node and same profile, it read
+  `protocol:"XRAY_VLESS_REALITY", split_tunnel_active:true` and held for
+  twenty minutes. The `"XRAY"` vs `"XRAY_VLESS_REALITY"` label may be
+  the tell, and `split_tunnel_active:false` on a session that reports
+  itself connected is a state the app would show as fine. Not diagnosed;
+  recorded as intermittent rather than fixed.
+* **A quiet game reads as a routed game.** In the first run that did
+  have a tunnel, the phases caught RuneLite *after* its game session had
+  already ended — 3,869 packets to the game port before the tunnel came
+  up and single digits afterwards. That is a clean-looking pass and it
+  means nothing. Hence phases D and E, which restart the client inside
+  each phase so every phase contains a whole fresh connection.
+
+### Rig notes earned the hard way
+
+* **Do not install the RS3 (NXT) client on this guest.** Its installer
+  chains a DirectX web setup and Guest Additions did not survive it:
+  `screenshotpng` began returning `E_FAIL` and *both* shared-folder
+  runners stopped writing heartbeats — indistinguishable from a wedged
+  guest. `controlvm reset` brought the framebuffer back. The guest also
+  began a Windows Update install at the next boot; disabling
+  `wuauserv`/`UsoSvc`/`WaaSMedicSvc`/`DoSvc` early is worth the minute.
+* **`/S` is not Inno Setup's silent flag.** It sat on a *Select Setup
+  Language* dialog for ten minutes looking exactly like a hang.
+  `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-` is the form.
+* **Ctrl+Shift+Enter in the Run dialog does not elevate here.** It
+  produced a plainly-titled `cmd.exe` at Medium integrity with no
+  consent prompt at all. What does work: start a medium runner, then
+  have it call `Start-Process -Verb RunAs`, and answer the prompt with
+  **Left then Space**. The prompt is real and renders into screenshots —
+  `ebboot.py`'s taskbar-brightness heuristic missed it for 200 s and
+  reported "no prompt ever appeared" while it was on screen. A
+  **whole-frame** mean below ~110 is the reliable tell.
+* **`Register-ScheduledTask` from a medium-integrity process lies.** It
+  returns without throwing and logs "registered"; `schtasks /query`
+  afterwards cannot find the task. So there is no free elevated runner
+  waiting after a reboot, and the Win+R dance has to be repeated.
+* **`setvideomodehint` must come before sending keys, not just before
+  screenshots.** A blanked framebuffer swallowed eight Win+R attempts in
+  a row and every one read as "the Run dialog would not open".
+* **The Run box opens pre-filled with the previous command, fully
+  selected.** `ebboot.py` pressed Enter on a stale
+  `powershell ... C:/Users/Public/rig-fix6c.ps1` it could not see. Also:
+  Ctrl+A/Delete does nothing if the dialog is open but *unfocused*, and
+  a focused and an unfocused Run dialog look nearly identical — pressing
+  Win+R again focuses the existing one. Read the box in a screenshot
+  before every Enter, and pick a shim name sharing no prefix with
+  anything in RunMRU (`Z:/nxq9e.cmd` autocompleted to `Z:/nxq9c.cmd`).
+* **A bash heredoc on this host eats one backslash from `\\VBOXSVR`,**
+  silently turning every UNC path into `C:\VBOXSVR\...`. Use the `$base`
+  variable the runner already has in scope.
+* **`$svc.Path` is null** for the LocalSystem service seen from a
+  medium-integrity runner. `Get-FileHash $svc.Path` then kills the phase
+  with "Cannot bind argument to parameter 'Path'" — which cost twenty
+  minutes with a capture already running and no output line to say so.
+* **`Start-Process` needs an explicit `-WorkingDirectory`** when the
+  runner was started from the UNC share; without one it fails with "The
+  system cannot find the file specified" even though the binary is
+  present and hash-identical.
+* **VirtualBox `nictrace` on the host is the right capture point** for
+  this class of question: it needs no in-guest privilege, survives a
+  guest that is struggling, and cannot be flattered by the service. Turn
+  it off before reading the file.
+* **Old School RuneScape runs and renders on this guest with no GPU
+  acceleration.** Frame rate never became the limiting factor.
+* **Jagex's own standalone launcher never gets past its config fetch
+  here.** stdout stops at `Config URL is
+  http://oldschool.runescape.com/k=3/l=0/jav_config.ws`, it opens a
+  320x100 "Jagex Ltd." loader window, and it makes **no TCP connection
+  at all** for minutes — while `curl` to that same URL from the same
+  guest returns 200 and 2,786 bytes. Not diagnosed. It is why RuneLite
+  is the client in every measurement above.
+
+### What is still not proven
+
+* **Nobody logged in and played.** The client reached its own terms
+  dialog and stopped there. Matchmaking, chat and long-session
+  stability under the tunnel remain untested.
+* **Anti-cheat is still never exercised.** OSRS has none; that is why it
+  was reachable at all.
+* **"Only the game is routed" is still open**, and now for a sharper
+  reason than last time: the TCP answer is clean, but the ICMP finding
+  says the honest overall answer is *no*. Whether anything else escapes
+  the same way (IGMP, raw sockets) was not tested.
+* **The catalogue was checked against reality for exactly one row.** It
+  failed. The other 1,445 generated rows have still never been compared
+  with an install.
