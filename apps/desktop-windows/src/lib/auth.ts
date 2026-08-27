@@ -1,6 +1,8 @@
 import { apiRequest, publicRequest } from "./api";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
-import { clearTokens, setTokens } from "./session";
+import { setTokens } from "./session";
+import { endCustomerSession } from "./session-end";
+import { clearGamingProfileCache } from "./customer";
 import { solveChallengeFor } from "./pow";
 import type { ApiResult } from "./api";
 import type { AttemptKind } from "./attempts";
@@ -67,6 +69,14 @@ export async function login(email: string, password: string) {
     body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
   });
   if (result.ok && !("requiresVerification" in result.data)) {
+    // Before the tokens, not after. From here on any fetch is this
+    // customer's, and a cache entry still holding the previous one's
+    // entitlement would be read as belonging to the session that just
+    // started. Sign-out clears this too; doing it here as well covers
+    // the sign-ins that never pass through a sign-out at all -- the
+    // auto-sign-in after email verification is three separate call
+    // sites, none of which ends a prior session.
+    clearGamingProfileCache();
     await setTokens(result.data);
   }
   // After the tokens are stored, so a successful sign-in is attributed
@@ -105,7 +115,11 @@ export async function resendVerification(email: string) {
 
 export async function logout(): Promise<void> {
   await apiRequest<void>("/customer-auth/logout", { method: "POST" });
-  await clearTokens();
+  // The server call goes first and this runs regardless of what it said:
+  // a sign-out the network refused is still a sign-out on this machine,
+  // and leaving the previous customer's credentials and entitlement
+  // behind because a request failed is the wrong way to fail.
+  await endCustomerSession();
 }
 
 /** Deletes the signed-in customer's own account, permanently.
@@ -129,7 +143,12 @@ export async function deleteAccount() {
   const result = await apiRequest<{ deleted: boolean; credentialsRevoked: number }>("/customer/me", {
     method: "DELETE",
   });
-  await clearTokens();
+  // The whole teardown, not just the tokens. An account that no longer
+  // exists has no business leaving its WireGuard keys and its cached
+  // entitlement on the machine -- and this path never went through
+  // `Dashboard.handleLogout`, which was the only caller of
+  // `clearSnapshot` before.
+  await endCustomerSession();
   return result;
 }
 

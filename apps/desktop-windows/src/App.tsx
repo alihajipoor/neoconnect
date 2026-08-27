@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
 import { verifyEmailByToken } from "./lib/auth";
 import { flushAttempts } from "./lib/attempts";
+import { endCustomerSession } from "./lib/session-end";
 import { Login } from "./screens/Login";
 import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
@@ -190,6 +191,27 @@ export default function App() {
     }
   }
 
+  /** The one place a session ends, whatever ended it.
+   *
+   * Both screens that can drop the customer back to sign-in route
+   * through here, and they arrive by more routes than the Sign out
+   * button: `Dashboard.loadAll` calls it when the API reports the
+   * session expired, and `DeleteAccountSection` calls it after the
+   * account is gone. `logout()` and `deleteAccount()` do their own
+   * teardown, so for those this is a second, idempotent pass -- the
+   * expired-session route is the one that had none, because it never
+   * goes through either function.
+   *
+   * Not awaited: this is a render-path handler and the screen change
+   * must not wait on two store writes. The in-memory entitlement cache
+   * is cleared synchronously inside `endCustomerSession` before its
+   * first await, which is the part a newly signed-in customer could
+   * otherwise read. */
+  function handleLoggedOut() {
+    void endCustomerSession();
+    setScreen("login");
+  }
+
   if (screen === "loading") {
     return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading...</div>;
   }
@@ -243,7 +265,7 @@ export default function App() {
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
         onOpenSupport={() => setScreen("support")}
-        onLoggedOut={() => setScreen("login")}
+        onLoggedOut={handleLoggedOut}
         customSection={<CustomModeCard />}
         // Supplied here rather than imported by the screen, the same way
         // Custom mode is: gaming mode drives the Windows helper service
@@ -280,7 +302,7 @@ export default function App() {
       />
       <div className="min-h-0 flex-1">
         <Dashboard
-          onLoggedOut={() => setScreen("login")}
+          onLoggedOut={handleLoggedOut}
           onBrowsePlans={() => setScreen("plans")}
           onOpenSettings={() => setScreen("settings")}
         />
