@@ -14736,3 +14736,144 @@ job is lint + typecheck + build + test.
   socket on 0826; the two halves have still never met.
 - **Nothing was opened in a browser**, and no panel page was loaded against
   a running backend.
+
+## 2026-08-27 — The pagination tail merged, and the two gaps it left
+
+`main` is `6bfdc4f`. Two merges: `claude/backend-scalability-tail`
+(`ae37fa8`) and the client-side pair below.
+
+### The merge was a fast-forward, and that is worth saying out loud
+
+The four-way trap this repo keeps hitting — changed signature meets new
+callers, Prisma stub without `$transaction`, struct grows a field while
+another branch builds it as a literal, test pins a wire key set — needs
+**two diverging lines of work**. There were not two. `main` had not moved
+since the branch was cut, so the merged tree is byte-identical to the
+branch tree and "verify the merged tree, not the branch" collapses to one
+tree. `docs/journal/windows.md` did not conflict for the same reason.
+
+I still md5'd line 9916 (the literal `` `<<<<<<< HEAD` `` inside
+backticks that two agents' resolvers previously ate) before and after:
+`02b8e9c116bdbf4a876010e5e0bc7c1f` both times, same line number. It
+survived because nothing had to resolve it, not because a resolver
+behaved.
+
+**No fifth combination failure appeared. That is not evidence the class
+is gone** — this merge simply never presented the conditions.
+
+### A turbo baseline that is red on `main`, and is not a regression
+
+`pnpm turbo run lint typecheck build test --force` on `1b23ef8` came back
+**13 of 17, `Failed: @neoxify/backend#test`**, 5 failed / 610 passed. All
+five are argon2 hashing tests in `customers`, `customer-auth` and
+`admins`, all "Exceeded timeout of 5000 ms", with those suites taking
+175–185 s.
+
+It is contention, not code: the same task alone
+(`turbo run test --filter=@neoxify/backend`) passes **615/615**, and the
+full run on the final tree passed **17 of 17**. argon2 is memory-hard and
+turbo was running two Vite builds and a Next build beside it.
+
+**If you see backend#test fail under a full parallel turbo run, re-run it
+alone before believing it.** Cost me a real detour.
+
+### `clearGamingProfileCache()` — wiring the call was not the fix
+
+The uncalled clear was the known half. Two more holes only showed up
+while writing the test:
+
+- **The in-flight promise is shared.** `getGamingProfile` hands the *same*
+  promise to every caller while a request is open. A sign-out that left it
+  in place meant the next customer's first read awaited the previous
+  customer's request and rendered its answer — never touching the cache,
+  so nulling the cache alone would not have stopped it.
+- **A 200 already on the wire refilled the cache after the clear.** The
+  304 branch was already guarded (it identity-checks the held entry); the
+  200 branch had nothing to compare against. Now a generation counter,
+  bumped by every clear, guards both writes.
+
+**The same shape elsewhere, and it is the more serious one.**
+`clearSnapshot()` says in its own comment that it is "called on sign-out"
+and was reached from **one of the three** ways a session ends. Delete
+your account or have your session expire and the previous customer's
+WireGuard private keys and route list stayed on disk — and
+`api-endpoints.ts` steers requests using the node hostnames in that
+snapshot, so it outlived the session twice.
+
+Root cause for both: **there is no auth context in this client.** Session
+state is a screen string in `App.tsx` plus files on disk, so there was no
+single "session ended" moment and every teardown had to be repeated by
+hand at each exit. `lib/session-end.ts` is that moment now; all three
+exits route through it, and sign-in clears too (the auto-sign-in after
+email verification is three call sites that end no prior session).
+
+Deliberately **not** extended to `split-tunnel.json`, `gaming.json` or
+`failover.json`. Each documents keeping itself across sign-out; they are
+the customer's configuration of this machine, not the previous account's
+secrets. `split-tunnel.json`'s `games[].exit` and `failover.json`'s
+`chosenRoute` do hold identifiers minted against the previous customer's
+route list — flagged, not changed, because both are documented decisions.
+
+### The re-scan, and the policy it had to earn
+
+Catalogue names resolved against running processes once, at Add time.
+A game added at its launcher stage got the launcher and never the client.
+
+The rules, in the order they matter:
+
+1. **Only names already in a game the customer added.** `group.names` is
+   the catalogue's list for a slug they picked. It adds no program they
+   did not choose.
+2. **A find joins its group or nothing.** Structural, not a convention: a
+   path is only looked up because a group named it, and membership is
+   derived by filename against those names.
+3. **At `MAX_APPS` the whole game is withheld**, and said. Adding the ones
+   that fit is exactly how a game ends up half in the tunnel. A withheld
+   game does not block a later smaller one.
+
+**Interval: 15 s, but the gate is the real answer.** The timer only exists
+while some added game is still incomplete, and stops itself when the last
+group becomes whole — so the steady state every customer reaches runs no
+timer at all.
+
+**Scoped to the Settings card.** Add a game, close Settings at once, and
+nothing looks again until Settings is reopened (mount scan runs
+immediately). Making it app-wide means a process-table poll on the
+connect path, which I was not willing to put there while
+`claude/concurrent-multi-exit-v2` is mid-verification.
+
+### Numbers
+
+Baseline measured on `1b23ef8` before touching anything: **364 Rust /
+246 vitest / 615 jest**, turbo as above. Final tree: **364 Rust** (0
+failed), **279 vitest** (21 files), **641 jest** (60 suites), **turbo 17
+of 17 with no `Failed:` line**, both guard scripts ok.
+
+Every test was proven by reverting: dropping the missing caller fails 3,
+leaving the in-flight promise fails 1, dropping the generation guard
+fails 1, removing the re-scan fails 7, removing just the cap check fails
+the 3 that hold the safe direction.
+
+One test originally **passed for the wrong reason** — "no `If-None-Match`
+was sent" is vacuously true of a request a stale cache meant never
+happened. It now asserts the request exists first. Worth watching for:
+a cache test that asserts an absence can be satisfied by absence of the
+whole request.
+
+### Not proven
+
+- **Nothing ran on the rig, and no app was launched.** Both changes are
+  pure logic verified in vitest with the Tauri boundary mocked. The
+  re-scan has never called the real `vpn_list_running_apps`, so the shape
+  of `RunningApp` under a real launcher-then-client start is assumed from
+  the existing add-time path, not observed.
+- **The 15 s interval is reasoned, not measured.** Nobody has watched a
+  real launcher-to-client gap with this running.
+- **No leak re-verification.** Both leak fixes are intact *by
+  construction* — `ipc/` and `service/src/split_tunnel/**` are
+  byte-identical to `1b23ef8` and no `.rs` file was touched — but nothing
+  was put on the wire this session under WireGuard, Xray or OpenVPN.
+- **The `CONCURRENTLY` migration has not been run**, by me or anyone. It
+  ships as a second file for the owner to run by hand.
+- **`concurrent-multi-exit-v2` was not merged**, as instructed; `C:/nxcme`
+  is still sitting on `rig/cme-v2-verify`.
