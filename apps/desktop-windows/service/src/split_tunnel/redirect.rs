@@ -339,6 +339,21 @@ pub const ACTIVATION_GRACE: Duration = Duration::from_secs(3);
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
+
+/// ICMP, on both families.
+///
+/// Named here despite nothing in this loop ever *carrying* an ICMP
+/// packet, because the loop now has to recognise one in order to refuse
+/// it. See [`icmp_echo_request`] for why refusing is the only available
+/// answer.
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_ICMPV6: u8 = 58;
+
+/// The first byte of an ICMP header is its type. These are the two that
+/// mean "ping", one per family; they are numbered differently and there
+/// is no relationship between the numbers.
+const ICMP_ECHO_REQUEST: u8 = 8;
+const ICMPV6_ECHO_REQUEST: u8 = 128;
 const TCP_FLAG_SYN: u8 = 0x02;
 const TCP_FLAG_ACK: u8 = 0x10;
 const TCP_FLAG_FIN: u8 = 0x01;
@@ -401,6 +416,22 @@ pub struct Stats {
     /// be installed for. Read the two together, from
     /// `ipv6-block-custom.log` and this line, or read neither.
     pub blocked_v6: AtomicU64,
+    /// ICMP echo requests refused because the tunnel cannot carry one.
+    ///
+    /// The second *deliberate* refusal in this struct, and it needs the
+    /// same reading as `blocked_v6`: high is normal for anything that
+    /// pings, and zero says only that nothing tried. Before the filter
+    /// was opened to ICMP this could not have read anything but zero --
+    /// the driver never handed the loop a ping, and 174 of them were
+    /// measured leaving in the clear while the same application's TCP
+    /// was fully tunnelled.
+    ///
+    /// **Not per-application, and that is the honest name for it.**
+    /// Nothing can attribute an ICMP packet to a process here, so this
+    /// counts every ping the machine attempts while Custom mode is on,
+    /// not only a selected application's. `settings.customIcmpBody`
+    /// is where the customer is told the same thing.
+    pub blocked_icmp: AtomicU64,
     /// Connections found living outside the tunnel that should be
     /// inside it -- see `owner::escaped_connections`.
     ///
@@ -539,7 +570,8 @@ const WARMUP: Duration = Duration::from_secs(12);
 impl Stats {
     pub fn summary(&self) -> String {
         format!(
-            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} escaped={} \
+            "seen={} matched={} redirected={} returned={} rejected={} blocked_v6={} \
+             blocked_icmp={} escaped={} \
              grace_dropped={} reset_v6={} refused_unattributed={} udp_send_failed={} \
              udp_reply_failed={} udp_unbound={}",
             self.seen.load(Ordering::Relaxed),
@@ -548,6 +580,7 @@ impl Stats {
             self.returned.load(Ordering::Relaxed),
             self.rejected.load(Ordering::Relaxed),
             self.blocked_v6.load(Ordering::Relaxed),
+            self.blocked_icmp.load(Ordering::Relaxed),
             self.escaped.load(Ordering::Relaxed),
             self.grace_dropped.load(Ordering::Relaxed),
             self.reset_v6.load(Ordering::Relaxed),
@@ -826,9 +859,23 @@ const DNS_PORT: u16 = 53;
 /// which is a class of bug nobody would think to look for. The test
 /// `the_permits_are_exactly_what_the_loop_leaves_alone` holds them
 /// together.
+///
+/// **ICMP is in the two outbound clauses but in neither `SrcPort`
+/// clause, and that asymmetry is the point.** The loop does not carry
+/// ICMP -- it refuses a ping and passes every other ICMP packet through
+/// untouched (`icmp_echo_request`, `is_icmp`) -- so there is no return
+/// leg to catch and no relay port for one to come back on. Admitting it
+/// here buys exactly one thing: the chance to drop an echo request
+/// before it leaves, which is the only way to stop a selected
+/// application handing its real address to every host it pings.
+///
+/// Adding `icmpv6` does **not** move the IPv6 address bounds, so
+/// `SPLIT_PERMITTED` is unaffected: the boundary it mirrors is about
+/// *which destinations* are the LAN, not about which protocols reach
+/// the loop.
 pub fn filter_for(redirect: &Redirect) -> String {
     format!(
-        "(outbound and ip and (tcp or udp) and not loopback \
+        "(outbound and ip and (tcp or udp or icmp) and not loopback \
            and ip.DstAddr != {node} \
            and (ip.DstAddr < 10.0.0.0 or ip.DstAddr > 10.255.255.255) \
            and (ip.DstAddr < 127.0.0.0 or ip.DstAddr > 127.255.255.255) \
@@ -836,7 +883,7 @@ pub fn filter_for(redirect: &Redirect) -> String {
            and (ip.DstAddr < 172.16.0.0 or ip.DstAddr > 172.31.255.255) \
            and (ip.DstAddr < 192.168.0.0 or ip.DstAddr > 192.168.255.255) \
            and ip.DstAddr < 224.0.0.0) \
-         or (outbound and ipv6 and (tcp or udp) and not loopback \
+         or (outbound and ipv6 and (tcp or udp or icmpv6) and not loopback \
            and ipv6.DstAddr > 0:0:0:0:ffff:ffff:ffff:ffff \
            and ipv6.DstAddr < fc00::) \
          or (ip and tcp.SrcPort == {tcp}) \
@@ -1275,6 +1322,99 @@ struct Parsed {
     source_port: u16,
     destination_port: u16,
     tcp_flags: u8,
+}
+
+/// Whether this is an outbound ICMP echo request -- a ping -- on either
+/// family.
+///
+/// # Why this loop refuses ping rather than carrying it
+///
+/// A real game measured on the rig had its TCP fully tunnelled while
+/// **174 ICMP echo requests left in the clear** to roughly 170 of its
+/// world servers, one per world, every time its server browser
+/// refreshed. So a correctly-routed player still handed their real
+/// address to every one of those hosts, and the latency numbers the
+/// game displayed described the direct path rather than the tunnel.
+///
+/// Carrying them instead is not available, for two independent reasons,
+/// either of which alone would settle it:
+///
+/// * **Nothing can say which process sent one.** Attribution here is
+///   `port -> pid`, read from `GetExtendedTcpTable` and
+///   `GetExtendedUdpTable` (see `owner::OwnerLookup`). An ICMP packet
+///   has no port, and Win32 has no ICMP analogue of those tables -- the
+///   endpoint tables cover TCP and UDP and nothing else. WFP's ALE
+///   layers *do* know the process for ICMP, but WinDivert exposes them
+///   only as a receive-only observation layer that cannot block or
+///   inject, and the flow event that carries the process id is raised by
+///   the same first packet we would have to hold. For a sweep that pings
+///   170 hosts once each, *every* packet is a first packet, so there is
+///   nothing to correlate against in time.
+/// * **The relay could not carry one if we knew.** `proxy.rs` is a
+///   transparent NAT relay with no wire protocol: the loop rewrites the
+///   destination to the relay's port and the source to a synthetic NAT
+///   port, and the relay recovers the real destination *from that source
+///   port alone*. The whole mechanism is keyed on ports. An ICMP packet
+///   has none, so there is nothing to rewrite and nothing to look the
+///   origin up by.
+///
+/// That leaves refusing. It is deliberately the narrowest refusal that
+/// closes the disclosure: **echo requests only**, and only to the public
+/// destinations the filter already selects, so pinging the LAN and the
+/// default gateway keeps working and ICMP error messages are untouched.
+///
+/// No state and no key. The decision is a pure function of the bytes in
+/// front of it, which is why it needs no cache and cannot grow
+/// `FlowKey` -- and why it sits *above* every selection and exit
+/// question rather than beside them.
+///
+/// **The cost, which the app tells the customer about rather than
+/// hiding:** this cannot be narrowed to the selected applications,
+/// because narrowing it would need exactly the attribution that does not
+/// exist. While Custom mode is on, ping stops working for everything on
+/// the machine. The alternative was an address disclosure the customer
+/// could not see, and a visible broken feature beats an invisible leak.
+///
+/// **Known gap:** an ICMPv6 echo request behind an extension-header
+/// chain is not recognised here and passes through. Windows' own ICMP
+/// helper never emits one, so this has never been observed, but it is a
+/// hole rather than a proof.
+/// Whether this is ICMP at all, on either family.
+///
+/// Separate from [`icmp_echo_request`] because the two answers are used
+/// for opposite purposes: an echo request is refused, and everything
+/// else ICMP is passed through untouched rather than handed to code
+/// that expects ports to exist.
+fn is_icmp(packet: &[u8]) -> bool {
+    match packet.first().map(|first| first >> 4) {
+        Some(4) => packet.get(9) == Some(&IPPROTO_ICMP),
+        Some(6) => packet.get(6) == Some(&IPPROTO_ICMPV6),
+        _ => false,
+    }
+}
+
+fn icmp_echo_request(packet: &[u8]) -> bool {
+    match packet.first().map(|first| first >> 4) {
+        Some(4) => {
+            if *packet.get(9).unwrap_or(&0) != IPPROTO_ICMP {
+                return false;
+            }
+            // Options may sit between the fixed header and the ICMP one,
+            // so the type byte is not at a fixed offset.
+            let header_len = ((packet[0] & 0x0F) as usize) * 4;
+            if header_len < 20 {
+                return false;
+            }
+            packet.get(header_len) == Some(&ICMP_ECHO_REQUEST)
+        }
+        Some(6) => {
+            if *packet.get(6).unwrap_or(&0) != IPPROTO_ICMPV6 {
+                return false;
+            }
+            packet.get(IPV6_HEADER) == Some(&ICMPV6_ECHO_REQUEST)
+        }
+        _ => false,
+    }
 }
 
 fn parse(packet: &[u8]) -> Option<Parsed> {
@@ -1734,6 +1874,31 @@ fn handle_packet(
     stats: &Stats,
     reset: &mut Option<Vec<u8>>,
 ) -> Option<Leg> {
+    // Answered before the family split and before every question below
+    // it, because it is not a routing decision at all: nothing here can
+    // carry a ping, on either family, for any selection, to any exit.
+    // See `icmp_echo_request` for why that is a property of the machine
+    // rather than a gap in this function. Deliberately above the
+    // selection read and the exit lookup, both of which are meaningless
+    // for a packet that is never going to be carried.
+    if icmp_echo_request(packet) {
+        stats.blocked_icmp.fetch_add(1, Ordering::Relaxed);
+        return Some(Leg::Swallowed);
+    }
+
+    // Any *other* ICMP leaves exactly as it did before the filter was
+    // opened to this protocol, and says so here rather than reaching
+    // code that would read it as something it is not. Without this line
+    // an ICMPv6 error message would fall into `handle_ipv6`, fail
+    // `parse_v6` -- which cannot find ports in an ICMP header because
+    // there are none -- and be dropped as an unattributable packet in
+    // `AllExcept` mode. Refusing ping is a decision that was argued for;
+    // silently dropping Packet Too Big and breaking path-MTU discovery
+    // would be a side effect of one, which is a different thing.
+    if is_icmp(packet) {
+        return None;
+    }
+
     // Decided before anything below is consulted, because none of it can
     // carry an IPv6 packet: the NAT table, the rewrite and the proxy's
     // upstream socket are all IPv4, and so is the address on the tunnel
@@ -2239,6 +2404,7 @@ mod tests {
             returned: AtomicU64::new(returned),
             rejected: AtomicU64::new(rejected),
             blocked_v6: AtomicU64::new(0),
+            blocked_icmp: AtomicU64::new(0),
             escaped: AtomicU64::new(0),
             grace_dropped: AtomicU64::new(0),
             reset_v6: AtomicU64::new(0),
@@ -4339,6 +4505,240 @@ mod tests {
         assert!(
             stats.refused_unattributed.load(Ordering::Relaxed) > refused_before,
             "the refusal must still be counted after the cache was cleared"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // ICMP: a selected application's ping is refused, not carried.
+    //
+    // The leak these cover was measured on the rig rather than reasoned
+    // about: a game whose TCP was fully tunnelled sent 174 ICMP echo
+    // requests in the clear to roughly 170 of its world servers. The
+    // loop never saw one, because the filter admitted only TCP and UDP.
+    // ---------------------------------------------------------------
+
+    /// An IPv4 ICMP packet of a given type. Type 8 is an echo request.
+    fn icmp_packet(destination: Ipv4Addr, icmp_type: u8) -> Vec<u8> {
+        let mut packet = vec![0u8; 28];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&28u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = IPPROTO_ICMP;
+        packet[12..16].copy_from_slice(&Ipv4Addr::new(192, 168, 1, 20).octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        packet[20] = icmp_type;
+        packet
+    }
+
+    /// An IPv6 ICMPv6 packet of a given type. Type 128 is an echo
+    /// request; type 2 is Packet Too Big, which path-MTU discovery needs.
+    fn icmpv6_packet(icmp_type: u8) -> Vec<u8> {
+        let mut packet = vec![0u8; IPV6_HEADER + 8];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&8u16.to_be_bytes());
+        packet[6] = IPPROTO_ICMPV6;
+        packet[7] = 64;
+        let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+        packet[8..24].copy_from_slice(&src.octets());
+        packet[24..40].copy_from_slice(&dst.octets());
+        packet[IPV6_HEADER] = icmp_type;
+        packet
+    }
+
+    /// Drives the real entry point rather than the classifier, so what
+    /// is asserted is the verdict the worker actually acts on.
+    fn icmp_verdict(packet: &mut [u8], ipv6: bool, selection: &Selection) -> (Option<Leg>, u64) {
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let mut address = outbound_address(ipv6);
+        let mut reset = None;
+        let leg = handle_packet(
+            packet,
+            &mut address,
+            &redirect,
+            &nat,
+            selection,
+            &mut owner,
+            &stats,
+            &mut reset,
+        );
+        (leg, stats.blocked_icmp.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn the_filter_now_hands_the_loop_icmp_on_both_families() {
+        // The leak was upstream of every decision in this file: the
+        // driver was told to hand over `(tcp or udp)`, so no amount of
+        // logic below could have refused a ping it never saw.
+        let filter = filter_for(&sample_redirect());
+        assert!(
+            filter.contains("(tcp or udp or icmp)"),
+            "IPv4 ICMP must reach the loop: {filter}"
+        );
+        assert!(
+            filter.contains("(tcp or udp or icmpv6)"),
+            "IPv6 ICMP must reach the loop: {filter}"
+        );
+        // ICMP has no ports, so it must not appear in the return-leg
+        // clauses -- there is no relay port for a ping to come back on.
+        assert!(filter.contains("or (ip and tcp.SrcPort =="));
+        assert!(filter.contains("or (ip and udp.SrcPort =="));
+        assert!(!filter.contains("icmp.SrcPort"));
+        // The parser rule the whole filter is shaped around still holds.
+        assert!(!filter.contains("not ("));
+    }
+
+    #[test]
+    fn a_ping_is_refused_rather_than_leaving_in_the_clear() {
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        let mut packet = icmp_packet(Ipv4Addr::new(203, 0, 113, 9), ICMP_ECHO_REQUEST);
+        let (leg, blocked) = icmp_verdict(&mut packet, false, &selection);
+        assert_eq!(leg, Some(Leg::Swallowed), "an echo request must not reach the network");
+        assert_eq!(blocked, 1, "and the refusal must be counted");
+    }
+
+    #[test]
+    fn an_icmpv6_ping_is_refused_too() {
+        // The same disclosure, on the family the machine may well
+        // prefer. Counted in the same place: `blocked_icmp` is not
+        // per-family, because the consequence to the customer is not.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        let mut packet = icmpv6_packet(ICMPV6_ECHO_REQUEST);
+        let (leg, blocked) = icmp_verdict(&mut packet, true, &selection);
+        assert_eq!(leg, Some(Leg::Swallowed));
+        assert_eq!(blocked, 1);
+    }
+
+    #[test]
+    fn the_refusal_is_upstream_of_the_selection_and_of_every_exit() {
+        // The decision cannot depend on which applications are chosen,
+        // because nothing can tell which application sent an ICMP
+        // packet: there is no port on it and Win32 has no ICMP endpoint
+        // table. A test that only ever asked with one selection would
+        // pass without establishing that.
+        let cases = [
+            ("nothing selected", selection_of(&[], SplitTunnelMode::OnlySelected)),
+            (
+                "a different app selected",
+                selection_of(&[r"C:\Other\thing.exe"], SplitTunnelMode::OnlySelected),
+            ),
+            ("all-except", selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::AllExcept)),
+        ];
+        for (name, selection) in cases {
+            let mut packet = icmp_packet(Ipv4Addr::new(203, 0, 113, 9), ICMP_ECHO_REQUEST);
+            let (leg, blocked) = icmp_verdict(&mut packet, false, &selection);
+            assert_eq!(leg, Some(Leg::Swallowed), "{name}: a ping is never carried");
+            assert_eq!(blocked, 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn refusing_a_ping_writes_nothing_to_the_nat_or_the_leave_alone_cache() {
+        // The discrimination that matters for the two leak fixes this
+        // must not regress. The verdict is a pure function of the bytes,
+        // so it needs no flow key at all -- and `FlowKey`, which is
+        // load-bearing for three separate features, must not grow one
+        // for ICMP. If a later refactor routes this decision through the
+        // tables, this fails.
+        let mut owner = OwnerLookup::new();
+        let nat = Nat::new();
+        let redirect = sample_redirect();
+        let stats = Stats::default();
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        let mut address = outbound_address(false);
+        let mut reset = None;
+        let mut packet = icmp_packet(Ipv4Addr::new(203, 0, 113, 9), ICMP_ECHO_REQUEST);
+
+        assert_eq!(
+            handle_packet(
+                &mut packet,
+                &mut address,
+                &redirect,
+                &nat,
+                &selection,
+                &mut owner,
+                &stats,
+                &mut reset,
+            ),
+            Some(Leg::Swallowed)
+        );
+        assert!(reset.is_none(), "a ping never provokes a synthesised reset");
+        // The ICMP type and code bytes sit exactly where a TCP or UDP
+        // header would keep its ports. A naive reading would turn them
+        // into a flow; nothing may.
+        assert!(
+            !nat.has_flow(Transport::Tcp, 0, Ipv4Addr::new(203, 0, 113, 9), 0),
+            "no TCP flow may be recorded for an ICMP packet"
+        );
+        assert!(
+            !nat.has_flow(Transport::Udp, 0, Ipv4Addr::new(203, 0, 113, 9), 0),
+            "no UDP flow may be recorded for an ICMP packet"
+        );
+    }
+
+    #[test]
+    fn an_icmp_error_message_is_passed_through_untouched() {
+        // The refusal is deliberately the narrowest one that closes the
+        // disclosure. Destination Unreachable is how a stack is told to
+        // back off; swallowing it would break things nobody connected to
+        // this change would think to look at.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+        let mut packet = icmp_packet(Ipv4Addr::new(203, 0, 113, 9), 3);
+        let (leg, blocked) = icmp_verdict(&mut packet, false, &selection);
+        assert_eq!(leg, None, "an ICMP error must reach the network unchanged");
+        assert_eq!(blocked, 0, "and must not be counted as a refusal");
+    }
+
+    #[test]
+    fn packet_too_big_survives_all_except_mode() {
+        // The trap in opening the filter to ICMPv6. `parse_v6` looks for
+        // ports, an ICMPv6 header has none, and `handle_ipv6` answers an
+        // unparseable packet in `AllExcept` mode by dropping it. Without
+        // an explicit ICMP arm above that, admitting ICMPv6 to the loop
+        // would have silently broken path-MTU discovery for every
+        // customer in that mode -- a side effect of a fix, not a fix.
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::AllExcept);
+        let mut packet = icmpv6_packet(2);
+        let (leg, blocked) = icmp_verdict(&mut packet, true, &selection);
+        assert_eq!(leg, None, "Packet Too Big must not be dropped");
+        assert_eq!(blocked, 0);
+    }
+
+    #[test]
+    fn a_ping_to_the_lan_is_never_seen_by_the_loop_at_all() {
+        // Pinging the router keeps working, and it is the kernel filter
+        // that guarantees it rather than anything in this file: the
+        // address exclusions the IPv4 clause already carried now apply
+        // to ICMP because ICMP shares that clause. Asserted through the
+        // real evaluator, because that is the only thing whose opinion
+        // counts.
+        let filter = filter_for(&sample_redirect());
+        super::super::divert::compile_filter(&filter).expect("the filter must compile");
+        let lan = icmp_packet(Ipv4Addr::new(192, 168, 1, 1), ICMP_ECHO_REQUEST);
+        assert!(
+            !super::super::divert::eval_filter(&filter, &lan, &outbound_address(false)),
+            "a ping to the LAN must not even reach the loop"
+        );
+        let internet = icmp_packet(Ipv4Addr::new(203, 0, 113, 9), ICMP_ECHO_REQUEST);
+        assert!(
+            super::super::divert::eval_filter(&filter, &internet, &outbound_address(false)),
+            "a ping to the internet must reach the loop, or it cannot be refused"
+        );
+    }
+
+    #[test]
+    fn the_stats_line_reports_the_refusals() {
+        // A counter nobody reads is not evidence, and this line is the
+        // only place the number is ever surfaced.
+        let stats = Stats::default();
+        stats.blocked_icmp.fetch_add(7, Ordering::Relaxed);
+        assert!(
+            stats.summary().contains("blocked_icmp=7"),
+            "the log line must carry it: {}",
+            stats.summary()
         );
     }
 }
