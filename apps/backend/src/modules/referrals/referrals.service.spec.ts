@@ -1,5 +1,6 @@
 import { BadRequestException } from "@nestjs/common";
 import { InvoiceStatus, ReferralRewardReason } from "@prisma/client";
+import { cursoredFindMany } from "../../../test/cursored";
 import { ReferralsService, maskEmail } from "./referrals.service";
 
 /** The reward rules, as configured by default. */
@@ -53,7 +54,8 @@ function fakePrisma(options: {
     rewards,
     credits,
     customer: {
-      findMany: jest.fn(() => Promise.resolve(options.friends.map((id) => ({ id })))),
+      // Cursor-aware -- the sweep reads referrers in batches.
+      findMany: cursoredFindMany(options.friends.map((id) => ({ id }))),
       findUnique: jest.fn(({ where }: { where: { id: string } }) =>
         Promise.resolve({
           id: where.id,

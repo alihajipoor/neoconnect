@@ -1,12 +1,16 @@
+import { cursoredFindMany } from "../../../test/cursored";
 import { ProvisioningBackfillService } from "./provisioning-backfill.service";
 
 /** Runs against the live fleet at every boot, so what it does when
  * things go wrong matters as much as what it does when they go right. */
 describe("ProvisioningBackfillService", () => {
   function build(subscriptionIds: string[], provisionAll: jest.Mock) {
+    // Cursor-aware: the backfill reads in batches, and a
+    // `mockResolvedValue` would hand back the same page forever --
+    // indistinguishable from a working cursor and from a broken one.
     const prisma = {
       subscription: {
-        findMany: jest.fn().mockResolvedValue(subscriptionIds.map((id) => ({ id }))),
+        findMany: cursoredFindMany(subscriptionIds.map((id) => ({ id }))),
       },
     };
     const service = new ProvisioningBackfillService(prisma as never, { provisionAll } as never);
