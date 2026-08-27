@@ -1,4 +1,5 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { cursoredFindMany } from "../../../test/cursored";
 import { InvoicesService } from "./invoices.service";
 import { PrismaService } from "../../prisma/prisma.service";
 
@@ -14,7 +15,9 @@ describe("InvoicesService", () => {
       invoice: {
         findUnique: jest.fn().mockResolvedValue(null),
         findFirst: jest.fn(),
-        findMany: jest.fn().mockResolvedValue([]),
+        // Cursor-aware -- markOverdue reads in batches. Overridable per
+        // test through `overrides`, but the default has to advance.
+        findMany: cursoredFindMany<{ id: string }>([]),
         create: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: "inv-1", ...data })),
         update: jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: "inv-1", ...data })),
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -176,7 +179,10 @@ describe("InvoicesService", () => {
       const { service, prisma } = build();
       const result = await service.markOverdue();
 
-      expect(result).toEqual([]);
+      // A count, not the rows. It used to return every invoice it
+      // touched, which a batched sweep cannot do without holding the
+      // whole result in memory -- the thing the batching exists to stop.
+      expect(result).toBe(0);
       expect(prisma.invoice.updateMany).not.toHaveBeenCalled();
     });
   });

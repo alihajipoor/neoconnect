@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ProtocolUsersService } from "./protocol-users.service";
 
@@ -57,25 +58,40 @@ export class ProvisioningBackfillService implements OnModuleInit {
     // cap still exists and will come back on renewal, and provisioning
     // does not grant access on its own -- the credentials stay disabled
     // until renewSubscription re-enables them.
-    const subscriptions = await this.prisma.subscription.findMany({
-      where: { status: { in: ["ACTIVE", "SUSPENDED"] } },
-      select: { id: true },
-    });
-
+    let considered = 0;
     let added = 0;
     let revoked = 0;
     let failed = 0;
-    for (const subscription of subscriptions) {
-      try {
-        const result = await this.protocolUsersService.provisionAll(subscription.id);
-        added += result.created.length;
-        revoked += result.revoked.length;
-      } catch (err) {
-        failed += 1;
-        const reason = err instanceof Error ? err.message : String(err);
-        this.logger.warn(`Backfill skipped subscription ${subscription.id}: ${reason}`);
-      }
-    }
+
+    // Cursored rather than read in one go. This one is not self-draining
+    // -- a subscription is still ACTIVE after it has been provisioned --
+    // so the cursor is what makes progress at all, and it is the reason a
+    // `take` would have been silently wrong here rather than merely
+    // partial.
+    await forEachBatch({
+      label: "provisioningBackfill",
+      read: (afterId, take) =>
+        this.prisma.subscription.findMany({
+          where: { status: { in: ["ACTIVE", "SUSPENDED"] }, ...after(afterId) },
+          select: { id: true },
+          orderBy: { id: "asc" },
+          take,
+        }),
+      handle: async (batch) => {
+        for (const subscription of batch) {
+          considered += 1;
+          try {
+            const result = await this.protocolUsersService.provisionAll(subscription.id);
+            added += result.created.length;
+            revoked += result.revoked.length;
+          } catch (err) {
+            failed += 1;
+            const reason = err instanceof Error ? err.message : String(err);
+            this.logger.warn(`Backfill skipped subscription ${subscription.id}: ${reason}`);
+          }
+        }
+      },
+    });
 
     // Silent when there was nothing to do, which is the steady state --
     // a line every boot saying "0" is noise that trains you to ignore
@@ -90,7 +106,7 @@ export class ProvisioningBackfillService implements OnModuleInit {
     if (added > 0 || revoked > 0 || failed > 0) {
       const summary =
         `Provisioning backfill: added ${added} credential(s), revoked ${revoked}, ` +
-        `across ${subscriptions.length} subscription(s)` +
+        `across ${considered} subscription(s)` +
         (failed > 0 ? `, ${failed} skipped` : "");
       if (revoked > 0) {
         this.logger.warn(summary);
@@ -98,6 +114,6 @@ export class ProvisioningBackfillService implements OnModuleInit {
         this.logger.log(summary);
       }
     }
-    return { added, revoked, failed, considered: subscriptions.length };
+    return { added, revoked, failed, considered };
   }
 }
