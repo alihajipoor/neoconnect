@@ -300,6 +300,9 @@ model Customer {
   gamingToken        GamingResolverToken?
 
   @@index([referredByCustomerId])
+  // `GET /customers` orders by `createdAt desc` with no filter, so
+  // without this the page's `take` bounds the response and not the sort.
+  @@index([createdAt(sort: Desc)])
   @@map("customers")
 }
 
@@ -440,6 +443,8 @@ model Subscription {
 
   @@index([customerId])
   @@index([status])
+  // `GET /subscriptions` orders by `createdAt desc` with no filter.
+  @@index([createdAt(sort: Desc)])
   @@map("subscriptions")
 }
 
@@ -610,6 +615,12 @@ model ProtocolUser {
   @@unique([nodeId, protocol, externalUserId])
   @@index([subscriptionId])
   @@index([routeId])
+  // `GET /protocol-users` orders by `createdAt desc`. Its `nodeId` filter
+  // is optional and no caller in this repo passes it, so the bare column
+  // is the one to index; the existing `@@unique([nodeId, ...])` cannot
+  // supply the order because `protocol` sits between them. If a caller
+  // ever does filter by node, that wants its own `[nodeId, createdAt]`.
+  @@index([createdAt(sort: Desc)])
   @@map("protocol_users")
 }
 
@@ -714,7 +725,14 @@ model Invoice {
   paymentTransaction PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id])
 
   @@index([customerId])
-  @@index([status])
+  // `GET /invoices` orders by `issuedAt desc`; the status filter is
+  // optional, so both the unfiltered and the status-filtered form need
+  // to be servable. The composite replaces a bare `@@index([status])`
+  // rather than joining it: an equality on the leading column leaves the
+  // second free to supply the order, so it does everything the old index
+  // did and orders as well.
+  @@index([issuedAt(sort: Desc)])
+  @@index([status, issuedAt(sort: Desc)])
   @@map("invoices")
 }
 
@@ -737,6 +755,8 @@ model PaymentTransaction {
 
   @@unique([provider, providerRef])
   @@index([customerId])
+  // `GET /billing/payments` orders by `createdAt desc` with no filter.
+  @@index([createdAt(sort: Desc)])
   @@map("payment_transactions")
 }
 
@@ -1116,7 +1136,14 @@ model Voucher {
   redemptions VoucherRedemption[]
 
   @@index([planId])
-  @@index([issuedByAdminId])
+  // Two routes page this table and they need different indexes.
+  // `GET /vouchers` (admin) has no filter and orders by `createdAt desc`.
+  // `GET /resellers/me/vouchers` always filters on `issuedByAdminId` and
+  // orders the same way, so it gets the composite -- which replaces the
+  // bare `@@index([issuedByAdminId])`, since an equality on the leading
+  // column serves every lookup the old one did.
+  @@index([createdAt(sort: Desc)])
+  @@index([issuedByAdminId, createdAt(sort: Desc)])
   @@map("vouchers")
 }
 
