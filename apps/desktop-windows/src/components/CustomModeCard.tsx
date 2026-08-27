@@ -57,6 +57,18 @@ export function CustomModeCard() {
   const { t } = useI18n();
   const [settings, setSettings] = useState<SplitTunnelSettings | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /**
+   * A game from the catalogue that matched nothing running, kept until
+   * something makes it stale.
+   *
+   * Separate from `notice` because it must outlive the click that
+   * produced it. `notice` is a one-line transient that every subsequent
+   * action clears, which is right for "already on the list" and wrong
+   * for this: resolving nothing is the case where the customer is most
+   * likely to believe the opposite of what happened, because the card
+   * looks exactly as it did before they picked the game.
+   */
+  const [unmatched, setUnmatched] = useState<{ game: string; names: string[] } | null>(null);
   const [picking, setPicking] = useState(false);
   /** The server's curated game list, or null until it has been asked
    * for. Games with no executable list are dropped here rather than in
@@ -272,6 +284,13 @@ export function CustomModeCard() {
       ? [...settings.games.filter((g) => g.slug !== game.slug), game]
       : settings.games;
     await apply({ ...settings, apps, scopes: scopesFor(apps, scopes), games: gamesFor(apps, games) });
+    // Cleared here rather than only where it was set, so the warning
+    // cannot outlive its own truth. Its whole point is that the
+    // customer picked a game by hand afterwards -- and a red block
+    // still saying nothing was added, above a list that now contains
+    // the program they just added, would be the same failure this
+    // change exists to fix, pointing the other way.
+    setUnmatched(null);
     return true;
   }
 
@@ -301,9 +320,22 @@ export function CustomModeCard() {
     }
     const resolved = resolveGameApps(game, running);
     if (resolved.paths.length === 0) {
-      setNotice(t("settings.customGameNone", { game: game.displayName }));
+      // Kept on screen rather than said once in the notice line, which
+      // is the whole difference between this and what shipped.
+      //
+      // A game that resolves *nothing* creates no group, so unlike a
+      // partly-resolved game there is no row left behind to carry a
+      // warning -- the card simply returned to how it looked before,
+      // with one small red sentence that the next click cleared. The
+      // customer's reasonable reading of that is that it worked.
+      //
+      // `wanted` rather than `resolved.missing`: they are equal here by
+      // construction, and naming the variable that means "what Neoxify
+      // looked for" is what the message is actually about.
+      setUnmatched({ game: game.displayName, names: wanted });
       return;
     }
+    setUnmatched(null);
     // The one gate on destination scoping, and the only place this
     // client decides to narrow anything.
     //
@@ -712,6 +744,47 @@ export function CustomModeCard() {
             </p>
           ))}
 
+          {/* A game that resolved nothing at all.
+
+              The catalogue's names come from Valve's appinfo for each
+              game's Steam build, and every title with a non-Steam
+              distribution is exposed to naming programs that are not on
+              the customer's disk. Old School RuneScape is the one that
+              has been checked: its row names oslaunch.exe and
+              osclient.exe, Jagex's own installer ships
+              JagexLauncher.exe, and the row therefore routes nothing at
+              all for anyone who installed it the account-free way.
+
+              So this names what was looked for. Without that the
+              customer has no way to tell "the game is not running yet"
+              -- which their next action fixes -- from "these names are
+              not my game's", which no amount of retrying will. */}
+          {unmatched ? (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-2">
+              <p className="text-xs font-medium text-destructive">
+                {t("settings.customGameNone", { game: unmatched.game })}
+              </p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {t("settings.customGameNoneBody", {
+                  game: unmatched.game,
+                  names: unmatched.names.join(", "),
+                })}
+              </p>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setUnmatched(null);
+                  setNotice(null);
+                  setPicking(true);
+                }}
+                className="mt-2 h-8 gap-2 px-2.5 text-xs"
+              >
+                <ListChecks className="size-3.5" />
+                {t("settings.customGameNoneAction")}
+              </Button>
+            </div>
+          ) : null}
+
           {notice ? <p className="text-xs text-destructive">{notice}</p> : null}
 
           {/* Two ways in, because neither covers everything. The
@@ -804,6 +877,32 @@ export function CustomModeCard() {
               does not stall. Same behaviour, and both deserve to be
               told rather than to find out. */}
           <p className="text-[11px] text-muted-foreground">{t("settings.customFailOpen")}</p>
+          {/* Ping, and why it stops.
+
+              Measured on the rig: a game whose TCP was fully tunnelled
+              still sent 174 ICMP echo requests in the clear to roughly
+              170 of its world servers, so a correctly-routed player was
+              handing their real address to every one of them -- and the
+              latency figures the game displayed were describing the
+              direct path, not the tunnel. The service now refuses those
+              packets rather than letting them out.
+
+              It cannot be narrowed to the chosen apps. An ICMP packet
+              carries no port and Windows keeps no ICMP equivalent of the
+              endpoint tables the split tunnel attributes TCP and UDP
+              with, so there is nothing to ask which program sent one.
+              Blocking machine-wide is the honest version of that, and
+              this paragraph is the half of it the customer is owed:
+              a visible broken feature they were warned about beats an
+              invisible leak they were not.
+
+              Shown whenever the mode is on, beside the fail-open note
+              and for the same reason -- it is a standing property of
+              Custom mode, not an event. */}
+          <p className="text-[11px] font-medium text-foreground">
+            {t("settings.customIcmpTitle")}
+          </p>
+          <p className="text-[11px] text-muted-foreground">{t("settings.customIcmpBody")}</p>
         </div>
       ) : null}
     </Card>

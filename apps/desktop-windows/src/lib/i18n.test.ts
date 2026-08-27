@@ -181,6 +181,66 @@ describe("what the strings are allowed to claim", () => {
     expect(fa["gaming.pickerMeaning"]).toContain("آزمایش نشده");
   });
 
+  it("says a game resolved nothing, and names what it looked for", () => {
+    // A customer who picks a game and gets silence is being told
+    // something false by omission. The catalogue's names come from the
+    // Steam build of each title, so a non-Steam install can match none
+    // of them -- proven for Old School RuneScape, whose row names
+    // oslaunch.exe and osclient.exe while Jagex's own installer ships
+    // JagexLauncher.exe. Retrying never fixes that, so the message has
+    // to carry the names for the customer to see why.
+    //
+    // Read through an untyped view on purpose: before these keys
+    // existed this was a failing assertion rather than a compile error,
+    // which is what makes it evidence.
+    const loose = en as Record<string, string | undefined>;
+    const looseFa = fa as Record<string, string | undefined>;
+
+    for (const dict of [loose, looseFa]) {
+      const body = dict["settings.customGameNoneBody"];
+      expect(body).toBeDefined();
+      // What it looked for, and which game.
+      expect(body).toContain("{names}");
+      expect(body).toContain("{game}");
+      expect(dict["settings.customGameNone"]).toContain("{game}");
+      expect(dict["settings.customGameNoneAction"]).toBeDefined();
+    }
+
+    // And it must point at the path that actually works rather than at
+    // the one that just failed. The old string said "start the game and
+    // add it again", which is a loop when the names are wrong.
+    expect(loose["settings.customGameNoneBody"]).toMatch(/running apps/i);
+    expect(loose["settings.customGameNoneBody"]).not.toMatch(/add it again/i);
+    expect(looseFa["settings.customGameNoneBody"]).toContain("در حال اجرا");
+  });
+
+  it("warns that Custom mode blocks ping, and does not pretend it is per-app", () => {
+    // Measured on the rig: a game whose TCP was fully tunnelled still
+    // sent 174 ICMP echo requests in the clear to ~170 of its world
+    // servers. The tunnel cannot carry ICMP and nothing can attribute it
+    // to a program, so it is blocked machine-wide -- and the customer has
+    // to be told, because their in-game ping display stops working and
+    // because any ping figure they do see is not the tunnel's.
+    const loose = en as Record<string, string | undefined>;
+    const looseFa = fa as Record<string, string | undefined>;
+
+    for (const dict of [loose, looseFa]) {
+      expect(dict["settings.customIcmpTitle"]).toBeDefined();
+      expect(dict["settings.customIcmpBody"]).toBeDefined();
+    }
+
+    // The scope must be stated. "Your chosen apps' ping is blocked"
+    // would be smaller than the truth and therefore a false promise.
+    expect(loose["settings.customIcmpBody"]).toMatch(/every app on this computer/i);
+    expect(looseFa["settings.customIcmpBody"]).toContain("همهٔ برنامه‌های این کامپیوتر");
+
+    // And the standing Custom-mode line on the dashboard carries it too,
+    // beside the IPv6 sentence, because it is a property of the mode
+    // rather than news about this session.
+    expect(en["dash.customActive"]).toMatch(/ping/i);
+    expect(fa["dash.customActive"]).toContain("پینگ");
+  });
+
   it("keeps Persian in the formal register", () => {
     // A sample of unambiguous informal (dovom-shakhs mofrad) verb endings.
     // «شما» takes «-ید»; these are the «تو» forms that have been rejected
