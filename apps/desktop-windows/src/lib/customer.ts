@@ -1,4 +1,4 @@
-import { apiRequest } from "./api";
+import { apiRequest, apiRequestRevalidated } from "./api";
 import type { ApiResult } from "./api";
 import type {
   AppLinks,
@@ -133,24 +133,73 @@ export interface GamingProfileResponse {
  *
  * Failures are NOT cached. `loadProfile` doubles as the "Try again" handler
  * behind a load failure, and a cached error would make that button do
- * nothing at all. */
+ * nothing at all.
+ *
+ * Past the TTL the entry is not thrown away -- it is *revalidated*. The
+ * server mints an ETag over the catalogue fingerprint plus this
+ * customer's entitlement and resolver, so offering it back turns an
+ * unchanged answer into a 304 with no body: 374 KB becomes a round trip.
+ * The body is kept alongside the tag because a 304 carries nothing, and
+ * a validator with no body to pair it with is worthless.
+ *
+ * Process memory only, deliberately -- never a file, never the Tauri
+ * store. Both halves are per-customer entitlement state, and
+ * `clearGamingProfileCache()` has no caller today, so anything persisted
+ * here would outlive a sign-out and be offered on behalf of whoever
+ * signs in next. */
 const GAMING_PROFILE_TTL_MS = 30_000;
-let gamingProfileCache: { at: number; value: ApiResult<GamingProfileResponse> } | null = null;
+/** The body, the validator that stands for it, and when it was last
+ * confirmed current. The three only make sense together, so they live in
+ * one object -- which is also what makes `clearGamingProfileCache()`
+ * dropping the tag along with the body unmissable rather than a second
+ * line somebody can forget. */
+type GamingProfileEntry = {
+  at: number;
+  value: { ok: true; data: GamingProfileResponse };
+  etag: string | null;
+};
+let gamingProfileCache: GamingProfileEntry | null = null;
 let gamingProfileInFlight: Promise<ApiResult<GamingProfileResponse>> | null = null;
 
+/** `held` is the entry `validator` was taken from, so a 304 can be
+ * matched against the body it actually stands for. */
+async function loadGamingProfile(
+  validator: string | null,
+  held: GamingProfileEntry | null,
+): Promise<ApiResult<GamingProfileResponse>> {
+  const result = await apiRequestRevalidated<GamingProfileResponse>("/customer/gaming-profile", validator);
+  if (!result.ok) return result;
+
+  if (result.notModified) {
+    // The cache must still be the entry the tag was minted against. If
+    // it was cleared or replaced while this was in flight -- a different
+    // customer signing in is exactly that case -- there is no body this
+    // 304 speaks for, and serving `held` anyway would show one
+    // customer's entitlement to another. Ask again unconditionally
+    // instead: belt and braces, and a re-download is the honest answer
+    // where an error would only give the customer a button to press.
+    if (!held || gamingProfileCache !== held) return loadGamingProfile(null, null);
+
+    // Confirmed current, so the TTL restarts from now. That is the whole
+    // point: the next 30 s are served from memory without the catalogue
+    // crossing the wire again.
+    gamingProfileCache = { at: Date.now(), value: held.value, etag: result.etag ?? held.etag };
+    return held.value;
+  }
+
+  const value = { ok: true as const, data: result.data };
+  gamingProfileCache = { at: Date.now(), value, etag: result.etag };
+  return value;
+}
+
 export function getGamingProfile(): Promise<ApiResult<GamingProfileResponse>> {
-  const fresh = gamingProfileCache && Date.now() - gamingProfileCache.at < GAMING_PROFILE_TTL_MS;
-  if (fresh && gamingProfileCache) return Promise.resolve(gamingProfileCache.value);
+  const held = gamingProfileCache;
+  if (held && Date.now() - held.at < GAMING_PROFILE_TTL_MS) return Promise.resolve(held.value);
   if (gamingProfileInFlight) return gamingProfileInFlight;
 
-  gamingProfileInFlight = apiRequest<GamingProfileResponse>("/customer/gaming-profile")
-    .then((result) => {
-      if (result.ok) gamingProfileCache = { at: Date.now(), value: result };
-      return result;
-    })
-    .finally(() => {
-      gamingProfileInFlight = null;
-    });
+  gamingProfileInFlight = loadGamingProfile(held?.etag ?? null, held).finally(() => {
+    gamingProfileInFlight = null;
+  });
   return gamingProfileInFlight;
 }
 
@@ -158,7 +207,10 @@ export function getGamingProfile(): Promise<ApiResult<GamingProfileResponse>> {
  *
  * For the cases where the answer can legitimately change out from under the
  * TTL -- a plan redeemed, a different customer signing in -- so that
- * entitlement is never shown from a previous session. */
+ * entitlement is never shown from a previous session. The ETag goes with
+ * it: the tag mixes in the customer id, and offering a previous
+ * customer's validator would ask the server a question about somebody
+ * else. */
 export function clearGamingProfileCache(): void {
   gamingProfileCache = null;
 }
