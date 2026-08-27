@@ -630,6 +630,12 @@ CONF
 # authenticator without forcing an early renewal; `certbot renew
 # --dry-run` afterwards is what proves it, and the caller is told to run
 # it rather than being told it worked.
+#
+# A certificate issued over DNS-01 records `authenticator = dns-cloudflare`
+# and is skipped by the grep below, which is correct and deliberate: it
+# never binds a port, so nginx taking :80 cannot break its renewal, and
+# rewriting it to webroot would break a renewal that works. Nothing here
+# needs to change when the shared wildcard is turned on.
 migrate_standalone_acme_to_webroot() {
   local conf name changed=0
   [[ -d /etc/letsencrypt/renewal ]] || return 0
@@ -806,6 +812,355 @@ CONF
   systemctl reload nginx 2>/dev/null || systemctl restart nginx
 }
 
+# ---------------------------------------------------------------------
+# Optional DNS-01 issuance of a shared, nodes-only wildcard certificate.
+#
+# Off unless /etc/neoxify/acme.conf says otherwise. With no such file
+# every certbot command line below is exactly the one this installer has
+# always run.
+#
+# Why this exists at all
+# ----------------------
+# Certificate Transparency is an append-only public log of every TLS
+# certificate ever issued. The default path here asks Let's Encrypt for
+# a certificate named after this node, which publishes the node's
+# hostname -- permanently, and within seconds of issuance. One crt.sh
+# query for the zone then returns the whole exit fleet by name, and DNS
+# turns each name into an address. No account, no probing, no rate
+# limit. That is precisely the technique
+# docs/research/gaming-ip-reputation.md used to enumerate another
+# operator's 635 nodes, and enumerability is the variable that
+# measurement identified as *causing* the `is_vpn` reputation label that
+# gets customers refused by third-party services.
+# docs/node-enumerability-remediation.md is the full write-up.
+#
+# A wildcard fixes the leak going forward: `*.n.example.com` covers
+# every node without naming a single one. Let's Encrypt issues wildcards
+# ONLY over DNS-01 -- that is CA policy, not a certbot limitation -- so
+# this needs a DNS provider credential, which is why it is opt-in rather
+# than the default. The zone this fleet uses is on Cloudflare, hence
+# python3-certbot-dns-cloudflare.
+#
+# Be clear about what it buys: a wildcard freezes the exposure, it does
+# not reduce it. Names already in CT are there forever, and no
+# certificate change withdraws them.
+#
+# The trap that decides the shape of this: NODES-ONLY, never the apex
+# ---------------------------------------------------------------------
+# A wildcard for the whole domain would be one private key covering the
+# panel, the API, billing and the updater, copied onto every node --
+# including a relay sitting in Iran, which is the machine in this fleet
+# most likely to be seized or compromised. Today, compromising that
+# relay costs its own name and nothing else. Widening it is a security
+# downgrade traded for a privacy gain and it is not acceptable, so
+# ACME_WILDCARD_BASE must be a dedicated node subdomain
+# (`n.example.com`) and never the registrable domain. The panel keeps
+# its own separate single-name certificate on purpose;
+# installer/lib/panel.sh is deliberately untouched by any of this.
+#
+# The other trap: the key type, and two callers who could fight over it
+# ---------------------------------------------------------------------
+# Xray and IKEv2 both need a certificate for this node. Today they issue
+# separately, and IKEv2 reissues the same --cert-name as RSA because
+# Android's IKE library rejects an ECDSA-signed AUTH payload outright
+# (install_ikev2 carries the exact exception and the day it was found).
+# Under a shared wildcard they no longer have separate certificates to
+# reissue -- they have one, and whichever ran last would decide its key
+# type for the other. If Xray's run won, certbot's post-2.0 default is
+# ECDSA and every Android IKEv2 dial on the node fails while the desktop
+# client keeps working. That asymmetry is exactly what makes this class
+# of bug ship.
+#
+# So the wildcard is issued RSA-2048 from the very first request, and
+# neoxify_acme_issue strips any key-type, cert-name or domain argument a
+# caller passes, so the two callers cannot disagree by construction
+# rather than by convention. Xray accepts RSA without complaint; IKEv2
+# has no alternative. install_ikev2 additionally verifies the key type
+# on disk before trusting a wildcard it did not issue itself.
+#
+# /etc/neoxify/acme.conf
+# ----------------------
+# Shell syntax, sourced, mode 0600. It holds no secret of its own -- it
+# points at the file that does, so a credential never has to be typed
+# into this installer or committed anywhere.
+#
+#   # Challenge to use: "http" (default, per-node name, publishes to CT)
+#   # or "dns-cloudflare" (shared wildcard, name stays out of CT).
+#   ACME_CHALLENGE=dns-cloudflare
+#   # Cloudflare credentials ini, in the form certbot's dns-cloudflare
+#   # plugin documents. Must be mode 0600. Never printed by this script.
+#   ACME_CF_INI=/root/.secrets/cloudflare.ini
+#   # The wildcard's base. A node whose hostname is one label under this
+#   # uses the shared certificate. MUST NOT be the registrable domain.
+#   ACME_WILDCARD_BASE=n.example.com
+#   # certbot --cert-name for the wildcard, i.e. the directory under
+#   # /etc/letsencrypt/live that every node reads from.
+#   ACME_CERT_NAME=neoxify-nodes
+#   # How long certbot waits for the TXT record to propagate.
+#   ACME_PROPAGATION_SECONDS=60
+#
+# Override the path with NEOXIFY_ACME_CONF to rehearse this somewhere
+# that is not a node.
+NEOXIFY_ACME_CONF="${NEOXIFY_ACME_CONF:-/etc/neoxify/acme.conf}"
+
+# Reads the config once per shell and validates it.
+#
+# The loaded state is cached in NEOXIFY_ACME_LOADED, including the
+# failure, because command substitution inherits shell variables:
+# neoxify_acme_cert_dir runs inside `$(...)` and would otherwise
+# re-source the file and re-print every warning on each call. A
+# validation failure caches as "bad" and keeps returning non-zero --
+# caching a failure as success is how a misconfigured node would quietly
+# issue a per-node certificate anyway.
+#
+# A bad config is fatal, deliberately. The tempting alternative -- warn
+# and fall back to HTTP-01 -- issues a certificate named after this node
+# and publishes it to a log that cannot be edited, which is the exact
+# thing the operator configured this to prevent. Refusing costs an
+# install; falling back costs a permanent public record.
+neoxify_acme_load_conf() {
+  case "${NEOXIFY_ACME_LOADED:-}" in
+    ok) return 0 ;;
+    bad) return 1 ;;
+  esac
+
+  ACME_CHALLENGE="http"
+  ACME_CF_INI=""
+  ACME_WILDCARD_BASE=""
+  ACME_CERT_NAME="neoxify-nodes"
+  ACME_PROPAGATION_SECONDS="60"
+
+  if [[ -f "$NEOXIFY_ACME_CONF" ]]; then
+    # shellcheck disable=SC1090
+    . "$NEOXIFY_ACME_CONF"
+  fi
+
+  if neoxify_acme_validate_conf; then
+    NEOXIFY_ACME_LOADED="ok"
+    return 0
+  fi
+  NEOXIFY_ACME_LOADED="bad"
+  return 1
+}
+
+# Split out from neoxify_acme_load_conf only so the caching above can
+# wrap it. Prints the credentials file's path and mode, never a byte of
+# its contents.
+neoxify_acme_validate_conf() {
+  local dots ini_mode
+
+  case "$ACME_CHALLENGE" in
+    http) return 0 ;;
+    dns-cloudflare) ;;
+    *)
+      echo "$NEOXIFY_ACME_CONF: ACME_CHALLENGE must be 'http' or 'dns-cloudflare'." >&2
+      return 1
+      ;;
+  esac
+
+  if [[ -z "$ACME_WILDCARD_BASE" ]]; then
+    echo "$NEOXIFY_ACME_CONF: ACME_CHALLENGE=dns-cloudflare needs ACME_WILDCARD_BASE," >&2
+    echo "  the subdomain the shared wildcard covers, e.g. n.example.com." >&2
+    return 1
+  fi
+  if [[ "$ACME_WILDCARD_BASE" == *[!a-zA-Z0-9.-]* ]] ||
+     [[ "$ACME_WILDCARD_BASE" == .* || "$ACME_WILDCARD_BASE" == *. ]]; then
+    echo "$NEOXIFY_ACME_CONF: ACME_WILDCARD_BASE is not a DNS name." >&2
+    return 1
+  fi
+  # Refuse a wildcard at the registrable domain. Three labels minimum
+  # means n.example.com passes and example.com does not, which is what
+  # stops the panel's private key being handed to every node -- see the
+  # block comment above. That is the worst outcome available here and it
+  # is one edited line away at all times.
+  #
+  # Honest about the heuristic: a zone under a multi-label suffix such
+  # as example.co.uk has three labels too and would slip through. This
+  # catches the mistake this fleet can actually make, and nothing in a
+  # shell script can know the public suffix without a copy of the PSL.
+  dots="${ACME_WILDCARD_BASE//[!.]/}"
+  if (( ${#dots} < 2 )); then
+    echo "$NEOXIFY_ACME_CONF: ACME_WILDCARD_BASE='$ACME_WILDCARD_BASE' looks like a whole domain." >&2
+    echo "  The wildcard must cover nodes only, e.g. n.example.com. A wildcard for the" >&2
+    echo "  registrable domain puts the panel, API and billing private key on every" >&2
+    echo "  node, including relays in hostile jurisdictions. Refusing." >&2
+    return 1
+  fi
+
+  if [[ -z "$ACME_CERT_NAME" || "$ACME_CERT_NAME" == *[!a-zA-Z0-9._-]* || "$ACME_CERT_NAME" == -* ]]; then
+    echo "$NEOXIFY_ACME_CONF: ACME_CERT_NAME must be a plain name -- it becomes a" >&2
+    echo "  directory under /etc/letsencrypt/live." >&2
+    return 1
+  fi
+
+  if [[ ! "$ACME_PROPAGATION_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$NEOXIFY_ACME_CONF: ACME_PROPAGATION_SECONDS must be a positive integer." >&2
+    return 1
+  fi
+
+  if [[ -z "$ACME_CF_INI" ]]; then
+    echo "$NEOXIFY_ACME_CONF: ACME_CHALLENGE=dns-cloudflare needs ACME_CF_INI," >&2
+    echo "  the path to the Cloudflare credentials file." >&2
+    return 1
+  fi
+  if [[ ! -f "$ACME_CF_INI" ]]; then
+    echo "$NEOXIFY_ACME_CONF: ACME_CF_INI points at $ACME_CF_INI, which does not exist." >&2
+    return 1
+  fi
+  # certbot checks the mode itself, but it checks several minutes into
+  # an install, after the operator has answered every other prompt.
+  # Checking here fails in the first second instead. The token is
+  # zone-scoped -- Cloudflare cannot scope one to a single record -- so
+  # anything that can read this file can rewrite the panel's DNS.
+  ini_mode="$(stat -c '%a' "$ACME_CF_INI" 2>/dev/null || true)"
+  if [[ "$ini_mode" != "600" ]]; then
+    echo "$NEOXIFY_ACME_CONF: $ACME_CF_INI is mode ${ini_mode:-unreadable}, and must be 600." >&2
+    echo "  Run: chmod 600 $ACME_CF_INI" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# True when this hostname should use the shared wildcard.
+#
+# The one-label rule is not tidiness: `*.n.example.com` matches
+# `a.n.example.com` and does NOT match `a.b.n.example.com`. DNS wildcards
+# cover exactly one label. Without this check a deeper hostname would be
+# pointed at a certificate that does not carry its name, and the failure
+# would surface on the customer's device as a certificate error rather
+# than here, where it is one line of output.
+neoxify_acme_wildcard_applies() {
+  local host="$1" leftmost
+  neoxify_acme_load_conf || return 1
+  [[ "$ACME_CHALLENGE" == "dns-cloudflare" ]] || return 1
+  [[ -n "$ACME_WILDCARD_BASE" ]] || return 1
+  [[ "$host" == *".$ACME_WILDCARD_BASE" ]] || return 1
+  leftmost="${host%".$ACME_WILDCARD_BASE"}"
+  [[ -n "$leftmost" && "$leftmost" != *.* ]]
+}
+
+# The directory under /etc/letsencrypt/live this node's certificate is
+# in: the wildcard's --cert-name when the wildcard covers this host,
+# otherwise the hostname, which is what certbot has always used and what
+# every existing node has on disk.
+#
+# Everything that reads a certificate goes through this rather than
+# building the path itself, so that turning the wildcard on cannot leave
+# one consumer reading a directory nothing writes any more. The
+# generated /bin/sh helpers cannot call back into this file, so they
+# bake the *resolved* directory in at generation time -- exactly as they
+# have always baked in the domain.
+neoxify_acme_cert_dir() {
+  local host="$1"
+  neoxify_acme_load_conf || return 1
+  if neoxify_acme_wildcard_applies "$host"; then
+    printf '%s\n' "$ACME_CERT_NAME"
+  else
+    printf '%s\n' "$host"
+  fi
+}
+
+# Whether a certificate on disk is RSA.
+#
+# Returns success when openssl is missing rather than blocking an
+# install on a machine that cannot answer the question. openssl is
+# present on every Ubuntu this installer supports and is already used
+# elsewhere in this file, so that path is theoretical.
+neoxify_acme_cert_is_rsa() {
+  local pem="$1"
+  command -v openssl >/dev/null 2>&1 || return 0
+  [[ -f "$pem" ]] || return 0
+  openssl x509 -in "$pem" -noout -text 2>/dev/null |
+    grep -q "Public Key Algorithm: rsaEncryption"
+}
+
+# Issues, or reuses, the shared wildcard for a host the wildcard covers.
+#
+#   neoxify_acme_issue <hostname> [account args...]
+#
+# Returns 2, having done nothing at all, when the wildcard does not
+# apply to this hostname. That is the signal for the caller to run its
+# own HTTP-01 block, which is left inline at each call site on purpose:
+# the Xray and IKEv2 paths differ in challenge order, output
+# redirection, port-80 detection and error text, and folding them
+# together here would change command lines that every existing node
+# already depends on. The default path is the one with live users on it.
+# It does not move.
+#
+# Caller arguments are filtered, not trusted. --key-type, --rsa-key-size,
+# --cert-name and -d are dropped because a shared certificate can only
+# have one of each, and both callers pass their own -- see the key-type
+# trap in the block comment above. Only account-level flags (-m,
+# --agree-tos, --non-interactive, --register-unsafely-without-email)
+# survive.
+neoxify_acme_issue() {
+  local host="$1"; shift
+  local arg skip_next=0 live_dir
+  local -a passthrough=()
+
+  neoxify_acme_load_conf || return 1
+  neoxify_acme_wildcard_applies "$host" || return 2
+
+  for arg in "$@"; do
+    if (( skip_next )); then skip_next=0; continue; fi
+    case "$arg" in
+      --key-type|--rsa-key-size|--elliptic-curve|--cert-name|-d|--domain|--domains|-w|--webroot-path)
+        skip_next=1 ;;
+      --key-type=*|--rsa-key-size=*|--elliptic-curve=*|--cert-name=*|--domain=*|--domains=*|--webroot-path=*)
+        ;;
+      --standalone|--webroot|--nginx|--apache)
+        ;;
+      *)
+        passthrough+=("$arg") ;;
+    esac
+  done
+
+  live_dir="/etc/letsencrypt/live/$ACME_CERT_NAME"
+  if [[ -f "$live_dir/fullchain.pem" ]]; then
+    # Reuse, never reissue. The second protocol installed on a node
+    # would otherwise renew a certificate the first one is already
+    # serving, and under a shared --cert-name that is precisely where a
+    # key-type flip would happen without anything saying so.
+    echo "Shared wildcard certificate '$ACME_CERT_NAME' already present -- reusing it."
+    if ! neoxify_acme_cert_is_rsa "$live_dir/cert.pem"; then
+      echo "  WARNING: '$ACME_CERT_NAME' is not RSA. Android refuses a non-RSA server" >&2
+      echo "  certificate for IKEv2, so IKEv2 on this node would fail while every other" >&2
+      echo "  protocol kept working. Reissue it with --key-type rsa --rsa-key-size 2048" >&2
+      echo "  --force-renewal before installing IKEv2." >&2
+    fi
+    return 0
+  fi
+
+  if ! dpkg -s python3-certbot-dns-cloudflare >/dev/null 2>&1; then
+    # This needs certbot from apt, which is what this installer
+    # installs. A snap certbot cannot load an apt-installed plugin.
+    echo "Installing python3-certbot-dns-cloudflare..."
+    apt-get update -qq && apt-get install -y -qq python3-certbot-dns-cloudflare || return 1
+  fi
+
+  echo "Requesting the shared wildcard *.$ACME_WILDCARD_BASE over DNS-01..."
+  echo "Expect roughly $ACME_PROPAGATION_SECONDS seconds of waiting while the TXT record propagates."
+  # RSA from the very first issuance, not as a preference -- see the
+  # key-type trap above. Xray takes RSA; Android's IKE library takes
+  # nothing else.
+  if ! certbot certonly \
+      --dns-cloudflare \
+      --dns-cloudflare-credentials "$ACME_CF_INI" \
+      --dns-cloudflare-propagation-seconds "$ACME_PROPAGATION_SECONDS" \
+      --cert-name "$ACME_CERT_NAME" \
+      --key-type rsa --rsa-key-size 2048 \
+      -d "*.$ACME_WILDCARD_BASE" \
+      ${passthrough[@]+"${passthrough[@]}"}; then
+    echo "Could not obtain the wildcard certificate for *.$ACME_WILDCARD_BASE." >&2
+    echo "Check that the Cloudflare token in $ACME_CF_INI carries Zone:DNS:Edit on this" >&2
+    echo "zone, and that ACME_PROPAGATION_SECONDS is long enough for the challenge TXT" >&2
+    echo "record to be visible to Let's Encrypt." >&2
+    return 1
+  fi
+  return 0
+}
+
 # Obtains a certificate for the Trojan inbound's domain.
 #
 # certbot standalone rather than the nginx plugin the panel installer
@@ -815,41 +1170,61 @@ CONF
 # reconfigured rather than alongside it.
 issue_tls_certificate() {
   local domain="$1"
+  local cert_dir
 
   if ! command -v certbot >/dev/null 2>&1; then
     echo "Installing certbot..."
     apt-get update -qq && apt-get install -y -qq certbot || return 1
   fi
 
-  if [[ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
+  # Where this node's certificate lives: the hostname, as it always has
+  # been, unless /etc/neoxify/acme.conf turns on the shared nodes-only
+  # wildcard. Split from the declaration so a failed load is not masked
+  # by `local`'s own exit status.
+  neoxify_acme_load_conf || return 1
+  cert_dir="$(neoxify_acme_cert_dir "$domain")" || return 1
+
+  if [[ -f "/etc/letsencrypt/live/$cert_dir/fullchain.pem" ]]; then
     echo "Certificate for $domain already present -- reusing it."
   else
-    echo "Requesting a certificate for $domain..."
-    echo "Inbound TCP 80 must reach this node and $domain must already resolve here."
-    read -r -p "Email for expiry notices: " le_email
-    # Webroot when something already holds port 80, standalone only on a
-    # node that genuinely has nothing there -- the same order install_ikev2
-    # uses, and for the same reason.
-    #
-    # On a fresh install this runs before nginx exists, so standalone is
-    # what fires and the renewal file records `standalone`. That is the
-    # state singapore-1 and finland1 are in, and it is a slow-motion
-    # outage: nginx arrives minutes later for the fallback site, takes
-    # port 80, and every future renewal fails to bind it. ensure_port80_site
-    # migrates those records to webroot once it owns the port. Re-runs
-    # from the management menu reach here with nginx already up, and take
-    # the webroot branch directly.
-    local acme_args=(--standalone)
-    if [[ -d /var/www/html ]] && ss -tln 2>/dev/null | grep -qE "[^0-9]:80[[:space:]]"; then
-      echo "Something already serves port 80; using the webroot challenge."
-      acme_args=(--webroot -w /var/www/html)
-    fi
-    if ! certbot certonly "${acme_args[@]}" -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
-      echo "Could not obtain a certificate for $domain." >&2
-      echo "Check that its DNS record points here, that inbound TCP 80 reaches" >&2
-      echo "this node including any cloud firewall, and that whatever holds" >&2
-      echo "port 80 serves /var/www/html." >&2
-      return 1
+    if neoxify_acme_wildcard_applies "$domain"; then
+      # DNS-01. Port 80 is not involved and is not mentioned, because
+      # saying "inbound TCP 80 must reach this node" here would send an
+      # operator debugging a firewall that has nothing to do with the
+      # failure.
+      echo "Requesting a certificate for $domain..."
+      echo "$domain is covered by the shared wildcard, so its own name never enters"
+      echo "Certificate Transparency and no inbound port is needed for the challenge."
+      read -r -p "Email for expiry notices: " le_email
+      neoxify_acme_issue "$domain" -m "$le_email" --agree-tos --non-interactive || return 1
+    else
+      echo "Requesting a certificate for $domain..."
+      echo "Inbound TCP 80 must reach this node and $domain must already resolve here."
+      read -r -p "Email for expiry notices: " le_email
+      # Webroot when something already holds port 80, standalone only on a
+      # node that genuinely has nothing there -- the same order install_ikev2
+      # uses, and for the same reason.
+      #
+      # On a fresh install this runs before nginx exists, so standalone is
+      # what fires and the renewal file records `standalone`. That is the
+      # state singapore-1 and finland1 are in, and it is a slow-motion
+      # outage: nginx arrives minutes later for the fallback site, takes
+      # port 80, and every future renewal fails to bind it. ensure_port80_site
+      # migrates those records to webroot once it owns the port. Re-runs
+      # from the management menu reach here with nginx already up, and take
+      # the webroot branch directly.
+      local acme_args=(--standalone)
+      if [[ -d /var/www/html ]] && ss -tln 2>/dev/null | grep -qE "[^0-9]:80[[:space:]]"; then
+        echo "Something already serves port 80; using the webroot challenge."
+        acme_args=(--webroot -w /var/www/html)
+      fi
+      if ! certbot certonly "${acme_args[@]}" -d "$domain" -m "$le_email" --agree-tos --non-interactive; then
+        echo "Could not obtain a certificate for $domain." >&2
+        echo "Check that its DNS record points here, that inbound TCP 80 reaches" >&2
+        echo "this node including any cloud firewall, and that whatever holds" >&2
+        echo "port 80 serves /var/www/html." >&2
+        return 1
+      fi
     fi
   fi
 
@@ -874,6 +1249,16 @@ issue_tls_certificate() {
 # running as nobody.
 install_cert_for_xray() {
   local domain="$1"
+  local cert_dir
+
+  # Resolved here, not inside the generated script: neoxify-sync-certs
+  # is plain /bin/sh with no access to any of this file's functions, so
+  # the directory has to be baked in at generation time -- exactly as
+  # the domain always has been. Re-running this function after
+  # /etc/neoxify/acme.conf changes rewrites the script with the new
+  # directory, which is what makes switching a node onto the wildcard a
+  # matter of re-running the menu entry.
+  cert_dir="$(neoxify_acme_cert_dir "$domain")" || return 1
 
   install -d -m 755 /usr/local/etc/xray/certs
   cat > /usr/local/bin/neoxify-sync-certs <<SYNC
@@ -881,8 +1266,8 @@ install_cert_for_xray() {
 set -e
 DEST="/usr/local/etc/xray/certs"
 install -d -m 755 "\$DEST"
-cp "/etc/letsencrypt/live/$domain/fullchain.pem" "\$DEST/fullchain.pem"
-cp "/etc/letsencrypt/live/$domain/privkey.pem" "\$DEST/privkey.pem"
+cp "/etc/letsencrypt/live/$cert_dir/fullchain.pem" "\$DEST/fullchain.pem"
+cp "/etc/letsencrypt/live/$cert_dir/privkey.pem" "\$DEST/privkey.pem"
 chown nobody:nogroup "\$DEST/fullchain.pem" "\$DEST/privkey.pem"
 chmod 644 "\$DEST/fullchain.pem"
 chmod 400 "\$DEST/privkey.pem"
@@ -2737,8 +3122,24 @@ install_ikev2() {
   #
   # The certificate becomes RSA for both users. Xray takes either;
   # IKEv2 does not.
-  local acme_ok="n"
-  if [[ -d /var/www/html ]] && ss -tlnp 2>/dev/null | grep -qE "[^0-9]:80\b"; then
+  #
+  # None of the above applies when the shared nodes-only wildcard is
+  # configured: there is then one certificate for every node and every
+  # protocol, it is issued RSA-2048 by neoxify_acme_issue on the first
+  # request precisely so this step never has to change its key type, and
+  # it is reused rather than reissued. The RSA check after issuance is
+  # what stops a wildcard that somebody created by hand as ECDSA from
+  # being accepted here and breaking every Android dial on the node.
+  local acme_ok="n" acme_wildcard="n" cert_dir
+  neoxify_acme_load_conf || return 1
+  cert_dir="$(neoxify_acme_cert_dir "$hostname_input")" || return 1
+  if neoxify_acme_wildcard_applies "$hostname_input"; then
+    acme_wildcard="y"
+    if neoxify_acme_issue "$hostname_input" --non-interactive --agree-tos \
+        --register-unsafely-without-email; then
+      acme_ok="y"
+    fi
+  elif [[ -d /var/www/html ]] && ss -tlnp 2>/dev/null | grep -qE "[^0-9]:80\b"; then
     echo "  Something already serves port 80; using the webroot challenge."
     if certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos \
         --cert-name "$hostname_input" --key-type rsa --rsa-key-size 2048 \
@@ -2746,7 +3147,13 @@ install_ikev2() {
       acme_ok="y"
     fi
   fi
-  if [[ "$acme_ok" != "y" ]]; then
+  # Guarded on acme_wildcard, not only on acme_ok: falling back to
+  # HTTP-01 after a failed wildcard would issue a certificate named
+  # after this node and publish that name to Certificate Transparency
+  # forever, which is the one outcome the wildcard exists to prevent. A
+  # failed wildcard has to fail, loudly, not quietly succeed at the
+  # thing the operator turned off.
+  if [[ "$acme_ok" != "y" && "$acme_wildcard" != "y" ]]; then
     if certbot certonly --standalone --non-interactive --agree-tos \
         --cert-name "$hostname_input" --key-type rsa --rsa-key-size 2048 \
         --register-unsafely-without-email -d "$hostname_input" >/dev/null 2>&1; then
@@ -2754,17 +3161,35 @@ install_ikev2() {
     fi
   fi
   if [[ "$acme_ok" != "y" ]]; then
-    echo "  certbot could not issue a certificate for $hostname_input." >&2
-    echo "  Check inbound TCP 80 reaches this node, including any cloud firewall," >&2
-    echo "  and that whatever holds port 80 serves /var/www/html." >&2
+    if [[ "$acme_wildcard" == "y" ]]; then
+      echo "  certbot could not obtain the shared wildcard certificate." >&2
+      echo "  IKEv2 is not being installed rather than falling back to a per-node" >&2
+      echo "  name, which would publish this node in Certificate Transparency." >&2
+    else
+      echo "  certbot could not issue a certificate for $hostname_input." >&2
+      echo "  Check inbound TCP 80 reaches this node, including any cloud firewall," >&2
+      echo "  and that whatever holds port 80 serves /var/www/html." >&2
+    fi
+    return 1
+  fi
+  # Fatal, not a warning. Android accepts the whole chain, negotiates
+  # everything else, then rejects a non-RSA AUTH payload and retries
+  # forever -- so shipping this would look like a working install and
+  # fail only on Android, only in the field, with nothing naming a
+  # certificate.
+  if [[ "$acme_wildcard" == "y" ]] &&
+     ! neoxify_acme_cert_is_rsa "/etc/letsencrypt/live/$cert_dir/cert.pem"; then
+    echo "  The shared wildcard '$cert_dir' is not an RSA certificate, and Android's" >&2
+    echo "  IKE library refuses anything else. Reissue it with --key-type rsa" >&2
+    echo "  --rsa-key-size 2048 --force-renewal, then re-run this menu entry." >&2
     return 1
   fi
 
   # strongSwan reads its own tree, not Let's Encrypt's.
   install -d -m 755 /etc/swanctl/x509 /etc/swanctl/x509ca /etc/swanctl/conf.d
   install -d -m 700 /etc/swanctl/private
-  cp "/etc/letsencrypt/live/$hostname_input/cert.pem" /etc/swanctl/x509/node.pem
-  cp "/etc/letsencrypt/live/$hostname_input/privkey.pem" /etc/swanctl/private/node.key
+  cp "/etc/letsencrypt/live/$cert_dir/cert.pem" /etc/swanctl/x509/node.pem
+  cp "/etc/letsencrypt/live/$cert_dir/privkey.pem" /etc/swanctl/private/node.key
   chmod 600 /etc/swanctl/private/node.key
 
   # One certificate per file, and this is what makes Windows work at all.
@@ -2779,7 +3204,7 @@ install_ikev2() {
   # reading charon's log next to a real dial; nothing on the client said
   # anything about certificates.
   rm -f /etc/swanctl/x509ca/neoxify-ca*.pem
-  awk 'BEGIN{n=0} /BEGIN CERT/{n++} {print > ("/etc/swanctl/x509ca/neoxify-ca" n ".pem")}'       "/etc/letsencrypt/live/$hostname_input/chain.pem"
+  awk 'BEGIN{n=0} /BEGIN CERT/{n++} {print > ("/etc/swanctl/x509ca/neoxify-ca" n ".pem")}'       "/etc/letsencrypt/live/$cert_dir/chain.pem"
   chmod 644 /etc/swanctl/x509ca/neoxify-ca*.pem
 
   # Windows fragments its own IKE messages at roughly 576 bytes and
@@ -2803,14 +3228,14 @@ FRAG
     echo "#!/bin/sh"
     echo "# Installed by the Neoxify agent installer."
     echo "set -e"
-    echo "cp /etc/letsencrypt/live/$hostname_input/cert.pem /etc/swanctl/x509/node.pem"
-    echo "cp /etc/letsencrypt/live/$hostname_input/privkey.pem /etc/swanctl/private/node.key"
+    echo "cp /etc/letsencrypt/live/$cert_dir/cert.pem /etc/swanctl/x509/node.pem"
+    echo "cp /etc/letsencrypt/live/$cert_dir/privkey.pem /etc/swanctl/private/node.key"
     echo "chmod 600 /etc/swanctl/private/node.key"
     # Split on renewal too. Restoring a single chain.pem here would undo
     # the fix above sixty days later, which is the worst possible time
     # to discover it.
     echo "rm -f /etc/swanctl/x509ca/neoxify-ca*.pem"
-    echo "awk 'BEGIN{n=0} /BEGIN CERT/{n++} {print > (\"/etc/swanctl/x509ca/neoxify-ca\" n \".pem\")}' /etc/letsencrypt/live/$hostname_input/chain.pem"
+    echo "awk 'BEGIN{n=0} /BEGIN CERT/{n++} {print > (\"/etc/swanctl/x509ca/neoxify-ca\" n \".pem\")}' /etc/letsencrypt/live/$cert_dir/chain.pem"
     echo "chmod 644 /etc/swanctl/x509ca/neoxify-ca*.pem"
     echo "swanctl --load-creds --clear >/dev/null 2>&1 || true"
   } > /etc/letsencrypt/renewal-hooks/deploy/neoxify-ikev2.sh

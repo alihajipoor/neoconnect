@@ -14354,3 +14354,128 @@ half-started is told which programs are missing and can re-add.
   copy per file, and let a failure be non-fatal.
 * `nictracefile1` can be switched at runtime with `nictrace1 off` /
   `on` around it, which is how the two phases got separate captures.
+
+## 2026-08-26 — CT enumerability: the capability landed, the migration did not
+
+Went after the fleet republishing itself to Certificate Transparency.
+Came back with the installer able to avoid it and **nothing changed on
+production** — every remaining step is gated on a credential or a
+provider console. Read `docs/node-enumerability-remediation.md`; it is
+corrected against the running fleet now, and the "Measured state" section
+at the top overrides the rest of the file where they disagree.
+
+### Four premises in the old runbook were wrong
+
+Worth knowing before anyone plans from it again:
+
+* **Cloudflare is confirmed, not inferred.** `neoxify.site` is on
+  Cloudflare nameservers, so `certbot-dns-cloudflare` is genuinely
+  available. `neoxify.com` and `.net` are on Namecheap — but no node
+  certificate is issued under either, so that blocks nothing.
+* **The exposure spans a second domain.** Querying only `%.neoxify.site`
+  showed six node names. `neoxify.com` carries four more, including a
+  `us1` with no `.site` counterpart at all. Ten resolving names, not six.
+* **The `*.neoxify.site` wildcard sitting in CT is not ours.** It is
+  Cloudflare Universal SSL, issued by Google Trust Services and
+  terminated at Cloudflare's edge. Its key has never been on our
+  hardware, and no node holds a certificate with a wildcard SAN. The
+  key-distribution trap the runbook warns about has not been sprung.
+* **Every node runs IKEv2**, which quietly kills the cheerful path. The
+  runbook says a node serving only the Xray TLS trio needs its A record
+  solely for HTTP-01, so DNS-01 would let the name stop resolving. True
+  of the code, vacuous in practice: there is no such node. IKEv2 clients
+  dial the name and refuse an address.
+
+### The consequence that matters
+
+**DNS-01 and the nodes-only wildcard are not alternatives.** DNS-01 with
+per-node names still writes the name into CT; it only removes the A
+record requirement for renewal, and the A record has to stay anyway for
+IKEv2. A wildcard is the only thing that keeps a name out of the log, and
+Let's Encrypt issues wildcards only via DNS-01. So DNS-01 is the
+prerequisite, not the choice. A plan that adopts DNS-01 and keeps
+per-node names has spent the effort and bought nothing.
+
+### Gotchas that cost time, or would have
+
+* **Wiring only the Xray path would have been a silent no-op.** The first
+  cut of the installer change did exactly that — helpers written, call
+  sites untouched, 349 insertions and zero deletions. It looked done and
+  changed nothing. Because every node runs IKEv2, leaving that path on
+  per-node certificates republishes the hostname at every IKEv2 install
+  and renewal regardless of what Xray does. Both consumers, or neither.
+* **The key type is a live trap under a shared `--cert-name`.** Xray lets
+  certbot default to ECDSA; IKEv2 forces RSA because Android rejects an
+  ECDSA-signed AUTH payload. Two callers sharing one certificate name
+  will flip it back and forth. `neoxify_acme_issue` strips key-type
+  arguments from both, reuses rather than reissues, and warns on a
+  non-RSA certificate.
+* **A wildcard covers exactly one label.** `*.n.example.net` matches
+  `a.n.example.net` and not `a.b.n.example.net`, and not the base itself.
+  Tested all of those, plus `notn.example.net`, so a suffix match cannot
+  false-positive.
+* **`crt.sh` was returning 502 throughout.** Cert Spotter's free API
+  answered every time and gives first/last issuance dates per name, which
+  is what showed the renewal cadence. Worth reaching for first.
+* **The nodes' own key type is a remote IKEv2 detector.** An RSA leaf on
+  a node's TLS port means the IKEv2 installer reissued that name, since
+  the Xray path would have left it ECDSA. That is how `de1` was
+  classified without a login.
+
+### Blocked, and on whom
+
+`de1` and the panel refuse every key on this machine (`ovh_neo` reaches
+fi1/fr1/ir1/sg1, `neo_tr1` reaches tr1). Not chased — no credential
+guessing.
+
+Everything left needs the owner:
+
+1. **Namecheap** — delete the four `.com` node A records. This is the
+   only step that *reduces* the live enumerable set rather than freezing
+   it, and the evidence says nothing depends on them: they serve a
+   certificate for a different name, no node renews a `.com` certificate
+   any more, the shipped clients removed the `.com` origin, and the Tauri
+   allowlist blocks `.com` outright.
+2. **Hetzner and Linode consoles** — clear the three provider-default PTRs.
+3. **A Cloudflare API token** scoped to `Zone:DNS:Edit` on `neoxify.site`.
+   This one blocks everything else.
+
+### The open question nobody has answered
+
+**Does IKEv2 work with a wildcard certificate?** Windows validates the
+server certificate against the name in the RAS entry; Android's
+`Ikev2VpnProfile.Builder(server, server)` uses one string as both address
+and remote identity. Neither is known to accept a wildcard SAN, and this
+is now on the critical path because every node runs IKEv2.
+
+Test it on `tr1` — it is not one of the two hardcoded API mirrors, so a
+mistake there cannot take out the censorship fallback — with a real dial
+from a Windows client and an Android handset. `swanctl --load-creds`
+returning 0 proves nothing: the failure mode on record is Windows
+silently discarding the IKE_AUTH response until the SA times out, which
+reports as "terminated by the remote computer" and points at the wrong
+thing.
+
+If it does not work, the fallback is a split: the Xray TLS trio moves to
+the wildcard, IKEv2 keeps a single-name certificate, and IKEv2 nodes stay
+in CT. That is a gap to state, not to paper over.
+
+### One correction to the framing
+
+"The fleet republishes itself every ~90 days" is worth softening.
+Re-issuing a certificate for a name **already** in the log gives an
+enumerator nothing new — those names are permanent. The residual harm is
+recency: a fresh entry proves the name is still live, where one last
+certified in June looks decommissioned. Real, second-order, and never
+worth an outage to fix. The first-order value is all in node seven
+onwards, plus the `.com` deletion.
+
+### Verified untouched
+
+Panel serves, `/api/health` 200. Both API mirrors 200. Xray and
+strongSwan active on all five reachable nodes. CT re-queried for both
+domains after the session: no new names, none withdrawn — as expected,
+since nothing was executed. Reputation baseline captured before the work
+(`scripts/check-exit-reputation.py`, artifact under gitignored `var/`):
+no exit labelled `is_vpn` or `is_proxy` on any feed. The property is
+still intact.
