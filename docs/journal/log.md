@@ -726,3 +726,50 @@ positives are in place.
 Not investigated. Under the current code that produced two alerts and no
 lasting record; under the new code a blip like that still produces
 exactly two, which is the intended distinction.
+
+---
+
+## 2026-08-31 — Dest-health monitoring: designed, deliberately not built
+
+**Status:** blocked by choice — next piece of work, not started
+**Touches:** nothing
+
+The finland1 rebuild established that an unreachable REALITY dest turns a
+node into one that accepts connections and serves nothing, while the
+panel goes on calling it ONLINE because the heartbeat has no opinion
+about REALITY. Nothing probes dests after install. This entry records why
+that is still true at the end of the session.
+
+**Reachability is a property of the node-dest pair**, so the probe has to
+run *on each node*. That rules out anything the panel can do alone.
+
+Getting the result back needs one of:
+
+- a field on `Heartbeat` — additive and backward compatible in proto3,
+  but a proto change, an agent change and a fleet rollout;
+- a new `CommandType` so the panel can ask — `CommandType` is an enum, so
+  also a proto change;
+- `StateSnapshot` — carries `ProtocolUserRef` only, wrong shape.
+
+There is no path that avoids a proto change and a new agent binary.
+
+**Why it is not being written now.** Three changes are already queued for
+the next agent rollout — keepalive, bounded sends, the single-writer
+refactor — and **not one of them has been on the wire.** Adding a proto
+change and a new agent behaviour to that same untested pile makes a
+single deploy the first real test of four things at once, and if
+something misbehaves the attribution problem is worse than the bug.
+
+The sequencing that follows: **roll out what exists, confirm it on real
+nodes, then add dest health as its own change.** It pairs naturally with
+that second rollout since it needs a new binary anyway.
+
+**Interim cover, costing nothing:** the probe already exists as
+`probe_reality_dest` in the installer, and running the audit by hand
+takes one command per node. It was run today and all six pass. That is
+not monitoring, but it means the fleet is known-good right now rather
+than assumed-good.
+
+`fr1` on `cloudflare.com:443` remains the one to fix regardless — it
+passes reachability and fails the ownership test, which is the check that
+only ever runs at install time.
