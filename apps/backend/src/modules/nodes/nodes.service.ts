@@ -3,8 +3,28 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { AlertingService } from "../alerting/alerting.service";
 import { CreateNodeDto } from "./dto/create-node.dto";
 
+/** How long between repeat alerts for a node that is still OFFLINE.
+ *
+ * setStatus alerts on the ONLINE->OFFLINE transition and then never
+ * again, so a node that goes down and stays down produces exactly one
+ * message. germany-1 and singapore-1 went OFFLINE within ten seconds of
+ * each other on 2026-08-24, both alerts fired, and the fleet then ran at
+ * four of six nodes for six days because one notification six days ago
+ * is indistinguishable from a blip nobody needed to act on.
+ *
+ * Six hours is chosen to be impossible to mistake for a blip and still
+ * quiet enough that a genuinely retired node does not become noise the
+ * team learns to filter. See docs/journal/log.md, 2026-08-30. */
+const STILL_OFFLINE_REMINDER_MS = 6 * 60 * 60 * 1000;
+
 @Injectable()
 export class NodesService {
+  /** nodeId -> when we last said it was still offline. In memory on
+   * purpose: a restart clearing it means the next sweep re-reports
+   * everything currently down, which is the right thing to do after a
+   * restart rather than a bug. */
+  private readonly lastOfflineReminderAt = new Map<string, number>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly alerting: AlertingService,
@@ -91,6 +111,60 @@ export class NodesService {
         nodeName: previous.name,
       });
     }
+  }
+
+  /** Re-alerts for nodes that are still OFFLINE, and forgets the ones
+   * that came back.
+   *
+   * Called from the stale-node sweep. Deliberately separate from
+   * setStatus: that one fires on a transition, this one fires on a
+   * state that is *persisting*, and the six-day outage this exists to
+   * prevent produced no transitions at all after the first minute.
+   *
+   * Never throws -- the sweep has real work to finish either way, and
+   * alerting is optional infrastructure. */
+  async remindAboutOfflineNodes(): Promise<void> {
+    const offline = await this.prisma.node.findMany({
+      where: { status: "OFFLINE" },
+      select: { id: true, name: true, lastHeartbeatAt: true },
+    });
+
+    const stillOffline = new Set(offline.map((n) => n.id));
+    for (const id of [...this.lastOfflineReminderAt.keys()]) {
+      if (!stillOffline.has(id)) {
+        this.lastOfflineReminderAt.delete(id);
+      }
+    }
+
+    const now = Date.now();
+    for (const node of offline) {
+      const last = this.lastOfflineReminderAt.get(node.id) ?? 0;
+      if (now - last < STILL_OFFLINE_REMINDER_MS) {
+        continue;
+      }
+      this.lastOfflineReminderAt.set(node.id, now);
+
+      const downFor = node.lastHeartbeatAt
+        ? `${Math.round((now - node.lastHeartbeatAt.getTime()) / 3_600_000)}h`
+        : "an unknown time";
+      await this.alerting.send(
+        `Node "${node.name}" (${node.id}) is STILL OFFLINE -- no heartbeat for ${downFor}`,
+        {
+          event: "node_still_offline",
+          nodeId: node.id,
+          nodeName: node.name,
+          offlineSince: node.lastHeartbeatAt?.toISOString(),
+        },
+      );
+    }
+  }
+
+  /** Suppresses the first repeat alert for a node the sweep has just
+   * marked OFFLINE, so the transition alert and the still-offline
+   * reminder do not arrive together. The reminder is for a state that
+   * has persisted; one interval has to pass before that is true. */
+  suppressNextOfflineReminder(id: string) {
+    this.lastOfflineReminderAt.set(id, Date.now());
   }
 
   async touchHeartbeat(id: string) {

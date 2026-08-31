@@ -659,3 +659,70 @@ and it has not moved: no node runs this binary. The race was real by
 grpc-go's documented contract and is now demonstrably gone in a test, but
 whether it ever contributed to the wedge is unknown and probably
 unknowable after the fact.
+
+---
+
+## 2026-08-31 — The alerting was never missing; it just never repeated
+
+**Status:** done (code + tests) — **not deployed**
+**Touches:** `apps/backend/src/modules/nodes/nodes.service.ts`,
+`agent-gateway.service.ts`, `nodes.offline-reminder.spec.ts` (new)
+
+Went to add node-down alerting and found it already there.
+`nodes.service.setStatus` alerts on every real ONLINE<->OFFLINE
+transition, `AlertingService` posts to a webhook that works against
+Slack or Discord, and **`ALERT_WEBHOOK_URL` is configured on
+production**. Checking the backend log for the night in question:
+
+```
+08/24/2026, 9:33:42 PM WARN [AgentGatewayService] Node ... (singapore-1) marked OFFLINE
+08/24/2026, 9:33:42 PM WARN [AgentGatewayService] Node ... (germany-1)  marked OFFLINE
+```
+
+with no `Alert webhook returned` and no `Failed to send alert` anywhere.
+**The alerts fired and were delivered.** Nobody was ignoring a broken
+alarm; the alarm rang twice, six days ago, and then went quiet — because
+it only fires on a *transition*, and after that first minute there were
+no more transitions to fire on. One message six days ago is
+indistinguishable from a blip that needed no action.
+
+So the gap was never "no alerting". It was that **nothing reports a state
+that is persisting**, which is the only kind of state a six-day outage
+has.
+
+`NodesService.remindAboutOfflineNodes()` now runs from the stale-node
+sweep and re-alerts every 6h for anything still OFFLINE, saying how long
+it has been down. `suppressNextOfflineReminder()` is called right after
+the sweep marks a node OFFLINE so the transition alert and the first
+reminder do not arrive together. Recovered nodes are pruned from the map,
+so a node's *next* outage reports immediately instead of being silenced
+by a stale timestamp.
+
+Six hours is chosen to be impossible to mistake for a blip while staying
+quiet enough that a retired node does not become noise people learn to
+filter. The map is in memory deliberately: a backend restart clears it
+and the next sweep re-reports everything currently down, which is the
+right behaviour after a restart rather than a bug.
+
+### Verified
+
+Backend typecheck exit 0. **Full backend suite: 61 suites, 647 tests,
+exit 0.** Six new tests covering the report, the window, the repeat after
+the window, the suppression, the prune-on-recovery, and the quiet fleet.
+
+**Proven by reverting**, with a caveat worth recording: gutting
+`remindAboutOfflineNodes` to a no-op fails **4 of the 6**. The two that
+still pass are the negative cases — "says nothing when the fleet is up"
+and "suppression holds the first repeat back" — and a no-op satisfies
+both vacuously. That is the same trap `windows.md` recorded on
+2026-08-27, where a cache test passed because the request it asserted
+about never happened. The four positive tests are what actually hold this
+behaviour; the two negatives only guard against over-alerting once the
+positives are in place.
+
+### Also seen while checking
+
+**ir1 was marked OFFLINE today at 09:01 UTC** and recovered on its own.
+Not investigated. Under the current code that produced two alerts and no
+lasting record; under the new code a blip like that still produces
+exactly two, which is the intended distinction.

@@ -281,8 +281,17 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
         this.registry.delete(node.id, call);
       }
       await this.nodesService.setStatus(node.id, "OFFLINE");
+      // setStatus has just alerted on the transition; hold the repeat
+      // reminder back one interval so both do not arrive at once.
+      this.nodesService.suppressNextOfflineReminder(node.id);
       this.logger.warn(`Node ${node.id} (${node.name}) marked OFFLINE: no heartbeat for >${HEARTBEAT_STALE_MS}ms`);
     }
+
+    // Nodes that were already OFFLINE produce no transition and so no
+    // alert. Without this, a node that goes down and stays down is
+    // reported exactly once and then never again -- which is how two of
+    // six ran dark for six days. See docs/journal/log.md, 2026-08-30.
+    await this.nodesService.remindAboutOfflineNodes();
   }
 
   private buildCredentials(): { credentials: grpc.ServerCredentials; isSecure: boolean } {
