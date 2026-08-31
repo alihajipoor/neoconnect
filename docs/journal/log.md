@@ -1296,3 +1296,45 @@ was tested.**
 So: if the 2.0–5.6s is real, it lives on the client side of the tunnel,
 not on the node. That is where to look next, and it needs the client,
 which means it needs Windows.
+
+---
+
+## 2026-09-01 — Light theme: not attempted, and why
+
+**Status:** declined for now — needs eyes on a running client
+**Touches:** nothing
+
+`HANDOVER` §6 item 11: "No light theme exists — `theme.css` defines
+`:root` and `.dark` identically."
+
+Confirmed, and it is more literal than it reads. `theme.css:30` is a
+single rule with a shared selector list:
+
+```css
+:root,
+.dark {
+  /* 28 tokens, one palette */
+}
+```
+
+So there is one palette, applied whether or not `.dark` is on the
+element, and **no theme switch exists anywhere in the UI** — grepping the
+client for a toggle, a `setTheme`, or a `classList` change on `dark`
+finds nothing. Both halves are missing, not just the values.
+
+**Not attempted deliberately.** It is designing 28 colour tokens and a
+toggle for a Windows application that cannot be built, run, or looked at
+from this machine. Contrast, focus rings, the RTL/Persian screens, the
+connection-state colours that customers read to decide whether they are
+protected — none of that can be checked by reasoning about hex values,
+and a palette that merely compiles is not a light theme.
+
+This is the same rule the rest of this session has been applying to
+tunnels and packet captures, pointed at pixels: shipping it unverified
+would be the substitution `CLAUDE.md` warns about, in a place where the
+failure is visible to every customer rather than hidden in a log.
+
+What would make it doable: any machine that can run the client, or a
+decision that a screenshot pass in the Android client's shared UI is
+close enough to design against. It is genuinely small work once it can
+be seen.
