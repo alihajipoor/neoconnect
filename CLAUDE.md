@@ -35,8 +35,26 @@ what was lost and what was recovered.
 
 ### What can and cannot be built here
 
-The Mac cannot compile the Windows desktop client, and iOS needs a full
-Xcode (not Command Line Tools). But **every release workflow runs on a
+The Mac **can type-check** the Windows desktop service, and cannot build
+or run it. `cargo check` does not link, so with the
+`x86_64-pc-windows-gnu` target and mingw-w64 supplying the C
+cross-compiler `ring` needs:
+
+```bash
+cd apps/desktop-windows
+export CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
+       AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar \
+       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+cargo check --target x86_64-pc-windows-gnu -p neoconnect-service --all-targets
+```
+
+That catches every type and borrow error before CI does, on a crate whose
+round trip is otherwise twenty minutes. It does **not** link and does
+**not** run -- `windivert-sys` links against `WinDivert.lib`, so the test
+binary still needs Windows and `cargo test` here is not an option. Check
+locally to know it compiles; read the desktop job to know the tests pass.
+
+iOS needs a full Xcode (not Command Line Tools). But **every release workflow runs on a
 GitHub-hosted runner**, so shipping does not depend on local toolchains:
 
 | Target | Workflow | Runner | Trigger |
