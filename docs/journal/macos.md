@@ -1,6 +1,11 @@
 # MacBook — iOS
 
-Written by the Mac session only. Append at the bottom.
+> **ARCHIVE.** The two-machine split ended 2026-08-30; nothing is
+> appended here any more. The current log is `log.md`. The iOS starting
+> state below still stands — no iOS work has been done since it was
+> written.
+
+Written by the Mac session, 2026-08-11.
 
 ---
 

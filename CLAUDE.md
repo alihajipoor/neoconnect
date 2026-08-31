@@ -5,79 +5,58 @@ Neoxify: a commercial multi-protocol VPN. NestJS backend + Next.js panel
 a bash installer. A large share of users are in Iran, on censored
 networks.
 
-## Two sessions at once — read this first
+This is the VPN, **neoxify.net**. There is a second, unrelated Neoxify
+product — the hosting panel at **neoxify.com**, in the `neoxify-panel`
+repo. Different codebase, different servers, different credentials. Do
+not carry anything between them.
 
-Work currently runs in parallel: a **Windows** machine (desktop client,
-backend, panel, installer, Android) and a **MacBook** (iOS only, because
-iOS cannot be built anywhere else). Neither session sees the other's
-context, so the boundaries have to live here.
+## One machine now — read this first
 
-### Who owns what
+Until 2026-08-30 work ran on two machines in parallel: a **Windows** box
+(desktop client, backend, panel, installer, Android) and a **MacBook**
+(iOS). **The Windows machine is gone.** Everything now runs from the
+Mac.
 
-| Area | Owner |
-|---|---|
-| `apps/desktop-windows/**`, `release-desktop-windows.yml` | Windows |
-| `apps/backend/**`, `apps/panel/**`, `installer/**`, `agent/**` | Windows |
-| `apps/mobile/plugins/vpn/ios/**`, `src-tauri/gen/apple/**`, `ci-ios.yml`, `docs/ios-client.md` | Mac |
-| `apps/mobile/src/**`, `apps/mobile/plugins/vpn/src/*.rs`, mobile `package.json` / `tauri.conf.json` / `Cargo.toml` | **shared — coordinate** |
+What that changes, concretely:
 
-Android and iOS are the *same app*. `apps/mobile/src/**` is one React
-codebase and `plugins/vpn/src/{lib,commands}.rs` is one Rust plugin, so
-"Android work" and "iOS work" are not naturally isolated.
+- **The ownership table is retired.** No area belongs to another
+  session. Nothing is "held" for anyone.
+- **The two-machine journal protocol is retired.** See
+  `docs/journal/README.md` — there is one log now.
+- **The test rig is gone.** `Neoxify-Test2` (VirtualBox), the packet
+  captures, and the `C:/nxcme` worktree all lived on that machine. This
+  matters more than anything else in this file; see *How work is
+  expected to be done here* below.
+- **Fleet SSH keys are gone** (`ovh_neo`, `azs_vps`, `neo_tr1`).
+  Node access has to be re-established before any node-side work.
 
-The conflicts git reports are the easy ones. The dangerous kind merge
-cleanly and fail at runtime — one session reshapes a plugin command for
-its platform while the other still calls the old shape. **Keep the
-shared plugin interface additive.** Do not unilaterally refactor a
-signature the other platform calls; add alongside instead.
+`docs/journal/log.md` records the full recovery assessment, including
+what was lost and what was recovered.
 
-### Staying in sync — do this first
+### What can and cannot be built here
 
-GitHub is the only channel between the two machines, so anything the
-other one needs to know must be committed, not remembered.
+The Mac cannot compile the Windows desktop client, and iOS needs a full
+Xcode (not Command Line Tools). But **every release workflow runs on a
+GitHub-hosted runner**, so shipping does not depend on local toolchains:
 
-**At the start of every session, before touching anything:**
+| Target | Workflow | Runner | Trigger |
+|---|---|---|---|
+| Windows desktop | `release-desktop-windows.yml` | `windows-latest` | tag `desktop-v*` |
+| Android | `release-android.yml` | `ubuntu-latest` | tag `android-v*` |
+| Node agent | `release-agent.yml` | `ubuntu-latest` | tag `v*` |
+| iOS (compile only) | `ci-ios.yml` | `macos-latest` | push to `main` |
+| Lint/typecheck/build/test | `ci.yml` | ubuntu + `windows-latest` | push/PR to `main`, `workflow_dispatch` |
 
-```bash
-bash scripts/session-start.sh
-```
+So: **releases are unaffected by losing the Windows box.** What was lost
+is the ability to *debug* the desktop client locally and to *prove*
+anything against real traffic.
 
-It pulls, then prints `docs/journal/shared.md` and the *other* machine's
-log. Read them. If an entry says something is in flight, believe it.
+`ci.yml` has `workflow_dispatch`, so CI is runnable by hand on any
+branch — use it. That escape hatch exists because the desktop job once
+sat broken from the day it was added, only testable by merging to main.
 
-**After landing anything worth knowing about, append a journal entry and
-push in the same session.** The push is the handoff — an entry sitting
-unpushed helps nobody.
-
-`docs/journal/` holds the state git cannot: what is half-done, what is
-blocked and on whom, decisions taken but not yet built, and gotchas that
-cost real time. It is **not** a changelog — git already records what
-changed, and duplicating it just creates something that goes stale and
-misleads. Each machine writes only its own file (`windows.md`,
-`macos.md`) so they can never conflict; `shared.md` is for cross-cutting
-decisions and is edited rarely. Full protocol in
-`docs/journal/README.md`.
-
-### Branching
-
-- **iOS work goes on a branch, never straight to main.** Main must stay
-  releasable at all times: there are live beta users on the desktop
-  client, and a hotfix has to be cuttable the minute it is needed.
-- Pull before starting, push small commits often. A long-lived divergent
-  branch on shared mobile files is the expensive case.
-
-### Versions and tags
-
-`apps/mobile` carries **one version for both platforms** — it is one app.
-Release workflows validate the tag against it (`android-v*`, and
-`ios-v*` when that exists), a guard that exists because a desktop
-release once shipped 0.8.0 under a 0.9.0 tag. Do not add a second
-version field without agreeing it across both sessions.
-
-Tag prefixes are load-bearing and must not be shared: `desktop-v*`,
-`android-v*`, `v*` (agent). The API resolves "newest release" per
-prefix, and a desktop release once hijacked the agent installer's
-download URL precisely because they collided.
+Backend, panel, web portal and the Go agent all build and test locally
+on the Mac once the toolchains are installed.
 
 ## How work is expected to be done here
 
@@ -89,6 +68,14 @@ three times against real packet captures before the fourth worked; a
 flowed. Counters, exit codes and "no error was thrown" have all produced
 false passes here. Ground truth means the server's own logs, a packet
 capture, or an exit IP that matches the node.
+
+**The rig that used to supply that proof is gone.** Do not quietly lower
+the bar to compensate. Until an equivalent exists, anything that needs
+real packets is **unverified, and must be labelled unverified** — not
+downgraded to "tests pass". A finding that needs a capture is blocked,
+not done. Rebuilding a capture rig is itself a work item; the traps that
+cost real hours on the old one are in `docs/journal/HANDOVER-2026-08-22.md`
+§7 and the final entries of `docs/journal/windows.md`.
 
 **Say what is proven and what is not.** A green CI run means it
 compiles. `ci-ios.yml` in particular builds the simulator, which cannot
@@ -104,17 +91,52 @@ matters for censored networks. A platform that cannot support one (iOS
 has no per-app split tunnel, for instance) is a gap to state plainly,
 not a decision to make quietly.
 
-**Live users exist.** Do not block ports on production nodes to test
-failover, restart engines, or change routes/protocol configs without
-asking. Client-side changes and new releases are fine.
+**Live users exist.** Friends run the desktop client and Android as
+their real VPN. Do not block ports on production nodes to test failover,
+restart engines, or change routes/protocol configs without asking.
+Client-side changes and new releases are fine.
+
+## Branching
+
+- **Main must stay releasable at all times.** There are live beta users
+  on the desktop client and a hotfix has to be cuttable the minute it is
+  needed.
+- Work on a branch, push small commits often, merge when verified.
+- Two branches are open and unmerged: `claude/concurrent-multi-exit-v2`
+  and `rig/cme-v2-verify`. The second carries the measurement run for
+  the first. Read their journal entries before touching either.
+
+## Versions and tags
+
+`apps/mobile` carries **one version for both platforms** — it is one
+app. Release workflows validate the tag against it (`android-v*`, and
+`ios-v*` when that exists), a guard that exists because a desktop
+release once shipped 0.8.0 under a 0.9.0 tag. Do not add a second
+version field.
+
+Tag prefixes are load-bearing and must not be shared: `desktop-v*`,
+`android-v*`, `v*` (agent). The API resolves "newest release" per
+prefix, and a desktop release once hijacked the agent installer's
+download URL precisely because they collided.
+
+Current: desktop `0.9.31`, mobile `0.2.15`, agent `v0.2.6` — each
+matching its latest released tag.
 
 ## Secrets
 
-`apps/mobile/.signing/` holds the Android release keystore and its
-password. It is gitignored and has never been committed — **keep it that
-way; this repo is public.** Android identifies an app by its signing
-key, so losing or leaking it is unrecoverable.
+`apps/mobile/.signing/` held the Android release keystore. **That
+directory is gone with the Windows machine.** The key itself survives
+only as the GitHub Actions secrets `ANDROID_KEYSTORE_BASE64` and
+`ANDROID_KEYSTORE_PASSWORD`, which `release-android.yml` signs from — so
+Android releases still work, but **that secret is now the only copy and
+GitHub will not let you read it back.** Android identifies an app by its
+signing key; losing it means every existing user must uninstall and
+reinstall. Treat it accordingly.
 
-Never paste credentials into commits, logs, or chat. When querying the
-database, select named columns — several tables carry encrypted
-credential blobs.
+This repo is public. Never paste credentials into commits, logs, or
+chat. When querying the database, select named columns — several tables
+carry encrypted credential blobs.
+
+Two credentials are known-exposed and still need rotating: turkey-1's
+root password and singapore-1's `agent.json` private key. See
+`docs/journal/HANDOVER-2026-08-22.md` §6.

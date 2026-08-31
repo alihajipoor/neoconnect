@@ -1,6 +1,12 @@
 # Windows machine — desktop, backend, panel, installer, Android
 
-Written by the Windows session only. Append at the bottom.
+> **ARCHIVE.** The Windows machine is gone as of 2026-08-30 and nothing
+> is appended here any more. **This file is still the reference for most
+> of this system's behaviour** — it is cited from source comments and
+> from much of `docs/`. Read it; do not move, rename or prune it.
+> The current log is `log.md`.
+
+Written by the Windows session, 2026-05 to 2026-08-27.
 
 Addresses in this file are redacted: `{germany-1}`, `{ir1}`, `{finland1-host}` and the like stand in for real node addresses and hostnames, and `{tester-home}` for a beta tester's home line. Node addresses are never committed -- see `docs/node-address-hygiene.md`.
 
