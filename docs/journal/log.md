@@ -930,3 +930,66 @@ up, every node is provisioned and heartbeating, and the keepalive pairing
 is proven against real peers — but "a customer connected and traffic
 flowed" remains untested, and the REALITY dest changes on fr1 and fi1 are
 the ones where that would matter most.
+
+---
+
+## 2026-08-31 — A real client carried traffic through fr1 and fi1
+
+**Status:** done — first ground-truth verification in this whole session
+**Touches:** nothing; test account created and deleted
+
+Every entry above ends with "nothing has carried a packet". This one
+does not.
+
+Method: a **dedicated test customer** (never a real customer's
+credentials), plan assigned via `POST /subscriptions/assign` so it
+provisioned properly, its VLESS+REALITY credentials decrypted with the
+backend's own `CREDENTIALS_ENCRYPTION_KEY`, and a local
+`xray 26.3.27` client built **from the panel's published params** — the
+same `serverName`, `realityPublicKey` and `shortId` a real client
+receives. SOCKS inbound, `curl` through it, compare the egress address.
+
+```
+direct (no tunnel)      50.34.35.228
+through france-1       104.105.205.233   <- france-1's own publicIp
+through finland1       204.168.161.100   <- finland1's own publicIp
+```
+
+Also through finland1: `https://www.wikipedia.org` → **HTTP 200 in
+1.33s**, so it is carrying ordinary traffic and not just answering one
+API call.
+
+That is the standard `CLAUDE.md` asks for — "an exit IP that matches the
+node" — met for both nodes.
+
+### What this actually settles
+
+**finland1's REALITY route carries traffic now.** That route is the one
+`rig/cme-v2-verify` recorded as completing TCP and then carrying nothing,
+with the panel still reporting ONLINE. The diagnosis in this session's
+earlier entry — an unreachable dest, because REALITY forwards every
+client handshake to it — is now confirmed by the fix working rather than
+only by the probe. That finding can be closed.
+
+**fr1's new `www.free.fr` dest is good.** The dest changed hours ago and
+nothing had connected through it since; a REALITY dest that a client
+cannot handshake against is exactly the failure being fixed, so this
+needed proving rather than assuming.
+
+**And the whole deployed stack was exercised end to end** — admin API,
+provisioning down to the node, the agent applying it, xray accepting a
+REALITY handshake, and traffic egressing. Every layer touched today.
+
+### What it does not settle
+
+One client, from one US residential connection, on TCP. Nothing was
+tested from Iran, nothing under censorship, no UDP, and none of the other
+protocols (WireGuard, OpenVPN, IKEv2, Trojan, Shadowsocks) or the other
+four nodes. The desktop client's own ladder and split-tunnel paths were
+not exercised — this was a raw xray client, which proves the *node* and
+the *panel data*, not the app.
+
+### Cleanup
+
+Test customer deleted, **0 leftover `protocol_users`** — deprovisioning
+reached every node. Local configs and decrypted credentials wiped.
