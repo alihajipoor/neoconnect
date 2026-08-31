@@ -773,3 +773,37 @@ than assumed-good.
 `fr1` on `cloudflare.com:443` remains the one to fix regardless — it
 passes reachability and fails the ownership test, which is the check that
 only ever runs at install time.
+
+---
+
+## 2026-08-31 — First CI run on a feature branch: green, all four jobs
+
+**Status:** done
+**Touches:** nothing
+
+`caf0d87` is the first push to a `claude/**` branch that CI has ever
+seen, and it passed on every job:
+
+```
+Shellcheck installer          success
+Go agent                      success
+TypeScript (backend + panel)  success
+Desktop client tests          success   <- windows-latest
+```
+
+The branch-coverage change verified itself on its own first run, which is
+the cheapest possible confirmation that it was the right change.
+
+**What this upgrades.** The keepalive, bounded sends and single-writer
+refactor are no longer "builds on my machine" — the Go agent job compiled
+and tested them on a clean Linux runner. The backend keepalive options
+and the still-offline reminder passed typecheck and the full jest suite
+there too. And **`Desktop client tests` passing on `windows-latest`
+proves the one thing this machine cannot check at all**: nothing in this
+branch broke the crate the Mac cannot compile.
+
+**What it does not upgrade.** None of it has carried a packet. CI proves
+these things compile and that their tests pass; it cannot prove a
+keepalive reopens a stalled stream, because that needs two real peers and
+an exhausted window. The distinction is the same one `CLAUDE.md` makes
+about `ci-ios.yml`, and it applies here unchanged.
