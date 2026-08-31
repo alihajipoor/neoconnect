@@ -1,4 +1,8 @@
-# Shared — decisions and blockers affecting both machines
+# Standing decisions and blockers
+
+Long-lived constraints that outlive a session. Still current — this was
+the cross-machine file, but what it holds is standing rules, not
+coordination. Day-to-day work goes in `log.md`.
 
 Append at the bottom. See `README.md` for the protocol.
 
@@ -236,3 +240,46 @@ around suspension, that is a real gap for iOS and the fix belongs in
 
 Nothing here touches `plugins/vpn/src/*.rs`, the plugin command surface,
 or the mobile version.
+
+---
+
+## 2026-08-30 — One machine; the two-machine entries above are retired
+
+**Status:** decided
+
+The Windows machine is gone. Everything now runs from the Mac. Full
+assessment of what was lost and what survived is in `log.md`.
+
+**Retired by this entry** — do not act on them:
+
+- *"Ground rules for parallel work"* (2026-08-11) — the ownership table
+  and the "coordinate before touching `apps/mobile`" rule. There is no
+  other session to coordinate with.
+- *"Windows is holding the Android work"* and *"Windows has taken
+  `apps/mobile` back"* (2026-08-11) — nothing is held by anyone.
+- *"Two new shared client modules"* (2026-08-23) — the branch it
+  describes, `claude/config-refresh-and-inbound-tag`, was never pushed
+  and went with the machine. The work is lost, not merged. Its contents
+  are described in `log.md` for whoever rewrites it.
+- *"Mobile Rust is now pinned"* (2026-08-23) — the **pin itself stands**
+  (`rust-toolchain.toml` at 1.97.1, the `[profile.release]` block); only
+  its "agree it across both machines before changing `channel`" clause
+  is retired. Its two open questions are still open: whether
+  `strip = "symbols"` breaks iOS crash symbolication, and whether the
+  size work helps the Network Extension memory cap.
+
+**Still standing, unchanged:**
+
+- *"One version for both mobile platforms"* and the tag-prefix rule.
+  These are product invariants, not coordination.
+- *"Live beta users: what not to do."* Friends still run desktop and
+  Android as their real VPN.
+- *"Blocked on the user, not on code"* — Windows code signing, the
+  Microsoft Store, Apple organization enrolment and Play App Signing.
+  All were blocked on accounts and verification rather than on the
+  machine, so losing it changes none of them. The Azure signing account
+  details there are still the ones to resume from.
+
+**iOS** is unaffected and unstarted: `macos.md`'s starting-state entry
+still describes where it begins. It now needs a full Xcode on this
+machine, which is not yet installed.

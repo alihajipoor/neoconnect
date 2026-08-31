@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# Run this at the start of every session, on either machine.
+# Run this at the start of every session.
 #
-# Two machines share this repo and cannot see each other: Windows does
-# the desktop client, backend, panel and Android; the MacBook does iOS,
-# which cannot be built anywhere else. GitHub is the only channel
-# between them, so "am I behind?" has to be answered before any change,
-# not after a conflict.
-#
-# Works on macOS and in Git Bash on Windows.
+# One machine works this repo (a Mac, since 2026-08-30). There is no
+# other session to sync with, but "am I behind?" and "what did I leave
+# half-done?" still have to be answered before any change, not after a
+# conflict.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 echo "=== Pulling ==="
 # Rebase so local work replays on top rather than creating a merge
-# commit for what is usually a fast-forward.
-git pull --rebase --autostash
+# commit for what is usually a fast-forward. A branch with no upstream
+# is the normal state for fresh work, not an error -- fetch so the
+# comparison below is honest, and say plainly that nothing was pulled.
+if git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+  git pull --rebase --autostash
+else
+  git fetch --quiet origin
+  echo "No upstream for this branch -- fetched only, nothing pulled."
+fi
 
 echo
 echo "=== Where you are ==="
@@ -23,29 +27,46 @@ printf 'branch : %s\n' "$(git rev-parse --abbrev-ref HEAD)"
 printf 'commit : %s\n' "$(git log -1 --format='%h %s (%cr)')"
 
 # Uncommitted work from a previous session is worth seeing before you
-# start layering more on top of it.
+# start layering more on top of it. With one machine there is no second
+# copy of anything uncommitted, so this is also the loss warning.
 if [ -n "$(git status --porcelain)" ]; then
   echo
-  echo "=== Uncommitted changes ==="
+  echo "=== Uncommitted changes (nothing else holds a copy) ==="
   git status --short
 fi
 
-echo
-echo "=== Journal: shared ==="
-tail -n 40 docs/journal/shared.md
-
-# Show the *other* machine's log -- your own is the one you already
-# know. Detected from the OS so neither session has to be told which it
-# is.
-case "$(uname -s)" in
-  Darwin) other=windows ;;
-  *)      other=macos ;;
-esac
+# Branches that exist locally but nowhere else are the exact shape of
+# the loss that already cost this repo a finished branch.
+unpushed=$(git for-each-ref --format='%(refname:short) %(upstream)' refs/heads \
+  | awk '$2 == "" { print $1 }')
+if [ -n "$unpushed" ]; then
+  echo
+  echo "=== Local branches with no remote (push these) ==="
+  echo "$unpushed" | sed 's/^/  /'
+fi
 
 echo
-echo "=== Journal: $other (the other machine) ==="
-tail -n 45 "docs/journal/$other.md"
+echo "=== Toolchains ==="
+# Environment facts changed with the machine; a missing toolchain should
+# surface here rather than three commands into a task.
+for t in node pnpm cargo go; do
+  if command -v "$t" >/dev/null 2>&1; then
+    printf '  %-6s %s\n' "$t" "$("$t" --version 2>&1 | head -1)"
+  else
+    printf '  %-6s MISSING\n' "$t"
+  fi
+done
+echo "  (Windows desktop cannot be built here; iOS needs full Xcode."
+echo "   Every release runs on a GitHub-hosted runner -- see CLAUDE.md.)"
+
+echo
+echo "=== Journal: standing decisions (shared.md) ==="
+tail -n 30 docs/journal/shared.md
+
+echo
+echo "=== Journal: working log (log.md) ==="
+tail -n 50 docs/journal/log.md
 
 echo
 echo "Full protocol: docs/journal/README.md"
-echo "Before touching apps/mobile/src or plugins/vpn/src, check the entries above."
+echo "Long-form history: docs/journal/windows.md (archive, still the reference)"
