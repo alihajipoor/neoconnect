@@ -147,3 +147,114 @@ list because they are newly cheap or newly urgent:
   the app renders that string, and this repo does not ship connection
   states it has not verified. Pure logic, testable on this Mac, no rig
   needed.
+
+---
+
+## 2026-08-30 — Production, read from the servers: 239 commits behind, and two nodes wedged for six days
+
+**Status:** done (diagnosis) — **germany-1 and singapore-1 need a decision, see bottom**
+**Touches:** nothing; read-only session on the panel VPS and five nodes
+
+Access restored. A dedicated key (`~/.ssh/neoxify_vpn`, separate from
+the hosting project's key) is installed on the panel and on de1, tr1,
+fr1, sg1, ir1. **fi1 refused it** — `Permission denied (publickey,
+password)`, so its root password differs from the other six. Finland is
+otherwise healthy; it is only the credential that is out of step.
+
+### The deployment is clean, and it is far behind
+
+`/root/neoconnect` on the panel VPS is on `main` at **`85bfaa9`
+(2026-08-23)** with a **completely clean working tree** — no
+hand-patching, no local commits, no drift of the kind that was the worry.
+
+It is **239 commits behind `origin/main`** (`6bfdc4f`). Undeployed: all
+of Gaming Mode, the 1,480-entry catalogue, per-game exits, exit groups,
+the bounded list endpoints and the panel's pager, the cron cursors and
+the sort indexes. 26 of those commits touch `apps/backend`, 4 touch
+`apps/panel`, 2 the agent, 12 the installer.
+
+**Three migrations are unapplied.** The live DB's newest is
+`20260823_route_uplink_health`; missing are `20260824_gaming_mode`,
+`20260826_list_ordering_indexes`, and that migration's `concurrent.sql`
+— the one `windows.md` records as never having been run by anyone.
+
+Stack: Ubuntu 26.04, docker compose — backend (image built 08-24),
+panel (08-18), discord-bot (08-10), postgres:16-alpine, redis:7-alpine.
+Scale: **33 customers, 30 subscriptions, 6 nodes.**
+
+### germany-1 and singapore-1 have been invisible since 2026-08-24
+
+Both are `OFFLINE` in `nodes`, last heartbeat **2026-08-24 21:32 UTC**.
+They are not down. On both boxes `neoxify-agentd` is **active**, has
+**never restarted** (`NRestarts=0`, running since Aug 18/19), and xray,
+wg-quick@wg0, openvpn-server and strongswan are all active. Existing
+tunnels are presumably still being served.
+
+What is actually wrong is narrower and worse: the agent process is alive
+but has produced **no log output since Aug 24 21:35:03 (de1) and
+21:34:53 (sg1)** — ten seconds apart — while still holding an
+**ESTABLISHED TCP connection to the panel on :50051**. Send-Q 0. So this
+is not a network drop and not a crash; it is a stream that died above
+TCP without either end closing the socket. Compare fr1, same build, same
+config, logging normally as of this session.
+
+**They cannot recover on their own.** The backend only re-asserts to
+nodes it considers ONLINE, so the moment these two were marked OFFLINE
+they stopped receiving anything at all. Nothing in the current design
+brings a wedged agent back; it will sit there until someone restarts it.
+
+### The re-assert volume, which is the obvious suspect and is not proven
+
+`REASSERT_INTERVAL_MS = 60_000` in `agent-gateway.service.ts:65`. Every
+60 seconds the backend writes a `CREATE_USER` down the stream for
+**every provisioned user on every online node** — currently **224 users
+× 3 standalone nodes + 13 on the relay, every minute**, 7,200 re-assert
+log lines per 24h, on the order of a million commands a day for 33
+customers. These go through `writeCommand`, not `enqueueCommand`, so
+they are direct stream writes with synthetic ids and no AgentCommand row.
+
+Both dead agents' final log lines are a burst of exactly these
+(`executed command reassert:<uuid> (CREATE_USER)`), all stamped the same
+second, and then silence.
+
+**That is correlation, and it is where I stopped.** I have not shown the
+re-assert storm causes the hang, have not captured a goroutine dump, and
+have not reproduced it. The honest statement is: two agents wedged
+mid-flood, the flood is a million writes a day, and the two facts have
+not been connected. Do not write this up as the cause until something
+demonstrates it.
+
+### Fleet agent skew
+
+Four nodes run one identical binary; the relay runs a different, newer one:
+
+```
+de1  2026-08-19  sha 8cc30b52d612   agentVersion "dev"
+tr1  2026-08-22  sha 8cc30b52d612   agentVersion "dev"
+fr1  2026-08-18  sha 8cc30b52d612   agentVersion "dev"
+sg1  2026-08-18  sha 8cc30b52d612   agentVersion "dev"
+ir1  2026-08-24  sha f3a6215f13c4   agentVersion "v0.2.6"
+```
+
+Only ir1 was upgraded when v0.2.6 shipped (2026-08-24). The other four
+predate the `--version` flag entirely — they return empty, which is why
+the panel records them as `dev`. fi1 not sampled (no access).
+
+### One thing I got wrong, recorded so it is not repeated
+
+An HTTPS probe of `fi1.neoxify.site:443` timing out was briefly read as
+corroborating the `rig/cme-v2-verify` finding that finland1's REALITY
+route does not carry. **It is not evidence of anything.** Port 443 on
+these nodes is the VLESS REALITY inbound, which by design does not
+answer a plain TLS handshake from a client without the keys — fr1, a
+node with no known fault, behaves identically. The finland1 data-plane
+question is still open and still needs a real client, not a probe.
+
+### Needs a decision
+
+**Restarting `neoxify-agentd` on de1 and sg1 would very likely restore
+both**, and the fleet has been at 4 of 6 usable nodes for six days.
+I have not done it: `CLAUDE.md` forbids restarting engines on production
+nodes without asking, and a wedged agent is also the only live evidence
+of this failure mode that exists. If the cause is ever to be found,
+someone should take a goroutine dump *before* the restart clears it.
