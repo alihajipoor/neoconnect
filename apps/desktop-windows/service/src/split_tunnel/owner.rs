@@ -2055,6 +2055,14 @@ const MIB_TCP_STATE_DELETE_TCB: u32 = 12;
 /// fields are zero or provisional.
 const MIB_TCP_STATE_ESTAB: u32 = 5;
 
+/// A connection whose SYN has gone out and whose reply has not come back.
+///
+/// Unlike the other non-established states, its remote fields are real --
+/// it is headed somewhere definite -- so it is the one state where
+/// skipping the row means a connection escapes the reset and completes
+/// outside the tunnel.
+const MIB_TCP_STATE_SYN_SENT: u32 = 3;
+
 /// Established connections belonging to selected applications, closed so
 /// they are rebuilt through the tunnel.
 ///
@@ -2136,6 +2144,21 @@ pub struct ResetOutcome {
     /// for the whole window, and the log would show only a number that
     /// did not move.
     pub failures: Vec<String>,
+    /// Rows that were a candidate in every respect except their state:
+    /// owned by a selected application, headed somewhere the tunnel is
+    /// for, and in `SYN_SENT` at the instant the table was walked.
+    ///
+    /// They are NOT closed, and cannot be: `SetTcpEntry` has no way to
+    /// tear down a half-open connection. That is why the activation reset
+    /// rescans rather than running once -- a row seen here should be
+    /// ESTABLISHED by a later pass and closed then.
+    ///
+    /// Counted because the rescan is an *assumption* that this converges,
+    /// and nothing measured it. A non-zero count on the final pass is a
+    /// connection that finished its handshake outside the tunnel and
+    /// stayed there, which is the failure the open item since 2026-08-22
+    /// describes; zero on the final pass says convergence did its job.
+    pub skipped_handshaking: usize,
 }
 
 /// Returns what was closed and what refused to close, for the log.
@@ -2194,7 +2217,14 @@ fn reset_with(
         // Only connections that actually carry traffic. A listener has
         // no peer to re-route and killing one would stop a program
         // accepting connections, which is not what was asked for.
-        if state != MIB_TCP_STATE_ESTAB {
+        //
+        // SYN_SENT is let through to the candidacy checks below but never
+        // closed: it is the one non-established state whose remote fields
+        // are real, so a row skipped here is a connection that escapes the
+        // reset and completes outside the tunnel. It is counted rather
+        // than closed -- see ResetOutcome::skipped_handshaking.
+        let handshaking = state == MIB_TCP_STATE_SYN_SENT;
+        if state != MIB_TCP_STATE_ESTAB && !handshaking {
             continue;
         }
 
@@ -2233,6 +2263,13 @@ fn reset_with(
             continue;
         }
         if !selection.should_tunnel(&image) {
+            continue;
+        }
+
+        // Every candidacy test above has passed, so this row would have
+        // been closed had it been established. Count it and move on.
+        if handshaking {
+            outcome.skipped_handshaking += 1;
             continue;
         }
 
@@ -2686,6 +2723,39 @@ mod audit_tests {
         assert_eq!(attempts.get(), 0, "a carried flow was handed to SetTcpEntry");
         assert_eq!(outcome.closed, 0);
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    }
+
+    /// A half-open row is counted, never closed, and never counted when
+    /// it was not a candidate in the first place.
+    ///
+    /// Only the negative direction is asserted, for the same reason the
+    /// test below does not assert a count: whether this machine happens
+    /// to hold a connection in SYN_SENT at this instant is not something
+    /// a test can arrange. With `carried` saying everything is already in
+    /// the tunnel, nothing is a candidate -- so a non-zero count here
+    /// would mean the skip is being tallied before the candidacy checks
+    /// rather than after them, which is the mistake worth guarding.
+    #[test]
+    fn a_handshaking_row_is_only_counted_when_it_was_a_candidate() {
+        let selection = Selection::new(Vec::new(), SplitTunnelMode::AllExcept);
+        let attempts = std::cell::Cell::new(0usize);
+
+        let outcome = reset_with(
+            &selection,
+            Ipv4Addr::new(203, 0, 113, 7),
+            &[],
+            &|_, _, _, _| true,
+            &|_| {
+                attempts.set(attempts.get() + 1);
+                NO_ERROR
+            },
+        );
+
+        assert_eq!(attempts.get(), 0, "a carried flow was handed to SetTcpEntry");
+        assert_eq!(
+            outcome.skipped_handshaking, 0,
+            "a row that was never a candidate was counted as skipped"
+        );
     }
 
     /// The other direction, which is what stops the test above passing
