@@ -451,3 +451,130 @@ exhausted window rather than treating as unrelated. The fix is a single
 writer goroutine fed by a channel. Not attempted here: it restructures
 all three loops, and doing it in the same change as the hang fix would
 make both harder to judge.
+
+---
+
+## 2026-08-31 — finland1 rebuilt from a wiped host, and why its REALITY route was never carrying
+
+**Status:** done — node fully restored and serving
+**Touches:** `installer/maintenance/restore-openvpn-from-panel.sh` (new)
+
+The Finland host was reprovisioned with a fresh OS and no data. It is back:
+**ONLINE, agent v0.2.6, 232 provisioned users** across all seven protocol
+rows, every engine active, every customer port listening.
+
+Rebuilt against the **existing** node record rather than a new one. The
+enrollment claim (`POST /nodes/:id/enrollment-tokens`, then
+`agentd --enroll-init`) rotates `agentPubKey`/`agentVersion`/`publicIp`
+and keeps the node id, so its users and routes survived and the panel's
+own re-assert sweep pushed all of them back. Creating a fresh node would
+have orphaned 29 customers' worth of provisioning.
+
+### The finland1 dead-route mystery is solved, and it was never the client
+
+`rig/cme-v2-verify` recorded that finland1's VLESS+REALITY route completes
+TCP and then carries nothing — "2 SYN, 2 SYN-ACK, 12 packets out, 10 in,
+and then nothing" — while `nodes.status` said ONLINE. It was filed as
+unexplained and needing node access.
+
+**Its REALITY dest was `www.shatel.ir:443`, and this node cannot reach
+it.** The installer's own probe, run from the box during this rebuild:
+
+```
+www.shatel.ir -- REJECTED: no TLS handshake from 85.15.17.13 --
+this server cannot reach it, or nothing there speaks TLS
+```
+
+REALITY forwards the client handshake to its dest on every connection. A
+dest the node cannot complete TLS with produces exactly the capture that
+was recorded: the TCP handshake succeeds because that is Xray accepting
+the connection, and everything above it dies waiting on a forward that
+never completes. Nothing about the client, the keys or the transport was
+ever wrong.
+
+It is now `www.helsinki.fi:443` — AS1741 FUNETAS, hosted in Finland, its
+own AS, not a CDN, and verified reachable from this node by the probe.
+
+**Two things to take from this beyond finland1.** A dest that stops being
+reachable turns a node into one that accepts connections and serves
+nothing, and the panel goes on reporting it ONLINE because the heartbeat
+has no opinion about REALITY. Nothing monitors dest reachability. And
+`HANDOVER-2026-08-22.md` §6 item 6 is now worth re-reading — **the other
+nodes' dests have not been re-probed**, and `fr1` is on
+`cloudflare.com:443`, which this installer's ownership check would reject
+outright as CDN-fronted.
+
+### A fresh install cannot reach the control plane, and the failure is silent
+
+`grpcTarget` was empty after enrolment, so the agent derived it from the
+panel URL: `connect.neoxify.site` → **104.21.21.89:50051** → a Cloudflare
+address. Cloudflare does not carry 50051, so every dial timed out and the
+node sat OFFLINE while looking healthy locally.
+
+Every working node has it set explicitly — `167.233.65.166:50051` on de1
+and ir1, `origin.neoxify.site:50051` on fr1. Set to the IP here, matching
+the majority. `dialTarget` keeps SNI as the panel hostname regardless of
+target, so the certificate still verifies.
+
+**This is an installer gap, not a one-off.** Any node enrolled against a
+CDN-fronted panel URL lands in the same state. `NEOXIFY_GRPC_TARGET`
+exists; nothing prompts for it or warns when the derived host resolves to
+a CDN.
+
+### `publicParamsJson` holds private keys — and I put finland1's in a transcript
+
+Reading that column for the OpenVPN row returned **caKeyPem, serverKeyPem
+and tlsCryptKey**. The name says public params. `CLAUDE.md` already says
+to select named columns because tables carry credential blobs; the column
+whose name promises otherwise is the one that catches you.
+
+finland1's OpenVPN CA key, server key and tls-crypt key should be treated
+as exposed. They were regenerated as part of this rebuild in the sense
+that the node was wiped — but **the panel's stored copies are the same
+ones**, and they are what clients use. Rotating them means reissuing
+every client cert on this node, which is why it is being flagged rather
+than done. **Renaming the column, or splitting the secret half out, is
+the fix that stops this recurring.**
+
+### OpenVPN could not be reinstalled, and the refusal was right
+
+`install_openvpn` POSTs to `/protocol-configs`, and the panel is what
+generates the CA and returns it. On a node whose config already exists the
+POST is refused, the CA never comes back, and the function exits before
+writing anything — so a rebuilt node gets no OpenVPN at all. The panel's
+message is explicit that deleting the config to get past this invalidates
+every client cert issued against that CA.
+
+Nothing is lost, though: the panel stores the CA, server cert/key and
+tls-crypt key. `installer/maintenance/restore-openvpn-from-panel.sh`
+fetches them and puts the node back **with the same CA**, so existing
+client certs keep working. That path did not exist and now does.
+
+### Smaller things this turned up
+
+- **`install_openvpn` cannot be called standalone.** It reads `panel_url`
+  and `node_id`, which only `action_engines_agent` sets; calling the
+  function directly dies with `panel_url: unbound variable` *after* the
+  apt install and the prompts.
+- **Sourcing `lib/agent.sh` outside `install.sh` needs `SCRIPT_DIR`
+  exported**, or it fails at the config template with an unbound variable.
+- **strongSwan's unit is `strongswan.service` on Ubuntu 26.04**, not
+  `strongswan-starter.service` as on the older nodes. Anything checking
+  the old name will report IKEv2 down on a node where it is running.
+- **finland1's OpenVPN config has no `subnetCidr`.** The installer's own
+  comment says route creation fails with "missing subnetCidr" without it —
+  the same fault recorded on ir1 on 2026-08-14. Not fixed here; it
+  predates the rebuild.
+- The certificate step **auto-migrated its renewal to webroot**, so the
+  standalone-then-nginx renewal trap the installer comments describe —
+  and which it names finland1 as being in — is handled on this box now.
+
+### Not verified
+
+**No tunnel was carried.** Every protocol is listening and every user is
+provisioned, but nothing has connected as a customer and no traffic has
+been put through this node. In a repo whose history is designs that read
+correctly and failed under real execution, that distinction is the whole
+point: this node is *restored*, not *proven*. The REALITY dest fix in
+particular is argued from the installer's probe, not from a client that
+completed a handshake through it.
