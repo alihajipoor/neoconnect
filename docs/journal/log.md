@@ -258,3 +258,102 @@ I have not done it: `CLAUDE.md` forbids restarting engines on production
 nodes without asking, and a wedged agent is also the only live evidence
 of this failure mode that exists. If the cause is ever to be found,
 someone should take a goroutine dump *before* the restart clears it.
+
+---
+
+## 2026-08-30 — Root cause of the wedged agents: a Send with no deadline on a stream with no keepalive
+
+**Status:** done — cause proven from goroutine dumps; **fix not written**
+**Touches:** nothing yet. The fix belongs in
+`agent/internal/controlplane/client.go` and the backend gRPC server opts.
+
+Both nodes were SIGQUIT'd (owner's call, `Restart=always`, back in
+seconds) specifically to capture stacks before the restart destroyed
+them. **All six nodes are ONLINE again**; germany-1 and singapore-1
+picked up their command backlog immediately (232 executed on sg1 within
+30s). Dumps: 27 goroutines / 67 KB (de1), 28 / 69 KB (sg1).
+
+### The mechanism, and every step of it is in the dumps
+
+`runStream` (`client.go:127-132`) starts three loops and waits for the
+first one to fail:
+
+```go
+errCh := make(chan error, 3)
+go func() { errCh <- heartbeatLoop(streamCtx, stream) }()
+go func() { errCh <- statsLoop(streamCtx, stream, dispatcher) }()
+go func() { errCh <- receiveLoop(streamCtx, stream, dispatcher) }()
+err = <-errCh
+```
+
+The whole reconnect design rests on one of those three returning. **None
+of them can.**
+
+- **`goroutine 1` — the main one — `[chan receive, 10233 minutes]` inside
+  `controlplane.runStream`.** That is the `<-errCh` above, blocked
+  7.1 days. Identical to the minute on both nodes.
+- **`heartbeatLoop` is blocked inside `stream.Send()`**, in
+  `transport.(*writeQuota).get` → `flowcontrol.go:60`. The HTTP/2 send
+  window is exhausted and no `WINDOW_UPDATE` is coming. `Send` takes no
+  deadline (`client.go:167`), so it does not time out, does not error,
+  and never returns.
+
+So the stream is dead above TCP while the socket stays `ESTABLISHED` with
+Send-Q 0 — exactly what was observed — and nothing tears it down.
+
+### Why it is permanent rather than transient
+
+Four things have to line up, and they all do:
+
+1. **No gRPC keepalive on either end.** The agent dials with
+   `grpc.NewClient(target, grpc.WithTransportCredentials(creds))` and
+   nothing else (`client.go:43`); the backend sets no server keepalive.
+   Keepalive is what would notice a peer that has stopped reading, kill
+   the transport, and make all three loops error out.
+2. **The heartbeat `Send` has no deadline**, so the one loop whose whole
+   job is proving liveness is itself the one that hangs.
+3. **A node marked OFFLINE stops being re-asserted to.** The backend only
+   pushes to nodes it believes are ONLINE, so going quiet removes the
+   remaining traffic — and with it any chance the window reopens.
+4. **systemd cannot see it.** The process is alive and healthy-looking;
+   `Restart=always` never fires. `NRestarts=0` after six days of doing
+   nothing.
+
+### What is proven, and what is still only likely
+
+**Proven:** the block is `writeQuota.get` under `heartbeatLoop`, the main
+goroutine is parked on `<-errCh`, there is no keepalive, and the deployed
+agent cannot recover from this state without an external kill.
+
+**Not proven:** that the 224-users-per-node-per-minute re-assert storm is
+what exhausted the window. It is the obvious pressure source on that
+connection and both nodes wedged mid-flood, but nothing here demonstrates
+it, and the deadlock as described would eventually happen at far lower
+volume. Treat the storm as aggravating, not established as causal.
+
+One caveat on the reading: the deployed binaries are the 2026-08-18/19
+build and the source read here is `main`. The stack frames match that
+source exactly (`client.go:168` → `heartbeatLoop` → `SendMsg`), so this
+is the code that ran, but the two are not byte-identical.
+
+### The fix, in the order it matters
+
+1. **Keepalive on both ends.** Agent:
+   `grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 30s,
+   Timeout: 10s, PermitWithoutStream: true})`. Backend: matching server
+   params and an `EnforcementPolicy` with `PermitWithoutStream: true`, or
+   the server will GOAWAY clients it thinks are pinging too often. This
+   alone converts a permanent hang into a reconnect.
+2. **A deadline on the heartbeat send**, so the liveness prober cannot
+   itself block forever even if keepalive is misconfigured.
+3. **Let the backend keep reaching OFFLINE nodes**, at a slow rate. Today
+   OFFLINE is an absorbing state: nothing is sent, so nothing can
+   recover. That is what turned a stalled window into six days of dark.
+4. **Alert on it.** Two of six nodes vanished for six days and the only
+   reason anyone knows is a manual `select` against `nodes`. A heartbeat
+   older than a few minutes should be loud.
+5. **Reconsider the re-assert rate** (`REASSERT_INTERVAL_MS = 60_000`,
+   every user, every node, every minute) independently of this bug.
+
+None of this is written. Nothing on any node was changed beyond the two
+restarts.
