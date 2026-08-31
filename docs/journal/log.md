@@ -1164,3 +1164,85 @@ exercised by the fleet audit instead.
 
 And nothing has run on a node. This ships in **agent v0.2.8**; until that
 rollout, every node reports nothing and the panel correctly says nothing.
+
+---
+
+## 2026-09-01 — The API mirrors were telling clients they were tunnelled when they were not
+
+**Status:** done — fleet-wide production fix + installer
+**Touches:** `installer/lib/agent.sh`; nginx and certbot on the panel and all six nodes
+
+`HANDOVER` §6 item 4, closed. It was worse than that entry recorded, and
+the reason is the interesting part.
+
+### What it looked like
+
+```
+                    /api/health/ip        my real address is 50.34.35.228
+direct (Cloudflare) {"ip":"50.34.35.228"} correct
+fr1 mirror          {"ip":"50.34.35.228"} correct
+fi1 mirror          {"ip":"204.168.161.100","country":"FI"}   <- fi1's OWN address
+```
+
+A client on fi1's mirror asks where it is coming from and is told the
+node's address. **That is precisely what a working tunnel looks like** —
+to a customer who has no tunnel at all. It is the same class of lie as a
+"Connected" indicator that never checked whether traffic flows, which
+this repo already has history with.
+
+**Five of six nodes were in that state.** Only fr1 escaped, and not
+because it was fixed properly: it proxied to `connect.neoxify.com`, whose
+certificate the panel does not hold, and it worked only because **nginx
+does not verify upstream certificates by default**. That is the
+"quietly stops verifying" outcome `HANDOVER` warned the one-line fix would
+produce, sitting in production on one node.
+
+I also caused a fresh instance of it: rebuilding fi1 ran the current
+installer, which derives the mirror upstream from the panel URL — the
+Cloudflare hostname — so a rebuilt node reintroduces the bug by design.
+
+### The fix, which needed the certificate first
+
+`HANDOVER` said the proper fix "needs a certificate first", and that was
+right. `origin.neoxify.site` already resolved straight to the panel;
+what was missing was a certificate covering it. Expanded the panel's cert
+to `connect.neoxify.site + origin.neoxify.site` (nginx authenticator,
+`/etc/letsencrypt` tarred first), added the name to the panel's
+`server_name`, and confirmed a **verified** TLS handshake to it.
+
+Then pointed all six mirrors at `origin.neoxify.site` **with
+`proxy_ssl_verify on`** and a CA bundle — so the hop is authenticated as
+well as encrypted, which fr1's arrangement never was. All six now return
+the client's own address.
+
+The installer takes `NEOXIFY_PANEL_ORIGIN` and writes the verification
+directives; without it the mirror still works but says loudly what it is
+about to do, because a silent wrong answer here reads as success.
+
+### And a node that was one lookup from an outage
+
+Switching de1 turned its mirror into a 502. Its nginx resolver was
+`38.54.13.84` — the provider's — and it **refuses nginx's queries
+outright**:
+
+```
+recv() failed (111: Connection refused) while resolving, resolver: 38.54.13.84:53
+```
+
+Not caused by the switch: the mirror re-resolves on a 30s TTL, so that
+resolver had to be answering earlier and had stopped. Any panel move, or
+any TTL expiry, would have taken de1's mirror down the same way with
+nothing pointing at the cause. Now `8.8.8.8 1.1.1.1` — two, so one dead
+server cannot do it again.
+
+Worth noting the fleet is uneven here: sg1, fr1, fi1 and ir1 use
+`127.0.0.53`, tr1 a single `8.8.8.8`. All answering, all single points of
+failure except de1's.
+
+### Verified
+
+All six mirrors return the client address, over a verified hop. Both
+panel names answer 200. The Iran relay reaches the fi1 and fr1 mirrors,
+which is the path that matters most — Cloudflare is unreachable from
+there, so for those customers the mirror is not a fallback, it is the
+only way in.
