@@ -578,3 +578,37 @@ correctly and failed under real execution, that distinction is the whole
 point: this node is *restored*, not *proven*. The REALITY dest fix in
 particular is argued from the installer's probe, not from a client that
 completed a handshake through it.
+
+---
+
+## 2026-08-31 — Fleet-wide dest audit: all six pass, and shatel.ir is not the villain
+
+**Status:** done — audit only, nothing changed
+**Touches:** nothing
+
+Probed each node's own REALITY dest **from that node**, TLS 1.3:
+
+```
+de1  www.shatel.ir:443        OK        tr1  www.donanimhaber.com:443  OK
+fr1  cloudflare.com:443       OK        sg1  www.shopee.sg:443         OK
+ir1  www.torob.com:443        OK        fi1  www.helsinki.fi:443       OK
+```
+
+**This corrects the entry above.** `www.shatel.ir` is *not* a dead dest —
+de1 completes a TLS 1.3 handshake with it right now. What was true is
+narrower and more useful: **the Finland host could not reach it**, and
+dest reachability is a property of the node-dest pair, not of the dest.
+The finland1 diagnosis stands; the generalisation "shatel.ir has rotted"
+would have been wrong, and a future session acting on it would go looking
+in the wrong place.
+
+That makes the monitoring gap sharper rather than softer. A dest has to
+be probed **from each node that uses it**, because the pair is what
+breaks, and nothing does that after install.
+
+**`fr1` on `cloudflare.com:443` is still worth fixing, for a different
+reason.** It passes reachability and would fail the installer's
+*ownership* check — it is CDN-fronted, which is the mismatch
+`HANDOVER-2026-08-22.md` §6 item 6 describes a filter catching at line
+rate. Reachable and unsuspicious are not the same test, and only the
+first one currently gets run after install.
