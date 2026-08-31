@@ -1694,17 +1694,20 @@ fn image_path(pid: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&buffer[..len as usize]))
 }
 
+/// No exit relay is carrying anything -- the world the placement tests
+/// were written in, before one session could hold several exits at once.
+/// Placement then falls through to the session-egress comparison.
+///
+/// At file scope because this file has two separate `#[cfg(test)]`
+/// modules and the call sites are in the second one. A plain fn rather
+/// than a `const &dyn Fn`, because a closure is not a constant.
+#[cfg(test)]
+fn no_live(_exit: &str) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
-    /// No exit relay is carrying anything -- the world these tests were
-    /// written in, before one session could hold several exits at once.
-    /// Placement then falls through to the session-egress comparison.
-    ///
-    /// A plain fn rather than a `const &dyn Fn`: a closure is not a
-    /// constant, and the const form does not compile.
-    fn no_live(_exit: &str) -> bool {
-        false
-    }
 
     use super::*;
 
