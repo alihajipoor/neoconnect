@@ -526,10 +526,35 @@ impl Selection {
     /// match: this product does not report a placement it has not
     /// established, for the same reason it does not report a tunnel
     /// state it has not verified.
-    pub fn placement(&self, image_path: &str, egress: Option<&str>) -> ExitPlacement {
+    /// `is_live` answers whether an exit currently has a relay carrying
+    /// traffic. It exists because comparing against `egress` alone stopped
+    /// being sufficient the moment one session could hold several exits at
+    /// once: the session's egress is one node, and an application routed
+    /// through a concurrent relay to a different node is on its preferred
+    /// exit anyway. Without this the function reported `Fallback` for
+    /// exactly the applications the feature works for -- observed on a rig
+    /// with two exit IPs live at once, copy A demonstrably egressing at
+    /// france-1 while this said `{"placement":"fallback"}`.
+    ///
+    /// The routing was right and only the sentence was wrong, which is the
+    /// safer way round -- but this product does not report a state it has
+    /// not established, and that cuts both ways.
+    pub fn placement(
+        &self,
+        image_path: &str,
+        egress: Option<&str>,
+        is_live: &dyn Fn(&str) -> bool,
+    ) -> ExitPlacement {
         let Some(preferred) = self.preferred_exit(image_path) else {
             return ExitPlacement::NoPreference;
         };
+        // Checked before `egress`, not after: a live relay to the preferred
+        // exit is a stronger statement than which node the session as a
+        // whole leaves from, and it is the case the session egress cannot
+        // see.
+        if is_live(preferred) {
+            return ExitPlacement::OnPreferred;
+        }
         match egress {
             None => ExitPlacement::Unknown { preferred: preferred.to_string() },
             Some(live) if live == preferred => ExitPlacement::OnPreferred,
@@ -549,7 +574,7 @@ impl Selection {
     /// Empty under `AllExcept`, and that is honest rather than a
     /// shortcut: the listed applications there are the ones *not*
     /// carried, so none of them has an egress to report.
-    pub fn placements(&self, egress: Option<&str>) -> Vec<AppPlacement> {
+    pub fn placements(&self, egress: Option<&str>, is_live: &dyn Fn(&str) -> bool) -> Vec<AppPlacement> {
         if !matches!(self.mode, SplitTunnelMode::OnlySelected) {
             return Vec::new();
         }
@@ -557,7 +582,7 @@ impl Selection {
             .iter()
             .map(|app| AppPlacement {
                 app: app.clone(),
-                placement: self.placement(app, egress),
+                placement: self.placement(app, egress, is_live),
             })
             .collect()
     }
@@ -1671,6 +1696,11 @@ fn image_path(pid: u32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// No exit relay is carrying anything -- the world these tests were
+    /// written in, before one session could hold several exits at once.
+    /// Placement then falls through to the session-egress comparison.
+    const NO_LIVE: &dyn Fn(&str) -> bool = &|_: &str| false;
+
     use super::*;
 
     fn scope_of(app: &str, destinations: &[&str]) -> neoconnect_ipc::AppScope {
@@ -2820,8 +2850,73 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(GAME, Some("germany-1")),
+            selection.placement(GAME, Some("germany-1"), NO_LIVE),
             ExitPlacement::OnPreferred
+        );
+    }
+
+    /// The defect this parameter exists for, recorded on
+    /// `rig/cme-v2-verify`: with two exits live at once, copy A was
+    /// demonstrably egressing at france-1 and the service answered
+    /// `{"placement":"fallback","preferred":"france-1"}` -- which reads
+    /// to a customer as "we could not put you on your exit".
+    ///
+    /// The session's egress is germany-1 here and always will be; that is
+    /// what a session egress *is* once concurrent exits exist. What
+    /// settles it is that france-1 has a relay carrying traffic.
+    #[test]
+    fn a_game_on_a_live_concurrent_exit_is_on_its_preferred_exit() {
+        let selection = preferring(
+            &[GAME],
+            &[(GAME, "france-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        let france_is_live: &dyn Fn(&str) -> bool = &|exit: &str| exit == "france-1";
+
+        assert_eq!(
+            selection.placement(GAME, Some("germany-1"), france_is_live),
+            ExitPlacement::OnPreferred
+        );
+        // And the old answer, to show the parameter is what changed it
+        // rather than something else moving underneath.
+        assert_eq!(
+            selection.placement(GAME, Some("germany-1"), NO_LIVE),
+            ExitPlacement::Fallback { preferred: "france-1".to_string() }
+        );
+    }
+
+    /// A relay for some *other* exit must not launder this one. Only the
+    /// application's own preferred exit being live counts.
+    #[test]
+    fn a_live_relay_for_a_different_exit_is_still_a_fallback() {
+        let selection = preferring(
+            &[GAME],
+            &[(GAME, "france-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        let elsewhere: &dyn Fn(&str) -> bool = &|exit: &str| exit == "singapore-1";
+
+        assert_eq!(
+            selection.placement(GAME, Some("germany-1"), elsewhere),
+            ExitPlacement::Fallback { preferred: "france-1".to_string() }
+        );
+    }
+
+    /// A live relay is a stronger statement than an absent egress, so it
+    /// resolves the case that would otherwise be Unknown.
+    #[test]
+    fn a_live_relay_answers_even_without_a_session_egress() {
+        let selection = preferring(
+            &[GAME],
+            &[(GAME, "france-1")],
+            SplitTunnelMode::OnlySelected,
+        );
+        let france_is_live: &dyn Fn(&str) -> bool = &|exit: &str| exit == "france-1";
+
+        assert_eq!(selection.placement(GAME, None, france_is_live), ExitPlacement::OnPreferred);
+        assert_eq!(
+            selection.placement(GAME, None, NO_LIVE),
+            ExitPlacement::Unknown { preferred: "france-1".to_string() }
         );
     }
 
@@ -2836,11 +2931,11 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(OTHER, Some("germany-1")),
+            selection.placement(OTHER, Some("germany-1"), NO_LIVE),
             ExitPlacement::NoPreference
         );
         assert_eq!(
-            selection.placement(OTHER, Some("finland-1")),
+            selection.placement(OTHER, Some("finland-1"), NO_LIVE),
             ExitPlacement::NoPreference,
             "an app with no preference cannot be on the wrong exit"
         );
@@ -2858,7 +2953,7 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(GAME, Some("germany-1")),
+            selection.placement(GAME, Some("germany-1"), NO_LIVE),
             ExitPlacement::Fallback { preferred: "turkey-1".to_string() }
         );
         // And the carry decision is untouched by any of it.
@@ -2880,7 +2975,7 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(GAME, None),
+            selection.placement(GAME, None, NO_LIVE),
             ExitPlacement::Unknown { preferred: "germany-1".to_string() }
         );
     }
@@ -2895,7 +2990,7 @@ mod audit_tests {
         assert!(!selection.has_exits());
         assert_eq!(selection.preferred_exit(OTHER), None);
         assert_eq!(
-            selection.placement(OTHER, Some("finland-1")),
+            selection.placement(OTHER, Some("finland-1"), NO_LIVE),
             ExitPlacement::NoPreference
         );
     }
@@ -2927,7 +3022,7 @@ mod audit_tests {
         // And both report the same placement, which is the customer-
         // visible form of the same fact.
         for app in [RUST_WRAPPER, RUST_CLIENT] {
-            assert_eq!(selection.placement(app, Some("germany-1")), ExitPlacement::OnPreferred);
+            assert_eq!(selection.placement(app, Some("germany-1"), NO_LIVE), ExitPlacement::OnPreferred);
         }
     }
 
@@ -2960,7 +3055,7 @@ mod audit_tests {
         );
         assert!(!selection.has_exits());
         assert_eq!(
-            selection.placement(RUST_WRAPPER, Some("finland-1")),
+            selection.placement(RUST_WRAPPER, Some("finland-1"), NO_LIVE),
             ExitPlacement::NoPreference
         );
         // Fail toward the safe behaviour, never toward dropping
@@ -3062,7 +3157,7 @@ mod audit_tests {
         for app in [RUST_WRAPPER, RUST_CLIENT] {
             assert!(selection.should_tunnel(app), "fail open: the game keeps working");
             assert_eq!(
-                selection.placement(app, Some("germany-1")),
+                selection.placement(app, Some("germany-1"), NO_LIVE),
                 ExitPlacement::Fallback { preferred: "turkey-1".to_string() }
             );
         }
@@ -3082,7 +3177,7 @@ mod audit_tests {
         assert!(!selection.has_exits());
         assert_eq!(selection.preferred_exit(GAME), None);
         assert!(
-            selection.placements(Some("germany-1")).is_empty(),
+            selection.placements(Some("germany-1"), NO_LIVE).is_empty(),
             "the listed apps in AllExcept are the uncarried ones and have nothing to report"
         );
     }
@@ -3101,7 +3196,7 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(r"c:\games\game.exe", Some("germany-1")),
+            selection.placement(r"c:\games\game.exe", Some("germany-1"), NO_LIVE),
             ExitPlacement::OnPreferred
         );
     }
@@ -3118,7 +3213,7 @@ mod audit_tests {
             &[(GAME, "turkey-1")],
             SplitTunnelMode::OnlySelected,
         );
-        let placements = selection.placements(Some("germany-1"));
+        let placements = selection.placements(Some("germany-1"), NO_LIVE);
         assert_eq!(placements.len(), 2);
         let game = placements
             .iter()
@@ -3152,11 +3247,11 @@ mod audit_tests {
         assert_eq!(selection.preferred_exit(GAME), Some("germany-1"));
         assert_eq!(selection.preferred_exit(OTHER), Some("finland-1"));
         assert_eq!(
-            selection.placement(GAME, Some("germany-1")),
+            selection.placement(GAME, Some("germany-1"), NO_LIVE),
             ExitPlacement::OnPreferred
         );
         assert_eq!(
-            selection.placement(OTHER, Some("germany-1")),
+            selection.placement(OTHER, Some("germany-1"), NO_LIVE),
             ExitPlacement::Fallback { preferred: "finland-1".to_string() }
         );
     }
@@ -3312,7 +3407,7 @@ mod audit_tests {
             Scoped::OutOfScope
         );
         assert_eq!(
-            selection.placement(GAME, Some("germany-1")),
+            selection.placement(GAME, Some("germany-1"), NO_LIVE),
             ExitPlacement::OnPreferred
         );
     }
