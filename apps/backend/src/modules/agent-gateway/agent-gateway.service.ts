@@ -128,7 +128,29 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       neoxify: { agent: { v1: { AgentGateway: { service: grpc.ServiceDefinition } } } };
     };
 
-    this.server = new grpc.Server();
+    // Keepalive. Without it the server cannot tell a peer that has
+    // stopped reading from one that is merely idle, and neither can the
+    // agent: the socket stays ESTABLISHED, the stream never errors, and
+    // both ends wait forever. germany-1 and singapore-1 sat exactly like
+    // that for six days -- see docs/journal/log.md, 2026-08-30.
+    //
+    // min_ping_interval_without_data_ms must be no larger than the
+    // agent's keepalive interval (30s, keepaliveTime in
+    // agent/internal/controlplane/client.go) or the server answers the
+    // agent's pings with GOAWAY/ENHANCE_YOUR_CALM and severs a healthy
+    // connection -- a worse failure than the hang. Changing either side
+    // means changing both.
+    //
+    // max_pings_without_data 0 means "unlimited": the agent dials with
+    // PermitWithoutStream, so its pings legitimately arrive on an idle
+    // connection, and the default of 2 would drop it for that alone.
+    this.server = new grpc.Server({
+      "grpc.keepalive_time_ms": 20_000,
+      "grpc.keepalive_timeout_ms": 10_000,
+      "grpc.keepalive_permit_without_calls": 1,
+      "grpc.http2.min_ping_interval_without_data_ms": 20_000,
+      "grpc.http2.max_pings_without_data": 0,
+    });
     this.server.addService(proto.neoxify.agent.v1.AgentGateway.service, {
       agentSync: (call: AgentDuplexCall) => this.handleAgentSync(call),
     });

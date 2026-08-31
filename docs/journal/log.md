@@ -198,10 +198,14 @@ is not a network drop and not a crash; it is a stream that died above
 TCP without either end closing the socket. Compare fr1, same build, same
 config, logging normally as of this session.
 
-**They cannot recover on their own.** The backend only re-asserts to
-nodes it considers ONLINE, so the moment these two were marked OFFLINE
-they stopped receiving anything at all. Nothing in the current design
-brings a wedged agent back; it will sit there until someone restarts it.
+**They cannot recover on their own.** Re-asserts go only to nodes in the
+live-stream registry, so once the stale sweep dropped these two they
+stopped receiving anything at all. Nothing in the current design brings a
+wedged agent back; it will sit there until someone restarts it.
+
+*(Corrected in the root-cause entry below: the sweep does not merely stop
+sending — it actively destroys the server-side call. The agent did not
+notice that either, which is the more useful fact.)*
 
 ### The re-assert volume, which is the obvious suspect and is not proven
 
@@ -312,9 +316,21 @@ Four things have to line up, and they all do:
    the transport, and make all three loops error out.
 2. **The heartbeat `Send` has no deadline**, so the one loop whose whole
    job is proving liveness is itself the one that hangs.
-3. **A node marked OFFLINE stops being re-asserted to.** The backend only
-   pushes to nodes it believes are ONLINE, so going quiet removes the
-   remaining traffic — and with it any chance the window reopens.
+3. **The server's own teardown does not reach the agent.**
+   `sweepStaleNodes` is not passive: it finds ONLINE nodes with stale
+   heartbeats, calls `call.destroy(new Error("heartbeat stale"))`, drops
+   them from the connection registry and sets status OFFLINE. Re-asserts
+   then stop, because `reassertAllConnectedNodes` iterates
+   `registry.connectedNodeIds()` — the live-stream map, **not** the DB
+   status field.
+
+   So the control plane did tear its half down, days before this session,
+   and the agent still sat with an `ESTABLISHED` socket and a parked
+   `Send`. `call.destroy()` resets one HTTP/2 *stream*; it does not close
+   the TCP connection. Whatever it emitted did not unblock
+   `writeQuota.get` on the other end. That is the strongest argument for
+   connection-level keepalive specifically: stream-level teardown is
+   already implemented and demonstrably insufficient.
 4. **systemd cannot see it.** The process is alive and healthy-looking;
    `Restart=always` never fires. `NRestarts=0` after six days of doing
    nothing.
@@ -346,14 +362,92 @@ is the code that ran, but the two are not byte-identical.
    alone converts a permanent hang into a reconnect.
 2. **A deadline on the heartbeat send**, so the liveness prober cannot
    itself block forever even if keepalive is misconfigured.
-3. **Let the backend keep reaching OFFLINE nodes**, at a slow rate. Today
-   OFFLINE is an absorbing state: nothing is sent, so nothing can
-   recover. That is what turned a stalled window into six days of dark.
-4. **Alert on it.** Two of six nodes vanished for six days and the only
+3. **Alert on it.** Two of six nodes vanished for six days and the only
    reason anyone knows is a manual `select` against `nodes`. A heartbeat
    older than a few minutes should be loud.
-5. **Reconsider the re-assert rate** (`REASSERT_INTERVAL_MS = 60_000`,
+4. **Reconsider the re-assert rate** (`REASSERT_INTERVAL_MS = 60_000`,
    every user, every node, every minute) independently of this bug.
 
 None of this is written. Nothing on any node was changed beyond the two
 restarts.
+
+---
+
+## 2026-08-31 — Keepalive and bounded sends, written and verified locally; not deployed
+
+**Status:** done (code + tests) — **not deployed to any node or the panel**
+**Touches:** `agent/internal/controlplane/client.go`,
+`agent/internal/controlplane/client_test.go` (new),
+`apps/backend/src/modules/agent-gateway/agent-gateway.service.ts`
+
+Fixes 1 and 2 from the entry above. Fix 3 (alerting) and 4 (the
+re-assert rate) are not written.
+
+**Agent.** Dials with `keepalive.ClientParameters{Time: 30s, Timeout:
+10s, PermitWithoutStream: true}`. Every stream write — hello, heartbeat,
+stats — now goes through `sendWithTimeout`, which runs `Send` on its own
+goroutine and gives up after 30s, because grpc-go's `Send` accepts no
+deadline of its own.
+
+**Backend.** `new grpc.Server({...})` with matching keepalive:
+`keepalive_time_ms 20s`, `keepalive_timeout_ms 10s`,
+`keepalive_permit_without_calls 1`,
+`http2.min_ping_interval_without_data_ms 20s`,
+`http2.max_pings_without_data 0`.
+
+**The two sides are coupled and must be changed together.** If the
+server's `min_ping_interval_without_data_ms` ever exceeds the agent's
+30s `Time`, the server answers the agent's keepalive with
+GOAWAY/ENHANCE_YOUR_CALM and severs healthy connections — a worse
+failure than the hang being fixed. `max_pings_without_data 0` is
+similarly load-bearing: the agent pings on idle connections by design,
+and the default of 2 would drop it for that alone. Both constraints are
+in the comments at both ends.
+
+### Verified
+
+Toolchains had to be installed first (Go 1.27, node 26.8.1, pnpm 9.15) —
+this Mac had none.
+
+- `gofmt` clean, `go build ./...` and `go vet ./...` clean, **full agent
+  suite passes** (7 packages, exit 0).
+- Backend **typecheck exit 0**, and the three agent-gateway suites pass
+  (19 tests, exit 0). Note `prisma generate` must run before typecheck or
+  ~15 unrelated errors appear in `usage.service.ts` and `vouchers/` from
+  missing generated types; they are environmental, not code.
+- Three new tests in `client_test.go`. **Proven by reverting**: with
+  `sendWithTimeout` gutted back to a bare `stream.Send`, the suite hangs
+  and panics on the 20s test timeout — the production failure, reproduced
+  in a unit test. Restored, it passes in 0.4s.
+
+### Not verified
+
+**Nothing has been deployed and nothing has been proven on the wire.**
+No node runs this binary; the panel runs the old server. Keepalive
+behaviour in particular cannot be shown by a unit test — it needs two
+real peers and a stalled window. Until then this is a fix that compiles,
+passes tests, and is argued from a goroutine dump. That is not the same
+as fixed.
+
+Deploying it means a new agent binary on all six nodes plus a backend
+release, which is a rollout decision. The fleet is already on skewed
+pre-v0.2.6 binaries (four nodes on one 08-18/19 build, ir1 alone on
+v0.2.6), so a rollout is arguably overdue independently of this.
+
+### Found while fixing, not fixed: three goroutines share one stream
+
+`runStream` starts `heartbeatLoop`, `statsLoop` and `receiveLoop`
+concurrently, and **all three call `Send` on the same
+`AgentGateway_AgentSyncClient`** (client.go:233, 298, 327). grpc-go's
+contract is one sender and one receiver per stream; concurrent `SendMsg`
+from multiple goroutines is explicitly not supported.
+
+This predates today's change — the same three sites called `stream.Send`
+directly before it — and `sendWithTimeout` neither introduces nor worsens
+it, since each caller still blocks until its own write resolves. But it
+is a real race against a documented contract, it lives on the exact code
+path that wedged, and it is worth suspecting as a contributor to the
+exhausted window rather than treating as unrelated. The fix is a single
+writer goroutine fed by a channel. Not attempted here: it restructures
+all three loops, and doing it in the same change as the hang fix would
+make both harder to judge.

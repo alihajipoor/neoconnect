@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/config"
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
@@ -29,6 +30,26 @@ const (
 	statsInterval     = 30 * time.Second
 	initialBackoff    = time.Second
 	maxBackoff        = 30 * time.Second
+
+	// HTTP/2 keepalive. Without it a peer that stops reading is
+	// indistinguishable from an idle one: the socket stays ESTABLISHED,
+	// the stream never errors, and the agent waits forever. Two nodes sat
+	// like that for six days -- see docs/journal/log.md, 2026-08-30.
+	//
+	// keepaliveTime must not be lower than the server's
+	// MinPingIntervalWithoutData or the server answers pings with GOAWAY
+	// (ENHANCE_YOUR_CALM), which is a worse failure than the one being
+	// fixed. Backend is configured at 20s; 30s here leaves margin.
+	keepaliveTime    = 30 * time.Second
+	keepaliveTimeout = 10 * time.Second
+
+	// Ceiling on a single stream write. grpc-go's Send takes no deadline
+	// of its own: when the HTTP/2 send window is exhausted it parks in
+	// writeQuota.get until the peer sends WINDOW_UPDATE, with no upper
+	// bound. Keepalive should catch a dead peer first; this is the
+	// backstop for a peer that is alive, answering pings, and still not
+	// reading -- which keepalive alone does not detect.
+	sendTimeout = 30 * time.Second
 )
 
 // Run connects to the control plane and keeps the AgentSync stream alive,
@@ -40,7 +61,17 @@ func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatche
 		return err
 	}
 
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(target,
+		grpc.WithTransportCredentials(creds),
+		// PermitWithoutStream because the agent must keep proving the
+		// connection between streams too -- a reconnect that dials a
+		// black hole should fail fast rather than hang on the next Send.
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                keepaliveTime,
+			Timeout:             keepaliveTimeout,
+			PermitWithoutStream: true,
+		}),
+	)
 	if err != nil {
 		return fmt.Errorf("create grpc client for %s: %w", target, err)
 	}
@@ -119,7 +150,7 @@ func runStream(
 		return fmt.Errorf("open AgentSync stream: %w", err)
 	}
 
-	if err := sendHello(stream, nodeID, key); err != nil {
+	if err := sendHello(streamCtx, stream, nodeID, key); err != nil {
 		return fmt.Errorf("send hello: %w", err)
 	}
 	log.Printf("connected to control plane, node %s authenticated", nodeID)
@@ -134,13 +165,47 @@ func runStream(
 	return err
 }
 
-func sendHello(stream pb.AgentGateway_AgentSyncClient, nodeID string, key ed25519.PrivateKey) error {
+// sendWithTimeout bounds a single stream write.
+//
+// grpc-go offers no way to give Send a deadline: the stream's context
+// governs the RPC as a whole, and cancelling it kills the stream rather
+// than the one write. So the write runs on its own goroutine and the
+// caller stops waiting after d.
+//
+// The goroutine outlives this function when the write is truly stuck.
+// That is intended and it is not a leak: every caller returns the error
+// to runStream, which cancels streamCtx, which unblocks Send and lets
+// the goroutine exit. The channel is buffered so it can never block on
+// a send nobody is receiving.
+func sendWithTimeout(
+	ctx context.Context,
+	stream pb.AgentGateway_AgentSyncClient,
+	msg *pb.AgentMessage,
+	d time.Duration,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- stream.Send(msg) }()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("stream write blocked for %s (send window exhausted)", d)
+	}
+}
+
+func sendHello(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, nodeID string, key ed25519.PrivateKey) error {
 	nonce := randomNonce()
 	timestamp := time.Now().Unix()
 	message := []byte(fmt.Sprintf("%s.%d.%s", nodeID, timestamp, nonce))
 	signature := ed25519.Sign(key, message)
 
-	return stream.Send(&pb.AgentMessage{
+	return sendWithTimeout(ctx, stream, &pb.AgentMessage{
 		Payload: &pb.AgentMessage_Hello{
 			Hello: &pb.Hello{
 				NodeId:       nodeID,
@@ -150,7 +215,7 @@ func sendHello(stream pb.AgentGateway_AgentSyncClient, nodeID string, key ed2551
 				AgentVersion: version.Version,
 			},
 		},
-	})
+	}, sendTimeout)
 }
 
 func heartbeatLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient) error {
@@ -165,9 +230,9 @@ func heartbeatLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient) 
 			// CPU/mem/active-connection sampling isn't implemented yet --
 			// presence (the heartbeat arriving at all) is what M2 proves;
 			// real metrics land with usage accounting (M6).
-			if err := stream.Send(&pb.AgentMessage{
+			if err := sendWithTimeout(ctx, stream, &pb.AgentMessage{
 				Payload: &pb.AgentMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}},
-			}); err != nil {
+			}, sendTimeout); err != nil {
 				return fmt.Errorf("send heartbeat: %w", err)
 			}
 		}
@@ -230,11 +295,11 @@ func statsLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, disp
 					DistinctSources: s.DistinctSources,
 				}
 			}
-			if err := stream.Send(&pb.AgentMessage{
+			if err := sendWithTimeout(ctx, stream, &pb.AgentMessage{
 				Payload: &pb.AgentMessage_StatsBatch{
 					StatsBatch: &pb.StatsBatch{Deltas: pbDeltas, Sessions: pbSessions},
 				},
-			}); err != nil {
+			}, sendTimeout); err != nil {
 				return fmt.Errorf("send stats batch: %w", err)
 			}
 		}
