@@ -86,6 +86,25 @@ pub enum Request {
     /// teardown ordering is more reliable than the UI sequencing it.
     Connect {
         profile: ConnectProfile,
+        /// Additional exits to carry at the same time as `profile`, for
+        /// per-game exit selection.
+        ///
+        /// Additive on exactly the terms `SplitTunnelConfig::exits` is:
+        /// an older app sends none and gets what it had, and a newer app
+        /// talking to an older service has these ignored and gets one
+        /// exit for everything -- a narrowing of what the customer
+        /// asked for, never a change to what is carried.
+        ///
+        /// **Honoured only when `profile` is one of the Xray-carried
+        /// protocols**, and silently dropped otherwise rather than
+        /// refused. See [`ConnectProfile::carries_concurrent_exits`]:
+        /// the mechanism is one Xray process with several tagged
+        /// inbounds, and WireGuard, OpenVPN and IKEv2 have no equivalent.
+        /// The client is responsible for not offering the choice where
+        /// it cannot be delivered; this is the service refusing to
+        /// pretend, not the place the customer finds out.
+        #[serde(default)]
+        exits: Vec<ExitProfile>,
     },
     Disconnect,
     Status,
@@ -860,6 +879,40 @@ const MAX_EXIT_ID_LEN: usize = 64;
 /// what arrives over IPC is held by a LocalSystem service.
 const MAX_EXIT_GROUP_LEN: usize = 64;
 
+/// How many exits one session may carry at the same time.
+///
+/// A product ceiling rather than a technical one, set by the owner:
+/// *"they cant choose more than 3 apps at the same time"*. Read as
+/// three **games**, not three executables -- a game is routinely
+/// several binaries and they all leave from one exit or from none, so
+/// the thing being counted here is distinct exits, which is the same
+/// number as distinct placed games and is what actually costs
+/// something.
+///
+/// # What it costs, which is why there is a ceiling at all
+///
+/// Each concurrent exit is one more outbound in the running Xray
+/// process, one more loopback inbound listening, and one more node
+/// holding a live connection for this customer. None of those is free,
+/// and the last is the one that matters: a customer whose traffic
+/// arrives at four nodes at once looks, from a publisher's side, like
+/// four people sharing an account. `docs/design/ban-safety.md`
+/// mechanism 4 is the whole reason exits are grouped per game in the
+/// first place, and it does not stop applying because the split is
+/// deliberate.
+///
+/// Enforced in three places, deliberately:
+///
+/// * The **client** will not let a customer choose a fourth, and says
+///   so on the row before they try -- a limit a customer discovers as
+///   an error afterwards is a limit that was not stated.
+/// * [`SplitTunnelConfig::validate`] refuses a config that names more,
+///   because this client cannot produce one.
+/// * `Selection::with_exits` drops every preference if one arrives
+///   anyway, because that constructor has other callers and a rule
+///   this expensive should not depend on which one was used.
+pub const MAX_CONCURRENT_EXITS: usize = 3;
+
 impl SplitTunnelConfig {
     /// Checks the selection before the service acts on it.
     ///
@@ -1029,6 +1082,44 @@ impl SplitTunnelConfig {
                 }
             }
         }
+
+        // No more than [`MAX_CONCURRENT_EXITS`] exits at once.
+        //
+        // The second rule here that refuses *meaning*, and it refuses
+        // for the same reason the group rule does rather than for a
+        // different one: there is no way to honour part of it that this
+        // service could then report honestly.
+        //
+        // Dropping the excess would mean choosing which games keep
+        // their exit, and nothing here has a basis for that choice --
+        // the wire order is the order a customer happened to add games
+        // in, which they were never told was load-bearing. The app
+        // would then report `OnPreferred` for games picked by list
+        // position and `NoPreference` for the rest, which is a
+        // placement nobody decided being reported as one somebody did.
+        // That is the same class of claim as a "Connected" indicator
+        // nothing checked.
+        //
+        // Counted over **distinct exits**, not over entries, because
+        // that is what the ceiling is about. A game is several binaries
+        // and each contributes an entry naming the same exit; three
+        // games with two binaries apiece is six entries, three exits,
+        // and entirely within the limit.
+        //
+        // Refusing costs the sender its whole `SetSplitTunnel`, and as
+        // with the group rule that is the right price: the client
+        // enforces this ceiling in the picker, so a config naming a
+        // fourth exit means a sender that is broken or is not us.
+        let mut distinct: Vec<&str> = Vec::new();
+        for exit in &self.exits {
+            if !distinct.iter().any(|e| *e == exit.exit) {
+                distinct.push(&exit.exit);
+            }
+        }
+        if distinct.len() > MAX_CONCURRENT_EXITS {
+            return Err(reject("exits", "names more exits than can be carried at once"));
+        }
+
         if let Some(egress) = &self.egress {
             if egress.is_empty() || egress.len() > MAX_EXIT_ID_LEN {
                 return Err(reject("egress", "names no exit"));
@@ -1578,6 +1669,57 @@ fn check_cidr_list(field: &str, value: &str) -> Checked {
     Ok(())
 }
 
+/// One concurrent exit: the node to dial, and the identifier the
+/// customer's per-game preferences name it by.
+///
+/// # Why the identifier travels with the profile
+///
+/// [`AppExit::exit`] is opaque to the service -- it is compared for
+/// equality and nothing else -- and that is what keeps the service from
+/// having an opinion about which exits exist. The same rule applies
+/// here: this pairs an identifier the *client* chose with credentials
+/// the client already holds, and the service's whole job is to keep the
+/// two associated so that a flow preferring `exit` reaches the node in
+/// `profile`. It never resolves one to the other, and it never learns
+/// which node is "germany-1".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitProfile {
+    /// Matched by equality against [`AppExit::exit`].
+    pub exit: String,
+    /// The node this exit leaves from.
+    pub profile: ConnectProfile,
+}
+
+impl ConnectProfile {
+    /// Whether this protocol can carry more than one exit at a time.
+    ///
+    /// **Xray only, and that is a platform gap rather than a decision
+    /// to drop a protocol.** The mechanism is one Xray process with
+    /// several tagged inbounds, each routed to its own outbound -- the
+    /// same thing `ProtocolConfig.inboundTag` does on a node.
+    /// WireGuard, OpenVPN and IKEv2 have no equivalent: each is one
+    /// engine, one adapter and one peer, and a second of any of them
+    /// runs into every singleton `docs/design/per-game-exits.md` §2.3
+    /// lists -- fixed adapter and service names, one passive route
+    /// metric, a process-global DNS mutex, a machine-wide IPv6 block,
+    /// and one WinDivert loop pinned to one interface.
+    ///
+    /// So a customer using concurrent exits is on Xray. The app must
+    /// say that plainly and must not offer the choice on a protocol
+    /// that cannot deliver it; this predicate is what the service uses
+    /// to make sure it never *acts* as though it could.
+    pub fn carries_concurrent_exits(&self) -> bool {
+        matches!(
+            self,
+            ConnectProfile::XrayVlessReality(_)
+                | ConnectProfile::XrayVlessTls(_)
+                | ConnectProfile::XrayTrojan(_)
+                | ConnectProfile::Shadowsocks(_)
+        )
+    }
+}
+
 impl ConnectProfile {
     /// Must be called by the service before writing any config file.
     pub fn validate(&self) -> Checked {
@@ -2072,6 +2214,154 @@ mod tests {
             );
         });
         assert!(profile.validate().is_err());
+    }
+
+
+    // -----------------------------------------------------------------
+    // The three-exit ceiling, and what it is counted in.
+    // -----------------------------------------------------------------
+
+    fn placed(entries: &[(&str, &str, &str)]) -> SplitTunnelConfig {
+        SplitTunnelConfig {
+            enabled: true,
+            mode: SplitTunnelMode::OnlySelected,
+            apps: entries.iter().map(|(app, _, _)| (*app).to_string()).collect(),
+            scopes: Vec::new(),
+            exits: entries
+                .iter()
+                .map(|(app, exit, group)| AppExit {
+                    app: (*app).to_string(),
+                    exit: (*exit).to_string(),
+                    group: Some((*group).to_string()),
+                })
+                .collect(),
+            egress: None,
+        }
+    }
+
+    #[test]
+    fn three_exits_are_accepted() {
+        assert!(placed(&[
+            (r"C:\a\game.exe", "germany-1", "game-a"),
+            (r"C:\b\game.exe", "turkey-1", "game-b"),
+            (r"C:\c\game.exe", "finland-1", "game-c"),
+        ])
+        .validate()
+        .is_ok());
+    }
+
+    /// The ceiling counts **exits**, not entries. A game is routinely
+    /// several binaries and they all name the same exit, so six entries
+    /// across three games is three concurrent exits and is within the
+    /// limit.
+    #[test]
+    fn many_binaries_naming_three_exits_are_accepted() {
+        assert!(placed(&[
+            (r"C:\a\launcher.exe", "germany-1", "game-a"),
+            (r"C:\a\client.exe", "germany-1", "game-a"),
+            (r"C:\b\launcher.exe", "turkey-1", "game-b"),
+            (r"C:\b\client.exe", "turkey-1", "game-b"),
+            (r"C:\c\anticheat.exe", "finland-1", "game-c"),
+            (r"C:\c\client.exe", "finland-1", "game-c"),
+        ])
+        .validate()
+        .is_ok());
+    }
+
+    /// A fourth exit is refused outright rather than trimmed.
+    ///
+    /// Trimming would mean the service choosing which games keep their
+    /// exit, on the basis of list position, and then reporting those
+    /// placements as though somebody had decided them. This client
+    /// enforces the ceiling in the picker, so a config naming a fourth
+    /// exit means a sender that is broken or is not us.
+    #[test]
+    fn a_fourth_exit_is_refused() {
+        let error = placed(&[
+            (r"C:\a\game.exe", "germany-1", "game-a"),
+            (r"C:\b\game.exe", "turkey-1", "game-b"),
+            (r"C:\c\game.exe", "finland-1", "game-c"),
+            (r"C:\d\game.exe", "poland-1", "game-d"),
+        ])
+        .validate()
+        .expect_err("four concurrent exits cannot be carried");
+        assert!(format!("{error:?}").contains("more exits than can be carried"), "{error:?}");
+    }
+
+    /// Four *games* sharing three exits is three concurrent exits.
+    #[test]
+    fn four_games_on_three_exits_are_accepted() {
+        assert!(placed(&[
+            (r"C:\a\game.exe", "germany-1", "game-a"),
+            (r"C:\b\game.exe", "turkey-1", "game-b"),
+            (r"C:\c\game.exe", "finland-1", "game-c"),
+            (r"C:\d\game.exe", "germany-1", "game-d"),
+        ])
+        .validate()
+        .is_ok());
+    }
+
+    /// The ceiling is the owner's number, and a silent change to it
+    /// would change what the picker offers and what the service
+    /// accepts without anything failing.
+    #[test]
+    fn the_ceiling_is_three() {
+        assert_eq!(MAX_CONCURRENT_EXITS, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Concurrent exits are an Xray-only capability.
+    // -----------------------------------------------------------------
+
+    /// Stated as a predicate rather than left implicit, because the
+    /// honest answer to "can this protocol do it" has to be the same in
+    /// the UI, in the Tauri command and in the service. A platform gap
+    /// is a gap to state, not a protocol to drop.
+    #[test]
+    fn only_the_xray_carried_protocols_can_hold_several_exits() {
+        let xray = ConnectProfile::XrayVlessReality(XrayProfile {
+            uuid: "3f2504e0-4f89-11d3-9a0c-0305e82c3301".into(),
+            flow: "xtls-rprx-vision".into(),
+            host: "203.0.113.5".into(),
+            port: 443,
+            reality_public_key: "3Qc9mF_kJz8xN2pQrStUvWxYz0123456789abcdefgh".into(),
+            short_id: "0123abcd".into(),
+            server_name: "example.com".into(),
+        });
+        assert!(xray.carries_concurrent_exits());
+
+        // One engine, one adapter, one peer -- and saying so plainly is
+        // the point. A platform gap is a gap to state, not a protocol
+        // to drop.
+        let ikev2 = ConnectProfile::Ikev2(Ikev2Profile {
+            server: "node.example.com".into(),
+            username: "u".into(),
+            password: "p".into(),
+        });
+        assert!(!ikev2.carries_concurrent_exits());
+
+        let wireguard = ConnectProfile::Wireguard(WireguardProfile {
+            private_key: "aGVsbG8gd29ybGQgdGhpcyBpcyBhIGtleSBhYWFhYWE=".into(),
+            address: "10.66.0.2/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "aGVsbG8gd29ybGQgdGhpcyBpcyBhIGtleSBiYmJiYmI=".into(),
+            endpoint: "203.0.113.5:51820".into(),
+        });
+        assert!(!wireguard.carries_concurrent_exits());
+    }
+
+    /// The wire field is additive on exactly the terms every other one
+    /// here is: an older app sends no `exits` and the service reads an
+    /// empty list, which is one exit for everything.
+    #[test]
+    fn a_connect_without_exits_still_parses() {
+        let older = r#"{"type":"connect","profile":{"protocol":"IKEV2","server":"a.example.com","username":"u","password":"p"}}"#;
+        let request: Request = serde_json::from_str(older).expect("an older app must still connect");
+        match request {
+            Request::Connect { exits, .. } => assert!(exits.is_empty()),
+            other => panic!("expected a connect, got {other:?}"),
+        }
     }
 
     #[test]

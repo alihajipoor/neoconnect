@@ -291,7 +291,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888\nPostUp = calc.exe".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
         let reply = round_trip(name, &request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -381,7 +381,7 @@ mod tests {
             server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
             endpoint: "203.0.113.5:51888".into(),
         });
-        let request = serde_json::to_string(&Request::Connect { profile }).unwrap();
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
         let reply = round_trip(name, &request).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "error");
@@ -493,7 +493,7 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                 Err(message) => Response::Error { message },
             }
         }
-        Request::Connect { profile } => {
+        Request::Connect { profile, exits } => {
             let mut engines = engines.lock().await;
             // Mutual exclusion with gaming mode, and it is refused
             // rather than resolved.
@@ -518,7 +518,7 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                 };
             }
             crate::engines::begin_operation();
-            match engines.connect(&profile) {
+            match engines.connect(&profile, &exits) {
                 Ok(()) => Response::Ok,
                 Err(message) => Response::Error { message },
             }

@@ -58,6 +58,40 @@ pub struct Origin {
     /// the query goes to `upstream` and the return leg is rewritten
     /// from `addr:port` as usual.
     pub upstream: Option<std::net::SocketAddrV4>,
+    /// Which concurrent exit this flow leaves from, as an index into
+    /// [`super::proxy::ExitRelays`].
+    ///
+    /// `None` -- overwhelmingly the common case -- means the session's
+    /// own tunnel adapter, which is what every flow used before
+    /// concurrent exits existed.
+    ///
+    /// # Why it is here and not on `FlowKey`
+    ///
+    /// `FlowKey` must not grow another component. It is the key of
+    /// `Tables::direct`, the leave-alone cache, and that cache records
+    /// "this flow is not carried" -- a fact about an application and a
+    /// peer that is true whichever exit the session is on. Adding an
+    /// exit would multiply the entries a chatty socket produces and
+    /// push the table toward its overflow path for a distinction that
+    /// does not exist. `docs/design/per-game-exits.md` §4.2 notes that
+    /// key is load-bearing for three separate features already.
+    ///
+    /// `Origin` is the value rather than the key, and it is built
+    /// **after** the decision to carry the packet has been made. That
+    /// is the whole safety argument, and §4.1 names this field as the
+    /// correct attachment point for exactly that reason: choosing
+    /// where to send a packet requires having already decided to carry
+    /// it, so an exit that could be attached earlier would be the
+    /// fire-and-forget UDP leak rebuilt.
+    ///
+    /// # Why an index rather than the identifier
+    ///
+    /// `Origin` is `Copy` and is held per live flow. A `String` here
+    /// would make it neither, and would allocate on the packet path.
+    /// The index is meaningful because
+    /// [`super::proxy::ExitRelays`] is fixed for the life of a
+    /// session -- see the note on that type.
+    pub exit: Option<u8>,
 }
 
 /// Synthetic source ports are drawn from here. Above the range Windows
@@ -454,6 +488,7 @@ mod tests {
             client_port,
             interface_id: 12,
             upstream: None,
+            exit: None,
         }
     }
 
@@ -743,6 +778,73 @@ mod tests {
         assert!(
             nat.tables.lock().unwrap().direct.is_empty(),
             "an expired verdict must be reclaimed, not merely ignored"
+        );
+    }
+
+    /// `FlowKey` has exactly four components, and adding a fifth must
+    /// be a deliberate act rather than a passing thought.
+    ///
+    /// # Why this is a destructuring and not an assertion about a size
+    ///
+    /// The pattern below has no `..`, so a new field is a **compile
+    /// error** on this line rather than a test that happens to fail.
+    /// That is the only instrument that catches the mistake in the form
+    /// it would actually arrive in: somebody adds `exit: Option<u8>`
+    /// here because a flow's exit feels like part of its identity, every
+    /// existing test still passes because every existing flow has
+    /// `None`, and nothing says otherwise until a customer's table
+    /// overflows.
+    ///
+    /// # What it is protecting
+    ///
+    /// This key is the key of `Tables::direct`, the leave-alone cache,
+    /// and it is load-bearing for three separate features -- the
+    /// fire-and-forget leak fix, destination scoping, and now exits.
+    /// `docs/design/per-game-exits.md` section 4.2 states the rule:
+    /// the cache records *"this flow is not carried"*, which is a fact
+    /// about an application and a peer and is true whichever exit the
+    /// session happens to be on. An exit component would multiply the
+    /// entries one chatty UDP socket produces -- a torrent client
+    /// reaches thousands of peers well inside the five seconds a
+    /// verdict lives -- and push the table toward `DIRECT_MAX_ENTRIES`
+    /// for a distinction that does not exist.
+    ///
+    /// The exit lives on [`Origin`] instead, which is the *value* and
+    /// is built only after the decision to carry has been made. See the
+    /// note on `Origin::exit`.
+    #[test]
+    fn the_flow_key_has_exactly_four_components_and_none_of_them_is_an_exit() {
+        let key = FlowKey {
+            transport: Transport::Udp,
+            client_port: 40_000,
+            destination: Ipv4Addr::new(203, 0, 113, 9),
+            destination_port: 27_015,
+        };
+        // No `..`: a fifth field stops this compiling.
+        let FlowKey { transport, client_port, destination, destination_port } = key;
+        assert_eq!(transport, Transport::Udp);
+        assert_eq!(client_port, 40_000);
+        assert_eq!(destination, Ipv4Addr::new(203, 0, 113, 9));
+        assert_eq!(destination_port, 27_015);
+    }
+
+    /// Two flows that differ *only* by the exit their applications
+    /// prefer are one entry in the leave-alone cache, not two.
+    ///
+    /// The behavioural half of the rule above: even if somebody found
+    /// another way to make the exit part of the key, this is the
+    /// consequence that would change.
+    #[test]
+    fn the_leave_alone_cache_does_not_distinguish_flows_by_exit() {
+        let nat = Nat::new();
+        let peer = Ipv4Addr::new(203, 0, 113, 9);
+        nat.record_direct(Transport::Udp, 40_000, peer, 27_015);
+        // The same flow, whatever exit anything prefers -- the cache
+        // has no vocabulary for one, which is the point.
+        assert_eq!(
+            nat.lookup(Transport::Udp, 40_000, peer, 27_015),
+            Verdict::Direct,
+            "one flow, one verdict, one entry"
         );
     }
 }

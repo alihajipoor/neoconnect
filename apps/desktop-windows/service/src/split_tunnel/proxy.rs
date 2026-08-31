@@ -41,6 +41,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use windows_sys::Win32::Networking::WinSock::setsockopt;
 
 use super::flows::Nat;
+use super::socks;
 use super::owner::Transport;
 use super::redirect::Stats;
 
@@ -111,6 +112,92 @@ impl TunnelInterface {
 impl Default for TunnelInterface {
     fn default() -> Self {
         Self { index: AtomicU32::new(0), address: AtomicU32::new(0) }
+    }
+}
+
+/// The concurrent exits the running engine is offering, and the
+/// loopback SOCKS5 port that reaches each.
+///
+/// # Why this is not a second `TunnelInterface`
+///
+/// [`TunnelInterface`] names *an adapter*. There is one adapter, one
+/// address on it, and one default route at one metric -- every one of
+/// those a singleton that `docs/design/per-game-exits.md` §2.3 lists as
+/// blocking a second engine. Nothing here is an adapter. Each entry is
+/// a port on loopback that the one running Xray process is listening
+/// on, and Xray's own routing table is what turns a port into a node.
+/// So this table can hold three exits while the machine still has one
+/// tunnel adapter, one route and one janitor.
+///
+/// # Why the table is fixed for the life of a session
+///
+/// [`super::flows::Origin`] stores an *index* into this table rather
+/// than the exit's name, because `Origin` is `Copy` and is stored per
+/// live flow. An index is only meaningful against the table it was
+/// taken from, so the table is written when an engine starts and
+/// cleared when it stops, and never edited in between. Changing a
+/// customer's *preferences* mid-session does not touch it: preferences
+/// live on [`super::owner::Selection`] and say which exit an
+/// application wants, while this says which exits exist. The two are
+/// separately mutable precisely so that the index a flow is holding
+/// cannot come to mean a different node underneath it.
+#[derive(Default)]
+pub struct ExitRelays {
+    /// Exit identifier -> loopback port, in the order the engine
+    /// created the inbounds, which is the order the indices count in.
+    table: Mutex<Vec<(String, u16)>>,
+}
+
+impl ExitRelays {
+    /// Records the exits an engine has just brought up.
+    ///
+    /// Truncated to [`neoconnect_ipc::MAX_CONCURRENT_EXITS`] rather
+    /// than refused. This is the last of the three places that ceiling
+    /// is enforced and the only one on the packet path's side of the
+    /// pipe; by the time a table is being written the customer's
+    /// engine is already up, so refusing here would mean a live
+    /// session with no exits at all instead of a live session with the
+    /// three it is allowed.
+    pub fn set(&self, exits: Vec<(String, u16)>) {
+        let mut table = self.table.lock().unwrap();
+        *table = exits;
+        table.truncate(neoconnect_ipc::MAX_CONCURRENT_EXITS);
+    }
+
+    /// Forgets them, which is the fail-open state: every flow goes back
+    /// to the one tunnel adapter.
+    pub fn clear(&self) {
+        self.table.lock().unwrap().clear();
+    }
+
+    /// Whether any concurrent exit is live. The packet path asks this
+    /// first so that a session with none -- overwhelmingly the common
+    /// case -- costs one atomic-free length check and nothing else.
+    pub fn is_empty(&self) -> bool {
+        self.table.lock().unwrap().is_empty()
+    }
+
+    /// The index an exit identifier occupies, if the engine brought it
+    /// up.
+    ///
+    /// `None` for an identifier the engine does not have, and that is
+    /// the fail-open case rather than an error: the application is
+    /// carried on the session's own exit and reported as
+    /// `ExitPlacement::Fallback`. A game that keeps working from the
+    /// wrong address beats a game that stops.
+    pub fn index_of(&self, exit: &str) -> Option<u8> {
+        let table = self.table.lock().unwrap();
+        table
+            .iter()
+            .position(|(name, _)| name == exit)
+            // The ceiling is 3, so a `u8` cannot truncate; the cast is
+            // safe by the same invariant `set` maintains.
+            .map(|i| i as u8)
+    }
+
+    /// The loopback port at an index.
+    pub fn port_at(&self, index: u8) -> Option<u16> {
+        self.table.lock().unwrap().get(index as usize).map(|(_, port)| *port)
     }
 }
 
@@ -272,11 +359,65 @@ fn pin_to_interface(socket: &Socket, index: u32) -> io::Result<()> {
 
 /// A TCP socket placed on the tunnel, or on the normal route if none is
 /// up.
+///
+/// `exit` is the flow's concurrent exit, if it has one. When it does,
+/// the socket is not pinned to anything: it is an ordinary loopback
+/// connection to the Xray inbound routed to that exit's node, and Xray
+/// pins its *own* outbound to the physical link. Nothing else in this
+/// function applies to that path, which is why it returns before any of
+/// it -- there is no interface to attach to and no registration to
+/// make, because the redirect loop's filter ends in `not loopback` and
+/// never sees the hop at all.
 fn connect_upstream(
     target: SocketAddrV4,
     tunnel: &TunnelInterface,
     own: &Arc<OwnSockets>,
+    exits: &ExitRelays,
+    exit: Option<u8>,
 ) -> io::Result<(TcpStream, Option<Registration>)> {
+    if let Some(port) = exit.and_then(|index| exits.port_at(index)) {
+        return match socks::connect(port, target) {
+            Ok(stream) => Ok((stream, None)),
+            Err(e) => {
+                // Logged for the same reason the attach failure below
+                // is: a flow that silently never connects is invisible
+                // in the counters, because the packets were rewritten
+                // and counted as redirected before this ran.
+                note(&format!(
+                    "exit relay connect FAILED to {target}: {e} (socks inbound on 127.0.0.1:{port})"
+                ));
+                // Failed, deliberately not fallen back to the tunnel
+                // adapter -- and this is the one place in this feature
+                // where "keep the game working" is the wrong answer.
+                //
+                // Everywhere else, fail-open means an application whose
+                // exit is unavailable is carried on the session's own,
+                // and that is safe because it happens to the **whole
+                // selection at once**: the exit is either in
+                // `ExitRelays` or it is not, so every binary of every
+                // game moves together.
+                //
+                // A per-connection fallback is not that. It would fire
+                // for one connection of one binary while its siblings
+                // stayed on the exit -- so `RustClient.exe` reaches the
+                // game's servers from Germany while `Rust.exe` reaches
+                // them from the customer's own session exit, at the same
+                // instant, on one account. That is precisely the
+                // two-source-address signature `docs/design/ban-safety.md`
+                // mechanism 4 describes and that the group rules in
+                // `Selection::with_exits` exist to make unrepresentable.
+                // Reintroducing it here, at runtime, below every check
+                // that enforces it, would undo all of them.
+                //
+                // So the connection fails. The application retries, and
+                // if the inbound is genuinely gone the engine's teardown
+                // clears the whole table, which moves every game back to
+                // the session's exit together -- the atomic transition
+                // that a per-connection fallback is not.
+                Err(e)
+            }
+        };
+    }
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     let pinned = tunnel.get();
     let mut registration = None;
@@ -523,10 +664,12 @@ fn bind_upstream_retrying(
     tunnel: &TunnelInterface,
     own: &Arc<OwnSockets>,
     stop: &AtomicBool,
-) -> io::Result<(UdpSocket, Option<Registration>)> {
+    exits: &ExitRelays,
+    exit: Option<u8>,
+) -> io::Result<(UpstreamUdp, Option<Registration>)> {
     let deadline = Instant::now() + BIND_RETRY_FOR;
     loop {
-        match bind_upstream(tunnel, own) {
+        match bind_upstream(tunnel, own, exits, exit) {
             Ok(socket) => return Ok(socket),
             Err(e) if Instant::now() >= deadline || stop.load(Ordering::SeqCst) => return Err(e),
             Err(_) => std::thread::sleep(BIND_RETRY_EVERY),
@@ -534,10 +677,76 @@ fn bind_upstream_retrying(
     }
 }
 
+/// The onward half of a redirected UDP flow.
+///
+/// Two ways of reaching the same place, behind one pair of methods so
+/// the relay loops do not branch per datagram:
+///
+/// * [`UpstreamUdp::Pinned`] is the original -- a socket attached to the
+///   tunnel adapter, which sends and receives ordinary datagrams.
+/// * [`UpstreamUdp::Exit`] is a SOCKS5 UDP association with a loopback
+///   Xray inbound, which frames each datagram with its destination and
+///   strips the frame off the replies.
+///
+/// The difference is deliberately invisible above this type. Both
+/// `send_to` and `recv_from` take and return exactly what the plain
+/// socket did, so `send_upstream` and the return-leg thread are
+/// unchanged by concurrent exits -- and the rewriting they do, which is
+/// the part a mistake would corrupt, is not touched at all.
+enum UpstreamUdp {
+    Pinned(UdpSocket),
+    Exit(socks::UdpAssociation),
+}
+
+impl UpstreamUdp {
+    fn send_to(&self, datagram: &[u8], target: SocketAddrV4) -> io::Result<usize> {
+        match self {
+            UpstreamUdp::Pinned(socket) => socket.send_to(datagram, target),
+            UpstreamUdp::Exit(association) => association.send_to(datagram, target),
+        }
+    }
+
+    fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddrV4)> {
+        match self {
+            UpstreamUdp::Pinned(socket) => match socket.recv_from(buffer)? {
+                (len, SocketAddr::V4(from)) => Ok((len, from)),
+                // The socket is bound to an IPv4 address, so a v6 peer
+                // cannot reach it. Reported rather than unwrapped
+                // because a panic in a relay thread takes the flow with
+                // it silently.
+                (_, from) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("an IPv4 socket received from {from}"),
+                )),
+            },
+            UpstreamUdp::Exit(association) => association.recv_from(buffer),
+        }
+    }
+}
+
 fn bind_upstream(
     tunnel: &TunnelInterface,
     own: &Arc<OwnSockets>,
-) -> io::Result<(UdpSocket, Option<Registration>)> {
+    exits: &ExitRelays,
+    exit: Option<u8>,
+) -> io::Result<(UpstreamUdp, Option<Registration>)> {
+    // The exit path first and returning early, for the reason
+    // `connect_upstream` does: none of what follows applies to it.
+    // There is no interface to attach to -- the association's socket
+    // talks to loopback -- and no registration to make, because the
+    // redirect loop's filter ends in `not loopback` and never hands
+    // over a packet from it.
+    if let Some(port) = exit.and_then(|index| exits.port_at(index)) {
+        let association = socks::UdpAssociation::open(port).inspect_err(|e| {
+            note(&format!("exit relay associate FAILED: {e} (socks inbound on 127.0.0.1:{port})"));
+        })?;
+        association.set_read_timeout(Some(POLL_INTERVAL))?;
+        // No fallback to the tunnel adapter, for the reason spelled out
+        // in `connect_upstream`: a per-flow fallback puts one of a
+        // game's binaries on a different address from its siblings,
+        // which is the signature this feature exists to avoid.
+        return Ok((UpstreamUdp::Exit(association), None));
+    }
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     match tunnel.get() {
         Some((index, address)) => attach_to_tunnel(&socket, index, address)?,
@@ -551,7 +760,7 @@ fn bind_upstream(
     // datagram has left, so the redirect loop can never see a packet
     // from a socket it does not yet know is ours.
     let registration = register(own, &socket, Transport::Udp);
-    Ok((socket.into(), registration))
+    Ok((UpstreamUdp::Pinned(socket.into()), registration))
 }
 
 /// Addresses used only to prove the tunnel carries traffic.
@@ -897,12 +1106,12 @@ struct UdpUpstreams {
 /// says it belongs to us -- so retiring the flow retires both, and a
 /// port number cannot stay claimed after Windows has reissued it.
 struct Upstream {
-    socket: Arc<UdpSocket>,
+    socket: Arc<UpstreamUdp>,
     _registration: Option<Registration>,
 }
 
 impl UdpUpstreams {
-    fn get(&self, nat_port: u16) -> Option<Arc<UdpSocket>> {
+    fn get(&self, nat_port: u16) -> Option<Arc<UpstreamUdp>> {
         self.sockets.lock().unwrap().get(&nat_port).map(|u| u.socket.clone())
     }
 
@@ -921,9 +1130,9 @@ impl UdpUpstreams {
     fn insert_if_absent(
         &self,
         nat_port: u16,
-        socket: Arc<UdpSocket>,
+        socket: Arc<UpstreamUdp>,
         registration: Option<Registration>,
-    ) -> Option<Arc<UdpSocket>> {
+    ) -> Option<Arc<UpstreamUdp>> {
         let mut sockets = self.sockets.lock().unwrap();
         if let Some(existing) = sockets.get(&nat_port) {
             return Some(existing.socket.clone());
@@ -951,6 +1160,7 @@ pub fn start(
     nat: Arc<Nat>,
     tunnel: Arc<TunnelInterface>,
     stats: Arc<Stats>,
+    exits: Arc<ExitRelays>,
 ) -> io::Result<Relays> {
     let tcp = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let tcp_port = tcp.local_addr()?.port();
@@ -965,14 +1175,14 @@ pub fn start(
     let mut threads = Vec::new();
 
     threads.push({
-        let (nat, tunnel, stop, own) =
-            (nat.clone(), tunnel.clone(), stop.clone(), own_sockets.clone());
-        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own))
+        let (nat, tunnel, stop, own, exits) =
+            (nat.clone(), tunnel.clone(), stop.clone(), own_sockets.clone(), exits.clone());
+        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own, exits))
     });
     threads.push({
         let (nat, stop, upstreams, own, stats) =
             (nat.clone(), stop.clone(), upstreams.clone(), own_sockets.clone(), stats.clone());
-        std::thread::spawn(move || serve_udp(udp, nat, tunnel, stop, upstreams, own, stats))
+        std::thread::spawn(move || serve_udp(udp, nat, tunnel, stop, upstreams, own, stats, exits))
     });
     threads.push({
         let (stop, upstreams) = (stop.clone(), upstreams.clone());
@@ -982,12 +1192,14 @@ pub fn start(
     Ok(Relays { tcp_port, udp_port, own_sockets, stop, upstreams, threads })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn accept_tcp(
     listener: TcpListener,
     nat: Arc<Nat>,
     tunnel: Arc<TunnelInterface>,
     stop: Arc<AtomicBool>,
     own: Arc<OwnSockets>,
+    exits: Arc<ExitRelays>,
 ) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
@@ -1014,12 +1226,15 @@ fn accept_tcp(
 
         let tunnel = tunnel.clone();
         let own = own.clone();
+        let exits = exits.clone();
         std::thread::spawn(move || {
             let target = origin.upstream.unwrap_or_else(|| SocketAddrV4::new(origin.addr, origin.port));
             // The registration is held for the life of the connection,
             // not just the connect: every packet this socket sends has
             // to be recognised as ours, not only its SYN.
-            if let Ok((upstream, _registration)) = connect_upstream(target, &tunnel, &own) {
+            if let Ok((upstream, _registration)) =
+                connect_upstream(target, &tunnel, &own, &exits, origin.exit)
+            {
                 pump(client, upstream);
             }
         });
@@ -1100,6 +1315,7 @@ fn serve_udp(
     upstreams: Arc<UdpUpstreams>,
     own: Arc<OwnSockets>,
     stats: Arc<Stats>,
+    exits: Arc<ExitRelays>,
 ) {
     let local = Arc::new(local);
     let pending = Arc::new(PendingFlows::default());
@@ -1144,7 +1360,7 @@ fn serve_udp(
                 // non-blocking local calls -- socket, setsockopt, bind,
                 // setsockopt -- so the case that always used to succeed
                 // still costs microseconds and still happens here.
-                match bind_upstream(&tunnel, &own) {
+                match bind_upstream(&tunnel, &own, &exits, origin.exit) {
                     Ok((socket, registration)) => install_upstream(
                         nat_port,
                         socket,
@@ -1185,7 +1401,7 @@ fn serve_udp(
                         // arrived precisely when the customer was
                         // already looking at it.
                         if pending.begin(nat_port, &buffer[..len]) {
-                            let (tunnel, own, upstreams, local, nat, stop, pending, stats) = (
+                            let (tunnel, own, upstreams, local, nat, stop, pending, stats, exits) = (
                                 tunnel.clone(),
                                 own.clone(),
                                 upstreams.clone(),
@@ -1194,11 +1410,12 @@ fn serve_udp(
                                 stop.clone(),
                                 pending.clone(),
                                 stats.clone(),
+                                exits.clone(),
                             );
                             std::thread::spawn(move || {
                                 bind_pending(
                                     nat_port, tunnel, own, upstreams, local, nat, stop, pending,
-                                    stats,
+                                    stats, exits,
                                 )
                             });
                         }
@@ -1231,7 +1448,7 @@ fn serve_udp(
 /// retrying here would hand the destination a duplicate of something the
 /// application may already have resent. What was missing was not a
 /// remedy but a record.
-fn send_upstream(upstream: &UdpSocket, datagram: &[u8], target: SocketAddrV4, stats: &Stats) {
+fn send_upstream(upstream: &UpstreamUdp, datagram: &[u8], target: SocketAddrV4, stats: &Stats) {
     if let Err(e) = upstream.send_to(datagram, target) {
         stats.udp_send_failed.fetch_add(1, Ordering::Relaxed);
         static FAILED: Throttle = Throttle::new();
@@ -1250,7 +1467,7 @@ fn send_upstream(upstream: &UdpSocket, datagram: &[u8], target: SocketAddrV4, st
 #[allow(clippy::too_many_arguments)]
 fn install_upstream(
     nat_port: u16,
-    socket: UdpSocket,
+    socket: UpstreamUdp,
     registration: Option<Registration>,
     upstreams: &Arc<UdpUpstreams>,
     local: &Arc<UdpSocket>,
@@ -1258,7 +1475,7 @@ fn install_upstream(
     stop: &Arc<AtomicBool>,
     client: Ipv4Addr,
     stats: &Arc<Stats>,
-) -> Arc<UdpSocket> {
+) -> Arc<UpstreamUdp> {
     let socket = Arc::new(socket);
     match upstreams.insert_if_absent(nat_port, socket.clone(), registration) {
         // Somebody bound one first. Theirs already has a reader thread;
@@ -1295,8 +1512,14 @@ fn bind_pending(
     stop: Arc<AtomicBool>,
     pending: Arc<PendingFlows>,
     stats: Arc<Stats>,
+    exits: Arc<ExitRelays>,
 ) {
-    let (socket, registration) = match bind_upstream_retrying(&tunnel, &own, &stop) {
+    // Read before the wait, unlike `origin` below, because it decides
+    // *what kind* of upstream to open rather than what to do with one.
+    // A flow retired underneath us is handled after the bind, where it
+    // always was.
+    let exit = nat.origin(Transport::Udp, nat_port).and_then(|origin| origin.exit);
+    let (socket, registration) = match bind_upstream_retrying(&tunnel, &own, &stop, &exits, exit) {
         Ok(bound) => bound,
         Err(e) => {
             // Said out loud, with the cost. The old code logged the
@@ -1366,7 +1589,7 @@ fn bind_pending(
 /// otherwise hold the thread forever.
 #[allow(clippy::too_many_arguments)]
 fn read_udp_replies(
-    upstream: Arc<UdpSocket>,
+    upstream: Arc<UpstreamUdp>,
     local: Arc<UdpSocket>,
     nat: Arc<Nat>,
     stop: Arc<AtomicBool>,
@@ -1617,7 +1840,7 @@ mod tests {
     fn relays_bind_distinct_ephemeral_ports() {
         // The redirect filter is built from these, so they have to be
         // real and they have to differ.
-        let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters())
+        let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
             .expect("relays should bind");
         assert!(relays.tcp_port > 0);
         assert!(relays.udp_port > 0);
@@ -1751,6 +1974,7 @@ mod tests {
                         client_port: 40000,
                         interface_id: 1,
                         upstream: None,
+                        exit: None,
                     },
                 )
                 .unwrap();
@@ -1778,7 +2002,7 @@ mod tests {
         let echo = udp_echo();
         let nat = Arc::new(Nat::new());
         let tunnel = Arc::new(TunnelInterface::default());
-        let relays = start(nat.clone(), tunnel.clone(), counters()).expect("relays should bind");
+        let relays = start(nat.clone(), tunnel.clone(), counters(), Arc::new(ExitRelays::default())).expect("relays should bind");
         let relay = SocketAddrV4::new(Ipv4Addr::LOCALHOST, relays.udp_port);
 
         // An established flow, bound while there is no tunnel at all --
@@ -1830,7 +2054,7 @@ mod tests {
         let nat = Arc::new(Nat::new());
         // Tentative from the outset: nothing can bind yet.
         let tunnel = Arc::new(TunnelInterface::new(1, UNBINDABLE));
-        let relays = start(nat.clone(), tunnel.clone(), counters()).expect("relays should bind");
+        let relays = start(nat.clone(), tunnel.clone(), counters(), Arc::new(ExitRelays::default())).expect("relays should bind");
         let relay = SocketAddrV4::new(Ipv4Addr::LOCALHOST, relays.udp_port);
 
         let (_, app) = udp_flow(&nat, echo);
@@ -1871,7 +2095,7 @@ mod tests {
         let unsendable = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 9);
         let nat = Arc::new(Nat::new());
         let stats = counters();
-        let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), stats.clone())
+        let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), stats.clone(), Arc::new(ExitRelays::default()))
             .expect("relays should bind");
         let relay = SocketAddrV4::new(Ipv4Addr::LOCALHOST, relays.udp_port);
 
@@ -1914,7 +2138,7 @@ mod tests {
         // Tentative forever: this bind is never going to succeed.
         let tunnel = Arc::new(TunnelInterface::new(1, UNBINDABLE));
         let stats = counters();
-        let relays = start(nat.clone(), tunnel, stats.clone()).expect("relays should bind");
+        let relays = start(nat.clone(), tunnel, stats.clone(), Arc::new(ExitRelays::default())).expect("relays should bind");
         let relay = SocketAddrV4::new(Ipv4Addr::LOCALHOST, relays.udp_port);
 
         let (_, app) = udp_flow(&nat, echo);
@@ -2005,7 +2229,7 @@ mod tests {
         // Nothing else can be done with it: the rewritten packet no
         // longer says where it was going. Carrying on regardless is how
         // a relay ends up connecting somewhere nobody asked for.
-        let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters())
+        let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
             .expect("relays should bind");
 
         let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, relays.tcp_port))
@@ -2037,7 +2261,7 @@ mod tests {
         });
 
         let nat = Arc::new(Nat::new());
-        let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), counters())
+        let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
             .expect("relays should bind");
 
         // No tunnel is up, so the upstream socket is unpinned -- the
@@ -2057,6 +2281,7 @@ mod tests {
                     client_port,
                     interface_id: 1,
                     upstream: None,
+                    exit: None,
                 },
             )
             .unwrap();
@@ -2079,5 +2304,77 @@ mod tests {
         stream.read_exact(&mut buffer).expect("the echo server must have been reached");
         assert_eq!(&buffer, b"through");
         relays.stop();
+    }
+
+    // -----------------------------------------------------------------
+    // The concurrent-exit table.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn an_empty_exit_table_is_the_fail_open_state() {
+        let exits = ExitRelays::default();
+        assert!(exits.is_empty());
+        assert_eq!(exits.index_of("germany-1"), None);
+        assert_eq!(exits.port_at(0), None);
+    }
+
+    #[test]
+    fn an_exit_resolves_to_the_port_its_inbound_listens_on() {
+        let exits = ExitRelays::default();
+        exits.set(vec![("turkey-1".into(), 41080), ("germany-1".into(), 41081)]);
+        assert_eq!(exits.index_of("turkey-1"), Some(0));
+        assert_eq!(exits.index_of("germany-1"), Some(1));
+        assert_eq!(exits.port_at(0), Some(41080));
+        assert_eq!(exits.port_at(1), Some(41081));
+    }
+
+    /// An identifier the engine did not bring up is `None`, which is
+    /// the fail-open case: the flow takes the session's own exit rather
+    /// than the first entry in the table.
+    ///
+    /// Answering with index 0 would be the ban signature -- one game
+    /// silently sent to another game's node.
+    #[test]
+    fn an_unknown_exit_resolves_to_nothing_rather_than_to_the_first() {
+        let exits = ExitRelays::default();
+        exits.set(vec![("turkey-1".into(), 41080)]);
+        assert_eq!(exits.index_of("germany-1"), None);
+    }
+
+    /// The last of the three places the ceiling is applied. By the time
+    /// a table is written the engine is already up, so refusing here
+    /// would mean a live session with no exits rather than a live
+    /// session with the three it is allowed.
+    #[test]
+    fn the_exit_table_never_holds_more_than_the_ceiling() {
+        let exits = ExitRelays::default();
+        exits.set(vec![
+            ("a".into(), 1),
+            ("b".into(), 2),
+            ("c".into(), 3),
+            ("d".into(), 4),
+            ("e".into(), 5),
+        ]);
+        assert_eq!(exits.index_of("c"), Some(2));
+        assert_eq!(
+            exits.index_of("d"),
+            None,
+            "past the ceiling, and falling back is the only honest answer"
+        );
+        assert_eq!(exits.port_at(neoconnect_ipc::MAX_CONCURRENT_EXITS as u8), None);
+    }
+
+    /// Clearing must move every game back to the session's exit in one
+    /// step. A table that emptied one entry at a time would move a
+    /// game's binaries at different moments, which is the two-source-
+    /// address signature the whole feature is shaped around.
+    #[test]
+    fn clearing_the_table_takes_every_exit_at_once() {
+        let exits = ExitRelays::default();
+        exits.set(vec![("turkey-1".into(), 41080), ("germany-1".into(), 41081)]);
+        exits.clear();
+        assert!(exits.is_empty());
+        assert_eq!(exits.index_of("turkey-1"), None);
+        assert_eq!(exits.index_of("germany-1"), None);
     }
 }

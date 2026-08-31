@@ -6,6 +6,7 @@ import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
 import { formatBytes } from "../lib/utils";
 import { customerProtocolLabel } from "../lib/protocol-labels";
+import { concurrentExitsFor } from "../lib/concurrent-exits";
 import {
   captureBaselineIp,
   captureIpv6Baseline,
@@ -1436,7 +1437,29 @@ export function Dashboard({
         }
 
         try {
-          await invoke("vpn_connect", { payload: candidate });
+          // The concurrent exits this candidate can carry alongside
+          // itself, worked out from credentials the client already
+          // holds. Empty unless the customer placed a game on an exit
+          // other than this one and the protocol can carry it -- see
+          // `concurrentExitsFor`, where every rule fails toward fewer
+          // exits and none of them can stop the connection.
+          //
+          // Recomputed per candidate rather than once before the
+          // ladder: the ladder settles wherever it settles, and which
+          // exits are *additional* depends on where it landed.
+          const concurrent = splitTunnelSettings
+            ? concurrentExitsFor(
+                candidate,
+                dialable,
+                routes,
+                splitTunnelSettings.games,
+                splitTunnelSettings.apps,
+              )
+            : [];
+          await invoke("vpn_connect", {
+            payload: candidate,
+            exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
+          });
           setProtocolUser(candidate);
           setConnectedAt(Date.now());
 
