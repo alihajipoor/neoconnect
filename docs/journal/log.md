@@ -1096,3 +1096,71 @@ verify again on the node, install, keep the old binary for rollback.
 endpoint validates the asset against the newest desktop build precisely
 so it cannot become an open redirect, and trading that for convenience
 would be the wrong fix.
+
+---
+
+## 2026-09-01 — Dest-health monitoring, built
+
+**Status:** done (code + tests) — **not deployed**; needs agent v0.2.8
+**Touches:** `packages/proto/agent.proto`, `agent/internal/realityprobe/**`
+(new), `agent/internal/controlplane/client.go`, `agent/cmd/agentd/main.go`,
+`apps/backend/src/modules/{nodes,agent-gateway}/**`, one migration
+
+The piece deferred on 2026-08-31 for being a fourth unverified change on
+one rollout. That rollout has since happened and held, so this is now its
+own change with its own rollout, which is what that entry asked for.
+
+**The agent measures, because only it can.** Reachability is a property
+of the node-dest *pair* — `www.shatel.ir` was dead from Finland and fine
+from Germany on the same afternoon — so the panel cannot answer this and
+never could. `internal/realityprobe` reads the dest out of the node's own
+Xray config, completes a **TLS 1.3 handshake with certificate
+verification**, and caches the answer.
+
+Probed every 10 minutes, reported on the 20-second heartbeat from cache.
+The heartbeat never dials: it *is* the liveness signal, and making it wait
+on the network is how it stops being one.
+
+**Two new `Heartbeat` fields**, `reality_dest` and
+`reality_dest_reachable`. Additive in proto3, so an old agent simply omits
+them and an old panel ignores them. The backend loads the `.proto` at
+runtime through `@grpc/proto-loader`, so only the Go side needed
+regeneration — and regenerating with *no* change first proved the local
+toolchain reproduces the committed files byte-for-byte apart from the
+protoc version comment.
+
+**The distinction the whole design turns on: absent is not unreachable.**
+An agent below v0.2.8 sends no dest, and a node with no REALITY inbound
+sends none either. Both are "did not measure" and neither writes, alerts,
+or is stored as `false`. Collapsing those two would page for the entire
+fleet the moment this ships, before a single node had reported anything —
+so the migration's three columns are nullable with no default and no
+backfill, and `recordRealityDestHealth` returns early on an empty dest.
+
+Alerting is transition-based like `setStatus`: first bad answer alerts,
+an unchanged bad answer stays quiet, recovery says so. No repeat reminder,
+unlike the offline sweep — an unreachable dest makes a node useless for
+REALITY, so it gets dealt with rather than lived with.
+
+### Verified
+
+`gofmt`, `go vet`, **full agent suite under `-race`, 8 packages, exit 0**
+(`-count=1`). Backend **62 suites / 653 tests, exit 0**, typecheck clean,
+all three drift guards ok.
+
+Thirteen new tests. The agent's cover config parsing against a realistic
+multi-inbound config, the REALITY-less and unreadable cases, an
+immediately-closed port, and context cancellation against TEST-NET-3. The
+backend's cover the write, the first bad answer, silence on repeat,
+recovery, a changed dest, and the empty-dest no-op.
+
+### Not verified
+
+**The succeeding half of `Reachable` is deliberately not unit tested.** It
+needs a dest presenting a publicly trusted certificate over TLS 1.3, and
+faking that means skipping verification or injecting a root — testing a
+weakened version of the check rather than the one that ships. It is
+exercised by the fleet audit instead.
+
+And nothing has run on a node. This ships in **agent v0.2.8**; until that
+rollout, every node reports nothing and the panel correctly says nothing.

@@ -51,6 +51,28 @@ message Heartbeat {
   double cpu_percent = 1;
   double mem_percent = 2;
   int32 active_connections = 3;
+
+  // REALITY camouflage-destination health, measured FROM THIS NODE.
+  //
+  // REALITY forwards every client handshake to its `dest`, so a dest the
+  // node cannot complete TLS with turns that node into one which accepts
+  // connections and serves nothing: the TCP handshake succeeds because
+  // Xray accepts it, and everything above dies waiting on a forward that
+  // never returns. finland1 was in exactly that state until 2026-08-31,
+  // its dest (www.shatel.ir) unreachable from Finland, while the panel
+  // reported it ONLINE the whole time -- because the heartbeat had no
+  // opinion about REALITY.
+  //
+  // It has to be measured on the node rather than by the panel:
+  // reachability is a property of the node-dest PAIR, not of the dest.
+  // www.shatel.ir is dead from Finland and fine from Germany.
+  //
+  // `reality_dest` is empty on a node with no REALITY inbound, and on any
+  // agent older than v0.2.8 -- which is why `reality_dest_reachable`
+  // must never be read without checking `reality_dest` first. A missing
+  // field is "did not say", not "unreachable".
+  string reality_dest = 4;
+  bool reality_dest_reachable = 5;
 }
 
 message StatsBatch {
