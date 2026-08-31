@@ -807,3 +807,28 @@ these things compile and that their tests pass; it cannot prove a
 keepalive reopens a stalled stream, because that needs two real peers and
 an exhausted window. The distinction is the same one `CLAUDE.md` makes
 about `ci-ios.yml`, and it applies here unchanged.
+
+---
+
+## 2026-08-31 — placement() is not a live bug, and the fix does not belong on main
+
+**Status:** correction — nothing changed
+**Touches:** nothing
+
+Earlier entries list `Selection::placement` reporting `fallback` for an
+application on its preferred exit as an open defect, and I carried that
+forward as if it affected customers now. It does not.
+
+**`ExitRelays` does not exist on `main`.** It lives only on
+`claude/concurrent-multi-exit-v2`. On main a session has exactly one
+exit, so comparing an app's preferred exit against the session egress is
+complete and `placement()` is correct. The defect appears only once
+concurrent exits do, and that feature is unmerged and unshipped.
+
+So the fix belongs on `claude/concurrent-multi-exit-v2` as a **merge
+precondition**, not on main. Writing it here would be a signature change
+with nothing to compare against.
+
+Recorded because "known bug in placement()" reads as something to fix
+next, and acting on that from main wastes the effort and risks a
+gratuitous signature change to code that is currently right.
