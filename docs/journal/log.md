@@ -1338,3 +1338,40 @@ What would make it doable: any machine that can run the client, or a
 decision that a screenshot pass in the Android client's shared UI is
 close enough to design against. It is genuinely small work once it can
 be seen.
+
+---
+
+## 2026-09-01 — The desktop crate can be type-checked here after all
+
+**Status:** done — environment capability, corrects an earlier entry
+**Touches:** `CLAUDE.md`
+
+Two CI failures on `claude/cme-placement-fix`, twenty minutes apart, both
+guessed at rather than read — the API was rate-limited and I could not
+fetch the log. The second guess was wrong. That is the point at which
+guessing should have stopped, so it did.
+
+**`cargo check` does not link.** With the `x86_64-pc-windows-gnu` target
+and mingw-w64 providing the C cross-compiler `ring`'s build script wants,
+the service crate type-checks on macOS:
+
+```bash
+cargo check --target x86_64-pc-windows-gnu -p neoconnect-service --all-targets
+```
+
+It named the error immediately: `no_live` undefined, seventeen times.
+`owner.rs` has **two** separate `#[cfg(test)]` modules; the stub went into
+the first and every call site is in the second. Moved to file scope, and
+both branches now `cargo check` clean at exit 0.
+
+**This corrects what I wrote in `CLAUDE.md` yesterday** — that the Mac
+"cannot compile the Windows desktop client *or run its tests*". Half of
+that was wrong. It cannot **link or run** them: `windivert-sys` needs
+`WinDivert.lib`, so `cargo test` still requires Windows and CI is still
+the only thing that can say whether tests pass. But every type and borrow
+error is now catchable locally, on the crate this session twice called
+untouchable.
+
+The rule in `CLAUDE.md` stands, narrowed: **check locally, then push and
+read the desktop job.** What changed is that the compiler is no longer
+twenty minutes away.
