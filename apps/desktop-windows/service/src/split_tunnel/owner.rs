@@ -1699,7 +1699,12 @@ mod tests {
     /// No exit relay is carrying anything -- the world these tests were
     /// written in, before one session could hold several exits at once.
     /// Placement then falls through to the session-egress comparison.
-    const NO_LIVE: &dyn Fn(&str) -> bool = &|_: &str| false;
+    ///
+    /// A plain fn rather than a `const &dyn Fn`: a closure is not a
+    /// constant, and the const form does not compile.
+    fn no_live(_exit: &str) -> bool {
+        false
+    }
 
     use super::*;
 
@@ -2850,7 +2855,7 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(GAME, Some("germany-1"), NO_LIVE),
+            selection.placement(GAME, Some("germany-1"), &no_live),
             ExitPlacement::OnPreferred
         );
     }
@@ -2880,7 +2885,7 @@ mod audit_tests {
         // And the old answer, to show the parameter is what changed it
         // rather than something else moving underneath.
         assert_eq!(
-            selection.placement(GAME, Some("germany-1"), NO_LIVE),
+            selection.placement(GAME, Some("germany-1"), &no_live),
             ExitPlacement::Fallback { preferred: "france-1".to_string() }
         );
     }
@@ -2915,7 +2920,7 @@ mod audit_tests {
 
         assert_eq!(selection.placement(GAME, None, france_is_live), ExitPlacement::OnPreferred);
         assert_eq!(
-            selection.placement(GAME, None, NO_LIVE),
+            selection.placement(GAME, None, &no_live),
             ExitPlacement::Unknown { preferred: "france-1".to_string() }
         );
     }
@@ -2931,11 +2936,11 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(OTHER, Some("germany-1"), NO_LIVE),
+            selection.placement(OTHER, Some("germany-1"), &no_live),
             ExitPlacement::NoPreference
         );
         assert_eq!(
-            selection.placement(OTHER, Some("finland-1"), NO_LIVE),
+            selection.placement(OTHER, Some("finland-1"), &no_live),
             ExitPlacement::NoPreference,
             "an app with no preference cannot be on the wrong exit"
         );
@@ -2953,7 +2958,7 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(GAME, Some("germany-1"), NO_LIVE),
+            selection.placement(GAME, Some("germany-1"), &no_live),
             ExitPlacement::Fallback { preferred: "turkey-1".to_string() }
         );
         // And the carry decision is untouched by any of it.
@@ -2975,7 +2980,7 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(GAME, None, NO_LIVE),
+            selection.placement(GAME, None, &no_live),
             ExitPlacement::Unknown { preferred: "germany-1".to_string() }
         );
     }
@@ -2990,7 +2995,7 @@ mod audit_tests {
         assert!(!selection.has_exits());
         assert_eq!(selection.preferred_exit(OTHER), None);
         assert_eq!(
-            selection.placement(OTHER, Some("finland-1"), NO_LIVE),
+            selection.placement(OTHER, Some("finland-1"), &no_live),
             ExitPlacement::NoPreference
         );
     }
@@ -3022,7 +3027,7 @@ mod audit_tests {
         // And both report the same placement, which is the customer-
         // visible form of the same fact.
         for app in [RUST_WRAPPER, RUST_CLIENT] {
-            assert_eq!(selection.placement(app, Some("germany-1"), NO_LIVE), ExitPlacement::OnPreferred);
+            assert_eq!(selection.placement(app, Some("germany-1"), &no_live), ExitPlacement::OnPreferred);
         }
     }
 
@@ -3055,7 +3060,7 @@ mod audit_tests {
         );
         assert!(!selection.has_exits());
         assert_eq!(
-            selection.placement(RUST_WRAPPER, Some("finland-1"), NO_LIVE),
+            selection.placement(RUST_WRAPPER, Some("finland-1"), &no_live),
             ExitPlacement::NoPreference
         );
         // Fail toward the safe behaviour, never toward dropping
@@ -3157,7 +3162,7 @@ mod audit_tests {
         for app in [RUST_WRAPPER, RUST_CLIENT] {
             assert!(selection.should_tunnel(app), "fail open: the game keeps working");
             assert_eq!(
-                selection.placement(app, Some("germany-1"), NO_LIVE),
+                selection.placement(app, Some("germany-1"), &no_live),
                 ExitPlacement::Fallback { preferred: "turkey-1".to_string() }
             );
         }
@@ -3177,7 +3182,7 @@ mod audit_tests {
         assert!(!selection.has_exits());
         assert_eq!(selection.preferred_exit(GAME), None);
         assert!(
-            selection.placements(Some("germany-1"), NO_LIVE).is_empty(),
+            selection.placements(Some("germany-1"), &no_live).is_empty(),
             "the listed apps in AllExcept are the uncarried ones and have nothing to report"
         );
     }
@@ -3196,7 +3201,7 @@ mod audit_tests {
             SplitTunnelMode::OnlySelected,
         );
         assert_eq!(
-            selection.placement(r"c:\games\game.exe", Some("germany-1"), NO_LIVE),
+            selection.placement(r"c:\games\game.exe", Some("germany-1"), &no_live),
             ExitPlacement::OnPreferred
         );
     }
@@ -3213,7 +3218,7 @@ mod audit_tests {
             &[(GAME, "turkey-1")],
             SplitTunnelMode::OnlySelected,
         );
-        let placements = selection.placements(Some("germany-1"), NO_LIVE);
+        let placements = selection.placements(Some("germany-1"), &no_live);
         assert_eq!(placements.len(), 2);
         let game = placements
             .iter()
@@ -3247,11 +3252,11 @@ mod audit_tests {
         assert_eq!(selection.preferred_exit(GAME), Some("germany-1"));
         assert_eq!(selection.preferred_exit(OTHER), Some("finland-1"));
         assert_eq!(
-            selection.placement(GAME, Some("germany-1"), NO_LIVE),
+            selection.placement(GAME, Some("germany-1"), &no_live),
             ExitPlacement::OnPreferred
         );
         assert_eq!(
-            selection.placement(OTHER, Some("germany-1"), NO_LIVE),
+            selection.placement(OTHER, Some("germany-1"), &no_live),
             ExitPlacement::Fallback { preferred: "finland-1".to_string() }
         );
     }
@@ -3407,7 +3412,7 @@ mod audit_tests {
             Scoped::OutOfScope
         );
         assert_eq!(
-            selection.placement(GAME, Some("germany-1"), NO_LIVE),
+            selection.placement(GAME, Some("germany-1"), &no_live),
             ExitPlacement::OnPreferred
         );
     }
