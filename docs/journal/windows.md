@@ -15048,3 +15048,217 @@ whole request.
   ships as a second file for the owner to run by hand.
 - **`concurrent-multi-exit-v2` was not merged**, as instructed; `C:/nxcme`
   is still sitting on `rig/cme-v2-verify`.
+
+## 2026-08-27 — Concurrent multi-exit, on a machine: two exit IPs at once
+
+Branch `rig/cme-v2-verify`, off `claude/concurrent-multi-exit-v2`. The
+2026-08-26 entry ends "**nothing ran on a machine**" and names two exit IPs
+at once as the only evidence that would settle it. They have now been
+observed. Nothing was changed to get there — no backend, no node, no route,
+no firewall rule — and the client connected as an ordinary customer with the
+credentials `ProtocolUsersService.provisionAll` had already put on the
+machine.
+
+*Addresses below are redacted per `docs/node-address-hygiene.md`:
+`{france-1}`, `{turkey-1}`, `{finland1}` are node exit addresses and `{rig}`
+is the guest's own public address. `198.51.100.7` is real — it is TEST-NET-2
+and was chosen precisely because nothing routes it.*
+
+### What was measured, and how
+
+Four byte-identical copies of one probe at four paths, hash-compared inside
+each run, so the only thing separating them is which exit each was assigned.
+Each copy asks its own exit IP twice per round over **two transports**: a
+TLS GET to `connect.neoxify.site/api/health/ip` (SOCKS5 CONNECT) and a STUN
+binding request whose XOR-MAPPED-ADDRESS is the address the datagram was
+seen to leave from (SOCKS5 UDP ASSOCIATE). Both forced to IPv4. STUN was
+chosen because it needs no server of ours, so the run changed nothing
+anywhere.
+
+The service was driven straight over its pipe, as previous runs did. **The
+picker, the Tauri command and the app's own connect path were not
+exercised** — only `setSplitTunnel` + `connect{profile, exits}` +
+`splitTunnelExits` + `status`. The desktop app was killed before every run
+so it could not re-issue a connect with no `exits` mid-measurement.
+
+### Confirmed
+
+**Two applications egressed from two different nodes at the same time.**
+Session on `{turkey-1}`, exit 0 = `france-1` (VLESS+REALITY), exit 1 =
+`turkey-1-trojan` (Trojan/TLS). Ten rounds each, four processes, both
+transports, zero failures:
+
+| copy | pinned to | TCP answer | UDP answer |
+|---|---|---|---|
+| A | exit 0 | `{france-1}` x10 | `{france-1}` x10 |
+| B | exit 1 | `{turkey-1}` x10 | `{turkey-1}` x10 |
+| C | selected, no preference | `{turkey-1}` x10 | `{turkey-1}` x10 |
+| D | **not selected** | `{rig}` x10 | `{rig}` x10 |
+
+Row D is what makes the rest mean anything: the same bytes at a fourth path,
+never leaving the customer's own address, for the whole run. Both exit
+inbounds held a live loopback connection in 10 of 10 snapshots.
+
+The vNIC capture agrees with the payloads: in the 96 s the four probes ran,
+**19 separate seconds carried packets to both node addresses**, 588 packets
+to one and 263 to the other, from one guest with one tunnel adapter. Over
+the whole capture, 82 such seconds.
+
+**UDP ASSOCIATE against xray-core's own inbound works.** This was section
+10.8's largest doubt — the association had only ever been tested against a
+SOCKS5 server written for the test, and the reply's bound address was called
+the field most likely to differ. It does not differ in a way that matters:
+xray-core answers an unspecified address, and `socks.rs` already forces that
+to loopback. Every UDP answer in every table above came back through the
+exit, addressed as the exit. **A game's traffic is UDP, so this was the row
+the feature stood on.**
+
+**Three concurrent outbounds, under load.** Five processes, 14 rounds at 3 s,
+three exits (VLESS to `{france-1}`, Trojan to `{turkey-1}`, Trojan to
+`{france-1}`) plus the session. All three exit inbounds held connections in
+9 of 9 snapshots; 70 of 70 rounds answered with the right address on both
+transports; not one failure. 2.3's worry that three engines could not
+activate on a slow guest does not transfer to three inbounds — they cost one
+process, one adapter, one route, as designed.
+
+**A failed SOCKS5 hop does not fall back to the tunnel adapter.** Exit 1
+pointed at `198.51.100.7`, which is well-formed and unroutable. Its
+application failed on **every** round on **both** transports, and — the
+whole point — never once reported the session's node or the customer's own
+address. Its sibling on exit 0 kept answering `{france-1}` throughout, so
+one binary losing its exit did not move the others. The unselected control
+answered `{rig}` throughout, which is what says the machine had working
+internet and the failure was about that exit. After `disconnect`, the same
+application went back to `{rig}`: the table cleared whole.
+
+**With no extra exits the generated config is byte-identical to the
+pre-change one — across builds, not just within one.** This matters more
+than the feature; every existing customer takes that path. Both service
+builds were installed in turn on the same guest and asked for the same
+session with no `exits` key at all:
+
+| shape | pre-change `1C94E99C...` | branch `BE83E9BB...` |
+|---|---|---|
+| full (split tunnel off) | `0FF38EDE...`, 659 chars | `0FF38EDE...`, 659 chars |
+| passive (Custom mode, no exits) | `D6DB02A2...`, 660 chars | `D6DB02A2...`, 660 chars |
+
+Same bytes, both shapes. No `routing` block and no `socks` string in either.
+
+### Refuted, and it is in the reporting layer, not the routing
+
+**`splitTunnelExits` reports `fallback` for an application that is on its
+preferred exit.** Every run above shows it: copy A is demonstrably egressing
+at `{france-1}`, and the service answers
+`{"placement":"fallback","preferred":"france-1"}` — which reads to a
+customer as *we could not put you on your exit*.
+
+The cause is `Selection::placement` in `split_tunnel/owner.rs`. It compares
+the application's preferred exit against the **session's `egress`** and
+nothing else; it has no access to `ExitRelays`, so it cannot know the exit
+is live and carrying. Before concurrent exits that comparison was complete,
+because one session meant one exit. It is now wrong for exactly the
+applications the feature works for, and only `NoPreference` and `Unknown`
+still come out right. **Left unfixed deliberately** — this run's scope is
+measurement, and the fix is a signature change on `placement`/`placements`.
+Worth noting that the routing is right and only the sentence is wrong, which
+is the safer way round, but "never report a state the app has not verified"
+cuts both ways and this is a state it has not verified.
+
+### Not established
+
+**The free-port race.** Ports were seen being handed out and Xray bound
+every one of them, but nothing was ever taken in the window between the
+probe bind and Xray's, and the loud-failure path — Xray refusing to start on
+a bound port, turned into a failed connect by `confirm_started` — was never
+exercised either. Neither half was observed. There is no way to force it
+from outside: the port is chosen by the OS inside `free_loopback_port()` and
+is not visible until the config is already written.
+
+### Two findings that are not about this branch
+
+**`{finland1}`'s VLESS+REALITY route does not carry.** Found because the
+first two-exit attempt had it at index 0 and that copy could not complete a
+single request. Isolated by giving it the session's own exit, where no
+concurrent-exit code is on the path at all: five rounds, both transports,
+all failed. The capture shows TCP opening to it and getting SYN-ACKs — 2
+SYN, 2 SYN-ACK, 12 packets out, 10 in — and then nothing, which is a
+handshake that completes at TCP and dies above it. `nodes.status` is ONLINE
+and the heartbeat is current, so **nothing on the panel says this route is
+broken**, and a customer picking that node's REALITY route gets a tunnel
+that connects and carries no traffic. Not investigated further; no node was
+touched.
+
+**The `exit relay connect FAILED` log line never fires for an unreachable
+node.** That line exists in `proxy.rs` to make a failed SOCKS hop visible,
+and the whole point of the no-fallback decision is that such a connection
+dies silently in the counters. But xray-core's SOCKS5 inbound replies
+*success* to CONNECT before it dials upstream, so `socks::connect` returns
+`Ok` and the failure surfaces later as a dead stream. Across a run in which
+every single request through the dead exit failed, `split-tunnel.log`
+contained **zero** `exit relay` lines. The behaviour is right; the
+diagnostic is blind to the most likely cause.
+
+### Suite counts, measured on this tree rather than trusted
+
+395 Rust (0 failed, 6 ignored) — matches. 265 vitest, 604 jest, 4 mobile
+vitest, and `pnpm turbo run lint typecheck build test` **17 successful, 17
+total**, re-run with `--force` so nothing was replayed from cache. Grepped
+for `Failed:` rather than trusting the exit code: 0 occurrences.
+
+### Rig traps, all new, all expensive
+
+**`VBoxManage keyboardputstring` drops one of a leading pair of
+backslashes.** `\\VBOXSVR\vmx\x.cmd` arrives as `\VBOXSVR\vmx\x.cmd` and
+Windows answers "cannot find". Use the mapped drive letter (`Z:\`). Same
+class as the known pipe-character drop.
+
+**The RunMRU trap fired again, exactly as the previous session wrote it
+down.** The Run box came up pre-filled with a stale
+`...-File C:/Users/Public/rig-fix6c.ps1` from an earlier session, selected,
+one Enter from executing. Clear the box with Ctrl+A then Delete, type, and
+**screenshot to verify the text before pressing Enter** — and have the shim
+write a marker file so which shim ran is a fact rather than an assumption.
+
+**The UAC prompt does render in the headless screenshot, with `No`
+filled**, and `Alt+Y` answered it — but only on the second send, tens of
+seconds after the first. Sample the screenshot; never time it. Do **not**
+send Escape while waiting: three Escapes cancelled a consent prompt that had
+not been drawn yet, and the symptom is a runner that simply never appears.
+
+**`lib6.ps1`'s `Pipe` can hang forever, and it looks exactly like a wedged
+guest.** It bounds the read with `.Wait($ms)` and then calls `$p.Dispose()`
+regardless — and disposing a `NamedPipeClientStream` with an outstanding
+async read blocks with no timeout. A phase that hit a slow service sat in
+one `Dispose` for fifteen minutes while its log simply stopped growing,
+which is indistinguishable from the guest dying, and it cost two full
+reruns. `libc9.ps1` bounds both halves and abandons a stream with unfinished
+IO rather than closing it.
+
+**`sc stop NeoxifyService` sits in STOP_PENDING indefinitely once the
+service has carried a session that was killed underneath it**, and the whole
+job channel blocks behind the wait loop. Forty seconds, then
+`taskkill /F /IM neoconnect-service.exe`. The service comes straight back
+under SCM's own restart, so `sc start` then answers `1056: already running`
+— that is fine, and the process that comes up is the newly copied file
+provided the copy happened before it started.
+
+**`runner2.ps1` has two startup steps that jam a much-restarted guest**, and
+neither is load-bearing: its `Register-ScheduledTask` block took 1 minute,
+then 5, then never returned, and nothing below it runs until it does; and
+its first write to the share is outside any `try`, so a logon where the
+share is a second behind kills the runner outright and presents as "the
+logon task did not fire". `zrun9.ps1` on the harness share is the same job
+channel with both removed.
+
+**PowerShell variable names are case-insensitive** — a `$dead` holding a
+profile object silently overwrote a `$DEAD` holding its identifier, and the
+service correctly refused the request with `invalid type: map, expected a
+string`. The refusal was the harness being wrong, not the build.
+
+### What a future session should pick up
+
+The picker to Tauri to service path is still undriven; everything here went
+over the pipe. `placement()` is wrong for live concurrent exits and should
+be fixed before the feature is shown to a customer, because the app renders
+that string. And `{finland1}`'s REALITY route needs someone with node access
+to look at it.
