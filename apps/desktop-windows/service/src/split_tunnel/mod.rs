@@ -1019,8 +1019,15 @@ impl SplitTunnel {
     /// not verify the node.
     pub fn exit_placements(&self) -> (Option<String>, Vec<AppPlacement>) {
         let live = if self.is_running() { self.egress.as_deref() } else { None };
-        let placements =
-            self.selection.read().unwrap_or_else(|e| e.into_inner()).placements(live);
+        // A concurrent exit relay carrying an application is what makes it
+        // "on its preferred exit" even when the session egresses elsewhere.
+        let exits = Arc::clone(&self.exits);
+        let is_live = move |exit: &str| exits.index_of(exit).is_some();
+        let placements = self
+            .selection
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .placements(live, &is_live);
         (live.map(str::to_string), placements)
     }
 
