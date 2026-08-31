@@ -32,7 +32,7 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use neoconnect_ipc::{ConnectProfile, SplitTunnelConfig, TunnelHealth};
+use neoconnect_ipc::{ConnectProfile, ExitProfile, SplitTunnelConfig, TunnelHealth};
 
 use crate::adapters;
 use crate::split_tunnel::SplitTunnel;
@@ -141,6 +141,16 @@ mod session {
         /// a Disconnect arriving after the fact has to be able to fix.
         pub(super) fn end(&mut self, split_tunnel: &mut SplitTunnel) -> Option<Active> {
             split_tunnel.stop();
+            // The concurrent exits go with the engine, in the same
+            // operation and for the same reason interception does.
+            // Their loopback inbounds live inside the process that is
+            // about to be killed, so a table that outlived it would
+            // point every placed game at ports nothing is listening on
+            // -- and each of those flows would fail separately, at
+            // whatever moment it next tried to connect, which is a
+            // game's binaries losing their exit one at a time. Cleared
+            // here, they lose it together.
+            split_tunnel.clear_exits();
             self.0.take()
         }
     }
@@ -281,7 +291,7 @@ impl Engines {
                     .to_string(),
             );
         };
-        self.connect(&profile)
+        self.connect(&profile, &[])
     }
 
     pub fn split_tunnel_running(&self) -> bool {
@@ -382,7 +392,7 @@ impl Engines {
     /// never leave two engines fighting over the system routing table.
     /// Wraps the real work so that EVERY failure path picks up the hint,
     /// rather than the two or three someone remembered to decorate.
-    pub fn connect(&mut self, profile: &ConnectProfile) -> Result<(), String> {
+    pub fn connect(&mut self, profile: &ConnectProfile, exits: &[ExitProfile]) -> Result<(), String> {
         // Noted before the attempt, reported only if it fails.
         //
         // Another VPN that is up owns the default route, and two clients
@@ -409,7 +419,7 @@ impl Engines {
             ikev2::ENTRY_NAME,
         ])
         .unwrap_or_default();
-        let result = self.connect_inner(profile).map_err(|e| with_rival_hint(e, &rivals));
+        let result = self.connect_inner(profile, exits).map_err(|e| with_rival_hint(e, &rivals));
         // Remembered only on success, so a failed attempt cannot leave a
         // profile behind for Custom mode to rebuild from.
         if result.is_ok() {
@@ -418,7 +428,11 @@ impl Engines {
         result
     }
 
-    fn connect_inner(&mut self, profile: &ConnectProfile) -> Result<(), String> {
+    fn connect_inner(
+        &mut self,
+        profile: &ConnectProfile,
+        exits: &[ExitProfile],
+    ) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
         self.disconnect()?;
         // Belt and braces with `disconnect`'s own reset: a connect that
@@ -473,7 +487,47 @@ impl Engines {
                     _ => unreachable!("outer match restricts this to the Xray protocols"),
                 };
 
-                let mut child = xray::connect(self, &outbound, passive)?;
+                // The concurrent exits this session will carry, if
+                // any. Built here rather than in `xray::connect`
+                // because it is the one place that holds both the
+                // request's profiles and the split tunnel they have to
+                // be registered with.
+                //
+                // Dropped entirely for a non-Xray primary -- the outer
+                // match makes that unreachable, and
+                // `ConnectProfile::carries_concurrent_exits` is what
+                // says so for the branches that are not here.
+                //
+                // Truncated rather than refused at
+                // `MAX_CONCURRENT_EXITS`, the last of the three places
+                // that ceiling is applied: refusing at this point would
+                // fail the whole connect over a preference, which is
+                // the one thing every rule about exits agrees must not
+                // happen.
+                let mut extra: Vec<(String, xray::Outbound)> = Vec::new();
+                for exit in exits.iter().take(neoconnect_ipc::MAX_CONCURRENT_EXITS) {
+                    // An exit whose own profile is not Xray-carried is
+                    // dropped, not refused. It cannot become an
+                    // outbound in this config, and failing the connect
+                    // would take a working session down over a game's
+                    // preference.
+                    let Some(exit_outbound) = xray_outbound_for(&exit.profile) else {
+                        continue;
+                    };
+                    if exit.profile.validate().is_err() {
+                        continue;
+                    }
+                    extra.push((exit.exit.clone(), exit_outbound));
+                }
+
+                let (mut child, table) =
+                    xray::connect_returning_exits(self, &outbound, &extra, passive)?;
+                // Registered before the routes and before the session
+                // is filled in, so that no flow can be decided against
+                // a table that is not there yet. Interception does not
+                // start until `start_split_tunnel`, which is later
+                // still.
+                self.split_tunnel.set_exits(table);
                 // Xray creates the adapter but routes nothing into it, so
                 // the tunnel is inert until this succeeds. Failing here
                 // must take the engine down with it rather than leave a
@@ -1438,6 +1492,23 @@ fn confirm_started(mut child: Child, engine: &str, log_path: &Path) -> Result<Ch
 /// another VPN is evidence, not a diagnosis, and a customer reading this
 /// is better served by "here is what else is running" than by us
 /// guessing which of the two is at fault.
+/// The Xray outbound for a profile, or `None` for a protocol Xray does
+/// not carry.
+///
+/// The borrow is the reason this is a free function taking a reference
+/// rather than a method: `xray::Outbound` holds a shared reference into
+/// the profile, so the profile has to outlive it and the caller is the
+/// only place that can promise that.
+fn xray_outbound_for(profile: &ConnectProfile) -> Option<xray::Outbound<'_>> {
+    match profile {
+        ConnectProfile::XrayVlessReality(p) => Some(xray::Outbound::VlessReality(p)),
+        ConnectProfile::XrayVlessTls(p) => Some(xray::Outbound::VlessTls(p)),
+        ConnectProfile::XrayTrojan(p) => Some(xray::Outbound::Trojan(p)),
+        ConnectProfile::Shadowsocks(p) => Some(xray::Outbound::Shadowsocks(p)),
+        _ => None,
+    }
+}
+
 fn with_rival_hint(error: String, rivals: &[String]) -> String {
     if rivals.is_empty() {
         return error;

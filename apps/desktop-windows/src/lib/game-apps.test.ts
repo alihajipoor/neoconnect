@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  canPlaceAnotherGame,
   canRouteByDestination,
   exitsForGames,
+  MAX_CONCURRENT_EXITS,
   gameExitGroup,
   groupMembers,
   isWholeGroup,
@@ -15,6 +17,7 @@ import {
   resolveGameApps,
   GAME_PAGE_SIZE,
   rankGames,
+  type GameExitGroup,
   type SearchableGame,
 } from "./game-apps";
 import type { RunningApp } from "./split-tunnel";
@@ -800,5 +803,142 @@ describe("the steam-client row against a real Steam install (rig, 2026-08-26)", 
     for (const path of resolveGameApps(steamRow, OBSERVED).paths) {
       expect(isSelectableAppPath(path)).toBe(true);
     }
+  });
+});
+
+describe("the three-game ceiling", () => {
+  function game(slug: string, exit: string | null, names: string[]): GameExitGroup {
+    return { slug, displayName: slug.toUpperCase(), names, exit };
+  }
+
+  const pathFor = (slug: string, name: string) => `C:\\Games\\${slug}\\${name}`;
+
+  function placed(entries: [string, string, string[]][]) {
+    const groups = entries.map(([slug, exit, names]) => game(slug, exit, names));
+    const apps = entries.flatMap(([slug, , names]) => names.map((n) => pathFor(slug, n)));
+    return { groups, apps };
+  }
+
+  it("carries three games on three exits", () => {
+    const { groups, apps } = placed([
+      ["a", "germany-1", ["a.exe"]],
+      ["b", "turkey-1", ["b.exe"]],
+      ["c", "finland-1", ["c.exe"]],
+    ]);
+    const { exits, withheld } = exitsForGames(groups, apps);
+    expect(withheld).toEqual([]);
+    expect(new Set(exits.map((e) => e.exit))).toEqual(
+      new Set(["germany-1", "turkey-1", "finland-1"]),
+    );
+  });
+
+  // The ceiling counts exits, not binaries. A game with a launcher, a
+  // client and an anti-cheat service must not eat three of the three.
+  it("counts a multi-binary game as one exit", () => {
+    const { groups, apps } = placed([
+      ["a", "germany-1", ["a-launcher.exe", "a-client.exe", "a-anticheat.exe"]],
+      ["b", "turkey-1", ["b-launcher.exe", "b-client.exe"]],
+      ["c", "finland-1", ["c-client.exe"]],
+    ]);
+    const { exits, withheld } = exitsForGames(groups, apps);
+    expect(withheld).toEqual([]);
+    expect(exits).toHaveLength(6);
+  });
+
+  // And it counts *distinct* exits, so four games sharing three exits
+  // is three concurrent exits.
+  it("lets four games share three exits", () => {
+    const { groups, apps } = placed([
+      ["a", "germany-1", ["a.exe"]],
+      ["b", "turkey-1", ["b.exe"]],
+      ["c", "finland-1", ["c.exe"]],
+      ["d", "germany-1", ["d.exe"]],
+    ]);
+    const { exits, withheld } = exitsForGames(groups, apps);
+    expect(withheld).toEqual([]);
+    expect(exits).toHaveLength(4);
+  });
+
+  // Over the ceiling, every preference is withheld rather than the
+  // fourth one. Trimming would mean choosing which games keep their
+  // exit on the basis of the order the customer added them in, which
+  // they were never told was load-bearing -- and the card would then
+  // show one game placed and another not with nothing explaining which
+  // rule chose. See `exitsForGames` rule 4.
+  it("withholds every preference when a fourth exit is chosen", () => {
+    const { groups, apps } = placed([
+      ["a", "germany-1", ["a.exe"]],
+      ["b", "turkey-1", ["b.exe"]],
+      ["c", "finland-1", ["c.exe"]],
+      ["d", "poland-1", ["d.exe"]],
+    ]);
+    const { exits, withheld } = exitsForGames(groups, apps);
+    expect(exits).toEqual([]);
+    expect(withheld).toHaveLength(4);
+    for (const held of withheld) {
+      expect(held.reason).toBe("overCeiling");
+      if (held.reason === "overCeiling") expect(held.chosen).toBe(4);
+    }
+  });
+
+  // A group already withheld for a conflict is not asking for an exit
+  // any more, so it must not consume one of the three -- and it must
+  // still be reported under the rule that actually applies to it, or
+  // the customer is pointed at the wrong fix.
+  it("does not let a conflicted game use up one of the three", () => {
+    const shared = "C:\\Games\\shared\\anticheat.exe";
+    const groups: GameExitGroup[] = [
+      { slug: "x", displayName: "X", names: ["anticheat.exe"], exit: "poland-1" },
+      { slug: "y", displayName: "Y", names: ["anticheat.exe"], exit: "spain-1" },
+      { slug: "a", displayName: "A", names: ["a.exe"], exit: "germany-1" },
+      { slug: "b", displayName: "B", names: ["b.exe"], exit: "turkey-1" },
+      { slug: "c", displayName: "C", names: ["c.exe"], exit: "finland-1" },
+    ];
+    const apps = [
+      shared,
+      "C:\\Games\\a\\a.exe",
+      "C:\\Games\\b\\b.exe",
+      "C:\\Games\\c\\c.exe",
+    ];
+    const { exits, withheld } = exitsForGames(groups, apps);
+    // Five exits were named, but two of them belong to a pair that
+    // conflicts, so only three are actually being asked for.
+    expect(new Set(exits.map((e) => e.exit))).toEqual(
+      new Set(["germany-1", "turkey-1", "finland-1"]),
+    );
+    expect(withheld.map((h) => h.reason).sort()).toEqual(["conflict", "conflict"]);
+  });
+
+  // The picker's own question, and the reason the ceiling is almost
+  // never met as an error: it is asked before an exit is offered.
+  it("says whether another game can be placed, before it is", () => {
+    const two = [
+      { slug: "a", displayName: "A", names: ["a.exe"], exit: "germany-1" },
+      { slug: "b", displayName: "B", names: ["b.exe"], exit: "turkey-1" },
+    ];
+    expect(canPlaceAnotherGame(two)).toBe(true);
+
+    const three = [...two, { slug: "c", displayName: "C", names: ["c.exe"], exit: "finland-1" }];
+    expect(canPlaceAnotherGame(three)).toBe(false);
+    // But an exit already in use costs nothing, so it stays offerable.
+    expect(canPlaceAnotherGame(three, "germany-1")).toBe(true);
+    expect(canPlaceAnotherGame(three, "poland-1")).toBe(false);
+  });
+
+  it("does not count a game with no exit against the ceiling", () => {
+    const groups = [
+      { slug: "a", displayName: "A", names: ["a.exe"], exit: "germany-1" },
+      { slug: "b", displayName: "B", names: ["b.exe"], exit: null },
+      { slug: "c", displayName: "C", names: ["c.exe"], exit: null },
+    ];
+    expect(canPlaceAnotherGame(groups)).toBe(true);
+  });
+
+  // The two constants sit either side of a wire that carries no schema.
+  // A mismatch surfaces as `SetSplitTunnel` being refused for a
+  // selection the picker allowed, which is the shape of bug nothing
+  // else here would catch.
+  it("keeps the ceiling at the number the service enforces", () => {
+    expect(MAX_CONCURRENT_EXITS).toBe(3);
   });
 });
