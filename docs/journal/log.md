@@ -1246,3 +1246,53 @@ panel names answer 200. The Iran relay reaches the fi1 and fr1 mirrors,
 which is the path that matters most — Cloudflare is unreachable from
 there, so for those customers the mirror is not a fallback, it is the
 only way in.
+
+---
+
+## 2026-09-01 — The Xray DNS latency item: not the node
+
+**Status:** narrowed, not closed — measurement only, nothing changed
+**Touches:** nothing
+
+`HANDOVER` §6 item 10 records Xray REALITY DNS latency at 2.0–5.6s
+against WireGuard's 0.16s, "DNS-specific and unexplained". Measured what
+can be measured from here.
+
+**The node's own resolution is not slow.** On fr1, `getent hosts` for
+four popular names: **0.00–0.01s each**. And Xray on that node has **no
+`dns` block at all**, so it uses the system resolver — the same
+systemd-resolved that just answered in a hundredth of a second.
+
+**Per-request latency through the tunnel is flat and unremarkable.** From
+a US client to the French node, with DNS resolved remotely at the node:
+
+```
+                        appconnect   total
+www.wikipedia.org          0.79s     1.46s
+github.com                 0.53s     1.54s
+discord.com                0.52s     1.18s
+store.steampowered.com     0.53s     6.65s   <- did not reproduce
+```
+
+`appconnect` — the TLS handshake to the destination — is steady at
+~0.5s everywhere, so the REALITY hop is not the variable. The one
+6.65s reading looked like the reported symptom, so it was repeated:
+**five further runs gave 1.61, 1.83, 1.82, 1.90, 1.76s**, against a
+github control at 1.47–1.50s. It was a cold one-off, not a pattern.
+
+### What this does and does not settle
+
+It moves the item from "unexplained" to **"not the node"**, which is
+worth having: the node's resolver, and Xray's use of it, are ruled out.
+
+It does **not** reproduce the reported figure, and cannot rule it out
+either, because the original was measured on the Windows desktop client
+and this was not. That client has its own DNS path — the split-tunnel
+redirect and whatever the service does with lookups — whereas a raw
+SOCKS client with `--socks5-hostname` hands the name to Xray and lets the
+node resolve it. **Those are different code paths, and only the second
+was tested.**
+
+So: if the 2.0–5.6s is real, it lives on the client side of the tunnel,
+not on the node. That is where to look next, and it needs the client,
+which means it needs Windows.
