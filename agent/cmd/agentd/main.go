@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/config"
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane"
@@ -21,6 +22,7 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/openvpn"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/wireguard"
 	"github.com/neoxify/neoxify-hub/agent/internal/protocols/xray"
+	"github.com/neoxify/neoxify-hub/agent/internal/realityprobe"
 	"github.com/neoxify/neoxify-hub/agent/internal/relay"
 	"github.com/neoxify/neoxify-hub/agent/internal/shaper"
 	"github.com/neoxify/neoxify-hub/agent/internal/version"
@@ -33,6 +35,7 @@ func main() {
 	panelURL := flag.String("panel-url", "", "control-plane base URL INCLUDING /api -- nginx only proxies the backend under that prefix, e.g. https://connect.example.com/api (required with --enroll-init)")
 	grpcTarget := flag.String("grpc-target", "", "override the gRPC host:port (default: <panel-url host>:50051)")
 	configPath := flag.String("config", config.DefaultPath, "path to the agent's persisted config")
+	xrayConfigPath := flag.String("xray-config", "/usr/local/etc/xray/config.json", "Xray's config file, read to learn which camouflage destination the REALITY inbound forwards handshakes to. Absent or REALITY-less is fine: the node simply reports no dest.")
 	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
 	xrayInboundTag := flag.String("xray-inbound-tag", "vless-in", "tag of the VLESS+REALITY inbound in Xray's config")
 	xrayTrojanTag := flag.String("xray-trojan-inbound-tag", "trojan-in", "tag of the Trojan+TLS inbound in Xray's config. Registered unconditionally: a tag that does not exist simply nacks any Trojan command with Xray's own error, which is clearer than the node silently not offering the protocol")
@@ -129,7 +132,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := controlplane.Run(ctx, cfg, dispatcher); err != nil && ctx.Err() == nil {
+	// Probed every 10 minutes rather than per-heartbeat: a dest does not
+	// rot on a 20-second timescale, and a dial on the heartbeat path
+	// would make the liveness signal depend on the network it is meant
+	// to be reporting about.
+	prober := realityprobe.New(*xrayConfigPath, 10*time.Minute)
+	go prober.Run(ctx)
+
+	if err := controlplane.Run(ctx, cfg, dispatcher, prober); err != nil && ctx.Err() == nil {
 		log.Fatalf("agent sync loop exited: %v", err)
 	}
 }

@@ -40,9 +40,24 @@ export interface StatsBatchMessage {
   sessions?: SessionCountMessage[];
 }
 
+/** What a node reports about its own REALITY camouflage destination.
+ *
+ * Optional throughout, and that is load-bearing: proto3 omits an unset
+ * string, and every agent before v0.2.8 sends no dest at all. An absent
+ * `realityDest` is "did not measure", never "unreachable" -- see the
+ * comment on Heartbeat in packages/proto/agent.proto. */
+export interface HeartbeatMessage {
+  cpuPercent?: number;
+  memPercent?: number;
+  activeConnections?: number;
+  realityDest?: string;
+  realityDestReachable?: boolean;
+}
+
 export interface AgentMessageEnvelope {
   payload: "hello" | "heartbeat" | "statsBatch" | "commandAck" | "stateSnapshot";
   hello?: HelloMessage;
+  heartbeat?: HeartbeatMessage;
   commandAck?: CommandAckMessage;
   statsBatch?: StatsBatchMessage;
 }

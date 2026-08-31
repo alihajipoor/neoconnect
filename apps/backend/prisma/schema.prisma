@@ -462,6 +462,20 @@ model Node {
   lastHeartbeatAt DateTime?
   agentVersion    String?
   agentPubKey     String?    @unique
+
+  /// The REALITY camouflage destination this node forwards handshakes to,
+  /// and whether the node could still complete a TLS 1.3 handshake with it
+  /// at `realityDestCheckedAt`. Reported by the agent (v0.2.8+) on its
+  /// heartbeat, because reachability is a property of the node-dest pair
+  /// and only the node can measure its own half.
+  ///
+  /// Null `realityDest` means "not measured" -- no REALITY inbound, or an
+  /// agent too old to report. It does NOT mean unreachable, and nothing
+  /// should alert on it.
+  realityDest          String?
+  realityDestReachable Boolean?
+  realityDestCheckedAt DateTime?
+
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 

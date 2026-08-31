@@ -332,6 +332,16 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               return;
             }
             await this.nodesService.touchHeartbeat(nodeId);
+            // Agents older than v0.2.8 send no dest at all, so this is a
+            // no-op for them rather than a downgrade to "unreachable".
+            const hb = msg.heartbeat;
+            if (hb?.realityDest) {
+              await this.nodesService.recordRealityDestHealth(
+                nodeId,
+                hb.realityDest,
+                hb.realityDestReachable === true,
+              );
+            }
           } else if (msg.payload === "commandAck") {
             await this.handleCommandAck(msg.commandAck!);
           } else if (msg.payload === "statsBatch") {

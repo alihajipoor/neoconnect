@@ -22,6 +22,7 @@ import (
 	"github.com/neoxify/neoxify-hub/agent/internal/config"
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
 	"github.com/neoxify/neoxify-hub/agent/internal/dispatch"
+	"github.com/neoxify/neoxify-hub/agent/internal/realityprobe"
 	"github.com/neoxify/neoxify-hub/agent/internal/version"
 )
 
@@ -55,7 +56,7 @@ const (
 // Run connects to the control plane and keeps the AgentSync stream alive,
 // reconnecting with exponential backoff on any failure. Blocks until ctx
 // is cancelled.
-func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatcher) error {
+func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatcher, prober *realityprobe.Prober) error {
 	target, creds, err := dialTarget(cfg)
 	if err != nil {
 		return err
@@ -89,7 +90,7 @@ func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatche
 			return ctx.Err()
 		}
 
-		if err := runStream(ctx, client, cfg.NodeID, signingKey, dispatcher); err != nil && ctx.Err() == nil {
+		if err := runStream(ctx, client, cfg.NodeID, signingKey, dispatcher, prober); err != nil && ctx.Err() == nil {
 			log.Printf("agent sync stream error: %v (retrying in %s)", err, backoff)
 		}
 
@@ -161,6 +162,7 @@ func runStream(
 	nodeID string,
 	key ed25519.PrivateKey,
 	dispatcher *dispatch.Dispatcher,
+	prober *realityprobe.Prober,
 ) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -182,7 +184,7 @@ func runStream(
 	}
 	log.Printf("connected to control plane, node %s authenticated", nodeID)
 
-	go func() { errCh <- heartbeatLoop(streamCtx, snd) }()
+	go func() { errCh <- heartbeatLoop(streamCtx, snd, prober) }()
 	go func() { errCh <- statsLoop(streamCtx, snd, dispatcher) }()
 	go func() { errCh <- receiveLoop(streamCtx, stream, snd, dispatcher) }()
 
@@ -283,7 +285,7 @@ func sendHello(ctx context.Context, snd *sender, nodeID string, key ed25519.Priv
 	}, sendTimeout)
 }
 
-func heartbeatLoop(ctx context.Context, snd *sender) error {
+func heartbeatLoop(ctx context.Context, snd *sender, prober *realityprobe.Prober) error {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -295,8 +297,19 @@ func heartbeatLoop(ctx context.Context, snd *sender) error {
 			// CPU/mem/active-connection sampling isn't implemented yet --
 			// presence (the heartbeat arriving at all) is what M2 proves;
 			// real metrics land with usage accounting (M6).
+			// The probe runs on its own schedule; this only reads its
+			// last answer. A heartbeat must never block on a dial --
+			// the heartbeat IS the liveness signal, and making it wait
+			// on the network is how it stops being one.
+			hb := &pb.Heartbeat{}
+			if prober != nil {
+				if r := prober.Snapshot(); r.Dest != "" {
+					hb.RealityDest = r.Dest
+					hb.RealityDestReachable = r.Reachable
+				}
+			}
 			if err := snd.send(ctx, &pb.AgentMessage{
-				Payload: &pb.AgentMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}},
+				Payload: &pb.AgentMessage_Heartbeat{Heartbeat: hb},
 			}, sendTimeout); err != nil {
 				return fmt.Errorf("send heartbeat: %w", err)
 			}

@@ -167,6 +167,63 @@ export class NodesService {
     this.lastOfflineReminderAt.set(id, Date.now());
   }
 
+  /** Records what a node says about its own REALITY dest, and alerts when
+   * that answer changes.
+   *
+   * Transition-based like setStatus, and for the same reason: a dest that
+   * is fine should be silent. Unlike node status, this one does not need a
+   * repeat reminder -- an unreachable dest makes the node useless for
+   * REALITY, so it will be dealt with rather than lived with.
+   *
+   * `dest` empty means the agent did not measure (no REALITY inbound, or
+   * an agent older than v0.2.8). That is written through as NULL and
+   * never alerted on: "did not say" is not "broken", and treating them
+   * alike would page for the entire fleet the day this ships.
+   */
+  async recordRealityDestHealth(id: string, dest: string, reachable: boolean): Promise<void> {
+    if (!dest) {
+      return;
+    }
+    const previous = await this.prisma.node.findUnique({
+      where: { id },
+      select: { name: true, realityDest: true, realityDestReachable: true },
+    });
+
+    await this.prisma.node.update({
+      where: { id },
+      data: {
+        realityDest: dest,
+        realityDestReachable: reachable,
+        realityDestCheckedAt: new Date(),
+      },
+    });
+
+    if (!previous) {
+      return;
+    }
+    // Alert on a change of answer, and on the first answer if it is bad.
+    // A node whose dest was already known-bad does not re-alert every
+    // heartbeat.
+    const changed = previous.realityDest !== dest || previous.realityDestReachable !== reachable;
+    if (!changed) {
+      return;
+    }
+    if (!reachable) {
+      await this.alerting.send(
+        `Node "${previous.name}" (${id}) cannot reach its REALITY dest ${dest} -- ` +
+          `clients will complete TCP and then hang`,
+        { event: "reality_dest_unreachable", nodeId: id, nodeName: previous.name, dest },
+      );
+    } else if (previous.realityDestReachable === false) {
+      await this.alerting.send(`Node "${previous.name}" (${id}) can reach its REALITY dest ${dest} again`, {
+        event: "reality_dest_recovered",
+        nodeId: id,
+        nodeName: previous.name,
+        dest,
+      });
+    }
+  }
+
   async touchHeartbeat(id: string) {
     await this.prisma.node.update({ where: { id }, data: { lastHeartbeatAt: new Date() } });
   }
