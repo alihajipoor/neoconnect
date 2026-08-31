@@ -993,3 +993,106 @@ the *panel data*, not the app.
 
 Test customer deleted, **0 leftover `protocol_users`** — deprovisioning
 reached every node. Local configs and decrypted credentials wiped.
+
+---
+
+## 2026-08-31 — Fleet hygiene, and a certificate that was quietly not renewing
+
+**Status:** done — production changes + installer fixes
+**Touches:** `installer/lib/agent.sh`,
+`installer/maintenance/push-agent-to-node.sh` (new),
+`agent/internal/controlplane/client.go`; de1/ir1 nginx and certbot
+
+### The nginx fingerprint is gone, after I briefly made it worse
+
+`HANDOVER` §6 item 5: de1 and ir1 still served Ubuntu's "Welcome to
+nginx". Removing the `default` site fixed the fingerprint and **broke
+port 80 entirely** — because `neoxify-fallback` listens only on
+`127.0.0.1:8080/8081` (it is REALITY's fallback target, not a public
+vhost). The public vhost is `neoxify-http`, which fr1 had and those two
+did not; they had been leaning on Ubuntu's default for port 80.
+
+That matters more than the cosmetics: `neoxify-http` is what serves
+`/.well-known/acme-challenge/`. Breaking it breaks certificate renewal.
+Installed on both, `/var/www/html/index.nginx-debian.html` removed so the
+welcome page cannot come back through the new vhost, and a disguise page
+written with the installer's own `write_disguise_page` logic — one of
+five variants plus a random marker, because a byte-identical page across
+six nodes is itself a fingerprint linking them.
+
+All six now answer 200 with a distinct page, and the ACME location is
+served on every one. Also cleared: `index.nginx-debian.html` still sat on
+tr1, sg1, fr1 and fi1 (harmless while `index.html` exists, but it is the
+welcome page one deletion away from returning), and a stale `probe` file
+from the installer's 2026-08-19 port-80 check on de1.
+
+### ir1's certificate has not been renewable, and nothing said so
+
+Proving the renewal still worked — after nearly breaking it — turned up
+that it was **already broken, and not by me**.
+
+ir1 has two certificates. `ir1-ikev2.conf` is on `webroot` and fine.
+`ir1.neoxify.site.conf` was on **`authenticator = standalone`**, which
+wants to bind port 80 itself:
+
+```
+Failed to renew certificate ir1.neoxify.site with error:
+Could not bind TCP port 80 because it is already in use
+```
+
+This is exactly the trap `install_xray`'s own comment describes: a fresh
+install issues before nginx exists, so standalone is what gets recorded;
+nginx then arrives for the fallback site and every future renewal fails.
+`ensure_port80_site` migrates those records — ir1 predates it or was
+missed. Migrated to `webroot` + `/var/www/html`, config backed up first.
+
+**The expiry is 2026-11-14, so this was ~10 weeks from an outage on the
+Iran relay** with nothing reporting it. Worth noting the shape: the cert
+monitoring that exists checks *expiry*, and expiry looks fine right up
+until it isn't. Nothing checks that renewal can actually run.
+
+### Two installer fixes, and one thing that was not the gap I claimed
+
+**Corrected:** I recorded that the installer derives its gRPC target from
+a CDN-fronted panel URL and fails silently. `action_install_agent` does
+**not** — it probes `panel_host:50051` and prompts when it cannot reach
+it. The gap is narrower and worse: **`action_reenroll_agent` had no such
+probe**, and re-enrolment is what a *rebuilt* node runs. The one path
+most likely to meet this was the one path that never looked, which is why
+finland1 sat OFFLINE after its rebuild. The probe is now in both.
+
+**`install_openvpn` reads `panel_url`/`node_id` back from
+`agent.json`** when a caller has not set them, instead of dying under
+`set -u` *after* apt has run and three prompts have been answered.
+
+**The agent says what it assumed.** When `grpcTarget` is empty it now
+logs the derived target once, next to the dial errors it will cause.
+
+### ir1 cannot reach Cloudflare, and that is worth knowing
+
+Measured from ir1 during this work:
+
+```
+connect.neoxify.site -> 188.114.99.0 (Cloudflare)   timeout at 45s
+167.233.65.166:443   -> HTTP 200 in 0.28s
+167.233.65.166:50051 -> open
+```
+
+**Cloudflare is filtered from there; the origin is not.** That is why the
+relay's `grpcTarget` must be an address rather than the panel hostname,
+and why its GitHub fetch failed during the v0.2.7 rollout.
+
+The client is not exposed to this — `PRODUCTION_API_BASE_URLS` falls back
+to `fi1.neoxify.site:2053` and `fr1.neoxify.site:2053`, and **both answer
+200 from ir1** (0.78s and 5.8s). Iranian clients pay one failed Cloudflare
+attempt and then work. Whether the CDN should still be first in that list
+is a real question, and not one to answer from a single datacentre.
+
+`installer/maintenance/push-agent-to-node.sh` does what I did by hand for
+that rollout: fetch where GitHub is reachable, verify, copy over SSH,
+verify again on the node, install, keep the old binary for rollback.
+
+**Not** done by widening `/api/updates/download/:tag/:asset`. That
+endpoint validates the asset against the newest desktop build precisely
+so it cannot become an open redirect, and trading that for convenience
+would be the wrong fix.

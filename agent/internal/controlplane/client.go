@@ -125,8 +125,28 @@ func dialTarget(cfg *config.Config) (string, credentials.TransportCredentials, e
 	}
 
 	target := cfg.GRPCTarget
+	derived := false
 	if target == "" {
 		target = fmt.Sprintf("%s:50051", host)
+		derived = true
+	}
+	// A derived target is the panel's own hostname, and that hostname is
+	// very often behind a CDN -- which serves 443 and nothing else. The
+	// dial then times out on every attempt and the node sits OFFLINE
+	// while looking healthy locally: agentd running, no crash, no restart.
+	// finland1 spent its whole first rebuild in exactly that state on
+	// 2026-08-31, because connect.neoxify.site resolves to Cloudflare.
+	//
+	// Nothing here can tell a CDN address from an origin one, so this
+	// does not guess -- it says what was assumed, once, so the assumption
+	// is visible in the log next to the dial errors it causes.
+	if derived {
+		log.Printf(
+			"no grpcTarget configured; derived %q from the panel URL. "+
+				"If the panel host is behind a CDN this will time out -- "+
+				"set grpcTarget in /etc/neoxify/agent.json to the origin's host:port.",
+			target,
+		)
 	}
 
 	if u.Scheme == "https" {

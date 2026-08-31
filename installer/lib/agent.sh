@@ -3378,6 +3378,30 @@ UNIT
 
 install_openvpn() {
   echo "Installing OpenVPN..."
+
+  # panel_url and node_id come from action_install_agent's locals when
+  # this runs as part of a fresh install, and from action_engines_agent
+  # when it runs from the menu. Called any other way -- directly, or from
+  # a script sourcing this file -- they are simply unset, and `set -u`
+  # kills the function at the registration step: AFTER apt has installed
+  # OpenVPN and after three prompts have been answered, which is the
+  # worst place to stop. Hit for real on 2026-08-31 while rebuilding
+  # finland1.
+  #
+  # Reading them back here makes the function self-sufficient wherever it
+  # is called from, and changes nothing when a caller has already set them.
+  if [[ -z "${panel_url:-}" || -z "${node_id:-}" ]]; then
+    if [[ -r /etc/neoxify/agent.json ]]; then
+      panel_url="${panel_url:-$(jq -r '.panelUrl // empty' /etc/neoxify/agent.json)}"
+      node_id="${node_id:-$(jq -r '.nodeId // empty' /etc/neoxify/agent.json)}"
+    fi
+  fi
+  if [[ -z "${panel_url:-}" || -z "${node_id:-}" ]]; then
+    echo "ERROR: this node is not enrolled yet -- /etc/neoxify/agent.json has no panelUrl/nodeId." >&2
+    echo "       Enrol first; OpenVPN's CA is minted by the panel, not locally." >&2
+    return 1
+  fi
+
   apt-get install -y -qq openvpn
 
   local suggested_port
@@ -3553,7 +3577,37 @@ action_reenroll_agent() {
   require_root
   read -r -p "New panel URL: " panel_url
   read -r -p "New enrollment token (from that panel's Nodes -> Add Node): " enroll_token
-  /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token"
+
+  # Same gRPC reachability check action_install_agent does, and for the
+  # same reason -- it was missing here, which is worse rather than
+  # better: re-enrolment is what a REBUILT node runs, so the one path
+  # most likely to meet a CDN-fronted panel was the one path that never
+  # looked. finland1 was rebuilt on 2026-08-31 through exactly this
+  # function, derived its target from connect.neoxify.site, resolved to
+  # Cloudflare, and sat OFFLINE with a healthy-looking agent until the
+  # target was set by hand.
+  local panel_host grpc_target
+  panel_host="$(printf '%s' "$panel_url" | sed -E 's#^[a-z]+://##; s#[:/].*$##')"
+  grpc_target="${NEOXIFY_GRPC_TARGET:-}"
+  if [[ -z "$grpc_target" ]]; then
+    if timeout 6 bash -c "cat < /dev/null > /dev/tcp/$panel_host/50051" 2>/dev/null; then
+      echo "  gRPC reaches $panel_host:50051; using it."
+    else
+      echo
+      echo "  $panel_host does not answer on 50051."
+      echo "  A panel behind a CDN serves 443 and nothing else, so the agent"
+      echo "  would time out on every dial and this node would sit OFFLINE"
+      echo "  while looking healthy locally. Give the origin's address."
+      read -r -p "Panel gRPC address [host:50051, blank to use $panel_host:50051]: " grpc_target
+    fi
+  fi
+
+  if [[ -n "$grpc_target" ]]; then
+    [[ "$grpc_target" == *:* ]] || grpc_target="$grpc_target:50051"
+    /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token" --grpc-target "$grpc_target"
+  else
+    /usr/local/bin/agentd --enroll-init --panel-url "$panel_url" --token "$enroll_token"
+  fi
   systemctl restart neoxify-agentd
 }
 
