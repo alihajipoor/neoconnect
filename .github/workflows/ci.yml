@@ -2,7 +2,22 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Feature branches build too, and the reason is specific rather than
+    # completeness: since 2026-08-30 this repo is worked from a Mac, and
+    # the desktop service cannot be compiled there at all -- its Windows
+    # dependencies are not target-gated, and windivert-sys links against
+    # WinDivert.lib at build time, so even its *test* binary fails to
+    # link off Windows.
+    #
+    # With CI limited to main, that left no route at all to verify a
+    # desktop change from the machine the work happens on: not locally,
+    # not on a branch, only by merging to main and hoping -- which is
+    # exactly the failure mode the workflow_dispatch comment below was
+    # added to fix, arrived at from the other direction.
+    #
+    # Scoped to the branch prefixes actually in use rather than "**", so
+    # this does not fire a windows-latest job for every scratch branch.
+    branches: [main, "claude/**", "rig/**"]
   pull_request:
     branches: [main]
   # Runnable by hand on any branch. Without this, a change to CI itself
