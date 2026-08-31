@@ -491,6 +491,10 @@ impl Convergence {
                 let deadline = Instant::now() + redirect::ACTIVATION_GRACE;
                 let mut closed = closed_already;
                 let mut passes = 0usize;
+                // Overwritten by each pass, so it holds the LAST pass's
+                // figure -- earlier passes seeing half-open rows is the
+                // rescan working, not a fault.
+                let mut still_handshaking = 0usize;
 
                 while Instant::now() < deadline {
                     // Interruptible, because Custom mode can be stopped
@@ -518,6 +522,7 @@ impl Convergence {
                         },
                     );
                     closed += outcome.closed;
+                    still_handshaking = outcome.skipped_handshaking;
                     passes += 1;
                     for failure in outcome.failures {
                         append(&path, &format!("  reset: {failure}"));
@@ -530,6 +535,17 @@ impl Convergence {
                         "activation reset settled after {passes} rescan(s): {closed} connection(s) closed in total"
                     ),
                 );
+                if still_handshaking > 0 {
+                    // The open item from 2026-08-22, observed rather than
+                    // reasoned about: these finished their handshake
+                    // outside the tunnel and the window closed first.
+                    append(
+                        &path,
+                        &format!(
+                            "  reset: {still_handshaking} connection(s) were still mid-handshake when the window closed -- they completed outside the tunnel"
+                        ),
+                    );
+                }
             })
         };
         Self { stop, thread: Some(thread) }
