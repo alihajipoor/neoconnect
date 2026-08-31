@@ -46,7 +46,13 @@ export CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc \
        AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar \
        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
 cargo check --target x86_64-pc-windows-gnu -p neoconnect-service --all-targets
+cargo check --target x86_64-pc-windows-gnu -p neoconnect-ipc --all-targets
 ```
+
+Those two crates only. **`neoconnect-desktop` (the Tauri crate) does not
+check here** -- its build script refuses to run until every bundled
+resource is on disk, and fetching those is a CI step. `--workspace` fails
+for that reason and not because of your change.
 
 That catches every type and borrow error before CI does, on a crate whose
 round trip is otherwise twenty minutes. It does **not** link and does
