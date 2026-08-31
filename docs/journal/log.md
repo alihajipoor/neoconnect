@@ -1375,3 +1375,42 @@ untouchable.
 The rule in `CLAUDE.md` stands, narrowed: **check locally, then push and
 read the desktop job.** What changed is that the compiler is no longer
 twenty minutes away.
+
+---
+
+## 2026-09-01 — Everything merged to main; two archive statements are now superseded
+
+**Status:** done
+**Touches:** `main`
+
+`claude/fleet-hygiene-and-installer-gaps` (fast-forward) and both
+concurrent-multi-exit branches are on `main`. Nothing is left unmerged.
+
+The feature was merged **on the owner's explicit instruction**, reversing
+the hold recorded on 2026-08-27. Its precondition had been met in the
+meantime: `placement()` no longer reports `fallback` for an application on
+a live concurrent exit.
+
+**Two statements in `windows.md` are now false, and are left standing
+because that file is an archive of what was true when written:**
+
+- *"`concurrent-multi-exit-v2` was not merged, as instructed"* — it is
+  merged now.
+- *"`placement()` is wrong for live concurrent exits and should be fixed
+  before the feature is shown to a customer"* — fixed, and that fix came
+  in with it.
+
+Also settled since that entry: *"`{finland1}`'s REALITY route needs
+someone with node access to look at it."* Someone did — the dest was
+unreachable from that node, it is now `www.helsinki.fi`, and a real client
+has carried traffic through it.
+
+**Still open from the same entry, and not changed by merging:** the picker
+→ Tauri → service path has never been driven (the rig went over the pipe),
+and the free-port race was never observed in either direction. Those are
+questions for whoever cuts the next `desktop-v*` tag; there are live beta
+users on that client.
+
+The merged tree was verified rather than the branches: desktop
+`cargo check` clean, agent green under `-race`, backend 62 suites / 653
+tests, four drift guards ok.
