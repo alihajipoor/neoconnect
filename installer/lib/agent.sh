@@ -717,6 +717,33 @@ ensure_fallback_site() {
   [[ "$panel_scheme" == "$panel_api" ]] && panel_scheme="https"
   panel_host="${panel_api#*://}"
   panel_host="${panel_host%%/*}"
+
+  # The mirror must NOT go through the CDN, and this is the one place
+  # that decides it.
+  #
+  # A CDN terminates the client's connection and re-originates it, so the
+  # X-Forwarded-For set below never survives the hop. The panel then sees
+  # the CDN as the client: every customer arriving through a node becomes
+  # one very busy address in the rate limiter, and -- far worse --
+  # `/api/health/ip` answers with the NODE's own address. That is
+  # indistinguishable from a working tunnel to a client which is not
+  # tunnelled at all. Measured on 2026-08-31: five of six nodes were in
+  # exactly that state.
+  #
+  # NEOXIFY_PANEL_ORIGIN names a hostname that resolves to the panel
+  # itself and is covered by the panel's certificate. Without it the
+  # mirror still works, but it is pointed at the CDN and says so loudly,
+  # because a silent wrong answer here looks like success.
+  local mirror_host="${NEOXIFY_PANEL_ORIGIN:-}"
+  if [[ -z "$mirror_host" ]]; then
+    mirror_host="$panel_host"
+    echo "  WARNING: the API mirror will proxy to $panel_host." >&2
+    echo "           If that is behind a CDN, X-Forwarded-For will not survive and" >&2
+    echo "           /api/health/ip through this node will report the NODE's address," >&2
+    echo "           which looks exactly like a working tunnel to a client that has none." >&2
+    echo "           Set NEOXIFY_PANEL_ORIGIN to a name that resolves straight to the" >&2
+    echo "           panel and is on its certificate." >&2
+  fi
   if grep -qs "127.0.0.53" /etc/resolv.conf; then
     mirror_resolver="127.0.0.53"
   else
@@ -750,7 +777,7 @@ ensure_fallback_site() {
       "        # variable proxy_pass does not do on its own." \
       "        resolver ${mirror_resolver} valid=30s ipv6=off;" \
       "        resolver_timeout 5s;" \
-      "        set \$neoxify_panel ${panel_host};" \
+      "        set \$neoxify_panel ${mirror_host};" \
       "        proxy_pass ${panel_scheme}://\$neoxify_panel\$request_uri;" \
       "        proxy_set_header Host \$neoxify_panel;" \
       "        # The panel rate-limits per client address, so the real" \
@@ -760,6 +787,14 @@ ensure_fallback_site() {
       "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;" \
       "        proxy_set_header X-Forwarded-Proto https;" \
       "        proxy_ssl_server_name on;" \
+      "        # Verified, not merely encrypted. Pointing the mirror at an" \
+      "        # origin name only helps if the hop is also authenticated --" \
+      "        # nginx does not verify upstream certificates by default, and" \
+      "        # an unverified hop was how one node ended up trusting" \
+      "        # whatever answered." \
+      "        proxy_ssl_verify on;" \
+      "        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;" \
+      "        proxy_ssl_verify_depth 3;" \
       "        # Support threads and update downloads are the long ones." \
       "        proxy_read_timeout 120s;" \
       "    }"
