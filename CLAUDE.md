@@ -45,15 +45,22 @@ GitHub-hosted runner**, so shipping does not depend on local toolchains:
 | Android | `release-android.yml` | `ubuntu-latest` | tag `android-v*` |
 | Node agent | `release-agent.yml` | `ubuntu-latest` | tag `v*` |
 | iOS (compile only) | `ci-ios.yml` | `macos-latest` | push to `main` |
-| Lint/typecheck/build/test | `ci.yml` | ubuntu + `windows-latest` | push/PR to `main`, `workflow_dispatch` |
+| Lint/typecheck/build/test | `ci.yml` | ubuntu + `windows-latest` | push to `main`/`claude/**`/`rig/**`, PR to `main`, `workflow_dispatch` |
 
 So: **releases are unaffected by losing the Windows box.** What was lost
 is the ability to *debug* the desktop client locally and to *prove*
 anything against real traffic.
 
-`ci.yml` has `workflow_dispatch`, so CI is runnable by hand on any
-branch — use it. That escape hatch exists because the desktop job once
-sat broken from the day it was added, only testable by merging to main.
+`ci.yml` runs on `main`, on PRs to `main`, and on pushes to `claude/**`
+and `rig/**`. That branch coverage is load-bearing rather than a
+convenience: **CI is the only way this machine can verify a desktop
+change at all.** `workflow_dispatch` covers anything on a different
+branch name — that escape hatch exists because the desktop job once sat
+broken from the day it was added, only testable by merging to main.
+
+So the working rule for `apps/desktop-windows/**`: write it, push it,
+and read the desktop job. Do not call such a change verified on the
+strength of review alone.
 
 Backend, panel, web portal and the Go agent all build and test locally
 on the Mac once the toolchains are installed.
