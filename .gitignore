@@ -36,3 +36,10 @@ apps/backend/prisma/catalogue/tools/.appinfo-cache/
 # see docs/node-address-hygiene.md. scripts/check-exit-reputation.py writes
 # here and nothing else does.
 var/
+
+# macOS/iCloud conflict copies. This repo lives under ~/Desktop, which is
+# iCloud-synced, and the sync makes "name 2.ext" beside a file it thinks
+# conflicted. Five of them were committed on 2026-09-01 -- including a
+# duplicate Go source file, which broke the build on main outright, and a
+# duplicate Prisma migration.
+*\ [0-9].*
