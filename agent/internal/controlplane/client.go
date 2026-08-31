@@ -150,47 +150,91 @@ func runStream(
 		return fmt.Errorf("open AgentSync stream: %w", err)
 	}
 
-	if err := sendHello(streamCtx, stream, nodeID, key); err != nil {
+	// The writer starts before the hello, because the hello is itself a
+	// stream write and goes through the same queue as everything else.
+	// errCh has room for all four so none can block on the way out.
+	errCh := make(chan error, 4)
+	snd := &sender{reqs: make(chan writeReq)}
+	go func() { errCh <- writerLoop(streamCtx, stream, snd.reqs) }()
+
+	if err := sendHello(streamCtx, snd, nodeID, key); err != nil {
 		return fmt.Errorf("send hello: %w", err)
 	}
 	log.Printf("connected to control plane, node %s authenticated", nodeID)
 
-	errCh := make(chan error, 3)
-	go func() { errCh <- heartbeatLoop(streamCtx, stream) }()
-	go func() { errCh <- statsLoop(streamCtx, stream, dispatcher) }()
-	go func() { errCh <- receiveLoop(streamCtx, stream, dispatcher) }()
+	go func() { errCh <- heartbeatLoop(streamCtx, snd) }()
+	go func() { errCh <- statsLoop(streamCtx, snd, dispatcher) }()
+	go func() { errCh <- receiveLoop(streamCtx, stream, snd, dispatcher) }()
 
 	err = <-errCh
 	cancel()
 	return err
 }
 
-// sendWithTimeout bounds a single stream write.
-//
-// grpc-go offers no way to give Send a deadline: the stream's context
-// governs the RPC as a whole, and cancelling it kills the stream rather
-// than the one write. So the write runs on its own goroutine and the
-// caller stops waiting after d.
-//
-// The goroutine outlives this function when the write is truly stuck.
-// That is intended and it is not a leak: every caller returns the error
-// to runStream, which cancels streamCtx, which unblocks Send and lets
-// the goroutine exit. The channel is buffered so it can never block on
-// a send nobody is receiving.
-func sendWithTimeout(
-	ctx context.Context,
-	stream pb.AgentGateway_AgentSyncClient,
-	msg *pb.AgentMessage,
-	d time.Duration,
-) error {
-	done := make(chan error, 1)
-	go func() { done <- stream.Send(msg) }()
+// writeReq is one queued stream write and the channel its result comes
+// back on. `done` is buffered so writerLoop can always deliver the
+// result, even to a caller that has already given up waiting.
+type writeReq struct {
+	msg  *pb.AgentMessage
+	done chan error
+}
 
+// sender is the only way anything in this package writes to the stream.
+//
+// grpc-go supports one goroutine sending and one receiving on a stream;
+// it does NOT support concurrent SendMsg. heartbeatLoop, statsLoop and
+// receiveLoop all need to write, so their writes are funnelled through
+// writerLoop instead of each calling Send directly.
+type sender struct {
+	reqs chan writeReq
+}
+
+// writerLoop owns stream.Send exclusively. It exits on the first send
+// error or when the stream context is cancelled, and its return value
+// joins the same errCh the other loops use, so a failed write still
+// tears the stream down and triggers a reconnect.
+func writerLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, reqs <-chan writeReq) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case r := <-reqs:
+			err := stream.Send(r.msg)
+			r.done <- err
+			if err != nil {
+				return fmt.Errorf("stream write: %w", err)
+			}
+		}
+	}
+}
+
+// send queues one write and waits up to d for it to complete.
+//
+// grpc-go's Send takes no deadline of its own: when the HTTP/2 send
+// window is exhausted it parks in writeQuota.get until the peer sends
+// WINDOW_UPDATE, with no upper bound. That is what left two nodes wedged
+// for six days (docs/journal/log.md, 2026-08-30). Both waits below are
+// bounded by the same timer, so a caller cannot be stuck longer than d
+// whether the queue is backed up or the write itself is blocked.
+//
+// A timeout leaves writerLoop parked in Send. That is intended and is
+// not a leak: the caller returns the error to runStream, which cancels
+// streamCtx, which unblocks Send and lets the goroutine exit.
+func (s *sender) send(ctx context.Context, msg *pb.AgentMessage, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 
+	req := writeReq{msg: msg, done: make(chan error, 1)}
 	select {
-	case err := <-done:
+	case s.reqs <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("stream write queue blocked for %s", d)
+	}
+
+	select {
+	case err := <-req.done:
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
@@ -199,13 +243,14 @@ func sendWithTimeout(
 	}
 }
 
-func sendHello(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, nodeID string, key ed25519.PrivateKey) error {
+func sendHello(ctx context.Context, snd *sender, nodeID string, key ed25519.PrivateKey) error {
+
 	nonce := randomNonce()
 	timestamp := time.Now().Unix()
 	message := []byte(fmt.Sprintf("%s.%d.%s", nodeID, timestamp, nonce))
 	signature := ed25519.Sign(key, message)
 
-	return sendWithTimeout(ctx, stream, &pb.AgentMessage{
+	return snd.send(ctx, &pb.AgentMessage{
 		Payload: &pb.AgentMessage_Hello{
 			Hello: &pb.Hello{
 				NodeId:       nodeID,
@@ -218,7 +263,7 @@ func sendHello(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, node
 	}, sendTimeout)
 }
 
-func heartbeatLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient) error {
+func heartbeatLoop(ctx context.Context, snd *sender) error {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -230,7 +275,7 @@ func heartbeatLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient) 
 			// CPU/mem/active-connection sampling isn't implemented yet --
 			// presence (the heartbeat arriving at all) is what M2 proves;
 			// real metrics land with usage accounting (M6).
-			if err := sendWithTimeout(ctx, stream, &pb.AgentMessage{
+			if err := snd.send(ctx, &pb.AgentMessage{
 				Payload: &pb.AgentMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}},
 			}, sendTimeout); err != nil {
 				return fmt.Errorf("send heartbeat: %w", err)
@@ -246,7 +291,7 @@ func heartbeatLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient) 
 // wire every 30s. A StatsSince error on one protocol is logged and
 // otherwise ignored: a blip in one engine's counters must not stop
 // heartbeats or command handling on the same stream.
-func statsLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, dispatcher *dispatch.Dispatcher) error {
+func statsLoop(ctx context.Context, snd *sender, dispatcher *dispatch.Dispatcher) error {
 	ticker := time.NewTicker(statsInterval)
 	defer ticker.Stop()
 
@@ -295,7 +340,7 @@ func statsLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, disp
 					DistinctSources: s.DistinctSources,
 				}
 			}
-			if err := sendWithTimeout(ctx, stream, &pb.AgentMessage{
+			if err := snd.send(ctx, &pb.AgentMessage{
 				Payload: &pb.AgentMessage_StatsBatch{
 					StatsBatch: &pb.StatsBatch{Deltas: pbDeltas, Sessions: pbSessions},
 				},
@@ -306,7 +351,7 @@ func statsLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, disp
 	}
 }
 
-func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, dispatcher *dispatch.Dispatcher) error {
+func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, snd *sender, dispatcher *dispatch.Dispatcher) error {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
@@ -324,7 +369,7 @@ func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, di
 			log.Printf("command %s (%s) failed: %s", cmd.GetId(), cmd.GetType(), errMsg)
 		}
 
-		if err := stream.Send(&pb.AgentMessage{
+		if err := snd.send(ctx, &pb.AgentMessage{
 			Payload: &pb.AgentMessage_CommandAck{
 				CommandAck: &pb.CommandAck{
 					CommandId: cmd.GetId(),
@@ -332,7 +377,7 @@ func receiveLoop(ctx context.Context, stream pb.AgentGateway_AgentSyncClient, di
 					Error:     errMsg,
 				},
 			},
-		}); err != nil {
+		}, sendTimeout); err != nil {
 			return fmt.Errorf("send command ack: %w", err)
 		}
 	}

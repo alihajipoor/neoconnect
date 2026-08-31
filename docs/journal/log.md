@@ -612,3 +612,50 @@ reason.** It passes reachability and would fail the installer's
 `HANDOVER-2026-08-22.md` §6 item 6 describes a filter catching at line
 rate. Reachable and unsuspicious are not the same test, and only the
 first one currently gets run after install.
+
+---
+
+## 2026-08-31 — One writer owns the stream now
+
+**Status:** done (code + tests) — **not deployed**
+**Touches:** `agent/internal/controlplane/client.go`, `client_test.go`
+
+The race flagged in the keepalive entry is closed. `heartbeatLoop`,
+`statsLoop` and `receiveLoop` no longer call `stream.Send` themselves —
+all three queue through a `sender`, and a single `writerLoop` goroutine
+owns the send side. grpc-go supports one sender and one receiver per
+stream; it does not support concurrent `SendMsg`, and three goroutines
+were doing exactly that on the path that wedged.
+
+`writerLoop` starts **before** the hello, because the hello is itself a
+stream write and goes through the same queue. Its return value joins the
+same `errCh` as the other loops, so a failed write still tears the stream
+down and triggers a reconnect — `errCh` is now sized 4 so nothing can
+block on the way out.
+
+`send` bounds **both** waits on one timer: getting into the queue, and
+the write itself. That second wait is the original hang; the first is new
+and matters just as much, because before this a second caller had no
+deadline at all — it blocked inside grpc-go behind the first one's stuck
+write. A timeout leaves `writerLoop` parked in `Send`, which is intended:
+the caller's error reaches `runStream`, which cancels `streamCtx`, which
+unblocks `Send`.
+
+### Verified
+
+`gofmt` clean, `go vet` clean, **full agent suite passes under `-race`**,
+7 packages, `-count=1` so nothing was replayed from cache.
+
+Six tests. The new one asserts the actual invariant — 8 goroutines × 25
+writes must reach the stream one at a time — and it is **proven by
+reverting**: make `writerLoop` spawn each send in its own goroutine and
+it reports *199 concurrent entries*; with the fix, zero. The blocked-write
+and cancellation tests are unchanged in intent and still pass.
+
+### Not verified
+
+Still nothing on the wire. This is the same caveat as the keepalive entry
+and it has not moved: no node runs this binary. The race was real by
+grpc-go's documented contract and is now demonstrably gone in a test, but
+whether it ever contributed to the wedge is unknown and probably
+unknowable after the fact.
