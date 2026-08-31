@@ -283,3 +283,37 @@ assessment of what was lost and what survived is in `log.md`.
 **iOS** is unaffected and unstarted: `macos.md`'s starting-state entry
 still describes where it begins. It now needs a full Xcode on this
 machine, which is not yet installed.
+
+---
+
+## 2026-08-31 — Gaming Mode is desktop-only, by decision
+
+**Status:** decided — product scope, not a gap
+
+Gaming Mode ships on the **Windows desktop client only**. It is **not**
+coming to Android — neither the Play build nor the direct APK — and not
+to iOS.
+
+`apps/mobile` contains no gaming or split-tunnel code today, and that is
+the intended end state rather than work outstanding. The 2026-08-25
+completion entry in `windows.md` already scoped it that way
+(`apps/backend/**`, `apps/desktop-windows/src/**`, "no mobile"); this
+entry makes it a decision rather than an accident of sequencing.
+
+**Do not** file "Gaming Mode missing on mobile" as a defect, plan it into
+a mobile release, or treat the absence of `gamingSection` on the mobile
+Dashboard as an oversight.
+
+Worth knowing for anyone tempted to revisit it: on iOS the per-game half
+is not merely unbuilt but unavailable — there is no per-app VPN outside
+MDM, which `macos.md` records. Android has no such block; it is simply
+not in scope.
+
+The server side stays platform-neutral and needs no change: the catalogue
+travels to any client that asks for `/customer/gaming-profile`, and a
+client that does not use it simply ignores it. Nothing needs gating per
+platform, and adding such a gate would be the wrong fix.
+
+`CLAUDE.md` says a platform that cannot support something is "a gap to
+state plainly, not a decision to make quietly" — so it is stated here,
+plainly, and it is a decision.
