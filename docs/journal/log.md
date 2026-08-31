@@ -832,3 +832,101 @@ with nothing to compare against.
 Recorded because "known bug in placement()" reads as something to fix
 next, and acting on that from main wastes the effort and risks a
 gratuitous signature change to code that is currently right.
+
+---
+
+## 2026-08-31 — Deployed: Gaming Mode, agent v0.2.7, and two fleet-wide config gaps closed
+
+**Status:** done — all four items shipped to production
+**Touches:** production only; no repo change beyond this entry
+
+### Gaming Mode is live
+
+Production went from `85bfaa9` (2026-08-23) to `61a06e2` — **253
+commits**. Ran to the runbook. Disk first: `docker buildx prune -af`
+took `/` from 84% to 27% (6.1G → 27G free), which the backend and Next.js
+builds both needed. Fresh backup taken and eyeballed (30.4 MB) before
+anything moved.
+
+`concurrent.sql` by hand first — 8 `CREATE INDEX CONCURRENTLY`, 2
+`DROP INDEX CONCURRENTLY`, zero invalid indexes after. Then the swap;
+the container migrated itself on boot as designed and applied
+`20260824_gaming_mode` and `20260826_list_ordering_indexes`, finding
+every index already present.
+
+**All six nodes reconnected within 15s of the backend restart.** That
+restart drops every agent stream, and the old agents had no keepalive —
+it was the exact scenario that wedged two nodes on 2026-08-24, and
+nothing wedged.
+
+The catalogue was **empty after deploy** and needed seeding —
+`node dist-seed/seed.js` in the backend container, **1,483 profiles**.
+Deliberately run without `SEED_ADMIN_*`: the catalogue is upserted first
+and the script then throws on the missing admin env, so the existing
+admin is untouched (`updatedAt` still 07-26, confirmed after).
+
+### Agent v0.2.7 on all six
+
+Tagged from main, released by CI, rolled out canary-first to **tr1** and
+watched for four minutes: one connect, no reconnects, **no GOAWAY, no
+ENHANCE_YOUR_CALM**, zero restarts. That is the keepalive pairing between
+the agent's 30s `Time` and the server's 20s
+`min_ping_interval_without_data_ms` confirmed against real peers — the
+one thing no unit test could establish. Then de1, fr1, sg1, fi1, and
+**ir1 last**.
+
+**ir1 could not download from GitHub** — it timed out, which on a censored
+network is unsurprising. Nothing was installed, because the checksum gate
+sits after the download and the download never produced a file; the node
+stayed on v0.2.6, healthy, untouched. Fixed by fetching and verifying the
+binary locally and pushing it over SSH. **Worth remembering: the Iran
+relay cannot self-update from GitHub releases**, so any future rollout
+needs that hop. Every node kept its previous binary in
+`/var/lib/neoxify/agentd-rollback/`.
+
+The version skew is also gone — the fleet was four nodes on a pre-0.2.6
+build reporting `dev`, and is now uniformly `v0.2.7`.
+
+### fr1's dest, and the landmine underneath it
+
+`cloudflare.com:443` replaced with `www.free.fr:443` — AS12322 PROXAD,
+Free SAS, **in France**, own AS, TLS 1.3 verified from fr1 itself. The
+probe also confirmed `HANDOVER` §6 item 6 first-hand: **`www.leboncoin.fr`
+now resolves into AWS** (AS16509, US), exactly the rot that entry
+predicted.
+
+**The change broke xray on fr1, and that was worth finding.** The new
+config was written `600 root:root`; xray runs as `User=nobody` and could
+not read it. Service down about a minute, restored with
+`640 root:nogroup`.
+
+The interesting part is *why the old config worked*: it was **also
+`600 root:root`**, dated 2026-08-24. xray had been running for a week
+only because the process held the file open from before those permissions
+were set. **fr1 would have failed to come back from any restart or
+reboot, silently, and nobody would have known until it happened.** Audited
+the whole fleet afterwards: fr1 was the only one — the other five are
+`644` and readable. Now all six are.
+
+### subnetCidr was missing on five of six
+
+Only ir1 had it, from when this fault was found there on 2026-08-14.
+Every node's `server.conf` uses `10.77.0.0/24`, so that was merged into
+the other five — **merged, not replaced**, and each response was checked
+to confirm all 5 secret fields survived the write.
+
+### One correction
+
+An early pass reported IKEv2 inactive on five nodes. That was my check
+being wrong, not the fleet: the unit is `strongswan-starter.service` on
+the five older nodes and `strongswan.service` on fi1 (Ubuntu 26.04).
+**All six are active and listening on UDP 500.** The naming split is real
+though, and any health check keying on one name will misreport the other.
+
+### Not verified
+
+No customer tunnel has been carried through any of this. Every service is
+up, every node is provisioned and heartbeating, and the keepalive pairing
+is proven against real peers — but "a customer connected and traffic
+flowed" remains untested, and the REALITY dest changes on fr1 and fi1 are
+the ones where that would matter most.
