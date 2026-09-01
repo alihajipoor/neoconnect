@@ -1531,3 +1531,57 @@ Measured state: `neoxify.net` is clean from Iran (74.208.24.198, 200), so
 the download page still reaches customers. Tunnels still carry, because
 REALITY uses the decoy SNI. The API does not, because every base is on
 `.site`.
+
+---
+
+## 2026-09-01 — Backend deployed and agent v0.2.8 rolled; ir1 held back
+
+**Status:** done — five of six nodes on v0.2.8, dest health live
+**Touches:** production only
+
+**Backend.** Production moved from `61a06e2` to `a214dbd` (24 commits),
+`20260901_reality_dest_health` applied on boot. Panel was not rebuilt —
+zero panel commits in the gap. Backup taken and verified first (32.9 MB).
+
+**Agent v0.2.8** on tr1 (canary), then de1, fr1, sg1, fi1. Every node
+reports its own dest and all five are reachable:
+
+```
+finland1     www.helsinki.fi:443       ok
+france-1     www.free.fr:443           ok
+germany-1    www.shatel.ir:443         ok
+singapore-1  www.shopee.sg:443         ok
+turkey-1     www.donanimhaber.com:443  ok
+ir1          (not measured)            -- still on v0.2.7
+```
+
+**The design held where it mattered.** Between the canary and the rest,
+the five nodes still on v0.2.7 showed `(not measured)` rather than
+`false`, and no alert fired for any of them. That is the distinction the
+whole feature turns on, and it is now demonstrated in production rather
+than only in a unit test.
+
+**germany-1's decoy is `www.shatel.ir`** — an Iranian ISP's site fronting
+a German node. It answers, so it is not broken, but it is worth a look:
+it is the dest that `windows.md` recorded as dead from Finland, and a
+German customer's traffic claiming to head for an Iranian ISP is an
+unusual shape.
+
+### ir1 deliberately not upgraded
+
+Its agent connects to the panel **by IP**, but `dialTarget` takes the TLS
+`ServerName` from `panelUrl` — `connect.neoxify.site` — which is exactly
+the name being SNI-blocked. So the agent announces the censored hostname
+on every dial and the middlebox kills the handshake. That is why it has
+been OFFLINE, and it is not something a new binary fixes.
+
+Upgrading it would gain nothing and would restart the agent on a node
+that is currently serving Iranian customers from config it already holds.
+Held until there is an infrastructure domain that is not blocked.
+
+**Its tunnels are unaffected** — REALITY dials the node IP with the decoy
+SNI, which still handshakes fine from inside Iran.
+
+Worth recording as a design note: **the agent has no way to separate
+"which host do I dial" from "which name do I present".** `grpcTarget`
+already solves the first. A censored deployment needs the second too.
