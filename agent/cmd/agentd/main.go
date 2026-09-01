@@ -34,6 +34,7 @@ func main() {
 	token := flag.String("token", "", "enrollment token issued by an admin in the panel (required with --enroll-init)")
 	panelURL := flag.String("panel-url", "", "control-plane base URL INCLUDING /api -- nginx only proxies the backend under that prefix, e.g. https://connect.example.com/api (required with --enroll-init)")
 	grpcTarget := flag.String("grpc-target", "", "override the gRPC host:port (default: <panel-url host>:50051)")
+	tlsServerName := flag.String("tls-server-name", "", "override the TLS server name (SNI) presented to the control plane. Default: the panel URL's host. Needed only where that hostname is blocked by SNI -- dial the origin with --grpc-target and announce a different name here. It must be on the panel's certificate; verification still applies.")
 	configPath := flag.String("config", config.DefaultPath, "path to the agent's persisted config")
 	xrayConfigPath := flag.String("xray-config", "/usr/local/etc/xray/config.json", "Xray's config file, read to learn which camouflage destination the REALITY inbound forwards handshakes to. Absent or REALITY-less is fine: the node simply reports no dest.")
 	xrayAPIAddr := flag.String("xray-api-addr", "127.0.0.1:10085", "Xray-core's local gRPC API address (see installer/assets/xray-config.json)")
@@ -62,7 +63,7 @@ func main() {
 	}
 
 	if *enrollInit {
-		if err := runEnrollInit(*token, *panelURL, *grpcTarget, *configPath); err != nil {
+		if err := runEnrollInit(*token, *panelURL, *grpcTarget, *tlsServerName, *configPath); err != nil {
 			log.Fatalf("enroll-init failed: %v", err)
 		}
 		return
@@ -144,7 +145,7 @@ func main() {
 	}
 }
 
-func runEnrollInit(token, panelURL, grpcTarget, configPath string) error {
+func runEnrollInit(token, panelURL, grpcTarget, tlsServerName, configPath string) error {
 	if token == "" || panelURL == "" {
 		return fmt.Errorf("--token and --panel-url are required")
 	}
@@ -160,10 +161,11 @@ func runEnrollInit(token, panelURL, grpcTarget, configPath string) error {
 	}
 
 	cfg := &config.Config{
-		NodeID:     nodeID,
-		PanelURL:   panelURL,
-		GRPCTarget: grpcTarget,
-		PrivateKey: base64.StdEncoding.EncodeToString(priv),
+		NodeID:        nodeID,
+		PanelURL:      panelURL,
+		GRPCTarget:    grpcTarget,
+		TLSServerName: tlsServerName,
+		PrivateKey:    base64.StdEncoding.EncodeToString(priv),
 	}
 	if err := cfg.Save(configPath); err != nil {
 		return fmt.Errorf("save config: %w", err)
