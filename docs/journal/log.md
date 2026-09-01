@@ -1493,3 +1493,41 @@ has to be fetched from the website rather than pushed by the updater.
 Which domain the API should live on, whether `.com` is the right bet when
 it is the hosting product's domain, and whether to cut an emergency
 client release. The server side is ready either way.
+
+### Follow-up, same day: the whole registrable domain, and the `.com` revert
+
+**The poisoning is domain-wide, not per-host.** From ir1:
+
+```
+neoxify.site                          -> 10.10.34.35
+www.neoxify.site                      -> 10.10.34.35
+nonexistent-probe-91723.neoxify.site  -> 10.10.34.35   (no DNS record exists)
+another-random-x7.neoxify.site        -> 10.10.34.35   (no DNS record exists)
+```
+
+Names that do not exist still answer with the sinkhole, so **no new
+`*.neoxify.site` subdomain can escape this.** Only a different
+registrable domain helps.
+
+**The `connect.neoxify.com` mitigation is reverted.** `.com` belongs to a
+separate product — a hosting and web-design agency — and the VPN must not
+be entangled with it. The certificate is back to `connect.neoxify.site +
+origin.neoxify.site`, nginx reloaded, panel healthy.
+
+Worth flagging separately, because it predates this session and is not
+mine: **`connect.neoxify.com` already resolves to the VPN panel
+(167.233.65.166) and is already in that panel's `server_name`.** The DNS
+record and the vhost entry were both there before today. That is a live
+crossing between the two products and probably wants cleaning up on its
+own merits.
+
+**The domain roles, as stated by the owner:** `neoxify.net` is the main
+website; the panel and agents live on `.site`. The block therefore lands
+squarely on the infrastructure half, and the fix inside that architecture
+is a *second* infrastructure domain — a purchase and DNS decision, not a
+code one.
+
+Measured state: `neoxify.net` is clean from Iran (74.208.24.198, 200), so
+the download page still reaches customers. Tunnels still carry, because
+REALITY uses the decoy SNI. The API does not, because every base is on
+`.site`.
