@@ -19,8 +19,23 @@ type Config struct {
 	NodeID     string `json:"nodeId"`
 	PanelURL   string `json:"panelUrl"`
 	GRPCTarget string `json:"grpcTarget"`
-	PrivateKey string `json:"privateKey"` // base64, 64-byte ed25519 seed+pubkey
-	Role       string `json:"role"`
+	// TLSServerName overrides the SNI presented on the control-plane
+	// connection. Empty means "use the panel URL's host", which is the
+	// right answer everywhere the panel's hostname is not itself hostile
+	// territory.
+	//
+	// It exists because grpcTarget already answers "which address do I
+	// dial" and nothing answered "which name do I announce". On
+	// 2026-09-01 those had to differ: neoxify.site was SNI-blocked in
+	// Iran, so the relay dialled the panel by IP -- correctly -- and then
+	// announced the blocked name in the handshake and was cut off anyway.
+	//
+	// Whatever is set here must be covered by the panel's certificate, or
+	// verification fails. That is deliberate: the point is to present a
+	// different *valid* name, not to stop checking.
+	TLSServerName string `json:"tlsServerName,omitempty"`
+	PrivateKey    string `json:"privateKey"` // base64, 64-byte ed25519 seed+pubkey
+	Role          string `json:"role"`
 }
 
 func (c *Config) SigningKey() (ed25519.PrivateKey, error) {

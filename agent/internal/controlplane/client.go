@@ -115,6 +115,18 @@ func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatche
 // (local dev only). The gRPC port is separate from the panel's HTTPS
 // port -- see docs/architecture.md on why this isn't proxied through
 // nginx in Phase 1.
+// tlsServerNameFor decides which name the handshake announces.
+//
+// Split out from dialTarget because it is the whole of the decision and
+// the rest of that function is URL parsing: a test can pin this without
+// constructing transport credentials it cannot inspect.
+func tlsServerNameFor(cfg *config.Config, panelHost string) string {
+	if cfg.TLSServerName != "" {
+		return cfg.TLSServerName
+	}
+	return panelHost
+}
+
 func dialTarget(cfg *config.Config) (string, credentials.TransportCredentials, error) {
 	u, err := url.Parse(cfg.PanelURL)
 	if err != nil {
@@ -151,7 +163,19 @@ func dialTarget(cfg *config.Config) (string, credentials.TransportCredentials, e
 	}
 
 	if u.Scheme == "https" {
-		return target, credentials.NewTLS(&tls.Config{ServerName: host}), nil
+		// The name announced in the handshake is not always the name we
+		// dial. Where a censor blocks by SNI, the two must differ: dial
+		// the origin's address, present a name that is both on the
+		// panel's certificate and not blocked.
+		//
+		// Verification is unchanged -- an override that the certificate
+		// does not cover fails, which is the intended behaviour. This
+		// swaps which valid name is used, it does not stop checking.
+		serverName := tlsServerNameFor(cfg, host)
+		if serverName != host {
+			log.Printf("presenting TLS server name %q (dialling %s)", serverName, target)
+		}
+		return target, credentials.NewTLS(&tls.Config{ServerName: serverName}), nil
 	}
 	return target, insecure.NewCredentials(), nil
 }

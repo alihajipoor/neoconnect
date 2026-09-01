@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neoxify/neoxify-hub/agent/internal/config"
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
 )
 
@@ -178,5 +179,33 @@ func TestConcurrentSendersNeverOverlapOnTheStream(t *testing.T) {
 	}
 	if got := stream.overlaps.Load(); got != 0 {
 		t.Fatalf("Send was entered concurrently %d times; grpc-go does not support that", got)
+	}
+}
+
+// The SNI override, added 2026-09-01 after neoxify.site was SNI-blocked
+// in Iran: the relay dialled the panel by IP -- correctly -- and then
+// announced the blocked hostname in the handshake and was cut off anyway.
+// `grpcTarget` already answered "which address"; nothing answered "which
+// name".
+func TestTLSServerNameDefaultsToThePanelHost(t *testing.T) {
+	if got := tlsServerNameFor(&config.Config{}, "connect.example.com"); got != "connect.example.com" {
+		t.Fatalf("want the panel host when nothing is set, got %q", got)
+	}
+}
+
+func TestTLSServerNameOverrideIsUsedWhenSet(t *testing.T) {
+	cfg := &config.Config{TLSServerName: "origin.example.net"}
+	if got := tlsServerNameFor(cfg, "connect.example.com"); got != "origin.example.net" {
+		t.Fatalf("want the override, got %q", got)
+	}
+}
+
+// An empty override must not blank the SNI. A handshake with no server
+// name is a different, worse failure: it does not select a virtual host
+// and it is itself a fingerprint.
+func TestEmptyOverrideDoesNotBlankTheServerName(t *testing.T) {
+	cfg := &config.Config{TLSServerName: ""}
+	if got := tlsServerNameFor(cfg, "connect.example.com"); got == "" {
+		t.Fatal("server name was blanked")
 	}
 }
