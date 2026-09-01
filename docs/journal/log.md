@@ -1414,3 +1414,82 @@ users on that client.
 The merged tree was verified rather than the branches: desktop
 `cargo check` clean, agent green under `-race`, backend 62 suites / 653
 tests, four drift guards ok.
+
+---
+
+## 2026-09-01 — `neoxify.site` is being censored in Iran
+
+**Status:** live incident — server-side mitigation in place, **client release needed**
+**Touches:** panel certificate only
+
+Found while deploying the backend: five nodes reconnected in ~15s and
+**ir1 did not**. The agent was retrying correctly once a second — this is
+not the wedge bug — with:
+
+```
+tls: first record does not look like a TLS handshake
+```
+
+### What is actually happening
+
+Measured from ir1:
+
+```
+fi1.neoxify.site      -> 10.10.34.35     (Iran's block-page sinkhole)
+fr1.neoxify.site      -> 10.10.34.35
+origin.neoxify.site   -> 10.10.34.35
+
+by IP, SNI = fi1.neoxify.site   -> no peer certificate
+by IP, no SNI                   -> Verify return code: 0 (ok)
+```
+
+**`*.neoxify.site` is DNS-poisoned and SNI-blocked.** `www.google.com`
+returns 200 from the same host, so this is targeted rather than an
+outage, and it began within the last few hours — those same mirrors
+answered 200 from ir1 earlier today.
+
+### What still works, and what does not
+
+**Tunnels are fine.** REALITY dials the node's IP with the *decoy* SNI,
+and `www.helsinki.fi` / `www.free.fr` both hand back
+`Verify return code: 0` from Iran. Customers already provisioned can
+still connect.
+
+**The API is not.** All three of `PRODUCTION_API_BASE_URLS` —
+`connect.neoxify.site`, `fi1.neoxify.site:2053`, `fr1.neoxify.site:2053`
+— are on the blocked domain. Login, config refresh and subscription
+checks fail for Iranian customers.
+
+### The architectural finding
+
+`config.ts` argues the CDN domain is separate from the marketing site so
+"a block aimed at one cannot take the other with it". That reasoning was
+right and the implementation did not follow it: **all three API bases
+share one registrable domain**, so one domain block took every fallback
+at once. Fallbacks that differ only by hostname are not fallbacks.
+
+### Mitigation now live
+
+`connect.neoxify.com` was already in the panel's `server_name` but not on
+its certificate, so it completed TLS and then failed validation. Expanded
+the certificate to `connect.neoxify.site + origin.neoxify.site +
+connect.neoxify.com`, reloaded nginx, and:
+
+```
+https://connect.neoxify.com/api/health   ->  200 from inside Iran
+```
+
+`neoxify.com` and `neoxify.net` both resolve correctly from there;
+`www.neoxify.net` returns 200, so the download page is still reachable
+and customers can be given a new build.
+
+**That path exists but nothing uses it.** The API bases are compiled into
+the client, and a censored customer cannot be told anything through an
+API they cannot reach — so this needs a client release, and the release
+has to be fetched from the website rather than pushed by the updater.
+
+### Not decided, and not mine to decide
+
+Which domain the API should live on, whether `.com` is the right bet when
+it is the hosting product's domain, and whether to cut an emergency
+client release. The server side is ready either way.
