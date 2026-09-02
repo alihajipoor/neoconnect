@@ -1529,3 +1529,35 @@ model GamingResolverToken {
 
   @@map("gaming_resolver_tokens")
 }
+
+/// The signed endpoint bundle, and the panel addresses that go into it.
+///
+/// Singleton, like the other settings models. Holds the envelope exactly
+/// as published: the backend never signs and never re-serialises it,
+/// because the signature covers specific bytes and anything that
+/// round-trips them through a parser is a signature check waiting to
+/// become decorative.
+///
+/// The private key is deliberately not here and must never be. This row
+/// is on a rented box; whoever holds that key can redirect every client
+/// the product has, and clients would be right to believe them.
+model EndpointBundleState {
+  id String @id @default(uuid())
+
+  /// Panel base URLs the operator has configured, as a JSON array of
+  /// { url, pin?, region? }. Node mirrors are not stored here -- they are
+  /// derived from the nodes table at draft time, so adding a node cannot
+  /// leave the two lists disagreeing.
+  panelBasesJson String @default("[]")
+
+  /// The signed envelope, verbatim. Null until the first upload.
+  signed String?
+
+  /// Mirrored out of the payload so the panel can show and compare
+  /// versions without parsing a blob it is not allowed to trust.
+  version Int @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("endpoint_bundle_state")
+}

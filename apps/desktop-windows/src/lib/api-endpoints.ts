@@ -1,6 +1,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { API_BASE_URLS } from "./config";
 import { loadSnapshot } from "./credential-cache";
+import { bundledBases } from "./endpoint-bundle-store";
 
 /** Where to reach the control plane, in the order worth trying.
  *
@@ -86,6 +87,18 @@ export async function apiEndpoints(): Promise<string[]> {
     if (typeof remembered === "string") add(remembered);
   } catch {
     // No memory is not an error; the list below still works.
+  }
+
+  // The signed bundle before the compiled-in list: the binary's idea of
+  // where to find us is fixed at build time and cannot be corrected for
+  // a customer who cannot reach us to be updated, which is exactly the
+  // customer this ordering is for. The compiled list stays underneath as
+  // the floor for a client that has never successfully fetched one.
+  try {
+    for (const base of await bundledBases()) add(base);
+  } catch {
+    // A missing or unreadable bundle is the ordinary state on a fresh
+    // install and must never stop the rest of the list being tried.
   }
 
   for (const base of API_BASE_URLS) add(base);
