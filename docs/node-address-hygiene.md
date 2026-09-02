@@ -3,6 +3,24 @@
 **This repository is public.** Every node IP and every node hostname
 committed to it is a permanent, free contribution to fleet enumeration.
 
+## The rule now also covers the replacement domains
+
+Added 2026-09-02. After `neoxify.site` was DNS-poisoned and SNI-blocked
+in Iran, replacement domains were registered for the panel, the node
+mirrors and the relay. **Those names must never appear in this
+repository either**, and the reason is sharper than for the old ones:
+the old names are already burned, while the new ones are only useful
+for as long as nobody has a list of them.
+
+This repository is public, and the whole mechanism that found the last
+set -- a scrape of names -- works just as well on a git grep. Committing
+the replacements would hand over the thing that was just bought.
+
+Use `{panel-alt-host}`, `{api-domain-1}`, `{node-domain}` and the like in
+docs and the journal, and RFC 2606 names in source and tests. The live
+values belong in the panel's database, in the signed endpoint bundle, and
+nowhere else.
+
 ## The rule
 
 > A production node's public IP address, and the public DNS hostname that
