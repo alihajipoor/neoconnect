@@ -207,6 +207,29 @@ export function GamingStatusPanel({ onOpenSettings }: { onOpenSettings: () => vo
         </p>
         <p className="mt-1 text-xs text-pretty text-muted-foreground">{t(HINT[phase])}</p>
 
+        {/* Why the orb will not do anything, directly under the orb.
+            These used to sit at the bottom of the panel, after three
+            paragraphs of standing disclaimer -- so on a short window the
+            control was visibly dead and the reason for it was below the
+            fold. A tester reported exactly that: "the turn on button is
+            not functional, nothing happens when I click". It was
+            behaving correctly and saying so somewhere he could not see.
+
+            The server's own reason first, then ours. Never both. */}
+        {profileFailed ? (
+          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            {t("gaming.profileFailed")}
+          </p>
+        ) : unavailable ? (
+          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            {t(unavailable)}
+          </p>
+        ) : profile && picked.length === 0 ? (
+          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            {t("gaming.noGamesDash")}
+          </p>
+        ) : null}
+
         {/* Where the exit-IP pill sits in VPN mode -- same chrome, and
             deliberately neutral rather than success-green. There is no
             single exit address in this mode to put in a pill: the
@@ -222,28 +245,6 @@ export function GamingStatusPanel({ onOpenSettings }: { onOpenSettings: () => vo
             and the fact that none of this is a speed claim. */}
         <p className="mt-1 text-xs text-highlight">{t("gaming.ipUnchanged")}</p>
         <p className="mt-1 text-[11px] text-muted-foreground">{t("gaming.noSpeedClaim")}</p>
-
-        {/* On with nothing chosen does nothing at all, and the warning
-            chrome is how that gets said instead of the screen sitting
-            there looking enabled. */}
-        {!unavailable && !profileFailed && picked.length === 0 ? (
-          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {t("gaming.noGamesDash")}
-          </p>
-        ) : null}
-
-        {/* The server's own reason, never one of ours. */}
-        {unavailable ? (
-          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {t(unavailable)}
-          </p>
-        ) : null}
-
-        {profileFailed ? (
-          <p className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
-            {t("gaming.profileFailed")}
-          </p>
-        ) : null}
 
         {/* The service's own words about why it could not confirm, under
             the sentence that already refuses to claim it did. */}
