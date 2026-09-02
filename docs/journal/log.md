@@ -1729,3 +1729,51 @@ restart, migrate -- was skipped, and the health check I ran afterwards
 returned 200 from the *old* container. I reported the deploy as done. Now
 each step prints its own exit code, and the migration is confirmed in
 `_prisma_migrations` rather than inferred from a healthy endpoint.
+
+## 2026-09-02 (later) — germany, and how nearly I got it wrong
+
+**germany-1's REALITY decoy was `www.shatel.ir`, which germany cannot
+reach.** Same defect as finland's, and it had been sitting there
+reporting `realityDestReachable=false` since the probe shipped. Replaced
+with `www.lufthansa.com`, verified reachable from germany *and*
+unblocked from Iran before applying. All six nodes now report reachable.
+Its config was `644 root:root`; rewriting it fresh would have produced a
+file xray could not read after a restart, which is exactly how fr1 was
+broken for a week, so ownership is restored explicitly after the rewrite.
+
+**germany is unreachable from Iran on every protocol.** TLS fails on
+2053, 443, 8443, 2083, 2087, 2096 and 9443 alike, so it is not a port
+choice; UDP probes to 51820/500/4500/1194 never arrive either. The TCP
+handshake completes genuinely -- SYN, SYN-ACK and ACK all captured on
+germany -- and then the client's TLS ClientHello is dropped in path. The
+block is one-directional: germany reaches ir1 fine (TLS, ping, HTTP 200).
+That asymmetry means a germany-initiated reverse relay through ir1 would
+work, but the clean fix is a new IP for that node.
+
+Everything else is healthy: six agents ONLINE and heartbeating, xray,
+agentd, wireguard, ipsec and openvpn up on all six, five of six mirrors
+serving from Iran, and login through an Iranian mirror returning a
+correct 401.
+
+### Three measurements I had to throw away
+
+I reported germany blackholed on the strength of a packet capture that
+recorded nothing. tcpdump was not installed on that host, and running it
+through `setsid nohup ... &` swallowed the "command not found" -- so the
+capture was empty by construction and I read that as proof. Installing it
+showed the opposite: packets arrive, the handshake completes, only the
+ClientHello is dropped.
+
+I then read a traceroute that reached germany at hop 10 as contradicting
+the capture, when the capture was simply broken.
+
+And I checked the released APK for the seed bundle by grepping for
+hostnames, which found nothing -- but the bundle is base64, and Tauri
+compresses the frontend into the native library, so even
+`connect.neoxify.site` is not greppable in a working build. The check
+could not have succeeded either way. Verified properly by building the
+frontend and decoding the payload out of `dist/`: v3, all eight
+endpoints, inlined.
+
+The pattern in all three: a check that cannot fail is not evidence, and I
+only noticed by testing the method against something already known.
