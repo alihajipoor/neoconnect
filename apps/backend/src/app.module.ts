@@ -37,6 +37,7 @@ import { AnnouncementsModule } from "./modules/announcements/announcements.modul
 import { IntegrationsModule } from "./modules/integrations/integrations.module";
 import { ClientAttemptsModule } from "./modules/client-attempts/client-attempts.module";
 import { GamingModule } from "./modules/gaming/gaming.module";
+import { EndpointsModule } from "./modules/endpoints/endpoints.module";
 
 @Module({
   imports: [
@@ -86,6 +87,7 @@ import { GamingModule } from "./modules/gaming/gaming.module";
     IntegrationsModule,
     ClientAttemptsModule,
     GamingModule,
+    EndpointsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
