@@ -32,25 +32,25 @@ function build(state: Record<string, unknown> = {}, nodes: unknown[] = []) {
 describe("EndpointsService draft", () => {
   it("derives a mirror per ONLINE node, addressed by IP", async () => {
     const { service, prisma } = build({}, [
-      { name: "finland1", region: "fi-finland", publicIp: "203.0.113.10" },
-      { name: "ir1", region: "ir-iran", publicIp: "203.0.113.30" },
+      { name: "finland1", region: "fi-finland", mirrorHost: "aaa111.example.net" },
+      { name: "ir1", region: "ir-iran", mirrorHost: "bbb222.example.net" },
     ]);
 
     const draft = await service.draft();
 
     expect(prisma.node.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { status: "ONLINE" } }),
+      expect.objectContaining({ where: { status: "ONLINE", mirrorHost: { not: null } } }),
     );
     expect(draft.endpoints).toEqual([
-      { kind: "mirror", url: "https://203.0.113.10:2053/api", region: "fi" },
-      { kind: "mirror", url: "https://203.0.113.30:2053/api", region: "ir" },
+      { kind: "mirror", url: "https://aaa111.example.net:2053/api", region: "fi" },
+      { kind: "mirror", url: "https://bbb222.example.net:2053/api", region: "ir" },
     ]);
   });
 
   it("puts configured panel bases before the derived mirrors", async () => {
     const { service } = build(
       { panelBasesJson: JSON.stringify([{ url: "https://panel.example.net/api" }]) },
-      [{ name: "finland1", region: "fi-finland", publicIp: "203.0.113.10" }],
+      [{ name: "finland1", region: "fi-finland", mirrorHost: "aaa111.example.net" }],
     );
     const draft = await service.draft();
     expect(draft.endpoints[0]).toEqual({
@@ -66,7 +66,7 @@ describe("EndpointsService draft", () => {
   // setting must not be able to take them out of the draft.
   it("still emits mirrors when the configured bases are malformed", async () => {
     const { service } = build({ panelBasesJson: "{not json" }, [
-      { name: "finland1", region: "fi-finland", publicIp: "203.0.113.10" },
+      { name: "finland1", region: "fi-finland", mirrorHost: "aaa111.example.net" },
     ]);
     const draft = await service.draft();
     expect(draft.endpoints).toHaveLength(1);
@@ -132,5 +132,29 @@ describe("EndpointsService published", () => {
     const signed = seal({ v: 3, endpoints: [{ kind: "panel", url: "https://a/api" }] });
     const { service } = build({ signed });
     expect(await service.published()).toBe(signed);
+  });
+});
+
+describe("EndpointsService mirror addressing", () => {
+  // The defect the first version shipped: mirrors addressed by IP, and a
+  // client that verifies certificates rejects every one of them, because
+  // the node's certificate is for a name and not an address. Testing with
+  // `curl -k` hid it.
+  it("asks only for nodes that have a mirror hostname", async () => {
+    const { service, prisma } = build({}, []);
+    await service.draft();
+    expect(prisma.node.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { status: "ONLINE", mirrorHost: { not: null } } }),
+    );
+  });
+
+  it("never emits an IP-addressed mirror", async () => {
+    const { service } = build({}, [
+      { name: "finland1", region: "fi-finland", mirrorHost: "aaa111.example.net" },
+    ]);
+    const draft = await service.draft();
+    for (const e of draft.endpoints) {
+      expect(e.url).not.toMatch(/https:\/\/\d+\.\d+\.\d+\.\d+/);
+    }
   });
 });

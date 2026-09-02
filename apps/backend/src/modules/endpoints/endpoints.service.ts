@@ -69,14 +69,18 @@ export class EndpointsService {
     }
 
     const nodes = await this.prisma.node.findMany({
-      where: { status: "ONLINE" },
-      select: { name: true, region: true, publicIp: true },
+      // A mirror is only worth listing if a client can both reach it and
+      // verify it. `mirrorHost` is the second half: addressed by IP the
+      // certificate does not match, and every entry fails validation --
+      // which is exactly what the first version of this shipped.
+      where: { status: "ONLINE", mirrorHost: { not: null } },
+      select: { name: true, region: true, mirrorHost: true },
       orderBy: { name: "asc" },
     });
 
     const mirrors: EndpointEntry[] = nodes.map((n) => ({
       kind: "mirror" as const,
-      url: `https://${n.publicIp}:${MIRROR_PORT}/api`,
+      url: `https://${n.mirrorHost}:${MIRROR_PORT}/api`,
       // Region carried so a client can prefer an in-country mirror. That
       // ordering is the difference between working and not when consumer
       // links lose international reach but domestic routing survives.
