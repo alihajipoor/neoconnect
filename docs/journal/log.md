@@ -1777,3 +1777,41 @@ endpoints, inlined.
 
 The pattern in all three: a check that cannot fail is not evidence, and I
 only noticed by testing the method against something already known.
+
+## 2026-09-02 (later still) — the panel is reachable from Iran after all
+
+Chased germany's block to the end and found something more useful on the
+way.
+
+**It is the Cloudflare addresses that are blocked, not the names.** ir1's
+own agent has been reaching the panel this whole time using
+`static.cinderpath.website` as its SNI -- a name I had written off as
+blocked. Dialled at the panel origin instead of Cloudflare, every one of
+these names is answered from Iran: cinderpath, northloops, driftglass,
+lumendataa, tasktracker, qfc, flawlessfinance. What fails is
+`188.114.98.0` and `188.114.99.0`, on either name, every attempt.
+
+I had also concluded `edge.northloops.shop` was burned because it
+returned nothing when pointed at the origin. It was a certificate
+mismatch: the panel cert covered connect, origin and cinderpath but not
+northloops, and curl was correctly refusing it. Expanded the panel
+certificate to all four names; from Iran both panel names now return 200
+for `/health` and for `/endpoints/bundle` when resolved to the origin.
+
+So the remaining step is a DNS toggle: grey-cloud those two names so they
+resolve to the panel origin, and Iranian clients regain a direct panel
+path instead of depending entirely on node mirrors. That closes the gap
+flagged this morning -- that if the mirrors went, Iranian clients had no
+third tier. The cost is publishing the origin address, which
+`origin.neoxify.site` already does today.
+
+**germany is comprehensively filtered from Iran**, and no transport
+choice avoids it. TCP connects on 80, 443, 2053 and 22, and on every one
+of them not a single byte comes back -- including SSH, whose banner is
+server-initiated. Finland answers the identical probe normally. New IP,
+or a germany-initiated relay through ir1, are the only two options; the
+direction germany->ir1 is clean.
+
+Also confirmed no agent dials `origin.neoxify.site` any more -- all six
+use `connect.neoxify.site` -- so retiring that record is safe whenever
+the DNS is to hand.
