@@ -1585,3 +1585,79 @@ SNI, which still handshakes fine from inside Iran.
 Worth recording as a design note: **the agent has no way to separate
 "which host do I dial" from "which name do I present".** `grpcTarget`
 already solves the first. A censored deployment needs the second too.
+
+---
+
+## 2026-09-02 — The relay is back, through a censored link
+
+**Status:** done — all six nodes ONLINE, Iranian API path restored
+**Touches:** panel certificate and vhost, ir1's agent config, agent v0.2.9
+
+### What was actually blocked, restated
+
+Not the servers. Not the addresses. **The names.** The panel's origin
+answers from Tehran in 0.28s and always did; every failure this week came
+from a poisoned lookup or a blocked SNI.
+
+That is why the fix needed no new hosting, and why moving the panel to a
+hyperscaler would have changed nothing — a point settled by measurement
+rather than argument: **Snapchat is hosted on Google infrastructure and is
+sinkholed in Iran anyway**, because Iran blocks the name and not the host.
+
+### The Iranian API path
+
+A replacement domain on Cloudflare's proxy answers **HTTP 200 from inside
+Iran with strict TLS**, no work on our side — Cloudflare terminates with
+its own certificate. Cloudflare is *not* blocked there, which corrects
+something recorded yesterday: `cloudflare.com` and `zoom.us` both answer
+from ir1. The 45-second timeout that produced that wrong conclusion was
+the old domain being blocked, not the CDN.
+
+The three new panel names are now in the panel's `server_name` rather
+than relying on the default vhost, and the certificate covers one of
+them.
+
+### How ir1 came back, which is the reusable part
+
+Its agent dialled the panel **by address** — correct, and already
+configurable — and then announced the blocked hostname in the handshake,
+because the SNI was derived from `panelUrl`. Every dial died at the
+middlebox on a link where the address itself was fine.
+
+v0.2.9's `tlsServerName` separates the two. Set to a name the censor does
+not block and the panel's certificate covers:
+
+```
+dial   -> panel origin address, port 50051   (open from Iran)
+present-> {panel-alt-host}                    (not blocked, on the cert)
+verify -> unchanged
+```
+
+**Verification was never relaxed.** The temptation here is to turn
+certificate checking off and be done in ten seconds; that hands the
+censor the connection you were protecting. The override changes *which
+valid name* is presented and nothing else.
+
+One trap on the way: the gRPC gateway holds its own copy of the
+certificate, loaded at container start. Expanding the cert is not enough
+— the backend has to be restarted before the new name is served on 50051.
+The nginx side picked it up on reload and the gRPC side did not, which
+looked exactly like the certificate not having been expanded at all.
+
+### Also proven, and it is the shape of the bootstrap
+
+From inside Iran, straight to the origin **address** with the unblocked
+name as SNI and full verification: **HTTP 200**. No DNS, no CDN, no
+cooperation from anything in the middle. That is precisely the IP+SNI
+entry the signed bundle is built to carry.
+
+### State
+
+Six of six ONLINE, ir1 on v0.2.9 reporting its dest healthy. The relay is
+back on the control plane over a link that is still censored.
+
+**Not done:** the two remaining panel domains are still delegated to the
+registrar's nameservers, so their records are not authoritative yet. And
+`origin.neoxify.site` still exists and still publishes the origin address
+the proxy is meant to hide — it stays only until the node mirrors are
+repointed, then it goes.
