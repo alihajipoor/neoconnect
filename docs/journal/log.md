@@ -1661,3 +1661,71 @@ registrar's nameservers, so their records are not authoritative yet. And
 `origin.neoxify.site` still exists and still publishes the origin address
 the proxy is meant to hide — it stays only until the node mirrors are
 repointed, then it goes.
+
+## 2026-09-02 — the bundle reached nobody
+
+Finished the censorship work: every node's certificate now covers its new
+mirror name, the published bundle addresses mirrors by hostname, and the
+clients ship with that bundle baked in.
+
+**Mirrors were addressed by IP, and no client could ever have used one.**
+The first bundle went out with `https://<ip>:2053/api` for all six nodes.
+A client verifies certificates; the node's certificate is for its name.
+Every one of those entries would have been rejected at the handshake.
+My own verification used `curl -k` throughout and reported six healthy
+mirrors. The fix is `Node.mirrorHost`, and the draft now asks only for
+nodes that have one, so a node whose certificate covers no useful name
+contributes nothing rather than something broken. A test now asserts no
+emitted URL is ever an address -- the check that would have caught it.
+
+**The bundle mechanism was inert.** Two independent reasons. `refreshFrom`
+was defined and never called from anywhere, so no client fetched a
+published list; and `cachedBundle` read only stored state, so a fresh
+install had no bundle and fell through to the compiled-in bases --
+`connect.neoxify.site`, `fi1`, `fr1`, every one on the domain that is now
+DNS-poisoned and SNI-blocked in Iran. A first-time Iranian customer had
+literally no reachable address. That is the tester's "Could not reach
+Neoxify", and it was never a client bug in the way we guessed: the app
+was correct and had nowhere to go.
+
+Builds now bake the published bundle in (fetched at build time, never
+committed -- it names the fleet), and a successful request refreshes it
+once per run. `cachedBundle` takes the newer of stored and seed, because
+after an upgrade the seed is fresher and after a rotation the stored one
+is, and only the version knows. Both release workflows set
+`NEOXIFY_REQUIRE_SEED=1`: a silent fallback would ship an installer that
+cannot reach the service and looks perfectly healthy. Android shares
+these modules through `@shared`, so it shared the bug and gets the fix.
+
+**Cloudflare is not a path into Iran.** Measured from ir1: both proxied
+panel bases resolve to 188.114.98.0 / 188.114.99.0, TCP opens on both,
+and the TLS handshake never completes -- on either address, for either
+name, 0 of 5 attempts. `edge.northloops.shop` answered 200 once and I
+reported it as working; it does not hold. The node mirrors are the real
+Iranian path, and the bundle's ordering has to keep them prominent.
+
+**germany-1's mirror is dead from Iran at the IP layer.** Handshake to
+`38.60.249.229:2053` never completes from ir1 regardless of SNI --
+including `www.google.com` -- while the same test against finland
+succeeds immediately. TCP opens on 22/80/443 too. Not a name block. Kept
+in the bundle since it is fine everywhere else, but it is dead weight for
+the audience that needs the list, and it costs an Iranian client one
+8-second timeout during failover.
+
+**Still open.** Five of six mirrors work from Iran; the panel bases do
+not, so an Iranian client's only paths are node mirrors -- if those were
+blocked there is no third tier. `origin.neoxify.site` still resolves and
+publishes the origin the proxy hides; it should go. `cdn.lumendataa.online`
+is still on GoDaddy nameservers.
+
+### Two ways I misled myself today
+
+`curl -k` in every mirror check. It made a certificate defect invisible
+and produced six confident green rows for endpoints no client could use.
+
+A deploy that reported success while doing nothing: `git fetch` failed
+transiently inside a `set -e` script, so every later step -- build,
+restart, migrate -- was skipped, and the health check I ran afterwards
+returned 200 from the *old* container. I reported the deploy as done. Now
+each step prints its own exit code, and the migration is confirmed in
+`_prisma_migrations` rather than inferred from a healthy endpoint.
