@@ -1,5 +1,8 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { isNewer, orderedBases, verifyBundle, type EndpointBundle } from "./endpoint-bundle";
+// Written at build time by scripts/ensure-seed-bundle.mjs. In the repo
+// this is the inert placeholder, so a checkout carries no addresses.
+import seedEnvelope from "./seed-bundle.json";
 
 /** Where the signed list is kept between runs.
  *
@@ -34,14 +37,33 @@ function getStore(): Promise<Store> {
  * than none.
  */
 export async function cachedBundle(): Promise<EndpointBundle | null> {
+  const seed = await seedBundle();
+  let stored: EndpointBundle | null = null;
   try {
     const store = await getStore();
     const raw = await store.get<string>(KEY);
-    if (typeof raw !== "string") return null;
     // Re-verified on every read rather than trusted because we wrote it:
     // the file sits on a disk other software can reach, and the signature
     // costs a millisecond.
-    return await verifyBundle(raw);
+    if (typeof raw === "string") stored = await verifyBundle(raw);
+  } catch {
+    stored = null;
+  }
+  // The newer of the two, not simply the stored one. An install that has
+  // never reached us has no stored bundle and would otherwise fall
+  // through to the compiled-in bases, every one of which is on the
+  // censored domain -- which is precisely the customer this exists for.
+  // And after an upgrade the shipped seed can legitimately be the fresher
+  // list, so version order decides rather than provenance.
+  if (!stored) return seed;
+  if (seed && isNewer(seed, stored)) return seed;
+  return stored;
+}
+
+/** The bundle compiled into this build, or null if it is the placeholder. */
+async function seedBundle(): Promise<EndpointBundle | null> {
+  try {
+    return await verifyBundle(JSON.stringify(seedEnvelope));
   } catch {
     return null;
   }
@@ -95,4 +117,34 @@ export async function bundledBases(preferRegion?: string): Promise<string[]> {
  * different names. */
 export function isKnownBlockPage(address: string): boolean {
   return /^10\.10\.34\./.test(address);
+}
+
+/** Refreshes the bundle from an endpoint that just answered, once a run.
+ *
+ * Called after a successful request rather than on a timer: an endpoint
+ * that has just served a response is known-reachable right now, which is
+ * the only moment a refresh is certain to be worth attempting. Without
+ * this the published list reached nobody -- the mechanism existed and was
+ * never triggered.
+ *
+ * Guarded to once per run because every request would otherwise re-fetch
+ * an address list that changes a few times a year.
+ */
+let refreshAttempted = false;
+export async function maybeRefreshBundle(base: string): Promise<void> {
+  if (refreshAttempted) return;
+  refreshAttempted = true;
+  // refreshFrom never throws; this is belt and braces for the fetch
+  // reference itself being unavailable in an odd host.
+  try {
+    await refreshFrom(base, (url) => fetch(url));
+  } catch {
+    // A refresh that did not happen costs nothing today: the held list
+    // still works, which is the entire premise of caching it forever.
+  }
+}
+
+/** Test seam: the once-per-run guard is module state. */
+export function resetBundleRefreshForTests(): void {
+  refreshAttempted = false;
 }

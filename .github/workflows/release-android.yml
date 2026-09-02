@@ -134,6 +134,18 @@ jobs:
       # committed, so this step is not optional: without it Gradle finds
       # no libs/ and the four Xray protocols silently vanish from the
       # build. Several minutes on a cold cache.
+      # The published endpoint list, baked into the app. Android shares
+      # the desktop client's API modules through the @shared alias, so it
+      # shares this gap too: a fresh install has nothing cached and every
+      # compiled-in base is on a domain censored in Iran. Required rather
+      # than best-effort -- a silent fallback ships a build that cannot
+      # reach the service and looks perfectly healthy doing it.
+      - name: Fetch endpoint seed bundle
+        working-directory: apps/mobile
+        run: pnpm run seed
+        env:
+          NEOXIFY_REQUIRE_SEED: "1"
+
       - name: Build the Xray engine
         working-directory: apps/mobile
         run: bash scripts/build-xray-aar.sh

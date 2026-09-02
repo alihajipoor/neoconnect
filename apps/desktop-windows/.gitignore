@@ -27,3 +27,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Generated at build time from the published bundle. Not committed: it
+# names every node mirror, and docs/node-address-hygiene.md keeps node
+# addresses out of this repo.
+src/lib/seed-bundle.json
