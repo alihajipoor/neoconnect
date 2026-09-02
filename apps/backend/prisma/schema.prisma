@@ -472,6 +472,19 @@ model Node {
   /// Null `realityDest` means "not measured" -- no REALITY inbound, or an
   /// agent too old to report. It does NOT mean unreachable, and nothing
   /// should alert on it.
+  /// Hostname the node's API mirror is reachable on, if it has one.
+  ///
+  /// The bundle used to address mirrors by IP, and every entry was
+  /// unusable: a client verifies certificates, and each node's cert is
+  /// for its hostname, not its address. Pinning would have been the other
+  /// way out and is a larger change; a name the certificate already
+  /// covers needs nothing on the client at all.
+  ///
+  /// Deliberately separate from the node's original hostname. That one is
+  /// on a domain now censored in Iran, and the whole point of this field
+  /// is to be somewhere else.
+  mirrorHost String?
+
   realityDest          String?
   realityDestReachable Boolean?
   realityDestCheckedAt DateTime?

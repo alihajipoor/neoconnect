@@ -74,12 +74,12 @@ interface SignedEnvelope {
  * it. The spare costs nothing today and is the only thing that makes key
  * rotation survivable.
  *
- * Placeholder values until the real keys are generated offline; a bundle
- * signed by anything else fails verification, which is the safe
- * direction to be wrong in. */
+ * These are public halves and belong in the binary -- they are shipped to
+ * every customer by definition. The private halves were generated offline
+ * and are not in this repository, on the panel, or on any node. */
 export const BUNDLE_KEYS: Readonly<Record<string, string>> = {
-  primary: "",
-  backup: "",
+  primary: "I7JX0c+ynlt9n51qwQUVeqKAfN0kVJ5D4LFMxMr0n/g=",
+  backup: "BJ3ROKfvxHbec/Zq7jGdUweQEUr2K6VspEPRlEveYsI=",
 };
 
 function fromBase64(value: string): Uint8Array {
