@@ -12,7 +12,11 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "fetch-binaries": "powershell -ExecutionPolicy Bypass -File src-tauri/scripts/fetch-binaries.ps1",
-    "test": "vitest run"
+    "test": "vitest run",
+    "seed": "node scripts/ensure-seed-bundle.mjs",
+    "prebuild": "node scripts/ensure-seed-bundle.mjs",
+    "pretest": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs",
+    "pretypecheck": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs"
   },
   "dependencies": {
     "@noble/ed25519": "^2",

@@ -106,6 +106,18 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
+      # The published endpoint list, baked into the binary. A fresh
+      # install has no cached bundle and every compiled-in base is on a
+      # domain censored in Iran, so without this the installer cannot
+      # reach the service at all on the networks it is built for.
+      # Required, not best-effort: a silent fallback would ship that
+      # failure looking entirely healthy.
+      - name: Fetch endpoint seed bundle
+        working-directory: apps/desktop-windows
+        run: pnpm run seed
+        env:
+          NEOXIFY_REQUIRE_SEED: "1"
+
       - name: Build
         working-directory: apps/desktop-windows
         run: pnpm exec tauri build

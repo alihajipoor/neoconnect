@@ -1,5 +1,6 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, rememberEndpoint } from "./api-endpoints";
+import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import { clearTokens, getTokens, setTokens } from "./session";
 import type { TokenPair } from "./types";
 
@@ -45,6 +46,10 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
       // Remembered before returning: the next request should start here
       // rather than paying the blocked address's timeout again.
       void rememberEndpoint(base);
+      // The endpoint answered, so it can also serve the next address
+      // list. This is the only trigger the bundle has; without it a
+      // published rotation never reaches a single client.
+      void maybeRefreshBundle(base);
       return response;
     } catch (err) {
       lastError = err;

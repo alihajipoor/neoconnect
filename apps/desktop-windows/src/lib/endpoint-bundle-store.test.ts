@@ -111,3 +111,67 @@ describe("block-page detection", () => {
     }
   });
 });
+
+describe("the seed bundle shipped in the binary", () => {
+  it("is what a fresh install falls back to, so it is not left with nothing", async () => {
+    // No stored bundle: the state of every first-ever launch, and the
+    // state in which every compiled-in base is on the censored domain.
+    store.get.mockResolvedValue(undefined);
+    const seeded = await sealed(7);
+    vi.resetModules();
+    vi.doMock("./seed-bundle.json", () => ({ default: JSON.parse(seeded) }));
+    const mod = await import("./endpoint-bundle-store");
+    expect((await mod.cachedBundle())?.v).toBe(7);
+  });
+
+  it("loses to a stored bundle that is newer", async () => {
+    const seeded = await sealed(2);
+    const stored = await sealed(9);
+    store.get.mockResolvedValue(stored);
+    vi.resetModules();
+    vi.doMock("./seed-bundle.json", () => ({ default: JSON.parse(seeded) }));
+    const mod = await import("./endpoint-bundle-store");
+    expect((await mod.cachedBundle())?.v).toBe(9);
+  });
+
+  it("wins over a stored bundle that is older, as after an upgrade", async () => {
+    const seeded = await sealed(9);
+    const stored = await sealed(2);
+    store.get.mockResolvedValue(stored);
+    vi.resetModules();
+    vi.doMock("./seed-bundle.json", () => ({ default: JSON.parse(seeded) }));
+    const mod = await import("./endpoint-bundle-store");
+    expect((await mod.cachedBundle())?.v).toBe(9);
+  });
+
+  it("is inert in the repo, so no node address is committed", async () => {
+    const { readFileSync } = await import("node:fs");
+    const placeholder = readFileSync("src/lib/seed-bundle.placeholder.json", "utf8");
+    const real = await import("./endpoint-bundle");
+    expect(await real.verifyBundle(placeholder)).toBeNull();
+  });
+});
+
+describe("refresh trigger", () => {
+  it("runs once per run, not once per request", async () => {
+    store.get.mockResolvedValue(undefined);
+    const mod = await import("./endpoint-bundle-store");
+    mod.resetBundleRefreshForTests();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, text: () => Promise.resolve("") });
+    vi.stubGlobal("fetch", fetchMock);
+    await mod.maybeRefreshBundle("https://a.example.net/api");
+    await mod.maybeRefreshBundle("https://a.example.net/api");
+    await mod.maybeRefreshBundle("https://b.example.net/api");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("never throws, so a refresh failure cannot break the request that triggered it", async () => {
+    store.get.mockResolvedValue(undefined);
+    const mod = await import("./endpoint-bundle-store");
+    mod.resetBundleRefreshForTests();
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("blocked")));
+    await expect(mod.maybeRefreshBundle("https://a.example.net/api")).resolves.toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+});
