@@ -1700,7 +1700,7 @@ these modules through `@shared`, so it shared the bug and gets the fix.
 **Cloudflare is not a path into Iran.** Measured from ir1: both proxied
 panel bases resolve to 188.114.98.0 / 188.114.99.0, TCP opens on both,
 and the TLS handshake never completes -- on either address, for either
-name, 0 of 5 attempts. `edge.northloops.shop` answered 200 once and I
+name, 0 of 5 attempts. `{panel-alt-host-2}` answered 200 once and I
 reported it as working; it does not hold. The node mirrors are the real
 Iranian path, and the bundle's ordering has to keep them prominent.
 
@@ -1715,7 +1715,7 @@ the audience that needs the list, and it costs an Iranian client one
 **Still open.** Five of six mirrors work from Iran; the panel bases do
 not, so an Iranian client's only paths are node mirrors -- if those were
 blocked there is no third tier. `origin.neoxify.site` still resolves and
-publishes the origin the proxy hides; it should go. `cdn.lumendataa.online`
+publishes the origin the proxy hides; it should go. `{cdn-host}`
 is still on GoDaddy nameservers.
 
 ### Two ways I misled myself today
@@ -1785,16 +1785,16 @@ way.
 
 **It is the Cloudflare addresses that are blocked, not the names.** ir1's
 own agent has been reaching the panel this whole time using
-`static.cinderpath.website` as its SNI -- a name I had written off as
+`{panel-alt-host}` as its SNI -- a name I had written off as
 blocked. Dialled at the panel origin instead of Cloudflare, every one of
-these names is answered from Iran: cinderpath, northloops, driftglass,
-lumendataa, tasktracker, qfc, flawlessfinance. What fails is
+these names is answered from Iran: all seven replacement
+domains. What fails is
 `188.114.98.0` and `188.114.99.0`, on either name, every attempt.
 
-I had also concluded `edge.northloops.shop` was burned because it
+I had also concluded `{panel-alt-host-2}` was burned because it
 returned nothing when pointed at the origin. It was a certificate
-mismatch: the panel cert covered connect, origin and cinderpath but not
-northloops, and curl was correctly refusing it. Expanded the panel
+mismatch: the panel cert covered connect, origin and the first
+replacement name but not the second, and curl was correctly refusing it. Expanded the panel
 certificate to all four names; from Iran both panel names now return 200
 for `/health` and for `/endpoints/bundle` when resolved to the origin.
 
@@ -1825,7 +1825,7 @@ points via check-host:
 
 **germany is not blocked from Iran.** `http://38.60.249.229/` returns 200
 from ir1..ir8 in ~0.15s, and the mirror
-`https://b2n6vy.tinbridge.site:2053/api/health` returns 200 from four
+`https://{node-mirror}/api/health` returns 200 from four
 Iranian nodes. What is true is narrower and much less interesting: ir1
 cannot reach germany. Everything I wrote about comprehensive filtering,
 about no transport choice avoiding it, and about needing a new IP or a
@@ -1851,7 +1851,7 @@ before it gets an answer, and ir1 alone is never sufficient evidence.
 
 The germany REALITY decoy fix from earlier stands on its own -- that dest
 was genuinely unreachable from germany and is now `www.lufthansa.com`.
-The panel certificate expansion to cover `edge.northloops.shop` is
+The panel certificate expansion to cover `{panel-alt-host-2}` is
 harmless and kept.
 
 ## 2026-09-03 — agents moved off neoxify.site
@@ -1863,8 +1863,8 @@ Each config went from
     grpcTarget    167.233.65.166:50051  (fr1, sg1: origin.neoxify.site:50051)
     tlsServerName unset
 
-to `panelUrl https://static.cinderpath.website/api`, the same origin
-address for gRPC, and `tlsServerName static.cinderpath.website` stated
+to `panelUrl https://`{panel-alt-host}`/api`, the same origin
+address for gRPC, and `tlsServerName `{panel-alt-host}` stated
 explicitly rather than left to default off the panel URL.
 
 gRPC stays pointed at the origin address on purpose. Cloudflare proxies
