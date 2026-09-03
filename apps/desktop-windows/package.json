@@ -1,7 +1,7 @@
 {
   "name": "@neoxify/desktop-windows",
   "private": true,
-  "version": "0.9.34",
+  "version": "0.9.35",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,10 +13,11 @@
     "tauri": "tauri",
     "fetch-binaries": "powershell -ExecutionPolicy Bypass -File src-tauri/scripts/fetch-binaries.ps1",
     "test": "vitest run",
-    "seed": "node scripts/ensure-seed-bundle.mjs",
+    "seed": "node scripts/ensure-seed-bundle.mjs && node scripts/apply-updater-endpoints.mjs",
     "prebuild": "node scripts/ensure-seed-bundle.mjs",
     "pretest": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs",
-    "pretypecheck": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs"
+    "pretypecheck": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs",
+    "updater-endpoints": "node scripts/apply-updater-endpoints.mjs"
   },
   "dependencies": {
     "@noble/ed25519": "^2",

@@ -112,7 +112,13 @@ jobs:
       # reach the service at all on the networks it is built for.
       # Required, not best-effort: a silent fallback would ship that
       # failure looking entirely healthy.
-      - name: Fetch endpoint seed bundle
+      # Two things, both from the published bundle and neither committed
+      # (docs/node-address-hygiene.md): the seed baked into the binary,
+      # and the auto-updater's own endpoint list. The updater keeps a
+      # separate list from the API bases, and it was left entirely on the
+      # censored domain -- so a blocked customer was never offered an
+      # update, which is the one channel that would have carried the fix.
+      - name: Fetch endpoint seed bundle and updater endpoints
         working-directory: apps/desktop-windows
         run: pnpm run seed
         env:
