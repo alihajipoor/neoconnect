@@ -1815,3 +1815,41 @@ direction germany->ir1 is clean.
 Also confirmed no agent dials `origin.neoxify.site` any more -- all six
 use `connect.neoxify.site` -- so retiring that record is safe whenever
 the DNS is to hand.
+
+## 2026-09-02 (correction) — ir1 is not Iran
+
+Retracting two conclusions from earlier today. Both were measured only
+from ir1, and ir1's network filters differently from the consumer ISPs
+customers actually use. Measured again from six Iranian ISP vantage
+points via check-host:
+
+**germany is not blocked from Iran.** `http://38.60.249.229/` returns 200
+from ir1..ir8 in ~0.15s, and the mirror
+`https://b2n6vy.tinbridge.site:2053/api/health` returns 200 from four
+Iranian nodes. What is true is narrower and much less interesting: ir1
+cannot reach germany. Everything I wrote about comprehensive filtering,
+about no transport choice avoiding it, and about needing a new IP or a
+relay, was wrong. germany needs nothing.
+
+**Cloudflare is a fine path into Iran.** Both proxied panel bases return
+200 from Iranian nodes. So the advice to grey-cloud them was wrong too,
+and would have traded away the origin-hiding the proxy provides for
+nothing. Do not un-proxy them.
+
+**What does hold, and it is the part that matters:**
+`connect.neoxify.site` fails from all six Iranian nodes -- refused or
+timed out -- while control nodes get 200. `neoxify.site` is genuinely
+blocked in Iran. The move to separate domains, the signed bundle, and
+shipping it inside the binary were all aimed at the real problem, and the
+release stands.
+
+The error was treating a single Iranian datacenter as representative of
+Iranian consumer networks. It is a VPS in an IDC with its own upstream
+filtering, and it disagrees with residential ISPs in both directions. Any
+future "is this blocked in Iran" question gets multiple vantage points
+before it gets an answer, and ir1 alone is never sufficient evidence.
+
+The germany REALITY decoy fix from earlier stands on its own -- that dest
+was genuinely unreachable from germany and is now `www.lufthansa.com`.
+The panel certificate expansion to cover `edge.northloops.shop` is
+harmless and kept.
