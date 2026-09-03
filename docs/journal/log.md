@@ -1853,3 +1853,49 @@ The germany REALITY decoy fix from earlier stands on its own -- that dest
 was genuinely unreachable from germany and is now `www.lufthansa.com`.
 The panel certificate expansion to cover `edge.northloops.shop` is
 harmless and kept.
+
+## 2026-09-03 — agents moved off neoxify.site
+
+All six agents now reach the control plane on the replacement domain.
+Each config went from
+
+    panelUrl      https://connect.neoxify.site/api
+    grpcTarget    167.233.65.166:50051  (fr1, sg1: origin.neoxify.site:50051)
+    tlsServerName unset
+
+to `panelUrl https://static.cinderpath.website/api`, the same origin
+address for gRPC, and `tlsServerName static.cinderpath.website` stated
+explicitly rather than left to default off the panel URL.
+
+gRPC stays pointed at the origin address on purpose. Cloudflare proxies
+443 and nothing else, so a CDN name as the gRPC target times out on every
+dial and leaves the node OFFLINE while agentd looks healthy locally --
+finland1 spent its first rebuild in exactly that state. The API half goes
+through Cloudflare, which is fine and keeps the origin hidden for it.
+
+Migrated one node at a time, each verified reconnected (heartbeat newer
+than 30s) before touching the next, with automatic rollback to the backup
+config on failure. Nothing needed rolling back; every node was back within
+about fifteen seconds.
+
+**Two things found while checking the node side.** Every node had two
+stale `.bak` entries in `sites-enabled`, symlinks to the same file as the
+live config, so nginx parsed it three times and discarded the duplicates
+with "conflicting server name" on every reload. Mine, from earlier edits.
+Removed. de1 had a real file rather than a symlink there -- an older copy
+still pointing at `origin.neoxify.site` with public DNS resolvers; nginx
+was already ignoring it in favour of the live config, and it is now out of
+`sites-enabled` and kept in /root. de1's live upstream was also still
+`origin.neoxify.site` and is now the origin address like the rest.
+
+Node-side `neoxify.site` references across agent configs and nginx: zero.
+
+**What still depends on it, and the order to retire it in.** Clients at
+0.9.33 and earlier carry `connect/fi1/fr1.neoxify.site` compiled in as
+their only addresses, so deleting those records strands every customer who
+has not updated. SSH access to the fleet is also by `<node>.neoxify.site`.
+The sequence is: let clients take 0.9.34 / 0.2.17, which ship the seed
+bundle and no longer need the compiled-in list; then cut a release whose
+compiled-in fallbacks are on the new domains; then retire the records.
+`origin.neoxify.site` is the exception and can go now -- nothing dials it
+any more.
