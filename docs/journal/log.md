@@ -1899,3 +1899,49 @@ bundle and no longer need the compiled-in list; then cut a release whose
 compiled-in fallbacks are on the new domains; then retire the records.
 `origin.neoxify.site` is the exception and can go now -- nothing dials it
 any more.
+
+## 2026-09-03 — the updater could not reach the people it was for
+
+Asked whether the auto-updater still worked. It did, and it did not, and
+the second half was the interesting one.
+
+**Verified working, cryptographically.** For a client on 0.9.33 the
+manifest offers 0.9.34, the download URL resolves through the panel to the
+release asset, the served bytes match `sha256sums.txt` exactly, the
+manifest signature is byte-identical to the `.sig` CI published, and that
+signature validates as Ed25519 against the public key compiled into the
+shipped client. Same chain re-verified for 0.9.35.
+
+**But the updater kept its own endpoint list**, separate from the API
+bases, and all three entries were on the censored domain -- the panel plus
+two node mirrors, every one of them on the name six Iranian ISPs refuse.
+So the customers each release exists for were the ones who could never be
+offered it: client healthy, release published, and the single channel that
+would carry the fix sitting behind the block. 0.9.34 shipped the seed
+bundle, fixed the API path, and left this untouched, because the bundle
+does not reach here -- Tauri reads this list from its own config.
+
+0.9.35 generates it at build time from the published bundle's panel
+entries, new ones first, committed ones kept underneath as the last
+resort. Not committed, for the reason below. Desktop only: the mobile app
+has no in-app updater, so Play covers store builds and direct APK users
+download from the site.
+
+The circularity is worth stating plainly: an existing install behind the
+block still needs 0.9.35 fetched by hand. The update that repairs the
+update channel cannot travel down it.
+
+### I leaked the replacement domains into this file
+
+`docs/node-address-hygiene.md` was extended yesterday to cover the
+replacement names, with the reasoning spelled out -- the old ones are
+burned, the new ones are worth something only while nobody holds a list,
+and a git grep enumerates them as well as the scrape that found the last
+set. I then spent the day writing them into the journal: both panel
+alternates, a node mirror hostname, and one line listing seven registrable
+domains together, which is precisely the list.
+
+Twelve lines, redacted forward to placeholders. History not rewritten, the
+same call as the node addresses in August. Noting it here because writing
+the rule and then breaking it within a day says the rule needs to be
+checked before committing, not remembered.
