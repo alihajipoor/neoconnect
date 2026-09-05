@@ -1945,3 +1945,39 @@ Twelve lines, redacted forward to placeholders. History not rewritten, the
 same call as the node addresses in August. Noting it here because writing
 the rule and then breaking it within a day says the rule needs to be
 checked before committing, not remembered.
+
+## 2026-09-05 — turkey's flapping: their network, our alert spam
+
+Discord filled up with turkey-1 cycling OFFLINE/ONLINE, sometimes half a
+dozen times in one minute. Two separate things, and worth keeping apart.
+
+**The link is genuinely bad, and it is the provider's.** turkey-1 logged
+91 gRPC stream errors in two hours while every other node logged zero --
+same agent build, same config after the migration, same workload (all six
+get a 200-user re-assert every minute; turkey's 33 against the others' 30
+is just the extra re-asserts after each reconnect). The panel is not the
+variable: backend up since 2 September, zero restarts, no GOAWAY and no
+keepalive-policy violations. The node itself is fine -- up two weeks, zero
+agentd restarts, no OOM, a clean NIC. What differs is the path: RTT to the
+panel 79.8ms with 13.6ms of variance against finland's 34.2/0.6, and a
+cumulative TCP retransmit rate of 18.8% against finland's 1.7%. The errors
+are all transport-level: TLS handshake deadline exceeded, connection reset
+by peer, connection timed out, EOF.
+
+**The three-alerts-per-blip was ours.** The stream-close path marked the
+node OFFLINE the instant the stream ended, ignoring HEARTBEAT_STALE_MS
+entirely, and -- unlike the sweep -- never called
+suppressNextOfflineReminder, so the sweep 30 seconds later fired the
+repeat as well. That is the "no heartbeat for 0h" in the alerts: a
+reminder written for an outage that has persisted, firing on one that had
+lasted a few hundred milliseconds. Liveness now belongs to sweepStaleNodes
+alone. A node that closes and does not return still goes OFFLINE within a
+sweep of the threshold, so the six-day dark outage this alerting exists
+for is still caught; a reconnect faster than the threshold is now silent.
+
+Two measurement notes for next time. ICMP said 50% loss from turkey with
+0.081ms of jitter, which is the signature of ICMP rate-limiting rather
+than loss -- the TCP retransmit counters were the honest number. And that
+18.8% is cumulative since boot: a 30-second sample showed zero retransmits
+on both nodes, so the loss is bursty, not constant. Neither number alone
+would have supported the conclusion.
