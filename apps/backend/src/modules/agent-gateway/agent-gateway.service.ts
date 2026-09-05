@@ -294,6 +294,29 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     await this.nodesService.remindAboutOfflineNodes();
   }
 
+  /** A stream ending is not the same as the node being down.
+   *
+   * This used to mark the node OFFLINE the moment the stream closed. On a
+   * link that drops and re-dials within a second that produced a full
+   * outage alert per drop -- and, because this path never called
+   * suppressNextOfflineReminder the way the sweep does, a "STILL OFFLINE
+   * -- no heartbeat for 0h" immediately behind it. turkey-1 sits on such
+   * a link and generated three alerts per blip, dozens of times a day,
+   * without ever missing a heartbeat deadline.
+   *
+   * Liveness is now decided in one place, sweepStaleNodes, against
+   * HEARTBEAT_STALE_MS. A node whose stream closes and does not come back
+   * still goes OFFLINE within one sweep of that deadline, which is what
+   * the threshold already promised -- so a real outage is still caught,
+   * and a reconnect faster than the threshold is correctly silent.
+   *
+   * The registry entry goes immediately regardless: it is the routing
+   * table, and a closed call must never be handed work.
+   */
+  private handleStreamClosed(nodeId: string, call: AgentDuplexCall) {
+    this.registry.delete(nodeId, call);
+  }
+
   private buildCredentials(): { credentials: grpc.ServerCredentials; isSecure: boolean } {
     const certPath = this.config.get<string>("agentGateway.tlsCertPath");
     const keyPath = this.config.get<string>("agentGateway.tlsKeyPath");
@@ -364,12 +387,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     });
 
     const onClose = () => {
-      if (nodeId) {
-        this.registry.delete(nodeId, call);
-        this.nodesService.setStatus(nodeId, "OFFLINE").catch((err) => {
-          this.logger.warn(`Failed to mark node ${nodeId} offline: ${err}`);
-        });
-      }
+      if (nodeId) this.handleStreamClosed(nodeId, call);
     };
     call.on("end", () => {
       onClose();
