@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { createHash } from "node:crypto";
 import * as nodemailer from "nodemailer";
 import { EmailSettingsService, ResolvedEmailSettings } from "./email-settings.service";
 import { EmailBrandService } from "./email-brand.service";
@@ -90,7 +91,21 @@ export class EmailService {
   }
 
   private getTransporter(settings: ResolvedEmailSettings): nodemailer.Transporter {
-    const fingerprint = `${settings.host}:${settings.port}:${settings.secure}:${settings.username}`;
+    // The password is part of the identity of this transporter, and
+    // leaving it out meant a password change silently did nothing: the
+    // host, port, secure flag and username are all unchanged by a
+    // rotation, so the fingerprint matched, the cached transporter was
+    // handed back, and it went on authenticating with the old secret
+    // until the process happened to restart. Every account verification
+    // and password reset failed 535 in the meantime, with the panel
+    // showing the new password saved.
+    //
+    // Hashed rather than concatenated: this string is only ever compared,
+    // never used as a credential, and a plain copy of the password living
+    // in a field named `fingerprint` is the kind of thing that ends up in
+    // a log line or a heap dump.
+    const secret = createHash("sha256").update(settings.password).digest("hex");
+    const fingerprint = `${settings.host}:${settings.port}:${settings.secure}:${settings.username}:${secret}`;
     if (this.cachedTransporter?.fingerprint === fingerprint) {
       return this.cachedTransporter.transporter;
     }
