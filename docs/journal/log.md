@@ -1981,3 +1981,38 @@ than loss -- the TCP retransmit counters were the honest number. And that
 18.8% is cumulative since boot: a 30-second sample showed zero retransmits
 on both nodes, so the loss is bursty, not constant. Neither number alone
 would have supported the conclusion.
+
+## 2026-09-08 — a password change that never left the process
+
+Registration emails had not been arriving. The panel logged
+`Invalid login: 535 5.7.8 authentication failed` on every send, one on
+6 September, five on the 7th, three on the 8th.
+
+The credentials were fine. Decrypting the stored password and
+authenticating against the SMTP host by hand succeeded first time, on the
+settings exactly as stored -- host, port 587, STARTTLS, that username.
+The mail server was fine too: reachable from the panel, and `AUTH PLAIN
+LOGIN` advertised after STARTTLS as expected.
+
+What was wrong is that the new password never reached the wire. The
+transporter cache keyed on `host:port:secure:username`, and a password
+rotation changes none of those. The fingerprint matched, the cached
+transporter came back, and it went on presenting the old secret until
+something restarted the backend. The settings row showed `updatedAt`
+21:55 and a send failed at 21:56:47 -- the admin had already fixed it,
+correctly, and the process was ignoring them.
+
+Worst-shaped failure available: the admin UI confirms the save, the
+database shows the new value, the mail server would accept it, and every
+send still fails.
+
+Restarting the backend restored service immediately. The fix puts the
+password in the fingerprint, hashed -- the string is only ever compared,
+never used as a credential, and a plain copy of a password in a field
+called `fingerprint` is what ends up in a log line or a heap dump. Three
+tests pin it; the password-only one fails against the old fingerprint,
+which is the point of having it.
+
+Worth noting the shape for next time: "the credentials are correct" and
+"the credentials are being sent" are different claims, and the log line
+only ever supports the second.
