@@ -54,7 +54,14 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      # packages: '' because the action's default list still asks for the
+      # legacy 'tools' package, which Google has withdrawn from the SDK
+      # repository -- sdkmanager exits 1 on "Failed to find package 'tools'"
+      # and took the 0.2.18 release down with it. The runner image already
+      # ships the SDK, and the NDK is installed by its own step below.
       - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
 
       # The Rust target name is not the Tauri target name: Tauri says
       # "x86_64"/"aarch64", Rust wants the full triple. Getting this wrong
