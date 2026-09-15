@@ -70,4 +70,35 @@ describe("API endpoints are within the HTTP capability scope", () => {
     const probe = "https://example.com/customer/me";
     expect((allowed ?? []).some((entry) => matches(entry.url, probe))).toBe(false);
   });
+
+  /** The compiled-in list is no longer the list that matters.
+   *
+   * The check above was written after a CDN domain shipped in config.ts
+   * without a matching capability glob. It then failed to catch the same
+   * fault a second time, because by then the addresses customers
+   * actually use arrive in the signed bundle, and the bundle's endpoints
+   * are not in PRODUCTION_API_BASE_URLS for it to look at. Every one of
+   * them was refused locally, the app fell back to a domain blocked in
+   * Iran, and a new customer there could not register -- the identical
+   * symptom, from the identical gap, with a test in place looking
+   * elsewhere.
+   */
+  it("permits every endpoint the shipped bundle carries", () => {
+    const seed = JSON.parse(
+      readFileSync(new URL("./seed-bundle.json", import.meta.url), "utf8"),
+    ) as { payload?: string };
+    // A placeholder seed ships no endpoints, so there is nothing to permit.
+    if (!seed.payload) return;
+    const bundle = JSON.parse(Buffer.from(seed.payload, "base64").toString("utf8")) as {
+      endpoints: { url: string }[];
+    };
+    expect(bundle.endpoints.length).toBeGreaterThan(0);
+    for (const endpoint of bundle.endpoints) {
+      const probe = endpoint.url + "/customer/me";
+      expect(
+        (allowed ?? []).some((entry) => matches(entry.url, probe)),
+        probe + " is not covered by any entry in capabilities/default.json",
+      ).toBe(true);
+    }
+  });
 });
