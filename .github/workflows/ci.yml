@@ -67,6 +67,15 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+
+      # The capability allowlists are patched at build time with the
+      # replacement domains. Committing a patched copy publishes the
+      # fleet, which docs/node-address-hygiene.md exists to prevent and
+      # which has now happened twice by staging a working copy a local
+      # test run had already modified.
+      - name: Committed capability files are not build output
+        run: bash scripts/check-committed-capabilities.sh
+
       - run: pnpm --filter @neoxify/backend prisma:generate
       - run: pnpm turbo run lint typecheck build test
 
