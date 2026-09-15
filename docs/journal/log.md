@@ -2016,3 +2016,63 @@ which is the point of having it.
 Worth noting the shape for next time: "the credentials are correct" and
 "the credentials are being sent" are different claims, and the log line
 only ever supports the second.
+
+## 2026-09-15 — the app was forbidden from dialling its own endpoints
+
+Asked to check the new domains work on Android and Play. They did not,
+and neither did desktop, for a reason that makes everything built this
+month moot.
+
+Tauri's HTTP plugin refuses any URL outside the capability allowlist,
+before the request leaves the device. The allowlist named one domain --
+the censored one. The signed bundle hands the app eight endpoints on
+other domains, and the plugin rejected every one of them locally. The app
+then fell through to the compiled-in list, also on the censored domain,
+and a new customer in Iran could not register.
+
+So the bundle, the seed baked into the binary, the replacement domains,
+the per-node certificates and the SNI migration have all been inert on
+the client since they shipped. Desktop 0.9.35 and Android 0.2.17 both
+carried a correct address list they were not permitted to use.
+
+**A test existed for exactly this and was green throughout.**
+api-endpoints.scope.test.ts was written after the same gap shipped once
+before -- a CDN domain added to config.ts and not to the capability, with
+the same symptom reported from Iran within the hour. It compares the
+capability against PRODUCTION_API_BASE_URLS. By now the addresses
+customers actually use arrive in the bundle, which that list does not
+contain, so the test kept passing while checking a list that no longer
+mattered. A test aimed at the wrong target is worse than none: it reads
+as coverage.
+
+Fixed by generating the capability globs at build time from the seed,
+next to the seed itself and the updater endpoints, so a build cannot ship
+an allowlist that disagrees with the addresses it ships. The scope test
+now also checks every endpoint in the bundle; reverting the generated
+allowlist makes it fail, which is the property it previously lacked.
+Verified in the shipped builds' own logs: "+16 glob(s) for 8 host(s)" in
+both 0.9.36 and 0.2.18.
+
+Also found while checking: germany's REALITY entry still told clients to
+present `www.shatel.ir` after I changed the node's decoy to lufthansa on
+2 September. The client SNI and the server's serverNames have to match,
+so REALITY on that node was refused for every client for thirteen days.
+Fixing the node without fixing what the panel hands clients is half a
+fix, and the half I did was the invisible one.
+
+**And I leaked the replacement domains again**, committing a mobile
+capability file a local test run had already patched -- the second breach
+of docs/node-address-hygiene.md in nine days, same cause both times:
+staging a working copy that a generator had touched. Caught before the
+branch merged, so it never reached main. There is now a CI check that
+fails when a committed capability file contains anything but the legacy
+host and localhost, written as a positive allowlist because a grep for
+the new domains would have to contain them.
+
+Two release-side notes. GitHub now forces Node 24 on actions built for
+Node 20, and separately Google withdrew the legacy `tools` SDK package,
+so setup-android exited 1 on "Failed to find package 'tools'" and took
+the Android release with it; `packages: ''` skips that install and the
+runner's own SDK suffices. And reading CI logs turns out to be possible
+with the credential already in the keychain, which would have saved three
+blind guesses at this failure.
