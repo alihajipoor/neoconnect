@@ -1,3 +1,5 @@
+import seedEnvelope from "./seed-bundle.json";
+
 /** Where the control plane lives, best first.
  *
  * A list rather than one address, because one address was a single point
@@ -11,7 +13,46 @@
  * pass while the production URLs went unchecked, which is the same shape
  * as the hole that let an unpermitted endpoint reach customers.
  */
-export const PRODUCTION_API_BASE_URLS: readonly string[] = [
+/** The addresses baked in at build time, from the published bundle.
+ *
+ * The literals below sit on a domain that is DNS-poisoned and SNI-blocked
+ * in Iran -- unreachable by exactly the customers a last-resort list
+ * exists for. They stay as the floor for a build made without network;
+ * the release workflows set NEOXIFY_REQUIRE_SEED so a shipped build never
+ * takes that path, and the seed's own panel entries go in front of them.
+ *
+ * Derived rather than committed, for the reason in
+ * docs/node-address-hygiene.md: the replacement names are worth something
+ * only while nobody holds a list of them, and a public repo is a list.
+ */
+function seedPanelBases(): string[] {
+  try {
+    const payload = (seedEnvelope as { payload?: unknown }).payload;
+    if (typeof payload !== "string" || payload === "") return [];
+    const raw =
+      typeof atob === "function"
+        ? atob(payload)
+        : Buffer.from(payload, "base64").toString("utf8");
+    const endpoints = (JSON.parse(raw) as { endpoints?: unknown }).endpoints;
+    if (!Array.isArray(endpoints)) return [];
+    return endpoints
+      .filter(
+        (e): e is { kind: string; url: string } =>
+          typeof e === "object" &&
+          e !== null &&
+          (e as { kind?: unknown }).kind === "panel" &&
+          typeof (e as { url?: unknown }).url === "string",
+      )
+      .map((e) => e.url);
+  } catch {
+    // A malformed seed must never stop the app starting; the literals
+    // below still work everywhere the block does not reach.
+    return [];
+  }
+}
+
+const LEGACY_API_BASE_URLS: readonly string[] = [
+
   // A separate domain on a CDN, deliberately sharing nothing with the
   // marketing site: a block aimed at one cannot take the other with it,
   // which is the entire reason it is a second domain rather than a
@@ -60,9 +101,17 @@ export const PRODUCTION_API_BASE_URLS: readonly string[] = [
 /** Dev talks to the local backend port; a real build talks to the public
  * /api path nginx proxies to it (see
  * installer/assets/nginx-panel.conf.template). */
+const SEED_PANEL_BASES = seedPanelBases();
+
+export const PRODUCTION_API_BASE_URLS: readonly string[] = [
+  ...SEED_PANEL_BASES,
+  ...LEGACY_API_BASE_URLS.filter((u) => !SEED_PANEL_BASES.includes(u)),
+];
+
 export const API_BASE_URLS: readonly string[] = import.meta.env.DEV
   ? ["http://localhost:4000"]
   : PRODUCTION_API_BASE_URLS;
+
 
 /** The first choice, for the few places that need a single address
  * rather than the ordered list. */

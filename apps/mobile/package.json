@@ -9,9 +9,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
-    "seed": "node ../desktop-windows/scripts/ensure-seed-bundle.mjs",
-    "prebuild": "node ../desktop-windows/scripts/ensure-seed-bundle.mjs",
-    "pretest": "NEOXIFY_SKIP_SEED=1 node ../desktop-windows/scripts/ensure-seed-bundle.mjs"
+    "seed": "node ../desktop-windows/scripts/ensure-seed-bundle.mjs && node ../desktop-windows/scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
+    "prebuild": "node ../desktop-windows/scripts/ensure-seed-bundle.mjs && node ../desktop-windows/scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
+    "pretest": "NEOXIFY_SKIP_SEED=1 node ../desktop-windows/scripts/ensure-seed-bundle.mjs && node ../desktop-windows/scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

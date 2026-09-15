@@ -13,10 +13,10 @@
     "tauri": "tauri",
     "fetch-binaries": "powershell -ExecutionPolicy Bypass -File src-tauri/scripts/fetch-binaries.ps1",
     "test": "vitest run",
-    "seed": "node scripts/ensure-seed-bundle.mjs && node scripts/apply-updater-endpoints.mjs",
-    "prebuild": "node scripts/ensure-seed-bundle.mjs",
-    "pretest": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs",
-    "pretypecheck": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs",
+    "seed": "node scripts/ensure-seed-bundle.mjs && node scripts/apply-updater-endpoints.mjs && node scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
+    "prebuild": "node scripts/ensure-seed-bundle.mjs && node scripts/apply-updater-endpoints.mjs && node scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
+    "pretest": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs && node scripts/apply-updater-endpoints.mjs && node scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
+    "pretypecheck": "NEOXIFY_SKIP_SEED=1 node scripts/ensure-seed-bundle.mjs && node scripts/apply-updater-endpoints.mjs && node scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
     "updater-endpoints": "node scripts/apply-updater-endpoints.mjs"
   },
   "dependencies": {
