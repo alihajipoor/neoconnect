@@ -29,10 +29,10 @@ function seedPanelBases(): string[] {
   try {
     const payload = (seedEnvelope as { payload?: unknown }).payload;
     if (typeof payload !== "string" || payload === "") return [];
-    const raw =
-      typeof atob === "function"
-        ? atob(payload)
-        : Buffer.from(payload, "base64").toString("utf8");
+    // atob only. This file is typechecked by the mobile app too, which
+    // has no node types, and every context it runs in -- both webviews
+    // and the test runner -- provides atob.
+    const raw = atob(payload);
     const endpoints = (JSON.parse(raw) as { endpoints?: unknown }).endpoints;
     if (!Array.isArray(endpoints)) return [];
     return endpoints
