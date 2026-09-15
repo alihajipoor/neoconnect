@@ -54,7 +54,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
 
       # The Rust target name is not the Tauri target name: Tauri says
       # "x86_64"/"aarch64", Rust wants the full triple. Getting this wrong
