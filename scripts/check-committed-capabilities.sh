@@ -17,16 +17,39 @@ status=0
 
 for f in apps/desktop-windows/src-tauri/capabilities/default.json \
          apps/mobile/src-tauri/capabilities/default.json; do
-  # Read the committed blob, not the working copy, which a local build
-  # or `pnpm test` will legitimately have patched.
-  content=$(git show "HEAD:$f" 2>/dev/null) || { echo "  $f: not tracked, skipped"; continue; }
+  # The staged blob, not the working copy and not HEAD.
+  #
+  # Not the working copy, because a local build or `pnpm test` patches it
+  # legitimately and constantly -- flagging that would train everyone to
+  # ignore this.
+  #
+  # Not HEAD, which is what this read before, because as a pre-commit
+  # hook that inspects the *parent* commit: a staged bad file passed the
+  # hook, got committed, and was only caught by CI afterwards -- by which
+  # point it had been pushed to a public repository. That is not a
+  # hypothetical; it is how run 35818935669 came to exist.
+  #
+  # The index is exactly the thing being committed, and staging a patched
+  # working copy is the failure this guard was written for, both times it
+  # has happened.
+  content=$(git show ":$f" 2>/dev/null) || { echo "  $f: not tracked, skipped"; continue; }
   bad=$(printf '%s' "$content" \
         | grep -oE '"url"[[:space:]]*:[[:space:]]*"[^"]+"' \
         | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
         | grep -vE "$allowed_host_re" || true)
   if [ -n "$bad" ]; then
-    echo "  $f: committed with generated entries:"
-    printf '%s\n' "$bad" | sed 's/^/      /'
+    # Counted, never printed. This guard fires exactly when a build-patched
+    # capability file has been staged, so `$bad` is a list of live panel
+    # alternates and node mirrors -- and it runs in CI on a public
+    # repository, where its own output is published. It has already done
+    # that once: run 35818935669 put eight hosts into a public Actions log
+    # while reporting that they must not be committed.
+    #
+    # The count and the file are enough to act on: regenerate the file, or
+    # `git checkout --` it. Which hosts they are is exactly what the person
+    # reading the failure already has in front of them.
+    n=$(printf '%s\n' "$bad" | grep -c .)
+    echo "  $f: committed with $n generated entr(y/ies) -- run 'git checkout -- $f'"
     status=1
   else
     echo "  $f: clean"
