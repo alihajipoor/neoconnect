@@ -202,6 +202,37 @@ class NeoxifyVpnPlugin: Plugin {
         }
     }
 
+    /// Whether the tunnel is really down, which is not what
+    /// `disconnect` returning means.
+    ///
+    /// The dashboard polls this for up to eight seconds after a customer
+    /// asks to disconnect and only then says it happened. Without it on
+    /// iOS the poll errored every time, the catch swallowed it, and every
+    /// disconnect spent the full eight seconds before reporting "still
+    /// routed through a VPN after disconnecting" and leaving the app in
+    /// the degraded state -- on a teardown that had in fact worked.
+    ///
+    /// Narrower than Android's on purpose. There the check is
+    /// platform-level -- does any network have TRANSPORT_VPN -- which
+    /// also sees other apps' tunnels, and errs toward "not gone" because
+    /// claiming a teardown it cannot see is the failure it exists to
+    /// prevent. iOS offers the app no equivalent view, so this reports on
+    /// our own two connections. It cannot see another app's VPN, and does
+    /// not pretend to.
+    ///
+    /// Anything that is not fully down counts as still up, including
+    /// .disconnecting: that state is exactly the window this is meant to
+    /// wait out.
+    @objc public func tunnelGone(_ invoke: Invoke) {
+        Task {
+            let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
+            let down: (NEVPNStatus) -> Bool = { $0 == .disconnected || $0 == .invalid }
+            let providerDown = managers.allSatisfy { down($0.connection.status) }
+            let ikev2Down = down(await Ikev2Engine.status())
+            invoke.resolve(["gone": providerDown && ikev2Down])
+        }
+    }
+
     @objc public func status(_ invoke: Invoke) {
         Task {
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []

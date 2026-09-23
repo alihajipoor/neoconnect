@@ -29,12 +29,11 @@ fn handle<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::State<'_, Vpn<R>>, St
     app.try_state::<Vpn<R>>().ok_or_else(unavailable)
 }
 
-// Not every command exists on both platforms. The seven the iOS plugin
-// implements are cfg'd for both; list_apps and tunnel_gone stay
-// Android-only and keep returning unavailable(), which is the truthful
-// answer rather than a stub that fails later. list_apps in particular
-// has no iOS equivalent at all: per-app routing there belongs to the
-// system, not to the app.
+// Not every command exists on both platforms. The eight the iOS plugin
+// implements are cfg'd for both; only list_apps stays Android-only,
+// returning unavailable(), which is the truthful answer rather than a
+// stub that fails later -- it has no iOS equivalent at all, because
+// per-app routing there belongs to the system, not to the app.
 //
 // Seven commands, each a single forwarding call. Written out rather than
 // generated: `#[tauri::command]` emits a macro named after the function,
@@ -163,14 +162,18 @@ pub async fn vpn_disconnect<R: Runtime>(app: AppHandle<R>) -> Result<Empty, Stri
 /// after a customer asks to disconnect, and only then says it happened.
 #[tauri::command]
 pub async fn vpn_tunnel_gone<R: Runtime>(app: AppHandle<R>) -> Result<TunnelGone, String> {
-    #[cfg(target_os = "android")]
+    // iOS as well. While this was Android-only the dashboard's teardown
+    // poll errored on every call, which its catch swallowed -- so every
+    // disconnect on iOS ran the full eight-second wait and then reported
+    // that the tunnel was still up.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
             .run_mobile_plugin::<TunnelGone>("tunnelGone", ())
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
         Err(unavailable())
