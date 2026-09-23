@@ -97,9 +97,13 @@ enum Ikev2Engine {
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Neoxify IKEv2"
         manager.isEnabled = true
-        // Not bypassable, mirroring the Android profile: an app that
-        // asks to skip the VPN should not be able to, or "connected"
-        // stops meaning anything.
+        // Cleared rather than left alone. On-demand rules make iOS
+        // bring the tunnel back by itself on a network change, so a
+        // profile that carried them from an earlier configuration would
+        // reconnect after the customer had pressed disconnect. It is
+        // not the equivalent of Android's setBypassable(false) -- that
+        // has no counterpart here, because traffic iOS routes into a
+        // VPN cannot be opted out of by an app in the first place.
         manager.isOnDemandEnabled = false
 
         try await manager.saveToPreferences()
