@@ -128,7 +128,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // From allowedIPs, which is what the profile says this peer
         // carries. Usually 0.0.0.0/0, but honouring it rather than
         // assuming it is what makes a split profile behave.
-        let routes = WireGuardEngine.split(profile.allowedIPs).compactMap { cidr -> NEIPv4Route? in
+        //
+        // IPv4 only. Every profile the backend issues carries
+        // "0.0.0.0/0, ::/0", and there is nowhere to put the IPv6 half:
+        // it allocates a single IPv4 address inside the tunnel, and iOS
+        // rejects IPv6 routes with no IPv6 settings to hang them on. The
+        // ::/0 is still given to wireguard-go, where it means something
+        // different and correct -- the peer's allowed source range.
+        let cidrs = WireGuardEngine.split(profile.allowedIPs)
+        for cidr in cidrs where WireGuardEngine.isIPv6(cidr) {
+            log.info("not routing \(cidr, privacy: .public): the tunnel has no IPv6 address")
+        }
+        let routes = cidrs.compactMap { cidr -> NEIPv4Route? in
             guard let (network, netmask) = WireGuardEngine.addressAndMask(cidr) else { return nil }
             return NEIPv4Route(destinationAddress: network, subnetMask: netmask)
         }
