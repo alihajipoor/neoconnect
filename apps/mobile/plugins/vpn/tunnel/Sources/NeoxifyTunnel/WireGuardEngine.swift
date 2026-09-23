@@ -70,20 +70,42 @@ enum WireGuardEngine {
             .filter { !$0.isEmpty }
     }
 
-    /// Splits `10.66.0.5/32` into an address and a mask.
+    /// Splits an IPv4 CIDR like `10.66.0.5/32` into an address and a mask.
     ///
     /// NEIPv4Settings takes a dotted netmask, not a prefix length, so the
     /// conversion has to happen somewhere. A missing prefix is treated as
     /// /32 rather than rejected: a bare address is what a hand-edited
     /// profile tends to carry, and a single host is the safe reading.
+    ///
+    /// Anything that is not four dotted octets returns nil, and that
+    /// check is the point rather than defensiveness. The backend sends
+    /// `allowedIPs: "0.0.0.0/0, ::/0"` on every WireGuard profile, and an
+    /// earlier version of this happily parsed `::/0` as address "::" with
+    /// mask "0.0.0.0" -- an NEIPv4Route holding an IPv6 address, built on
+    /// every single connection. Returning a plausible answer for input it
+    /// does not understand is the whole failure.
     static func addressAndMask(_ value: String) -> (address: String, mask: String)? {
         let parts = value.split(separator: "/", maxSplits: 1)
         guard let address = parts.first, !address.isEmpty else { return nil }
+        let octets = address.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4, octets.allSatisfy({ UInt8($0) != nil }) else { return nil }
         let prefix = parts.count == 2 ? Int(parts[1]) ?? 32 : 32
         guard (0...32).contains(prefix) else { return nil }
         let bits = prefix == 0 ? UInt32(0) : UInt32.max << (32 - UInt32(prefix))
         let mask = (0..<4).map { String((bits >> (24 - 8 * UInt32($0))) & 0xff) }.joined(separator: ".")
         return (String(address), mask)
+    }
+
+    /// Whether a CIDR is IPv6, so the caller can say so rather than
+    /// silently dropping it.
+    ///
+    /// Nothing builds an NEIPv6Route from this yet: the backend allocates
+    /// only an IPv4 address inside the tunnel, and iOS will not accept
+    /// IPv6 routes without IPv6 tunnel settings to attach them to. The
+    /// `::/0` the profile carries is still passed to wireguard-go, where
+    /// it is the peer's allowed source range and is correct.
+    static func isIPv6(_ cidr: String) -> Bool {
+        cidr.contains(":")
     }
 
     static func start(profile: Profile, descriptor: Int32, mtu: Int) throws {
