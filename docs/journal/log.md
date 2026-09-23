@@ -2076,3 +2076,43 @@ the Android release with it; `packages: ''` skips that install and the
 runner's own SDK suffices. And reading CI logs turns out to be possible
 with the credential already in the keychain, which would have saved three
 blind guesses at this failure.
+
+## 2026-09-23 — iOS: the engine ports for free, the plumbing does not
+
+Started the iOS app now that there is an organisation Apple account,
+which Guideline 5.4 requires for a VPN.
+
+**The engine needed no port.** It is 183 lines of Go behind
+Start/Stop/Running, built with gomobile, and gomobile takes the platform
+as an argument -- the same source that makes the Android AAR makes an
+iOS xcframework. CI now builds it for device and simulator, and the app
+builds too: `** BUILD SUCCEEDED **`. That is the whole of the free half.
+
+**What does not port is the tun handover.** `Start()` takes a file
+descriptor and an Android `Protector`; iOS hands a packet tunnel a
+`NEPacketTunnelFlow` and there is no descriptor to give. That, inside a
+NEPacketTunnelProvider extension and its memory budget, is the real
+work, and none of it exists yet -- the plugin has `android/` and nothing
+else.
+
+Three things had to be fixed before any of it could be checked:
+
+- gomobile was installed at `@latest` by reflex. build-xray-aar.sh pins
+  it deliberately and explains why at length -- the binary and the bind
+  runtime are two different things from the same module, and the one
+  time they drifted, 15.4 MB of uncompressed DWARF went into a shipped
+  APK. Reinstalled at the pinned commit.
+- ci-ios.yml only fired on main, so the first engine commit produced no
+  run at all. ci.yml already carries this reasoning for the desktop
+  service: the work machine cannot build the target, so branches must
+  reach CI. iOS has the identical problem -- gomobile and tauri both
+  refuse without a full Xcode, and this box has Command Line Tools only.
+  Without it, verifying the packet-tunnel work would mean merging Swift
+  nobody had compiled.
+- ci-ios.yml had no setup-go, so the engine step died on exit 127. Now
+  pinned to 1.26.5 with GOTOOLCHAIN=local, matching the Android release.
+
+Worth recording for the scope conversation: Apple removed VPN apps from
+the Iranian App Store, so Iranian customers need a non-Iranian Apple ID
+to install anything built here. It does not change the engineering, but
+it does change who iOS reaches.
