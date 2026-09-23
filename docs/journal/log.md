@@ -2211,3 +2211,37 @@ what branch the commit is actually on before reading CI as evidence.
 Still never run. Tauri does not work with Xcode 27, so the app cannot be
 built on this machine at all; CI builds it with 26.6. Xcode 26 alongside
 27 is the way out, and until then nothing here has carried a packet.
+
+## 2026-09-23 (night) — iOS reaches the app layer
+
+The bridge was cfg'd to Android throughout, so every command returned
+unavailable() on iOS -- the Swift plugin existed and nothing could reach
+it. Widened for the five it implements. WireGuard, IKEv2 and tunnel_gone
+stay Android-only, and list_apps has no iOS equivalent at all since
+per-app routing there is the system's.
+
+The connect ladder then had to stop offering what iOS cannot carry.
+Attempting WireGuard or IKEv2 on iOS does not fail cleanly: it fails at
+the system boundary with a configuration error, which a customer reads as
+their own network being at fault rather than the app lacking a feature.
+Skipped with a reason, like the IKEv2-with-selected-apps case it sits
+beside. The protocols iOS does carry are the Xray ones, which are also
+the ones that survive a filtered network, so this costs the intended
+customers nothing.
+
+iPadOS was the awkward case in platform detection: it claims to be a Mac
+and is only distinguishable by reporting a touchscreen, which no real Mac
+does. Tested both directions, since getting it backwards would either
+hide every protocol from iPad or offer unbuildable ones to the desktop
+client that shares this directory.
+
+Also chased the Xcode 27 break to the end rather than accepting it.
+Tauri's Swift package declares both macOS and iOS platforms, so the
+obvious theory was that SwiftPM resolved the macOS variant -- removing
+`.macOS` from the package changed nothing. The real shape is in the
+compiler invocations: Tauri builds its Swift twice, once for
+`arm64-apple-ios15.0-simulator` and once for `arm64-apple-macos12.0`, and
+only the second fails. That second build is inside Tauri's own build
+script, so there is no local fix. Xcode 26 alongside 27 stands as the
+answer, and CLAUDE.md now says so rather than leaving the next person to
+rediscover it.
