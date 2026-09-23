@@ -37,6 +37,29 @@ likely to exceed it.
 Do not submit before a device has connected on each of Xray, WireGuard
 and IKEv2 and carried real traffic.
 
+Four specific things to watch for, because they cannot be settled from
+here and each fails in a way that does not name its cause:
+
+- **Memory.** The Xray engine is the thing most likely to exceed the
+  ceiling. If the tunnel dies shortly after connecting with nothing in
+  the app's log, that is what happened -- the extension is killed, not
+  crashed.
+- **How many VPN prompts you get.** The app asks for permission once,
+  before the connect ladder starts, by saving a tunnel-provider
+  configuration. IKEv2 lives in the separate personal-VPN slot, so if
+  iOS treats consent as per-configuration rather than per-app, a second
+  prompt will appear part-way down the ladder with no explanation
+  attached to it. If it does, the fix is to ask for both up front.
+- **Whether IKEv2 authenticates.** Its password goes into the keychain
+  and the profile carries a persistent reference, because the system VPN
+  daemon reads the secret out of process. If that daemon cannot reach
+  the item, the failure arrives as an authentication error rather than a
+  keychain one, and the answer is a shared keychain access group.
+- **IPv6.** See the leak measured on Windows in
+  `service/src/engines/ipv6_block.rs`; neither mobile client has an
+  equivalent. A capture on a dual-stack network, disconnected and then
+  connected, is what would settle it.
+
 ### 2. Developer portal
 
 Two App IDs, because the extension is its own bundle:
