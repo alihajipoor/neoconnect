@@ -34,7 +34,10 @@ const EXT_TARGET = "NeoxifyTunnel";
 const GROUP = "group.com.neoxify.mobile";
 const DEPLOYMENT_TARGET = "15.0";
 
-const ios = join(mobile, "plugins", "vpn", "ios");
+// The extension's own sources and engine. Separate from plugins/vpn/ios,
+// which is the Tauri plugin Swift package for the app process -- the two
+// are built into different binaries and must not share a directory.
+const tunnel = join(mobile, "plugins", "vpn", "tunnel");
 const rel = (p) => relative(apple, p);
 
 let text = readFileSync(spec, "utf8");
@@ -69,13 +72,13 @@ const extension = `
     type: app-extension
     platform: iOS
     sources:
-      - path: ${rel(join(ios, "Sources", "NeoxifyTunnel"))}
+      - path: ${rel(join(tunnel, "Sources", "NeoxifyTunnel"))}
     dependencies:
       # The engine, built by scripts/build-xray-xcframework.sh. embed:
       # false because an app extension must not carry its own copy -- the
       # host app embeds it and the extension links against that one.
       # Embedding it twice is rejected at submission.
-      - framework: ${rel(join(ios, "Frameworks", "NeoxifyXray.xcframework"))}
+      - framework: ${rel(join(tunnel, "Frameworks", "NeoxifyXray.xcframework"))}
         embed: false
     # Declared here rather than pointed at a committed file. XcodeGen's
     # \`info.path\` and \`entitlements.path\` mean "generate one here", not
@@ -144,7 +147,7 @@ if (!appDeps.test(text)) {
 text = text.replace(
   appDeps,
   `$1      - target: ${EXT_TARGET}\n` +
-    `      - framework: ${rel(join(ios, "Frameworks", "NeoxifyXray.xcframework"))}\n` +
+    `      - framework: ${rel(join(tunnel, "Frameworks", "NeoxifyXray.xcframework"))}\n` +
     `        embed: true\n`,
 );
 

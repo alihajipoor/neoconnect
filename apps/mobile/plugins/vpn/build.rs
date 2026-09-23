@@ -5,5 +5,12 @@
 const COMMANDS: &[&str] = &[];
 
 fn main() {
-    tauri_plugin::Builder::new(COMMANDS).android_path("android").build();
+    tauri_plugin::Builder::new(COMMANDS)
+        .android_path("android")
+        // The Swift package for the app process. The packet tunnel is
+        // NOT here: it is a separate extension target, added to the
+        // generated Xcode project by scripts/add-tunnel-extension.mjs,
+        // and it is built into a different binary.
+        .ios_path("ios")
+        .build();
 }

@@ -17,7 +17,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 src="$here/plugins/vpn/xray"
-out_dir="$here/plugins/vpn/ios/Frameworks"
+out_dir="$here/plugins/vpn/tunnel/Frameworks"
 framework="$out_dir/NeoxifyXray.xcframework"
 
 # Same commit as build-xray-aar.sh and as plugins/vpn/xray/go.mod. The
