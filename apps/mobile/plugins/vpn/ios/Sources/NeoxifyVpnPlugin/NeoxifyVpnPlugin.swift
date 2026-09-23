@@ -96,10 +96,41 @@ class NeoxifyVpnPlugin: Plugin {
         }
     }
 
+    /// IKEv2, which does not go through the extension at all.
+    ///
+    /// Unlike connectXray there is no provider bundle, no config JSON
+    /// and no Xray engine: the system's own IKEv2 client dials it. That
+    /// makes it the one protocol here free of the extension's ~50MB
+    /// memory ceiling, which is why it is worth having as a fallback
+    /// even though it is the most easily blocked of the three.
+    @objc public func connectIkev2(_ invoke: Invoke) {
+        struct Args: Decodable {
+            let server: String
+            let username: String
+            let password: String
+        }
+        Task {
+            do {
+                let args = try invoke.parseArgs(Args.self)
+                try await Ikev2Engine.connect(
+                    server: args.server, username: args.username, password: args.password)
+                invoke.resolve()
+            } catch {
+                invoke.reject("could not start IKEv2: \(error.localizedDescription)")
+            }
+        }
+    }
+
     @objc public func disconnect(_ invoke: Invoke) {
         Task {
+            // Both stores, not just the tunnel providers. IKEv2 lives in
+            // the single personal-VPN slot, which
+            // `NETunnelProviderManager.loadAllFromPreferences` does not
+            // return -- stopping only those would leave an IKEv2 tunnel
+            // up while the app reported it down.
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
             for manager in managers { manager.connection.stopVPNTunnel() }
+            await Ikev2Engine.disconnect()
             invoke.resolve()
         }
     }
@@ -107,7 +138,13 @@ class NeoxifyVpnPlugin: Plugin {
     @objc public func status(_ invoke: Invoke) {
         Task {
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
-            let state = managers.first?.connection.status ?? .invalid
+            let tunnel = managers.first?.connection.status ?? .invalid
+            let ikev2 = await Ikev2Engine.status()
+            // Whichever is actually up. Only one can be at a time, so
+            // preferring the connected one cannot mask the other; taking
+            // the tunnel-provider state unconditionally would report a
+            // live IKEv2 session as disconnected.
+            let state = tunnel == .connected ? tunnel : (ikev2 == .connected ? ikev2 : tunnel)
             invoke.resolve(["connected": state == .connected, "state": String(describing: state)])
         }
     }

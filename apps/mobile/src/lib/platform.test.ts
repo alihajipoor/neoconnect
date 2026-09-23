@@ -43,13 +43,21 @@ describe("protocol support", () => {
     }
   });
 
-  it("offers only what the iOS extension can carry", () => {
+  it("offers only what iOS can carry", () => {
     on("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)");
     expect(protocolSupported("XRAY_VLESS_REALITY")).toBe(true);
     expect(protocolSupported("XRAY_TROJAN")).toBe(true);
     expect(protocolSupported("SHADOWSOCKS")).toBe(true);
-    // Each would need its own provider, and neither is built.
+    // Dialled by the system's own client, so it needs no provider of
+    // ours -- which is why it is available while WireGuard is not.
+    expect(protocolSupported("IKEV2")).toBe(true);
+    // Would need its own provider built and embedded. Not yet.
     expect(protocolSupported("WIREGUARD")).toBe(false);
-    expect(protocolSupported("IKEV2")).toBe(false);
+  });
+
+  it("still offers everything on Android, IKEv2 included", () => {
+    on("Mozilla/5.0 (Linux; Android 14)");
+    expect(protocolSupported("IKEV2")).toBe(true);
+    expect(protocolSupported("WIREGUARD")).toBe(true);
   });
 });
