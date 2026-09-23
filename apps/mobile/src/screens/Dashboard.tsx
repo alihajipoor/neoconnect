@@ -22,6 +22,7 @@ import { refreshConnectionConfig } from "@shared/lib/connection-config";
 import { useRefreshOnResume } from "@shared/lib/resume";
 import { outcomeFromError, reportAttempt, rungsFrom } from "@shared/lib/attempts";
 import { loadAllowedApps } from "../lib/per-app";
+import { protocolSupported } from "../lib/platform";
 import {
   connectIkev2,
   connectWireGuard,
@@ -604,6 +605,16 @@ export function Dashboard({
       // "Connected".
       if (candidate.protocol === "IKEV2" && allowedApps.length > 0) {
         attempts.push(`${label}: not available with selected apps`);
+      // iOS carries Xray in a packet-tunnel extension and nothing else.
+      // WireGuard and IKEv2 would each need their own provider and
+      // neither is built, so attempting one fails at the system
+      // boundary with a configuration error -- which reads to a customer
+      // as their network being at fault rather than the app lacking a
+      // feature. Skipped with a reason, like the case above.
+      if (!protocolSupported(candidate.protocol)) {
+        attempts.push(`${label}: not supported on this platform`);
+        continue;
+      }
         continue;
       }
 
