@@ -2116,3 +2116,54 @@ Worth recording for the scope conversation: Apple removed VPN apps from
 the Iranian App Store, so Iranian customers need a non-Iranian Apple ID
 to install anything built here. It does not change the engineering, but
 it does change who iOS reaches.
+
+## 2026-09-23 — the iOS packet tunnel exists
+
+The extension builds, in CI and on this machine, and its bundle was
+checked rather than its spec: NSExtensionPointIdentifier is
+com.apple.networkextension.packet-tunnel, _OBJC_CLASS_$_PacketTunnelProvider
+is in the binary, libresolv and NetworkExtension are linked.
+
+**The engine needed no port, and not by luck.** xray-core's
+tun_darwin.go already reads a descriptor from `xray.tun.fd`, with a
+comment saying it is for NetworkExtension. So iOS takes the same
+supported path Android does, into the same Go package -- no fork, no
+tun2socks, no second networking stack. The whole iOS problem reduced to
+obtaining the descriptor, which NEPacketTunnelProvider does not hand out,
+so TunDescriptor finds it by asking each open descriptor its interface
+name.
+
+**Four failures, each costing a build.**
+
+Go's net package leaves _res_9_nsearch undefined until libresolv is
+linked. The symbol names nothing recognisable from this codebase.
+
+The patcher's "already present" guard read as idempotent and was not:
+`tauri ios init` leaves an existing project.yml alone, so a stale spec
+survived and the libresolv fix never reached the build that needed it.
+It strips and re-applies now.
+
+XcodeGen's `info.path` means "generate a plist here", not "use this one".
+Pointed at a committed file it overwrote it, stripping NSExtension --
+producing an extension that built, linked and would install, and that the
+system would never recognise as a tunnel provider. Both plist and
+entitlements are declared as properties now and generated into gen/apple,
+where being overwritten is harmless.
+
+And the app target ended up with two `dependencies:` keys. Valid YAML,
+silently keeps the last, dropped Tauri's own libapp.a and SDK
+frameworks.
+
+That last one matters beyond itself: it surfaced as the app compiling
+against the macOS SDK and dying in WebKit -- and so does Tauri's own
+incompatibility with Xcode 27. Two unrelated causes wearing one face. A
+pristine project, no extension and no patch, fails identically here,
+while CI builds it with Xcode_26.6. Without that experiment the second
+cause would have been invisible behind the first.
+
+So the app build is blocked locally on toolchain, not on this work. The
+answer is Xcode 26 alongside 27; CI builds the extension every run in the
+meantime, which is the only place it can be built at all today.
+
+Still never run. A packet tunnel has to carry a packet before any of this
+counts, and that needs a simulator the app can actually start on.
