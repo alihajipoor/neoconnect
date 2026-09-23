@@ -2167,3 +2167,47 @@ meantime, which is the only place it can be built at all today.
 
 Still never run. A packet tunnel has to carry a packet before any of this
 counts, and that needs a simulator the app can actually start on.
+
+## 2026-09-23 (later) — the whole iOS stack builds
+
+CI (iOS) green with all four pieces: the Xray xcframework, the
+packet-tunnel extension, the Swift plugin for the app process, and the
+Rust side registering it. That is the first point at which iOS is a build
+rather than a collection of files.
+
+The app half had to exist because the tunnel cannot start itself. On iOS
+the app process may only ask the system to run a provider; the tunnel is
+a separate binary with its own entitlement. So the plugin installs the
+profile, starts and stops it, and reports state -- the counterpart of the
+Kotlin plugin, with a deliberately asymmetric implementation behind one
+JS API. Permission there is an Activity result; here it is the user
+agreeing to save a configuration, so a saved profile is the only evidence
+they agreed. And there is no app list: per-app routing on iOS is the
+system's.
+
+Failures, all of the same kind -- conventions that are invisible until
+violated:
+
+`tauri::ios_plugin_binding!` rather than a hand-written extern. The
+signature guessed wrong and `tauri::ios` is private, so the type cannot
+be named from outside anyway. Only `cargo check --target aarch64-apple-ios`
+found it: the registration is cfg-gated, so a host build says nothing.
+
+The Swift package must be named for the *crate*, not the plugin. Tauri
+links it as a native static library under the crate name, and the error
+names the crate rather than the package -- pointing away from the file
+that is wrong.
+
+And `git add -A` staged the plugin's entire Rust `target/` directory,
+7,008 files. Undone before pushing; the plugin now has its own .gitignore
+for target/, .tauri/ and Package.resolved, none of which existed because
+the plugin had never been built as its own crate before.
+
+Twice more the same lesson in a different costume: a commit went to main
+while every push named a feature branch that had not moved, so CI kept
+reporting on an older commit and I read it as "no run created". Check
+what branch the commit is actually on before reading CI as evidence.
+
+Still never run. Tauri does not work with Xcode 27, so the app cannot be
+built on this machine at all; CI builds it with 26.6. Xcode 26 alongside
+27 is the way out, and until then nothing here has carried a packet.
