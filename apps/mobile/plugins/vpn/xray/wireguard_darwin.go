@@ -1,4 +1,4 @@
-//go:build ios
+//go:build darwin
 
 // WireGuard for iOS, in the same package and the same framework as the
 // Xray engine.
@@ -18,11 +18,25 @@
 // comes from `com.wireguard.android:tunnel`, which ships its own
 // GoBackend and its own VpnService, and duplicating it into the AAR
 // would grow every APK for nothing.
+//
+// The constraint is `darwin`, not `ios`, which is wider than the only
+// platform this ships to. gomobile builds iOS as GOOS=ios and ios
+// implies darwin, so what ships is identical -- but GOOS=ios binaries
+// cannot be run on a Mac, and darwin lets the utun framing below be
+// exercised by `go test` on the build machine. That framing is the one
+// part of this testable at all without an iPhone, and the part most
+// worth testing.
+//
+// It is in the filename as well as the //go:build line, and it has to
+// be. Go constrains by filename suffix first: while this was called
+// wireguard_ios.go it was excluded from every non-ios build regardless
+// of what its build tag said, and the tests could not see it.
 package neoxifyxray
 
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -47,7 +61,13 @@ import (
 // subtly wrong, and a wrong version passes small packets and corrupts
 // large ones.
 type iosTUN struct {
+	// The descriptor, and separately the thing read and written.
+	// `File()` is part of tun.Device and has to hand back a real
+	// *os.File, but the framing is the interesting half and a test
+	// cannot supply a utun descriptor -- so the I/O goes through an
+	// interface that a buffer can satisfy.
 	file   *os.File
+	io     io.ReadWriter
 	name   string
 	mtu    int
 	events chan tun.Event
@@ -77,7 +97,7 @@ func (t *iosTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	if offset < 4 {
 		return 0, errors.New("neoxify: read offset must leave room for the utun header")
 	}
-	n, err := t.file.Read(bufs[0][offset-4:])
+	n, err := t.io.Read(bufs[0][offset-4:])
 	if err != nil {
 		return 0, err
 	}
@@ -115,7 +135,7 @@ func (t *iosTUN) Write(bufs [][]byte, offset int) (int, error) {
 			// discard it anyway, without the count being honest.
 			continue
 		}
-		if _, err := t.file.Write(framed); err != nil {
+		if _, err := t.io.Write(framed); err != nil {
 			return written, err
 		}
 		written++
@@ -197,8 +217,10 @@ func WireGuardStart(uapiConfig string, tunFd int, mtu int) error {
 		return fmt.Errorf("neoxify: could not set the tunnel non-blocking: %w", err)
 	}
 
+	file := os.NewFile(uintptr(duplicated), name)
 	t := &iosTUN{
-		file:   os.NewFile(uintptr(duplicated), name),
+		file:   file,
+		io:     file,
 		name:   name,
 		mtu:    mtu,
 		events: make(chan tun.Event, 4),

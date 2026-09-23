@@ -168,11 +168,19 @@ The engine is the same Go as Android's AAR: gomobile takes the platform
 as an argument, and xray-core's darwin tun inbound already accepts a
 descriptor from `xray.tun.fd` for NetworkExtension. Nothing was ported.
 
-WireGuard lives in that same package, behind a `//go:build ios` tag, and
+WireGuard lives in that same package, constrained to darwin, and
 in the same framework -- two gomobile frameworks would link two Go
 runtimes into one extension. It is off Android because WireGuard there
 comes from `com.wireguard.android:tunnel`. It adds almost nothing:
 xray-core already depends on wireguard-go for its own outbound.
+
+Darwin rather than ios is deliberate -- gomobile builds iOS as GOOS=ios
+and ios implies darwin, so what ships is the same, but a GOOS=ios binary
+will not run on the build machine and darwin lets `go test` exercise the
+utun framing. That framing is the only part of the iOS tunnel testable
+without an iPhone. Note the constraint is in the *filename* too: Go
+applies the suffix rule first, so `wireguard_ios.go` was invisible to
+every non-ios build no matter what its build tag said.
 
 **The extension target is not committed.** `tauri ios init` regenerates
 `gen/apple` and would erase it, so `scripts/add-tunnel-extension.mjs`
