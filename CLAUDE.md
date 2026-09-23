@@ -159,7 +159,7 @@ The app is four pieces, and only the first is shared with Android:
 
 | Piece | Where | Built by |
 |---|---|---|
-| Xray engine | `plugins/vpn/xray` (Go) | `scripts/build-xray-xcframework.sh` |
+| Xray + WireGuard engines | `plugins/vpn/xray` (Go) | `scripts/build-xray-xcframework.sh` |
 | Packet tunnel | `plugins/vpn/tunnel` (Swift) | the `NeoxifyTunnel` Xcode target |
 | App-side plugin | `plugins/vpn/ios` (Swift) | Tauri, as a Swift package |
 | Bridge | `plugins/vpn/src` (Rust) | cargo |
@@ -168,6 +168,12 @@ The engine is the same Go as Android's AAR: gomobile takes the platform
 as an argument, and xray-core's darwin tun inbound already accepts a
 descriptor from `xray.tun.fd` for NetworkExtension. Nothing was ported.
 
+WireGuard lives in that same package, behind a `//go:build ios` tag, and
+in the same framework -- two gomobile frameworks would link two Go
+runtimes into one extension. It is off Android because WireGuard there
+comes from `com.wireguard.android:tunnel`. It adds almost nothing:
+xray-core already depends on wireguard-go for its own outbound.
+
 **The extension target is not committed.** `tauri ios init` regenerates
 `gen/apple` and would erase it, so `scripts/add-tunnel-extension.mjs`
 patches the XcodeGen spec and regenerates. Run it after any `ios init`:
@@ -175,6 +181,23 @@ patches the XcodeGen spec and regenerates. Run it after any `ios init`:
 ```bash
 pnpm exec tauri ios init --ci && node scripts/add-tunnel-extension.mjs
 ```
+
+**Build with `pnpm ios:build`, not `tauri ios build`.** The wrapper
+regenerates the project (a new Swift file is otherwise simply not in it,
+which reads as "cannot find type X in scope"), sets
+`VITE_DISTRIBUTION=store`, clears Tauri's previous output -- it renames
+over it and fails every rebuild after the first with "Directory not
+empty (os error 66)" -- and then asserts the bundle carries no checkout
+or voucher path. App Store guideline 3.1.1.
+
+**A green simulator build says nothing about entitlements.** The
+simulator does not enforce them. The app was signed with an empty
+`<dict/>` for weeks and built, installed and ran throughout; it would
+have failed on the first device. If you touch `add-tunnel-extension.mjs`,
+check the generated `mobile_iOS/mobile_iOS.entitlements` has content.
+Tauri already writes an `entitlements:` key for the app target, so
+*adding* one gives a duplicate YAML key and the last silently wins --
+the same trap the script documents for `dependencies:`.
 
 **Tauri does not build with Xcode 27.** It compiles its Swift package
 twice -- once for `arm64-apple-ios`, correctly, and once for
@@ -187,10 +210,23 @@ point at it:
 sudo xcode-select -s /Applications/Xcode-26.6.app/Contents/Developer
 ```
 
-iOS carries only the Xray protocols. WireGuard and IKEv2 would each need
-their own provider and neither is built; per-app routing belongs to the
-system. `src/lib/platform.ts` keeps the connect ladder from offering
-them.
+iOS carries the same protocols as Android, by three routes: Xray and
+WireGuard share the one packet-tunnel extension (iOS allows a tunnel
+extension one principal class, so the provider picks the engine from the
+profile), and IKEv2 goes through the system's own client with no
+extension of ours involved. Per-app routing belongs to the system.
+`src/lib/platform.ts` is now a guard for whatever is added next rather
+than a restriction on anything in the ladder today.
+
+**Nothing has carried a packet.** Network Extensions do not run in the
+simulator and NEVPNManager cannot dial from one, so every protocol, and
+the extension's ~50MB memory ceiling, is gated on a real iPhone.
+
+Export compliance (`ITSAppUsesNonExemptEncryption`) is deliberately
+unset, so App Store Connect asks at upload. A VPN plainly uses
+encryption, so `false` would be untrue, and `true` commits to a
+self-classification filing that is a legal decision, not a build
+setting.
 
 ## Secrets
 
