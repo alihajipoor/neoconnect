@@ -21,18 +21,25 @@ export const isIOS = (): boolean =>
 
 /** Whether the platform can carry this protocol at all.
  *
- * iOS runs the Xray engine in a packet-tunnel extension and nothing else:
- * WireGuard and IKEv2 would each need their own provider, and neither is
- * built. Offering them would produce a connection attempt that fails at
- * the system boundary with a message about configuration -- which reads
- * as the customer's network being at fault rather than the app lacking a
- * feature.
+ * iOS runs the Xray engine in a packet-tunnel extension, and IKEv2
+ * through the system's own client -- which needs no provider of ours at
+ * all, and so is also the one protocol here with no extension memory
+ * ceiling over it.
  *
- * The ones iOS does support are also the ones that work on filtered
+ * WireGuard is the remaining gap. It would need its own provider built
+ * and embedded, and until that exists, offering it would produce a
+ * connection attempt that fails at the system boundary with a message
+ * about configuration -- which reads as the customer's network being at
+ * fault rather than the app lacking a feature.
+ *
+ * The ones iOS does support include all of those that work on filtered
  * networks, so the restriction costs the customers this is built for
- * nothing.
+ * nothing: IKEv2 is the most easily blocked of the three and is a
+ * fallback for unfiltered networks, not the path into Iran.
  */
 export const protocolSupported = (protocol: string): boolean => {
   if (!isIOS()) return true;
-  return protocol.startsWith("XRAY_") || protocol === "SHADOWSOCKS";
+  return (
+    protocol.startsWith("XRAY_") || protocol === "SHADOWSOCKS" || protocol === "IKEV2"
+  );
 };

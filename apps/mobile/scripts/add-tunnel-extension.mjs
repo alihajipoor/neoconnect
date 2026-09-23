@@ -177,6 +177,42 @@ text = text.replace(
     `        embed: true\n`,
 );
 
+// The app's own additions. Stripped before being re-added, for the
+// same reason the extension block is: Tauri regenerates project.yml on
+// `ios init`, but this script also gets run against an already-patched
+// spec, and without a strip each run appended another copy. Four
+// identical PrivacyInfo entries is what that looked like.
+const PRIVACY_SOURCE = `      - path: ${rel(join(privacy("app"), "PrivacyInfo.xcprivacy"))}\n        buildPhase: resources\n`;
+text = text.split(PRIVACY_SOURCE).join("");
+// An earlier version of this script added a second `entitlements:` key
+// here. See below for why that was wrong; this removes it from a spec
+// that still carries one.
+text = text.replace(
+  /^    entitlements:\n      path: NeoxifyApp\.entitlements\n(?:[ ]{6,}.*\n)*/m,
+  "",
+);
+// And the properties this script adds to Tauri's own entitlements
+// block. Without this a second run appends a second `properties:` --
+// harmless only because both copies say the same thing, which is the
+// kind of "harmless" that stops being true the moment one changes.
+//
+// Anchored on the app target, not just on `entitlements:`. The
+// extension's block appears first in the file, so an unanchored match
+// stripped that one instead -- invisibly, because the extension block
+// is rebuilt from scratch on every run, leaving the app's copies to go
+// on accumulating.
+text = text.replace(
+  new RegExp(
+    `(^  ${APP_TARGET}:\\n(?:.*\\n)*?    entitlements:\\n      path: .*\\n)` +
+      // One or more: a spec that already accumulated several has to
+      // come back to exactly one, and a single-block strip would just
+      // remove one and re-add one for ever.
+      `(?:      properties:\\n(?:[ ]{8,}.*\\n)*)+`,
+    "m",
+  ),
+  "$1",
+);
+
 // The app's privacy manifest. Required at the bundle root since spring
 // 2024 -- an upload without one is rejected before review sees it.
 //
@@ -189,20 +225,42 @@ if (!appSources.test(text)) {
   console.error(`add-tunnel-extension: no sources list found on ${APP_TARGET}`);
   process.exit(1);
 }
-text = text.replace(
-  appSources,
-  `$1      - path: ${rel(join(privacy("app"), "PrivacyInfo.xcprivacy"))}\n` +
-    `        buildPhase: resources\n`,
-);
+text = text.replace(appSources, `$1${PRIVACY_SOURCE}`);
 
-// Entitlements are a key Tauri does not set, so this one is an insert.
+// The app's entitlements, merged into the block Tauri already writes
+// rather than added as a second one.
+//
+// This is the duplicate-key trap again, and it had already bitten: the
+// app target arrives with `entitlements: path: mobile_iOS/
+// mobile_iOS.entitlements` and no properties, so inserting our own
+// `entitlements:` key produced two, YAML kept the last, and the app was
+// signed with Tauri's empty <dict/>. Nothing said so. The simulator does
+// not enforce entitlements, so the app built, installed and ran -- it
+// would have failed on the first real device, or at submission, with an
+// error naming the provisioning profile rather than this file.
+//
+// So: keep Tauri's path, and give that block the properties it lacks.
+const appEntitlements = new RegExp(
+  `(^  ${APP_TARGET}:\\n(?:.*\\n)*?    entitlements:\\n      path: .*\\n)`,
+  "m",
+);
+if (!appEntitlements.test(text)) {
+  console.error(`add-tunnel-extension: no entitlements block found on ${APP_TARGET}`);
+  process.exit(1);
+}
 text = text.replace(
-  new RegExp(`(^  ${APP_TARGET}:\\n)`, "m"),
-  `$1    entitlements:\n` +
-    `      path: NeoxifyApp.entitlements\n` +
-    `      properties:\n` +
+  appEntitlements,
+  `$1      properties:\n` +
     `        com.apple.developer.networking.networkextension:\n` +
     `          - packet-tunnel-provider\n` +
+    // Personal VPN, a different capability from the packet tunnel and
+    // not implied by it. IKEv2 goes through NEVPNManager rather than
+    // our extension, and without this the profile save fails with a
+    // permission error naming nothing. It also has to be enabled on the
+    // App ID in the developer portal -- an entitlement the profile does
+    // not grant is a signing failure, not a runtime one.
+    `        com.apple.developer.networking.vpn.api:\n` +
+    `          - allow-vpn\n` +
     `        com.apple.security.application-groups:\n` +
     `          - ${GROUP}\n`,
 );
