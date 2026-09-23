@@ -12,6 +12,7 @@ import { Settings } from "@shared/screens/Settings";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
+import { isAndroid } from "./lib/platform";
 import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/ProminentDisclosure";
 
 /** How often a queued diagnostic report retries. Matches the desktop
@@ -178,7 +179,14 @@ export default function App() {
         onOpenReferrals={() => setScreen("referrals")}
         onOpenSupport={() => setScreen("support")}
         onLoggedOut={() => setScreen("login")}
-        customSection={<PerAppCard />}
+        // Android only. Custom mode is per-app routing, which on iOS
+        // belongs to the system: `vpn_list_apps` has no iOS
+        // implementation and returns unavailable(), so this card
+        // offered a feature that errored the moment it was switched
+        // on -- which is also what App Review would find. Positive
+        // test rather than `!isIOS()`, so a platform this does not
+        // recognise hides the section instead of offering a broken one.
+        customSection={isAndroid() ? <PerAppCard /> : null}
       />
     );
   }
