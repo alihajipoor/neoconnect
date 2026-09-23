@@ -68,7 +68,17 @@ class NeoxifyVpnPlugin: Plugin {
     }
 
     @objc public func connectXray(_ invoke: Invoke) {
-        struct Args: Decodable { let config: String }
+        // dns and mtu are carried, not ignored. The client sends both --
+        // the same TUN_DNS and TUN_MTU it puts inside the xray config
+        // itself -- and Android applies them to its VpnService.Builder.
+        // iOS used to hardcode 1500 while the engine's own tun was
+        // configured for 1400, so the system handed xray packets larger
+        // than its endpoint would take.
+        struct Args: Decodable {
+            let config: String
+            let dns: String
+            let mtu: Int
+        }
         Task {
             do {
                 let args = try invoke.parseArgs(Args.self)
@@ -79,7 +89,11 @@ class NeoxifyVpnPlugin: Plugin {
                 // Carried in the profile rather than only in the start
                 // options, so a tunnel the system restarts on its own --
                 // on demand, or after a crash -- still has its config.
-                proto.providerConfiguration = ["config": args.config]
+                proto.providerConfiguration = [
+                    "config": args.config,
+                    "dns": args.dns,
+                    "mtu": args.mtu,
+                ]
                 manager.protocolConfiguration = proto
                 manager.isEnabled = true
                 try await manager.saveToPreferences()
@@ -88,7 +102,11 @@ class NeoxifyVpnPlugin: Plugin {
                 // with a permission error that has nothing to do with
                 // permissions.
                 try await manager.loadFromPreferences()
-                try manager.connection.startVPNTunnel(options: ["config": args.config as NSString])
+                try manager.connection.startVPNTunnel(options: [
+                    "config": args.config as NSString,
+                    "dns": args.dns as NSString,
+                    "mtu": args.mtu as NSNumber,
+                ])
                 invoke.resolve()
             } catch {
                 invoke.reject("could not start the tunnel: \(error.localizedDescription)")
