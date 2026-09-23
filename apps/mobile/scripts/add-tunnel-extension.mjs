@@ -38,6 +38,25 @@ const DEPLOYMENT_TARGET = "15.0";
 // which is the Tauri plugin Swift package for the app process -- the two
 // are built into different binaries and must not share a directory.
 const tunnel = join(mobile, "plugins", "vpn", "tunnel");
+// One directory per bundle, because the file has to be called
+// PrivacyInfo.xcprivacy on disk. XcodeGen's `name:` renames the
+// reference in the project navigator, not the file that gets copied,
+// so two manifests cannot share a folder.
+const privacy = (bundle) => join(mobile, "ios", "privacy", bundle);
+
+// Read from tauri.conf.json rather than written down here. An app
+// extension's CFBundleShortVersionString must equal its parent app's --
+// Xcode says so as a warning, and App Store Connect rejects the upload
+// outright. Tauri sets the app's from this file and sets nothing on the
+// extension, so it defaulted to XcodeGen's 1.0 and the mismatch would
+// only have surfaced on the first real submission.
+const version = JSON.parse(
+  readFileSync(join(mobile, "src-tauri", "tauri.conf.json"), "utf8"),
+).version;
+if (!version) {
+  console.error("add-tunnel-extension: no version in tauri.conf.json");
+  process.exit(1);
+}
 const rel = (p) => relative(apple, p);
 
 let text = readFileSync(spec, "utf8");
@@ -73,6 +92,11 @@ const extension = `
     platform: iOS
     sources:
       - path: ${rel(join(tunnel, "Sources", "NeoxifyTunnel"))}
+      # The extension's privacy manifest. It reaches a required-reason
+      # API the host app does not (mach_absolute_time), so it needs its
+      # own rather than relying on the app's.
+      - path: ${rel(join(privacy("tunnel"), "PrivacyInfo.xcprivacy"))}
+        buildPhase: resources
     dependencies:
       # The engine, built by scripts/build-xray-xcframework.sh. embed:
       # false because an app extension must not carry its own copy -- the
@@ -91,6 +115,8 @@ const extension = `
       properties:
         CFBundleDisplayName: Neoxify Tunnel
         CFBundlePackageType: XPC!
+        CFBundleShortVersionString: "${version}"
+        CFBundleVersion: "${version}"
         NSExtension:
           # Resolved through the Objective-C runtime, which is why the
           # Swift class is @objc(PacketTunnelProvider). A mangled name
@@ -149,6 +175,24 @@ text = text.replace(
   `$1      - target: ${EXT_TARGET}\n` +
     `      - framework: ${rel(join(tunnel, "Frameworks", "NeoxifyXray.xcframework"))}\n` +
     `        embed: true\n`,
+);
+
+// The app's privacy manifest. Required at the bundle root since spring
+// 2024 -- an upload without one is rejected before review sees it.
+//
+// Appended into Tauri's existing `sources:` for the same reason the
+// dependencies are: a second `sources:` key is valid YAML and silently
+// wins, which would drop Assets.xcassets and the launch screen and
+// produce an app with no icon.
+const appSources = new RegExp(`(^  ${APP_TARGET}:\\n(?:.*\\n)*?    sources:\\n)`, "m");
+if (!appSources.test(text)) {
+  console.error(`add-tunnel-extension: no sources list found on ${APP_TARGET}`);
+  process.exit(1);
+}
+text = text.replace(
+  appSources,
+  `$1      - path: ${rel(join(privacy("app"), "PrivacyInfo.xcprivacy"))}\n` +
+    `        buildPhase: resources\n`,
 );
 
 // Entitlements are a key Tauri does not set, so this one is an insert.

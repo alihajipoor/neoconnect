@@ -122,6 +122,12 @@ jobs:
             -sdk iphonesimulator -configuration debug \
             CODE_SIGNING_ALLOWED=NO build
 
+      # Through the wrapper rather than `tauri ios build` directly, so
+      # CI builds the same flavour that ships. The wrapper sets
+      # VITE_DISTRIBUTION=store and then asserts the built bundle
+      # carries no checkout or voucher path -- guideline 3.1.1. Calling
+      # tauri directly here would leave that assertion untested until a
+      # release, which is the one build nobody wants to discover it on.
       - name: Build for the simulator
         working-directory: apps/mobile
-        run: pnpm tauri ios build --target aarch64-sim --debug
+        run: pnpm ios:build --target aarch64-sim --debug
