@@ -28,7 +28,9 @@ pub struct TunnelGone {
 use serde::{Deserialize, Serialize};
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 use tauri::Runtime;
-#[cfg(target_os = "android")]
+// Both mobile platforms call app.manage(); neither desktop build does,
+// and an unconditional import is an unused-import warning there.
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri::Manager;
 
 /// Must match the `namespace` in android/build.gradle.kts.
@@ -126,6 +128,12 @@ pub struct Apps {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Empty {}
 
+// Tauri's own macro rather than a hand-written extern: it emits the
+// binding with the signature register_ios_plugin expects, and
+// tauri::ios is private so the type cannot be named from here anyway.
+#[cfg(target_os = "ios")]
+tauri::ios_plugin_binding!(init_plugin_neoxify_vpn);
+
 pub struct Vpn<R: Runtime>(#[allow(dead_code)] PluginHandle<R>);
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
@@ -134,6 +142,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             #[cfg(target_os = "android")]
             {
                 let handle = _api.register_android_plugin(PLUGIN_IDENTIFIER, "NeoxifyVpnPlugin")?;
+                _app.manage(Vpn(handle));
+            }
+            #[cfg(target_os = "ios")]
+            {
+                let handle = _api.register_ios_plugin(init_plugin_neoxify_vpn)?;
                 _app.manage(Vpn(handle));
             }
             Ok(())

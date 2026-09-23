@@ -51,4 +51,4 @@ local.properties
 
 # Built by scripts/build-xray-xcframework.sh; a compiled Go framework
 # has no business in git, same as the Android AAR.
-plugins/vpn/ios/Frameworks/
+plugins/vpn/tunnel/Frameworks/
