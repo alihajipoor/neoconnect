@@ -84,6 +84,19 @@ jobs:
       # call it. It also needs a full Xcode, which is exactly what a
       # developer machine with only Command Line Tools cannot provide,
       # so CI is the only place it can be checked today.
+      # Same pin and the same GOTOOLCHAIN=local as the Android release,
+      # and for the same reason: this Go compiles the engine, and an
+      # unpinned compiler is a build input that changes without a commit.
+      # ci-ios.yml had no setup-go at all, so the engine step failed with
+      # exit 127 -- `go` simply was not there.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: apps/mobile/plugins/vpn/xray/go.sum
+
+      - name: Refuse a silent toolchain switch
+        run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
       - name: Build the Xray engine for iOS
         working-directory: apps/mobile
         run: bash scripts/build-xray-xcframework.sh
