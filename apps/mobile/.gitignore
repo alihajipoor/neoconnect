@@ -48,3 +48,7 @@ local.properties
 # as a different app, with no upgrade path. Back it up somewhere outside
 # this machine.
 .signing/
+
+# Built by scripts/build-xray-xcframework.sh; a compiled Go framework
+# has no business in git, same as the Android AAR.
+plugins/vpn/ios/Frameworks/
