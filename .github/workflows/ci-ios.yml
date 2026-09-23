@@ -97,6 +97,16 @@ jobs:
       - name: Refuse a silent toolchain switch
         run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
 
+      # Before building it, because a framing bug is cheaper to find here
+      # than in an extension on a phone. These live in ci-ios.yml rather
+      # than ci.yml's Go job for two reasons: that job covers `agent` on
+      # Go 1.23, and these tests are darwin-only -- the WireGuard TUN is
+      # constrained to darwin so that it can be run at all, since a
+      # GOOS=ios binary will not execute on the runner.
+      - name: Test the engine package
+        working-directory: apps/mobile/plugins/vpn/xray
+        run: go test ./...
+
       - name: Build the Xray engine for iOS
         working-directory: apps/mobile
         run: bash scripts/build-xray-xcframework.sh

@@ -47,7 +47,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// tunnel extension exactly one principal class -- a second protocol
     /// cannot mean a second extension. The engines themselves are both
     /// in the one framework for the same kind of reason: see the build
-    /// tag note in wireguard_ios.go.
+    /// constraint note in wireguard_darwin.go.
     private enum Request {
         case xray(String)
         case wireGuard(WireGuardEngine.Profile)
