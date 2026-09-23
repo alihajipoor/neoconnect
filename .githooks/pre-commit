@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Refuses a commit that carries build-generated capability files.
+#
+# Three times now a working copy patched by a local build or test run has
+# been staged with `git add -A`, publishing every replacement domain --
+# the exact enumeration docs/node-address-hygiene.md exists to prevent.
+# CI catches it, but only at the merge boundary, by which point the
+# commit exists and has usually been pushed.
+#
+# Enable once per clone:
+#   git config core.hooksPath .githooks
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+[ -x "$root/scripts/check-committed-capabilities.sh" ] || exit 0
+
+# Checks the index, not HEAD, so it runs before the commit exists.
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+status=0
+for f in apps/desktop-windows/src-tauri/capabilities/default.json \
+         apps/mobile/src-tauri/capabilities/default.json; do
+  git show ":$f" > "$tmp/staged.json" 2>/dev/null || continue
+  bad=$(grep -oE '"url"[[:space:]]*:[[:space:]]*"[^"]+"' "$tmp/staged.json" \
+        | sed -E 's/.*"url"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' \
+        | grep -vE '^https://(\*\.neoxify\.site(:\*)?|localhost:[0-9]+)(/\*)?$|^http://localhost:[0-9]+/\*$' || true)
+  if [ -n "$bad" ]; then
+    echo "pre-commit: $f is staged with build-generated entries:" >&2
+    printf '%s\n' "$bad" | sed 's/^/    /' >&2
+    status=1
+  fi
+done
+if [ "$status" -ne 0 ]; then
+  echo >&2
+  echo "Unstage it -- the build regenerates it:" >&2
+  echo "  git checkout HEAD -- <file>" >&2
+  exit 1
+fi
