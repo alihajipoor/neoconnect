@@ -27,6 +27,13 @@ if [ "${1:-}" = "--" ]; then shift; args=("$@"); fi
 rm -rf src-tauri/gen/apple/build/*/Neoxify.app
 rm -rf src-tauri/gen/apple/build/mobile_iOS.xcarchive
 
+# Regenerated every time, because the Xcode project is generated and a
+# new Swift file added to the extension is otherwise simply not in it.
+# That failure reads as "cannot find type X in scope", which looks like
+# a typo rather than a stale project. Safe to repeat: the patcher strips
+# its own previous edits before reapplying.
+node scripts/add-tunnel-extension.mjs
+
 export VITE_DISTRIBUTION=store
 pnpm exec tauri ios build "${args[@]}"
 

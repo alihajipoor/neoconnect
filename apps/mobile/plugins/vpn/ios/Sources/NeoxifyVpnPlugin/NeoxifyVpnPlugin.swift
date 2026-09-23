@@ -96,6 +96,55 @@ class NeoxifyVpnPlugin: Plugin {
         }
     }
 
+    /// WireGuard, which goes through the same extension as Xray.
+    ///
+    /// iOS allows a packet-tunnel extension exactly one principal class,
+    /// so this does not start a second provider -- it starts the same one
+    /// with a different payload, and the provider picks the engine. The
+    /// profile is re-encoded rather than forwarded verbatim because
+    /// providerConfiguration takes property-list values, and the
+    /// extension wants one string it can decode.
+    // `connectWireguard`, lower-case g, because that is the name the
+    // Rust command invokes and the name the Kotlin plugin registers.
+    // Spelling it the way the product does compiles fine on both sides
+    // and fails only at runtime, with "method not found".
+    @objc public func connectWireguard(_ invoke: Invoke) {
+        struct Args: Codable {
+            let privateKey: String
+            let address: String
+            let dns: String
+            let serverPublicKey: String
+            let endpoint: String
+            let allowedIPs: String
+        }
+        Task {
+            do {
+                let args = try invoke.parseArgs(Args.self)
+                guard let json = String(data: try JSONEncoder().encode(args), encoding: .utf8) else {
+                    invoke.reject("the WireGuard profile could not be encoded")
+                    return
+                }
+                let manager = try await loadManager()
+                let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
+                proto.providerBundleIdentifier = providerBundleIdentifier
+                proto.serverAddress = "Neoxify"
+                // Only the WireGuard key, and the Xray one cleared. Both
+                // present would leave the extension to guess, and a
+                // stale Xray config from the previous connection is
+                // exactly what it would find.
+                proto.providerConfiguration = ["wireguard": json]
+                manager.protocolConfiguration = proto
+                manager.isEnabled = true
+                try await manager.saveToPreferences()
+                try await manager.loadFromPreferences()
+                try manager.connection.startVPNTunnel(options: ["wireguard": json as NSString])
+                invoke.resolve()
+            } catch {
+                invoke.reject("could not start WireGuard: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// IKEv2, which does not go through the extension at all.
     ///
     /// Unlike connectXray there is no provider bundle, no config JSON

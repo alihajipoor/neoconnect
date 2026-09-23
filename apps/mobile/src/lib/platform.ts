@@ -21,25 +21,25 @@ export const isIOS = (): boolean =>
 
 /** Whether the platform can carry this protocol at all.
  *
- * iOS runs the Xray engine in a packet-tunnel extension, and IKEv2
- * through the system's own client -- which needs no provider of ours at
- * all, and so is also the one protocol here with no extension memory
- * ceiling over it.
+ * iOS now carries the same set as Android, by three different routes:
+ * Xray and WireGuard both run inside the one packet-tunnel extension --
+ * iOS allows a tunnel extension only one principal class, so the
+ * provider picks the engine from the profile it is handed -- while
+ * IKEv2 goes through the system's own client and involves no extension
+ * of ours at all.
  *
- * WireGuard is the remaining gap. It would need its own provider built
- * and embedded, and until that exists, offering it would produce a
- * connection attempt that fails at the system boundary with a message
- * about configuration -- which reads as the customer's network being at
- * fault rather than the app lacking a feature.
+ * So nothing in the connect ladder is refused on iOS any more, and this
+ * is now a guard rather than a restriction: it exists for the next
+ * protocol added to that ladder, not for any protocol in it today.
  *
- * The ones iOS does support include all of those that work on filtered
- * networks, so the restriction costs the customers this is built for
- * nothing: IKEv2 is the most easily blocked of the three and is a
- * fallback for unfiltered networks, not the path into Iran.
+ * OPENVPN is the one it still refuses. There is no engine for it in
+ * either mobile client, and it is not in the ladder either -- so this
+ * never sees it in practice. It is named rather than left to the
+ * default because the day it is added to the ladder, the honest answer
+ * on iOS is still no, and a function that returned true for everything
+ * would say yes.
  */
 export const protocolSupported = (protocol: string): boolean => {
   if (!isIOS()) return true;
-  return (
-    protocol.startsWith("XRAY_") || protocol === "SHADOWSOCKS" || protocol === "IKEV2"
-  );
+  return protocol !== "OPENVPN";
 };
