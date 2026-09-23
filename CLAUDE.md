@@ -153,6 +153,45 @@ download URL precisely because they collided.
 Current: desktop `0.9.34`, mobile `0.2.17`, agent `v0.2.9` — each
 matching its latest released tag.
 
+## iOS
+
+The app is four pieces, and only the first is shared with Android:
+
+| Piece | Where | Built by |
+|---|---|---|
+| Xray engine | `plugins/vpn/xray` (Go) | `scripts/build-xray-xcframework.sh` |
+| Packet tunnel | `plugins/vpn/tunnel` (Swift) | the `NeoxifyTunnel` Xcode target |
+| App-side plugin | `plugins/vpn/ios` (Swift) | Tauri, as a Swift package |
+| Bridge | `plugins/vpn/src` (Rust) | cargo |
+
+The engine is the same Go as Android's AAR: gomobile takes the platform
+as an argument, and xray-core's darwin tun inbound already accepts a
+descriptor from `xray.tun.fd` for NetworkExtension. Nothing was ported.
+
+**The extension target is not committed.** `tauri ios init` regenerates
+`gen/apple` and would erase it, so `scripts/add-tunnel-extension.mjs`
+patches the XcodeGen spec and regenerates. Run it after any `ios init`:
+
+```bash
+pnpm exec tauri ios init --ci && node scripts/add-tunnel-extension.mjs
+```
+
+**Tauri does not build with Xcode 27.** It compiles its Swift package
+twice -- once for `arm64-apple-ios`, correctly, and once for
+`arm64-apple-macos`, which dies on WebKit under the macOS 27 SDK. A
+pristine Tauri project fails the same way, so it is not ours. CI uses
+Xcode 26.6 and works. To build locally, install Xcode 26 alongside 27 and
+point at it:
+
+```bash
+sudo xcode-select -s /Applications/Xcode-26.6.app/Contents/Developer
+```
+
+iOS carries only the Xray protocols. WireGuard and IKEv2 would each need
+their own provider and neither is built; per-app routing belongs to the
+system. `src/lib/platform.ts` keeps the connect ladder from offering
+them.
+
 ## Secrets
 
 `apps/mobile/.signing/` held the Android release keystore. **That
