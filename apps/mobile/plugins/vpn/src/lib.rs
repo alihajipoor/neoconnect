@@ -140,8 +140,34 @@ pub struct Apps {
     pub apps: Vec<InstalledApp>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// "The call succeeded and has nothing to say."
+///
+/// Deserialised by hand because the two platforms do not agree on what
+/// an empty response looks like, and the derived version accepts only
+/// one of them.
+///
+/// Kotlin's `Invoke.resolve()` sends `{}`. Swift's sends nothing, and
+/// Tauri's iOS glue turns that into the literal string "null"
+/// (`callback(id, success, payload ?? "null")` in Tauri.swift), which
+/// reaches serde as `Value::Null`. A derived `Deserialize` for a struct
+/// rejects null -- "invalid type: null, expected struct Empty" -- so
+/// every connect and every disconnect on iOS returned an error after
+/// doing exactly what it was asked. The ladder would have marked all
+/// three protocols as failing on a device that was in fact connected.
+///
+/// Fixed here rather than by passing `{}` from each Swift method,
+/// because that has to be remembered once per method and this bug is
+/// precisely what forgetting looks like. Anything at all is accepted:
+/// the value is a marker, and there is nothing in it to be wrong about.
+#[derive(Debug, Serialize)]
 pub struct Empty {}
+
+impl<'de> Deserialize<'de> for Empty {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Option::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(Empty {})
+    }
+}
 
 // Tauri's own macro rather than a hand-written extern: it emits the
 // binding with the signature register_ios_plugin expects, and
@@ -169,9 +195,33 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .build()
 }
 
+/// What the two mobile plugins actually put on the wire.
+///
+/// These are about the boundary, not the logic: each pins a payload one
+/// platform really sends against the type the Rust side really expects.
+/// Both bugs they were written for were invisible on this machine and
+/// on CI, because neither platform's plugin can run here -- they showed
+/// up only by reading one side against the other.
 #[cfg(test)]
-mod status_contract_tests {
-    use super::VpnStatus;
+mod plugin_contract_tests {
+    use super::{Empty, VpnStatus};
+
+    /// iOS's empty response, exactly as it arrives.
+    ///
+    /// Swift's `invoke.resolve()` sends no payload, and Tauri's glue
+    /// turns that into the literal string "null" before it crosses into
+    /// Rust. The derived Deserialize rejected it, so every connect and
+    /// every disconnect on iOS reported failure after succeeding.
+    #[test]
+    fn an_empty_response_may_be_null() {
+        serde_json::from_str::<Empty>("null").expect("iOS empty response rejected");
+    }
+
+    /// Android's, which must keep working.
+    #[test]
+    fn an_empty_response_may_be_an_object() {
+        serde_json::from_str::<Empty>("{}").expect("Android empty response rejected");
+    }
 
     /// Exactly what the iOS plugin sends back from `status`.
     ///
