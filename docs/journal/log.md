@@ -2245,3 +2245,113 @@ only the second fails. That second build is inside Tauri's own build
 script, so there is no local fix. Xcode 26 alongside 27 stands as the
 answer, and CLAUDE.md now says so rather than leaving the next person to
 rediscover it.
+
+## 2026-09-23 — the iOS client becomes something Apple could accept
+
+Four things, and only the first was the one asked for.
+
+**It sold inside the app.** `IS_STORE_BUILD` has existed since the Play
+AAB and nothing set it for iOS, so an iPhone build shipped the checkout
+call and the voucher redemption. Apple's 3.1.1 names license keys as a
+prohibited unlock in its own right, so the voucher path is a violation
+on its own, separate from the payment one.
+
+The flag is now set by a script that is the only supported way to build
+iOS, rather than by an env var on a workflow step that has to be
+remembered. iOS has one distribution channel -- there is no sideloading
+path as there is on Android -- so there is nothing to choose between.
+
+The assertion is on absence from the bytes, not on behaviour: a route
+that is merely skipped still ships the code behind it. Choosing the
+marker took a measurement rather than a guess. The Android release
+counts `plans.toAddress`, which in a store build still reads 2 -- the
+English and Farsi i18n entries, object literals no tree-shaker can drop
+and inert because nothing looks them up. That can only ever give a
+relative comparison needing both builds side by side, which iOS does not
+have. `checkoutUrl` and `redeem` go 4 and 1 to exactly 0, which is an
+absolute claim about one bundle. Verified in both directions: the check
+rejects a direct bundle.
+
+**There was no privacy manifest.** Required since spring 2024; the
+upload is rejected without one. Both files are derived rather than
+chosen. The collected data types are the four the disclosure screen
+already lists, so the two cannot drift apart without one looking wrong.
+The accessed-API entries came from `nm -u` on the built binaries, which
+found what a guess would have missed: the extension reaches
+mach_absolute_time and the app does not, so they need separate manifests
+rather than one shared file.
+
+**The app has never carried its entitlements.** Found while adding the
+personal-VPN one for IKEv2. The app target arrives from Tauri with
+`entitlements: path: mobile_iOS/mobile_iOS.entitlements` and no
+properties, so the block this repo's script inserted was a *second*
+`entitlements:` key -- the same duplicate-key trap the script's own
+comment documents two paragraphs further down for `dependencies:`. YAML
+kept the last, and the app was signed with Tauri's empty `<dict/>`.
+
+Nothing said so. The simulator does not enforce entitlements, so it
+built, installed, launched and screenshotted exactly as it does now. It
+would have failed on the first real device, or at submission, with an
+error naming the provisioning profile rather than the file. The lesson
+is narrower than "check entitlements": a green simulator build is not
+evidence about anything that is enforced at signing, and the two failure
+modes look identical from here.
+
+The same script's app-target edits were not idempotent either. The spec
+had accumulated four identical PrivacyInfo entries and five identical
+properties blocks. The strip has to be anchored on the app target,
+because the extension's block appears first in the file and was being
+stripped instead -- invisibly, since that block is rebuilt from scratch
+every run.
+
+**WireGuard and IKEv2 now work on iOS**, so it carries the same set as
+Android. IKEv2 needed almost nothing: the system dials it, the Rust
+command and the JS call already existed and were merely gated to
+Android, and the profile needed no second shape because the iOS side
+maps `server` to both the address and the remote identifier, which is
+what `Ikev2VpnProfile.Builder(server, server)` already did.
+
+WireGuard needed more. It runs inside the same extension as Xray,
+because iOS allows a tunnel extension one principal class, and inside
+the same Go framework, because two gomobile frameworks would link two Go
+runtimes into one process. It costs almost nothing in size: xray-core
+already depends on wireguard-go's device, tun and conn for its own
+WireGuard outbound, so go.mod and go.sum are untouched.
+
+The part worth remembering is why the TUN device had to be written out.
+`tun.CreateTUNFromFile` opens an AF_ROUTE raw socket and sets the MTU
+with an ioctl; both are denied to an app extension, so it fails before
+WireGuard starts, with a permissions error that says nothing about
+routing. wireguard-apple does not use it either. Two other failures of
+the same kind, silent rather than loud: UAPI wants hex keys and the
+backend issues base64, which is accepted as a string and handshakes with
+nobody; and the network settings have to come from the profile, since
+the server assigned the address and putting the phone on a different one
+gives a successful handshake with nothing returning.
+
+**What none of this proves.** No tunnel here has carried a packet.
+Network Extensions do not run in the simulator and NEVPNManager cannot
+dial from one, so all three protocols, and the extension's ~50MB memory
+ceiling, are gated on a real iPhone. "CI is green" still means "it
+compiles".
+
+Export compliance is left unanswered on purpose. `ITSAppUsesNonExemptEncryption`
+is unset: a VPN plainly uses encryption so `false` would be untrue, and
+`true` commits to a self-classification filing that is a legal decision
+rather than a build setting. Unset, App Store Connect asks at upload.
+
+Two unrelated things surfaced on the way. web-portal's build typechecks
+desktop-windows' shared code, which imports the generated
+seed-bundle.json that web-portal never generated -- it passed only when
+a neighbour's prebuild had run first, and turbo is free to serve that
+neighbour from cache. It now generates its own.
+
+And the working tree itself failed. The repo lives under the
+iCloud-synced Desktop, the disk was at 93%, and 97 of 1026 tracked files
+had been evicted to `compressed,dataless` placeholders that would not
+materialise -- reads failing with `ETIMEDOUT` and `Unknown system error
+-81` on plainly local files. `.git` was unaffected, so every one was
+rewritten from `git show HEAD:`, which loses the executable bit and
+needed the modes restored from the index. The real fix is to move the
+repo off the synced Desktop; noted here because it reads exactly like
+filesystem corruption and is not.

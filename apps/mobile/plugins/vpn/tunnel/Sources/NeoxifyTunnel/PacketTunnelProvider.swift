@@ -35,15 +35,67 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         /// to nobody, so it cannot collide with a customer's own network
         /// the way 10/8 or 192.168/16 routinely do.
         static let peer = "198.18.0.2"
+        /// WireGuard's framing costs 80 bytes, so its inner MTU has to be
+        /// lower than Xray's. Leaving it at 1500 fragments every full-size
+        /// packet, which shows up as "slow" rather than as broken.
+        static let wireGuardMTU = 1420
+    }
+
+    /// What the app asked for.
+    ///
+    /// Two engines behind one provider, because iOS allows a packet
+    /// tunnel extension exactly one principal class -- a second protocol
+    /// cannot mean a second extension. The engines themselves are both
+    /// in the one framework for the same kind of reason: see the build
+    /// constraint note in wireguard_darwin.go.
+    private enum Request {
+        case xray(String)
+        case wireGuard(WireGuardEngine.Profile)
     }
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
-        guard let configJSON = configuration(from: options) else {
-            log.error("no xray configuration was passed to the tunnel")
-            completionHandler(TunnelError.missingConfiguration)
+        let request: Request
+        do {
+            guard let parsed = try self.request(from: options) else {
+                log.error("no configuration was passed to the tunnel")
+                completionHandler(TunnelError.missingConfiguration)
+                return
+            }
+            request = parsed
+        } catch {
+            log.error("the configuration passed to the tunnel could not be read: \(error.localizedDescription)")
+            completionHandler(error)
             return
         }
 
+        let settings: NEPacketTunnelNetworkSettings
+        switch request {
+        case .xray:
+            settings = xraySettings()
+        case .wireGuard(let profile):
+            guard let built = wireGuardSettings(for: profile) else {
+                log.error("the WireGuard profile did not carry a usable address")
+                completionHandler(TunnelError.badWireGuardAddress)
+                return
+            }
+            settings = built
+        }
+
+        setTunnelNetworkSettings(settings) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.log.error("the system refused the tunnel settings: \(error.localizedDescription)")
+                completionHandler(error)
+                return
+            }
+            self.startEngine(request, completionHandler: completionHandler)
+        }
+    }
+
+    /// Xray's settings are fixed, because nothing in an Xray profile
+    /// describes the inside of the tunnel -- the engine terminates
+    /// everything and the addresses are ours to choose.
+    private func xraySettings() -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: Tunnel.peer)
         let ipv4 = NEIPv4Settings(addresses: [Tunnel.address], subnetMasks: [Tunnel.netmask])
         // Everything, because this is a full tunnel. Split tunnelling on
@@ -61,38 +113,80 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let dns = NEDNSSettings(servers: ["1.1.1.1", "1.0.0.1"])
         dns.matchDomains = [""]
         settings.dnsSettings = dns
-
-        setTunnelNetworkSettings(settings) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.log.error("the system refused the tunnel settings: \(error.localizedDescription)")
-                completionHandler(error)
-                return
-            }
-            self.startEngine(configJSON: configJSON, completionHandler: completionHandler)
-        }
+        return settings
     }
 
-    /// Hands the descriptor to xray-core.
+    /// WireGuard's come from the profile, because the server assigned
+    /// them. Using Tunnel.address here would put the phone on an address
+    /// the peer has never heard of, and the handshake would succeed while
+    /// nothing returned.
+    private func wireGuardSettings(for profile: WireGuardEngine.Profile) -> NEPacketTunnelNetworkSettings? {
+        guard let (address, mask) = WireGuardEngine.addressAndMask(profile.address) else { return nil }
+
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: Tunnel.peer)
+        let ipv4 = NEIPv4Settings(addresses: [address], subnetMasks: [mask])
+        // From allowedIPs, which is what the profile says this peer
+        // carries. Usually 0.0.0.0/0, but honouring it rather than
+        // assuming it is what makes a split profile behave.
+        //
+        // IPv4 only. Every profile the backend issues carries
+        // "0.0.0.0/0, ::/0", and there is nowhere to put the IPv6 half:
+        // it allocates a single IPv4 address inside the tunnel, and iOS
+        // rejects IPv6 routes with no IPv6 settings to hang them on. The
+        // ::/0 is still given to wireguard-go, where it means something
+        // different and correct -- the peer's allowed source range.
+        let cidrs = WireGuardEngine.split(profile.allowedIPs)
+        for cidr in cidrs where WireGuardEngine.isIPv6(cidr) {
+            log.info("not routing \(cidr, privacy: .public): the tunnel has no IPv6 address")
+        }
+        let routes = cidrs.compactMap { cidr -> NEIPv4Route? in
+            guard let (network, netmask) = WireGuardEngine.addressAndMask(cidr) else { return nil }
+            return NEIPv4Route(destinationAddress: network, subnetMask: netmask)
+        }
+        ipv4.includedRoutes = routes.isEmpty ? [NEIPv4Route.default()] : routes
+        settings.ipv4Settings = ipv4
+        // 1420, not 1500: WireGuard's own overhead is 80 bytes, and a
+        // tunnel MTU that ignores it fragments every full-size packet.
+        settings.mtu = NSNumber(value: Tunnel.wireGuardMTU)
+
+        let servers = WireGuardEngine.split(profile.dns)
+        let dns = NEDNSSettings(servers: servers.isEmpty ? ["1.1.1.1", "1.0.0.1"] : servers)
+        dns.matchDomains = [""]
+        settings.dnsSettings = dns
+        return settings
+    }
+
+    /// Hands the descriptor to whichever engine was asked for.
     ///
     /// Only after `setTunnelNetworkSettings` has returned: the descriptor
     /// does not exist before the system has accepted the settings, so
     /// looking for it earlier finds nothing and the failure reads as a
     /// missing interface rather than a sequencing mistake.
-    private func startEngine(configJSON: String, completionHandler: @escaping (Error?) -> Void) {
+    private func startEngine(_ request: Request, completionHandler: @escaping (Error?) -> Void) {
         guard let fd = TunDescriptor.current() else {
             log.error("the tunnel is up but its descriptor could not be found")
             completionHandler(TunnelError.noTunnelDescriptor)
             return
         }
 
-        var engineError: NSError?
-        let started = NeoxifyxrayStart(configJSON, Int(fd), NoopProtector(), &engineError)
-        if !started {
-            let message = engineError?.localizedDescription ?? "unknown"
-            log.error("xray-core did not start: \(message)")
-            completionHandler(engineError ?? TunnelError.engineFailed)
-            return
+        switch request {
+        case .xray(let configJSON):
+            var engineError: NSError?
+            let started = NeoxifyxrayStart(configJSON, Int(fd), NoopProtector(), &engineError)
+            if !started {
+                let message = engineError?.localizedDescription ?? "unknown"
+                log.error("xray-core did not start: \(message)")
+                completionHandler(engineError ?? TunnelError.engineFailed)
+                return
+            }
+        case .wireGuard(let profile):
+            do {
+                try WireGuardEngine.start(profile: profile, descriptor: fd, mtu: Tunnel.wireGuardMTU)
+            } catch {
+                log.error("WireGuard did not start: \(error.localizedDescription)")
+                completionHandler(error)
+                return
+            }
         }
 
         log.info("tunnel up on descriptor \(fd)")
@@ -101,22 +195,47 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         log.info("stopping: \(String(describing: reason))")
+        // Both engines, unconditionally. stopTunnel does not say which
+        // one was started, the provider may have been restarted since,
+        // and each stop is a no-op when that engine is not running --
+        // so asking is more code and more ways to leave one up.
         var error: NSError?
         // Reported, not propagated: stopTunnel has nowhere to return a
         // failure, and the system is tearing this process down either way.
         if !NeoxifyxrayStop(&error), let error {
             log.error("xray-core did not stop cleanly: \(error.localizedDescription)")
         }
+        if let error = WireGuardEngine.stop() {
+            log.error("WireGuard did not stop cleanly: \(error.localizedDescription)")
+        }
         completionHandler()
     }
 
-    private func configuration(from options: [String: NSObject]?) -> String? {
-        if let passed = options?["config"] as? String, !passed.isEmpty { return passed }
-        // The app stores it in the provider configuration when the
-        // profile is saved, which is the path a tunnel started by the
-        // system -- on demand, or from Settings -- comes through.
-        let proto = protocolConfiguration as? NETunnelProviderProtocol
-        return proto?.providerConfiguration?["config"] as? String
+    /// Reads whichever engine's configuration was supplied.
+    ///
+    /// Options first, then the provider configuration -- the latter is
+    /// the path a tunnel started by the system, on demand or from
+    /// Settings, comes through, where there are no start options at all.
+    private func request(from options: [String: NSObject]?) throws -> Request? {
+        let stored = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+
+        if let passed = options?["wireguard"] as? String, !passed.isEmpty {
+            return .wireGuard(try decodeProfile(passed))
+        }
+        if let passed = options?["config"] as? String, !passed.isEmpty {
+            return .xray(passed)
+        }
+        if let saved = stored?["wireguard"] as? String, !saved.isEmpty {
+            return .wireGuard(try decodeProfile(saved))
+        }
+        if let saved = stored?["config"] as? String, !saved.isEmpty {
+            return .xray(saved)
+        }
+        return nil
+    }
+
+    private func decodeProfile(_ json: String) throws -> WireGuardEngine.Profile {
+        try JSONDecoder().decode(WireGuardEngine.Profile.self, from: Data(json.utf8))
     }
 }
 
@@ -139,12 +258,16 @@ enum TunnelError: LocalizedError {
     case missingConfiguration
     case noTunnelDescriptor
     case engineFailed
+    case badWireGuardKey
+    case badWireGuardAddress
 
     var errorDescription: String? {
         switch self {
         case .missingConfiguration: "No VPN configuration was supplied to the tunnel."
         case .noTunnelDescriptor: "The tunnel started but its network interface could not be found."
         case .engineFailed: "The VPN engine failed to start."
+        case .badWireGuardKey: "The WireGuard keys in this profile are not valid."
+        case .badWireGuardAddress: "The WireGuard profile did not carry a usable address."
         }
     }
 }

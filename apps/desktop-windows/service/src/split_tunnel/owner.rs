@@ -2741,7 +2741,19 @@ mod audit_tests {
         println!("{} established connection(s) outside a nothing-carried tunnel", escapes.len());
         for escape in escapes.iter().take(5) {
             println!("{} -> {}:{}", escape.image, escape.remote, escape.remote_port);
-            assert!(escape.image.to_lowercase().ends_with(".exe"), "{escape:?}");
+            // An absolute path, not a name ending in `.exe`. That was the
+            // original check and it is not a property Windows guarantees:
+            // GitHub's own hosted runner agent is
+            // `C:\ProgramData\GitHub\HostedComputeAgent\hosted-compute-agent`,
+            // with no extension at all, and this test failed the moment
+            // that process happened to hold a connection while it ran.
+            // What the walk actually promises is a resolved image path,
+            // so that is what is asserted.
+            assert!(!escape.image.is_empty(), "{escape:?}");
+            assert!(
+                escape.image.contains('\\') || escape.image.contains('/'),
+                "{escape:?}"
+            );
             assert_ne!(escape.remote_port, 0, "{escape:?}");
             match escape.remote {
                 IpAddr::V4(addr) => assert!(is_public_v4(addr), "{escape:?}"),
