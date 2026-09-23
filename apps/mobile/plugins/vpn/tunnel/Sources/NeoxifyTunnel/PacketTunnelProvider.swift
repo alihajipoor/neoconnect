@@ -29,7 +29,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private enum Tunnel {
         static let address = "198.18.0.1"
         static let netmask = "255.255.255.0"
-        static let mtu = 1500
+        /// Only for a stored profile written before the client began
+        /// sending these, which is the one case where the provider has
+        /// to choose. The client is the authority otherwise, and these
+        /// match what it sends today -- a fallback that disagreed with
+        /// it would be the original bug again, just rarer.
+        static let fallbackMTU = 1400
+        static let fallbackDNS = "1.1.1.1"
         /// 198.18.0.0/15 is the benchmarking range, chosen for the same
         /// reason the Windows client uses it: routable-looking, allocated
         /// to nobody, so it cannot collide with a customer's own network
@@ -49,7 +55,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// in the one framework for the same kind of reason: see the build
     /// constraint note in wireguard_darwin.go.
     private enum Request {
-        case xray(String)
+        /// The engine config, plus the two settings the client chooses
+        /// rather than this file: they are the same TUN_DNS and TUN_MTU
+        /// that go inside the xray config, and the tunnel interface has
+        /// to agree with the engine's own endpoint about them.
+        case xray(config: String, dns: String, mtu: Int)
         case wireGuard(WireGuardEngine.Profile)
     }
 
@@ -70,8 +80,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let settings: NEPacketTunnelNetworkSettings
         switch request {
-        case .xray:
-            settings = xraySettings()
+        case .xray(_, let dns, let mtu):
+            settings = xraySettings(dns: dns, mtu: mtu)
         case .wireGuard(let profile):
             guard let built = wireGuardSettings(for: profile) else {
                 log.error("the WireGuard profile did not carry a usable address")
@@ -95,7 +105,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Xray's settings are fixed, because nothing in an Xray profile
     /// describes the inside of the tunnel -- the engine terminates
     /// everything and the addresses are ours to choose.
-    private func xraySettings() -> NEPacketTunnelNetworkSettings {
+    private func xraySettings(dns: String, mtu: Int) -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: Tunnel.peer)
         let ipv4 = NEIPv4Settings(addresses: [Tunnel.address], subnetMasks: [Tunnel.netmask])
         // Everything, because this is a full tunnel. Split tunnelling on
@@ -103,16 +113,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // equivalent of the Windows client's per-app redirect here.
         ipv4.includedRoutes = [NEIPv4Route.default()]
         settings.ipv4Settings = ipv4
-        settings.mtu = NSNumber(value: Tunnel.mtu)
+        // The client's, not a constant of ours. It hardcoded 1500 while
+        // the engine's own tun inbound was configured for the client's
+        // 1400, so the system handed xray packets its endpoint would not
+        // take -- which presents as large transfers stalling rather than
+        // as a tunnel that fails.
+        settings.mtu = NSNumber(value: mtu)
 
         // Resolvers inside the tunnel, matching every other client: the
         // lookup has to travel the tunnel or the name leaks to whatever
         // network the device is on, which is the failure that was
         // reported from Iran as "the IP changes but the site will not
         // open".
-        let dns = NEDNSSettings(servers: ["1.1.1.1", "1.0.0.1"])
-        dns.matchDomains = [""]
-        settings.dnsSettings = dns
+        let resolvers = NEDNSSettings(servers: [dns])
+        resolvers.matchDomains = [""]
+        settings.dnsSettings = resolvers
         return settings
     }
 
@@ -170,7 +185,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         switch request {
-        case .xray(let configJSON):
+        case .xray(let configJSON, _, _):
             var engineError: NSError?
             let started = NeoxifyxrayStart(configJSON, Int(fd), NoopProtector(), &engineError)
             if !started {
@@ -223,13 +238,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return .wireGuard(try decodeProfile(passed))
         }
         if let passed = options?["config"] as? String, !passed.isEmpty {
-            return .xray(passed)
+            return .xray(
+                config: passed,
+                dns: options?["dns"] as? String ?? Tunnel.fallbackDNS,
+                mtu: (options?["mtu"] as? NSNumber)?.intValue ?? Tunnel.fallbackMTU,
+            )
         }
         if let saved = stored?["wireguard"] as? String, !saved.isEmpty {
             return .wireGuard(try decodeProfile(saved))
         }
         if let saved = stored?["config"] as? String, !saved.isEmpty {
-            return .xray(saved)
+            return .xray(
+                config: saved,
+                dns: stored?["dns"] as? String ?? Tunnel.fallbackDNS,
+                mtu: (stored?["mtu"] as? NSNumber)?.intValue ?? Tunnel.fallbackMTU,
+            )
         }
         return nil
     }

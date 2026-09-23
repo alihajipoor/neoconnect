@@ -18,9 +18,13 @@ import { invoke } from "@tauri-apps/api/core";
 export interface VpnStatus {
   connected: boolean;
   protocol: string | null;
-  /** Bytes since the tunnel came up, straight from the engine. */
-  rxBytes: number;
-  txBytes: number;
+  /** Bytes since the tunnel came up, or null where the platform will
+   * not say. Android reads them from the engine; iOS has none to read,
+   * because the tunnel runs in a separate extension process and
+   * NEVPNConnection exposes no totals to the app. Null rather than zero,
+   * so nothing later reads "not known" as "nothing was carried". */
+  rxBytes: number | null;
+  txBytes: number | null;
   /** Seconds since the last WireGuard handshake, or null when the
    * active protocol has no equivalent. The same evidence the Windows
    * client uses to tell "engine running" from "traffic flowing", which

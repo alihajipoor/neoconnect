@@ -95,8 +95,23 @@ pub struct Ikev2Profile {
 pub struct VpnStatus {
     pub connected: bool,
     pub protocol: Option<String>,
-    pub rx_bytes: i64,
-    pub tx_bytes: i64,
+    /// Bytes carried, or null where the platform will not say.
+    ///
+    /// Optional for the same reason `last_handshake_age_secs` below is,
+    /// and the argument there applies unchanged: null is the honest
+    /// answer for "no evidence". iOS has no counters to read -- the
+    /// tunnel runs in a separate extension process and NEVPNConnection
+    /// exposes no byte totals to the app -- so the alternative was a
+    /// zero, which reads as "nothing was carried" rather than "not
+    /// known".
+    ///
+    /// They were required, and the iOS plugin sends neither, so every
+    /// single `vpn_status` call on iOS failed to deserialise with
+    /// "missing field `rxBytes`". Nothing in either client reads these
+    /// values, which is why a permanently failing status call went
+    /// unnoticed.
+    pub rx_bytes: Option<i64>,
+    pub tx_bytes: Option<i64>,
     /// Seconds since the last handshake, or null when there has not been
     /// one. Null is the honest answer for "no evidence", and the UI
     /// treats it differently from a stale number -- so it must never be
@@ -125,8 +140,34 @@ pub struct Apps {
     pub apps: Vec<InstalledApp>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// "The call succeeded and has nothing to say."
+///
+/// Deserialised by hand because the two platforms do not agree on what
+/// an empty response looks like, and the derived version accepts only
+/// one of them.
+///
+/// Kotlin's `Invoke.resolve()` sends `{}`. Swift's sends nothing, and
+/// Tauri's iOS glue turns that into the literal string "null"
+/// (`callback(id, success, payload ?? "null")` in Tauri.swift), which
+/// reaches serde as `Value::Null`. A derived `Deserialize` for a struct
+/// rejects null -- "invalid type: null, expected struct Empty" -- so
+/// every connect and every disconnect on iOS returned an error after
+/// doing exactly what it was asked. The ladder would have marked all
+/// three protocols as failing on a device that was in fact connected.
+///
+/// Fixed here rather than by passing `{}` from each Swift method,
+/// because that has to be remembered once per method and this bug is
+/// precisely what forgetting looks like. Anything at all is accepted:
+/// the value is a marker, and there is nothing in it to be wrong about.
+#[derive(Debug, Serialize)]
 pub struct Empty {}
+
+impl<'de> Deserialize<'de> for Empty {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Option::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(Empty {})
+    }
+}
 
 // Tauri's own macro rather than a hand-written extern: it emits the
 // binding with the signature register_ios_plugin expects, and
@@ -152,4 +193,65 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             Ok(())
         })
         .build()
+}
+
+/// What the two mobile plugins actually put on the wire.
+///
+/// These are about the boundary, not the logic: each pins a payload one
+/// platform really sends against the type the Rust side really expects.
+/// Both bugs they were written for were invisible on this machine and
+/// on CI, because neither platform's plugin can run here -- they showed
+/// up only by reading one side against the other.
+#[cfg(test)]
+mod plugin_contract_tests {
+    use super::{Empty, VpnStatus};
+
+    /// iOS's empty response, exactly as it arrives.
+    ///
+    /// Swift's `invoke.resolve()` sends no payload, and Tauri's glue
+    /// turns that into the literal string "null" before it crosses into
+    /// Rust. The derived Deserialize rejected it, so every connect and
+    /// every disconnect on iOS reported failure after succeeding.
+    #[test]
+    fn an_empty_response_may_be_null() {
+        serde_json::from_str::<Empty>("null").expect("iOS empty response rejected");
+    }
+
+    /// Android's, which must keep working.
+    #[test]
+    fn an_empty_response_may_be_an_object() {
+        serde_json::from_str::<Empty>("{}").expect("Android empty response rejected");
+    }
+
+    /// Exactly what the iOS plugin sends back from `status`.
+    ///
+    /// It carries no counters and no handshake age, because iOS offers
+    /// the app neither, and an extra `state` key that nothing reads.
+    /// This failed for as long as iOS has had a status call.
+    #[test]
+    fn the_ios_status_payload_deserialises() {
+        let payload = r#"{"connected":true,"state":"connected"}"#;
+        let parsed = serde_json::from_str::<VpnStatus>(payload);
+        assert!(parsed.is_ok(), "iOS status rejected: {:?}", parsed.err());
+        let status = parsed.unwrap();
+        assert!(status.connected);
+        // Null, not zero. A zero here would be read as "nothing was
+        // carried" by anything that later starts displaying these.
+        assert_eq!(status.rx_bytes, None);
+        assert_eq!(status.tx_bytes, None);
+        assert_eq!(status.last_handshake_age_secs, None);
+    }
+
+    /// Android still sends numbers, and they must still arrive as
+    /// numbers rather than being widened away.
+    #[test]
+    fn the_android_status_payload_still_carries_its_counters() {
+        let payload = r#"{"connected":true,"protocol":"WIREGUARD","rxBytes":1024,
+                          "txBytes":2048,"lastHandshakeAgeSecs":3}"#;
+        let status = serde_json::from_str::<VpnStatus>(payload).expect("android status rejected");
+        assert_eq!(status.rx_bytes, Some(1024));
+        assert_eq!(status.tx_bytes, Some(2048));
+        assert_eq!(status.last_handshake_age_secs, Some(3));
+        assert_eq!(status.protocol.as_deref(), Some("WIREGUARD"));
+    }
 }

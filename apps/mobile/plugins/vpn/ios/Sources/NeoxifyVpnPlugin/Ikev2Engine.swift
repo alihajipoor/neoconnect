@@ -30,6 +30,16 @@ enum Ikev2Engine {
     private static let account = "neoxify-ikev2"
     private static let service = "com.neoxify.mobile.ikev2"
 
+    /// How we recognise our own profile again.
+    ///
+    /// One constant because it is written in one place and read in
+    /// another, and the two have to agree: `loadedIfOurs` decides whether
+    /// a live personal VPN is ours by comparing against it. Two literals
+    /// that drift apart would not fail to build -- `status` would simply
+    /// start answering `.invalid` for a tunnel that is up, and
+    /// `disconnect` would quietly stop stopping it.
+    private static let profileName = "Neoxify IKEv2"
+
     /// Stores the password and returns the persistent reference.
     ///
     /// Deletes first rather than updating: the credential is reissued
@@ -95,7 +105,7 @@ enum Ikev2Engine {
         proto.disconnectOnSleep = false
 
         manager.protocolConfiguration = proto
-        manager.localizedDescription = "Neoxify IKEv2"
+        manager.localizedDescription = profileName
         manager.isEnabled = true
         // Cleared rather than left alone. On-demand rules make iOS
         // bring the tunnel back by itself on a network change, so a
@@ -184,7 +194,7 @@ enum Ikev2Engine {
     private static func loadedIfOurs() async -> NEVPNManager? {
         let manager = NEVPNManager.shared()
         guard (try? await manager.loadFromPreferences()) != nil else { return nil }
-        return manager.localizedDescription == "Neoxify IKEv2" ? manager : nil
+        return manager.localizedDescription == profileName ? manager : nil
     }
 
     static func status() async -> NEVPNStatus {
