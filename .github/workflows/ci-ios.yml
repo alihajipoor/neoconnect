@@ -67,6 +67,17 @@ jobs:
       # guard instead. Deliberately not pre-empted: committing a
       # generated project before there is anything to customise in it
       # just creates a merge-conflict surface.
+      # The Xray engine, built for iOS from the same Go source as the
+      # Android AAR. This is the half of the iOS port that needs no new
+      # code -- gomobile takes the target as an argument -- so compiling
+      # it here proves the engine is portable before any Swift exists to
+      # call it. It also needs a full Xcode, which is exactly what a
+      # developer machine with only Command Line Tools cannot provide,
+      # so CI is the only place it can be checked today.
+      - name: Build the Xray engine for iOS
+        working-directory: apps/mobile
+        run: bash scripts/build-xray-xcframework.sh
+
       - name: Generate the Xcode project
         if: ${{ hashFiles('apps/mobile/src-tauri/gen/apple/**') == '' }}
         working-directory: apps/mobile
