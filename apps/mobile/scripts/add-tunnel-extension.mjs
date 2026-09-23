@@ -32,6 +32,7 @@ if (!existsSync(spec)) {
 const APP_TARGET = "mobile_iOS";
 const EXT_TARGET = "NeoxifyTunnel";
 const GROUP = "group.com.neoxify.mobile";
+const DEPLOYMENT_TARGET = "15.0";
 
 const ios = join(mobile, "plugins", "vpn", "ios");
 const rel = (p) => relative(apple, p);
@@ -49,8 +50,14 @@ text = text.replace(existing, "\n");
 // Same for the app-target block this script adds, so it is not stacked
 // on top of itself.
 text = text.replace(
-  new RegExp(`(^  ${APP_TARGET}:\\n)(?:    (?:dependencies|entitlements):\\n(?:      .*\\n)*)+`, "m"),
+  new RegExp(`(^  ${APP_TARGET}:\\n)    entitlements:\\n(?:      .*\\n)*`, "m"),
   "$1",
+);
+// and the two dependency entries this script appends
+text = text.replace(new RegExp(`^      - target: ${EXT_TARGET}\\n`, "m"), "");
+text = text.replace(
+  /^      - framework: .*NeoxifyXray\.xcframework\n        embed: true\n/m,
+  "",
 );
 
 // Edited as text, not parsed and re-emitted. project.yml is generated,
@@ -105,30 +112,46 @@ const extension = `
         OTHER_LDFLAGS: -lresolv
         # The extension bundle lives inside the app, so its deployment
         # target may not be older than the app's.
-        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "${DEPLOYMENT_TARGET}"
         SWIFT_VERSION: "5.0"
 `;
+
+// The whole project's floor, not just the extension's. Tauri writes
+// 14.0 and ignores bundle.iOS.minimumSystemVersion, and the iOS 27 SDK
+// refuses to build a simulator target that old -- so the app fails
+// before the extension is even reached. Raised here because this script
+// is the one thing that always runs after Tauri regenerates the spec.
+text = text.replace(/^(\s*iOS:\s*)14\.0\s*$/m, `$1${DEPLOYMENT_TARGET}`);
 
 // The extension target itself.
 text = text.replace(/^targets:\n/m, `targets:\n${extension}`);
 
 // And the app: it embeds the extension, links the engine, and carries
 // the matching entitlement. Without the app-side entitlement the system
-// refuses to install the profile at all, with an error that names the
-// app rather than the extension.
-const appBlock = new RegExp(`^  ${APP_TARGET}:\\n`, "m");
-if (!appBlock.test(text)) {
-  console.error(`add-tunnel-extension: target ${APP_TARGET} not found in the spec`);
+// refuses to install the profile at all, with an error naming the app
+// rather than the extension.
+//
+// Appended into Tauri's existing `dependencies:` list, not added as a
+// second one. A duplicate key is valid YAML and silently keeps only the
+// last -- which dropped Tauri's own libapp.a and Swift packages, and
+// surfaced as the app being compiled against the macOS SDK and failing
+// on WebKit, a mile from the actual cause.
+const appDeps = new RegExp(`(^  ${APP_TARGET}:\\n(?:.*\\n)*?    dependencies:\\n)`, "m");
+if (!appDeps.test(text)) {
+  console.error(`add-tunnel-extension: no dependencies list found on ${APP_TARGET}`);
   process.exit(1);
 }
 text = text.replace(
-  appBlock,
-  `  ${APP_TARGET}:\n` +
-    `    dependencies:\n` +
-    `      - target: ${EXT_TARGET}\n` +
+  appDeps,
+  `$1      - target: ${EXT_TARGET}\n` +
     `      - framework: ${rel(join(ios, "Frameworks", "NeoxifyXray.xcframework"))}\n` +
-    `        embed: true\n` +
-    `    entitlements:\n` +
+    `        embed: true\n`,
+);
+
+// Entitlements are a key Tauri does not set, so this one is an insert.
+text = text.replace(
+  new RegExp(`(^  ${APP_TARGET}:\\n)`, "m"),
+  `$1    entitlements:\n` +
     `      path: NeoxifyApp.entitlements\n` +
     `      properties:\n` +
     `        com.apple.developer.networking.networkextension:\n` +
