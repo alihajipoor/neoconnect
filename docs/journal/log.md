@@ -2355,3 +2355,34 @@ rewritten from `git show HEAD:`, which loses the executable bit and
 needed the modes restored from the index. The real fix is to move the
 repo off the synced Desktop; noted here because it reads exactly like
 filesystem corruption and is not.
+
+**Two things found after the above was written**, both worth recording
+because of how they were found rather than what they were.
+
+The first was in the WireGuard code, before it had ever run. The pure
+helpers -- the base64-to-hex key conversion and the CIDR parser -- were
+executed against the values the backend actually sends rather than read.
+`generate-credentials.ts` puts `allowedIPs: "0.0.0.0/0, ::/0"` on every
+WireGuard profile, unconditionally, and the parser split only on `/`, so
+`::/0` came back as address "::" with mask "0.0.0.0". Every connection
+would have built an NEIPv4Route holding an IPv6 address. It now requires
+four dotted octets: returning a plausible answer for input it does not
+understand was the whole failure.
+
+The second is not fixed and is now issue #48. Chasing where the IPv6
+half of that profile should go led to `engines/ipv6_block.rs`, which
+records a measured leak on Windows -- packet capture outside the client,
+OpenVPN and IKEv2 leaking outright -- and says of it that "the customer
+is told they are protected, and the evidence the app collects agrees,
+while an observer on their own network reads their traffic". The reason
+it gives is that every node is IPv4-only, which is not a Windows fact.
+Neither mobile client has an equivalent: Android adds one IPv4 address
+and one IPv4 route, iOS sets ipv4Settings and no ipv6Settings on both
+engines, and no `domainStrategy` is set anywhere so Xray runs at `AsIs`.
+
+Left open deliberately. On iOS the remedy is a different mechanism from
+the Windows one -- an app has no firewall there, so the usual approach
+routes IPv6 into the tunnel, which means the packets reach the engines
+rather than being dropped. That is a behaviour change on a path shared
+by both engines, on two clients, one of them already on Play, and it
+wants the same kind of capture the Windows numbers came from.
