@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node ../desktop-windows/scripts/ensure-seed-bundle.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

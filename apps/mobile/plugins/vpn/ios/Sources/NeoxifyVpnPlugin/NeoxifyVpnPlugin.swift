@@ -96,10 +96,90 @@ class NeoxifyVpnPlugin: Plugin {
         }
     }
 
+    /// WireGuard, which goes through the same extension as Xray.
+    ///
+    /// iOS allows a packet-tunnel extension exactly one principal class,
+    /// so this does not start a second provider -- it starts the same one
+    /// with a different payload, and the provider picks the engine. The
+    /// profile is re-encoded rather than forwarded verbatim because
+    /// providerConfiguration takes property-list values, and the
+    /// extension wants one string it can decode.
+    // `connectWireguard`, lower-case g, because that is the name the
+    // Rust command invokes and the name the Kotlin plugin registers.
+    // Spelling it the way the product does compiles fine on both sides
+    // and fails only at runtime, with "method not found".
+    @objc public func connectWireguard(_ invoke: Invoke) {
+        struct Args: Codable {
+            let privateKey: String
+            let address: String
+            let dns: String
+            let serverPublicKey: String
+            let endpoint: String
+            let allowedIPs: String
+        }
+        Task {
+            do {
+                let args = try invoke.parseArgs(Args.self)
+                guard let json = String(data: try JSONEncoder().encode(args), encoding: .utf8) else {
+                    invoke.reject("the WireGuard profile could not be encoded")
+                    return
+                }
+                let manager = try await loadManager()
+                let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
+                proto.providerBundleIdentifier = providerBundleIdentifier
+                proto.serverAddress = "Neoxify"
+                // Only the WireGuard key, and the Xray one cleared. Both
+                // present would leave the extension to guess, and a
+                // stale Xray config from the previous connection is
+                // exactly what it would find.
+                proto.providerConfiguration = ["wireguard": json]
+                manager.protocolConfiguration = proto
+                manager.isEnabled = true
+                try await manager.saveToPreferences()
+                try await manager.loadFromPreferences()
+                try manager.connection.startVPNTunnel(options: ["wireguard": json as NSString])
+                invoke.resolve()
+            } catch {
+                invoke.reject("could not start WireGuard: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// IKEv2, which does not go through the extension at all.
+    ///
+    /// Unlike connectXray there is no provider bundle, no config JSON
+    /// and no Xray engine: the system's own IKEv2 client dials it. That
+    /// makes it the one protocol here free of the extension's ~50MB
+    /// memory ceiling, which is why it is worth having as a fallback
+    /// even though it is the most easily blocked of the three.
+    @objc public func connectIkev2(_ invoke: Invoke) {
+        struct Args: Decodable {
+            let server: String
+            let username: String
+            let password: String
+        }
+        Task {
+            do {
+                let args = try invoke.parseArgs(Args.self)
+                try await Ikev2Engine.connect(
+                    server: args.server, username: args.username, password: args.password)
+                invoke.resolve()
+            } catch {
+                invoke.reject("could not start IKEv2: \(error.localizedDescription)")
+            }
+        }
+    }
+
     @objc public func disconnect(_ invoke: Invoke) {
         Task {
+            // Both stores, not just the tunnel providers. IKEv2 lives in
+            // the single personal-VPN slot, which
+            // `NETunnelProviderManager.loadAllFromPreferences` does not
+            // return -- stopping only those would leave an IKEv2 tunnel
+            // up while the app reported it down.
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
             for manager in managers { manager.connection.stopVPNTunnel() }
+            await Ikev2Engine.disconnect()
             invoke.resolve()
         }
     }
@@ -107,7 +187,13 @@ class NeoxifyVpnPlugin: Plugin {
     @objc public func status(_ invoke: Invoke) {
         Task {
             let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
-            let state = managers.first?.connection.status ?? .invalid
+            let tunnel = managers.first?.connection.status ?? .invalid
+            let ikev2 = await Ikev2Engine.status()
+            // Whichever is actually up. Only one can be at a time, so
+            // preferring the connected one cannot mask the other; taking
+            // the tunnel-provider state unconditionally would report a
+            // live IKEv2 session as disconnected.
+            let state = tunnel == .connected ? tunnel : (ikev2 == .connected ? ikev2 : tunnel)
             invoke.resolve(["connected": state == .connected, "state": String(describing: state)])
         }
     }

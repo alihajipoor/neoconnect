@@ -12,7 +12,9 @@
     "seed": "node ../desktop-windows/scripts/ensure-seed-bundle.mjs && node ../desktop-windows/scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
     "prebuild": "node ../desktop-windows/scripts/ensure-seed-bundle.mjs && node ../desktop-windows/scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
     "pretest": "NEOXIFY_SKIP_SEED=1 node ../desktop-windows/scripts/ensure-seed-bundle.mjs && node ../desktop-windows/scripts/apply-capability-scope.mjs src-tauri/capabilities/default.json",
-    "ios:project": "pnpm exec tauri ios init --ci && node scripts/add-tunnel-extension.mjs"
+    "ios:project": "pnpm exec tauri ios init --ci && node scripts/add-tunnel-extension.mjs",
+    "ios:build": "bash scripts/build-ios.sh --",
+    "ios:assert-store": "node scripts/assert-store-bundle.mjs dist"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
