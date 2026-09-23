@@ -101,10 +101,26 @@ jobs:
         working-directory: apps/mobile
         run: bash scripts/build-xray-xcframework.sh
 
+      # The packet-tunnel extension is added to Tauri's generated project
+      # by a script rather than committed, because `tauri ios init`
+      # regenerates gen/apple and would erase it. Building it here is the
+      # only check that the extension still assembles -- it cannot be
+      # built on a machine whose Xcode Tauri does not support.
       - name: Generate the Xcode project
         if: ${{ hashFiles('apps/mobile/src-tauri/gen/apple/**') == '' }}
         working-directory: apps/mobile
         run: pnpm tauri ios init --ci
+
+      - name: Add the packet-tunnel extension
+        working-directory: apps/mobile
+        run: node scripts/add-tunnel-extension.mjs
+
+      - name: Build the packet-tunnel extension
+        working-directory: apps/mobile/src-tauri/gen/apple
+        run: |
+          xcodebuild -project mobile.xcodeproj -target NeoxifyTunnel \
+            -sdk iphonesimulator -configuration debug \
+            CODE_SIGNING_ALLOWED=NO build
 
       - name: Build for the simulator
         working-directory: apps/mobile
