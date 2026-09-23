@@ -95,8 +95,23 @@ pub struct Ikev2Profile {
 pub struct VpnStatus {
     pub connected: bool,
     pub protocol: Option<String>,
-    pub rx_bytes: i64,
-    pub tx_bytes: i64,
+    /// Bytes carried, or null where the platform will not say.
+    ///
+    /// Optional for the same reason `last_handshake_age_secs` below is,
+    /// and the argument there applies unchanged: null is the honest
+    /// answer for "no evidence". iOS has no counters to read -- the
+    /// tunnel runs in a separate extension process and NEVPNConnection
+    /// exposes no byte totals to the app -- so the alternative was a
+    /// zero, which reads as "nothing was carried" rather than "not
+    /// known".
+    ///
+    /// They were required, and the iOS plugin sends neither, so every
+    /// single `vpn_status` call on iOS failed to deserialise with
+    /// "missing field `rxBytes`". Nothing in either client reads these
+    /// values, which is why a permanently failing status call went
+    /// unnoticed.
+    pub rx_bytes: Option<i64>,
+    pub tx_bytes: Option<i64>,
     /// Seconds since the last handshake, or null when there has not been
     /// one. Null is the honest answer for "no evidence", and the UI
     /// treats it differently from a stale number -- so it must never be
@@ -152,4 +167,41 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             Ok(())
         })
         .build()
+}
+
+#[cfg(test)]
+mod status_contract_tests {
+    use super::VpnStatus;
+
+    /// Exactly what the iOS plugin sends back from `status`.
+    ///
+    /// It carries no counters and no handshake age, because iOS offers
+    /// the app neither, and an extra `state` key that nothing reads.
+    /// This failed for as long as iOS has had a status call.
+    #[test]
+    fn the_ios_status_payload_deserialises() {
+        let payload = r#"{"connected":true,"state":"connected"}"#;
+        let parsed = serde_json::from_str::<VpnStatus>(payload);
+        assert!(parsed.is_ok(), "iOS status rejected: {:?}", parsed.err());
+        let status = parsed.unwrap();
+        assert!(status.connected);
+        // Null, not zero. A zero here would be read as "nothing was
+        // carried" by anything that later starts displaying these.
+        assert_eq!(status.rx_bytes, None);
+        assert_eq!(status.tx_bytes, None);
+        assert_eq!(status.last_handshake_age_secs, None);
+    }
+
+    /// Android still sends numbers, and they must still arrive as
+    /// numbers rather than being widened away.
+    #[test]
+    fn the_android_status_payload_still_carries_its_counters() {
+        let payload = r#"{"connected":true,"protocol":"WIREGUARD","rxBytes":1024,
+                          "txBytes":2048,"lastHandshakeAgeSecs":3}"#;
+        let status = serde_json::from_str::<VpnStatus>(payload).expect("android status rejected");
+        assert_eq!(status.rx_bytes, Some(1024));
+        assert_eq!(status.tx_bytes, Some(2048));
+        assert_eq!(status.last_handshake_age_secs, Some(3));
+        assert_eq!(status.protocol.as_deref(), Some("WIREGUARD"));
+    }
 }
