@@ -41,11 +41,13 @@ for d in data.get("result", {}).get("devices", []):
     hw = d.get("hardwareProperties", {})
     if hw.get("platform") != "iOS":
         continue
-    # `reality` is the field that separates a phone from a simulator.
-    # Filtering on platform alone picks up every booted simulator, which
-    # would install happily and prove nothing -- the exact false success
-    # this script exists to avoid.
-    if hw.get("reality") != "physical":
+    # Exclude simulators rather than require "physical". Filtering on
+    # platform alone picks up every booted simulator, which would install
+    # happily and prove nothing. But a real iPhone reports `reality: null`
+    # -- only simulators fill the field in -- so requiring "physical"
+    # rejected the actual phone and kept the simulators, which is the
+    # same bug with the sign flipped. Found by plugging one in.
+    if hw.get("reality") == "simulated":
         continue
     print(d.get("identifier", ""), props.get("name", "?"), sep="\t")
 ' | head -1)
