@@ -25,7 +25,17 @@ name: CI (iOS)
 # compiles" and nothing more.
 on:
   push:
-    branches: [main]
+    # Feature branches too, for the reason ci.yml gives about the desktop
+    # service, arrived at from the other direction: iOS cannot be built on
+    # this machine either. `gomobile bind -target=ios` and `tauri ios
+    # build` both refuse without a full Xcode, and the work machine has
+    # Command Line Tools only.
+    #
+    # With this limited to main, an iOS change could be verified only by
+    # merging it -- which for the packet-tunnel work ahead means merging
+    # Swift nobody has ever compiled. A macos-latest runner is the only
+    # place that can say whether it builds, so branches have to reach it.
+    branches: [main, "claude/**", "rig/**"]
     paths:
       - "apps/mobile/**"
       - ".github/workflows/ci-ios.yml"
