@@ -6,10 +6,10 @@
 //! Tauri plugins put their commands in a submodule for the same reason.
 
 use crate::{Apps, Empty, Granted, Ikev2Profile, TunnelGone, VpnStatus, WireGuardProfile, XrayProfile};
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::Vpn;
 use tauri::{AppHandle, Runtime};
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri::Manager;
 
 /// Why a call cannot be served off Android.
@@ -24,25 +24,32 @@ fn unavailable() -> String {
 
 /// The Kotlin handle, looked up rather than taken as a `State` argument
 /// so the miss is a returned error instead of an extractor panic.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn handle<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::State<'_, Vpn<R>>, String> {
     app.try_state::<Vpn<R>>().ok_or_else(unavailable)
 }
 
+// Not every command exists on both platforms. The five the iOS plugin
+// implements are cfg'd for both; wireguard, ikev2, list_apps and
+// tunnel_gone stay Android-only and keep returning unavailable(),
+// which is the truthful answer rather than a stub that fails later.
+// list_apps in particular has no iOS equivalent at all: per-app routing
+// there belongs to the system, not to the app.
+//
 // Seven commands, each a single forwarding call. Written out rather than
 // generated: `#[tauri::command]` emits a macro named after the function,
 // and expanding that from inside a `macro_rules!` collides with itself.
 
 #[tauri::command]
 pub async fn vpn_has_permission<R: Runtime>(app: AppHandle<R>) -> Result<Granted, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
             .run_mobile_plugin::<Granted>("hasPermission", ())
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
         Err(unavailable())
@@ -51,14 +58,14 @@ pub async fn vpn_has_permission<R: Runtime>(app: AppHandle<R>) -> Result<Granted
 
 #[tauri::command]
 pub async fn vpn_request_permission<R: Runtime>(app: AppHandle<R>) -> Result<Granted, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
             .run_mobile_plugin::<Granted>("requestPermission", ())
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
         Err(unavailable())
@@ -89,14 +96,14 @@ pub async fn vpn_connect_xray<R: Runtime>(
     app: AppHandle<R>,
     profile: XrayProfile,
 ) -> Result<Empty, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
             .run_mobile_plugin::<Empty>("connectXray", profile)
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = (app, profile);
         Err(unavailable())
@@ -124,14 +131,14 @@ pub async fn vpn_connect_ikev2<R: Runtime>(
 
 #[tauri::command]
 pub async fn vpn_disconnect<R: Runtime>(app: AppHandle<R>) -> Result<Empty, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
             .run_mobile_plugin::<Empty>("disconnect", ())
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
         Err(unavailable())
@@ -162,14 +169,14 @@ pub async fn vpn_tunnel_gone<R: Runtime>(app: AppHandle<R>) -> Result<TunnelGone
 
 #[tauri::command]
 pub async fn vpn_status<R: Runtime>(app: AppHandle<R>) -> Result<VpnStatus, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
             .run_mobile_plugin::<VpnStatus>("status", ())
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
         Err(unavailable())
