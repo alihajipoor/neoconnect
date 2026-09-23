@@ -479,7 +479,7 @@ const en = {
   "dash.offlineHint":
     "Using your saved servers. Data usage and expiry were last updated {when} and may be out of date.",
   "dash.androidWireguardOnly":
-    "{protocol} isn't in the Android app yet, so it will connect with Fast instead.",
+    "{protocol} isn't in the mobile app yet, so it will connect with Fast instead.",
   "settings.customAllApps": "No apps chosen yet, so every app uses the VPN. Pick one to route just that app.",
   "settings.customHintNative": "Send only the apps you choose through the VPN. Everything else uses your normal connection.",
   "settings.customSearch": "Search apps",
@@ -807,7 +807,7 @@ const en = {
   "disclosure.subtitle": "What this app does, and what we collect. Please read it once.",
   "disclosure.vpnHeading": "Why Neoxify needs VPN permission",
   "disclosure.vpnBody":
-    "Neoxify is a VPN. Android asks for your permission to create a VPN connection, and the app cannot work without it.",
+    "Neoxify is a VPN. Your phone asks for your permission to create a VPN connection, and the app cannot work without it.",
   "disclosure.vpnBody2":
     "While you are connected, the app builds an encrypted tunnel and sends your device's internet traffic through the server you pick, so your connection stays private and can reach sites your network blocks. In Custom mode you choose which apps use the tunnel and the rest connect normally. Nothing is routed through the tunnel while you are disconnected.",
   "disclosure.dataHeading": "What we collect, and why",
@@ -1093,7 +1093,7 @@ const fa: Record<TranslationKey, string> = {
   "dash.offlineHint":
     "از سرورهای ذخیره‌شده استفاده می‌شود. مصرف داده و تاریخ انقضا آخرین بار در {when} به‌روز شده و ممکن است دقیق نباشد.",
   "dash.androidWireguardOnly":
-    "پروتکل {protocol} هنوز در نسخه اندروید نیست، بنابراین با Fast متصل می‌شود.",
+    "پروتکل {protocol} هنوز در نسخه موبایل نیست، بنابراین با Fast متصل می‌شود.",
   "settings.customAllApps":
     "هنوز برنامه‌ای انتخاب نشده، پس همه برنامه‌ها از VPN عبور می‌کنند. برای عبور فقط یک برنامه، آن را انتخاب کنید.",
   "settings.customHintNative":
@@ -1293,7 +1293,7 @@ const fa: Record<TranslationKey, string> = {
   "disclosure.subtitle": "این برنامه چه می‌کند و ما چه اطلاعاتی جمع‌آوری می‌کنیم. لطفاً یک بار بخوانید.",
   "disclosure.vpnHeading": "چرا نئوکسیفای به دسترسی وی‌پی‌ان نیاز دارد",
   "disclosure.vpnBody":
-    "نئوکسیفای یک وی‌پی‌ان است. اندروید برای ساختن اتصال وی‌پی‌ان از شما اجازه می‌گیرد و برنامه بدون آن کار نمی‌کند.",
+    "نئوکسیفای یک وی‌پی‌ان است. گوشی شما برای ساختن اتصال وی‌پی‌ان از شما اجازه می‌گیرد و برنامه بدون آن کار نمی‌کند.",
   "disclosure.vpnBody2":
     "تا زمانی که متصل هستید، برنامه یک تونل رمزنگاری‌شده می‌سازد و ترافیک اینترنت دستگاه شما را از سروری که انتخاب می‌کنید عبور می‌دهد، تا اتصال شما خصوصی بماند و به سایت‌هایی که شبکه‌تان مسدود کرده دسترسی داشته باشید. در حالت سفارشی، خودتان انتخاب می‌کنید کدام برنامه‌ها از تونل استفاده کنند و بقیه به‌طور عادی متصل می‌شوند. وقتی قطع هستید، هیچ ترافیکی از تونل عبور نمی‌کند.",
   "disclosure.dataHeading": "چه اطلاعاتی جمع‌آوری می‌کنیم و چرا",
