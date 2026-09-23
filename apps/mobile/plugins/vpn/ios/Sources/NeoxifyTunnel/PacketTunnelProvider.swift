@@ -13,6 +13,11 @@ import os
 /// Both then take the identical supported path into xray-core, whose
 /// darwin tun inbound accepts a descriptor from `xray.tun.fd` for
 /// exactly this case.
+// @objc, and with an explicit name: NSExtensionPrincipalClass in the
+// Info.plist is resolved through the Objective-C runtime. Without this
+// the runtime looks for a Swift-mangled name, finds nothing, and the
+// tunnel fails to start with no message saying why.
+@objc(PacketTunnelProvider)
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private let log = Logger(subsystem: "com.neoxify.mobile", category: "tunnel")
 
