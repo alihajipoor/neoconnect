@@ -29,12 +29,12 @@ fn handle<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::State<'_, Vpn<R>>, St
     app.try_state::<Vpn<R>>().ok_or_else(unavailable)
 }
 
-// Not every command exists on both platforms. The six the iOS plugin
-// implements are cfg'd for both; wireguard, list_apps and tunnel_gone
-// stay Android-only and keep returning unavailable(), which is the
-// truthful answer rather than a stub that fails later. list_apps in
-// particular has no iOS equivalent at all: per-app routing there
-// belongs to the system, not to the app.
+// Not every command exists on both platforms. The seven the iOS plugin
+// implements are cfg'd for both; list_apps and tunnel_gone stay
+// Android-only and keep returning unavailable(), which is the truthful
+// answer rather than a stub that fails later. list_apps in particular
+// has no iOS equivalent at all: per-app routing there belongs to the
+// system, not to the app.
 //
 // Seven commands, each a single forwarding call. Written out rather than
 // generated: `#[tauri::command]` emits a macro named after the function,
@@ -77,14 +77,19 @@ pub async fn vpn_connect_wireguard<R: Runtime>(
     app: AppHandle<R>,
     profile: WireGuardProfile,
 ) -> Result<Empty, String> {
-    #[cfg(target_os = "android")]
+    // iOS as well. It runs wireguard-go inside the same packet-tunnel
+    // extension as Xray rather than a second one, because iOS allows a
+    // tunnel extension only one principal class -- the provider picks
+    // the engine from which key the profile arrived under. `allowedApps`
+    // is ignored there: per-app routing on iOS belongs to the system.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         handle(&app)?
             .0
             .run_mobile_plugin::<Empty>("connectWireguard", profile)
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = (app, profile);
         Err(unavailable())

@@ -48,11 +48,12 @@ describe("protocol support", () => {
     expect(protocolSupported("XRAY_VLESS_REALITY")).toBe(true);
     expect(protocolSupported("XRAY_TROJAN")).toBe(true);
     expect(protocolSupported("SHADOWSOCKS")).toBe(true);
-    // Dialled by the system's own client, so it needs no provider of
-    // ours -- which is why it is available while WireGuard is not.
+    // Dialled by the system's own client, so it needs no provider of ours.
     expect(protocolSupported("IKEV2")).toBe(true);
-    // Would need its own provider built and embedded. Not yet.
-    expect(protocolSupported("WIREGUARD")).toBe(false);
+    // Shares the packet-tunnel extension with Xray.
+    expect(protocolSupported("WIREGUARD")).toBe(true);
+    // No engine for it on either mobile platform.
+    expect(protocolSupported("OPENVPN")).toBe(false);
   });
 
   it("still offers everything on Android, IKEv2 included", () => {
