@@ -2386,3 +2386,72 @@ routes IPv6 into the tunnel, which means the packets reach the engines
 rather than being dropped. That is a behaviour change on a path shared
 by both engines, on two clients, one of them already on Play, and it
 wants the same kind of capture the Windows numbers came from.
+
+## 2026-09-23 (evening) — the app runs on a real iPhone
+
+Signing, from nothing: no Apple account in Xcode, no certificate, no
+profile. The team id was read out of the certificate's subject rather
+than asked for -- `OU` is the team, which is worth remembering, because
+Xcode does not show it anywhere obvious until a profile exists.
+
+Three things had to be done by hand and could not be automated, which is
+worth recording so nobody burns time looking for a flag. Developer Mode
+is a device-side toggle requiring the passcode and a reboot; `devicectl`
+exposes no verb for it, by design. Signing in to an Apple ID is a
+credential operation. And a team with zero devices will not have its
+first one registered by `-allowProvisioningUpdates` -- that needs the
+portal once, after which automatic provisioning maintains the list.
+
+Two bugs in the path to the device, both ours. Tauri sets
+DEVELOPMENT_TEAM on the app target from the environment and knows
+nothing about the extension added afterwards, so the app signed and the
+extension did not. And the device picker filtered on
+`reality == "physical"`, which is backwards: a real iPhone reports
+`reality: null` and only simulators fill the field in, so it rejected
+the phone and would have installed to a simulator -- the false success
+the filter existed to prevent, with the sign flipped.
+
+**The entitlements fix is confirmed on hardware.** The installed bundle
+carries `7ZMDDWR2XH.com.neoxify.mobile` with packet-tunnel-provider,
+allow-vpn and the app group. That is this morning's empty `<dict/>`,
+verified where it actually matters rather than inferred from a simulator
+that does not enforce entitlements at all.
+
+`devicectl device capture screenshot` works, which changes how the rest
+of this goes: the phone's screen can be read directly instead of
+described. It is how the Settings rail was diagnosed.
+
+### A correction
+
+The icon commit claims the Play release carries Tauri's logo "because
+the same directory feeds Android's generated mipmaps". **That is wrong.**
+`release-android.yml` has an explicit step that re-applies
+`src-tauri/icons/icon.png` after `android init`, with a comment naming
+the precedent: without it, android-v0.1.0 shipped Tauri's logo. That
+step exists, and `icon.png` was the Neoxify mark throughout. Play is
+unaffected.
+
+What was actually wrong was narrower: the generated `gen/apple` tree
+held Tauri's placeholder icons, and nothing in the iOS path replaced
+them the way the Android release does. The committed `icons/ios/` set is
+now alpha-free and a test pins it, so a regenerated project picks up the
+right icons and an alpha channel cannot reach a marketing icon again --
+that one is rejected after upload rather than at build time.
+
+### The tree itself
+
+Moved to `~/Developer/neoconnect`. iCloud had gone from evicting files
+to duplicating them: " 2" copies reaching `.git/index`,
+`.git/refs/heads/main`, and the Xcode project, where `mobile 2.xcodeproj`
+failed every build with "you have modified your package name from mobile
+2 to mobile". Deleting them did not hold -- the next build produced
+`mobile 3.xcodeproj`, faster than a build could run.
+
+`mv` is the wrong tool: the FileProvider-backed Desktop is a separate
+volume, so it copies rather than renames, and it hung for fifteen
+minutes having written nothing. Clone from GitHub and copy back only the
+expensive gitignored artefacts -- the Go xcframework and the fetched
+seed bundle. Two minutes.
+
+**Still unproven: that any tunnel carries a packet.** Nothing here
+changes that.
