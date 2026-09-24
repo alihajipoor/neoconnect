@@ -142,6 +142,19 @@ enum Ikev2Engine {
     /// is only ever spent on a genuinely slow path.
     private static func waitUntilConnected(_ connection: NEVPNConnection) async throws {
         let start = Date()
+        // Every status this connection passed through, in order.
+        //
+        // Kept because the two errors below used to be the only thing
+        // that ever reached the customer, and they are guesses. A
+        // connection that never leaves .disconnected failed before the
+        // handshake -- a profile iOS would not install, a permission not
+        // granted -- while one that reaches .connecting and drops back
+        // failed *in* it, on the credential or the proposal. Those need
+        // opposite fixes and produced identical text, which is why
+        // "IKEv2 does not work on iOS" stayed unattributable through a
+        // whole release. Bounded, so a slow path cannot grow it without
+        // limit.
+        var seen: [NEVPNStatus] = []
         // `startVPNTunnel` returns before the status leaves
         // .disconnected, so a failure cannot be believed immediately --
         // without this grace period every healthy connection would be
@@ -151,7 +164,9 @@ enum Ikev2Engine {
 
         while true {
             let elapsed = Date().timeIntervalSince(start)
-            switch connection.status {
+            let status = connection.status
+            if seen.last != status && seen.count < 32 { seen.append(status) }
+            switch status {
             case .connected:
                 return
             // Both patterns are guarded, spelled out rather than
@@ -162,7 +177,19 @@ enum Ikev2Engine {
             case .invalid where elapsed > grace, .disconnected where elapsed > grace:
                 throw NSError(
                     domain: "NeoxifyIkev2", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "the server refused the connection"])
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            seen.contains(.connecting)
+                                // It negotiated and was turned away. The
+                                // credential or the proposal, not the
+                                // profile.
+                                ? "the server refused the connection (\(trail(seen)))"
+                                // It never began. Saying the server
+                                // refused us would name a machine that
+                                // was never dialled -- the failure is on
+                                // this device.
+                                : "iOS did not start the connection (\(trail(seen)))",
+                    ])
             default:
                 break
             }
@@ -173,7 +200,28 @@ enum Ikev2Engine {
         connection.stopVPNTunnel()
         throw NSError(
             domain: "NeoxifyIkev2", code: 2,
-            userInfo: [NSLocalizedDescriptionKey: "the connection timed out"])
+            userInfo: [NSLocalizedDescriptionKey: "the connection timed out (\(trail(seen)))"])
+    }
+
+    /// The statuses a connection went through, for the error text.
+    ///
+    /// Spelled out rather than `String(describing:)` over the raw enum:
+    /// NEVPNStatus is an ObjC enum and describes itself as a number, so
+    /// the trail would read "0, 1, 0" in the one place it exists to be
+    /// read by somebody trying to explain a failure.
+    private static func trail(_ statuses: [NEVPNStatus]) -> String {
+        let name: (NEVPNStatus) -> String = {
+            switch $0 {
+            case .invalid: return "invalid"
+            case .disconnected: return "disconnected"
+            case .connecting: return "connecting"
+            case .connected: return "connected"
+            case .reasserting: return "reasserting"
+            case .disconnecting: return "disconnecting"
+            @unknown default: return "unknown"
+            }
+        }
+        return statuses.isEmpty ? "no status observed" : statuses.map(name).joined(separator: " -> ")
     }
 
     /// Whether the live personal-VPN connection is ours.
