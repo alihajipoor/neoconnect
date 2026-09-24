@@ -243,6 +243,27 @@ if (!appSources.test(text)) {
 }
 text = text.replace(appSources, `$1${PRIVACY_SOURCE}`);
 
+// Externals must not be copied into the bundle.
+//
+// Tauri lists it as a plain source path, and XcodeGen infers "resource"
+// for a directory with no buildPhase -- so the Rust staticlib is copied
+// in whole, and App Store validation rejects the result:
+//
+//   Invalid bundle structure. The "Neoxify.app/libapp.a" binary file is
+//   not permitted. Your app cannot contain standalone executables or
+//   libraries.
+//
+// It is already linked, through the `- framework: libapp.a` dependency
+// and LIBRARY_SEARCH_PATHS, so nothing needs it as a resource. It is
+// also 190MB, which is most of what the archive was carrying.
+//
+// Only caught by `altool --validate-app`; the build, the signing and the
+// device install are all perfectly happy with it.
+text = text.replace(
+  /^(  mobile_iOS:\n(?:.*\n)*?      - path: Externals\n)(?!        buildPhase:)/m,
+  "$1        buildPhase: none\n",
+);
+
 // The app's entitlements, merged into the block Tauri already writes
 // rather than added as a second one.
 //
