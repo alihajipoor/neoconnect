@@ -111,7 +111,14 @@ final class RemoteControl: XCTestCase {
     /// are divs with roles rather than native buttons, so buttons alone
     /// finds almost nothing.
     private func firstMatch(_ needle: String) -> XCUIElement? {
-        let pools = [app.buttons, app.staticTexts, app.otherElements, app.links, app.images]
+        // Scoped to the web view, not the whole application. Querying
+        // the app element makes XCUITest snapshot everything, and
+        // against a WKWebView that does not return not-found -- it times
+        // out inside the query, which reads as the app being unreachable.
+        // The web view is the only thing in this app anyway.
+        let web = app.webViews.firstMatch
+        let root: XCUIElement = web.exists ? web : app
+        let pools = [root.buttons, root.staticTexts, root.otherElements, root.links, root.images]
         for pool in pools {
             let exact = pool[needle].firstMatch
             if exact.exists { return exact }

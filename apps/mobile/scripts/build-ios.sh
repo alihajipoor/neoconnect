@@ -54,6 +54,19 @@ rm -rf src-tauri/gen/apple/Externals/*/"$stale"
 # its own previous edits before reapplying.
 node scripts/add-tunnel-extension.mjs
 
+# The app icon, applied after the project is generated.
+#
+# `tauri ios init` writes Tauri's own placeholder icons into
+# gen/apple/Assets.xcassets and does NOT copy src-tauri/icons/ios, so
+# the committed set never reaches the build on its own -- the phone shows
+# Tauri's rings on the home screen. release-android.yml has had the
+# equivalent step since android-v0.1.0 shipped exactly that way; iOS
+# never got one.
+#
+# After the regeneration above, not before: that step rewrites the
+# project and would undo this.
+cp src-tauri/icons/ios/*.png src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
+
 export VITE_DISTRIBUTION=store
 pnpm exec tauri ios build "${args[@]}"
 
