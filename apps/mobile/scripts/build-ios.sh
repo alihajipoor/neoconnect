@@ -54,6 +54,10 @@ rm -rf src-tauri/gen/apple/Externals/*/"$stale"
 # its own previous edits before reapplying.
 node scripts/add-tunnel-extension.mjs
 
+# Before anything expensive: a manifest that is invalid XML is rejected
+# only after a full build, a sign and an upload.
+./scripts/assert-privacy-manifests.sh
+
 # The app icon, applied after the project is generated.
 #
 # `tauri ios init` writes Tauri's own placeholder icons into
@@ -68,7 +72,10 @@ node scripts/add-tunnel-extension.mjs
 cp src-tauri/icons/ios/*.png src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
 
 export VITE_DISTRIBUTION=store
-pnpm exec tauri ios build "${args[@]}"
+# bash 3.2 (what macOS ships) treats an empty array as unset under
+# `set -u`, so the plain "${args[@]}" aborts a build invoked with no
+# arguments at all -- which is every release build.
+pnpm exec tauri ios build ${args[@]+"${args[@]}"}
 
 # After, not before: `tauri ios build` runs `pnpm build` itself, so
 # dist/ is only the store bundle once that has finished. Checking first

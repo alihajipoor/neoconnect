@@ -7,8 +7,8 @@
 
   Every entry below is derived from something checkable rather than
   chosen. The collected data types are the four the app's own disclosure
-  screen lists to the user before anything else happens -- email and
-  account ID, support messages, connection diagnostics -- so this file
+  screen lists to the user before anything else happens — email and
+  account ID, support messages, connection diagnostics — so this file
   and that screen cannot drift apart without one of them looking wrong.
   Server-side connection records are covered by the diagnostics entry;
   they are the same category of data and are already disclosed.
@@ -17,7 +17,7 @@
   on 2026-09-23, not from a guess about what Tauri might do: stat,
   fstat and lstat appear (file timestamp), and NSUserDefaults is
   resolved through the Objective-C runtime. The system-boot-time API is
-  deliberately absent here -- mach_absolute_time is reached only from
+  deliberately absent here — mach_absolute_time is reached only from
   the tunnel extension, which carries its own manifest saying so.
 
   Nothing here is tracking. There is no advertising SDK, no analytics
@@ -66,7 +66,7 @@
 			<false/>
 			<key>NSPrivacyCollectedDataTypePurposes</key>
 			<array>
-				<string>NSPrivacyCollectedDataTypePurposeCustomerSupport</string>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
 			</array>
 		</dict>
 		<dict>
