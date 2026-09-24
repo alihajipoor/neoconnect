@@ -74,10 +74,16 @@ export function Settings({
   gamingSection?: ReactNode;
 }) {
   const { t } = useI18n();
-  // Custom stays the landing pane. Gaming sits above it in the rail
-  // because it is the coarser choice, but moving where this screen opens
-  // is a change to a habit people already have.
-  const [section, setSection] = useState<SectionId>("custom");
+  // Custom stays the landing pane where it exists. Gaming sits above it
+  // in the rail because it is the coarser choice, but moving where this
+  // screen opens is a change to a habit people already have.
+  //
+  // Null until something is chosen, rather than defaulting to "custom"
+  // outright: iOS has no Custom pane, so a hardcoded default opened this
+  // screen on a section with no tab and no content -- a blank page with
+  // nothing selected. The landing pane is now whichever section is
+  // actually first, which is Custom wherever Custom exists.
+  const [chosen, setChosen] = useState<SectionId | null>(null);
 
   const sections: { id: SectionId; label: string; icon: typeof AppWindow }[] = [
     // Gaming above Custom: it is the coarser choice of the two -- it
@@ -88,7 +94,16 @@ export function Settings({
       : []),
     // Custom mode leads the rest: it is the only one that changes how the
     // VPN behaves, and the only one anybody opens this screen twice for.
-    { id: "custom", label: t("settings.custom"), icon: AppWindow },
+    //
+    // Conditional on the pane existing, like gaming above it. iOS
+    // passes null -- per-app routing there belongs to the system --
+    // and without this the tab rendered anyway and opened an empty
+    // pane. It also sat first, so the strip scrolled the selected
+    // tab half out of view to reach it, which is most of what
+    // "the settings page looks weird" was.
+    ...(customSection
+      ? [{ id: "custom" as const, label: t("settings.custom"), icon: AppWindow }]
+      : []),
     { id: "general", label: t("settings.general"), icon: Languages },
     // Between the everyday settings and the account ones, because that
     // is what it is: something you reach for when the product has gone
@@ -97,6 +112,8 @@ export function Settings({
     { id: "repair", label: t("settings.repair"), icon: Wrench },
     { id: "account", label: t("settings.account"), icon: KeyRound },
   ];
+
+  const section = chosen ?? sections[0]?.id ?? "general";
 
   return (
     <div className="mx-auto flex h-full w-full max-w-3xl flex-col gap-5 p-5">
@@ -115,11 +132,19 @@ export function Settings({
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 sm:flex-row sm:gap-5">
-        {/* A column when there is room, a scrolling row when there is
-            not -- the window is resizable and gets narrow. */}
+        {/* A column when there is room, a wrapping row when there is
+            not -- the window is resizable, and a phone is narrower
+            than either.
+        
+            Wrapping rather than scrolling. A scrolling strip clipped
+            its own tabs at both edges with nothing to say it could
+            be scrolled, and the browser scrolled the selected tab
+            partway out of view to bring it on screen. The labels are
+            short enough to fit two rows at phone width, and all of
+            them visible at once is the point of a tab strip. */}
         <nav
           aria-label={t("settings.sections")}
-          className="flex shrink-0 gap-1 overflow-x-auto sm:w-44 sm:flex-col sm:overflow-visible"
+          className="flex shrink-0 flex-wrap gap-1 sm:w-44 sm:flex-col sm:flex-nowrap"
         >
           {sections.map(({ id, label, icon: Icon }) => {
             const active = id === section;
@@ -127,7 +152,7 @@ export function Settings({
               <button
                 key={id}
                 type="button"
-                onClick={() => setSection(id)}
+                onClick={() => setChosen(id)}
                 aria-current={active ? "page" : undefined}
                 className={cn(
                   "press relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors",
