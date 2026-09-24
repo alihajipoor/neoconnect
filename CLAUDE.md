@@ -10,6 +10,36 @@ product — the hosting panel at **neoxify.com**, in the `neoxify-panel`
 repo. Different codebase, different servers, different credentials. Do
 not carry anything between them.
 
+## Where this repo lives
+
+`/Users/alihajipoor/Developer/neoconnect`. **Not** the old path under
+`~/Desktop/Claude/Neoxify/`.
+
+It was moved on 2026-09-23 because macOS syncs Desktop to iCloud, and
+that actively corrupts a build tree. Two distinct failures in one day:
+
+- **Eviction.** Under disk pressure macOS turns file contents into
+  `dataless` placeholders. 97 tracked files and part of `node_modules`
+  became unreadable -- reads failing with `ETIMEDOUT` and `Unknown system
+  error -81` on plainly local files, which reads as filesystem corruption
+  and is not. Tracked files were recoverable with `git show HEAD:<path>`;
+  `node_modules` needed a reinstall.
+- **Duplication.** iCloud copies files it thinks conflict, appending
+  " 2". That reached `.git/index`, `.git/refs/heads/main`, and the
+  generated Xcode project -- where `mobile 2.xcodeproj` made every build
+  fail with *"you have modified your package name from mobile 2 to
+  mobile"*. Cleaning them was not enough: the next build produced
+  `mobile 3.xcodeproj`. It was happening faster than the build could run.
+
+The old directory may still be on the Desktop. Do not work in it.
+
+`mv` is the wrong way to move it: macOS treats the FileProvider-backed
+Desktop as a separate volume, so it copies rather than renames, and it
+hung for fifteen minutes having written nothing. Clone from GitHub
+instead and copy back only what is gitignored and expensive -- the Go
+xcframework (`plugins/vpn/tunnel/Frameworks`) and the fetched
+`seed-bundle.json`. That took two minutes.
+
 ## One machine now — read this first
 
 Until 2026-08-30 work ran on two machines in parallel: a **Windows** box
