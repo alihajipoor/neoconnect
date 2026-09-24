@@ -183,7 +183,15 @@ class NeoxifyVpnPlugin: Plugin {
                     server: args.server, username: args.username, password: args.password)
                 invoke.resolve()
             } catch {
-                invoke.reject("could not start IKEv2: \(error.localizedDescription)")
+                // Domain and code as well as the text. NEVPNManager
+                // rejects a profile with descriptions like "permission
+                // denied" that name neither what was denied nor to whom,
+                // and the code is the only part that distinguishes a
+                // configuration iOS would not accept from one it would
+                // not start. Without it every cause reads the same in a
+                // support message.
+                let ns = error as NSError
+                invoke.reject("could not start IKEv2: \(ns.localizedDescription) [\(ns.domain) \(ns.code)]")
             }
         }
     }

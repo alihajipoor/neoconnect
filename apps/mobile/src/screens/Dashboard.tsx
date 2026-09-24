@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
+import { displayedRoute } from "@shared/lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "@shared/lib/customer";
 import { logout } from "@shared/lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "@shared/lib/types";
@@ -732,22 +733,18 @@ export function Dashboard({
     onLoggedOut();
   }
 
-  /** The route this screen should name, which is the one a connect will
-   * actually dial.
+  /** The route this screen should name.
    *
-   * The pinned choice leads, and the provisioned route only fills in
-   * when nothing is pinned. They can disagree: switching the route
-   * through another device changes what the backend has provisioned
-   * while this app keeps dialling what its customer picked here. When
-   * that happened the SERVER tile read de-germany and every connect went
-   * to fr-france -- the app naming one server and using another, which
-   * is the same shape of lie as a false "Connected". */
+   * While nothing is up this is the pinned choice, which is what a
+   * connect will dial first; once an engine is up it is the route the
+   * ladder actually settled on. Both halves exist because the tile got
+   * each of them wrong in turn -- naming a route the app had stopped
+   * dialling, and then naming a pin the ladder had walked past. See
+   * `displayedRoute`, which holds the decision so the two clients cannot
+   * drift and so it can be tested without an unreachable server. */
   const currentRoute = useMemo(
-    () =>
-      routes.find((r) => r.id === chosenRouteId) ??
-      routes.find((r) => r.id === protocolUser?.routeId) ??
-      null,
-    [routes, protocolUser, chosenRouteId],
+    () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId),
+    [routes, protocolUser, chosenRouteId, connectionState],
   );
 
   /** Null cap means unlimited, which is a different thing from a cap we
