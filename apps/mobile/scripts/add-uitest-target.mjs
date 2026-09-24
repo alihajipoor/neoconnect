@@ -24,6 +24,12 @@ const TARGET = "NeoxifyUITests";
 const APP = "mobile_iOS";
 const team = process.env.APPLE_DEVELOPMENT_TEAM ?? "";
 
+// The script is baked into the scheme rather than passed at run time.
+// xcodebuild's TEST_RUNNER_<NAME> did not reach the runner -- the test
+// fell back to its default every time, silently, which looks exactly
+// like a harness that does not work. Regenerating is a second and
+// removes the guesswork.
+
 let text = readFileSync(spec, "utf8");
 
 // Strip and reapply, like the extension script, so running twice is
@@ -38,15 +44,26 @@ const target = `
     platform: iOS
     sources:
       - path: ${rel}
-    dependencies:
-      - target: ${APP}
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.neoxify.mobile.uitests
-        # Named so XCUITest knows which app it is driving. Without it the
-        # bundle builds and then fails at launch with a message about the
-        # target application, not about this setting.
+        # TEST_TARGET_NAME is what tells XCUITest which app it drives.
+        # Without it, XCUIApplication(bundleIdentifier:) never resolves --
+        # debugDescription returns only the query chain and every lookup
+        # misses, which looks like an empty screen rather than a missing
+        # setting.
+        #
+        # The scheme still builds only this target, so the app's Build
+        # Rust Code phase -- which needs an RPC server only tauri ios
+        # build starts -- is not run.
         TEST_TARGET_NAME: ${APP}
+        # No dependency on the app target, for that same reason.
+        # Either one makes this scheme build the app target, whose Build
+        # Rust Code phase shells out to tauri ios xcode-script and needs
+        # an RPC server only tauri ios build starts -- so the test run
+        # dies on a refused connection to localhost, a mile from anything
+        # to do with testing. The test attaches to the installed app by
+        # bundle id instead.
         IPHONEOS_DEPLOYMENT_TARGET: "15.0"
         SWIFT_VERSION: "5.0"${team ? `\n        DEVELOPMENT_TEAM: ${team}` : ""}
 `;
@@ -60,11 +77,12 @@ schemes:
   ${TARGET}:
     build:
       targets:
-        ${APP}: all
         ${TARGET}: [test]
     test:
       targets:
         - ${TARGET}
+      environmentVariables:
+        NEOXIFY_SCRIPT: ${JSON.stringify(process.env.NEOXIFY_SCRIPT ?? "dump")}
 `;
 
 writeFileSync(spec, text);

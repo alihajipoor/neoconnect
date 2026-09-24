@@ -21,7 +21,16 @@ final class RemoteControl: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = true
-        app = XCUIApplication()
+        // By bundle id, not XCUIApplication(), so this drives whatever
+        // is already installed rather than building the app itself.
+        //
+        // Building it from here is not possible: the app target's "Build
+        // Rust Code" phase shells out to `tauri ios xcode-script`, which
+        // talks to an RPC server only `tauri ios build` starts, so a
+        // plain `xcodebuild test` dies on a refused connection to
+        // localhost. Decoupling also means a UI run costs seconds rather
+        // than a full Rust rebuild.
+        app = XCUIApplication(bundleIdentifier: "com.neoxify.mobile")
 
         // The VPN consent alert belongs to Springboard, not to the app,
         // and it blocks the first connect of a fresh install. An
@@ -43,7 +52,12 @@ final class RemoteControl: XCTestCase {
         let script = ProcessInfo.processInfo.environment["NEOXIFY_SCRIPT"] ?? "dump"
         app.launch()
 
-        for rawLine in script.split(separator: "\n") {
+        // Split on both, because a multi-line value does not survive
+        // being passed through xcodebuild's argument list -- the runner
+        // received nothing and silently fell back to the default. A
+        // semicolon-separated one-liner does survive.
+        let separators = CharacterSet(charactersIn: "\n;")
+        for rawLine in script.components(separatedBy: separators) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty || line.hasPrefix("#") { continue }
             let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
@@ -63,12 +77,16 @@ final class RemoteControl: XCTestCase {
                 print("NEOXIFY-ASSERT \(arg) -> \(found ? "present" : "ABSENT")")
                 XCTAssertTrue(found, "\(arg) is not on screen")
             case "text":
-                // Everything readable, which is how the runner learns the
-                // exit address and the session timer without a screenshot.
-                for element in app.staticTexts.allElementsBoundByIndex where !element.label.isEmpty {
-                    print("NEOXIFY-TEXT \(element.label)")
+                // Parsed out of one tree snapshot, not enumerated.
+                // `allElementsBoundByIndex` resolves every node, and against
+                // a WKWebView that times out -- "Failed to resolve query:
+                // Timed out while evaluating", which reads as the app being
+                // unreachable rather than the query being too broad.
+                for label in labels(in: app.debugDescription) {
+                    print("NEOXIFY-TEXT \(label)")
                 }
             case "dump":
+                print("NEOXIFY-STATE exists=\(app.exists) state=\(app.state.rawValue)")
                 print("NEOXIFY-TREE \(app.debugDescription)")
             case "screenshot":
                 let shot = XCTAttachment(screenshot: app.screenshot())
@@ -78,10 +96,12 @@ final class RemoteControl: XCTestCase {
             default:
                 XCTFail("unknown verb: \(verb)")
             }
-            // Nudges the interruption monitor, which only fires on the
-            // next interaction after an alert appears -- without this a
-            // consent dialog sits there and every later step misses.
-            app.activate()
+            // No activate() here. It was meant to nudge the interruption
+            // monitor, which fires on the next interaction after an alert
+            // appears -- but activating an app attached by bundle id
+            // fails with "Failed to launch", aborting the run after the
+            // first step. The monitor fires on the taps the script does
+            // anyway, which is the only time it matters.
         }
         print("NEOXIFY-DONE")
     }
@@ -93,15 +113,33 @@ final class RemoteControl: XCTestCase {
     private func firstMatch(_ needle: String) -> XCUIElement? {
         let pools = [app.buttons, app.staticTexts, app.otherElements, app.links, app.images]
         for pool in pools {
-            let exact = pool[needle]
+            let exact = pool[needle].firstMatch
             if exact.exists { return exact }
         }
         for pool in pools {
+            // `.firstMatch` short-circuits; `allElementsBoundByIndex`
+            // resolves the whole tree and times out on a web view.
             let predicate = NSPredicate(format: "label CONTAINS[c] %@", needle)
-            let found = pool.matching(predicate).allElementsBoundByIndex.first { $0.exists }
-            if let found { return found }
+            let found = pool.matching(predicate).firstMatch
+            if found.exists { return found }
         }
         return nil
+    }
+
+    /// Pulls the label out of each line of a tree snapshot. The snapshot
+    /// prints them as `label: 'Connected'`, which is the only reliable
+    /// way to read this app's text: it is a web view, so almost nothing
+    /// is a native control and the element pools are close to empty.
+    private func labels(in dump: String) -> [String] {
+        var out: [String] = []
+        for line in dump.components(separatedBy: "\n") {
+            guard let range = line.range(of: "label: '") else { continue }
+            let rest = line[range.upperBound...]
+            guard let end = rest.range(of: "'") else { continue }
+            let text = String(rest[..<end.lowerBound])
+            if !text.isEmpty && !out.contains(text) { out.append(text) }
+        }
+        return out
     }
 
     private func tap(_ needle: String) throws {
