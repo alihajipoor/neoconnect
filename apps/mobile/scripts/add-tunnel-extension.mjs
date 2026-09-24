@@ -38,6 +38,22 @@ const DEPLOYMENT_TARGET = "15.0";
 // which is the Tauri plugin Swift package for the app process -- the two
 // are built into different binaries and must not share a directory.
 const tunnel = join(mobile, "plugins", "vpn", "tunnel");
+
+// The signing team, for the extension only.
+//
+// Tauri sets DEVELOPMENT_TEAM on the app target from this variable and
+// knows nothing about the extension, so without this the app signs and
+// the extension does not -- "Signing for NeoxifyTunnel requires a
+// development team", pointing at an editor pane that does not exist for
+// a generated project.
+//
+// Read from the environment rather than written down. It is not a
+// secret -- it is in the subject of every certificate the team issues --
+// but a generated project is the wrong place to fix an identity, and CI
+// signs nothing.
+const team = process.env.APPLE_DEVELOPMENT_TEAM
+  ? `\n        DEVELOPMENT_TEAM: ${process.env.APPLE_DEVELOPMENT_TEAM}`
+  : "";
 // One directory per bundle, because the file has to be called
 // PrivacyInfo.xcprivacy on disk. XcodeGen's `name:` renames the
 // reference in the project navigator, not the file that gets copied,
@@ -133,7 +149,7 @@ const extension = `
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.neoxify.mobile.tunnel
-        PRODUCT_NAME: ${EXT_TARGET}
+        PRODUCT_NAME: ${EXT_TARGET}${team}
         # Go's net package calls into the system resolver, so the
         # framework leaves _res_9_nsearch undefined until libresolv is
         # linked. Without it the extension fails at link time with a

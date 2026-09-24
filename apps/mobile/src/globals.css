@@ -25,6 +25,27 @@
     /* Chrome's overscroll glow inside a WebView reads as the app coming
        loose from its own frame. */
     overscroll-behavior-y: none;
+    /* No pinch-zoom. A native app does not zoom, and this one zooming
+       is how a customer first notices it is a web view -- reported
+       from a real phone as "the UI is weird, I shouldn't be able to
+       zoom". `pan-x pan-y` keeps scrolling and drops the pinch. */
+    touch-action: pan-x pan-y;
+    /* iOS inflates the font of a block it decides is too narrow to
+       read, which silently breaks a layout built to a fixed scale --
+       the same class of weirdness as the zoom, and harder to spot
+       because it only fires on some screens. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  /* On html too. The three mechanisms are not interchangeable:
+     the viewport's user-scalable governs page scale, touch-action
+     governs the gesture, and a double-tap zoom is handled by
+     neither on its own. */
+  html {
+    touch-action: pan-x pan-y;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
   /* Keeps content clear of the notch, the status bar and the gesture
@@ -42,5 +63,16 @@
      element, on top of the app's own press animation. */
   * {
     -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Long-pressing a control otherwise raises iOS's Copy / Look Up
+     callout over it. Scoped to controls rather than everything,
+     because Support.tsx deliberately relies on its text staying
+     selectable -- its own comment says so: the clipboard can
+     refuse, and selecting by hand is the fallback. */
+  button,
+  a,
+  [role="button"] {
+    -webkit-touch-callout: none;
   }
 }
