@@ -27,6 +27,26 @@ if [ "${1:-}" = "--" ]; then shift; args=("$@"); fi
 rm -rf src-tauri/gen/apple/build/*/Neoxify.app
 rm -rf src-tauri/gen/apple/build/mobile_iOS.xcarchive
 
+# The Rust staticlib for the configuration we are NOT building.
+#
+# Tauri copies libapp.a into Externals/<arch>/<configuration>/, and the
+# Xcode target copies the whole Externals folder into the bundle. Once
+# both a debug and a release copy exist for the same arch, two copy
+# commands target the same path and the build fails outright:
+#
+#   error: Multiple commands produce '.../Neoxify.app/libapp.a'
+#
+# Nothing says the second one is stale, and the error names Xcode's
+# DerivedData rather than the directory to clear. One debug build left
+# behind by a manual xcodebuild invocation was enough to break every
+# release build after it.
+if printf '%s\n' "${args[@]:-}" | grep -q -- "--debug"; then
+  stale=release
+else
+  stale=debug
+fi
+rm -rf src-tauri/gen/apple/Externals/*/"$stale"
+
 # Regenerated every time, because the Xcode project is generated and a
 # new Swift file added to the extension is otherwise simply not in it.
 # That failure reads as "cannot find type X in scope", which looks like
