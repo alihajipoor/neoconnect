@@ -38,8 +38,30 @@ Proven on sg1 in this order.
    - `chain.pem`   -> `/etc/swanctl/x509ca/chain.pem`
    - `privkey.pem` -> `/etc/swanctl/private/<node>.key`, mode 600
 3. Write `/etc/swanctl/conf.d/neoxify.conf` -- the `connections` and
-   `pools` blocks. Copy the working file from sg1 verbatim; the local
-   `id` must be the node's hostname, matching the certificate.
+   `pools` blocks. Copy the working file from sg1 verbatim.
+
+   **The local `id` must be the hostname clients are given to dial, not
+   the node's own name.** These stopped being the same thing when the
+   panel began handing out mirror hostnames, and this instruction said
+   "the node's hostname" for long enough that every node was configured
+   that way. The result: IKE_SA_INIT succeeded, then every IKE_AUTH
+   failed, on every client. iOS and Android both pin the remote identity
+   to the address they dialled -- Android has no way not to -- so a
+   server asserting a different name is rejected however good its
+   certificate is. It had never once established an SA. The certificate
+   is not the thing to check here; it already carries both names in its
+   SAN, which is why this looked fine from the node.
+
+   Verify with `swanctl --list-conns` and compare the `id:` under local
+   public key authentication against the `endpointHost` the panel
+   publishes for that node. They must match exactly.
+
+   Read the certificate out of whatever file is in `/etc/swanctl/x509`
+   rather than assuming `node.pem`. One node names it after the host
+   instead, and a check that opens a fixed filename reports "the
+   certificate does not cover this name" for a certificate that does --
+   which is the wrong diagnosis in the more expensive direction, since
+   it sends you to reissue a certificate that is fine.
 4. Write `/etc/swanctl/conf.d/neoxify-users.conf` containing an empty
    `secrets { }`, mode 600. The agent owns this file from then on and
    rewrites it wholesale; the installer must not put users in it.
@@ -64,6 +86,15 @@ reports the connection and pool loaded. That is necessary, not
 sufficient: prove it by connecting a real client to the hostname and
 confirming traffic egresses, the same standard every other protocol here
 was held to.
+
+Two things that look like proof and are not. A reply to a raw
+IKE_SA_INIT proves only that UDP reaches charon -- no certificate or
+identity is exchanged that early, so a node with the identity bug above
+answers it perfectly. And dialling one node from another fails at chain
+validation regardless: `/etc/swanctl/x509ca` holds only this node's own
+chain, so the initiator has no ISRG root and reports `no trusted RSA
+public key found`, which reads exactly like an identity mismatch. Real
+clients carry a full trust store and do not hit it. Use a phone.
 
 ## What is deliberately missing
 
