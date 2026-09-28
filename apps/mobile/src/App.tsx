@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
 import { Login } from "@shared/screens/Login";
@@ -121,6 +122,7 @@ export default function App() {
     setScreen("verify");
   }
 
+  function renderScreen() {
   if (screen === "loading") {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -208,11 +210,14 @@ export default function App() {
   if (screen === "plans" && !IS_STORE_BUILD) {
     return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;
   }
-  return (
-    <Dashboard
-      onLoggedOut={() => setScreen("login")}
-      onBrowsePlans={() => setScreen("plans")}
-      onOpenSettings={() => setScreen("settings")}
-    />
-  );
+    return (
+      <Dashboard
+        onLoggedOut={() => setScreen("login")}
+        onBrowsePlans={() => setScreen("plans")}
+        onOpenSettings={() => setScreen("settings")}
+      />
+    );
+  }
+
+  return <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>;
 }
