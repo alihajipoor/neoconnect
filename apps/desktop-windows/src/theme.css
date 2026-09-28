@@ -171,6 +171,31 @@
     cursor: text;
   }
 
+  /* Touch targets, on touch devices only.
+   *
+   * Every Button in the app is h-9 -- 36px -- which is right for a
+   * 400x640 desktop window driven by a mouse and 8px under Apple's 44pt
+   * minimum for a finger. The header icon buttons are the worst case:
+   * size-9 square, so 36x36 for a target the guidelines put at 44x44.
+   *
+   * Applied as min-* rather than by editing two dozen call sites, and
+   * gated on `pointer: coarse` so the desktop client keeps its compact
+   * controls -- the same reasoning the scrollbar rules above use. min-*
+   * wins over the `size-9`/`h-9` utilities without needing !important,
+   * because it is a different property rather than a louder one.
+   *
+   * Anchors are deliberately excluded. A link inside a sentence is
+   * inline, and giving it a 44px box either does nothing or breaks the
+   * line it sits in; the controls that actually need this are buttons. */
+  @media (pointer: coarse) {
+    button,
+    [role="button"],
+    summary {
+      min-height: 44px;
+      min-width: 44px;
+    }
+  }
+
   ::selection {
     background: rgba(139, 92, 246, 0.4);
     color: #fff;

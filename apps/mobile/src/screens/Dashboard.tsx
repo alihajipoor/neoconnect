@@ -799,7 +799,7 @@ export function Dashboard({
   }
 
   return (
-    <div className="relative mx-auto flex h-full w-full max-w-xl flex-col gap-3 p-4">
+    <div className="relative mx-auto flex h-full w-full max-w-xl flex-col gap-3 p-4 sm:max-w-2xl sm:gap-4 sm:p-6 md:h-auto md:max-h-[46rem] lg:max-w-3xl lg:gap-5 lg:p-8">
       <header className="flex items-center justify-between">
         <Logo />
         <div className="flex items-center gap-1">
@@ -810,7 +810,7 @@ export function Dashboard({
             aria-label={t("nav.settings")}
             className="size-9 justify-center px-0"
           >
-            <SettingsIcon className="size-4" />
+            <SettingsIcon className="size-4 sm:size-5" />
           </Button>
           <Button variant="ghost" onClick={handleLogout} className="h-9 px-2 text-xs">
             {t("nav.signOut")}
