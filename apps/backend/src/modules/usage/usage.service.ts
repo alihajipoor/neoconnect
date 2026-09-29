@@ -4,7 +4,7 @@ import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { EmailService } from "../email/email.service";
-import { lowDataWarningEmail, expiringSoonEmail } from "../email/templates";
+import { lowDataWarningEmail, expiringSoonEmail, toLocale } from "../email/templates";
 
 export interface UsageDeltaInput {
   externalUserId: string;
@@ -229,7 +229,7 @@ export class UsageService {
             id: true,
             dataCapBytes: true,
             dataUsedBytes: true,
-            customer: { select: { email: true } },
+            customer: { select: { email: true, locale: true } },
           },
           orderBy: { id: "asc" },
           take,
@@ -243,7 +243,10 @@ export class UsageService {
         );
         for (const s of nearCap) {
           const remainingGb = Number(s.dataCapBytes! - s.dataUsedBytes) / Number(BYTES_PER_GB);
-          await this.emailService.sendMail({ to: s.customer.email, ...lowDataWarningEmail(remainingGb) });
+          await this.emailService.sendMail({
+            to: s.customer.email,
+            ...lowDataWarningEmail(toLocale(s.customer.locale), remainingGb),
+          });
           await this.prisma.subscription.update({
             where: { id: s.id },
             data: { lowDataWarningSentAt: new Date() },
@@ -274,7 +277,7 @@ export class UsageService {
           // Same narrowing as the low-data sweep above, and for the same
           // reason: the only thing wanted off the customer is where to
           // send.
-          select: { id: true, expireAt: true, customer: { select: { email: true } } },
+          select: { id: true, expireAt: true, customer: { select: { email: true, locale: true } } },
           orderBy: { id: "asc" },
           take,
         }),
@@ -284,7 +287,10 @@ export class UsageService {
             1,
             Math.ceil((s.expireAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000)),
           );
-          await this.emailService.sendMail({ to: s.customer.email, ...expiringSoonEmail(daysRemaining) });
+          await this.emailService.sendMail({
+            to: s.customer.email,
+            ...expiringSoonEmail(toLocale(s.customer.locale), daysRemaining),
+          });
           await this.prisma.subscription.update({
             where: { id: s.id },
             data: { expiryWarningSentAt: new Date() },

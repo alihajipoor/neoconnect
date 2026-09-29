@@ -7,6 +7,7 @@ import {
   Header,
   Param,
   HttpStatus,
+  Patch,
   Post,
   Req,
   Res,
@@ -29,6 +30,7 @@ import { renderInvoiceHtml } from "../invoices/invoice-document";
 import { CreatePaymentDto } from "../billing/dto/create-payment.dto";
 import { CreateOwnSubscriptionDto } from "./dto/create-own-subscription.dto";
 import { SwitchRouteDto } from "./dto/switch-route.dto";
+import { SetLocaleDto } from "./dto/set-locale.dto";
 import { ReferralsService } from "../referrals/referrals.service";
 import { VouchersService } from "../vouchers/vouchers.service";
 import { AppLinksService } from "../app-links/app-links.service";
@@ -92,6 +94,26 @@ export class CustomerController {
   @Delete("me")
   deleteAccount(@CurrentCustomer() customer: AuthenticatedCustomer) {
     return this.customersService.deleteOwnAccount(customer.sub);
+  }
+
+  /** The language to write to this customer in, changed after signup.
+   *
+   * Registration captures it once, but a language is a setting somebody
+   * changes -- typically right after first launch, because the app
+   * guessed from the OS locale or from the country the CDN reported
+   * (I18nProvider in apps/desktop-windows/src/lib/i18n.tsx) and guessed
+   * wrong. Without this, the guess made at signup would be the language
+   * of every email for the life of the account, and the one screen that
+   * fixes it would visibly not fix it.
+   *
+   * Its own endpoint rather than a general "update my profile": this is
+   * the only field on Customer a customer may set about themselves, and
+   * a PATCH that accepts a body shaped like the row is a PATCH that
+   * eventually accepts a field it should not.
+   */
+  @Patch("locale")
+  setLocale(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: SetLocaleDto) {
+    return this.customersService.setLocale(customer.sub, dto.locale);
   }
 
   @Get("subscriptions")

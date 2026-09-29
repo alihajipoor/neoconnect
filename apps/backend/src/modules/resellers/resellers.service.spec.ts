@@ -16,16 +16,24 @@ import { ResellersService } from "./resellers.service";
  * non-empty string would have passed throughout the entire outage.
  */
 describe("ResellersService activation links", () => {
-  /** Captures what would have been handed to the mail transport. */
-  function build(websiteUrl?: string) {
+  /** Captures what would have been handed to the mail transport.
+   *
+   * `recipientLocale` is what a customer row would say if the address
+   * already belongs to one. Null is the ordinary case for this email --
+   * a reseller handing a subscription to somebody who has never heard of
+   * us -- and means the recipient gets English. */
+  function build(websiteUrl?: string, recipientLocale: string | null = null) {
     const sendMail = jest.fn().mockResolvedValue(true);
+    const findUnique = jest
+      .fn()
+      .mockResolvedValue(recipientLocale === null ? null : { locale: recipientLocale });
     const service = new ResellersService(
-      {} as any,
+      { customer: { findUnique } } as any,
       { sendMail } as any,
       { get: jest.fn().mockResolvedValue(websiteUrl ? { websiteUrl } : {}) } as any,
       { get: jest.fn().mockReturnValue(undefined) } as any,
     );
-    return { service, sendMail };
+    return { service, sendMail, findUnique };
   }
 
   it("sends a link the live host actually resolves", async () => {
@@ -61,6 +69,35 @@ describe("ResellersService activation links", () => {
 
     const sent = sendMail.mock.calls[0][0];
     expect(sent.text).toContain("https://staging.neoxify.net/account/?voucher=ABCD2345EFGH");
+  });
+
+  it("writes in English to somebody who has no account yet", async () => {
+    // The one send here whose recipient may be a complete stranger --
+    // that is the point of a reseller voucher. There is nothing to read
+    // a language off, and guessing from the reseller would be guessing
+    // from the wrong person: resellers here sell across borders.
+    const { service, sendMail } = build();
+
+    await service["sendVoucherEmail"]("ABCD2345EFGH", "Pro", "stranger@example.com", null);
+
+    const sent = sendMail.mock.calls[0][0];
+    expect(sent.html).toContain('<html dir="ltr" lang="en">');
+  });
+
+  it("writes in Persian to an address we already know reads Persian", async () => {
+    // The case worth catching: a reseller renewing somebody they have
+    // sold to before. Sending that customer English again would be a
+    // regression we introduced knowingly.
+    const { service, sendMail, findUnique } = build(undefined, "fa");
+
+    await service["sendVoucherEmail"]("ABCD2345EFGH", "Pro", "returning@example.com", null);
+
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { email: "returning@example.com" },
+      select: { locale: true },
+    });
+    const sent = sendMail.mock.calls[0][0];
+    expect(sent.html).toContain('<html dir="rtl" lang="fa">');
   });
 
   it("percent-encodes a code rather than letting it break out of the query", async () => {

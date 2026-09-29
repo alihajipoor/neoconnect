@@ -26,10 +26,22 @@ export class AnnouncementsService {
 
     const subscriptions = await this.prisma.subscription.findMany({
       where,
-      select: { customer: { select: { email: true } } },
+      select: { customer: { select: { email: true, locale: true } } },
       distinct: ["customerId"],
     });
-    const recipients = [...new Set(subscriptions.map((s) => s.customer.email))];
+    // Deduplicated on the address, as before -- `distinct` is on
+    // customerId, so two subscriptions held by one customer are already
+    // one row, but an address shared by two customer records was not.
+    // The locale rides along rather than being looked up again in the
+    // worker: the worker would then need a database of its own reason to
+    // exist, and the list is already in hand here.
+    const byEmail = new Map<string, { email: string; locale: string }>();
+    for (const s of subscriptions) {
+      if (!byEmail.has(s.customer.email)) {
+        byEmail.set(s.customer.email, { email: s.customer.email, locale: s.customer.locale });
+      }
+    }
+    const recipients = [...byEmail.values()];
 
     if (recipients.length > 0) {
       await this.queue.add("send", { subject: dto.subject, body: dto.body, recipients });

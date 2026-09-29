@@ -177,7 +177,9 @@ describe("InvoicesService.markOverdue marks every due invoice", () => {
     const args = findMany.mock.calls[0][0] as {
       select: { customer: { select: Record<string, boolean> } };
     };
-    expect(Object.keys(args.select.customer.select)).toEqual(["email"]);
+    // `locale` was added alongside it when the emails became bilingual,
+    // and is read on the join for the same reason the address is.
+    expect(Object.keys(args.select.customer.select).sort()).toEqual(["email", "locale"]);
     // And `lineItemsJson`, the largest column on the model, is not read.
     expect(args.select).not.toHaveProperty("lineItemsJson");
   });

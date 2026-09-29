@@ -154,12 +154,19 @@ describe("UsageService sweeps process every due row, not the first batch of them
 
     // `include: { customer: true }` here used to read every candidate's
     // passwordHash and both one-time codes to use one field.
+    //
+    // `locale` joined `email` in 2026-09-28's bilingual emails: it is
+    // the second thing a send needs off the customer, and reading it
+    // here is what stops the sweep doing a findUnique per row to get it.
+    // The column list is asserted exactly rather than loosely, because
+    // the way this regressed the first time was somebody widening the
+    // projection without noticing what came with it.
     const args = findMany.mock.calls[0][0] as {
       select: { customer: { select: Record<string, boolean> } };
       include?: unknown;
     };
     expect(args.include).toBeUndefined();
-    expect(Object.keys(args.select.customer.select)).toEqual(["email"]);
+    expect(Object.keys(args.select.customer.select).sort()).toEqual(["email", "locale"]);
   });
 
   it("warns every subscription expiring soon, across batches", async () => {

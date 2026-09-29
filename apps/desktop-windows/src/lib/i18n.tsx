@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { load, type Store } from "@tauri-apps/plugin-store";
-import { publicRequest } from "./api";
+import { apiRequest, publicRequest } from "./api";
+import { getTokens } from "./session";
 
 /** Supported interface languages.
  *
@@ -1370,6 +1371,45 @@ async function detectCountry(): Promise<string | undefined> {
   }
 }
 
+/** The language the interface is showing, readable from outside React.
+ *
+ * Exists so the non-component code that talks to the server can say
+ * which language this customer is reading -- `register()` in ./auth.ts
+ * has to send it, and it is not a component and has no hook to call.
+ * The alternative is threading the language down through every screen
+ * that might eventually need it, which makes remembering to pass it the
+ * screen's job and guarantees one that forgets.
+ *
+ * Kept in step by the provider below rather than being a second source
+ * of truth: React state stays the one that renders. */
+let current: Language = detectLanguage();
+
+export function currentLanguage(): Language {
+  return current;
+}
+
+/** Tells the server which language to write this customer's email in.
+ *
+ * Best-effort and deliberately silent. The language has already changed
+ * on screen by the time this runs, and a customer who switched to
+ * Persian on a blocked network must not be shown an error about it --
+ * the worst case is that the next email is in the old language, which is
+ * exactly what used to happen to everyone.
+ *
+ * Skipped without a session: registration carries the locale in its own
+ * body, and before that there is no account to set it on. */
+async function pushLocale(next: Language): Promise<void> {
+  try {
+    if (!(await getTokens())) return;
+    await apiRequest("/customer/locale", {
+      method: "PATCH",
+      body: JSON.stringify({ locale: next }),
+    });
+  } catch {
+    // See above: nothing on screen depends on this having worked.
+  }
+}
+
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [language, setLanguageState] = useState<Language>(detectLanguage);
 
@@ -1400,6 +1440,15 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     })();
   }, []);
 
+  // Catches every route that changes the language without going through
+  // setLanguage(): the saved choice being restored from disk, and the
+  // country probe deciding on Persian. setLanguage writes the mirror
+  // itself as well, synchronously, because a screen can call register()
+  // in the same tick as the switch and this effect has not run yet.
+  useEffect(() => {
+    current = language;
+  }, [language]);
+
   const dir = LANGUAGES[language].dir;
 
   // Set on the document rather than a wrapper element so it reaches
@@ -1412,6 +1461,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
 
   const setLanguage = useCallback((next: Language) => {
     setLanguageState(next);
+    current = next;
     void (async () => {
       try {
         await (await getStore()).set(STORE_KEY, next);
@@ -1420,6 +1470,11 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
         // failing to remember it is better than refusing to switch.
       }
     })();
+    // Only on an explicit switch, not on the detection paths above. The
+    // detected language is a guess this app makes on every launch; the
+    // switch is the customer saying which one is right, and that is the
+    // one worth telling the server about.
+    void pushLocale(next);
   }, []);
 
   const t = useCallback(

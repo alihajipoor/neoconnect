@@ -14,6 +14,7 @@ const SAFE_SELECT = {
   telegramId: true,
   referralCode: true,
   status: true,
+  locale: true,
   emailVerifiedAt: true,
   createdAt: true,
   updatedAt: true,
@@ -77,6 +78,19 @@ export class CustomersService {
       },
       select: SAFE_SELECT,
     });
+  }
+
+  /** Sets the language this customer is written to in.
+   *
+   * Deliberately not routed through update() above: that one revokes
+   * every session when it sees a password, and a customer tapping a
+   * language switch must not be signed out of their own app. Narrow on
+   * purpose -- the caller is the customer themselves, and the only field
+   * they are trusted with about their own row is this one.
+   */
+  async setLocale(id: string, locale: "en" | "fa") {
+    await this.get(id);
+    return this.prisma.customer.update({ where: { id }, data: { locale }, select: SAFE_SELECT });
   }
 
   /** A password in the DTO is hashed and swapped for the raw value before

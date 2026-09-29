@@ -253,6 +253,24 @@ model Customer {
   telegramId                     String?
   referralCode                   String?        @unique
   status                         CustomerStatus @default(ACTIVE)
+  // Which language to write to this customer in. Set from the client at
+  // registration and updated when they change it in the app -- the
+  // clients have been English/Persian since launch, and every email this
+  // backend sends was English until 2026-09-28.
+  //
+  // Defaulted rather than nullable so no send path has to decide what
+  // null means. A nullable column would give every one of the eleven
+  // call sites a third case to get right ("unknown" versus "English"),
+  // and they would not all get it right the same way. "en" is both the
+  // language these templates were written in first and the answer a
+  // client that never sends the field should get.
+  //
+  // A plain String, not an enum: the set of languages is decided by what
+  // the clients ship, and widening a Postgres enum is a migration that
+  // has to land before the client release rather than after it. Read
+  // back through `toLocale()` in the email templates, which narrows
+  // anything unrecognised to "en".
+  locale                         String         @default("en")
   // Refresh-token revocation counter, same purpose/pattern as
   // AdminUser.tokenVersion -- bumping it invalidates every outstanding
   // customer refresh token at once (logout-all-sessions).

@@ -23,25 +23,25 @@ describe("email verification link", () => {
     it("points at an https page when the public API address is known", () => {
       // Webmail strips custom URI schemes, so the button has to be a
       // normal https link to be clickable at all.
-      const { html } = verificationEmail("tok-123", "123456", "https://panel.example.com/api");
+      const { html } = verificationEmail("en", "tok-123", "123456", "https://panel.example.com/api");
       expect(html).toContain("https://panel.example.com/api/customer-auth/verify-email/open?token=tok-123");
       expect(html).not.toContain('href="neoconnect://');
     });
 
     it("tolerates a trailing slash on the configured address", () => {
-      const { html } = verificationEmail("tok-123", "123456", "https://panel.example.com/api/");
+      const { html } = verificationEmail("en", "tok-123", "123456", "https://panel.example.com/api/");
       expect(html).toContain("https://panel.example.com/api/customer-auth/verify-email/open?token=tok-123");
     });
 
     it("falls back to the app link when no public address is configured", () => {
       // Worse, but not broken: the 6-digit code is the primary path and
       // works regardless.
-      const { html } = verificationEmail("tok-123", "123456", undefined);
+      const { html } = verificationEmail("en", "tok-123", "123456", undefined);
       expect(html).toContain("neoconnect://verify-email?token=tok-123");
     });
 
     it("always shows the code, which works in every mail client", () => {
-      const { html } = verificationEmail("tok-123", "123456", "https://panel.example.com/api");
+      const { html } = verificationEmail("en", "tok-123", "123456", "https://panel.example.com/api");
       expect(html).toContain("1 2 3 4 5 6");
     });
   });
