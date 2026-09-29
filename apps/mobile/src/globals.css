@@ -59,6 +59,32 @@
     box-sizing: border-box;
   }
 
+  /* Tablets. The screens are laid out for a phone and stretch to fill
+     whatever they are given, so on a 13" iPad the connect control ended
+     up floating in roughly 900px of empty space -- correct, and reading
+     as a phone app that had been pulled out of shape.
+
+     Centring the app column instead of stretching it turns that into a
+     deliberate composition: the same screen, sized to itself, sitting in
+     the middle of the display. Done here rather than per screen so
+     Settings, Support and the rest inherit it, and gated at the tablet
+     breakpoint so phones are untouched -- there the column filling the
+     screen is exactly right.
+
+     The safe-area padding above still applies; this only changes how the
+     remaining space is distributed. */
+  @media (min-width: 768px) {
+    #root {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #root > * {
+      max-height: 100%;
+    }
+  }
+
   /* A tap on Android otherwise flashes a grey box over the tapped
      element, on top of the app's own press animation. */
   * {

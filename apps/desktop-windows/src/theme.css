@@ -171,6 +171,31 @@
     cursor: text;
   }
 
+  /* Touch targets, on touch devices only.
+   *
+   * Every Button in the app is h-9 -- 36px -- which is right for a
+   * 400x640 desktop window driven by a mouse and 8px under Apple's 44pt
+   * minimum for a finger. The header icon buttons are the worst case:
+   * size-9 square, so 36x36 for a target the guidelines put at 44x44.
+   *
+   * Applied as min-* rather than by editing two dozen call sites, and
+   * gated on `pointer: coarse` so the desktop client keeps its compact
+   * controls -- the same reasoning the scrollbar rules above use. min-*
+   * wins over the `size-9`/`h-9` utilities without needing !important,
+   * because it is a different property rather than a louder one.
+   *
+   * Anchors are deliberately excluded. A link inside a sentence is
+   * inline, and giving it a 44px box either does nothing or breaks the
+   * line it sits in; the controls that actually need this are buttons. */
+  @media (pointer: coarse) {
+    button,
+    [role="button"],
+    summary {
+      min-height: 44px;
+      min-width: 44px;
+    }
+  }
+
   ::selection {
     background: rgba(139, 92, 246, 0.4);
     color: #fff;
@@ -379,6 +404,107 @@
     animation: breathe 3.5s ease-in-out infinite;
   }
 
+  /* Navigation. Screens arrive from the side they logically come from
+     and leave the way they came, which is what makes "back" feel like
+     back rather than another arrival.
+
+     The distance is small -- 24px, not a full screen width. A phone OS
+     slides the whole view because it is moving between apps' worth of
+     content; here the header and the shell stay put, and a long throw
+     would read as the app coming apart and reassembling. */
+  @keyframes screen-enter {
+    from {
+      opacity: 0;
+      transform: translateX(24px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes screen-enter-back {
+    from {
+      opacity: 0;
+      transform: translateX(-24px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  /* Leaving is faster than arriving, and fades further. The screen you
+     are going to is the one worth watching; the one you left should get
+     out of the way rather than compete for attention on the way out. */
+  @keyframes screen-leave {
+    from {
+      opacity: 1;
+      transform: none;
+    }
+    to {
+      opacity: 0;
+      transform: translateX(-16px);
+    }
+  }
+  @keyframes screen-leave-back {
+    from {
+      opacity: 1;
+      transform: none;
+    }
+    to {
+      opacity: 0;
+      transform: translateX(16px);
+    }
+  }
+  /* Sheets -- the location picker, which Server, Protocol and Change
+     location all open. It is a full-screen overlay that covered the
+     app in one frame and vanished the same way.
+
+     Up from the bottom rather than in from the side, because it is not
+     a sibling screen: it is a layer arriving over the one you are on,
+     and the direction should say so. Further travel than a screen
+     change (32px) since it is a larger surface, and it fades as it
+     goes so the dashboard reads through it for a moment rather than
+     being replaced by a hard edge. */
+  @keyframes sheet-enter {
+    from {
+      opacity: 0;
+      transform: translateY(32px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes sheet-leave {
+    from {
+      opacity: 1;
+      transform: none;
+    }
+    to {
+      opacity: 0;
+      transform: translateY(32px);
+    }
+  }
+  .sheet-enter {
+    animation: sheet-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .sheet-leave {
+    animation: sheet-leave 180ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
+  .screen-enter {
+    animation: screen-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .screen-enter-back {
+    animation: screen-enter-back 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .screen-leave {
+    animation: screen-leave 180ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+  .screen-leave-back {
+    animation: screen-leave-back 180ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
   /* Respect the OS setting -- a VPN client is a utility, and someone who
      has asked their machine to stop animating means it. */
   @media (prefers-reduced-motion: reduce) {
@@ -386,7 +512,13 @@
     .animate-spin-slow,
     .animate-shimmer::after,
     .animate-rise,
-    .animate-breathe {
+    .animate-breathe,
+    .screen-enter,
+    .screen-enter-back,
+    .screen-leave,
+    .screen-leave-back,
+    .sheet-enter,
+    .sheet-leave {
       animation: none;
     }
   }
