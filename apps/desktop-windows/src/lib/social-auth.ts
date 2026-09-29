@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { API_BASE_URL } from "./config";
+import { currentLanguage, DICTIONARIES } from "./i18n";
+import type { TranslationKey } from "./i18n";
 
 /** Getting a customer through a provider's sign-in, per platform.
  *
@@ -75,6 +77,17 @@ function startUrl(provider: "google" | "facebook", locale: string): string {
   return `${base}/customer-auth/social/${provider}/start?locale=${encodeURIComponent(locale)}`;
 }
 
+/** Translation outside a component.
+ *
+ * The messages below are thrown, not rendered, so they cannot reach
+ * useI18n() -- but they end up in front of a customer all the same, and
+ * an English sentence in an otherwise Persian app is a bug. Reads the
+ * same dictionaries the hook does.
+ */
+function translate(key: TranslationKey): string {
+  return DICTIONARIES[currentLanguage()][key];
+}
+
 /** Pulls the result out of the callback the browser came back with.
  *
  * `neoconnect://social-callback?handoff=...` on success, `?error=...`
@@ -88,11 +101,16 @@ export function readCallback(raw: string): SocialOutcome | null {
   const error = url.searchParams.get("error");
   if (error) {
     if (error === "cancelled") return null;
+    // The server could not start the flow at all, which in practice
+    // means that provider has no credentials configured. Distinct from
+    // a failure, because nothing the customer does will fix it and the
+    // other buttons still work.
+    if (error === "unavailable") throw new Error(translate("auth.socialUnavailable"));
     const detail = url.searchParams.get("detail");
-    throw new Error(detail ?? "That sign-in did not work. Please try again.");
+    throw new Error(detail ?? translate("auth.socialFailed"));
   }
   const code = url.searchParams.get("handoff");
-  if (!code) throw new Error("That sign-in did not work. Please try again.");
+  if (!code) throw new Error(translate("auth.socialFailed"));
   return { kind: "handoff", code };
 }
 
@@ -178,7 +196,7 @@ export async function startSocialSignIn(
 ): Promise<SocialOutcome | null> {
   if (provider === "apple") {
     if (!appleSignInAvailable()) {
-      throw new Error("Sign in with Apple is not available on this device.");
+      throw new Error(translate("auth.socialUnavailable"));
     }
     const result = await invoke<{ identityToken: string | null }>("vpn_sign_in_with_apple");
     // The sheet was dismissed. Apple reports that as an error code

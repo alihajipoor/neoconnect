@@ -116,7 +116,17 @@ export class CustomerAuthController {
     @Res() res: Response,
   ) {
     const provider = this.browserProvider(providerParam);
-    res.redirect(this.oauthFlow.start(provider, locale ?? "en"));
+    try {
+      res.redirect(this.oauthFlow.start(provider, locale ?? "en"));
+    } catch {
+      // Almost always a provider with no credentials configured. Letting
+      // the exception through would render Nest's JSON error page inside
+      // the sign-in browser, and the customer's only way out is to
+      // dismiss it -- which the app reads as a cancellation and reports
+      // as nothing at all. So the button would appear to do nothing.
+      // Bouncing straight back to the app turns that into a message.
+      res.redirect(this.oauthFlow.appCallback({ error: "unavailable" }));
+    }
   }
 
   /** Where the provider sends the browser back.

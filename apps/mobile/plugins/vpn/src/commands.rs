@@ -5,7 +5,14 @@
 //! root of a library crate those two collide with each other. Official
 //! Tauri plugins put their commands in a submodule for the same reason.
 
-use crate::{Apps, Empty, Granted, Ikev2Profile, TunnelGone, VpnStatus, WireGuardProfile, XrayProfile};
+use crate::{
+    AppleIdentity, Apps, Empty, Granted, Ikev2Profile, TunnelGone, VpnStatus, WireGuardProfile,
+    XrayProfile,
+};
+// Only the mobile branch of vpn_open_auth_session names this; the
+// desktop fallback returns an error without ever building one.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use crate::AuthCallback;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::Vpn;
 use tauri::{AppHandle, Runtime};
@@ -208,6 +215,71 @@ pub async fn vpn_list_apps<R: Runtime>(app: AppHandle<R>) -> Result<Apps, String
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
+        Err(unavailable())
+    }
+}
+
+/// Sign in with Apple, through the system sheet.
+///
+/// iOS only, and not by preference: `AuthenticationServices`' native
+/// sheet is an Apple-platform API. Everywhere else Sign in with Apple
+/// means the web flow, which needs a Services ID and a signing key this
+/// project has not set up -- so Android gets the same honest refusal a
+/// desktop build gets rather than a sheet that cannot open.
+#[tauri::command]
+pub async fn vpn_sign_in_with_apple<R: Runtime>(app: AppHandle<R>) -> Result<AppleIdentity, String> {
+    #[cfg(target_os = "ios")]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<AppleIdentity>("signInWithApple", ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = app;
+        Err("Sign in with Apple is only available on iOS".to_string())
+    }
+}
+
+/// Opens a provider's sign-in page and waits for it to come back.
+///
+/// iOS uses `ASWebAuthenticationSession` and Android a Custom Tab. Both
+/// are the platform's "sign in somewhere else and come back" primitive,
+/// and both matter for the same reason an in-app WebView would not do:
+/// they carry the customer's existing provider cookies, so somebody
+/// already signed in to Google taps once rather than typing a password
+/// into a window our app could be reading. Google refuses to serve its
+/// sign-in page inside an embedded WebView at all, for exactly that
+/// reason.
+///
+/// Returns the callback URL, or nothing if the sheet was dismissed.
+#[tauri::command]
+pub async fn vpn_open_auth_session<R: Runtime>(
+    app: AppHandle<R>,
+    url: String,
+    scheme: String,
+) -> Result<Option<String>, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            url: String,
+            scheme: String,
+        }
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<AuthCallback>("openAuthSession", Args { url, scheme })
+            .map(|c| c.url)
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        // The desktop client does not come through here at all: it opens
+        // the real browser and catches the neoconnect:// link the
+        // deep-link plugin already registers. See social-auth.ts.
+        let _ = (app, url, scheme);
         Err(unavailable())
     }
 }

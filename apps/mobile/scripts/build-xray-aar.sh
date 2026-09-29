@@ -104,6 +104,9 @@ gomobile bind \
 # resources would not make it into the library's own .aar. Both pieces
 # are supported separately: a plain .jar as a file dependency, and the
 # native library through jniLibs, which a library module does package.
-python "$here/scripts/unpack-xray-aar.py" "$aar" "$libs"
+# python3, not python: macOS has shipped no `python` since Monterey,
+# so this line failed on a clean Mac after the slow part had already
+# succeeded, leaving a built .aar and no xray-classes.jar beside it.
+python3 "$here/scripts/unpack-xray-aar.py" "$aar" "$libs"
 
 echo "built $aar"

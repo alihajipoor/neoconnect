@@ -140,6 +140,29 @@ pub struct Apps {
     pub apps: Vec<InstalledApp>,
 }
 
+/// What Sign in with Apple's native sheet came back with.
+///
+/// `None` means the customer dismissed it. Apple reports that as an
+/// error code rather than a result, and the Swift side turns it into an
+/// absent token here -- a cancellation is not a failure, and surfacing
+/// it as one would show an error to somebody who just pressed Cancel.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleIdentity {
+    pub identity_token: Option<String>,
+}
+
+/// The callback URL a web auth session ended on.
+///
+/// `None` again means dismissed. Wrapped in a struct rather than
+/// returned bare because Tauri's Android bridge resolves a call with a
+/// JSObject, so a lone string has nowhere to live -- the same reason
+/// `Granted` exists.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthCallback {
+    pub url: Option<String>,
+}
+
 /// "The call succeeded and has nothing to say."
 ///
 /// Deserialised by hand because the two platforms do not agree on what

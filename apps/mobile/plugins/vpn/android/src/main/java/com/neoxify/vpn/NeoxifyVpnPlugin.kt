@@ -653,4 +653,47 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
          * hangs does not stall the whole failover sweep. */
         private const val TUNNEL_START_TIMEOUT_MS = 20_000L
     }
+
+    @InvokeArg
+    class AuthSessionArgs {
+        lateinit var url: String
+
+        /** Carried for symmetry with iOS, where ASWebAuthenticationSession
+         * has to be told which scheme to intercept. Android learns the
+         * same thing from the intent filter on SocialAuthActivity, so
+         * nothing reads this here. Dropping it from the Rust command
+         * would mean two call shapes for one operation. */
+        var scheme: String? = null
+    }
+
+    /**
+     * Opens a provider's sign-in page and waits for the redirect.
+     *
+     * The work is all in SocialAuthActivity; this is the bridge between
+     * it and the call that is waiting. Sign in with Apple has no branch
+     * here at all: it is an Apple-platform API, and the Rust command
+     * refuses off iOS rather than pretending Android has a sheet.
+     */
+    @Command
+    fun openAuthSession(invoke: Invoke) {
+        val args = invoke.parseArgs(AuthSessionArgs::class.java)
+        val intent = Intent(activity, SocialAuthActivity::class.java)
+            .putExtra(SocialAuthActivity.EXTRA_URL, args.url)
+        startActivityForResult(invoke, intent, "authSessionResult")
+    }
+
+    @ActivityCallback
+    fun authSessionResult(invoke: Invoke, result: ActivityResult) {
+        // A dismissed tab resolves with no URL rather than rejecting.
+        // The customer pressed Back; telling them their sign-in failed
+        // would be both wrong and alarming.
+        val callback = result.data?.getStringExtra(SocialAuthActivity.EXTRA_CALLBACK)
+        val answer = JSObject()
+        if (result.resultCode == Activity.RESULT_OK && callback != null) {
+            answer.put("url", callback)
+        } else {
+            answer.put("url", null as String?)
+        }
+        invoke.resolve(answer)
+    }
 }
