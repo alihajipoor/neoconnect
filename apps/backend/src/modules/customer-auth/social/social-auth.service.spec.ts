@@ -33,10 +33,9 @@ describe("resolving a customer from a social identity", () => {
       },
       customer: {
         findUnique: jest.fn().mockResolvedValue(null),
-        create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
-          id: "new",
-          ...data,
-        })),
+        create: jest.fn(({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({ id: "new", ...data }),
+        ),
       },
       ...over,
     };
@@ -84,7 +83,7 @@ describe("resolving a customer from a social identity", () => {
     const prisma = prismaDouble({
       customer: {
         findUnique: jest.fn().mockResolvedValue({ id: "victim", status: "ACTIVE" }),
-        create: jest.fn(async () => ({ id: "new" })),
+        create: jest.fn(() => Promise.resolve({ id: "new" })),
       },
     });
     await serviceWith(prisma).resolveCustomer("FACEBOOK", { ...verified, emailVerified: false }, "en");

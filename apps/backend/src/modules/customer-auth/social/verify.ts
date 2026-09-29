@@ -49,6 +49,32 @@ async function jwks(url: string, forceRefresh = false): Promise<Jwk[]> {
   return body.keys;
 }
 
+/** A claim, but only if it really is a string.
+ *
+ * Every field below is read out of JSON that arrived over the wire, so
+ * its type is whatever the token said it was. `String(x)` on an object
+ * yields the literal "[object Object]" -- harmless for `iss`, which
+ * then simply matches no expected issuer, and not harmless at all for
+ * `email`, which would become a customer's address. Narrowing once here
+ * means none of the call sites has to remember which is which.
+ */
+function claimString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/** The subject, which is the one claim nothing works without.
+ *
+ * It is the join key for the whole feature: every account is found by
+ * (provider, subject). Defaulting a missing or non-string one to "" would
+ * make every such token resolve to the same account, so this refuses
+ * instead.
+ */
+function requiredSubject(payload: Record<string, unknown>): string {
+  const sub = claimString(payload.sub);
+  if (!sub) throw new Error("token carries no subject");
+  return sub;
+}
+
 function b64urlToBuffer(value: string): Buffer {
   return Buffer.from(value.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
@@ -97,14 +123,19 @@ async function verifyRs256(
 
   const payload = JSON.parse(b64urlToBuffer(payloadB64).toString("utf8")) as Record<string, unknown>;
 
-  const iss = String(payload.iss ?? "");
+  const iss = claimString(payload.iss) ?? "";
   if (!expectedIssuers.includes(iss)) throw new Error(`token issued by ${iss || "nobody"}`);
 
   // `aud` is a string or an array depending on the provider and the
   // flow; both shapes are legal, so both are handled rather than
   // assuming the one seen first in testing.
   const audClaim = payload.aud;
-  const auds = Array.isArray(audClaim) ? audClaim.map(String) : [String(audClaim ?? "")];
+  // Non-string entries are dropped rather than stringified: an audience
+  // that is not a string cannot be one of ours, and turning it into
+  // "[object Object]" only invents a value to compare.
+  const auds = Array.isArray(audClaim)
+    ? audClaim.map(claimString).filter((a): a is string => a !== null)
+    : [claimString(audClaim) ?? ""];
   if (!auds.some((a) => expectedAudiences.includes(a))) {
     throw new Error("token was issued for a different application");
   }
@@ -124,8 +155,8 @@ export async function verifyGoogle(idToken: string, clientIds: string[]): Promis
     clientIds,
   );
   return {
-    subject: String(payload.sub),
-    email: payload.email ? String(payload.email) : null,
+    subject: requiredSubject(payload),
+    email: claimString(payload.email),
     emailVerified: payload.email_verified === true || payload.email_verified === "true",
   };
 }
@@ -151,8 +182,8 @@ export async function verifyApple(identityToken: string, audiences: string[]): P
     audiences,
   );
   return {
-    subject: String(payload.sub),
-    email: payload.email ? String(payload.email) : null,
+    subject: requiredSubject(payload),
+    email: claimString(payload.email),
     // Apple sends this as the string "true"/"false" as often as a bool.
     emailVerified: payload.email_verified === true || payload.email_verified === "true",
   };

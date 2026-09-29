@@ -164,14 +164,16 @@ describe("OauthFlowService", () => {
     it("posts the code with the client secret and returns Google's id_token", async () => {
       const fetchMock = jest.spyOn(global, "fetch").mockResolvedValue({
         ok: true,
-        json: async () => ({ id_token: "the-id-token", access_token: "ignored" }),
+        json: () => Promise.resolve({ id_token: "the-id-token", access_token: "ignored" }),
       } as Response);
 
       await expect(service().exchangeCode("google", "the-code")).resolves.toBe("the-id-token");
 
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe("https://oauth2.googleapis.com/token");
-      const body = new URLSearchParams(String((init as RequestInit).body));
+      // The body is the URLSearchParams exchangeCode built, so it is read
+      // as one rather than stringified through String().
+      const body = (init as RequestInit).body as URLSearchParams;
       expect(body.get("code")).toBe("the-code");
       expect(body.get("client_secret")).toBe("google-client-secret");
       expect(body.get("grant_type")).toBe("authorization_code");
@@ -180,7 +182,7 @@ describe("OauthFlowService", () => {
     it("returns Facebook's access_token, since Facebook signs nothing", async () => {
       jest.spyOn(global, "fetch").mockResolvedValue({
         ok: true,
-        json: async () => ({ access_token: "the-access-token" }),
+        json: () => Promise.resolve({ access_token: "the-access-token" }),
       } as Response);
       await expect(service().exchangeCode("facebook", "c")).resolves.toBe("the-access-token");
     });
@@ -189,7 +191,7 @@ describe("OauthFlowService", () => {
       jest.spyOn(global, "fetch").mockResolvedValue({
         ok: false,
         status: 400,
-        text: async () => "redirect_uri_mismatch",
+        text: () => Promise.resolve("redirect_uri_mismatch"),
       } as Response);
       await expect(service().exchangeCode("google", "c")).rejects.toThrow(
         /could not complete that sign-in/,
@@ -201,7 +203,7 @@ describe("OauthFlowService", () => {
       // successful sign-in for an empty subject.
       jest.spyOn(global, "fetch").mockResolvedValue({
         ok: true,
-        json: async () => ({}),
+        json: () => Promise.resolve({}),
       } as Response);
       await expect(service().exchangeCode("google", "c")).rejects.toThrow(BadRequestException);
     });
