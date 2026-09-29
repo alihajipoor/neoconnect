@@ -455,6 +455,43 @@
       transform: translateX(16px);
     }
   }
+  /* Sheets -- the location picker, which Server, Protocol and Change
+     location all open. It is a full-screen overlay that covered the
+     app in one frame and vanished the same way.
+
+     Up from the bottom rather than in from the side, because it is not
+     a sibling screen: it is a layer arriving over the one you are on,
+     and the direction should say so. Further travel than a screen
+     change (32px) since it is a larger surface, and it fades as it
+     goes so the dashboard reads through it for a moment rather than
+     being replaced by a hard edge. */
+  @keyframes sheet-enter {
+    from {
+      opacity: 0;
+      transform: translateY(32px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes sheet-leave {
+    from {
+      opacity: 1;
+      transform: none;
+    }
+    to {
+      opacity: 0;
+      transform: translateY(32px);
+    }
+  }
+  .sheet-enter {
+    animation: sheet-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .sheet-leave {
+    animation: sheet-leave 180ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
   .screen-enter {
     animation: screen-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
@@ -479,7 +516,9 @@
     .screen-enter,
     .screen-enter-back,
     .screen-leave,
-    .screen-leave-back {
+    .screen-leave-back,
+    .sheet-enter,
+    .sheet-leave {
       animation: none;
     }
   }

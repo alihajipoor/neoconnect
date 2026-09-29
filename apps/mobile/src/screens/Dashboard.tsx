@@ -1,27 +1,64 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Clock, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
+import {
+  ChevronRight,
+  Clock,
+  Globe,
+  MapPin,
+  Settings as SettingsIcon,
+  Shield,
+  Tag,
+} from "lucide-react";
 import { displayedRoute } from "@shared/lib/displayed-route";
-import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "@shared/lib/customer";
+import {
+  getAvailableRoutes,
+  getMe,
+  getProtocolUsers,
+  getSubscriptions,
+} from "@shared/lib/customer";
 import { logout } from "@shared/lib/auth";
-import type { Customer, ProtocolUser, RouteOption, Subscription } from "@shared/lib/types";
+import type {
+  Customer,
+  ProtocolUser,
+  RouteOption,
+  Subscription,
+} from "@shared/lib/types";
 import { formatBytes } from "@shared/lib/utils";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
-import { captureBaselineIp, verifyEgress, type BaselineIp } from "@shared/lib/egress";
-import { classifyConnectionError, type ClassifiedError } from "@shared/lib/connection-errors";
+import {
+  captureBaselineIp,
+  verifyEgress,
+  type BaselineIp,
+} from "@shared/lib/egress";
+import {
+  classifyConnectionError,
+  type ClassifiedError,
+} from "@shared/lib/connection-errors";
 import { orderCandidates } from "@shared/lib/failover";
 import { Button, Card, Stat } from "@shared/components/ui";
-import { ConnectOrb, type ConnectionState } from "@shared/components/ConnectOrb";
+import {
+  ConnectOrb,
+  type ConnectionState,
+} from "@shared/components/ConnectOrb";
 import { Logo } from "@shared/components/Logo";
 import { Flag } from "@shared/components/Flag";
 import { LocationPicker } from "@shared/components/LocationPicker";
+import { Sheet } from "@shared/components/Sheet";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
-import { clearSnapshot, loadSnapshot, saveSnapshot } from "@shared/lib/credential-cache";
+import {
+  clearSnapshot,
+  loadSnapshot,
+  saveSnapshot,
+} from "@shared/lib/credential-cache";
 import { refreshConnectionConfig } from "@shared/lib/connection-config";
 import { useRefreshOnResume } from "@shared/lib/resume";
-import { outcomeFromError, reportAttempt, rungsFrom } from "@shared/lib/attempts";
+import {
+  outcomeFromError,
+  reportAttempt,
+  rungsFrom,
+} from "@shared/lib/attempts";
 import { loadAllowedApps } from "../lib/per-app";
 import { protocolSupported } from "../lib/platform";
 import {
@@ -35,7 +72,12 @@ import {
   vpnStatus,
   type VpnStatus,
 } from "../lib/vpn";
-import { buildXrayConfig, isXrayProtocol, TUN_DNS, TUN_MTU } from "../lib/xray-config";
+import {
+  buildXrayConfig,
+  isXrayProtocol,
+  TUN_DNS,
+  TUN_MTU,
+} from "../lib/xray-config";
 import { loadChosenRoute, saveChosenRoute } from "../lib/route-preference";
 
 /** The Android dashboard.
@@ -142,7 +184,9 @@ async function waitForTeardown(): Promise<boolean> {
 function stateFromStatus(status: VpnStatus): ConnectionState {
   if (!status.connected) return "disconnected";
   if (status.lastHandshakeAgeSecs === null) return "connected";
-  return status.lastHandshakeAgeSecs <= HANDSHAKE_STALE_SECS ? "connected" : "degraded";
+  return status.lastHandshakeAgeSecs <= HANDSHAKE_STALE_SECS
+    ? "connected"
+    : "degraded";
 }
 
 /** The subscription worth showing. PENDING and CANCELLED entitle nobody
@@ -168,7 +212,9 @@ function ikev2Server(user: ProtocolUser): string {
 }
 
 function usableSubscription(all: Subscription[]): Subscription | null {
-  const real = all.filter((s) => s.status !== "PENDING" && s.status !== "CANCELLED");
+  const real = all.filter(
+    (s) => s.status !== "PENDING" && s.status !== "CANCELLED",
+  );
   return real.find((s) => s.status === "ACTIVE") ?? real[0] ?? null;
 }
 
@@ -225,8 +271,10 @@ export function Dashboard({
   const [protocolUsers, setProtocolUsers] = useState<ProtocolUser[]>([]);
   const [chosenRouteId, setChosenRouteId] = useState<string | null>(null);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
-  const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
-  const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
+  const [connectionState, setConnectionState] =
+    useState<ConnectionState>("disconnected");
+  const [connectionError, setConnectionError] =
+    useState<ClassifiedError | null>(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
   /** Set when the customer presses the button during a connect.
    *
@@ -251,7 +299,9 @@ export function Dashboard({
   const [failedOverTo, setFailedOverTo] = useState<string | null>(null);
   /** Set when the chosen server's protocol has no engine in this build,
    * so the reason is a missing feature rather than a blocked network. */
-  const [unsupportedChoice, setUnsupportedChoice] = useState<string | null>(null);
+  const [unsupportedChoice, setUnsupportedChoice] = useState<string | null>(
+    null,
+  );
   /** When the shown data was last fetched, if the server could not be
    * reached this time. Null means everything on screen is current. */
   const [offlineSince, setOfflineSince] = useState<number | null>(null);
@@ -284,10 +334,16 @@ export function Dashboard({
   // Credentials only, and only when the cache is past its horizon. See
   // useRefreshOnResume for why this is not a poll.
   useRefreshOnResume(async () => {
-    const refreshed = await refreshConnectionConfig({ held: protocolUsers, force: true });
+    const refreshed = await refreshConnectionConfig({
+      held: protocolUsers,
+      force: true,
+    });
     if (refreshed.source !== "network") return;
     setProtocolUsers(refreshed.protocolUsers);
-    setProtocolUser((current) => refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current);
+    setProtocolUser(
+      (current) =>
+        refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current,
+    );
   });
 
   useEffect(() => {
@@ -322,7 +378,9 @@ export function Dashboard({
         setRoutes(cached.routes);
         const preferred = preferRouteId ?? chosenRouteId;
         setProtocolUser(
-          cached.protocolUsers.find((u) => u.routeId === preferred) ?? cached.protocolUsers[0] ?? null,
+          cached.protocolUsers.find((u) => u.routeId === preferred) ??
+            cached.protocolUsers[0] ??
+            null,
         );
         setOfflineSince(cached.savedAt);
         setError(null);
@@ -330,7 +388,13 @@ export function Dashboard({
         return;
       }
 
-      setError(!meResult.ok ? meResult.error : !subsResult.ok ? subsResult.error : t("dash.loadFailed"));
+      setError(
+        !meResult.ok
+          ? meResult.error
+          : !subsResult.ok
+            ? subsResult.error
+            : t("dash.loadFailed"),
+      );
       setLoading(false);
       return;
     }
@@ -342,7 +406,11 @@ export function Dashboard({
     setSubscription(sub);
     setProtocolUsers(usersResult.data);
     const chosen = preferRouteId ?? chosenRouteId;
-    setProtocolUser(usersResult.data.find((u) => u.routeId === chosen) ?? usersResult.data[0] ?? null);
+    setProtocolUser(
+      usersResult.data.find((u) => u.routeId === chosen) ??
+        usersResult.data[0] ??
+        null,
+    );
     setLoading(false);
 
     let currentRoutes: RouteOption[] = [];
@@ -387,7 +455,8 @@ export function Dashboard({
   // not a recovery. This becomes the mid-session failover trigger when
   // the Xray engines land.
   useEffect(() => {
-    if (connectionState !== "connected" && connectionState !== "degraded") return;
+    if (connectionState !== "connected" && connectionState !== "degraded")
+      return;
 
     const id = setInterval(async () => {
       let fromStatus: ConnectionState;
@@ -405,9 +474,12 @@ export function Dashboard({
       }
 
       const egress = await verifyEgress(baselineIp);
-      const carrying = egress.state === "throughTunnel" || egress.state === "indeterminate";
+      const carrying =
+        egress.state === "throughTunnel" || egress.state === "indeterminate";
       if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
-      setConnectionState(carrying && fromStatus === "connected" ? "connected" : "degraded");
+      setConnectionState(
+        carrying && fromStatus === "connected" ? "connected" : "degraded",
+      );
     }, HEALTH_POLL_MS);
 
     return () => clearInterval(id);
@@ -518,10 +590,16 @@ export function Dashboard({
     });
     if (refreshed.source === "network") {
       setProtocolUsers(refreshed.protocolUsers);
-      setProtocolUser((current) => refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current);
+      setProtocolUser(
+        (current) =>
+          refreshed.protocolUsers.find((u) => u.id === current?.id) ?? current,
+      );
     }
 
-    const all = refreshed.protocolUsers.length > 0 ? refreshed.protocolUsers : [protocolUser!];
+    const all =
+      refreshed.protocolUsers.length > 0
+        ? refreshed.protocolUsers
+        : [protocolUser!];
     const usable = all.filter((u) => SUPPORTED.has(u.protocol));
 
     // Said before the attempt rather than discovered after it. A customer
@@ -531,7 +609,9 @@ export function Dashboard({
     // ignoring them.
     const chosen = all.find((u) => u.routeId === chosenRouteId) ?? all[0];
     if (chosen && !SUPPORTED.has(chosen.protocol)) {
-      setUnsupportedChoice(customerProtocolLabel(chosen.protocol, chosen.connection?.transport));
+      setUnsupportedChoice(
+        customerProtocolLabel(chosen.protocol, chosen.connection?.transport),
+      );
     }
 
     if (usable.length === 0) {
@@ -590,7 +670,10 @@ export function Dashboard({
       // torn down by the toggle that set the flag, so this only has to
       // stop walking the list.
       if (cancelRef.current) return reportCancelled();
-      const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
+      const label = customerProtocolLabel(
+        candidate.protocol,
+        candidate.connection?.transport,
+      );
 
       // Taken while nothing is up. Captured through a live tunnel it
       // would record the exit address as the "before" value, and every
@@ -606,16 +689,16 @@ export function Dashboard({
       // "Connected".
       if (candidate.protocol === "IKEV2" && allowedApps.length > 0) {
         attempts.push(`${label}: not available with selected apps`);
-      // iOS carries Xray in a packet-tunnel extension and nothing else.
-      // WireGuard and IKEv2 would each need their own provider and
-      // neither is built, so attempting one fails at the system
-      // boundary with a configuration error -- which reads to a customer
-      // as their network being at fault rather than the app lacking a
-      // feature. Skipped with a reason, like the case above.
-      if (!protocolSupported(candidate.protocol)) {
-        attempts.push(`${label}: not supported on this platform`);
-        continue;
-      }
+        // iOS carries Xray in a packet-tunnel extension and nothing else.
+        // WireGuard and IKEv2 would each need their own provider and
+        // neither is built, so attempting one fails at the system
+        // boundary with a configuration error -- which reads to a customer
+        // as their network being at fault rather than the app lacking a
+        // feature. Skipped with a reason, like the case above.
+        if (!protocolSupported(candidate.protocol)) {
+          attempts.push(`${label}: not supported on this platform`);
+          continue;
+        }
         continue;
       }
 
@@ -675,7 +758,8 @@ export function Dashboard({
           // nothing and nothing had failed. Seen twice while testing
           // before it was recognised as a bug rather than the ladder
           // reporting real work.
-          if (chosenRouteId && candidate.routeId !== chosenRouteId) setFailedOverTo(label);
+          if (chosenRouteId && candidate.routeId !== chosenRouteId)
+            setFailedOverTo(label);
           setConnectionState("connected");
           // Successes carry the denominator. A failure count without one
           // cannot distinguish "the tablet build is broken" from "one
@@ -685,7 +769,10 @@ export function Dashboard({
             outcome: "SUCCESS",
             protocol: label,
             routeId: candidate.routeId,
-            attempts: attempts.length > 0 ? rungsFrom([...attempts, `${label}: connected`]) : undefined,
+            attempts:
+              attempts.length > 0
+                ? rungsFrom([...attempts, `${label}: connected`])
+                : undefined,
           });
           return;
         }
@@ -693,7 +780,10 @@ export function Dashboard({
         attempts.push(`${label}: up but not carrying traffic`);
         lastError = {
           kind: "serverUnreachable",
-          messageKey: candidates.length > 1 ? "err.allProtocolsFailed" : "err.notCarryingTraffic",
+          messageKey:
+            candidates.length > 1
+              ? "err.allProtocolsFailed"
+              : "err.notCarryingTraffic",
           detail: `tried ${attempts.length} of ${candidates.length} available\n${attempts.join("\n")}`,
         };
       } catch (err) {
@@ -743,7 +833,14 @@ export function Dashboard({
    * `displayedRoute`, which holds the decision so the two clients cannot
    * drift and so it can be tested without an unreachable server. */
   const currentRoute = useMemo(
-    () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId),
+    () =>
+      displayedRoute(
+        routes,
+        connectionState,
+        protocolUser?.routeId,
+        chosenRouteId,
+        protocolUser?.routeId,
+      ),
     [routes, protocolUser, chosenRouteId, connectionState],
   );
 
@@ -754,7 +851,8 @@ export function Dashboard({
     if (!subscription) return null;
     const used = Number(subscription.dataUsedBytes);
     if (!Number.isFinite(used)) return null;
-    if (subscription.dataCapBytes === null) return { used, cap: null as number | null, percent: 0 };
+    if (subscription.dataCapBytes === null)
+      return { used, cap: null as number | null, percent: 0 };
     const cap = Number(subscription.dataCapBytes);
     if (!Number.isFinite(cap) || cap <= 0) return null;
     return { used, cap, percent: Math.min(100, (used / cap) * 100) };
@@ -764,7 +862,8 @@ export function Dashboard({
    * customer to connect. See subscription-state for why the decision
    * lives outside the component. */
   const endedState = useMemo(
-    () => (subscription ? endedNotice(subscription.status, IS_STORE_BUILD) : null),
+    () =>
+      subscription ? endedNotice(subscription.status, IS_STORE_BUILD) : null,
     [subscription],
   );
 
@@ -812,7 +911,11 @@ export function Dashboard({
           >
             <SettingsIcon className="size-4 sm:size-5" />
           </Button>
-          <Button variant="ghost" onClick={handleLogout} className="h-9 px-2 text-xs">
+          <Button
+            variant="ghost"
+            onClick={handleLogout}
+            className="h-9 px-2 text-xs"
+          >
             {t("nav.signOut")}
           </Button>
         </div>
@@ -829,9 +932,13 @@ export function Dashboard({
         <>
           {offlineSince !== null ? (
             <div className="animate-rise rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
-              <p className="text-xs font-medium text-warning">{t("dash.offlineTitle")}</p>
+              <p className="text-xs font-medium text-warning">
+                {t("dash.offlineTitle")}
+              </p>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {t("dash.offlineHint", { when: new Date(offlineSince).toLocaleString() })}
+                {t("dash.offlineHint", {
+                  when: new Date(offlineSince).toLocaleString(),
+                })}
               </p>
             </div>
           ) : null}
@@ -880,7 +987,8 @@ export function Dashboard({
                           ? t("dash.protected")
                           : connectionState === "degraded"
                             ? t("dash.degraded")
-                            : connectionState === "connecting" || connectionState === "verifying"
+                            : connectionState === "connecting" ||
+                                connectionState === "verifying"
                               ? t("dash.verifying")
                               : t("dash.notProtected")}
                       </p>
@@ -889,7 +997,8 @@ export function Dashboard({
                           ? t("dash.protectedHint")
                           : connectionState === "degraded"
                             ? t("dash.degradedHint")
-                            : connectionState === "connecting" || connectionState === "verifying"
+                            : connectionState === "connecting" ||
+                                connectionState === "verifying"
                               ? t("dash.verifyingHint")
                               : t("dash.notProtectedHint")}
                       </p>
@@ -899,20 +1008,25 @@ export function Dashboard({
                           were a working failover that told nobody. */}
                       {connectionState === "connected" && failedOverTo ? (
                         <p className="mt-1 text-xs text-amber-400/90">
-                          {t("dash.switchedTo")} <span className="font-medium">{failedOverTo}</span>
+                          {t("dash.switchedTo")}{" "}
+                          <span className="font-medium">{failedOverTo}</span>
                         </p>
                       ) : null}
 
                       {unsupportedChoice ? (
                         <p className="mt-1 text-xs text-amber-400/90">
-                          {t("dash.androidWireguardOnly", { protocol: unsupportedChoice })}
+                          {t("dash.androidWireguardOnly", {
+                            protocol: unsupportedChoice,
+                          })}
                         </p>
                       ) : null}
 
                       {connectionState === "connected" && exitIp ? (
                         <p className="mt-1.5 text-xs text-muted-foreground">
                           {t("dash.yourIp")}{" "}
-                          <span className="tabular-nums font-medium text-foreground">{exitIp}</span>
+                          <span className="tabular-nums font-medium text-foreground">
+                            {exitIp}
+                          </span>
                         </p>
                       ) : null}
                     </div>
@@ -920,12 +1034,14 @@ export function Dashboard({
                     <div className="min-h-4 px-2 text-center">
                       {permissionDenied ? (
                         <p className="text-xs text-destructive">
-                          Android needs your permission to create a VPN connection. Tap Connect again and
-                          choose OK.
+                          Android needs your permission to create a VPN
+                          connection. Tap Connect again and choose OK.
                         </p>
                       ) : connectionError ? (
                         <>
-                          <p className="text-xs text-destructive">{t(connectionError.messageKey)}</p>
+                          <p className="text-xs text-destructive">
+                            {t(connectionError.messageKey)}
+                          </p>
                           <details className="mt-1">
                             <summary className="cursor-pointer text-[10px] text-muted-foreground select-none">
                               {t("err.showDetail")}
@@ -944,17 +1060,23 @@ export function Dashboard({
                 )}
               </div>
 
-
               {/* The plan has stopped working. Until now this said so
                   only in the error a connect attempt produced -- text
                   that told the customer to "upgrade or wait for it to
                   renew" on a screen with nothing to press. */}
               {endedState ? (
                 <Card className="ring-brand animate-rise flex flex-col gap-2 text-center">
-                  <p className="text-sm font-semibold">{t(endedState.titleKey)}</p>
-                  <p className="text-xs text-muted-foreground">{t(endedState.bodyKey)}</p>
+                  <p className="text-sm font-semibold">
+                    {t(endedState.titleKey)}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {t(endedState.bodyKey)}
+                  </p>
                   {endedState.showPlansButton ? (
-                    <Button onClick={onBrowsePlans} className="mt-2 w-full justify-center gap-2">
+                    <Button
+                      onClick={onBrowsePlans}
+                      className="mt-2 w-full justify-center gap-2"
+                    >
                       <Tag className="size-4" />
                       {t("dash.renewCta")}
                     </Button>
@@ -971,7 +1093,10 @@ export function Dashboard({
                 <Stat
                   icon={
                     currentRoute ? (
-                      <Flag region={currentRoute.location.region} className="h-3 w-[1rem]" />
+                      <Flag
+                        region={currentRoute.location.region}
+                        className="h-3 w-[1rem]"
+                      />
                     ) : (
                       <Globe className="size-3" />
                     )
@@ -981,7 +1106,9 @@ export function Dashboard({
                   onClick={() => setShowLocationPicker(true)}
                   actionLabel={t("dash.change")}
                   disabledReason={
-                    connectionState === "disconnected" ? undefined : t("dash.disconnectToChange")
+                    connectionState === "disconnected"
+                      ? undefined
+                      : t("dash.disconnectToChange")
                   }
                 />
                 <Stat
@@ -989,13 +1116,18 @@ export function Dashboard({
                   label={t("dash.protocol")}
                   value={
                     protocolUser
-                      ? customerProtocolLabel(protocolUser.protocol, protocolUser.connection?.transport)
+                      ? customerProtocolLabel(
+                          protocolUser.protocol,
+                          protocolUser.connection?.transport,
+                        )
                       : "—"
                   }
                   onClick={() => setShowLocationPicker(true)}
                   actionLabel={t("dash.change")}
                   disabledReason={
-                    connectionState === "disconnected" ? undefined : t("dash.disconnectToChange")
+                    connectionState === "disconnected"
+                      ? undefined
+                      : t("dash.disconnectToChange")
                   }
                 />
                 <Stat
@@ -1015,13 +1147,18 @@ export function Dashboard({
 
               <Card className="animate-rise flex flex-col gap-2.5 py-3">
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-xs font-medium text-muted-foreground">{t("dash.dataUsed")}</span>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    {t("dash.dataUsed")}
+                  </span>
                   <span className="tabular-nums text-xs font-semibold">
                     {usage ? (
                       <>
                         {formatBytes(usage.used)}{" "}
                         <span className="font-normal text-muted-foreground">
-                          / {usage.cap === null ? t("dash.unlimited") : formatBytes(usage.cap)}
+                          /{" "}
+                          {usage.cap === null
+                            ? t("dash.unlimited")
+                            : formatBytes(usage.cap)}
                         </span>
                       </>
                     ) : (
@@ -1060,7 +1197,8 @@ export function Dashboard({
                           : "rounded-full bg-white/6 px-2 py-0.5 text-[10px] font-semibold text-muted-foreground"
                       }
                     >
-                      <span className="tabular-nums">{daysLeft}</span> {t("dash.daysLeft")}
+                      <span className="tabular-nums">{daysLeft}</span>{" "}
+                      {t("dash.daysLeft")}
                     </span>
                   ) : null}
                 </div>
@@ -1093,7 +1231,9 @@ export function Dashboard({
                 <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full bg-primary/15 text-primary">
                   <Tag className="size-5" />
                 </div>
-                <p className="text-sm font-semibold">{t("dash.noSubscription")}</p>
+                <p className="text-sm font-semibold">
+                  {t("dash.noSubscription")}
+                </p>
                 {/* A store build cannot sell, and cannot point at where
                     to buy either -- both stores restrict steering a
                     customer to an outside payment. What it must not do
@@ -1102,11 +1242,18 @@ export function Dashboard({
                     done. So it says plainly what state the account is
                     in and what will happen when that changes. */}
                 {IS_STORE_BUILD ? (
-                  <p className="mt-1 text-xs text-muted-foreground">{t("dash.noPlanStore")}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t("dash.noPlanStore")}
+                  </p>
                 ) : (
                   <>
-                    <p className="mt-1 text-xs text-muted-foreground">{t("dash.noPlanHint")}</p>
-                    <Button onClick={onBrowsePlans} className="mt-4 w-full justify-center gap-2">
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("dash.noPlanHint")}
+                    </p>
+                    <Button
+                      onClick={onBrowsePlans}
+                      className="mt-4 w-full justify-center gap-2"
+                    >
                       <Tag className="size-4" />
                       {t("dash.viewPlans")}
                     </Button>
@@ -1118,28 +1265,30 @@ export function Dashboard({
         </>
       )}
 
-      {showLocationPicker && subscription ? (
-        <LocationPicker
-          subscriptionId={subscription.id}
-          currentRouteId={protocolUser?.routeId}
-          // Latency cannot be measured from inside the tunnel; see
-          // the prop's own note. Anything but "disconnected" means
-          // routes are installed, including the verifying and
-          // degraded states where a tunnel exists but is not
-          // trusted yet.
-          tunnelActive={connectionState !== "disconnected"}
-          onClose={() => setShowLocationPicker(false)}
-          onSwitched={(routeId) => {
-            setChosenRouteId(routeId ?? null);
-            // Best-effort and deliberately not awaited: the customer's
-            // connection should not wait on a disk write, and losing
-            // the preference costs them one re-pick rather than a
-            // connection.
-            void saveChosenRoute(routeId ?? null);
-            void loadAll(routeId);
-          }}
-        />
-      ) : null}
+      <Sheet open={showLocationPicker && subscription !== null}>
+        {subscription ? (
+          <LocationPicker
+            subscriptionId={subscription.id}
+            currentRouteId={protocolUser?.routeId}
+            // Latency cannot be measured from inside the tunnel; see
+            // the prop's own note. Anything but "disconnected" means
+            // routes are installed, including the verifying and
+            // degraded states where a tunnel exists but is not
+            // trusted yet.
+            tunnelActive={connectionState !== "disconnected"}
+            onClose={() => setShowLocationPicker(false)}
+            onSwitched={(routeId) => {
+              setChosenRouteId(routeId ?? null);
+              // Best-effort and deliberately not awaited: the customer's
+              // connection should not wait on a disk write, and losing
+              // the preference costs them one re-pick rather than a
+              // connection.
+              void saveChosenRoute(routeId ?? null);
+              void loadAll(routeId);
+            }}
+          />
+        ) : null}
+      </Sheet>
     </div>
   );
 }

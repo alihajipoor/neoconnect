@@ -42,9 +42,18 @@ const DEPTH: Record<string, number> = {
  * that it never feels like waiting for the app. */
 const DURATION_MS = 220;
 
-export function ScreenTransition({ screenKey, children }: { screenKey: string; children: ReactNode }) {
+export function ScreenTransition({
+  screenKey,
+  children,
+}: {
+  screenKey: string;
+  children: ReactNode;
+}) {
   const [current, setCurrent] = useState({ key: screenKey, node: children });
-  const [leaving, setLeaving] = useState<{ key: string; node: ReactNode } | null>(null);
+  const [leaving, setLeaving] = useState<{
+    key: string;
+    node: ReactNode;
+  } | null>(null);
   const [back, setBack] = useState(false);
 
   // Held in a ref because `children` is a new element on every render:
@@ -72,7 +81,8 @@ export function ScreenTransition({ screenKey, children }: { screenKey: string; c
   // Keep the visible screen's content fresh while it is not transitioning,
   // otherwise state updates inside a screen would stop rendering.
   useEffect(() => {
-    if (leaving === null && current.key === screenKey) setCurrent({ key: screenKey, node: children });
+    if (leaving === null && current.key === screenKey)
+      setCurrent({ key: screenKey, node: children });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [children]);
 
@@ -94,7 +104,10 @@ export function ScreenTransition({ screenKey, children }: { screenKey: string; c
           {leaving.node}
         </div>
       ) : null}
-      <div key={current.key} className={`h-full ${back ? "screen-enter-back" : "screen-enter"}`}>
+      <div
+        key={current.key}
+        className={`h-full ${back ? "screen-enter-back" : "screen-enter"}`}
+      >
         {current.node}
       </div>
     </div>
