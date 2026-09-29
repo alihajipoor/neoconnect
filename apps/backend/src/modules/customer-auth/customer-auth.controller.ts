@@ -7,10 +7,14 @@ import {
   HttpCode,
   HttpStatus,
   Ip,
+  Param,
   Post,
   Query,
+  Res,
+  UnauthorizedException,
   UseGuards,
 } from "@nestjs/common";
+import type { Response } from "express";
 import { LoginGuardService } from "../login-guard/login-guard.service";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
@@ -21,7 +25,9 @@ import { AuthenticatedCustomer } from "./types";
 import { RegisterCustomerDto } from "./dto/register-customer.dto";
 import { LoginDto } from "../auth/dto/login.dto";
 import { SocialLoginDto } from "./dto/social-login.dto";
+import { SocialExchangeDto } from "./dto/social-exchange.dto";
 import { SocialAuthService } from "./social/social-auth.service";
+import { OauthFlowService, type BrowserProvider } from "./social/oauth-flow.service";
 import { RefreshDto } from "../auth/dto/refresh.dto";
 import { VerifyEmailDto } from "./dto/verify-email.dto";
 import { VerifyEmailCodeDto } from "./dto/verify-email-code.dto";
@@ -45,6 +51,7 @@ export class CustomerAuthController {
     private readonly customerAuthService: CustomerAuthService,
     private readonly loginGuard: LoginGuardService,
     private readonly socialAuth: SocialAuthService,
+    private readonly oauthFlow: OauthFlowService,
   ) {}
 
   // Same brute-force reasoning as admin login. Registration no longer
@@ -84,6 +91,107 @@ export class CustomerAuthController {
     const identity = await this.socialAuth.verify(provider, dto.token);
     const customer = await this.socialAuth.resolveCustomer(provider, identity, dto.locale ?? "en");
     return this.customerAuthService.issueTokenPair(customer);
+  }
+
+  private browserProvider(raw: string): BrowserProvider {
+    if (raw !== "google" && raw !== "facebook") {
+      // Apple is a real provider but not a browser one -- it arrives at
+      // POST /social with a native token. Saying so beats "not found".
+      throw new BadRequestException("That provider does not use the browser sign-in flow");
+    }
+    return raw;
+  }
+
+  /** Opens the provider's consent screen.
+   *
+   * The app opens this in a browser rather than calling it, so there is
+   * nothing to return -- it is a redirect, and the app never sees the
+   * provider's authorization code at all. See OauthFlowService.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Get("social/:provider/start")
+  socialStart(
+    @Param("provider") providerParam: string,
+    @Query("locale") locale: string | undefined,
+    @Res() res: Response,
+  ) {
+    const provider = this.browserProvider(providerParam);
+    res.redirect(this.oauthFlow.start(provider, locale ?? "en"));
+  }
+
+  /** Where the provider sends the browser back.
+   *
+   * Everything that can go wrong here -- a declined consent screen, an
+   * expired state, a provider that will not exchange the code -- ends
+   * the same way: back at the app with an `error`, so the app closes
+   * the browser and says something, rather than leaving the customer
+   * staring at a blank page wondering whether it worked.
+   */
+  @Get("social/:provider/callback")
+  async socialCallback(
+    @Param("provider") providerParam: string,
+    @Query("code") code: string | undefined,
+    @Query("state") state: string | undefined,
+    @Query("error") providerError: string | undefined,
+    @Res() res: Response,
+  ) {
+    const provider = this.browserProvider(providerParam);
+
+    // The customer pressed Cancel on the consent screen. Not an error
+    // to report, just a flow that ended.
+    if (providerError) {
+      res.redirect(this.oauthFlow.appCallback({ error: "cancelled" }));
+      return;
+    }
+    if (!code || !state) {
+      res.redirect(this.oauthFlow.appCallback({ error: "invalid" }));
+      return;
+    }
+
+    try {
+      const pending = this.oauthFlow.consumeState(state);
+      // The state carries which provider started the flow, so a
+      // callback aimed at /google/callback cannot replay a state minted
+      // for Facebook.
+      if (pending.provider !== provider) throw new BadRequestException("provider mismatch");
+
+      const providerToken = await this.oauthFlow.exchangeCode(provider, code);
+      const upper = provider.toUpperCase() as "GOOGLE" | "FACEBOOK";
+      const identity = await this.socialAuth.verify(upper, providerToken);
+      const customer = await this.socialAuth.resolveCustomer(upper, identity, pending.locale);
+      const tokens = await this.customerAuthService.issueTokenPair(customer);
+      res.redirect(this.oauthFlow.appCallback({ handoff: this.oauthFlow.storeHandoff(tokens) }));
+    } catch (err) {
+      // resolveCustomer refuses for reasons the customer can act on --
+      // a disabled account, an unverified password account with the
+      // same address, a provider account with no email. Those messages
+      // are written for them, so they travel; anything else does not,
+      // because an internal failure reads as an accusation.
+      const message =
+        err instanceof BadRequestException || err instanceof UnauthorizedException
+          ? (err.getResponse() as { message?: string }).message
+          : undefined;
+      res.redirect(
+        this.oauthFlow.appCallback(
+          typeof message === "string" && message !== "provider mismatch"
+            ? { error: "rejected", detail: message }
+            : { error: "failed" },
+        ),
+      );
+    }
+  }
+
+  /** Trades the one-time code from the redirect for the session.
+   *
+   * Separate from the redirect because a refresh token must not travel
+   * in a URL: custom-scheme URLs are handled by whatever claims the
+   * scheme and land in browser history on the way.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("social/exchange")
+  @HttpCode(HttpStatus.OK)
+  socialExchange(@Body() dto: SocialExchangeDto) {
+    return this.oauthFlow.consumeHandoff(dto.code);
   }
 
   @Throttle({ default: { limit: 5, ttl: 60_000 } })

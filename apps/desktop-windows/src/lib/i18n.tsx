@@ -26,6 +26,11 @@ export type Language = keyof typeof LANGUAGES;
  */
 const en = {
   "app.tagline": "Private, fast, yours.",
+  "auth.continueWithGoogle": "Continue with Google",
+  "auth.continueWithApple": "Continue with Apple",
+  "auth.continueWithFacebook": "Continue with Facebook",
+  "auth.orUseEmail": "or use email",
+  "auth.socialFailed": "That sign-in did not work. Please try again.",
   "auth.signInToConnect": "Sign in to connect.",
   "auth.noCardRequired": "No credit card required to get started.",
   "verify.noCode": "Didn't get a code? Resend it",
@@ -834,6 +839,11 @@ export type TranslationKey = keyof typeof en;
  * unfinished. */
 const fa: Record<TranslationKey, string> = {
   "app.tagline": "خصوصی، سریع، مال شما.",
+  "auth.continueWithGoogle": "ادامه با گوگل",
+  "auth.continueWithApple": "ادامه با اپل",
+  "auth.continueWithFacebook": "ادامه با فیسبوک",
+  "auth.orUseEmail": "یا با ایمیل",
+  "auth.socialFailed": "ورود انجام نشد. لطفاً دوباره تلاش کنید.",
   "auth.signInToConnect": "برای اتصال وارد شوید.",
   "auth.noCardRequired": "برای شروع نیازی به کارت بانکی نیست.",
   "verify.noCode": "کد را دریافت نکردید؟ ارسال دوباره",

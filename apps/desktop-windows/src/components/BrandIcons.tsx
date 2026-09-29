@@ -65,3 +65,48 @@ export function InstagramIcon({ className }: { className?: string }) {
 export function TelegramIcon({ className }: { className?: string }) {
   return <BrandMark path={TELEGRAM} className={className} />;
 }
+
+/* --- Sign-in providers ---------------------------------------------
+   Apple and Google both publish binding rules for these marks, and a
+   wrong or recoloured one is a review finding rather than a matter of
+   taste. Apple's logo may be solid white or solid black and nothing
+   else, which suits `currentColor`. Google's may not be recoloured at
+   all -- their four brand colours are the mark -- so it is the one icon
+   here that ignores currentColor and carries its own fills. */
+
+const APPLE =
+  "M17.05 12.536c-.024-2.69 2.196-3.98 2.296-4.043-1.25-1.83-3.194-2.08-3.885-2.108-1.654-.168-3.23.974-4.07.974-.84 0-2.133-.95-3.508-.924-1.805.027-3.47 1.05-4.397 2.665-1.874 3.25-.479 8.062 1.35 10.7.893 1.29 1.958 2.74 3.355 2.688 1.346-.055 1.855-.87 3.483-.87 1.628 0 2.086.87 3.51.843 1.45-.026 2.368-1.315 3.255-2.61 1.026-1.497 1.448-2.946 1.472-3.02-.032-.014-2.825-1.084-2.854-4.295M14.39 4.59c.743-.9 1.244-2.152 1.107-3.4-1.07.044-2.367.713-3.135 1.612-.688.797-1.29 2.07-1.128 3.292 1.194.093 2.413-.607 3.156-1.504";
+
+export function AppleIcon({ className }: { className?: string }) {
+  return <BrandMark path={APPLE} className={className} />;
+}
+
+export function GoogleIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" focusable="false">
+      <path
+        fill="#4285F4"
+        d="M23.52 12.273c0-.851-.076-1.67-.218-2.455H12v4.642h6.458a5.52 5.52 0 0 1-2.396 3.622v3.01h3.878c2.269-2.089 3.58-5.165 3.58-8.819"
+      />
+      <path
+        fill="#34A853"
+        d="M12 24c3.24 0 5.956-1.075 7.94-2.908l-3.877-3.01c-1.075.72-2.45 1.145-4.063 1.145-3.126 0-5.772-2.111-6.716-4.948H1.276v3.109A11.995 11.995 0 0 0 12 24"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.284 14.279A7.212 7.212 0 0 1 4.909 12c0-.791.136-1.56.375-2.279V6.612H1.276A11.995 11.995 0 0 0 0 12c0 1.937.464 3.769 1.276 5.388l4.008-3.109Z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 4.773c1.762 0 3.344.605 4.587 1.794l3.442-3.442C17.951 1.19 15.235 0 12 0 7.31 0 3.255 2.689 1.276 6.612l4.008 3.109C6.228 6.884 8.874 4.773 12 4.773"
+      />
+    </svg>
+  );
+}
+
+const FACEBOOK =
+  "M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073";
+
+export function FacebookIcon({ className }: { className?: string }) {
+  return <BrandMark path={FACEBOOK} className={className} />;
+}

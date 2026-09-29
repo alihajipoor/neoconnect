@@ -145,7 +145,11 @@ export default function App() {
     );
   }
   if (screen === "register") {
-    return <Register onNeedsVerification={goToVerify} onGoLogin={() => setScreen("login")} />;
+    return <Register
+        onNeedsVerification={goToVerify}
+        onSuccess={() => setScreen("dashboard")}
+        onGoLogin={() => setScreen("login")}
+      />;
   }
   if (screen === "forgot") {
     return (
