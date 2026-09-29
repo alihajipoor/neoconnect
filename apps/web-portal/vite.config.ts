@@ -50,6 +50,7 @@ export default defineConfig({
       { find: "@tauri-apps/plugin-clipboard-manager", replacement: shim("misc.ts") },
       { find: "@tauri-apps/plugin-process", replacement: shim("misc.ts") },
       { find: "@tauri-apps/plugin-updater", replacement: shim("misc.ts") },
+      { find: "@tauri-apps/plugin-deep-link", replacement: shim("misc.ts") },
     ],
   },
 

@@ -43,6 +43,28 @@ const isIOS = (): boolean =>
 
 export const isMobile = (): boolean => isAndroid() || isIOS();
 
+/** Whether this build can complete a provider sign-in at all.
+ *
+ * False in the web portal, which reuses these screens but is an ordinary
+ * page on shared hosting. Every route back from a provider ends at
+ * `neoconnect://social-callback`, and nothing in a browser can claim a
+ * custom scheme -- so the flow would open a provider, succeed, and
+ * strand the customer on a URL their browser cannot open.
+ *
+ * A capability check rather than a platform guess: what the flow needs
+ * is the Tauri runtime that provides the native sheet on mobile and the
+ * deep-link listener on desktop, and this asks for exactly that.
+ *
+ * Social sign-in on the web is a real gap rather than a decision. It
+ * needs a second, https redirect target and a server that will send the
+ * session to it, which is more than a stand-in here could honestly be.
+ * Until then the buttons are not rendered, on the same principle Apple
+ * is hidden off iOS: a button that opens a flow we cannot finish is
+ * worse than no button.
+ */
+const hasNativeRuntime = (): boolean =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 /** Whether Sign in with Apple can be offered here.
  *
  * iOS only, and not because of preference. The native sheet is an iOS
@@ -53,7 +75,10 @@ export const isMobile = (): boolean => isAndroid() || isIOS();
  * than a list of platforms to exclude, which silently says yes on the
  * next platform added.
  */
-export const appleSignInAvailable = (): boolean => isIOS();
+export const appleSignInAvailable = (): boolean => hasNativeRuntime() && isIOS();
+
+/** Whether to offer provider sign-in here at all. */
+export const socialSignInAvailable = (): boolean => hasNativeRuntime();
 
 /** How long to wait for the customer to finish at the provider.
  *

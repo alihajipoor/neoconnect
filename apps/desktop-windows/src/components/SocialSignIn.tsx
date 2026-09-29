@@ -3,7 +3,11 @@ import { useState, type ReactElement } from "react";
 import { AppleIcon, FacebookIcon, GoogleIcon } from "./BrandIcons";
 import { useI18n } from "../lib/i18n";
 import { socialSignIn } from "../lib/auth";
-import { appleSignInAvailable, type SocialProvider } from "../lib/social-auth";
+import {
+  appleSignInAvailable,
+  socialSignInAvailable,
+  type SocialProvider,
+} from "../lib/social-auth";
 
 /** The providers this build can actually complete a sign-in with.
  *
@@ -13,6 +17,11 @@ import { appleSignInAvailable, type SocialProvider } from "../lib/social-auth";
  * rather than a platform API.
  */
 export function availableSocialProviders(): SocialProvider[] {
+  // The web portal reuses these screens and can complete none of these
+  // flows -- see socialSignInAvailable(). An empty list renders nothing,
+  // including the "or use email" divider, so the form stands alone as it
+  // did before.
+  if (!socialSignInAvailable()) return [];
   return appleSignInAvailable()
     ? ["apple", "google", "facebook"]
     : ["google", "facebook"];

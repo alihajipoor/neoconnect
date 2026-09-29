@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { readCallback } from "./social-auth";
+import { appleSignInAvailable, readCallback, socialSignInAvailable } from "./social-auth";
 
 /** What comes back at the end of a provider sign-in.
  *
@@ -57,5 +57,59 @@ describe("readCallback", () => {
 
   it("does not mistake an empty handoff for a session", () => {
     expect(() => readCallback("neoconnect://social-callback?handoff=")).toThrow(/did not work/);
+  });
+});
+
+/** Where the buttons are offered at all.
+ *
+ * The web portal reuses these same screens from
+ * apps/desktop-windows/src, on ordinary shared hosting. Every route back
+ * from a provider ends at `neoconnect://social-callback`, and nothing in
+ * a browser can claim a custom scheme — so offering the buttons there
+ * would open a provider, succeed, and strand the customer on a URL their
+ * browser cannot open.
+ *
+ * The portal is the reason this guard exists, and it is invisible from
+ * the desktop and mobile apps: a change here typechecks and passes their
+ * tests while breaking a live commerce surface. That is what these pin.
+ */
+describe("where provider sign-in is offered", () => {
+  const setRuntime = (present: boolean) => {
+    const win = present ? { __TAURI_INTERNALS__: {} } : {};
+    vi.stubGlobal("window", win);
+  };
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("is not offered without the Tauri runtime", () => {
+    // i.e. the web portal.
+    setRuntime(false);
+    expect(socialSignInAvailable()).toBe(false);
+  });
+
+  it("is offered inside the app", () => {
+    setRuntime(true);
+    expect(socialSignInAvailable()).toBe(true);
+  });
+
+  it("never offers Apple without the runtime, whatever the user agent says", () => {
+    // The portal opened on an iPhone is still the portal: iOS is true
+    // and there is no native sheet to open. Checking the platform alone
+    // would put a dead button in front of exactly those customers.
+    setRuntime(false);
+    vi.stubGlobal("navigator", { userAgent: "iPhone", maxTouchPoints: 5 });
+    expect(appleSignInAvailable()).toBe(false);
+  });
+
+  it("offers Apple on iOS inside the app", () => {
+    setRuntime(true);
+    vi.stubGlobal("navigator", { userAgent: "iPhone", maxTouchPoints: 5 });
+    expect(appleSignInAvailable()).toBe(true);
+  });
+
+  it("does not offer Apple on Android inside the app", () => {
+    setRuntime(true);
+    vi.stubGlobal("navigator", { userAgent: "Android", maxTouchPoints: 5 });
+    expect(appleSignInAvailable()).toBe(false);
   });
 });
