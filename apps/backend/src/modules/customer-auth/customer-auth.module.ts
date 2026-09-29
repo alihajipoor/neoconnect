@@ -3,6 +3,7 @@ import { JwtModule } from "@nestjs/jwt";
 import { PassportModule } from "@nestjs/passport";
 import { CustomerAuthController } from "./customer-auth.controller";
 import { CustomerAuthService } from "./customer-auth.service";
+import { SocialAuthService } from "./social/social-auth.service";
 import { CustomerJwtStrategy } from "./strategies/customer-jwt.strategy";
 import { CustomersModule } from "../customers/customers.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
@@ -23,7 +24,7 @@ import { EmailModule } from "../email/email.module";
     EmailModule,
   ],
   controllers: [CustomerAuthController],
-  providers: [CustomerAuthService, CustomerJwtStrategy],
-  exports: [CustomerAuthService],
+  providers: [CustomerAuthService, CustomerJwtStrategy, SocialAuthService],
+  exports: [CustomerAuthService, SocialAuthService],
 })
 export class CustomerAuthModule {}

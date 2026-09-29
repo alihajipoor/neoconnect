@@ -1,6 +1,7 @@
 import { BadRequestException } from "@nestjs/common";
 import { CustomerAuthController } from "./customer-auth.controller";
 import { CustomerAuthService } from "./customer-auth.service";
+import { SocialAuthService } from "./social/social-auth.service";
 import { LoginGuardService } from "../login-guard/login-guard.service";
 import { verificationEmail } from "../email/templates";
 
@@ -16,6 +17,14 @@ describe("email verification link", () => {
     return new CustomerAuthController(
       { verifyEmail: verify } as unknown as CustomerAuthService,
       { enforce: jest.fn(), recordFailure: jest.fn(), recordSuccess: jest.fn() } as unknown as LoginGuardService,
+      // Social sign-in is equally irrelevant here, and a stub that
+      // throws on use would make an accidental call obvious rather than
+      // letting it return undefined and fail somewhere further away.
+      {
+        verify: jest.fn(() => {
+          throw new Error("social sign-in should not be reached by the verification landing page");
+        }),
+      } as unknown as SocialAuthService,
     );
   }
 

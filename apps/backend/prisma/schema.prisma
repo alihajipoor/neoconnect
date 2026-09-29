@@ -246,13 +246,57 @@ model ResellerTokenBalance {
   @@map("reseller_token_balances")
 }
 
+/// A third-party account a customer signs in with.
+///
+/// Separate from Customer rather than columns on it because a person can
+/// arrive through Google today and add Apple tomorrow, and because the
+/// pair that identifies them is (provider, subject) -- the subject is
+/// only unique within its provider, and Apple's is specific to this
+/// team, so it is meaningless on its own.
+///
+/// The email is stored as the provider gave it, and is deliberately not
+/// the join key. Apple lets a customer hide their real address behind a
+/// privaterelay.appleid.com forwarding one, and Google addresses change
+/// when a workspace is renamed. Matching on the subject means a changed
+/// address does not silently create a second account.
+model CustomerIdentity {
+  id         String           @id @default(uuid())
+  customerId String
+  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  provider   IdentityProvider
+  /// The provider's stable identifier for this person -- `sub` in every
+  /// one of the three. Never an email.
+  subject    String
+  /// What the provider said the address was at the time of linking, for
+  /// support and for spotting a relay address. Not used to find anyone.
+  email      String?
+  createdAt  DateTime         @default(now())
+  lastUsedAt DateTime         @default(now())
+
+  @@unique([provider, subject])
+  @@index([customerId])
+  @@map("customer_identities")
+}
+
+enum IdentityProvider {
+  GOOGLE
+  APPLE
+  FACEBOOK
+}
+
 model Customer {
-  id                             String         @id @default(uuid())
-  email                          String         @unique
-  passwordHash                   String
+  id                             String             @id @default(uuid())
+  email                          String             @unique
+  // Null for an account created through Google, Apple or Facebook,
+  // which has never had a password. Nullable rather than a random
+  // unusable hash: a hash nobody can produce is indistinguishable from
+  // one the customer simply forgot, so "forgot password" would send a
+  // reset for an account that has no password to reset, and the reply
+  // would be a lie. Null lets every path ask the real question.
+  passwordHash                   String?
   telegramId                     String?
-  referralCode                   String?        @unique
-  status                         CustomerStatus @default(ACTIVE)
+  referralCode                   String?            @unique
+  status                         CustomerStatus     @default(ACTIVE)
   // Which language to write to this customer in. Set from the client at
   // registration and updated when they change it in the app -- the
   // clients have been English/Persian since launch, and every email this
@@ -270,11 +314,12 @@ model Customer {
   // has to land before the client release rather than after it. Read
   // back through `toLocale()` in the email templates, which narrows
   // anything unrecognised to "en".
-  locale                         String         @default("en")
+  locale                         String             @default("en")
+  identities                     CustomerIdentity[]
   // Refresh-token revocation counter, same purpose/pattern as
   // AdminUser.tokenVersion -- bumping it invalidates every outstanding
   // customer refresh token at once (logout-all-sessions).
-  tokenVersion                   Int            @default(0)
+  tokenVersion                   Int                @default(0)
   // null = unverified. Set by POST /customer-auth/verify-email or
   // /verify-email-code. No VPN access (trial or paid) is granted before
   // this is set -- see M16's "Customer Self-Signup + Free Trial Mode"
@@ -507,8 +552,8 @@ model Node {
   realityDestReachable Boolean?
   realityDestCheckedAt DateTime?
 
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   protocolConfigs  ProtocolConfig[]
   protocolUsers    ProtocolUser[]

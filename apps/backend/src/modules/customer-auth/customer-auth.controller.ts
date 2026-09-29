@@ -20,6 +20,8 @@ import { CurrentCustomer } from "../../common/decorators/current-customer.decora
 import { AuthenticatedCustomer } from "./types";
 import { RegisterCustomerDto } from "./dto/register-customer.dto";
 import { LoginDto } from "../auth/dto/login.dto";
+import { SocialLoginDto } from "./dto/social-login.dto";
+import { SocialAuthService } from "./social/social-auth.service";
 import { RefreshDto } from "../auth/dto/refresh.dto";
 import { VerifyEmailDto } from "./dto/verify-email.dto";
 import { VerifyEmailCodeDto } from "./dto/verify-email-code.dto";
@@ -42,6 +44,7 @@ export class CustomerAuthController {
   constructor(
     private readonly customerAuthService: CustomerAuthService,
     private readonly loginGuard: LoginGuardService,
+    private readonly socialAuth: SocialAuthService,
   ) {}
 
   // Same brute-force reasoning as admin login. Registration no longer
@@ -59,6 +62,28 @@ export class CustomerAuthController {
     // protection into a way to slow down the person it protects.
     this.loginGuard.enforce("customer", dto.challenge, undefined, ip);
     return this.customerAuthService.register(dto);
+  }
+
+  /** Sign in with Google, Apple or Facebook.
+   *
+   * Throttled like password login and for the same reason -- the
+   * expensive part is a network round trip to the provider, so an
+   * unthrottled endpoint is a way to make this server hammer Google on
+   * someone else's behalf.
+   *
+   * Deliberately outside the login guard's challenge: the guard exists
+   * to slow password guessing against a known address, and there is no
+   * password and no address here until the provider has answered. A
+   * token either verifies or it does not; there is nothing to guess.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("social")
+  @HttpCode(HttpStatus.OK)
+  async social(@Body() dto: SocialLoginDto) {
+    const provider = dto.provider.toUpperCase() as "GOOGLE" | "APPLE" | "FACEBOOK";
+    const identity = await this.socialAuth.verify(provider, dto.token);
+    const customer = await this.socialAuth.resolveCustomer(provider, identity, dto.locale ?? "en");
+    return this.customerAuthService.issueTokenPair(customer);
   }
 
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
