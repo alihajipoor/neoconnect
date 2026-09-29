@@ -94,6 +94,27 @@ services:
       INTEGRATIONS_SERVICE_TOKEN: ${INTEGRATIONS_SERVICE_TOKEN:-}
       # Public address of this API, used to build links inside emails.
       PUBLIC_API_URL: ${PUBLIC_API_URL:-}
+      # Signing in with Google, Apple and Facebook.
+      #
+      # Enumerated here, like everything else in this block, because a
+      # value in infra/.env reaches Compose's interpolation and NOT the
+      # container -- the same gap the billing keys above sat in until the
+      # M11 pass. It had already happened again here: all five were set
+      # in .env and none was passed through, so every provider button
+      # would have answered "not available right now" with only a log
+      # line to say why.
+      #
+      # Each defaults to empty rather than being required. A provider
+      # with no credentials refuses that one sign-in and leaves the
+      # others and password login working, which is the behaviour a
+      # half-configured deployment should have.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-}
+      # The bundle identifier, not a client id -- the native sheet has no
+      # client secret. Comma separated, for a future macOS or web client.
+      APPLE_SIGNIN_AUDIENCES: ${APPLE_SIGNIN_AUDIENCES:-}
       # Recent failures tolerated before a sign-in must carry a solved
       # proof-of-work challenge. Unset = 5. Set to 0 to require one on
       # every attempt -- but ONLY once every customer is on a client
