@@ -3,12 +3,20 @@ import { register } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { Logo } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { SocialSignIn } from "../components/SocialSignIn";
 
 export function Register({
   onNeedsVerification,
+  onSuccess,
   onGoLogin,
 }: {
   onNeedsVerification: (email: string, password: string) => void;
+  /** A signup through a provider ends with a usable session, not a
+   * verification step: the provider has already proven the address, so
+   * mailing a code to it would only lose people. That is why this
+   * screen has a success path at all -- the password form below never
+   * takes it. */
+  onSuccess: () => void;
   onGoLogin: () => void;
 }) {
   const { t } = useI18n();
@@ -41,6 +49,7 @@ export function Register({
       <Card className="w-full max-w-xs">
         <h1 className="mb-1 text-lg font-semibold">{t("auth.createAccount")}</h1>
         <p className="mb-4 text-sm text-muted-foreground">{t("auth.noCardRequired")}</p>
+        <SocialSignIn onSuccess={onSuccess} disabled={pending} />
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="email">{t("auth.email")}</Label>

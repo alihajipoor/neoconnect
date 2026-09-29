@@ -49,6 +49,36 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <!-- Where a provider sign-in comes back to.
+
+             singleTask is load bearing, not a style choice. This
+             activity opens the Custom Tab, and the redirect at the end
+             of the flow has to re-enter this same instance through
+             onNewIntent so the result reaches the call still waiting on
+             it. Any other launch mode stacks a second copy and the
+             first one waits forever.
+
+             exported because the redirect arrives from the browser,
+             which is a different app. The scheme plus host pair is the
+             whole of what it accepts, and what it does with it is hand
+             the URL back to the activity that started the flow.
+
+             Note for anyone editing this comment: XML forbids a double
+             hyphen inside a comment, so the repo's usual em dash cannot
+             be used here. See the note further down. -->
+        <activity
+            android:name="com.neoxify.vpn.SocialAuthActivity"
+            android:launchMode="singleTask"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="neoconnect" android:host="social-callback" />
+            </intent-filter>
+        </activity>
     </application>
 
     <!-- Android 13+ will not show the tunnel's ongoing notification without

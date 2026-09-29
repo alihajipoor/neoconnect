@@ -3,6 +3,7 @@ import { login } from "../lib/auth";
 import { Button, Card, Input, Label } from "../components/ui";
 import { LogoMark } from "../components/Logo";
 import { useI18n } from "../lib/i18n";
+import { SocialSignIn } from "../components/SocialSignIn";
 
 export function Login({
   onSuccess,
@@ -58,6 +59,10 @@ export function Login({
             {notice}
           </p>
         ) : null}
+        {/* A social sign-in lands straight on the dashboard: the
+            provider has already vouched for the address, so there is no
+            verification step to send anyone to. */}
+        <SocialSignIn onSuccess={onSuccess} disabled={pending} />
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="email">{t("auth.email")}</Label>

@@ -299,7 +299,20 @@ text = text.replace(
     `        com.apple.developer.networking.vpn.api:\n` +
     `          - allow-vpn\n` +
     `        com.apple.security.application-groups:\n` +
-    `          - ${GROUP}\n`,
+    `          - ${GROUP}\n` +
+    // Sign in with Apple. "Default" is the whole of the value for an
+    // app that is not sharing an account namespace with a website;
+    // there is no scope list to configure.
+    //
+    // Mandatory rather than optional, and not for a technical reason:
+    // Apple's Guideline 4.8 requires it wherever an app offers another
+    // third-party login, and the app offers Google and Facebook. It
+    // also has to be enabled on the App ID (APPLE_ID_AUTH), like the
+    // VPN capability above -- an entitlement the profile does not grant
+    // fails at signing, and a capability with no entitlement fails when
+    // the sheet is opened.
+    `        com.apple.developer.applesignin:\n` +
+    `          - Default\n`,
 );
 
 writeFileSync(spec, text);

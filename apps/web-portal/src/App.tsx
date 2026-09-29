@@ -110,7 +110,17 @@ export default function App() {
       />
     );
   } else if (screen === "register") {
-    content = <Register onNeedsVerification={goToVerify} onGoLogin={() => setScreen("login")} />;
+    content = (
+      <Register
+        onNeedsVerification={goToVerify}
+        // Unreachable here: the only path to it is a provider sign-in,
+        // and the portal offers none. Wired to the same handler Login
+        // uses rather than left to throw, so the day the web flow does
+        // exist this is already correct.
+        onSuccess={afterAuth}
+        onGoLogin={() => setScreen("login")}
+      />
+    );
   } else if (screen === "forgot") {
     content = (
       <ForgotPassword

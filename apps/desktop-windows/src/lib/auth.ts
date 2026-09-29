@@ -5,6 +5,8 @@ import { endCustomerSession } from "./session-end";
 import { clearGamingProfileCache } from "./customer";
 import { solveChallengeFor } from "./pow";
 import { currentLanguage } from "./i18n";
+import { startSocialSignIn } from "./social-auth";
+import type { SocialOutcome, SocialProvider } from "./social-auth";
 import type { ApiResult } from "./api";
 import type { AttemptKind } from "./attempts";
 import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from "./types";
@@ -89,6 +91,62 @@ export async function login(email: string, password: string) {
   }
   // After the tokens are stored, so a successful sign-in is attributed
   // to the customer it belongs to rather than arriving anonymous.
+  reportAuth("SIGN_IN", result);
+  return result;
+}
+
+/** Signing in with Google, Apple or Facebook.
+ *
+ * Deliberately the same shape as `login()` above, including the cache
+ * clear and the attempt report, because everything downstream of a
+ * session must not be able to tell how it was obtained. The difference
+ * is only in how the credential is obtained, which is social-auth.ts's
+ * problem, and which endpoint finishes it.
+ *
+ * Returns `null` when the customer cancelled -- distinct from a failed
+ * result, because a cancellation has nothing to report and nothing to
+ * show.
+ */
+export async function socialSignIn(
+  provider: SocialProvider,
+): Promise<ApiResult<TokenPair> | null> {
+  const locale = currentLanguage();
+
+  let outcome: SocialOutcome | null;
+  try {
+    outcome = await startSocialSignIn(provider, locale);
+  } catch (err) {
+    // A provider that refused, a browser that would not open, a message
+    // the server wrote for this customer. None of these reached an
+    // endpoint, so there is no ApiResult -- but the screen still needs
+    // something to show, and reportAuth still wants to know it failed.
+    const error = err instanceof Error ? err.message : String(err);
+    const result: ApiResult<TokenPair> = { ok: false, error };
+    reportAuth("SIGN_IN", result);
+    return result;
+  }
+  if (outcome === null) return null;
+
+  const result =
+    outcome.kind === "apple-token"
+      ? await publicRequest<TokenPair>("/customer-auth/social", {
+          method: "POST",
+          body: JSON.stringify({ provider, token: outcome.token, locale }),
+        })
+      : // Google and Facebook finished on the server; this only collects
+        // the session it is already holding.
+        await publicRequest<TokenPair>("/customer-auth/social/exchange", {
+          method: "POST",
+          body: JSON.stringify({ code: outcome.code }),
+        });
+
+  if (result.ok) {
+    // Same reasoning as login(): before the tokens, so a stale
+    // entitlement from the previous customer is never read as this
+    // one's.
+    clearGamingProfileCache();
+    await setTokens(result.data);
+  }
   reportAuth("SIGN_IN", result);
   return result;
 }

@@ -325,6 +325,14 @@ export class CustomerAuthService {
     if (!customer) {
       throw new UnauthorizedException("Invalid email or password");
     }
+    // An account created through Google, Apple or Facebook has no
+    // password. The message stays the generic one on purpose: telling an
+    // unauthenticated caller "this address exists but signs in with
+    // Google" hands them both a confirmed address and the provider to
+    // phish. The customer sees the provider buttons on the same screen.
+    if (customer.passwordHash === null) {
+      throw new UnauthorizedException("Invalid email or password");
+    }
     const valid = await argon2.verify(customer.passwordHash, password);
     if (!valid) {
       throw new UnauthorizedException("Invalid email or password");
@@ -546,6 +554,15 @@ export class CustomerAuthService {
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) {
       throw new BadRequestException("Account not found");
+    }
+
+    // Here the caller is already authenticated, so naming the situation
+    // costs nothing and saying "your current password is incorrect" to
+    // someone who has never had one is simply wrong.
+    if (customer.passwordHash === null) {
+      throw new BadRequestException(
+        "This account signs in with Google, Apple or Facebook and has no password to change",
+      );
     }
 
     const valid = await argon2.verify(customer.passwordHash, dto.currentPassword);

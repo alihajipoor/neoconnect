@@ -88,3 +88,23 @@ export interface Update {
 export async function check(): Promise<Update | null> {
   return null;
 }
+
+// --- @tauri-apps/plugin-deep-link -------------------------------------
+//
+// social-auth.ts imports this lazily to catch the neoconnect:// callback
+// at the end of a provider sign-in. Nothing in a browser can register a
+// custom scheme, so the portal never takes that path --
+// availableSocialProviders() returns nothing here and the buttons are
+// not rendered at all.
+//
+// It exists anyway because the import is resolved at build time even
+// though it is never executed, and an unresolvable one fails the bundle
+// rather than the call. Throwing rather than no-oping, for the reason
+// `invoke` above throws: if this is ever reached, a screen took a route
+// it should not have, and that should be loud.
+export async function onOpenUrl(_handler: (urls: string[]) => void): Promise<() => void> {
+  throw new Error("Deep links are not available in the web portal.");
+}
+export async function getCurrent(): Promise<string[] | null> {
+  throw new Error("Deep links are not available in the web portal.");
+}
