@@ -3,7 +3,7 @@ import { Prisma, SupportTicketStatus } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
-import { supportReplyEmail } from "../email/templates";
+import { supportReplyEmail, toLocale } from "../email/templates";
 import { UpdateSupportSettingsDto } from "./dto/update-support-settings.dto";
 
 /** Newest first, and capped. A thread is a conversation, not an archive
@@ -209,7 +209,7 @@ export class SupportService {
   async replyAsAdmin(ticketId: string, body: string) {
     const ticket = await this.prisma.supportTicket.findUnique({
       where: { id: ticketId },
-      include: { customer: { select: { email: true } } },
+      include: { customer: { select: { email: true, locale: true } } },
     });
     if (!ticket) {
       throw new NotFoundException("That conversation does not exist");
@@ -228,7 +228,11 @@ export class SupportService {
     // The app may not be open, and a reply nobody sees is the same as no
     // reply. Best-effort: a mail failure must not lose the answer that
     // has already been written.
-    const rendered = supportReplyEmail(ticket.subject, body.trim());
+    // The chrome and the direction follow the customer; the reply
+    // itself is the operator's own words and is sent as written. An
+    // answer typed in Persian was already being laid out left to right
+    // in a Latin face, which is the half of this that a locale can fix.
+    const rendered = supportReplyEmail(toLocale(ticket.customer.locale), ticket.subject, body.trim());
     void this.email
       .sendMail({
         to: ticket.customer.email,

@@ -6,7 +6,7 @@ import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
-import { invoiceIssuedEmail, invoiceOverdueEmail } from "../email/templates";
+import { invoiceIssuedEmail, invoiceOverdueEmail, toLocale } from "../email/templates";
 
 export interface InvoiceLineItem {
   description: string;
@@ -122,6 +122,7 @@ export class InvoicesService {
       await this.emailService.sendMail({
         to: customer.email,
         ...invoiceIssuedEmail({
+          locale: toLocale(customer.locale),
           invoiceNumber: invoice.invoiceNumber,
           planName: planName,
           amountUsd: invoice.amountUsd.toString(),
@@ -350,7 +351,7 @@ export class InvoicesService {
             invoiceNumber: true,
             amountUsd: true,
             currency: true,
-            customer: { select: { email: true } },
+            customer: { select: { email: true, locale: true } },
           },
           orderBy: { id: "asc" },
           take,
@@ -370,6 +371,7 @@ export class InvoicesService {
           await this.emailService.sendMail({
             to: invoice.customer.email,
             ...invoiceOverdueEmail({
+              locale: toLocale(invoice.customer.locale),
               invoiceNumber: invoice.invoiceNumber,
               amountUsd: invoice.amountUsd.toString(),
               currency: invoice.currency,

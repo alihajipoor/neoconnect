@@ -4,6 +4,7 @@ import { setTokens } from "./session";
 import { endCustomerSession } from "./session-end";
 import { clearGamingProfileCache } from "./customer";
 import { solveChallengeFor } from "./pow";
+import { currentLanguage } from "./i18n";
 import type { ApiResult } from "./api";
 import type { AttemptKind } from "./attempts";
 import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from "./types";
@@ -48,6 +49,13 @@ export async function register(email: string, password: string, referralCode?: s
     body: JSON.stringify({
       email,
       password,
+      // Read here rather than passed in by the screen, so the one call
+      // site that creates an account cannot be the one that forgets.
+      // The very first email this account receives is the verification
+      // code, and it is sent before the customer has anywhere to tell
+      // us anything -- so the language has to travel with the signup or
+      // that email is in the wrong one no matter what happens later.
+      locale: currentLanguage(),
       ...(referralCode ? { referralCode } : {}),
       ...(challenge ? { challenge } : {}),
     }),

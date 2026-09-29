@@ -1,0 +1,20 @@
+-- Which language to write to a customer in.
+--
+-- The clients have shipped English and Persian since launch; every email
+-- this backend sends has been English only. Iran is this product's
+-- largest market, so the part of the product that asks somebody to do
+-- something -- type a verification code, renew before expiry, pay an
+-- invoice -- was the one part they could not read.
+--
+-- Additive, with a default, and therefore safe to apply while the API is
+-- running: every existing row gets 'en', which is exactly what those
+-- customers have been receiving all along, so nothing anybody is used to
+-- changes on deploy. New rows get their locale from the client at
+-- registration.
+--
+-- Not an enum. The set of languages is decided by what the clients ship,
+-- and a Postgres enum would have to be widened in a migration that lands
+-- before the client release rather than after it. Unrecognised values are
+-- narrowed to 'en' when read (toLocale() in the email templates), so a
+-- hand-edited row cannot produce an email full of undefined.
+ALTER TABLE "customers" ADD COLUMN "locale" TEXT NOT NULL DEFAULT 'en';

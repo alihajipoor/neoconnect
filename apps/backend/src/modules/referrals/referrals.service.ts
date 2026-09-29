@@ -3,7 +3,7 @@ import { InvoiceStatus, ReferralRewardReason, SubscriptionStatus } from "@prisma
 import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { EmailService } from "../email/email.service";
-import { referralFriendJoinedEmail, referralRewardEmail } from "../email/templates";
+import { referralFriendJoinedEmail, referralRewardEmail, toLocale } from "../email/templates";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ReferralSettingsService } from "./referral-settings.service";
@@ -87,12 +87,19 @@ export class ReferralsService {
 
       const referrer = await this.prisma.customer.findUnique({
         where: { id: customer.referredByCustomerId },
-        select: { email: true },
+        // The inviter's language, not the new customer's: this email is
+        // addressed to the person who did the inviting, and the two are
+        // often not in the same country at all.
+        select: { email: true, locale: true },
       });
       if (!referrer) return;
 
       const progress = await this.progressFor(customer.referredByCustomerId);
-      const mail = referralFriendJoinedEmail(maskEmail(customer.email), progress.monthsToNextReward);
+      const mail = referralFriendJoinedEmail(
+        toLocale(referrer.locale),
+        maskEmail(customer.email),
+        progress.monthsToNextReward,
+      );
       await this.emailService.sendMail({ to: referrer.email, ...mail });
     } catch (error) {
       this.logger.warn(`could not notify referrer of an activation: ${String(error)}`);
@@ -363,14 +370,21 @@ export class ReferralsService {
     settings: Awaited<ReturnType<ReferralSettingsService["get"]>>,
   ) {
     const [referrer, plan] = await Promise.all([
-      this.prisma.customer.findUnique({ where: { id: referrerId }, select: { email: true } }),
+      this.prisma.customer.findUnique({
+        where: { id: referrerId },
+        select: { email: true, locale: true },
+      }),
       this.prisma.subscriptionPlan.findUnique({
         where: { id: settings.rewardPlanId as string },
         select: { name: true },
       }),
     ]);
     if (!referrer) return;
-    const mail = referralRewardEmail(settings.rewardDays, plan?.name ?? "your plan");
+    const mail = referralRewardEmail(
+      toLocale(referrer.locale),
+      settings.rewardDays,
+      plan?.name ?? null,
+    );
     await this.emailService.sendMail({ to: referrer.email, ...mail });
   }
 

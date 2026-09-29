@@ -11,7 +11,7 @@ import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import { AppLinksService } from "../app-links/app-links.service";
-import { resellerVoucherEmail } from "../email/templates";
+import { resellerVoucherEmail, toLocale } from "../email/templates";
 import { randomCode } from "../vouchers/voucher-code";
 
 /** Where a recipient goes to redeem. The portal reads ?voucher= and
@@ -386,6 +386,7 @@ export class ResellersService {
   ): Promise<boolean> {
     try {
       const message = resellerVoucherEmail({
+        locale: await this.localeFor(to),
         code,
         planName,
         activationUrl: await this.activationUrl(code),
@@ -397,5 +398,30 @@ export class ResellersService {
       this.logger.warn(`Could not email voucher to ${to}: ${String(err)}`);
       return false;
     }
+  }
+
+  /** The one send in this codebase whose recipient may not have an
+   * account, which is the whole point of it -- a reseller hands a
+   * subscription to somebody who has never heard of us.
+   *
+   * So there is nothing to read a locale off unless the address already
+   * belongs to a customer, which happens whenever a reseller renews
+   * somebody they have sold to before. That case is worth catching: it
+   * is a customer we already know reads Persian, and sending them
+   * English again would be a regression we introduced knowingly.
+   *
+   * A genuine stranger gets English. The alternative is guessing from
+   * the reseller, and a reseller's own language is not evidence about
+   * their customer's -- resellers here sell across borders. Flagged as a
+   * gap rather than papered over: if this matters, the right fix is for
+   * the panel to let the reseller pick the language when they mint the
+   * code, which is a UI change and not this one.
+   */
+  private async localeFor(email: string) {
+    const customer = await this.prisma.customer.findUnique({
+      where: { email },
+      select: { locale: true },
+    });
+    return toLocale(customer?.locale);
   }
 }

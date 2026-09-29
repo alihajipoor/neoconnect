@@ -11,7 +11,7 @@ import { FreeTrialSettingsService } from "../free-trial-settings/free-trial-sett
 import { EmailService } from "../email/email.service";
 import { ReferralsService } from "../referrals/referrals.service";
 import { RegisterCustomerDto } from "./dto/register-customer.dto";
-import { verificationEmail, passwordResetEmail } from "../email/templates";
+import { verificationEmail, passwordResetEmail, toLocale, type Locale } from "../email/templates";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 import {
   CustomerAccessTokenPayload,
@@ -97,10 +97,18 @@ export class CustomerAuthService {
     const referredByCustomerId = await this.referralsService.resolveReferralCode(dto.referralCode);
 
     const customer = await this.customersService.create(dto);
-    if (referredByCustomerId) {
+    // Both of the things only a self-signing-up customer can tell us, in
+    // the one write. The locale has to land before the send below, not
+    // after: the verification email is the first thing this account ever
+    // receives, and it is the one email whose whole purpose is to get
+    // somebody to act on it.
+    if (referredByCustomerId || dto.locale) {
       await this.prisma.customer.update({
         where: { id: customer.id },
-        data: { referredByCustomerId },
+        data: {
+          ...(referredByCustomerId ? { referredByCustomerId } : {}),
+          ...(dto.locale ? { locale: dto.locale } : {}),
+        },
       });
     }
 
@@ -108,7 +116,7 @@ export class CustomerAuthService {
     // entire content was "a separate verification email is on its way" --
     // nothing actionable, arriving before the customer could do anything,
     // and doubling how much of our mail a spam filter got to judge.
-    await this.sendVerificationEmail(customer.id, customer.email);
+    await this.sendVerificationEmail(customer.id, customer.email, toLocale(dto.locale));
 
     return { requiresVerification: true, email: customer.email };
   }
@@ -119,7 +127,7 @@ export class CustomerAuthService {
    * broke the email's layout when displayed prominently. The code is
    * looked up server-side (verifyEmailByCode()), unlike the token which
    * is self-verifying, so it has to be persisted with its own expiry. */
-  private async sendVerificationEmail(customerId: string, email: string) {
+  private async sendVerificationEmail(customerId: string, email: string, locale: Locale) {
     const payload: CustomerVerifyEmailTokenPayload = { sub: customerId, purpose: "verify-email" };
     const token = await this.jwt.signAsync(payload, {
       secret: this.config.get<string>("customerJwt.accessSecret"),
@@ -137,7 +145,7 @@ export class CustomerAuthService {
 
     await this.emailService.sendMail({
       to: email,
-      ...verificationEmail(token, code, this.config.get<string>("publicApiUrl")),
+      ...verificationEmail(locale, token, code, this.config.get<string>("publicApiUrl")),
     });
   }
 
@@ -152,7 +160,7 @@ export class CustomerAuthService {
   async resendVerification(email: string): Promise<void> {
     const customer = await this.prisma.customer.findUnique({ where: { email } });
     if (!customer || customer.emailVerifiedAt) return;
-    await this.sendVerificationEmail(customer.id, customer.email);
+    await this.sendVerificationEmail(customer.id, customer.email, toLocale(customer.locale));
   }
 
   /** The gate for all VPN access, trial or paid (2026-07-24 decision):
@@ -416,7 +424,10 @@ export class CustomerAuthService {
     // a new code invalidates the one they were guessing at.
     this.resetCodeAttempts.delete(this.resetCodeKey(customer.email));
 
-    await this.emailService.sendMail({ to: customer.email, ...passwordResetEmail(code) });
+    await this.emailService.sendMail({
+      to: customer.email,
+      ...passwordResetEmail(toLocale(customer.locale), code),
+    });
   }
 
   /** Resets by emailed code rather than by token.
