@@ -77,6 +77,18 @@ reloading the page, not by looking at the field.
 
 ### Apple
 
+App Store Connect has two apps on this account and they are easy to
+confuse: **Neoxify is `6815764263`** (`com.neoxify.mobile`); `6816536281`
+is **Nura Wallet**, a different product. Confirm with
+`apps?fields[apps]=name,bundleId` before any API call that names an app —
+three in-app purchase products were once created on the wrong one, and
+Apple burns a product id permanently on first use, so the identifiers
+could not be recovered.
+
+The in-app purchases are `com.neoxify.mobile.{starter,pro,ultimate}.30d`,
+non-renewing, mapped to plans through `SubscriptionPlan.appleProductId`.
+
+
 The `APPLE_ID_AUTH` capability is already enabled on the App ID
 `com.neoxify.mobile`, and `com.apple.developer.applesignin` is in
 `mobile_iOS.entitlements`. Both are needed: the entitlement without the
