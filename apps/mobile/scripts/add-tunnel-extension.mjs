@@ -54,6 +54,31 @@ const tunnel = join(mobile, "plugins", "vpn", "tunnel");
 const team = process.env.APPLE_DEVELOPMENT_TEAM
   ? `\n        DEVELOPMENT_TEAM: ${process.env.APPLE_DEVELOPMENT_TEAM}`
   : "";
+
+// Manual signing, for a build that is going to the App Store.
+//
+// Opt-in through NEOXIFY_IOS_SIGNING=appstore, and opt-in deliberately:
+// CI builds the simulator target, which needs no signing at all, so
+// naming a distribution identity unconditionally would fail a build on
+// a machine that holds no certificates and no profiles.
+//
+// Automatic signing is the better default and stays the default. It is
+// unusable here only because it needs a live Apple ID session in Xcode
+// to mint a profile, and the entitlements this app carries -- Network
+// Extensions, Personal VPN, App Groups and now Sign in with Apple --
+// make a stale profile fail at signing with an error that names the
+// profile rather than the missing entitlement.
+//
+// This has to live in this script rather than in the generated
+// project.yml, because build-ios.sh runs the script on every build and
+// rewrites that file. An edit made there by hand survives exactly until
+// the next build, which is an expensive way to lose a release.
+const signing = (profile) =>
+  process.env.NEOXIFY_IOS_SIGNING === "appstore"
+    ? `\n        CODE_SIGN_STYLE: Manual` +
+      `\n        CODE_SIGN_IDENTITY: "Apple Distribution"` +
+      `\n        PROVISIONING_PROFILE_SPECIFIER: "${profile}"`
+    : "";
 // One directory per bundle, because the file has to be called
 // PrivacyInfo.xcprivacy on disk. XcodeGen's `name:` renames the
 // reference in the project navigator, not the file that gets copied,
@@ -149,7 +174,7 @@ const extension = `
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.neoxify.mobile.tunnel
-        PRODUCT_NAME: ${EXT_TARGET}${team}
+        PRODUCT_NAME: ${EXT_TARGET}${team}${signing("Neoxify Tunnel AppStore 2026")}
         # Go's net package calls into the system resolver, so the
         # framework leaves _res_9_nsearch undefined until libresolv is
         # linked. Without it the extension fails at link time with a
@@ -314,6 +339,84 @@ text = text.replace(
     `        com.apple.developer.applesignin:\n` +
     `          - Default\n`,
 );
+
+// The app target's signing, into its BUILD SETTINGS.
+//
+// Its own replacement rather than riding along on the entitlements
+// block above: those are two different keys, and appending to that one
+// put CODE_SIGN_STYLE inside `entitlements:` as a sibling of
+// `properties:`, where XcodeGen simply ignores it. The build then fails
+// with "requires a development team" and nothing points at the reason.
+if (process.env.NEOXIFY_IOS_SIGNING === "appstore") {
+  const appSettings = new RegExp(
+    `(^  ${APP_TARGET}:\\n(?:.*\\n)*?    settings:\\n      base:\\n)`,
+    "m",
+  );
+  if (!appSettings.test(text)) {
+    console.error(`add-tunnel-extension: no settings block found on ${APP_TARGET}`);
+    process.exit(1);
+  }
+  text = text.replace(
+    appSettings,
+    `$1        CODE_SIGN_STYLE: Manual\n` +
+      `        CODE_SIGN_IDENTITY: "Apple Distribution"\n` +
+      `        PROVISIONING_PROFILE_SPECIFIER: "Neoxify AppStore 2026"\n`,
+  );
+}
+
+
+// The App Store's two version numbers, when they need to differ from
+// the one in tauri.conf.json.
+//
+// Tauri writes both CFBundleShortVersionString and CFBundleVersion from
+// that single value, which is right for every other channel and wrong
+// here. Apple wants the short string to match the version record in App
+// Store Connect ("1.0.0"), and the build number to be strictly greater
+// than every build already uploaded against it -- compared as dotted
+// integers, so "0.2.21" is LOWER than the existing "4" and is refused
+// at upload with a message about the version already existing.
+//
+// Both are env-driven and both default to leaving the file alone, so
+// nothing changes for a simulator build, a device build, or CI.
+const marketingVersion = process.env.NEOXIFY_IOS_MARKETING_VERSION;
+const buildNumber = process.env.NEOXIFY_IOS_BUILD_NUMBER;
+if (marketingVersion || buildNumber) {
+  // REPLACE Tauri's values rather than add our own. Both end up in the
+  // same `properties:` map, and YAML keeps the last of a duplicated key
+  // -- the exact trap described above for `entitlements:`. Prepending
+  // produced a spec that read 1.0.0 at the top, 0.2.21 lower down, and
+  // built 0.2.21 while reporting that it had set 1.0.0.
+  //
+  // Anchored inside the app target's info block so the tunnel's own
+  // version, a few lines earlier in the file, is left alone: the
+  // extension's short version has to match the app's, but its build
+  // number is Tauri's business and nothing here needs to move it.
+  const infoBlock = new RegExp(
+    `(^  ${APP_TARGET}:\\n(?:.*\\n)*?    info:\\n(?:.*\\n)*?)(    entitlements:\\n)`,
+    "m",
+  );
+  const found = text.match(infoBlock);
+  if (!found) {
+    console.error(`add-tunnel-extension: no info block found on ${APP_TARGET}`);
+    process.exit(1);
+  }
+  let block = found[1];
+  const replaceIn = (key, value) => {
+    const re = new RegExp(`(\\n        ${key}: )"?[^"\\n]*"?`);
+    if (!re.test(block)) {
+      console.error(`add-tunnel-extension: ${key} not found on ${APP_TARGET}`);
+      process.exit(1);
+    }
+    block = block.replace(re, `$1"${value}"`);
+  };
+  if (marketingVersion) replaceIn("CFBundleShortVersionString", marketingVersion);
+  if (buildNumber) replaceIn("CFBundleVersion", buildNumber);
+  text = text.replace(infoBlock, block + "$2");
+  console.log(
+    `add-tunnel-extension: app version ${marketingVersion ?? "(unchanged)"} ` +
+      `build ${buildNumber ?? "(unchanged)"}`,
+  );
+}
 
 writeFileSync(spec, text);
 console.log(`add-tunnel-extension: added ${EXT_TARGET} (app group ${GROUP})`);
