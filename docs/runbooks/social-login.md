@@ -130,3 +130,26 @@ Worth walking per platform:
    -- refused, with a message telling them to finish the password
    signup. This is deliberate: linking on an address nobody has proven
    is account takeover with extra steps.
+
+
+## Submitting a release that carries new in-app purchases
+
+The final submit must be done in the App Store Connect **web UI**. Apple
+refuses a standalone IAP submission —
+
+> The first Non-Renewing Subscription for this app must be submitted for
+> review at the same time that you submit an app version.
+
+— and there is no API path to pair them: `appStoreVersions` exposes no
+`inAppPurchases` relationship, `reviewSubmissionItems` accepts
+`appStoreVersion` but not `inAppPurchaseV2`, and `inAppPurchaseSubmissions`
+returns the error above.
+
+Submitting the version alone through `reviewSubmissions` does **not**
+carry the purchases: the version reaches WAITING_FOR_REVIEW and the IAPs
+stay at READY_TO_SUBMIT, so a reviewer finds an empty purchase screen.
+Confirmed on 2026-09-30 and cancelled.
+
+So prepare by API — attach the build, write the review notes, get every
+IAP to READY_TO_SUBMIT — then tick the purchases under "In-App Purchases
+and Subscriptions" on the version page and press Submit by hand.
