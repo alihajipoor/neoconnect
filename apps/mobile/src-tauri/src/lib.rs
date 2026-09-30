@@ -23,6 +23,10 @@ pub fn run() {
             tauri_plugin_neoxify_vpn::vpn_list_apps,
             tauri_plugin_neoxify_vpn::vpn_sign_in_with_apple,
             tauri_plugin_neoxify_vpn::vpn_open_auth_session,
+            tauri_plugin_neoxify_vpn::vpn_iap_products,
+            tauri_plugin_neoxify_vpn::vpn_iap_purchase,
+            tauri_plugin_neoxify_vpn::vpn_iap_unfinished,
+            tauri_plugin_neoxify_vpn::vpn_iap_finish,
             // The location picker calls this for every route. Absent
             // here, every call rejected and every server showed "--"
             // where its latency should be -- for the whole life of the

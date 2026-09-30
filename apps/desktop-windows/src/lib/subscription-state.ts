@@ -44,14 +44,26 @@ export interface EndedNotice {
 export function endedNotice(
   status: SubscriptionStatus,
   isStoreBuild: boolean,
+  /** Whether this build can actually take a payment in-app.
+   *
+   * Not the same question as `isStoreBuild`, and conflating them is a
+   * real bug rather than a nicety. The App Store build now sells
+   * through StoreKit, so it should offer to. The Play build is equally
+   * a store build and sells nothing at all, so offering it a button
+   * would lead to a screen with nothing on it -- which is exactly the
+   * dead end this function was written to stop.
+   */
+  canBuyInApp = false,
 ): EndedNotice | null {
   if (status !== "SUSPENDED" && status !== "EXPIRED") return null;
 
+  const sells = !isStoreBuild || canBuyInApp;
   return {
     titleKey: status === "SUSPENDED" ? "dash.outOfData" : "dash.planExpired",
-    // Direct builds sell; store builds send them back to wherever they
-    // bought it, without naming a destination or offering a link.
-    bodyKey: isStoreBuild ? "dash.renewStore" : "dash.renewHint",
-    showPlansButton: !isStoreBuild,
+    // A build that cannot sell sends them back to wherever they bought
+    // it, without naming a destination or offering a link -- that link
+    // is what guideline 3.1.1 rejected 1.0 over.
+    bodyKey: sells ? "dash.renewHint" : "dash.renewStore",
+    showPlansButton: sells,
   };
 }

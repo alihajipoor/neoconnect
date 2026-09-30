@@ -6,8 +6,8 @@
 //! Tauri plugins put their commands in a submodule for the same reason.
 
 use crate::{
-    AppleIdentity, Apps, Empty, Granted, Ikev2Profile, TunnelGone, VpnStatus, WireGuardProfile,
-    XrayProfile,
+    AppleIdentity, Apps, Empty, Granted, IapProducts, IapPurchase, IapUnfinished, Ikev2Profile,
+    TunnelGone, VpnStatus, WireGuardProfile, XrayProfile,
 };
 // Only the mobile branch of vpn_open_auth_session names this; the
 // desktop fallback returns an error without ever building one.
@@ -280,6 +280,108 @@ pub async fn vpn_open_auth_session<R: Runtime>(
         // the real browser and catches the neoconnect:// link the
         // deep-link plugin already registers. See social-auth.ts.
         let _ = (app, url, scheme);
+        Err(unavailable())
+    }
+}
+
+/// The plans this build can sell, priced by the App Store.
+///
+/// iOS only. Android sells nothing in-app -- Play builds carry no
+/// purchase surface either -- and the desktop client sends people to
+/// the web checkout, which needs none of this.
+#[tauri::command]
+pub async fn vpn_iap_products<R: Runtime>(
+    app: AppHandle<R>,
+    product_ids: Vec<String>,
+) -> Result<IapProducts, String> {
+    #[cfg(target_os = "ios")]
+    {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            product_ids: Vec<String>,
+        }
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<IapProducts>("iapProducts", Args { product_ids })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, product_ids);
+        Err("In-app purchase is only available on iOS".to_string())
+    }
+}
+
+/// Charges for a plan. Does NOT mark it delivered -- see
+/// `vpn_iap_finish`, which is called only once the server has granted
+/// the subscription.
+#[tauri::command]
+pub async fn vpn_iap_purchase<R: Runtime>(
+    app: AppHandle<R>,
+    product_id: String,
+) -> Result<IapPurchase, String> {
+    #[cfg(target_os = "ios")]
+    {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            product_id: String,
+        }
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<IapPurchase>("iapPurchase", Args { product_id })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, product_id);
+        Err("In-app purchase is only available on iOS".to_string())
+    }
+}
+
+/// Purchases that were paid for and never granted.
+///
+/// Swept on launch. Without it, a customer whose app died between
+/// paying Apple and reaching our API has been charged for nothing, and
+/// the only record left is the transaction StoreKit is still holding.
+#[tauri::command]
+pub async fn vpn_iap_unfinished<R: Runtime>(app: AppHandle<R>) -> Result<IapUnfinished, String> {
+    #[cfg(target_os = "ios")]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<IapUnfinished>("iapUnfinished", ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = app;
+        Ok(IapUnfinished { signed_transactions: Vec::new() })
+    }
+}
+
+/// Tells StoreKit the subscription has been delivered.
+#[tauri::command]
+pub async fn vpn_iap_finish<R: Runtime>(
+    app: AppHandle<R>,
+    transaction_id: Option<String>,
+) -> Result<Empty, String> {
+    #[cfg(target_os = "ios")]
+    {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            transaction_id: Option<String>,
+        }
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<Empty>("iapFinish", Args { transaction_id })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, transaction_id);
         Err(unavailable())
     }
 }

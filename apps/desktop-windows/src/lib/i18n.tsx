@@ -658,6 +658,11 @@ const en = {
   "plans.speed": "Speed",
   "plans.devices": "Devices",
   "plans.unlimited": "Unlimited",
+  "plans.buyWithAppStore": "Buy with App Store",
+  // Not an error, and worded so it does not read as one: this is what a
+  // customer sees while the products are still pending review in App
+  // Store Connect.
+  "plans.noneAvailable": "No plans are available to buy here right now. Please check back shortly.",
   "plans.upTo": "Up to {n} Mbps",
   "plans.devicesAtOnce": "{n} at once",
   "plans.bestValue": "Best value",
@@ -1220,6 +1225,8 @@ const fa: Record<TranslationKey, string> = {
   "plans.speed": "سرعت",
   "plans.devices": "دستگاه",
   "plans.unlimited": "نامحدود",
+  "plans.buyWithAppStore": "خرید از اپ استور",
+  "plans.noneAvailable": "در حال حاضر پلنی برای خرید در دسترس نیست. لطفاً کمی بعد دوباره سر بزنید.",
   "plans.upTo": "تا {n} مگابیت",
   "plans.devicesAtOnce": "{n} همزمان",
   "plans.bestValue": "بهترین انتخاب",

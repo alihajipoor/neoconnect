@@ -119,6 +119,13 @@ export interface SubscriptionPlan {
   maxDownloadMbps: number | null;
   maxUploadMbps: number | null;
   protocolsAllowed: Protocol[];
+  /** The StoreKit product this plan is sold as on iPhone, if it is.
+   *
+   * Null for anything Apple never sees, which is most plans on most
+   * channels. The iOS purchase screen lists only plans that have one,
+   * and prices them from Apple rather than from `priceUsd` -- see
+   * lib/iap.ts. */
+  appleProductId: string | null;
   isActive: boolean;
   defaultRouteId: string | null;
   createdAt: string;
