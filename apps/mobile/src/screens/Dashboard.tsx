@@ -1203,6 +1203,25 @@ export function Dashboard({
                     </span>
                   ) : null}
                 </div>
+
+                {/* A way to buy while a plan is still running.
+                    endedNotice only offers one once the plan has ENDED,
+                    which left an App Store build with no route to its
+                    own purchase screen for anybody currently subscribed
+                    -- including a reviewer on the free trial, who would
+                    have had no way to reach the in-app purchase at all.
+                    Only shown where buying actually works: the Play
+                    build sells nothing. */}
+                {iapAvailable() ? (
+                  <Button
+                    variant="outline"
+                    onClick={onBrowsePlans}
+                    className="mt-3 w-full justify-center gap-2"
+                  >
+                    <Tag className="size-4" />
+                    {t("dash.viewPlans")}
+                  </Button>
+                ) : null}
               </Card>
 
               <Button
