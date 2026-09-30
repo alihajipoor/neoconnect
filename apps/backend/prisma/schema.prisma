@@ -149,6 +149,15 @@ enum PaymentProvider {
   /// Appended, never inserted: Postgres orders enum values by creation
   /// and existing rows sort by that order.
   PLISIO
+  /// Bought through StoreKit on an iPhone.
+  ///
+  /// Unlike the other three this one takes no money of ours and issues
+  /// no invoice: Apple collects, keeps its commission, and remits the
+  /// rest. The row exists so a subscription can say where it came from,
+  /// so a transaction cannot be replayed (see the unique constraint on
+  /// provider+providerRef), and so support can tell a customer who asks
+  /// for a refund that Apple, not us, has to give it.
+  APPLE_IAP
 }
 
 enum PaymentStatus {
@@ -407,12 +416,32 @@ model SubscriptionPlan {
   /// signup threw and no customer got a trial, with nothing saying why.
   /// Visibility now has its own flag below.
   isActive                 Boolean    @default(true)
+  /// The StoreKit product this plan is sold as on iPhone, if it is.
+  ///
+  /// Null for a plan Apple never sees -- the trial, anything unlisted,
+  /// and anything sold only on the web. A plan with no product id simply
+  /// does not appear in the iOS purchase list, which is the same rule
+  /// `isPurchasable` already applies everywhere else.
+  ///
+  /// Unique because the mapping has to be reversible: a StoreKit
+  /// transaction names a product, and the server has to turn that back
+  /// into exactly one plan before it grants anything. Two plans sharing
+  /// a product id would make that ambiguous, and the ambiguity would be
+  /// resolved by whichever row came back first.
+  ///
+  /// The price lives in App Store Connect as well as here, and Apple's
+  /// is the one the customer is charged. `priceUsd` stays the source of
+  /// truth for every other channel and for reporting; they are kept in
+  /// step by hand, because Apple's price points are not arbitrary
+  /// decimals and cannot be derived from ours.
+  appleProductId           String?    @unique
+
   /// Whether customers see this plan in the purchase list.
   ///
   /// Separate from isActive on purpose: a plan can be perfectly usable
   /// and deliberately unlisted -- a trial nobody buys, a legacy tier
   /// existing customers keep, a plan issued only by voucher.
-  isPurchasable            Boolean    @default(true)
+  isPurchasable Boolean @default(true)
   // Which Route a customer purchasing this plan gets provisioned on --
   // same v1 simplification as FreeTrialSettings.trialRouteId (one
   // admin-configured default, no per-purchase server picker yet). Used
@@ -429,7 +458,7 @@ model SubscriptionPlan {
   /// traffic crosses two servers and the Iran side costs more per
   /// gigabyte, so quietly provisioning every customer onto it would be
   /// paying twice to serve people who never asked for it.
-  relayOnly                Boolean    @default(false)
+  relayOnly     Boolean @default(false)
 
   defaultRouteId String?
   createdAt      DateTime @default(now())

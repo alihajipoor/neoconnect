@@ -5,6 +5,7 @@ import {
   Delete,
   Get,
   Header,
+  HttpCode,
   Param,
   HttpStatus,
   Patch,
@@ -18,6 +19,7 @@ import type { Request, Response } from "express";
 import { createHash } from "node:crypto";
 import { ConfigService } from "@nestjs/config";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 import { CustomersService } from "../customers/customers.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
@@ -27,6 +29,7 @@ import { BillingService } from "../billing/billing.service";
 import { InvoicesService } from "../invoices/invoices.service";
 import { PaymentSettingsService } from "../payment-settings/payment-settings.service";
 import { renderInvoiceHtml } from "../invoices/invoice-document";
+import { AppleRedeemDto } from "./dto/apple-redeem.dto";
 import { CreatePaymentDto } from "../billing/dto/create-payment.dto";
 import { CreateOwnSubscriptionDto } from "./dto/create-own-subscription.dto";
 import { SwitchRouteDto } from "./dto/switch-route.dto";
@@ -384,6 +387,35 @@ export class CustomerController {
     }
     const returnUrl = `${publicApiUrl.replace(/\/$/, "")}/customer/billing/return`;
     return this.billingService.createForClient(dto, returnUrl);
+  }
+
+
+  /** Redeems a completed App Store purchase.
+   *
+   * Apple rejected 1.0 under guideline 3.1.1, and this is the other half
+   * of the answer: on iPhone the customer buys through StoreKit, and the
+   * app posts the signed transaction here. Every other channel is
+   * untouched and Apple takes nothing from them, because those payments
+   * never go near the App Store.
+   *
+   * Throttled, but not as a brute-force defence -- there is nothing to
+   * guess, since a transaction either carries Apple's signature or it
+   * does not. It is here because verification does real cryptographic
+   * work on unauthenticated-in-practice input, and a device in a retry
+   * loop should not be able to spend the server's CPU on it.
+   *
+   * Safe to call more than once with the same transaction: that is the
+   * restore path, and it returns the subscription the first call made
+   * rather than issuing a second.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post("billing/apple/redeem")
+  @HttpCode(HttpStatus.OK)
+  async redeemApplePurchase(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Body() dto: AppleRedeemDto,
+  ) {
+    return this.billingService.redeemApplePurchase(customer.sub, dto.signedTransaction);
   }
 
 }

@@ -40,6 +40,9 @@ describe("BillingService.confirmPayment expiry", () => {
       // renewal and expiry.
       { availableProviders: jest.fn().mockResolvedValue([]) } as never,
       { issueForPayment: jest.fn().mockResolvedValue({}) } as never,
+      // subscriptions -- unused by these cases, which never redeem an
+      // App Store purchase.
+      {} as never,
     );
     return { service, prisma };
   }
