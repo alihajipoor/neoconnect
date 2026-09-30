@@ -580,7 +580,7 @@ export class BillingService {
       throw err;
     }
 
-    await this.confirmPayment(transaction.id, verified as unknown as Prisma.InputJsonValue);
+    await this.confirmPayment(transaction.id, verified);
     return { subscriptionId: subscription.id, alreadyRedeemed: false };
   }
 }
