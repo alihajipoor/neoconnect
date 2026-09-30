@@ -26,7 +26,20 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const MARKERS = ["checkoutUrl", "redeem"];
+// `websiteUrl` was added after Apple rejected 1.0 (0.2.20) under 3.1.1.
+// The bundle already carried no checkout, and that was not enough: the
+// Dashboard had a Website button opening neoxify.net, which sells
+// subscriptions, so the app gave access to paid content by means other
+// than In-App Purchase. Stripping the checkout answers "does the app
+// sell?"; this answers "does the app hand you somewhere that does?",
+// and the guideline asks both.
+//
+// It reaches zero for the same reason the other two do: IS_STORE_BUILD
+// is a Vite compile-time constant, so the branch holding it is
+// eliminated rather than merely unreachable. The privacy policy link to
+// the same domain is deliberately not a marker -- Apple requires it,
+// and a privacy page is not a purchase surface.
+const MARKERS = ["checkoutUrl", "redeem", "websiteUrl"];
 const root = process.argv[2] ?? "dist";
 
 const files = [];
