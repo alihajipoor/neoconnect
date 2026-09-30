@@ -418,35 +418,6 @@ if (marketingVersion || buildNumber) {
   );
 }
 
-
-// Export compliance, answered in the binary rather than once per upload.
-//
-// Without this key every upload sits in App Store Connect showing
-// "Determine Compliance Requirements" and does not appear in the builds
-// API at all -- so it looks like the upload silently failed, when it is
-// actually waiting for a question to be answered in the web UI or the
-// App Store Connect app.
-//
-// `false` is the answer this account has given on every previous build
-// (both 1.0.0 and 4 read usesNonExemptEncryption: false), and it is a
-// declaration about the app rather than a build setting: it says the
-// app uses only encryption exempt under the US EAR, which is the
-// category HTTPS and the platform's own cryptography fall into. It is
-// recorded here so the same answer is given every time instead of being
-// re-entered by hand, not to change what is being declared.
-if (!/ITSAppUsesNonExemptEncryption/.test(text)) {
-  const anchor = new RegExp(
-    `(^  ${APP_TARGET}:\\n(?:.*\\n)*?    info:\\n      path: .*\\n      properties:\\n)`,
-    "m",
-  );
-  if (!anchor.test(text)) {
-    console.error(`add-tunnel-extension: no info block found on ${APP_TARGET}`);
-    process.exit(1);
-  }
-  text = text.replace(anchor, `$1        ITSAppUsesNonExemptEncryption: false\n`);
-  console.log("add-tunnel-extension: declared ITSAppUsesNonExemptEncryption=false");
-}
-
 writeFileSync(spec, text);
 console.log(`add-tunnel-extension: added ${EXT_TARGET} (app group ${GROUP})`);
 
