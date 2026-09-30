@@ -24,6 +24,7 @@ import type {
 } from "@shared/lib/types";
 import { formatBytes } from "@shared/lib/utils";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
+import { iapAvailable } from "@shared/lib/iap";
 import { endedNotice } from "@shared/lib/subscription-state";
 import { customerProtocolLabel } from "@shared/lib/protocol-labels";
 import {
@@ -863,7 +864,7 @@ export function Dashboard({
    * lives outside the component. */
   const endedState = useMemo(
     () =>
-      subscription ? endedNotice(subscription.status, IS_STORE_BUILD) : null,
+      subscription ? endedNotice(subscription.status, IS_STORE_BUILD, iapAvailable()) : null,
     [subscription],
   );
 
@@ -1241,7 +1242,7 @@ export function Dashboard({
                     which is what hiding the button alone would have
                     done. So it says plainly what state the account is
                     in and what will happen when that changes. */}
-                {IS_STORE_BUILD ? (
+                {IS_STORE_BUILD && !iapAvailable() ? (
                   <p className="mt-1 text-xs text-muted-foreground">
                     {t("dash.noPlanStore")}
                   </p>

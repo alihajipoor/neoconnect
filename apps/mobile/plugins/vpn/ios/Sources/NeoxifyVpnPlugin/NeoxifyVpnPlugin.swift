@@ -1,5 +1,6 @@
 import AuthenticationServices
 import NetworkExtension
+import StoreKit
 import Tauri
 import UIKit
 
@@ -328,6 +329,87 @@ class NeoxifyVpnPlugin: Plugin {
             }
         } catch {
             invoke.reject("bad arguments: \(error.localizedDescription)")
+        }
+    }
+
+    // --- App Store purchases -------------------------------------
+    //
+    // These live here rather than in StoreKitPurchases.swift for the
+    // same reason signInWithApple does: Tauri finds a command through
+    // `responds(to:)`, so nothing references these statically, and the
+    // linker drops an object file holding only unreferenced methods.
+    // Putting them beside the class that is already linked is what
+    // makes them exist at run time.
+
+    @objc public func iapProducts(_ invoke: Invoke) {
+        struct Args: Decodable { let productIds: [String] }
+        do {
+            let args = try invoke.parseArgs(Args.self)
+            Task {
+                do {
+                    let products = try await StoreKitPurchases.products(ids: args.productIds)
+                    let encoded = try JSONEncoder().encode(products)
+                    let array = try JSONSerialization.jsonObject(with: encoded)
+                    invoke.resolve(["products": array])
+                } catch {
+                    NSLog("[Neoxify] loading products failed: \(error)")
+                    invoke.reject("iap-products-failed")
+                }
+            }
+        } catch {
+            invoke.reject("bad arguments: \(error.localizedDescription)")
+        }
+    }
+
+    @objc public func iapPurchase(_ invoke: Invoke) {
+        struct Args: Decodable { let productId: String }
+        do {
+            let args = try invoke.parseArgs(Args.self)
+            Task {
+                do {
+                    switch try await StoreKitPurchases.purchase(productId: args.productId) {
+                    case .bought(let jws, let transactionId):
+                        // NOT finished here. The server has to grant the
+                        // subscription first; see StoreKitPurchases.
+                        invoke.resolve([
+                            "signedTransaction": jws,
+                            "transactionId": String(transactionId),
+                        ])
+                    case .cancelled:
+                        invoke.resolve(["signedTransaction": NSNull()])
+                    case .pending:
+                        invoke.resolve(["signedTransaction": NSNull(), "pending": true])
+                    }
+                } catch {
+                    NSLog("[Neoxify] purchase failed: \(error)")
+                    invoke.reject((error as? LocalizedError)?.errorDescription ?? "iap-failed")
+                }
+            }
+        } catch {
+            invoke.reject("bad arguments: \(error.localizedDescription)")
+        }
+    }
+
+    /// Purchases that were paid for but never granted, from a previous
+    /// run that died between the two.
+    @objc public func iapUnfinished(_ invoke: Invoke) {
+        Task {
+            invoke.resolve(["signedTransactions": await StoreKitPurchases.unfinishedTransactions()])
+        }
+    }
+
+    /// Tells StoreKit a purchase has been delivered. Only ever called
+    /// after our own API has granted the subscription.
+    @objc public func iapFinish(_ invoke: Invoke) {
+        struct Args: Decodable { let transactionId: String? }
+        let args = try? invoke.parseArgs(Args.self)
+        Task {
+            if let raw = args?.transactionId, let id = UInt64(raw) {
+                await StoreKitPurchases.finish(transactionId: id)
+            } else {
+                await StoreKitPurchases.finishAll()
+            }
+            invoke.resolve()
         }
     }
 

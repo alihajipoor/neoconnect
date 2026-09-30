@@ -7,10 +7,12 @@ import { Register } from "@shared/screens/Register";
 import { VerifyEmail } from "@shared/screens/VerifyEmail";
 import { ForgotPassword } from "@shared/screens/ForgotPassword";
 import { Plans } from "@shared/screens/Plans";
+import { StorePlans } from "@shared/screens/StorePlans";
 import { Referrals } from "@shared/screens/Referrals";
 import { Support } from "@shared/screens/Support";
 import { Settings } from "@shared/screens/Settings";
 import { IS_STORE_BUILD } from "@shared/lib/distribution";
+import { sweepUnfinishedPurchases } from "@shared/lib/iap";
 import { Dashboard } from "./screens/Dashboard";
 import { PerAppCard } from "./components/PerAppCard";
 import { isAndroid } from "./lib/platform";
@@ -117,6 +119,19 @@ export default function App() {
   // page that already works. The 6-digit code in the same email is the
   // route that works today, on both platforms.
 
+
+  // Anything paid for but never granted, from a run that died between
+  // Apple taking the money and our API hearing about it. Rare, and the
+  // customer is out of pocket until it runs -- so it runs on every
+  // launch rather than being triggered by anything they have to find.
+  //
+  // Silent either way: a recovered purchase simply appears on the
+  // dashboard, and a failure here must not push itself in front of
+  // somebody trying to connect. It is retried on the next launch.
+  useEffect(() => {
+    void sweepUnfinishedPurchases().catch(() => undefined);
+  }, []);
+
   function goToVerify(email: string, password: string) {
     setPendingAuth({ email, password });
     setScreen("verify");
@@ -213,6 +228,17 @@ export default function App() {
   // looks for and what a determined customer finds.
   if (screen === "plans" && !IS_STORE_BUILD) {
     return <Plans onActivated={() => setScreen("dashboard")} onBack={() => setScreen("dashboard")} />;
+  }
+  // The App Store counterpart, and the mirror image of the branch above:
+  // this one is dropped from every non-store build for the same reason,
+  // so neither artifact carries the other's purchase path.
+  if (screen === "plans" && IS_STORE_BUILD) {
+    return (
+      <StorePlans
+        onActivated={() => setScreen("dashboard")}
+        onBack={() => setScreen("dashboard")}
+      />
+    );
   }
     return (
       <Dashboard

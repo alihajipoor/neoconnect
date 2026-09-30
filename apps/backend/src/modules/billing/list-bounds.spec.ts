@@ -49,6 +49,7 @@ describe("GET /billing/payments bounds", () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any, // subscriptions
     );
   });
 

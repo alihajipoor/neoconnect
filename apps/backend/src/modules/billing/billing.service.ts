@@ -9,6 +9,8 @@ import { ConfigService } from "@nestjs/config";
 import { PaymentSettingsService } from "../payment-settings/payment-settings.service";
 import { StripeProvider } from "./providers/stripe.provider";
 import { InvoicesService } from "../invoices/invoices.service";
+import { SubscriptionsService } from "../subscriptions/subscriptions.service";
+import { verifyAppleTransaction, type VerifiedTransaction } from "./providers/apple-iap.provider";
 import type { ListWindow, Page } from "../../common/pagination";
 
 /** What a payment row looks like on the list, and nothing else.
@@ -51,6 +53,10 @@ export class BillingService {
     private readonly config: ConfigService,
     private readonly paymentSettings: PaymentSettingsService,
     private readonly invoices: InvoicesService,
+    // Appended, like every dependency added here since: these are
+    // positional, and inserting one silently re-binds every argument
+    // after it.
+    private readonly subscriptions: SubscriptionsService,
   ) {}
 
   /** Every payment ever taken, newest first -- bounded.
@@ -283,6 +289,14 @@ export class BillingService {
     // moved and the subscription is live. Logged loudly instead, since a
     // paid-but-uninvoiced transaction is a real bookkeeping gap that
     // someone has to fix by hand.
+    // Not for App Store purchases. Apple is the merchant of record
+    // there: it takes the customer's money, keeps its commission, remits
+    // the rest, and sends the customer its own receipt. An invoice from
+    // us for the full price would describe a transaction that did not
+    // happen, and would be wrong in exactly the way an auditor cares
+    // about.
+    if (transaction.provider === "APPLE_IAP") return;
+
     try {
       await this.invoices.issueForPayment(transactionId);
     } catch (err) {
@@ -456,5 +470,117 @@ export class BillingService {
       return "PLISIO" as const;
     }
     return "NOWPAYMENTS" as const;
+  }
+
+  /** Turns a finished App Store purchase into a subscription.
+   *
+   * Unlike every other provider here there is no pending phase and no
+   * webhook: by the time the app calls this, Apple has already taken
+   * the customer's money. So this verifies, then activates, in one go.
+   *
+   * It is also the restore path. Apple expects a customer who reinstalls
+   * or changes phone to get their purchase back without paying again,
+   * and the app replays the same signed transaction to do it -- which is
+   * indistinguishable from an attacker replaying it, so the two are
+   * handled by the same rule: a transaction id is worth exactly one
+   * subscription, to exactly one customer, forever.
+   */
+  async redeemApplePurchase(customerId: string, signedTransaction: string) {
+    const bundleId = this.config.get<string>("APPLE_BUNDLE_ID");
+    if (!bundleId) {
+      this.logger.error("APPLE_BUNDLE_ID is not configured; App Store purchases cannot be verified");
+      throw new BadRequestException("Purchases are not available right now");
+    }
+
+    let verified: VerifiedTransaction;
+    try {
+      verified = verifyAppleTransaction(signedTransaction, bundleId);
+    } catch (err) {
+      // Logged, never returned. Every failure here describes a forgery,
+      // and naming which check it tripped tells whoever is probing us
+      // what to fix.
+      this.logger.warn(`App Store purchase rejected: ${(err as Error).message}`);
+      throw new BadRequestException("That purchase could not be verified");
+    }
+
+    // A sandbox transaction is genuinely signed by Apple, so the
+    // signature check passes and cannot be what stops it. TestFlight and
+    // the simulator both mint them freely, which would make a paid
+    // subscription free for anybody willing to install a beta build.
+    if (verified.environment !== "Production" && this.config.get<string>("APPLE_ALLOW_SANDBOX") !== "true") {
+      this.logger.warn(`Refused a ${verified.environment} App Store purchase in production`);
+      throw new BadRequestException("That purchase could not be verified");
+    }
+
+    const plan = await this.prisma.subscriptionPlan.findUnique({
+      where: { appleProductId: verified.productId },
+    });
+    // Not a customer error: it means a product exists in App Store
+    // Connect that nothing here maps to, which is an operator mistake
+    // and one the customer has already been charged for.
+    if (!plan || !plan.isActive) {
+      this.logger.error(
+        `App Store product ${verified.productId} maps to no active plan; a customer has paid for nothing`,
+      );
+      throw new BadRequestException("That purchase could not be matched to a plan");
+    }
+
+    const already = await this.prisma.paymentTransaction.findUnique({
+      where: { provider_providerRef: { provider: "APPLE_IAP", providerRef: verified.transactionId } },
+    });
+    if (already) {
+      if (already.customerId !== customerId) {
+        // Somebody is replaying a transaction that belongs to another
+        // account. The honest answer to the customer is that it is not
+        // theirs to redeem.
+        this.logger.warn(
+          `App Store transaction ${verified.transactionId} replayed against a different customer`,
+        );
+        throw new BadRequestException("That purchase belongs to a different account");
+      }
+      // Their own purchase, seen again: a restore, or a retry after a
+      // dropped response. Same answer as the first time, no second
+      // subscription.
+      return { subscriptionId: already.subscriptionId, alreadyRedeemed: true };
+    }
+
+    const subscription = await this.subscriptions.createOrReusePending(customerId, plan.id);
+
+    let transaction;
+    try {
+      transaction = await this.prisma.paymentTransaction.create({
+        data: {
+          customerId,
+          subscriptionId: subscription.id,
+          provider: "APPLE_IAP",
+          // The transaction id IS the idempotency key, which is why it
+          // goes in the column with the unique constraint on it rather
+          // than into the payload.
+          providerRef: verified.transactionId,
+          // What the plan costs us to honour, not what Apple charged or
+          // what it remits after commission. Apple's price is set in App
+          // Store Connect and its cut is not visible here, so recording
+          // anything else would be a guess dressed as a figure.
+          amountUsd: plan.priceUsd,
+          currency: "usd",
+          status: "PENDING",
+          rawWebhookPayload: verified as unknown as Prisma.InputJsonValue,
+        },
+      });
+    } catch (err) {
+      // Two devices redeeming the same purchase at once. The unique
+      // constraint is the arbiter; the loser reports what the winner
+      // already did rather than failing in front of a paying customer.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        const winner = await this.prisma.paymentTransaction.findUnique({
+          where: { provider_providerRef: { provider: "APPLE_IAP", providerRef: verified.transactionId } },
+        });
+        return { subscriptionId: winner?.subscriptionId ?? subscription.id, alreadyRedeemed: true };
+      }
+      throw err;
+    }
+
+    await this.confirmPayment(transaction.id, verified);
+    return { subscriptionId: subscription.id, alreadyRedeemed: false };
   }
 }

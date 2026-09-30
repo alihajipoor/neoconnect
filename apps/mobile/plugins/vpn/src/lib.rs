@@ -163,6 +163,46 @@ pub struct AuthCallback {
     pub url: Option<String>,
 }
 
+/// One purchasable plan, as the App Store describes it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IapProduct {
+    pub id: String,
+    pub display_name: String,
+    /// Apple's own localised price string. Shown verbatim: it already
+    /// carries the customer's currency and their storefront's
+    /// conventions, and Apple requires its price to be the displayed
+    /// one.
+    pub display_price: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IapProducts {
+    pub products: Vec<IapProduct>,
+}
+
+/// The result of asking StoreKit to charge for something.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IapPurchase {
+    /// Absent when the customer cancelled, or when Apple has put the
+    /// purchase in a pending state awaiting someone else's approval.
+    pub signed_transaction: Option<String>,
+    /// Kept so the transaction can be finished once our own API has
+    /// granted the subscription -- never before.
+    pub transaction_id: Option<String>,
+    #[serde(default)]
+    pub pending: bool,
+}
+
+/// Purchases StoreKit still considers undelivered: paid for, but never
+/// granted, because a previous run died between the two.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IapUnfinished {
+    pub signed_transactions: Vec<String>,
+}
+
 /// "The call succeeded and has nothing to say."
 ///
 /// Deserialised by hand because the two platforms do not agree on what

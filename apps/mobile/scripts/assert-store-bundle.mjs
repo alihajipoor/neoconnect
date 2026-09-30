@@ -26,6 +26,18 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+// `vouchers/redeem` was a bare `redeem` until App Store purchasing was
+// added. The word was a proxy for the voucher path, and once the app
+// legitimately redeemed an *Apple* transaction it matched that too --
+// failing a clean bundle, and inviting exactly the wrong fix, which is
+// to rename honest code until the grep goes quiet.
+//
+// The request path is the better marker on both counts. It names the
+// prohibited capability exactly rather than by association, and it is a
+// string literal: unlike an identifier, no minifier can rename it out
+// of the bundle and leave this assertion passing over code that is
+// still in there.
+//
 // `websiteUrl` was added after Apple rejected 1.0 (0.2.20) under 3.1.1.
 // The bundle already carried no checkout, and that was not enough: the
 // Dashboard had a Website button opening neoxify.net, which sells
@@ -39,7 +51,7 @@ import { join } from "node:path";
 // eliminated rather than merely unreachable. The privacy policy link to
 // the same domain is deliberately not a marker -- Apple requires it,
 // and a privacy page is not a purchase surface.
-const MARKERS = ["checkoutUrl", "redeem", "websiteUrl"];
+const MARKERS = ["checkoutUrl", "vouchers/redeem", "websiteUrl"];
 const root = process.argv[2] ?? "dist";
 
 const files = [];
