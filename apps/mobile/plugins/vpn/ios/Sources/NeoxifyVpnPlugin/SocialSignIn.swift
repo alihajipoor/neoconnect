@@ -21,98 +21,30 @@ import UIKit
 /// carrying packets -- but a second Tauri plugin means a second Rust
 /// crate, Swift package, Kotlin module and permission set for two
 /// methods, and the app has exactly one native surface today.
-extension NeoxifyVpnPlugin {
-    @objc public func signInWithApple(_ invoke: Invoke) {
-        DispatchQueue.main.async {
-            let request = ASAuthorizationAppleIDProvider().createRequest()
-            // The address is the only thing we need and the only thing
-            // asked for. Apple sends it once, on the very first consent,
-            // and never again -- the backend joins on the subject for
-            // exactly that reason.
-            request.requestedScopes = [.email]
-
-            let controller = ASAuthorizationController(authorizationRequests: [request])
-            let delegate = AppleSignInDelegate(invoke: invoke)
-            controller.delegate = delegate
-            controller.presentationContextProvider = delegate
-            // Same lifetime problem as the session above: performRequests()
-            // returns straight away and the controller is a local, so
-            // without this ARC frees it before the sheet answers.
-            delegate.controller = controller
-            // The delegate is the only strong reference to itself:
-            // ASAuthorizationController holds both of these weakly, so
-            // without this the object is deallocated before the sheet
-            // returns and no callback ever fires. The sheet appears,
-            // the customer signs in, and the button spins forever.
-            delegate.retain()
-            controller.performRequests()
-        }
-    }
-
-    @objc public func openAuthSession(_ invoke: Invoke) {
-        struct Args: Decodable {
-            let url: String
-            let scheme: String
-        }
-        do {
-            let args = try invoke.parseArgs(Args.self)
-            guard let url = URL(string: args.url) else {
-                invoke.reject("that sign-in address is not valid")
-                return
-            }
-            DispatchQueue.main.async {
-                let context = AuthPresentationContext()
-                let session = ASWebAuthenticationSession(
-                    url: url,
-                    callbackURLScheme: args.scheme
-                ) { callbackURL, error in
-                    // Held until here so ARC does not take the session
-                    // away mid-flight; releasing it now is what lets the
-                    // context go too.
-                    context.release()
-                    if let error = error as? ASWebAuthenticationSessionError,
-                       error.code == .canceledLogin {
-                        // Dismissed. Not a failure: the customer knows
-                        // what they just did, and an error alert here
-                        // would be both wrong and alarming.
-                        invoke.resolve(["url": NSNull()])
-                        return
-                    }
-                    if let error = error {
-                        invoke.reject("sign-in could not be completed: \(error.localizedDescription)")
-                        return
-                    }
-                    guard let callbackURL = callbackURL else {
-                        invoke.resolve(["url": NSNull()])
-                        return
-                    }
-                    invoke.resolve(["url": callbackURL.absoluteString])
-                }
-                context.session = session
-                session.presentationContextProvider = context
-                // The customer's existing provider cookies are the whole
-                // point: somebody already signed in to Google taps once
-                // instead of typing a password. An ephemeral session
-                // would ask for the password every time and lose most of
-                // the reason to offer the button.
-                session.prefersEphemeralWebBrowserSession = false
-                context.retain()
-                if !session.start() {
-                    context.release()
-                    invoke.reject("could not open the sign-in page")
-                }
-            }
-        } catch {
-            invoke.reject("bad arguments: \(error.localizedDescription)")
-        }
-    }
-}
+//
+// NOTE ON PLACEMENT: the two @objc methods that belong to the plugin are
+// in NeoxifyVpnPlugin.swift, not here, and that is load bearing.
+//
+// Tauri reaches a command through `responds(to: Selector("name:"))`, so
+// nothing in the binary ever references these methods statically. They
+// began as an extension in this file, which compiled, linked and then
+// failed at run time with "No command openAuthSession found for plugin
+// neoxify-vpn": the Swift package is linked as a static archive, the
+// linker pulls object files only when something in them is referenced,
+// and an object file holding nothing but an unreferenced extension is
+// dropped entirely. The selectors were present in the .a and absent
+// from the app.
+//
+// Apple's usual answer is -ObjC or -force_load. Putting the methods in
+// the same file as the class the plugin already links is the version
+// that needs no link flag, and so cannot be lost the next time the
+// Xcode project is regenerated.
 
 /// Somewhere to put the sheet.
 ///
 /// Both APIs ask the app which window to present over, and both hold
 /// this weakly, so it keeps itself alive across the call.
-private class AuthPresentationContext: NSObject, ASWebAuthenticationPresentationContextProviding {
+class AuthPresentationContext: NSObject, ASWebAuthenticationPresentationContextProviding {
     private var self_: AuthPresentationContext?
 
     /// The session itself.
@@ -136,7 +68,7 @@ private class AuthPresentationContext: NSObject, ASWebAuthenticationPresentation
     }
 }
 
-private class AppleSignInDelegate: NSObject, ASAuthorizationControllerDelegate,
+class AppleSignInDelegate: NSObject, ASAuthorizationControllerDelegate,
                                    ASAuthorizationControllerPresentationContextProviding {
     private let invoke: Invoke
     private var self_: AppleSignInDelegate?
@@ -183,7 +115,25 @@ private class AppleSignInDelegate: NSObject, ASAuthorizationControllerDelegate,
             invoke.resolve(["identityToken": NSNull()])
             return
         }
-        invoke.reject("Apple sign-in failed: \(error.localizedDescription)")
+        // A stable token, not localizedDescription.
+        //
+        // Apple's text is written for a developer: the no-Apple-Account
+        // case arrives as "The operation couldn't be completed.
+        // (com.apple.AuthenticationServices.AuthorizationError error
+        // 1000.)", which is what a customer would otherwise read. It is
+        // also English-only, and Persian is this product's largest
+        // market. The JS side turns these into a translated sentence;
+        // the real reason is logged here where it is useful.
+        NSLog("[Neoxify] Apple sign-in failed: \(error)")
+        let token: String
+        if let authError = error as? ASAuthorizationError, authError.code == .unknown {
+            // Overwhelmingly "no Apple Account signed in on this device",
+            // which is the one cause the customer can actually act on.
+            token = "apple-no-account"
+        } else {
+            token = "apple-failed"
+        }
+        invoke.reject(token)
     }
 
     func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
@@ -197,7 +147,7 @@ private class AppleSignInDelegate: NSObject, ASAuthorizationControllerDelegate,
 /// `UIApplication.shared.windows`, and falls back to a fresh window so
 /// this can never return an implicitly-unwrapped nil and crash the app
 /// at the moment somebody tries to sign in.
-private func activeWindow() -> ASPresentationAnchor {
+func activeWindow() -> ASPresentationAnchor {
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
     let active = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
     return active?.keyWindow ?? active?.windows.first ?? UIWindow()

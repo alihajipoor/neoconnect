@@ -1,3 +1,4 @@
+import AuthenticationServices
 import NetworkExtension
 import Tauri
 import UIKit
@@ -238,6 +239,95 @@ class NeoxifyVpnPlugin: Plugin {
             let providerDown = managers.allSatisfy { down($0.connection.status) }
             let ikev2Down = down(await Ikev2Engine.status())
             invoke.resolve(["gone": providerDown && ikev2Down])
+        }
+    }
+
+    @objc public func signInWithApple(_ invoke: Invoke) {
+        DispatchQueue.main.async {
+            let request = ASAuthorizationAppleIDProvider().createRequest()
+            // The address is the only thing we need and the only thing
+            // asked for. Apple sends it once, on the very first consent,
+            // and never again -- the backend joins on the subject for
+            // exactly that reason.
+            request.requestedScopes = [.email]
+
+            let controller = ASAuthorizationController(authorizationRequests: [request])
+            let delegate = AppleSignInDelegate(invoke: invoke)
+            controller.delegate = delegate
+            controller.presentationContextProvider = delegate
+            // Same lifetime problem as the session above: performRequests()
+            // returns straight away and the controller is a local, so
+            // without this ARC frees it before the sheet answers.
+            delegate.controller = controller
+            // The delegate is the only strong reference to itself:
+            // ASAuthorizationController holds both of these weakly, so
+            // without this the object is deallocated before the sheet
+            // returns and no callback ever fires. The sheet appears,
+            // the customer signs in, and the button spins forever.
+            delegate.retain()
+            controller.performRequests()
+        }
+    }
+
+    @objc public func openAuthSession(_ invoke: Invoke) {
+        struct Args: Decodable {
+            let url: String
+            let scheme: String
+        }
+        do {
+            let args = try invoke.parseArgs(Args.self)
+            guard let url = URL(string: args.url) else {
+                invoke.reject("that sign-in address is not valid")
+                return
+            }
+            DispatchQueue.main.async {
+                let context = AuthPresentationContext()
+                let session = ASWebAuthenticationSession(
+                    url: url,
+                    callbackURLScheme: args.scheme
+                ) { callbackURL, error in
+                    // Held until here so ARC does not take the session
+                    // away mid-flight; releasing it now is what lets the
+                    // context go too.
+                    context.release()
+                    if let error = error as? ASWebAuthenticationSessionError,
+                       error.code == .canceledLogin {
+                        // Dismissed. Not a failure: the customer knows
+                        // what they just did, and an error alert here
+                        // would be both wrong and alarming.
+                        invoke.resolve(["url": NSNull()])
+                        return
+                    }
+                    if let error = error {
+                        // Same reasoning as the Apple path: a stable
+                        // token the JS side can translate, with the real
+                        // reason logged rather than shown.
+                        NSLog("[Neoxify] web auth session failed: \(error)")
+                        invoke.reject("auth-session-failed")
+                        return
+                    }
+                    guard let callbackURL = callbackURL else {
+                        invoke.resolve(["url": NSNull()])
+                        return
+                    }
+                    invoke.resolve(["url": callbackURL.absoluteString])
+                }
+                context.session = session
+                session.presentationContextProvider = context
+                // The customer's existing provider cookies are the whole
+                // point: somebody already signed in to Google taps once
+                // instead of typing a password. An ephemeral session
+                // would ask for the password every time and lose most of
+                // the reason to offer the button.
+                session.prefersEphemeralWebBrowserSession = false
+                context.retain()
+                if !session.start() {
+                    context.release()
+                    invoke.reject("could not open the sign-in page")
+                }
+            }
+        } catch {
+            invoke.reject("bad arguments: \(error.localizedDescription)")
         }
     }
 

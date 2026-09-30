@@ -210,6 +210,28 @@ async function openAuthSessionDesktop(url: string): Promise<string | null> {
   });
 }
 
+/** Turns a native error token into a sentence the customer can read.
+ *
+ * The Swift side rejects with a stable token rather than Apple's own
+ * text, which is written for a developer and is English only -- the
+ * no-Apple-Account case arrives as "The operation couldn\u2019t be
+ * completed. (com.apple.AuthenticationServices.AuthorizationError error
+ * 1000.)". The real reason is in the device log; this is what goes on
+ * screen.
+ */
+function nativeError(err: unknown): Error {
+  const token = err instanceof Error ? err.message : String(err);
+  const key: TranslationKey | null =
+    token === "apple-no-account"
+      ? "auth.appleNoAccount"
+      : token === "apple-failed" || token === "auth-session-failed"
+        ? "auth.socialFailed"
+        : null;
+  // An unrecognised token is still a failure, and still must not be put
+  // in front of anybody verbatim.
+  return new Error(translate(key ?? "auth.socialFailed"));
+}
+
 /** Runs the provider's sign-in and returns what came back.
  *
  * `null` means the customer cancelled, which is not an error and must
@@ -223,14 +245,24 @@ export async function startSocialSignIn(
     if (!appleSignInAvailable()) {
       throw new Error(translate("auth.socialUnavailable"));
     }
-    const result = await invoke<{ identityToken: string | null }>("vpn_sign_in_with_apple");
+    let result: { identityToken: string | null };
+    try {
+      result = await invoke<{ identityToken: string | null }>("vpn_sign_in_with_apple");
+    } catch (err) {
+      throw nativeError(err);
+    }
     // The sheet was dismissed. Apple reports that as an error code
     // rather than a result, and the plugin turns it into a null token.
     if (!result.identityToken) return null;
     return { kind: "apple-token", token: result.identityToken };
   }
 
-  const callback = await openAuthSession(startUrl(provider, locale));
+  let callback: string | null;
+  try {
+    callback = await openAuthSession(startUrl(provider, locale));
+  } catch (err) {
+    throw nativeError(err);
+  }
   if (callback === null) return null;
   return readCallback(callback);
 }
