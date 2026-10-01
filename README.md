@@ -90,7 +90,9 @@ panel.
 `installer/install.sh` is the single entrypoint for both server roles:
 
 ```bash
-git clone https://github.com/alihajipoor/neoconnect.git
+# The source repository is private; this needs an account with access,
+# or a read-only deploy key on the server.
+git clone git@github.com:alihajipoor/neoconnect.git
 cd neoconnect/installer
 sudo ./install.sh
 ```
@@ -236,8 +238,14 @@ the background and install on request.
 The workflow **refuses a tag whose version disagrees with the app's**,
 because a mismatch makes the updater offer the same build forever. The
 website should link to
-`https://github.com/alihajipoor/neoconnect/releases/latest/download/Neoxify-Setup.exe`,
-which never needs changing.
+`https://connect.neoxify.site/api/updates/installer/windows` (and
+`/android`), which never needs changing. That endpoint resolves the
+newest release server-side and 302s to it, so the link survives a change
+of release host without the website being touched -- which is exactly
+what happened on 2026-09-30, when binaries moved to the separate public
+`alihajipoor/neoxify-releases` repository so that the source repository
+could be made private. A link pointed straight at GitHub would have
+broken that day.
 
 The updater's signing key is separate from any Authenticode certificate
 and is **not recoverable**: losing it means already-installed clients can
