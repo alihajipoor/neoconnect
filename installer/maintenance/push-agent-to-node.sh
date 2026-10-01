@@ -33,7 +33,7 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20)
 [[ -n "$KEY" ]] && SSH_OPTS+=(-i "$KEY")
 
 ASSET="agentd-linux-amd64"
-BASE="https://github.com/alihajipoor/neoconnect/releases/download/$TAG"
+BASE="https://github.com/alihajipoor/neoxify-releases/releases/download/$TAG"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

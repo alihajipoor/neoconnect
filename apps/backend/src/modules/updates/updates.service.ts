@@ -11,7 +11,16 @@ const TAG_PREFIX = "desktop-v";
  * trees and there is no reason for a Windows fix to bump Android. */
 const ANDROID_TAG_PREFIX = "android-v";
 
-const GITHUB_REPO = "alihajipoor/neoconnect";
+/** Releases live in their own public repository, separate from the
+ * source tree.
+ *
+ * The download URLs below are handed straight to customers, whose
+ * browsers and updaters carry no credentials -- so the repository that
+ * serves them has to stay public even though the source does not. The
+ * source repository was made private on 2026-09-30 because it had been
+ * leaking production node addresses; moving releases out first was what
+ * made that safe to do without 404ing every update in the field. */
+const GITHUB_REPO = "alihajipoor/neoxify-releases";
 
 /** The branded bootstrapper, which is what a person should download.
  * The raw NSIS installer beside it is the updater's payload -- it runs

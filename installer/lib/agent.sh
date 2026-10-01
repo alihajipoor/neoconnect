@@ -4,7 +4,9 @@
 # engines as systemd units, and enrolls with the control-plane panel.
 set -euo pipefail
 
-AGENT_REPO="${AGENT_REPO:-alihajipoor/neoconnect}"
+# Agent binaries are published to the public releases repository; the
+# source repository is private and would 404 for an unauthenticated node.
+AGENT_REPO="${AGENT_REPO:-alihajipoor/neoxify-releases}"
 
 # Where the admin access token is cached for the life of this install.
 #
