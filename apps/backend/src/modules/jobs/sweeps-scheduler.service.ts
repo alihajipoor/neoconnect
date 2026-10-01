@@ -28,6 +28,13 @@ const REFERRAL_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // is dangerous, and the sweep is the only thing that actually enforces
 // the retention promise.
 const CLIENT_ATTEMPT_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// Half-hourly, which with the two-cycle alert threshold means an outage
+// is reported after roughly an hour. Faster would not help: a block
+// takes effect in seconds but is not worth paging on until it has
+// persisted, and every cycle spends requests at a rate-limited third
+// party on behalf of the whole fleet. Slower would leave a filtered node
+// serving nobody for an afternoon before anyone heard about it.
+const REACHABILITY_INTERVAL_MS = 30 * 60 * 1000;
 
 /** Registers the two repeatable sweep jobs on startup. Adding a
  * repeatable job with the same jobId+repeat config is idempotent in
@@ -69,6 +76,11 @@ export class SweepsSchedulerService implements OnModuleInit {
       "client-attempt-retention",
       {},
       { repeat: { every: CLIENT_ATTEMPT_INTERVAL_MS }, jobId: "client-attempt-retention-sweep" },
+    );
+    await this.queue.add(
+      "reachability",
+      {},
+      { repeat: { every: REACHABILITY_INTERVAL_MS }, jobId: "reachability-sweep" },
     );
   }
 }

@@ -7,6 +7,7 @@ import { EmailModule } from "../email/email.module";
 import { InvoicesModule } from "../invoices/invoices.module";
 import { SubscriptionsModule } from "../subscriptions/subscriptions.module";
 import { ClientAttemptsModule } from "../client-attempts/client-attempts.module";
+import { ReachabilityModule } from "../reachability/reachability.module";
 import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { ReferralsModule } from "../referrals/referrals.module";
 import { SweepsProcessor } from "./sweeps.processor";
@@ -43,6 +44,9 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     SubscriptionsModule,
     // For the retention sweep only.
     ClientAttemptsModule,
+    // For the half-hourly Iran reachability probe. No cycle: the
+    // reachability module pulls in Prisma, email and alerting only.
+    ReachabilityModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

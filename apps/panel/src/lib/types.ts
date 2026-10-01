@@ -609,3 +609,38 @@ export interface PlanFeatureGrant {
   planName: string;
   features: PlanFeatureKey[];
 }
+
+export type ReachabilityVerdict = "REACHABLE" | "DEGRADED" | "UNREACHABLE" | "INCONCLUSIVE";
+
+/** One vantage point's answer, as stored in the check's detail blob. */
+export interface ReachabilityProbe {
+  vantage: string;
+  asn: string | null;
+  city: string | null;
+  ok: boolean;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+export interface NodeReachability {
+  nodeId: string;
+  name: string;
+  region: string;
+  /** What the node's own agent reports. Shown beside the verdict on
+   * purpose: ONLINE together with UNREACHABLE is the exact condition
+   * this page exists to surface, and seeing them side by side is what
+   * makes it legible rather than contradictory. */
+  agentStatus: string;
+  verdict: ReachabilityVerdict | null;
+  probesOk: number | null;
+  probesAnswered: number | null;
+  medianLatencyMs: number | null;
+  checkedAt: string | null;
+  port: number;
+  detail: ReachabilityProbe[];
+  /** When the current incident opened, or null when there is none. */
+  openSince: string | null;
+  /** False means the alert mail did not go out -- an incident nobody was
+   * told about must not look like one that is merely unacknowledged. */
+  alertDelivered: boolean | null;
+}

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2 } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2, SatelliteDish } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
@@ -29,6 +29,12 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
   // No role restriction: diagnosing why a customer cannot connect is
   // support work, and the backend gates the read the same way.
   { href: "/client-attempts", label: "Client Attempts", icon: Activity },
+  // Same reasoning, and it sits next to Client Attempts deliberately:
+  // the two answer the same question from opposite ends. That page says
+  // customers are failing to connect; this one says whether the node is
+  // reachable from Iran at all. Running the probe is SUPERADMIN-only,
+  // gated per-page via `canProbe` rather than at the nav level.
+  { href: "/reachability", label: "Iran Reachability", icon: SatelliteDish },
   { href: "/announcements", label: "Announcements", icon: Megaphone, roles: ["SUPERADMIN"] },
   { href: "/admins", label: "Admins", icon: ShieldCheck, roles: ["SUPERADMIN"] },
   // The reseller's own section: their balances, their codes. Also shown

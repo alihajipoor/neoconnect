@@ -103,10 +103,13 @@ export default () => ({
     // Optional read-only token for the release-feed lookups in
     // modules/updates. Unauthenticated calls get 60 an hour per IP,
     // authenticated ones 5,000 -- so this takes the rate ceiling off the
-    // table as a failure mode. Needs no scopes at all: the repo is
-    // public and only public release metadata is read. Left unset (local
-    // dev, CI) the calls are made anonymously and everything still
-    // works, just against the smaller budget.
+    // table as a failure mode. Needs no scopes at all: those lookups go
+    // to alihajipoor/neoxify-releases, which is public and holds only
+    // binaries, and must stay public because customers download from it
+    // without credentials. The source repository being private does not
+    // change what this token is for. Left unset (local dev, CI) the
+    // calls are made anonymously and everything still works, just
+    // against the smaller budget.
     token: process.env.GITHUB_API_TOKEN,
   },
   alerting: {
@@ -114,5 +117,38 @@ export default () => ({
     // endpoint all accept a plain JSON POST) -- alerting is a silent
     // no-op when unset, see modules/alerting.
     webhookUrl: process.env.ALERT_WEBHOOK_URL,
+  },
+  reachability: {
+    // Probing nodes from inside Iran. See modules/reachability.
+    //
+    // On by default: the condition it catches -- a node that heartbeats
+    // happily while being blocked at the border -- is invisible to
+    // everything else in this system, and an operator who has to
+    // remember to switch monitoring on does not have monitoring.
+    enabled: process.env.REACHABILITY_ENABLED !== "false",
+
+    // Vantage country, ISO alpha-2 lowercase. The alerting is written
+    // against whatever this is rather than against Iran specifically,
+    // so a second country needs configuration rather than code.
+    country: (process.env.REACHABILITY_COUNTRY ?? "ir").toLowerCase(),
+
+    // The port probed. 443 because that is where the REALITY and TLS
+    // inbounds live and what a blocked customer is failing to reach;
+    // filtering is per IP *and* port, so this is not an arbitrary pick.
+    port: Number(process.env.REACHABILITY_PORT ?? 443),
+
+    // Consecutive failing cycles before the operator is emailed. Two, at
+    // the default half-hourly cadence, means roughly an hour of genuine
+    // unreachability -- long enough that a single bad cycle at the probe
+    // provider cannot page anyone, short enough to matter.
+    failuresBeforeAlert: Number(process.env.REACHABILITY_FAILURES_BEFORE_ALERT ?? 2),
+
+    // How long probe history is kept. It is diagnostic, not accounting.
+    retentionDays: Number(process.env.REACHABILITY_RETENTION_DAYS ?? 30),
+
+    // Comma-separated override for who gets alerted. Unset, every
+    // SUPERADMIN in admin_users is mailed, which is the right default
+    // precisely because it needs no maintenance.
+    recipients: process.env.REACHABILITY_ALERT_EMAILS,
   },
 });

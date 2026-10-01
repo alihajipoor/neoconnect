@@ -595,6 +595,9 @@ model Node {
   /// mode, which is the state the whole fleet is in today.
   gamingResolver   GamingResolver?
 
+  reachabilityChecks NodeReachabilityCheck[]
+  reachabilityAlerts NodeReachabilityAlert[]
+
   @@map("nodes")
 }
 
@@ -1665,4 +1668,106 @@ model EndpointBundleState {
   updatedAt DateTime @updatedAt
 
   @@map("endpoint_bundle_state")
+}
+
+/// What a single probe cycle concluded about one node, from one country.
+enum ReachabilityVerdict {
+  /// Enough vantage points connected. The node is reachable from there.
+  REACHABLE
+
+  /// Some connected and some did not. On Iranian networks this is the
+  /// normal shape of a partial block: filtering is applied per operator,
+  /// so a node can be dead on one ASN and perfectly healthy on the rest.
+  /// Worth seeing, deliberately not worth an alert on its own.
+  DEGRADED
+
+  /// Every vantage point that answered failed to connect.
+  UNREACHABLE
+
+  /// The probe service itself could not tell us anything -- it was down,
+  /// it rate-limited us, or no vantage returned a result before the
+  /// deadline.
+  ///
+  /// This exists so that an outage at the probe provider cannot be
+  /// mistaken for an outage of the whole fleet. It is recorded and shown,
+  /// and it never counts toward an alert, because the alternative is
+  /// emailing the operator that every node is filtered because a third
+  /// party had a bad minute.
+  INCONCLUSIVE
+}
+
+/// One probe cycle against one node.
+///
+/// Reachability is measured from outside because it cannot be measured
+/// from inside: a node answers its own heartbeat perfectly while being
+/// comprehensively blocked at the border. `nodes.status` says the daemon
+/// is alive; this says customers can actually open a socket to it.
+model NodeReachabilityCheck {
+  id     String @id @default(uuid())
+  nodeId String
+
+  /// ISO country of the vantage points, lowercase. Only "ir" today;
+  /// stored so a second country can be added without a migration and
+  /// without the alerting logic having to special-case the first one.
+  country String @default("ir")
+
+  /// TCP port probed. Filtering is per IP *and* port, so a check that
+  /// does not record which port it tested cannot be compared with a
+  /// later one.
+  port Int
+
+  verdict ReachabilityVerdict
+
+  /// Vantage points that connected, and that returned any answer at all.
+  /// `probesOk` over `probesAnswered` is the reachability ratio;
+  /// `probesAnswered` below `probesRequested` means the probe service
+  /// itself was flaky, not the node.
+  probesOk        Int
+  probesAnswered  Int
+  probesRequested Int
+
+  /// Median round-trip of the successful probes, for spotting a node
+  /// that is reachable but being throttled into uselessness.
+  medianLatencyMs Int?
+
+  /// Per-vantage detail: [{ vantage, asn, city, ok, latencyMs, error }].
+  /// Kept as JSON rather than its own table because it is only ever read
+  /// as a whole, alongside the row that owns it.
+  detailJson Json
+
+  checkedAt DateTime @default(now())
+
+  node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId, checkedAt])
+  @@index([checkedAt])
+  @@map("node_reachability_checks")
+}
+
+/// An open or resolved reachability incident for one node.
+///
+/// Separate from the checks themselves so that "have we already told the
+/// operator about this outage" is a fact we store rather than one we
+/// re-derive from a window of rows every cycle. An alert with a null
+/// `resolvedAt` is live, which is also what suppresses a second email
+/// every half hour for an outage already reported.
+model NodeReachabilityAlert {
+  id      String @id @default(uuid())
+  nodeId  String
+  country String @default("ir")
+
+  openedAt   DateTime  @default(now())
+  resolvedAt DateTime?
+
+  /// How many consecutive failing cycles were seen when this opened, and
+  /// whether the notification actually went out -- a mail failure must
+  /// not silently look like a node that was never alerted on.
+  consecutiveFailures Int
+  notifiedAt          DateTime?
+  notifyError         String?
+
+  node Node @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId, resolvedAt])
+  @@map("node_reachability_alerts")
 }

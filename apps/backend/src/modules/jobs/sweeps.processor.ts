@@ -6,6 +6,7 @@ import { InvoicesService } from "../invoices/invoices.service";
 import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ReferralsService } from "../referrals/referrals.service";
 import { ClientAttemptsService } from "../client-attempts/client-attempts.service";
+import { ReachabilityService } from "../reachability/reachability.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -18,6 +19,7 @@ export class SweepsProcessor extends WorkerHost {
     private readonly subscriptionsService: SubscriptionsService,
     private readonly referralsService: ReferralsService,
     private readonly clientAttemptsService: ClientAttemptsService,
+    private readonly reachabilityService: ReachabilityService,
   ) {
     super();
   }
@@ -74,6 +76,22 @@ export class SweepsProcessor extends WorkerHost {
         // people in a country where holding them is dangerous. The
         // service logs the count itself when it deletes anything.
         await this.clientAttemptsService.prune();
+        break;
+      }
+      case "reachability": {
+        // Probes each node from inside Iran and opens or resolves an
+        // incident. Swallows its own failures by design: a monitor that
+        // can fail the queue it runs on is a monitor that takes the
+        // other sweeps down with it.
+        const results = await this.reachabilityService.runCycle();
+        const bad = results.filter((r) => r.verdict !== "REACHABLE");
+        if (bad.length) {
+          this.logger.warn(
+            `reachability: ${bad.map((r) => `${r.nodeName}=${r.verdict}(${r.probesOk}/${r.probesAnswered})`).join(", ")}`,
+          );
+        } else if (results.length) {
+          this.logger.log(`reachability: all ${results.length} node(s) reachable`);
+        }
         break;
       }
       default:

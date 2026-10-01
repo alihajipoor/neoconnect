@@ -36,6 +36,7 @@ import { EmailModule } from "./modules/email/email.module";
 import { AnnouncementsModule } from "./modules/announcements/announcements.module";
 import { IntegrationsModule } from "./modules/integrations/integrations.module";
 import { ClientAttemptsModule } from "./modules/client-attempts/client-attempts.module";
+import { ReachabilityModule } from "./modules/reachability/reachability.module";
 import { GamingModule } from "./modules/gaming/gaming.module";
 import { EndpointsModule } from "./modules/endpoints/endpoints.module";
 
@@ -86,6 +87,7 @@ import { EndpointsModule } from "./modules/endpoints/endpoints.module";
     AnnouncementsModule,
     IntegrationsModule,
     ClientAttemptsModule,
+    ReachabilityModule,
     GamingModule,
     EndpointsModule,
   ],
