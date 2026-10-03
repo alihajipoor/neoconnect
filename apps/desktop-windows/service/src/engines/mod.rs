@@ -964,6 +964,35 @@ impl Engines {
                     let _ = ikev2::disconnect();
                 }
                 self.unblock_ipv6();
+
+                // The machine-wide DNS rule outlives everything above,
+                // and leaving it is how a machine ends up with no
+                // internet at all.
+                //
+                // This arm used to stop at unblock_ipv6(), which meant
+                // an engine that died on its own left the NRPT `.` rule
+                // pointing every lookup on the machine at a resolver
+                // that no longer exists -- while reporting `false` here,
+                // so the app showed "disconnected" and the customer had
+                // no reason to press Disconnect. The idle watchdog did
+                // not catch it either: it gates on `if !up { continue; }`
+                // and status had just said down. Nothing cleared it
+                // until the next connect, an explicit disconnect, Repair,
+                // or a reboot.
+                //
+                // Unconditional, like the calls above it: this is the
+                // fail-open path. `clear()` reports its own failures
+                // through cleanup_log and returns nothing, so there is
+                // no result to handle here.
+                dns::clear();
+
+                // Same reasoning for everything else that only
+                // disconnect() reached: a dead engine can leave an
+                // orphaned xray.exe or openvpn.exe holding routes and,
+                // in OpenVPN's case, block-outside-dns filters that drop
+                // every lookup off the tunnel adapter.
+                janitor::reconcile(&self.exe_dir);
+
                 (false, None, TunnelHealth::Down)
             }
         }
