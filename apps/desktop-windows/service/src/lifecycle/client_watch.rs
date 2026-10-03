@@ -30,9 +30,10 @@
 
 use std::io;
 use std::os::windows::io::AsRawHandle;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::net::windows::named_pipe::NamedPipeServer;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 // SYNCHRONIZE is a generic access right, and windows-sys files it under
 // Storage::FileSystem as a FILE_ACCESS_RIGHTS rather than beside
 // OpenProcess. Both are u32 aliases, so it passes where a
@@ -40,7 +41,30 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 // not a mistake here.
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
-use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, INFINITE};
+use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
+
+/// How long one slice of the wait lasts.
+///
+/// A second, so a client that dies is noticed effectively immediately
+/// while a live one costs one syscall per second. Short enough that
+/// service shutdown is not held up noticeably; long enough that this is
+/// not a busy loop.
+const WAIT_SLICE_MS: u32 = 1_000;
+
+/// Set when the service is stopping, so the watch threads end rather
+/// than holding the blocking pool -- and with it the runtime -- open.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Tell every live watch to stop waiting.
+///
+/// Called from the service's stop path. Without it a client that is
+/// still running keeps a blocking thread alive, and dropping a tokio
+/// runtime waits for its blocking pool, so the process would not exit --
+/// which is the fault this whole module exists to fix, arrived at from
+/// the other direction.
+pub fn stop_watching() {
+    SHUTTING_DOWN.store(true, Ordering::Release);
+}
 
 /// An owned process handle that closes itself.
 ///
@@ -110,22 +134,48 @@ impl ClientWatch {
 
     /// Resolves when the watched process exits, however it exits.
     ///
-    /// The wait itself is `INFINITE` and blocking, so it runs on a
-    /// blocking thread rather than a runtime worker. That matters more
-    /// here than almost anywhere else in this service: the whole point
-    /// of this type is to be the one signal that still arrives when
-    /// every async worker is busy, and a wait parked on a worker would
-    /// be exactly as starvable as the timer it replaces.
+    /// The wait is blocking, so it runs on a blocking thread rather than
+    /// a runtime worker. That matters more here than almost anywhere
+    /// else in this service: the whole point of this type is to be the
+    /// one signal that still arrives when every async worker is busy,
+    /// and a wait parked on a worker would be exactly as starvable as
+    /// the timer it replaces.
+    ///
+    /// It waits in slices rather than with `INFINITE`, and that is not a
+    /// detail. An infinite wait on a blocking thread can never be
+    /// abandoned, and dropping a tokio runtime waits for its blocking
+    /// pool -- so a service whose client is still alive could never shut
+    /// down, which is precisely the fault this module was written to
+    /// remove. It also hangs the test suite outright, because there the
+    /// watched process is the test process and it does not exit.
+    ///
+    /// A slice costs one syscall per second per live client, against the
+    /// alternative of a teardown path that cannot complete.
     pub async fn exited(self) -> ExitSignal {
         let pid = self.pid;
         let result = tokio::task::spawn_blocking(move || {
             // Moved in, so the handle is closed when this closure ends
             // whichever way the wait went.
             let handle = self.handle;
-            // SAFETY: the handle is open for the duration of this call,
-            // which is what owning it in this scope guarantees.
-            let waited = unsafe { WaitForSingleObject(handle.0, INFINITE) };
-            waited == WAIT_OBJECT_0
+            loop {
+                // SAFETY: the handle is open for the duration of this
+                // call, which is what owning it in this scope
+                // guarantees.
+                let waited = unsafe { WaitForSingleObject(handle.0, WAIT_SLICE_MS) };
+                if waited == WAIT_OBJECT_0 {
+                    return true;
+                }
+                if waited != WAIT_TIMEOUT {
+                    // Neither signalled nor timed out: the handle is
+                    // unusable. Reported rather than spun on.
+                    return false;
+                }
+                if SHUTTING_DOWN.load(Ordering::Acquire) {
+                    // The service is stopping, so nobody is left to tear
+                    // down for. Ends the thread so the runtime can.
+                    return false;
+                }
+            }
         })
         .await;
 
@@ -224,7 +274,14 @@ mod tests {
             .spawn()
             .expect("spawning a helper process");
 
-        server.connect().await.unwrap();
+        // Bounded: if the helper never connects, this must fail rather
+        // than hang the whole suite. A test that can hang is worse than
+        // a test that can fail, because the failure is a timeout nobody
+        // can attribute.
+        tokio::time::timeout(std::time::Duration::from_secs(30), server.connect())
+            .await
+            .expect("the helper should connect within thirty seconds")
+            .unwrap();
         let watch = ClientWatch::of(&server).expect("the helper is alive");
 
         child.kill().expect("killing the helper");

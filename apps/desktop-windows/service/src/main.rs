@@ -632,6 +632,16 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
             _ = shutdown_rx => {}
         }
 
+        // End the client watches first.
+        //
+        // Each one holds a blocking thread waiting on a live client's
+        // process handle, and dropping a tokio runtime waits for its
+        // blocking pool -- so without this a service with the app still
+        // running could not finish stopping. That is the fault this
+        // whole stop path exists to remove, reached from the other
+        // direction.
+        crate::lifecycle::client_watch::stop_watching();
+
         // Tell the SCM we are stopping, and roughly how long to allow.
         //
         // Without this the service stayed `Running` until the teardown
