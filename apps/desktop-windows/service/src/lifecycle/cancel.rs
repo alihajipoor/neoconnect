@@ -118,6 +118,59 @@ impl CancelToken {
         }
     }
 
+    /// Run blocking work that cannot be polled, and stop waiting for it
+    /// if this token is cancelled.
+    ///
+    /// Some waits cannot be made cancellable, however the code around
+    /// them is written. `to_socket_addrs()` is `getaddrinfo`, a
+    /// synchronous Win32 call with no timeout and no way in; a TCP
+    /// connect to a node that is not answering sits in the kernel until
+    /// the stack gives up. Both are *exactly* the case a customer hits
+    /// when a node is unreachable -- the connect takes a long time
+    /// precisely because something is not responding -- and both are
+    /// where the old service became uninterruptible.
+    ///
+    /// The syscall is not cancelled, because it cannot be. What is
+    /// cancelled is this operation's *interest* in it: the work moves to
+    /// a thread of its own and the caller stops waiting. The customer
+    /// gets their disconnect at once, and the teardown behind it runs
+    /// against a connect that has already unwound.
+    ///
+    /// **The abandoned thread keeps running until its syscall returns.**
+    /// That is the deliberate trade and it is a cheap one: it holds no
+    /// lock, owns nothing the teardown needs, and ends on its own when
+    /// the resolver or the TCP stack times out. What it must never do is
+    /// touch engine state, which is why this takes a closure returning a
+    /// value rather than one borrowing anything.
+    pub fn interruptible<T, F>(&self, work: F) -> Result<T, Cancelled>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        self.check()?;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("neoxify-interruptible".to_owned())
+            .spawn(move || {
+                // The receiver is gone when the caller stopped waiting.
+                // Dropping the value here is the whole point.
+                let _ = tx.send(work());
+            })
+            .map_err(|_| Cancelled)?;
+
+        loop {
+            match rx.recv_timeout(POLL) {
+                Ok(value) => return Ok(value),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => self.check()?,
+                // The worker panicked. Not this module's to interpret:
+                // report it as cancelled so the operation unwinds, and
+                // let the caller's own teardown run.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(Cancelled),
+            }
+        }
+    }
+
     /// Wait up to `within` for `ready`.
     pub fn wait_for(
         &self,
@@ -257,6 +310,66 @@ mod tests {
     /// in the same instant the customer gives up must still stop --
     /// otherwise a disconnect pressed at the wrong moment proceeds to
     /// bring the tunnel the rest of the way up.
+    /// The case the customer actually hits: a node that is not
+    /// answering, so the connect is slow *because* something is stuck.
+    /// The syscall cannot be interrupted, so the test is that the
+    /// caller stops waiting for it -- promptly, while it is still
+    /// running.
+    #[test]
+    fn an_uninterruptible_wait_can_still_be_abandoned() {
+        let token = CancelToken::new();
+        let worker = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            worker.cancel();
+        });
+
+        let started = Instant::now();
+        // Stands in for getaddrinfo against a node that never answers.
+        let outcome = token.interruptible(|| {
+            std::thread::sleep(Duration::from_secs(30));
+            "the resolver finally answered"
+        });
+        let took = started.elapsed();
+
+        assert_eq!(outcome, Err(Cancelled));
+        assert!(
+            took < Duration::from_secs(5),
+            "waited {took:?}, so it sat through the whole stuck call"
+        );
+    }
+
+    #[test]
+    fn interruptible_work_returns_its_value_when_nothing_cancels() {
+        let token = CancelToken::new();
+        assert_eq!(token.interruptible(|| 6 * 7), Ok(42));
+    }
+
+    /// Already cancelled means the work never starts. A disconnect that
+    /// arrived a moment before a stage began must not have that stage
+    /// dial a node anyway.
+    #[test]
+    fn interruptible_work_does_not_start_if_already_cancelled() {
+        let token = CancelToken::new();
+        token.cancel();
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        let outcome = token.interruptible(move || flag.store(true, Ordering::SeqCst));
+        assert_eq!(outcome, Err(Cancelled));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!ran.load(Ordering::SeqCst), "the work must never have been spawned");
+    }
+
+    /// A panic inside abandoned work must unwind the operation rather
+    /// than hang it waiting for a value that will never arrive.
+    #[test]
+    fn a_panicking_interruptible_unwinds_rather_than_hanging() {
+        let token = CancelToken::new();
+        let outcome: Result<(), Cancelled> =
+            token.interruptible(|| panic!("the resolver did something regrettable"));
+        assert_eq!(outcome, Err(Cancelled));
+    }
+
     #[test]
     fn cancellation_wins_over_a_ready_condition() {
         let token = CancelToken::new();
