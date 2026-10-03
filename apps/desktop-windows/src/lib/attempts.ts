@@ -49,6 +49,20 @@ export interface AttemptReport {
   protocol?: string;
   reason?: string;
   attempts?: AttemptRung[];
+  /** Which control-plane address or addresses were in play.
+   *
+   * The backend has accepted this since the table was created and the
+   * client has never once sent it, so every CONTROL_PLANE_UNREACHABLE
+   * row ever recorded has a null here -- 160 of them from Windows in
+   * thirty days, against 107 successful connects, where Android manages
+   * 43 against 323. Something about the Windows path reaches the API far
+   * less reliably, and the one column that would say whether it is the
+   * main domain being blocked or the mirror list being wrong has been
+   * empty the entire time.
+   *
+   * Hostnames rather than full URLs: the path adds nothing and the
+   * column is read by a person scanning for a pattern. */
+  apiEndpoint?: string;
 }
 
 interface QueuedReport extends AttemptReport {
