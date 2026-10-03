@@ -12,6 +12,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Tauri refuses to build when a Rust crate and its JavaScript package are
+# on different minors, so these and package.json move together. Pinning
+# the crates *down* to the Windows app's npm versions was tried first and
+# does not work: tauri 2.11 no longer compiles against the transitive
+# dependencies cargo resolves today, with nineteen errors inside tauri
+# itself. Forward is the direction that builds.
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
