@@ -14,10 +14,15 @@
   which is com.apple.developer.system-extension.install.
 
   Deliberately NOT sandboxed. App Sandbox is required for the Mac App
-  Store and forbids the System Extension model entirely -- the App Store
+  Store and forbids the System Extension model entirely. The App Store
   build uses a sandboxed .appex instead, which is a different target
   with a different plist, not a flag flipped on this one.
 -->
+<!-- Note: a double hyphen is illegal inside an XML comment, however
+     ordinary it is as an em dash elsewhere in this codebase. plutil
+     accepts it; xmllint and Apple's AMFI parser do not, and codesign
+     then fails with "AMFIUnserializeXML: syntax error". The same
+     mistake once shipped as ITMS-91056 on a privacy manifest. -->
 <plist version="1.0">
 <dict>
 	<key>com.apple.developer.system-extension.install</key>
