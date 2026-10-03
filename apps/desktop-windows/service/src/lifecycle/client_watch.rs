@@ -153,45 +153,58 @@ impl ClientWatch {
     /// alternative of a teardown path that cannot complete.
     pub async fn exited(self) -> ExitSignal {
         let pid = self.pid;
-        let result = tokio::task::spawn_blocking(move || {
-            // Moved in, so the handle is closed when this closure ends
-            // whichever way the wait went.
-            let handle = self.handle;
-            loop {
-                // SAFETY: the handle is open for the duration of this
-                // call, which is what owning it in this scope
-                // guarantees.
-                let waited = unsafe { WaitForSingleObject(handle.0, WAIT_SLICE_MS) };
-                if waited == WAIT_OBJECT_0 {
-                    return true;
-                }
-                if waited != WAIT_TIMEOUT {
-                    // Neither signalled nor timed out: the handle is
-                    // unusable. Reported rather than spun on.
-                    return false;
-                }
-                if SHUTTING_DOWN.load(Ordering::Acquire) {
-                    // The service is stopping, so nobody is left to tear
-                    // down for. Ends the thread so the runtime can.
-                    return false;
-                }
-            }
-        })
-        .await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
 
-        match result {
+        // A plain thread, deliberately, and not `spawn_blocking`.
+        //
+        // Tokio waits for its blocking pool when a runtime is dropped,
+        // so a watch on a client that is still alive would hold the
+        // runtime open -- a service whose app is running could not
+        // finish stopping, which is the fault this module exists to fix.
+        // An ordinary thread is not the runtime's to wait for: it ends
+        // when it notices nobody is listening, and the process can exit
+        // regardless.
+        std::thread::Builder::new()
+            .name(format!("neoxify-watch-{pid}"))
+            .spawn(move || {
+                // Moved in, so the handle is closed when this ends
+                // whichever way the wait went.
+                let handle = self.handle;
+                let outcome = loop {
+                    // SAFETY: the handle is open for the duration of
+                    // this call, which owning it in this scope
+                    // guarantees.
+                    let waited = unsafe { WaitForSingleObject(handle.0, WAIT_SLICE_MS) };
+                    if waited == WAIT_OBJECT_0 {
+                        break true;
+                    }
+                    if waited != WAIT_TIMEOUT {
+                        // Neither signalled nor timed out: the handle is
+                        // unusable. Reported rather than spun on.
+                        break false;
+                    }
+                    // Nobody is waiting for this answer any more -- the
+                    // task was dropped, or the service is stopping. This
+                    // is what lets the thread end on its own, and it is
+                    // why the wait is sliced rather than INFINITE.
+                    if tx.is_closed() || SHUTTING_DOWN.load(Ordering::Acquire) {
+                        return;
+                    }
+                };
+                let _ = tx.send(outcome);
+            })
+            .ok();
+
+        match rx.await {
             Ok(true) => ExitSignal::Exited { pid },
             // The wait returned something other than "the object is
-            // signalled", which should not happen for an INFINITE wait
-            // on a live handle. Reported rather than retried: treating
-            // an unexplained result as "still running" would leave a
-            // tunnel up on a machine whose app is gone, and that is the
-            // failure this module exists to prevent. Fail towards
-            // tearing down.
+            // signalled". Reported rather than retried: treating an
+            // unexplained result as "still running" would leave a tunnel
+            // up on a machine whose app is gone, which is the failure
+            // this module exists to prevent. Fail towards tearing down.
             Ok(false) => ExitSignal::Unknown { pid },
-            // The blocking pool is shutting down, which happens when the
-            // service itself is stopping -- at which point the teardown
-            // is already running for its own reasons.
+            // The thread ended without answering, which happens when the
+            // service is shutting down. Nobody is left to tear down for.
             Err(_) => ExitSignal::WatchAbandoned { pid },
         }
     }
