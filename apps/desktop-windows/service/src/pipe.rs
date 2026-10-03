@@ -16,6 +16,8 @@
 //! [`dispatch`].
 
 use std::sync::Arc;
+
+use crate::lifecycle::client_watch::ClientWatch;
 use std::time::{Duration, Instant};
 
 use neoconnect_ipc::{Request, Response, PIPE_NAME};
@@ -82,6 +84,15 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
     let last_seen = Arc::new(Mutex::new(Instant::now()));
     spawn_idle_watchdog(Arc::clone(&engines), Arc::clone(&last_seen));
 
+    // Which process is currently being watched, so the app's
+    // connection-per-request habit does not produce a watch per
+    // request. The idle watchdog above stays as the backstop for the
+    // cases a process handle cannot cover -- a client that is alive but
+    // has stopped asking anything, which is what a wedged app looks
+    // like -- but it is no longer the only thing standing between a
+    // closed window and a tunnel nobody owns.
+    let watched: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+
     loop {
         server.connect().await?;
         let connected = server;
@@ -89,6 +100,57 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
         // reconnecting immediately after a disconnect never finds the
         // pipe missing.
         server = create_pipe_server(name, false)?;
+
+        // Watch whoever opened this, so the kernel tells us when the
+        // app stops existing.
+        //
+        // One watch at a time, keyed on the process id: the app opens a
+        // fresh connection per request, so a watch per connection would
+        // mean dozens on the same process. A new id means the app was
+        // restarted, which is the only time this is replaced.
+        //
+        // The watch is on the *process*, not the connection, which is
+        // what makes it right where the idle timer was wrong -- a
+        // connection closing is the app going quiet between requests,
+        // and a process ending is the app being gone.
+        let watched = Arc::clone(&watched);
+        match ClientWatch::of(&connected) {
+            Ok(watch) if watched.lock().await.replace(watch.pid) != Some(watch.pid) => {
+                let engines = Arc::clone(&engines);
+                tokio::spawn(async move {
+                    let signal = watch.exited().await;
+                    crate::cleanup_log::note("the app went away", &signal.reason());
+
+                    // Whatever it was doing is no longer wanted by
+                    // anyone, so stop it before asking for the lock.
+                    crate::engines::abandon_current_operation();
+
+                    let mut engines = engines.lock().await;
+                    crate::engines::begin_operation();
+
+                    // Phase one, the same one a Disconnect runs. The
+                    // customer is not waiting on this -- they have
+                    // closed the window -- but the speed is not the
+                    // point here: the point is that it happens at all,
+                    // promptly, and leaves nothing behind for them to
+                    // find in Task Manager and distrust.
+                    let report = crate::lifecycle::teardown::hard_stop(&mut *engines);
+                    crate::cleanup_log::note("teardown after the app went away", &report.summary());
+
+                    // And the thorough pass, since nothing is waiting.
+                    if let Err(message) = engines.disconnect() {
+                        crate::cleanup_log::note("thorough teardown after the app went away", &message);
+                    }
+                });
+            }
+            // Already watching this process, so there is nothing to do.
+            Ok(_) => {}
+            // The client is already gone, or could not be opened. Not
+            // worth a log line on its own: the connection will fail on
+            // its first read and the previous watch, if any, still
+            // stands.
+            Err(_) => {}
+        }
 
         let engines = Arc::clone(&engines);
         let last_seen = Arc::clone(&last_seen);
