@@ -13,6 +13,7 @@
 pub(crate) mod dns;
 mod ikev2;
 pub(crate) mod ipv6_block;
+mod hard_stop;
 mod janitor;
 mod ras;
 mod openvpn;

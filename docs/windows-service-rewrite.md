@@ -132,7 +132,16 @@ set.
    oversight: people in Iran are worse served by a machine locked down
    safely than by one that reaches the internet.
 4. **No PowerShell on the connect or disconnect path.** Registry and
-   Win32 only. Cmdlets are allowed in repair and in phase two.
+   Win32 first; cmdlets are allowed in repair and in phase two.
+
+   The rule is about PowerShell specifically, and the measurement is
+   why: 4.4 to 6.5 seconds are spent before its first statement runs.
+   A small native executable is a different cost class -- phase one
+   runs `route.exe delete` at most three times, because the record of
+   which routes were installed dies with the session and nothing later
+   can remove them. Where an API exists it still wins: IKEv2 hangs up
+   through `RasHangUpW` rather than `rasdial.exe`, and the NRPT rules
+   go by registry write rather than by cmdlet.
 5. **Nothing blocking inside an async task.** `spawn_blocking` or an
    owning thread.
 6. **Every commit compiles on `windows-latest`.** It cannot be compiled

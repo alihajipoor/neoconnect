@@ -172,6 +172,44 @@ const TUNNEL_SERVICE_POLL: Duration = Duration::from_millis(250);
 /// all -- a killed service, a half-removed install, or the
 /// START_PENDING-then-marked-for-delete state described above, where
 /// asking wireguard.exe again is precisely what hangs.
+/// Ask the SCM to stop the tunnel service, and return without waiting.
+///
+/// The fast half of a teardown. [`clear_tunnel_service`] does the
+/// thorough version -- it polls until the service is actually gone,
+/// bounded at [`TUNNEL_SERVICE_GONE_WITHIN`], 45 seconds -- and that
+/// wait is correct for the background pass but ruinous on the path a
+/// customer is watching. `wireguard.exe /installtunnelservice` has been
+/// seen holding the engine lock for twenty-five minutes in the field,
+/// with every request behind it unanswered while the customer sat
+/// tunnelled with no way out.
+///
+/// Stopping the service is what severs the tunnel; whether its entry has
+/// finished disappearing from the SCM is a question for phase two, and
+/// the service-start sweep removes it on the next boot regardless.
+///
+/// Never an error worth failing a teardown over. A service that is
+/// already gone, or that was never installed because this session used a
+/// different engine, is the normal case rather than a fault.
+pub(super) fn request_stop_without_waiting() -> Result<(), String> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|err| format!("could not reach the service manager: {err}"))?;
+
+    let service = match manager.open_service(TUNNEL_SERVICE_NAME, ServiceAccess::STOP) {
+        Ok(service) => service,
+        // Not installed. Nothing to stop, which is success.
+        Err(_) => return Ok(()),
+    };
+
+    // The result is deliberately not inspected beyond reporting it. A
+    // stop sent to a service that is already stopping returns an error
+    // saying so, and that is not something the customer's disconnect
+    // should be held up by or told about.
+    match service.stop() {
+        Ok(_) => Ok(()),
+        Err(err) => Err(format!("the tunnel service did not accept a stop: {err}")),
+    }
+}
+
 pub(super) fn clear_tunnel_service() -> Result<(), String> {
     let deadline = Instant::now() + TUNNEL_SERVICE_GONE_WITHIN;
     loop {
