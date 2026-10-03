@@ -88,6 +88,21 @@ services:
       # /api/updates from 60 requests an hour per IP to 5,000. Optional:
       # unset, the lookups are made anonymously and still work.
       GITHUB_API_TOKEN: ${GITHUB_API_TOKEN:-}
+      # Iran reachability probing. All optional -- every one has a
+      # working default in the code, and the feature is on without any
+      # of them being set. Declared here rather than left implicit so
+      # they can be tuned on a running panel without a rebuild, and so
+      # that a fresh install knows they exist.
+      #
+      # REACHABILITY_COUNTRY is deliberately absent: it has a string
+      # default in configuration.ts, so it needs nothing from here.
+      REACHABILITY_ENABLED: ${REACHABILITY_ENABLED:-}
+      REACHABILITY_PORT: ${REACHABILITY_PORT:-}
+      REACHABILITY_FAILURES_BEFORE_ALERT: ${REACHABILITY_FAILURES_BEFORE_ALERT:-}
+      REACHABILITY_RETENTION_DAYS: ${REACHABILITY_RETENTION_DAYS:-}
+      # Unset, every SUPERADMIN in admin_users is mailed, which is the
+      # right default because it needs no maintenance.
+      REACHABILITY_ALERT_EMAILS: ${REACHABILITY_ALERT_EMAILS:-}
       # Shared secret machine callers present as X-Service-Token. Must reach
       # the backend as well as the bot: the guard fails closed, so with this
       # set only on the bot side every request is rejected with a 401.

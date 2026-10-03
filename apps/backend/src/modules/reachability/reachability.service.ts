@@ -1,6 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { AdminRole, NodeStatus, ReachabilityVerdict } from "@prisma/client";
+import { AdminRole, NodeStatus, Prisma, ReachabilityVerdict } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { AlertingService } from "../alerting/alerting.service";
 import { EmailService } from "../email/email.service";
@@ -136,7 +136,11 @@ export class ReachabilityService {
         probesAnswered: outcome.results.length,
         probesRequested: outcome.requested,
         medianLatencyMs: medianOf(okResults.map((r) => r.latencyMs ?? 0)),
-        detailJson: outcome.results as unknown as object,
+        // Cast, and it is a real one rather than noise: the value is
+        // valid JSON, but Prisma's InputJsonValue is a structural type
+        // that an interface array does not satisfy without an index
+        // signature.
+        detailJson: outcome.results as unknown as Prisma.InputJsonValue,
       },
     });
 
