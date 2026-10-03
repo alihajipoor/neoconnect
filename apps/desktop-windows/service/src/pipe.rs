@@ -236,6 +236,65 @@ mod tests {
         line
     }
 
+    /// The bar, as a test: a disconnect answers in about the time it
+    /// takes to stop, not the time it takes to tidy.
+    ///
+    /// Nothing is connected here, so this measures the arm itself rather
+    /// than a real teardown -- which is the point. The old arm called
+    /// `disconnect()` and replied only when the thorough pass was done,
+    /// so its reply time was whatever the slowest leftover took: a DNS
+    /// sweep that can reach PowerShell at 4.4 to 6.5 seconds just to
+    /// start, a tunnel-service wait bounded at forty-five. The new arm
+    /// replies after phase one and leaves that behind it.
+    ///
+    /// The budget here is deliberately loose. It is not trying to prove
+    /// 900ms on a contended CI runner; it is trying to fail loudly if
+    /// somebody puts a cmdlet, a process spawn or an unbounded wait back
+    /// on the path a customer waits on, and any of those blows this by a
+    /// wide margin.
+    #[tokio::test]
+    async fn a_disconnect_is_answered_promptly() {
+        let name = r"\\.\pipe\neoconnect-test-disconnect-speed";
+        start_server(name).await;
+
+        let began = std::time::Instant::now();
+        let reply = round_trip(name, r#"{"type":"disconnect"}"#).await;
+        let took = began.elapsed();
+
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert!(
+            parsed["status"] == "ok" || parsed["status"] == "error",
+            "a disconnect must answer, got {parsed}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(3),
+            "the disconnect took {took:?}; something slow is back on the reply path"
+        );
+    }
+
+    /// A second disconnect, with nothing to disconnect, must be as cheap
+    /// as the first and must not error differently.
+    ///
+    /// The app sends one defensively on startup and when switching
+    /// accounts, so this is a common path rather than an edge case, and
+    /// an arm that got slower or louder the second time would show up as
+    /// a sluggish launch.
+    #[tokio::test]
+    async fn disconnecting_twice_is_cheap_and_quiet() {
+        let name = r"\\.\pipe\neoconnect-test-disconnect-twice";
+        start_server(name).await;
+
+        let first = round_trip(name, r#"{"type":"disconnect"}"#).await;
+        let began = std::time::Instant::now();
+        let second = round_trip(name, r#"{"type":"disconnect"}"#).await;
+        let took = began.elapsed();
+
+        let a: serde_json::Value = serde_json::from_str(first.trim()).unwrap();
+        let b: serde_json::Value = serde_json::from_str(second.trim()).unwrap();
+        assert_eq!(a["status"], b["status"], "the second disconnect must read the same as the first");
+        assert!(took < std::time::Duration::from_secs(3), "the second took {took:?}");
+    }
+
     #[tokio::test]
     async fn reports_disconnected_state_over_a_real_pipe() {
         // Exercises the whole shipping path: ACL construction, pipe
