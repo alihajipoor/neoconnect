@@ -11,3 +11,4 @@
 
 pub mod cancel;
 pub mod client_watch;
+pub mod teardown;
