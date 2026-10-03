@@ -8,7 +8,9 @@
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "pretypecheck": "NEOXIFY_SKIP_SEED=1 node ../desktop-windows/scripts/ensure-seed-bundle.mjs",
+    "prebuild": "NEOXIFY_SKIP_SEED=1 node ../desktop-windows/scripts/ensure-seed-bundle.mjs"
   },
   "dependencies": {
     "@noble/ed25519": "^2",
