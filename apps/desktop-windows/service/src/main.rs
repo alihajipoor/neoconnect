@@ -58,6 +58,7 @@ mod adapters;
 mod cleanup_log;
 mod engines;
 mod gaming;
+mod lifecycle;
 mod pipe;
 mod security;
 mod split_tunnel;

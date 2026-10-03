@@ -48,6 +48,10 @@ features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    # GetNamedPipeClientProcessId, so the service can hold a handle to
+    # the app's process and be told by the kernel when it dies --
+    # see lifecycle::client_watch.
+    "Win32_System_Pipes",
     "Win32_System_Threading",
     # GetLocalTime, to stamp the teardown log in the customer's own
     # clock -- see cleanup_log.
