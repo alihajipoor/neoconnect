@@ -479,18 +479,78 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             apps: crate::split_tunnel::running_apps(),
         },
         Request::Disconnect => {
-            let mut engines = match tokio::time::timeout(DISCONNECT_LOCK_WAIT, engines.lock()).await
-            {
-                Ok(engines) => engines,
-                Err(_) => {
-                    crate::engines::abandon_current_operation();
-                    engines.lock().await
+            // Cancel first, and before waiting for anything.
+            //
+            // Cancelling does not need the lock, so there is no reason
+            // to spend two seconds discovering that somebody else holds
+            // it before reaching the operation that holds it. The old
+            // order abandoned only *after* the wait expired, which made
+            // every mid-connect disconnect two seconds slower than it
+            // had to be -- and mid-connect is when customers press it.
+            crate::engines::abandon_current_operation();
+
+            match tokio::time::timeout(DISCONNECT_LOCK_WAIT, engines.lock()).await {
+                Ok(mut held) => {
+                    // The in-flight operation has unwound, so the
+                    // abandon is spent. Clearing it now is what stops
+                    // the teardown below cancelling itself.
+                    crate::engines::begin_operation();
+
+                    // Phase one: everything the customer waits for.
+                    // Kill, close, delete, answer -- no process, no
+                    // cmdlet, nothing polled until it disappears.
+                    let report = crate::lifecycle::teardown::hard_stop(&mut *held);
+                    if !report.within_budget() {
+                        crate::cleanup_log::note("disconnect", &report.summary());
+                    }
+                    drop(held);
+
+                    // Phase two: the thorough pass, behind them. This is
+                    // the old `disconnect()` unchanged -- it removes the
+                    // tunnel service registration, runs the janitor, and
+                    // reaches the cmdlets if the registry could not be
+                    // read. It can take forty seconds and nobody
+                    // notices, because the machine's networking came
+                    // back in phase one.
+                    let thorough = Arc::clone(engines);
+                    tokio::spawn(async move {
+                        let mut engines = thorough.lock().await;
+                        if let Err(message) = engines.disconnect() {
+                            crate::cleanup_log::note("thorough teardown after disconnect", &message);
+                        }
+                    });
+
+                    if report.all_succeeded() {
+                        Response::Ok
+                    } else {
+                        Response::Error { message: report.summary() }
+                    }
                 }
-            };
-            crate::engines::begin_operation();
-            match engines.disconnect() {
-                Ok(()) => Response::Ok,
-                Err(message) => Response::Error { message },
+                Err(_) => {
+                    // Bounded, where this used to wait forever. An
+                    // unbounded second acquisition is how a disconnect
+                    // came to hang for as long as whatever held the lock
+                    // -- twenty-five minutes, in one field case -- with
+                    // the customer tunnelled and no way out.
+                    //
+                    // The teardown still happens: it is queued behind
+                    // whoever holds the lock, and the abandon above is
+                    // already unwinding them. What is not done is making
+                    // the customer wait for it with no idea whether
+                    // anything is happening.
+                    let queued = Arc::clone(engines);
+                    tokio::spawn(async move {
+                        let mut engines = queued.lock().await;
+                        crate::engines::begin_operation();
+                        if let Err(message) = engines.disconnect() {
+                            crate::cleanup_log::note("deferred teardown after a busy disconnect", &message);
+                        }
+                    });
+                    Response::Error {
+                        message: "the tunnel is still shutting down; it will be torn down in a moment"
+                            .to_string(),
+                    }
+                }
             }
         }
         Request::Connect { profile, exits } => {
