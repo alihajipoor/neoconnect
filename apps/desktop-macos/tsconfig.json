@@ -2,7 +2,11 @@
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // ES2021, matching the Windows and mobile projects. All three
+    // compile @shared from the Windows app's src, including the API
+    // client that races endpoints with Promise.any, so all three
+    // tsconfigs have to agree about what the language provides.
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
 
