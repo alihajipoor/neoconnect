@@ -114,8 +114,28 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
         // connection closing is the app going quiet between requests,
         // and a process ending is the app being gone.
         let watched = Arc::clone(&watched);
-        match ClientWatch::of(&connected) {
-            Ok(watch) if watched.lock().await.replace(watch.pid) != Some(watch.pid) => {
+        // The pid is taken out before the lock is awaited, deliberately.
+        //
+        // Holding a `&ClientWatch` across an await makes the whole task
+        // non-Send: a shared reference is only Send when the type is
+        // Sync, and the watch owns a raw Win32 handle that is Send but
+        // not Sync. Marking it Sync to get past that would be widening
+        // an unsafe promise to satisfy the borrow checker, which is
+        // exactly the wrong direction. Only a `u32` crosses the await
+        // here; the watch itself is owned, Send, and moved into the task
+        // below.
+        let watch = ClientWatch::of(&connected).ok();
+        let pid = watch.as_ref().map(|w| w.pid);
+        let newly_seen = match pid {
+            Some(pid) => watched.lock().await.replace(pid) != Some(pid),
+            // The client is already gone, or the handle could not be
+            // opened. The connection will fail on its first read, and
+            // any previous watch still stands.
+            None => false,
+        };
+
+        match watch {
+            Some(watch) if newly_seen => {
                 let engines = Arc::clone(&engines);
                 tokio::spawn(async move {
                     let signal = watch.exited().await;
@@ -143,13 +163,9 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
                     }
                 });
             }
-            // Already watching this process, so there is nothing to do.
-            Ok(_) => {}
-            // The client is already gone, or could not be opened. Not
-            // worth a log line on its own: the connection will fail on
-            // its first read and the previous watch, if any, still
-            // stands.
-            Err(_) => {}
+            // Already watching this process, or there is nothing to
+            // watch. Either way there is nothing to do.
+            _ => {}
         }
 
         let engines = Arc::clone(&engines);
