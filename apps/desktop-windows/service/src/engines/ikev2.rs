@@ -46,7 +46,7 @@ pub const ENTRY_NAME: &str = "Neoxify";
 /// already carries.
 pub(super) const IKEV2_DNS: &str = "1.1.1.1";
 
-pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
+pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<ras::Connection, String> {
     // The entry is removed first rather than updated --
     // Add-VpnConnection refuses when it exists, and -Force only
     // suppresses the prompt, not the conflict; a stale entry pointing at
@@ -174,7 +174,7 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
     }
 
     match dial(&profile.username, &profile.password) {
-        Ok(()) => {
+        Ok(live) => {
             // Same exposure as every other protocol, despite Windows
             // owning this tunnel: strongSwan pushes 1.1.1.1 and Windows
             // applies it to the VPN interface, but "applied" is not
@@ -229,7 +229,10 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
             if super::dns::machine_wide_rule_wanted(passive) {
                 super::dns::force(IKEV2_DNS);
             }
-            Ok(())
+            // Handed to the caller to hold for the life of the session.
+            // Dropping it hangs the tunnel up, which is what makes the
+            // teardown one API call instead of a `rasdial.exe` spawn.
+            Ok(live)
         }
         Err(code) => {
             // Tear the entry down again. Leaving a half-configured
@@ -247,7 +250,7 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<(), String> {
 /// failed, which is what makes a failed connect observable here rather
 /// than something the app discovers later. See [`super::ras`] for why
 /// `rasdial.exe` cannot do this job.
-fn dial(username: &str, password: &str) -> Result<(), u32> {
+fn dial(username: &str, password: &str) -> Result<ras::Connection, u32> {
     let mut params = ras::dial_params();
     ras::set_field(&mut params.szEntryName, ENTRY_NAME);
     ras::set_field(&mut params.szUserName, username);
@@ -274,15 +277,19 @@ fn dial(username: &str, password: &str) -> Result<(), u32> {
             &mut connection,
         )
     };
+    // Owned from here on, whether the dial worked or not: a handle can
+    // come back even on failure, and leaking it would hold a RAS port
+    // open for the life of the service. Dropping it hangs it up.
+    let live = ras::Connection::from_raw(connection);
+
     if code != 0 {
-        // A handle can come back even on failure, and leaking it would
-        // hold a RAS port open for the life of the service.
-        if !connection.is_null() {
-            unsafe { ras::ras_hang_up(connection) };
-        }
         return Err(code);
     }
-    Ok(())
+
+    // A success with no handle should not happen, but if RAS ever does
+    // it, there is nothing to hang up later and saying so is better than
+    // reporting a tunnel this service cannot take down.
+    live.ok_or(0)
 }
 
 /// Hangs up and removes the entry.
@@ -405,7 +412,7 @@ fn powershell_within(script: &str, budget: std::time::Duration) -> Result<String
 /// advice. Anything else falls back to Windows' own wording, which is
 /// generic but accurate and already translated -- better than a
 /// sentence invented here for a code nobody has ever seen.
-fn dial_error(code: u32) -> String {
+pub(super) fn dial_error(code: u32) -> String {
     match code {
         691 => "The server rejected these credentials.".into(),
         // The classic one for this protocol. 809 is "no response",
