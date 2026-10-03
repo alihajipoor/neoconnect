@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* The desktop UI lives in the Windows app; see vite.config.ts for
+       why it is aliased rather than extracted into a package. Both this
+       and the vite alias have to agree -- tsc resolves through here and
+       the bundler resolves through there. */
+    "baseUrl": ".",
+    "paths": { "@shared/*": ["../desktop-windows/src/*"] }
+  },
+  "include": ["src", "../desktop-windows/src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

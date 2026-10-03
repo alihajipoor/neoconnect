@@ -1,0 +1,10 @@
+dist
+node_modules
+
+# Cargo build output.
+src-tauri/target
+
+# Tauri regenerates these from tauri.conf.json and the capability files
+# on every build, the same as the Windows app does; committing them
+# means reviewing churn nobody wrote.
+src-tauri/gen
