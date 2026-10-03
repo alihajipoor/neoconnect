@@ -9,4 +9,5 @@
 //!
 //! See docs/windows-service-rewrite.md.
 
+pub mod cancel;
 pub mod client_watch;
