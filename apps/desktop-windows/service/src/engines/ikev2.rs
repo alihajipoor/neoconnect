@@ -340,7 +340,7 @@ pub(super) fn entry_present() -> Option<bool> {
     }
 }
 
-fn remove_entry() -> Result<(), String> {
+pub(super) fn remove_entry() -> Result<(), String> {
     let script = format!(
         "Remove-VpnConnection -Name '{ENTRY_NAME}' -AllUserConnection -Force -ErrorAction SilentlyContinue"
     );
