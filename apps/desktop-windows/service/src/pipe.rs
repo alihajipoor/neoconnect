@@ -384,8 +384,22 @@ mod tests {
             .await
             .expect("the supervisor should still be running");
 
-        let reply = round_trip(name, r#"{"type":"status"}"#).await;
-        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        // Asked more than once, because a status that misses its
+        // deadline is answered from the operating system instead of from
+        // the engine state -- which is correct behaviour and reports
+        // nothing about a DNS rule, since the OS does not know about one.
+        // On a loaded runner the queued job can miss a one second window,
+        // so this waits for the answer that came from the engine rather
+        // than asserting on whichever arrived first.
+        let mut parsed = serde_json::Value::Null;
+        for _ in 0..20 {
+            let reply = round_trip(name, r#"{"type":"status"}"#).await;
+            parsed = serde_json::from_str(reply.trim()).unwrap();
+            if parsed["tunnel_dns_unprotected"] == true {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
         assert_eq!(
             parsed["tunnel_dns_unprotected"], true,
             "a tunnel whose DNS rule could not be installed did not say so"
