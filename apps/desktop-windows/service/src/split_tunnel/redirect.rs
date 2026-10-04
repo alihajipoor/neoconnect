@@ -4345,7 +4345,14 @@ mod tests {
         let mut allowance =
             firewall::Allowance::install(&[local_addr], relays.tcp_port, relays.udp_port)
                 .expect("the inbound allowance must install");
-        firewall::wait_until_reachable(local_addr, relays.tcp_port).expect("relay must be up");
+        // A live token: this test wants the wait to run, not to be
+        // skipped, so it hands one that is not cancelled.
+        firewall::wait_until_reachable(
+            local_addr,
+            relays.tcp_port,
+            &crate::lifecycle::cancel::CancelToken::new(),
+        )
+        .expect("relay must be up");
 
         let selection: SharedSelection = Arc::new(RwLock::new(Selection::new(
             [curl.to_string()],

@@ -376,11 +376,14 @@ mod tests {
         // run in parallel and an earlier draft of this shared one static
         // between them, which passed alone and failed together.
         engines
-            .lock()
+            .run(|engines: &mut Engines, _| {
+                engines.set_dns_state_for_test(crate::engines::dns::TunnelDns::Unforced(
+                    "powershell did not finish within 35s".into(),
+                ));
+            })
             .await
-            .set_dns_state_for_test(crate::engines::dns::TunnelDns::Unforced(
-                "powershell did not finish within 35s".into(),
-            ));
+            .expect("the supervisor should still be running");
+
         let reply = round_trip(name, r#"{"type":"status"}"#).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(
