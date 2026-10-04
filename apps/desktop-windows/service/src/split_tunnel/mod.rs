@@ -1224,8 +1224,7 @@ impl SplitTunnel {
         {
             Ok(relays) => relays,
             Err(e) => {
-                let mut route = route;
-                route.remove();
+                // `route` is removed by its Drop on the way out.
                 return Err(format!("could not start the local relay: {e}"));
             }
         };
@@ -1242,8 +1241,7 @@ impl SplitTunnel {
                 Ok(allowance) => allowance,
                 Err(e) => {
                     relays.stop();
-                    let mut route = route;
-                    route.remove();
+                    // `route` is removed by its Drop on the way out.
                     return Err(e);
                 }
             };
@@ -1272,8 +1270,7 @@ impl SplitTunnel {
 
         if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port, limits) {
             relays.stop();
-            let mut route = route;
-            route.remove();
+            // `route` is removed by its Drop on the way out.
             return Err(e);
         }
 
@@ -1451,8 +1448,7 @@ impl SplitTunnel {
             }
             Err(e) => {
                 relays.stop();
-                let mut route = route;
-                route.remove();
+                // `route` is removed by its Drop on the way out.
                 Err(e)
             }
         }

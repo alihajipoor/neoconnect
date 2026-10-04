@@ -28,8 +28,9 @@ use std::path::PathBuf;
 
 use super::run_hidden;
 
-/// Routes installed for the current tunnel, removed on drop-equivalent
-/// (an explicit `remove()` call from disconnect).
+/// Routes installed for the current tunnel, removed by an explicit
+/// `remove()` on every teardown path and by `Drop` on any path that has
+/// none.
 ///
 /// Deliberately records exactly what was added rather than assuming a
 /// fixed set, so a partial failure during setup still tears down cleanly.
@@ -194,6 +195,26 @@ impl InstalledRoutes {
                 ],
             );
         }
+    }
+}
+
+/// The backstop, not the mechanism. Every teardown still calls
+/// `remove()` where its ordering matters -- routes before the engine is
+/// killed, so nothing points at an adapter that is about to vanish --
+/// and `remove()` drains the list, so this then has nothing to do.
+///
+/// What it covers is the path nobody wrote: Custom mode's bring-up
+/// unwound by hand at four exits and a panic on any of them, or the
+/// next early return added to it, would leave a `0.0.0.0/0` on our
+/// adapter for the life of the machine's uptime. The rewrite's rule is
+/// that every system mutation reverts in `Drop`; the firewall allowance
+/// and both IPv6 blocks already did, and this was the one that did not.
+///
+/// It runs `route.exe` at most once per route, which phase one of a
+/// teardown is allowed to do -- see `docs/windows-service-rewrite.md`.
+impl Drop for InstalledRoutes {
+    fn drop(&mut self) {
+        self.remove();
     }
 }
 
