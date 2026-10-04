@@ -3967,6 +3967,67 @@ mod tests {
         assert!(filter.contains("udp.SrcPort == 19998"));
     }
 
+    /// The kernel filter and the leak audit are the same list seen from
+    /// opposite ends: the filter decides what the loop is handed, and
+    /// `owner::is_public_v4` decides what the audit may call an escape.
+    /// If they drift, the audit reports "escapes" the loop never had a
+    /// chance to carry -- a number that looks like a leak.
+    ///
+    /// They were held together by two hand-written address lists, one per
+    /// side, which drift exactly as the code does. This reads the
+    /// exclusions out of the filter string the driver is actually given
+    /// and asks `is_public_v4` about each range's edges, so editing either
+    /// side alone fails here.
+    #[test]
+    fn the_filter_and_the_audit_agree_at_every_edge_of_every_range() {
+        use crate::split_tunnel::owner::is_public_v4;
+
+        let redirect = sample_redirect();
+        let filter = filter_for(&redirect);
+        let v4 = filter.split("or (outbound and ipv6").next().expect("an IPv4 clause");
+
+        let addr = |text: &str| -> u32 { u32::from(text.trim().parse::<Ipv4Addr>().expect(text)) };
+        let ranges: Vec<(u32, u32)> = v4
+            .split("(ip.DstAddr < ")
+            .skip(1)
+            .map(|clause| {
+                let (low, rest) = clause.split_once(" or ip.DstAddr > ").expect("a paired bound");
+                (addr(low), addr(rest.split(')').next().expect("a closing paren")))
+            })
+            .collect();
+        let ceiling = addr(
+            v4.split("and ip.DstAddr < ").nth(1).expect("a ceiling").split(')').next().expect("a closing paren"),
+        );
+        assert!(ranges.len() >= 5, "the filter's ranges were not found: {v4}");
+
+        let admitted = |a: u32| a < ceiling && !ranges.iter().any(|&(low, high)| (low..=high).contains(&a));
+
+        let mut probes = vec![ceiling - 1, ceiling, u32::MAX, u32::from(Ipv4Addr::new(1, 1, 1, 1))];
+        for &(low, high) in &ranges {
+            probes.extend([low - 1, low, low + (high - low) / 2, high, high + 1]);
+        }
+        for a in probes {
+            let address = Ipv4Addr::from(a);
+            assert_eq!(
+                is_public_v4(address),
+                admitted(a),
+                "{address}: the filter {} it and the audit calls it {}",
+                if admitted(a) { "admits" } else { "excludes" },
+                if is_public_v4(address) { "public" } else { "local" },
+            );
+        }
+
+        // The one known difference, and why it is harmless. The audit
+        // treats the unspecified address as local; the filter has no
+        // clause for it, because no packet addressed to 0.0.0.0 ever
+        // leaves a host for the loop to be handed. The node is the other
+        // exclusion the filter makes by address, and the audit excludes
+        // it by name -- `reset_with` and `escaped_connections` both
+        // compare against it -- so it is not a range to agree on here.
+        assert!(admitted(0) && !is_public_v4(Ipv4Addr::UNSPECIFIED));
+        assert!(filter.contains(&format!("ip.DstAddr != {}", redirect.node_addr)));
+    }
+
     fn sample_redirect() -> Redirect {
         Redirect {
             local_addr: Ipv4Addr::new(192, 168, 1, 20),
