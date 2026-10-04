@@ -91,9 +91,34 @@ Inherited from `windows-service-rewrite.md`, plus:
 
 1. **The boundary above is frozen.** If a rewrite seems to need it
    changed, that is a finding to report, not a change to make.
-2. **The 204 tests are the acceptance criteria.** A test may be moved
-   or renamed. Deleting one requires saying, in the commit message,
-   what behaviour it pinned and why that behaviour no longer exists.
+2. **The tests are the acceptance criteria — and there are 215, not
+   204.** The 204 inside `split_tunnel/` are the obvious ones. Eleven
+   more live outside it and are easy to miss:
+
+   | file | test |
+   |---|---|
+   | `engines/mod.rs` | `ending_a_session_stops_the_split_tunnel` |
+   | `engines/mod.rs` | `ending_an_already_empty_session_still_stops_the_split_tunnel` |
+   | `engines/mod.rs` | `a_helper_past_its_budget_is_killed_rather_than_waited_on` |
+   | `engines/dns.rs` | `custom_mode_still_wants_the_machine_wide_rule` |
+   | `engines/dns.rs` | `the_two_engines_that_force_dns_answer_the_same_way` |
+   | `engines/dns.rs` | `both_engines_point_the_rule_at_the_same_resolver` |
+   | `engines/ikev2.rs` | `split_tunneling_is_named_only_for_custom_mode` |
+   | `engines/ikev2.rs` | `the_entry_script_is_structurally_sound_in_both_modes` |
+   | `engines/routing.rs` | `every_recorded_route_carries_the_interface_it_was_added_on` |
+   | `pipe.rs` | `the_status_poll_carries_whether_the_tunnel_s_dns_was_forced` |
+   | `pipe.rs` | `dispatch` |
+
+   The first two are the real behavioural constraint on `stop()`, and
+   they are why `stop_calls` is boundary. The `dns.rs` three constrain
+   what `wants_passive_tunnel` and `wants_interception` are allowed to
+   mean — one of them exists because the two engines once disagreed and
+   Custom mode got a machine-wide DNS rule on one protocol and not the
+   other.
+
+   A test may be moved or renamed. Deleting one requires saying, in the
+   commit message, what behaviour it pinned and why that behaviour no
+   longer exists.
 3. **Every commit compiles and passes on `windows-latest`.** This crate
    does not build on the Mac, so CI is the only check, and
    `rustfmt --check` proves syntax only — never type-checking.
