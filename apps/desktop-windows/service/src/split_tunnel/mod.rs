@@ -1365,7 +1365,17 @@ impl SplitTunnel {
                 // left. Doing it earlier would simply hand it the
                 // same connection back.
                 let outcome = {
-                    let selection = self.selection.read().expect("selection lock");
+                    // Poison is survived here as it is at the other
+                    // nine read sites, and this is the site where it
+                    // matters most. `redirect::start` has already
+                    // returned by now, so a panic between here and
+                    // `Active` being assembled leaves interception
+                    // live, `RUNNING` false, and nothing in `active`
+                    // for `stop` to take -- a redirect the service no
+                    // longer knows it is running and cannot tear down.
+                    // That is the stranded-background-tunnel complaint,
+                    // reachable from one unwrap.
+                    let selection = self.selection.read().unwrap_or_else(|e| e.into_inner());
                     owner::reset_selected_connections(
                         &selection,
                         node,

@@ -613,16 +613,27 @@ impl Engines {
             }
         }
 
-        // Interception, not passivity. "Everything except these"
-        // deliberately builds a *full* tunnel and then pushes the chosen
-        // applications out of it, so asking whether the tunnel is
-        // passive answers no and skips the redirect entirely -- which
-        // presents as the excluded applications still being tunnelled,
-        // the setting doing nothing at all.
         if limits.cancelled() {
             let _ = self.disconnect();
             return Err(ABANDONED.to_string());
         }
+
+        // Interception, not passivity -- and the reason is no longer the
+        // one this comment used to give.
+        //
+        // It claimed "everything except these" built a *full* tunnel and
+        // pushed the chosen applications out of it, so asking about
+        // passivity would answer no and skip the redirect. That belief
+        // was wrong and `SplitTunnel::wants_interception` says so at
+        // length: `mode` reaches two places in that file, the selection
+        // and the log header, so no branch anywhere builds a different
+        // shape of tunnel for AllExcept. One shape, proven by one route
+        // probe.
+        //
+        // The call is still the right one to make, because it is the
+        // question actually being asked here -- does anything need
+        // intercepting -- rather than because the two answers differ.
+        // They do not: `wants_passive_tunnel` is defined as this.
         if self.split_tunnel.wants_interception() {
             self.start_split_tunnel(profile, limits)?;
         }
