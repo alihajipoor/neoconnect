@@ -1063,6 +1063,38 @@ struct Job {
     packet: Vec<u8>,
     length: u32,
     address: WINDIVERT_ADDRESS,
+    /// What the dispatcher read the packet as, so the worker decides
+    /// about the same thing the dispatcher hashed rather than reading the
+    /// bytes a second time.
+    header: Header,
+}
+
+/// What a packet is, read once.
+///
+/// The dispatcher used to parse every packet to choose its worker, and
+/// the worker then parsed it again to decide what to do with it -- an
+/// IPv6 packet's extension-header chain walked twice. Beyond the cost,
+/// that was two independent readings of one packet that nothing held to
+/// agreement. Now the dispatcher reads it, the hash uses that reading,
+/// and the worker is handed it.
+///
+/// `None` inside a family is the same answer each parser has always
+/// given: a header this code cannot read, which every caller already
+/// treats as an unknown owner rather than as permission.
+enum Header {
+    V4(Option<Parsed>),
+    V6(Option<ParsedV6>),
+    Other,
+}
+
+impl Header {
+    fn read(packet: &[u8]) -> Self {
+        match packet.first().map(|first| first >> 4) {
+            Some(4) => Header::V4(parse(packet)),
+            Some(6) => Header::V6(parse_v6(packet)),
+            _ => Header::Other,
+        }
+    }
 }
 
 // SAFETY: `WINDIVERT_ADDRESS` is a plain `repr(C)` record of integers and
@@ -1100,14 +1132,15 @@ impl Fanout {
     /// Hands a packet to its worker, returning false once that worker
     /// has gone.
     fn hand_over(&self, packet: &[u8], length: u32, address: WINDIVERT_ADDRESS) -> bool {
-        let slot = affinity(packet, self.queues.len());
+        let header = Header::read(packet);
+        let slot = affinity_of(&header, packet, self.queues.len());
         // A full queue blocks rather than drops. A worker cannot be
         // behind for long without the driver's own queue -- thirty times
         // deeper -- absorbing it, and this file's whole position is that
         // a packet which disappears without a counter moving is the
         // failure that cannot be argued about afterwards. Blocking is
         // visible as latency; dropping is visible as nothing.
-        self.queues[slot].send(Job { packet: packet.to_vec(), length, address }).is_ok()
+        self.queues[slot].send(Job { packet: packet.to_vec(), length, address, header }).is_ok()
     }
 }
 
@@ -1143,12 +1176,12 @@ fn fold(key: u64, word: u64) -> u64 {
 /// refuses to make decisions about -- a truncated header, an IPv6
 /// fragment after the first, an extension header chain this does not
 /// follow. There are not enough of them to unbalance anything.
-fn affinity(packet: &[u8], workers: usize) -> usize {
+fn affinity_of(header: &Header, packet: &[u8], workers: usize) -> usize {
     if workers <= 1 {
         return 0;
     }
-    let key = match packet.first().map(|byte| byte >> 4) {
-        Some(4) => parse(packet).map(|parsed| {
+    let key = match header {
+        Header::V4(parsed) => parsed.as_ref().map(|parsed| {
             let mut key = fold(0, u32::from(parsed.source) as u64);
             key = fold(key, u32::from(parsed.destination) as u64);
             key = fold(key, ((parsed.source_port as u64) << 16) | parsed.destination_port as u64);
@@ -1159,12 +1192,12 @@ fn affinity(packet: &[u8], workers: usize) -> usize {
         // walked still lands consistently -- with the rest of the
         // traffic between the same two hosts, which is more than enough
         // to keep it in order.
-        Some(6) if packet.len() >= IPV6_HEADER => {
+        Header::V6(parsed) if packet.len() >= IPV6_HEADER => {
             let mut key = 0u64;
             for chunk in packet[8..IPV6_HEADER].chunks_exact(4) {
                 key = fold(key, u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64);
             }
-            if let Some(parsed) = parse_v6(packet) {
+            if let Some(parsed) = parsed {
                 key = fold(
                     key,
                     ((parsed.source_port as u64) << 16) | parsed.destination_port as u64,
@@ -1263,7 +1296,7 @@ fn worker(
     let mut owner = OwnerLookup::new();
 
     while let Ok(job) = queue.recv() {
-        let Job { mut packet, length: len, mut address } = job;
+        let Job { mut packet, length: len, mut address, header } = job;
 
         // Read per packet, not captured once at startup. Editing the
         // chosen applications while Custom mode stays on does not
@@ -1273,8 +1306,9 @@ fn worker(
         // restarted the app.
         let chosen = selection.read().unwrap_or_else(|e| e.into_inner());
         let mut reset = None;
-        let rewrote = handle_packet(
+        let rewrote = handle_parsed(
             &mut packet[..len as usize],
+            &header,
             &mut address,
             &redirect,
             &nat,
@@ -1761,8 +1795,9 @@ fn inject_v6_reset(
 /// the IPv4 path. Nothing needs remembering: the verdict is the same
 /// every time it is asked, so there is no earlier answer to stay
 /// consistent with and nothing a reused port could inherit.
-fn handle_ipv6(
+fn handle_ipv6_parsed(
     packet: &[u8],
+    parsed: Option<&ParsedV6>,
     redirect: &Redirect,
     selection: &Selection,
     owner: &mut OwnerLookup,
@@ -1777,7 +1812,7 @@ fn handle_ipv6(
     // A packet whose ports could not be read. Answered the same way the
     // IPv4 path answers an unknown owner, and for the same reason: which
     // way to fail depends on which way the customer's list reads.
-    let Some(parsed) = parse_v6(packet) else {
+    let Some(parsed) = parsed else {
         return if selection.tunnel_when_owner_unknown() { block(stats) } else { None };
     };
 
@@ -1907,8 +1942,13 @@ fn handle_ipv6(
 /// Rewrites the packet in place if it should be redirected. Returns
 /// whether anything changed, which is what decides if the checksums need
 /// recomputing.
-fn handle_packet(
+///
+/// `header` is the dispatcher's reading of these same bytes -- see
+/// [`Header`].
+#[allow(clippy::too_many_arguments)]
+fn handle_parsed(
     packet: &mut [u8],
+    header: &Header,
     address: &mut WINDIVERT_ADDRESS,
     redirect: &Redirect,
     nat: &Nat,
@@ -1946,11 +1986,13 @@ fn handle_packet(
     // carry an IPv6 packet: the NAT table, the rewrite and the proxy's
     // upstream socket are all IPv4, and so is the address on the tunnel
     // adapter they would send it to.
-    if packet.first().map(|first| first >> 4) == Some(6) {
-        return handle_ipv6(packet, redirect, selection, owner, stats, reset);
-    }
-
-    let parsed = parse(packet)?;
+    let parsed = match header {
+        Header::V6(parsed) => {
+            return handle_ipv6_parsed(packet, parsed.as_ref(), redirect, selection, owner, stats, reset);
+        }
+        Header::V4(Some(parsed)) => parsed,
+        Header::V4(None) | Header::Other => return None,
+    };
 
     let proxy_port = match parsed.transport {
         Transport::Tcp => redirect.tcp_proxy_port,
@@ -2507,6 +2549,40 @@ fn rewrite_return_leg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The production path reads a packet once, in the dispatcher, and
+    // hands that reading on. These read it the same way at the point of
+    // use, so the tests below keep asking about bytes rather than about
+    // a header built to suit them.
+    fn affinity(packet: &[u8], workers: usize) -> usize {
+        affinity_of(&Header::read(packet), packet, workers)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_packet(
+        packet: &mut [u8],
+        address: &mut WINDIVERT_ADDRESS,
+        redirect: &Redirect,
+        nat: &Nat,
+        selection: &Selection,
+        owner: &mut OwnerLookup,
+        stats: &Stats,
+        reset: &mut Option<Vec<u8>>,
+    ) -> Option<Leg> {
+        let header = Header::read(packet);
+        handle_parsed(packet, &header, address, redirect, nat, selection, owner, stats, reset)
+    }
+
+    fn handle_ipv6(
+        packet: &[u8],
+        redirect: &Redirect,
+        selection: &Selection,
+        owner: &mut OwnerLookup,
+        stats: &Stats,
+        reset: &mut Option<Vec<u8>>,
+    ) -> Option<Leg> {
+        handle_ipv6_parsed(packet, parse_v6(packet).as_ref(), redirect, selection, owner, stats, reset)
+    }
 
     fn stats(seen: u64, matched: u64, redirected: u64, returned: u64, rejected: u64) -> Stats {
         Stats {
