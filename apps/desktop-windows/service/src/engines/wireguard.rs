@@ -97,12 +97,26 @@ pub fn connect(
 }
 
 pub fn disconnect(engines: &Engines) -> Result<(), String> {
-    // A teardown's own boundary read, not a token borrowed from the
-    // connect path. A disconnect is what cancellation *leads to*, so it
-    // is never handed someone else's cancellation -- but it still reads
-    // the live one, because a customer who pressed Disconnect twice
-    // should not queue behind the first one's ten-second wait.
-    let cancel = super::current_token();
+    // A teardown is not cancellable, and this is the one place that
+    // tried to make it so.
+    //
+    // Reading the live token here looks right and is not:
+    // `pipe::dispatch` cancels the running operation *before* it runs
+    // the disconnect, so the token a disconnect would read is one it
+    // just had cancelled on its own behalf. The teardown then aborted
+    // itself at the first poll and reported failure -- caught by
+    // `disconnecting_twice_is_cheap_and_quiet`, and precisely how a
+    // machine ends up stranded with a tunnel service still running
+    // while the app says disconnected.
+    //
+    // So this pass is given a token nothing can cancel. The customer is
+    // not waiting on it: the hard stop already answered them inside
+    // 900ms and asked the service to stop. This is the thorough pass
+    // behind that, and its whole job is to establish that the thing is
+    // actually gone. Disconnecting twice stays cheap for the real
+    // reason rather than an accidental one -- the second call finds no
+    // service to open and returns immediately.
+    let uncancellable = crate::lifecycle::cancel::CancelToken::new();
     let exe = engines.engine_path("wireguard.exe")?;
     let status = run_hidden(&exe, &[OsStr::new("/uninstalltunnelservice"), OsStr::new(TUNNEL_NAME)])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
@@ -113,7 +127,7 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
     // clear_tunnel_service. Without this, a disconnect returns while the
     // machine is still tunnelled, and the very next status poll
     // correctly reports it as connected.
-    clear_tunnel_service(&cancel)
+    clear_tunnel_service(&uncancellable)
 }
 
 /// How long the tunnel service is given to go away.
@@ -135,12 +149,14 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
 ///
 /// Forty-five seconds instead. This is not a process budget -- nothing
 /// is spawned, it is an SCM poll -- so the argument about one wedged
-/// child making the service deaf does not apply, and the loop reads the
-/// caller's token on every pass, so a customer pressing Disconnect ends
-/// it immediately whatever the ceiling says. What is left is only: how
-/// long before "the service is still stopping" becomes "the service is
-/// never stopping". Forty-five seconds is generous for the first and
-/// still well short of the second.
+/// child making the service deaf does not apply. On the connect path
+/// the loop reads the caller's token on every pass, so a customer
+/// pressing Disconnect ends it immediately whatever the ceiling says;
+/// on the teardown path nothing can cancel it, deliberately, and the
+/// ceiling is the only bound there is. What is left is only: how long
+/// before "the service is still stopping" becomes "the service is never
+/// stopping". Forty-five seconds is generous for the first and still
+/// well short of the second.
 pub(super) const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(45);
 
 /// How often the service manager is asked whether it has gone yet.
