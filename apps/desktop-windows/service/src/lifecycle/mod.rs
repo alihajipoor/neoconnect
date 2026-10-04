@@ -12,4 +12,5 @@
 pub mod budget;
 pub mod cancel;
 pub mod client_watch;
+pub mod supervisor;
 pub mod teardown;
