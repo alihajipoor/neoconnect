@@ -286,7 +286,13 @@ impl Engines {
                 self.split_tunnel.stop();
                 // A separate request, so its own boundary read rather
                 // than a token borrowed from a connect that has finished.
-                return self.start_split_tunnel(&profile, &current_token());
+                return self.start_split_tunnel(
+                    &profile,
+                    &crate::lifecycle::budget::Limits::new(
+                        current_token(),
+                        crate::lifecycle::budget::CONNECT_BUDGET.limit,
+                    ),
+                );
             }
             // Editing the list within a mode changes nothing about how
             // the tunnel is built, and the redirect reads the selection
@@ -437,9 +443,14 @@ impl Engines {
         // it, and a global is a thing an author can simply not know
         // about, where an argument is a thing they have to decide about.
         // One lookup, at the boundary, and then it travels explicitly.
-        let cancel = current_token();
+        // The boundary builds both facts at once: the published
+        // token, and the clock the whole connect has to answer by.
+        let limits = crate::lifecycle::budget::Limits::new(
+            current_token(),
+            crate::lifecycle::budget::CONNECT_BUDGET.limit,
+        );
         let result = self
-            .connect_inner(profile, exits, &cancel)
+            .connect_inner(profile, exits, &limits)
             .map_err(|e| with_rival_hint(e, &rivals));
         // Remembered only on success, so a failed attempt cannot leave a
         // profile behind for Custom mode to rebuild from.
@@ -453,7 +464,7 @@ impl Engines {
         &mut self,
         profile: &ConnectProfile,
         exits: &[ExitProfile],
-        cancel: &crate::lifecycle::cancel::CancelToken,
+        limits: &crate::lifecycle::budget::Limits,
     ) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
 
@@ -467,7 +478,7 @@ impl Engines {
         // had run. Asking first costs a mutex and is the difference
         // between a button that responds and one that responds
         // eventually.
-        if cancel.is_cancelled() {
+        if limits.cancelled() {
             return Err(ABANDONED.to_string());
         }
 
@@ -480,7 +491,7 @@ impl Engines {
         // customer who pressed Disconnect gets the tunnel left down
         // rather than watching it come back up because the request that
         // was already running finished its job.
-        if cancel.is_cancelled() {
+        if limits.cancelled() {
             return Err(ABANDONED.to_string());
         }
 
@@ -492,7 +503,7 @@ impl Engines {
 
         match profile {
             ConnectProfile::Wireguard(p) => {
-                wireguard::connect(self, p, passive, cancel)?;
+                wireguard::connect(self, p, passive, limits)?;
                 self.active.fill(Active::WireguardTunnel);
             }
             // Nothing is spawned: Windows brings the interface up and
@@ -574,9 +585,9 @@ impl Engines {
                 // with none has no source to send from -- but nothing is
                 // routed into it.
                 let prepared = if passive {
-                    xray::prepare_passive(&outbound, cancel).map(|_| InstalledRoutes::none())
+                    xray::prepare_passive(&outbound, limits).map(|_| InstalledRoutes::none())
                 } else {
-                    xray::install_routes(&outbound, cancel)
+                    xray::install_routes(&outbound, limits)
                 };
                 let routes = match prepared {
                     Ok(routes) => routes,
@@ -593,7 +604,7 @@ impl Engines {
                 });
             }
             ConnectProfile::Openvpn(p) => {
-                let child = openvpn::connect(self, p, passive, cancel)?;
+                let child = openvpn::connect(self, p, passive, limits)?;
                 self.active.fill(Active::Child {
                     protocol: "OPENVPN",
                     child,
@@ -608,12 +619,12 @@ impl Engines {
         // passive answers no and skips the redirect entirely -- which
         // presents as the excluded applications still being tunnelled,
         // the setting doing nothing at all.
-        if cancel.is_cancelled() {
+        if limits.cancelled() {
             let _ = self.disconnect();
             return Err(ABANDONED.to_string());
         }
         if self.split_tunnel.wants_interception() {
-            self.start_split_tunnel(profile, cancel)?;
+            self.start_split_tunnel(profile, limits)?;
         }
         self.block_ipv6_if_needed(profile);
         // Whatever the engine above reported about the tunnel's DNS
@@ -674,10 +685,10 @@ impl Engines {
     fn start_split_tunnel(
         &mut self,
         profile: &ConnectProfile,
-        cancel: &crate::lifecycle::cancel::CancelToken,
+        limits: &crate::lifecycle::budget::Limits,
     ) -> Result<(), String> {
         let adapter = adapter_name_for(profile);
-        let node = match node_address(profile, cancel) {
+        let node = match node_address(profile, limits) {
             Ok(node) => node,
             Err(e) => {
                 let _ = self.disconnect();
@@ -690,7 +701,7 @@ impl Engines {
         // Every wait inside the bring-up unwinds on a disconnect instead
         // of holding the engine state for the ~38 seconds those waits
         // add up to.
-        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir, cancel) {
+        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir, limits.token()) {
             let _ = self.disconnect();
             return Err(e);
         }
@@ -1138,7 +1149,7 @@ fn adapter_name_for(profile: &ConnectProfile) -> &'static str {
 /// Custom mode's packet filter excludes it, which is not an
 /// optimisation: the tunnel's own encrypted traffic goes to this
 /// address, and redirecting that would put the tunnel inside itself.
-fn node_address(profile: &ConnectProfile, cancel: &crate::lifecycle::cancel::CancelToken) -> Result<Ipv4Addr, String> {
+fn node_address(profile: &ConnectProfile, limits: &crate::lifecycle::budget::Limits) -> Result<Ipv4Addr, String> {
     let (host, port) = match profile {
         ConnectProfile::Wireguard(p) => split_host_port(&p.endpoint)?,
         ConnectProfile::Openvpn(p) => split_host_port(&p.endpoint)?,
@@ -1170,7 +1181,10 @@ fn node_address(profile: &ConnectProfile, cancel: &crate::lifecycle::cancel::Can
     //
     // The real hostname was here until 2026-08-26 and is redacted per
     // docs/node-address-hygiene.md -- this repository is public.
-    let deadline = std::time::Instant::now() + RESOLVE_RETRY_FOR;
+    // Clamped: the retry window is this stage's own ceiling, and what
+    // the connect has left is the real bound when earlier stages have
+    // already spent the budget.
+    let deadline = std::time::Instant::now() + limits.clamp(RESOLVE_RETRY_FOR);
     let mut last = String::new();
     loop {
         // getaddrinfo, moved off this thread so a disconnect does not
@@ -1185,7 +1199,7 @@ fn node_address(profile: &ConnectProfile, cancel: &crate::lifecycle::cancel::Can
         // cancelled is this operation's interest in it.
         let resolving = {
             let host = host.clone();
-            cancel.interruptible(move || (host.as_str(), port).to_socket_addrs())
+            limits.token().interruptible(move || (host.as_str(), port).to_socket_addrs())
         };
         let resolving = match resolving {
             Ok(result) => result,
@@ -1205,7 +1219,7 @@ fn node_address(profile: &ConnectProfile, cancel: &crate::lifecycle::cancel::Can
             }
             Err(e) => last = e.to_string(),
         }
-        if std::time::Instant::now() >= deadline || cancel.is_cancelled() {
+        if std::time::Instant::now() >= deadline || limits.done() {
             return Err(format!("could not resolve {host}: {last}"));
         }
         std::thread::sleep(RESOLVE_RETRY_EVERY);
@@ -1436,6 +1450,18 @@ fn abandoned() -> bool {
 /// reach them: pressing Disconnect while a connect is still running ends
 /// that connect, and the app shows whatever it said.
 const ABANDONED: &str = "this attempt was stopped so the disconnect could go ahead";
+
+/// What a connect that ran out of time reports.
+///
+/// Distinct from [`ABANDONED`] because the causes are different and so
+/// is the advice: one means somebody pressed Disconnect, the other means
+/// every stage was still working when the clock ran out. Also distinct
+/// from a stage's own timeout message, which names that stage -- by the
+/// time the budget is gone the stage that happens to notice is an
+/// accident of ordering, and blaming OpenVPN for a slow DNS lookup
+/// three stages earlier sends whoever reads it to the wrong place.
+pub(super) const OUT_OF_TIME: &str =
+    "this connection attempt ran out of time. Trying a different server usually helps.";
 
 /// The name to put in an error message, from the command being run.
 fn helper_name(command: &Command) -> String {

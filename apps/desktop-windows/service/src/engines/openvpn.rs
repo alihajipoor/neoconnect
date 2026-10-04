@@ -491,7 +491,7 @@ pub fn connect(
     engines: &Engines,
     profile: &OpenvpnProfile,
     passive: bool,
-    cancel: &crate::lifecycle::cancel::CancelToken,
+    limits: &crate::lifecycle::budget::Limits,
 ) -> Result<Child, String> {
     let exe = engines.engine_path("openvpn.exe")?;
     engines.engine_path("wintun.dll")?;
@@ -524,7 +524,7 @@ pub fn connect(
     .map_err(|e| format!("could not start openvpn.exe: {e}"))?;
 
     let child = confirm_started(child, "OpenVPN", &log_path)?;
-    wait_until_up(child, &log_path, cancel)
+    wait_until_up(child, &log_path, limits)
 }
 
 /// Waits until OpenVPN says its tunnel is up, rather than until it has
@@ -547,9 +547,19 @@ pub fn connect(
 fn wait_until_up(
     mut child: Child,
     log_path: &std::path::Path,
-    cancel: &crate::lifecycle::cancel::CancelToken,
+    limits: &crate::lifecycle::budget::Limits,
 ) -> Result<Child, String> {
-    let deadline = std::time::Instant::now() + TUNNEL_UP_WITHIN;
+    // The ceiling stays a ceiling; the connect's remaining time is
+    // what actually bounds this when it runs last. Reported below as
+    // the budget that was really applied, because "did not connect
+    // within 75s" after giving up at 20 is a lie to whoever reads it.
+    let budget = limits.clamp(TUNNEL_UP_WITHIN);
+    if budget.is_zero() {
+        let _ = child.kill();
+        super::reap(&mut child);
+        return Err(super::OUT_OF_TIME.to_string());
+    }
+    let deadline = std::time::Instant::now() + budget;
     loop {
         let log = std::fs::read_to_string(log_path).unwrap_or_default();
         if log.contains(TUNNEL_UP_MARK) {
@@ -568,7 +578,7 @@ fn wait_until_up(
                 return Err(format!("could not check whether OpenVPN was still running: {e}"));
             }
         }
-        if cancel.is_cancelled() {
+        if limits.cancelled() {
             let _ = child.kill();
             super::reap(&mut child);
             return Err(super::ABANDONED.to_string());
@@ -578,7 +588,7 @@ fn wait_until_up(
             super::reap(&mut child);
             return Err(format!(
                 "OpenVPN did not finish connecting within {}s: {}",
-                TUNNEL_UP_WITHIN.as_secs(),
+                budget.as_secs(),
                 tail(&log)
             ));
         }

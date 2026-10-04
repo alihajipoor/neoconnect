@@ -114,6 +114,64 @@ impl Deadline {
     }
 }
 
+/// What an operation is allowed: whether to keep trying, and for how long.
+///
+/// Two facts, one argument. Every wait on the connect path needs both --
+/// a disconnect must end it now, and the app's deadline must end it
+/// eventually -- and passing them separately means each new wait gets to
+/// take one and forget the other. Forgetting the first is the dead
+/// Disconnect button; forgetting the second is the connect that answers
+/// after the app stopped listening. Neither is a mistake worth leaving
+/// available.
+///
+/// Cheap to clone, because the engine entry points hand it down by
+/// reference and the token behind it is already shared.
+#[derive(Debug, Clone)]
+pub struct Limits {
+    cancel: crate::lifecycle::cancel::CancelToken,
+    deadline: Deadline,
+}
+
+impl Limits {
+    pub fn new(cancel: crate::lifecycle::cancel::CancelToken, budget: Duration) -> Self {
+        Self { cancel, deadline: Deadline::starting_now(budget) }
+    }
+
+    /// Has somebody asked for this to stop.
+    pub fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// Has the operation run out of time.
+    pub fn expired(&self) -> bool {
+        self.deadline.passed()
+    }
+
+    /// Either reason to stop. What a wait's loop condition reads.
+    pub fn done(&self) -> bool {
+        self.cancelled() || self.expired()
+    }
+
+    /// The shorter of a stage's own ceiling and what the operation has
+    /// left. See [`Deadline::clamp`].
+    pub fn clamp(&self, ceiling: Duration) -> Duration {
+        self.deadline.clamp(ceiling)
+    }
+
+    pub fn remaining(&self) -> Duration {
+        self.deadline.remaining()
+    }
+
+    /// The token itself, for the two callers that need it rather than a
+    /// question answered about it: `CancelToken::interruptible`, which
+    /// moves an uncancellable syscall to its own thread, and the
+    /// subsystems that keep their own deadline and only borrow the
+    /// cancellation.
+    pub fn token(&self) -> &crate::lifecycle::cancel::CancelToken {
+        &self.cancel
+    }
+}
+
 /// What a whole connect may spend before the app stops listening.
 ///
 /// Seven seconds under [`APP_REPLY_DEADLINE`], which is not a round

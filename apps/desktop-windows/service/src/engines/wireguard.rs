@@ -78,7 +78,7 @@ pub fn connect(
     engines: &Engines,
     profile: &WireguardProfile,
     passive: bool,
-    cancel: &crate::lifecycle::cancel::CancelToken,
+    limits: &crate::lifecycle::budget::Limits,
 ) -> Result<(), String> {
     let exe = engines.engine_path("wireguard.exe")?;
     let conf_path = engines.config_path(CONF_FILE);
@@ -86,7 +86,7 @@ pub fn connect(
 
     // The name has to be free before this runs, or wireguard.exe never
     // returns. See clear_tunnel_service.
-    clear_tunnel_service(cancel)?;
+    clear_tunnel_service(limits)?;
 
     let status = run_hidden(&exe, &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
@@ -116,7 +116,10 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
     // actually gone. Disconnecting twice stays cheap for the real
     // reason rather than an accidental one -- the second call finds no
     // service to open and returns immediately.
-    let uncancellable = crate::lifecycle::cancel::CancelToken::new();
+    let uncancellable = crate::lifecycle::budget::Limits::new(
+        crate::lifecycle::cancel::CancelToken::new(),
+        TUNNEL_SERVICE_GONE_WITHIN,
+    );
     let exe = engines.engine_path("wireguard.exe")?;
     let status = run_hidden(&exe, &[OsStr::new("/uninstalltunnelservice"), OsStr::new(TUNNEL_NAME)])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
@@ -233,8 +236,13 @@ pub(super) fn request_stop_without_waiting() -> Result<(), String> {
     }
 }
 
-pub(super) fn clear_tunnel_service(cancel: &crate::lifecycle::cancel::CancelToken) -> Result<(), String> {
-    let deadline = Instant::now() + TUNNEL_SERVICE_GONE_WITHIN;
+pub(super) fn clear_tunnel_service(limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
+    // One pass always runs, even on a spent budget: the early returns
+    // below are the cheap-and-quiet case -- no service to open means the
+    // name is already free -- and refusing before asking would turn the
+    // common case into a failure.
+    let budget = limits.clamp(TUNNEL_SERVICE_GONE_WITHIN);
+    let deadline = Instant::now() + budget;
     loop {
         let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         else {
@@ -266,14 +274,20 @@ pub(super) fn clear_tunnel_service(cancel: &crate::lifecycle::cancel::CancelToke
         // Disconnect must not queue behind the rest of it. Reported as
         // the abandonment rather than as a WireGuard fault, because that
         // is what happened.
-        if cancel.is_cancelled() {
+        if limits.cancelled() {
             return Err(super::ABANDONED.to_string());
         }
         if Instant::now() >= deadline {
+            // A spent budget is not WireGuard's fault and must not read
+            // as it: the stage that happens to notice the clock ran out
+            // is an accident of ordering.
+            if budget.is_zero() {
+                return Err(super::OUT_OF_TIME.to_string());
+            }
             return Err(format!(
                 "the previous WireGuard tunnel was still shutting down after {}s. \
                  Waiting a few seconds and connecting again usually clears it.",
-                TUNNEL_SERVICE_GONE_WITHIN.as_secs()
+                budget.as_secs()
             ));
         }
         std::thread::sleep(TUNNEL_SERVICE_POLL);
