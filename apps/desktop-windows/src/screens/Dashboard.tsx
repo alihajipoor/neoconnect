@@ -2446,6 +2446,9 @@ export function Dashboard({
           // degraded states where a tunnel exists but is not
           // trusted yet.
           tunnelActive={connectionState !== "disconnected"}
+          // Already loaded here, so the picker opens on real content
+          // instead of a spinner.
+          initialRoutes={routes}
           onClose={() => setShowLocationPicker(false)}
           // Re-reads the provisioned connection rather than adopting the
           // switch response directly. Two reasons, one of which was a

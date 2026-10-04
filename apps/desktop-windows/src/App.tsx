@@ -10,6 +10,7 @@ import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
 import { ForgotPassword } from "./screens/ForgotPassword";
 import { Dashboard } from "./screens/Dashboard";
+import { ScreenTransition } from "./components/ScreenTransition";
 import { Plans } from "./screens/Plans";
 import { Settings } from "./screens/Settings";
 import { Referrals } from "./screens/Referrals";
@@ -212,6 +213,13 @@ export default function App() {
     setScreen("login");
   }
 
+  // Every screen goes through one function so the transition can see
+  // both halves of a navigation: the one leaving and the one
+  // arriving. As a chain of early returns only one screen was ever
+  // in scope, which is why this build cuts between screens while
+  // the mobile one animates -- the component lived here and only
+  // mobile was ever wired into it.
+  const renderScreen = () => {
   if (screen === "loading") {
     return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading...</div>;
   }
@@ -313,4 +321,7 @@ export default function App() {
       </div>
     </div>
   );
+  };
+
+  return <ScreenTransition screenKey={screen}>{renderScreen()}</ScreenTransition>;
 }

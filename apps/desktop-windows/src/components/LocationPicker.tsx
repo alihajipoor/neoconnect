@@ -19,6 +19,7 @@ export function LocationPicker({
   onClose,
   onSwitched,
   tunnelActive = false,
+  initialRoutes,
 }: {
   subscriptionId: string;
   currentRouteId: string | undefined;
@@ -45,11 +46,25 @@ export function LocationPicker({
    * pin it -- picking a server deliberately should not be quietly
    * overridden by failover. */
   onSwitched: (routeId: string) => void;
+  /** What the dashboard already has, rendered immediately.
+   *
+   * The list used to start empty and fetch on open, so every time this
+   * was opened the customer watched a spinner for a round trip to the
+   * API -- three to ten seconds on a slow link, for data the dashboard
+   * was already holding. Other VPN clients feel instant because they
+   * show what they have and reconcile behind it; there was no reason
+   * this could not.
+   *
+   * Still refreshed in the background, because a route can be added or
+   * withdrawn between the dashboard's fetch and this being opened. The
+   * difference is that the customer is not made to wait for it. */
+  initialRoutes?: RouteOption[];
 }) {
   const { t } = useI18n();
-  const [loading, setLoading] = useState(true);
+  const [routes, setRoutes] = useState<RouteOption[]>(initialRoutes ?? []);
+  // Only a blocking load when there is genuinely nothing to show.
+  const [loading, setLoading] = useState((initialRoutes ?? []).length === 0);
   const [error, setError] = useState<string | null>(null);
-  const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [switchError, setSwitchError] = useState<string | null>(null);
   /** Measured round-trip per route. Absent means "not measured yet",
@@ -59,16 +74,21 @@ export function LocationPicker({
 
   useEffect(() => {
     void load();
+    // Measuring starts against whatever is on screen now rather than
+    // waiting for the refresh, so the numbers fill in while the list is
+    // already readable.
+    if ((initialRoutes ?? []).length > 0) void measureAll(initialRoutes ?? []);
   }, []);
 
   async function load() {
-    setLoading(true);
     setError(null);
     const result = await getAvailableRoutes(subscriptionId);
     if (result.ok) {
       setRoutes(result.data);
       void measureAll(result.data);
-    } else {
+    } else if (routes.length === 0) {
+      // A failed refresh must not blank a list the customer can see and
+      // use. It only becomes an error when there is nothing behind it.
       setError(result.error);
     }
     setLoading(false);
