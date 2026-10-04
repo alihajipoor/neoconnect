@@ -150,6 +150,23 @@ pub struct Selection {
     exits: HashMap<String, String>,
 }
 
+/// Whether `image_path`, lowercased, is exactly `lowered` -- without
+/// building the lowercased copy.
+///
+/// ASCII only, and the callers check that first. For an ASCII string
+/// `to_lowercase` is byte-for-byte `to_ascii_lowercase`, so comparing
+/// byte by byte with the case folded on the fly gives exactly the answer
+/// the allocating version gave. A path with anything else in it -- a
+/// customer's user folder named in their own script -- takes the
+/// allocating route unchanged, because Unicode lowercasing is not a
+/// per-byte operation and a cheaper answer that differs from it would
+/// change which applications are carried.
+fn same_ascii_path(lowered: &str, image_path: &str) -> bool {
+    debug_assert!(image_path.is_ascii());
+    lowered.len() == image_path.len()
+        && lowered.bytes().zip(image_path.bytes()).all(|(l, i)| l == i.to_ascii_lowercase())
+}
+
 impl Selection {
     pub fn new<I: IntoIterator<Item = String>>(paths: I, mode: SplitTunnelMode) -> Self {
         Self::with_scopes(paths, mode, Vec::new())
@@ -366,7 +383,15 @@ impl Selection {
     }
 
     /// Whether an executable path is one the customer selected.
+    ///
+    /// Asked on every packet, so it must not allocate -- and it did: the
+    /// type's own doc promised "a plain comparison" while this lowercased
+    /// the whole path into a fresh `String` each time. See
+    /// [`same_ascii_path`] for how the comparison is now made without one.
     pub fn matches(&self, image_path: &str) -> bool {
+        if image_path.is_ascii() {
+            return self.paths.iter().any(|p| same_ascii_path(p, image_path));
+        }
         let lowered = image_path.to_lowercase();
         self.paths.iter().any(|p| *p == lowered)
     }
@@ -455,7 +480,15 @@ impl Selection {
         if self.scopes.is_empty() {
             return Scoped::Unscoped;
         }
-        let Some(scope) = self.scopes.get(&image_path.to_lowercase()) else {
+        // A walk rather than a hash lookup for the same reason `matches`
+        // is: the key would have to be lowercased into a new `String`
+        // first, per packet. Scopes are a handful of games at most.
+        let found = if image_path.is_ascii() {
+            self.scopes.iter().find(|(p, _)| same_ascii_path(p, image_path)).map(|(_, s)| s)
+        } else {
+            self.scopes.get(&image_path.to_lowercase())
+        };
+        let Some(scope) = found else {
             return Scoped::Unscoped;
         };
         match scope.contains(destination) {
@@ -1925,6 +1958,53 @@ mod tests {
             selection.destination_scope(r"C:\GAMES\Game.EXE", "203.0.113.7".parse().unwrap()),
             Scoped::InScope
         );
+    }
+
+    /// Matching no longer lowercases the path into a new string per
+    /// packet, and the cheaper comparison must give exactly the answer
+    /// the old one did -- a disagreement changes which applications are
+    /// carried. So the old rule is written out here as the oracle and
+    /// every case is asked of both.
+    ///
+    /// The non-ASCII rows are the ones that matter most: a customer's
+    /// user folder is named in their own script, and those paths still
+    /// take the allocating route on purpose.
+    #[test]
+    fn matching_without_allocating_agrees_with_lowercasing_first() {
+        let selected = [
+            r"C:\Games\Game.exe",
+            r"C:\Users\ÄLI\AppData\Local\Game\game.exe",
+            r"C:\Users\علی\Desktop\launcher.exe",
+        ];
+        let selection = Selection::new(selected.iter().map(|s| s.to_string()), SplitTunnelMode::OnlySelected);
+        let oracle = |image: &str| selected.iter().any(|s| s.to_lowercase() == image.to_lowercase());
+
+        for image in [
+            r"C:\Games\Game.exe",
+            r"c:\games\game.exe",
+            r"C:\GAMES\GAME.EXE",
+            r"C:\Games\Game.exe2",
+            r"C:\Games\Game.ex",
+            r"C:\Games\Gamf.exe",
+            r"D:\Games\Game.exe",
+            r"C:\Users\ÄLI\AppData\Local\Game\game.exe",
+            r"c:\users\äli\appdata\local\game\GAME.EXE",
+            r"c:\users\ali\appdata\local\game\game.exe",
+            r"C:\Users\علی\Desktop\LAUNCHER.exe",
+            r"C:\Users\علی\Desktop\launcher.exe.bak",
+            "",
+        ] {
+            assert_eq!(selection.matches(image), oracle(image), "{image}");
+        }
+
+        let scoped = Selection::with_scopes(
+            [r"C:\Users\ÄLI\Game\game.exe".to_string()],
+            SplitTunnelMode::OnlySelected,
+            [scope_of(r"c:\users\äli\game\GAME.exe", &["203.0.113.0/24"])],
+        );
+        let inside: IpAddr = "203.0.113.7".parse().unwrap();
+        assert_eq!(scoped.destination_scope(r"C:\USERS\ÄLI\GAME\game.exe", inside), Scoped::InScope);
+        assert_eq!(scoped.destination_scope(r"C:\Users\ALI\Game\game.exe", inside), Scoped::Unscoped);
     }
 
     /// The rule, spelled out as a table, because every cell of it is a
