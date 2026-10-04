@@ -65,10 +65,8 @@ mod split_tunnel;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
 use tokio::time::timeout;
 use windows_service::service::{
     ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
@@ -618,11 +616,14 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     // itself at the next boot rather than needing the app opened.
     gaming::sweep_leftovers();
 
-    let engines = Arc::new(Mutex::new(engines));
+    // One owner on its own thread, with a queue in front of it, rather
+    // than a mutex every request contends on. See
+    // docs/windows-service-rewrite.md and lifecycle::supervisor.
+    let engines = crate::lifecycle::supervisor::Supervisor::spawn(engines, "neoxify-engines");
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
-        let serving = pipe::serve(Arc::clone(&engines));
+        let serving = pipe::serve(engines.clone());
         tokio::select! {
             result = serving => {
                 if let Err(err) = result {
@@ -682,23 +683,38 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         // stops without having cleaned up, because the start-up sweep
         // above heals the leftovers at the next boot, and this service
         // is AutoStart. Refusing to stop heals nothing.
-        match timeout(STOP_LOCK_WAIT, engines.lock()).await {
-            Ok(mut guard) => {
-                let _ = guard.disconnect();
+        // Stop whatever is running, then queue the teardown behind it.
+        //
+        // Cancelling does not wait for the queue, so this reaches an
+        // operation in flight immediately; the teardown is then the next
+        // job the owning thread picks up. Bounded, because the process
+        // must stop either way -- a service that refuses to stop heals
+        // nothing, while one that stops without having finished is
+        // healed by the sweep at the next start, and this service is
+        // AutoStart.
+        engines.cancel_running();
+        engines::abandon_current_operation();
+
+        let torn_down = engines.run(|engines: &mut engines::Engines, _| {
+            engines::begin_operation();
+            engines.disconnect()
+        });
+
+        match timeout(STOP_LOCK_WAIT + STOP_LOCK_WAIT_AFTER_ABANDON, torn_down).await {
+            Ok(Ok(Err(err))) => {
+                cleanup_log::note("tear down at service stop", &err);
             }
-            Err(_) => {
-                engines::abandon_current_operation();
-                match timeout(STOP_LOCK_WAIT_AFTER_ABANDON, engines.lock()).await {
-                    Ok(mut guard) => {
-                        let _ = guard.disconnect();
-                    }
-                    Err(_) => cleanup_log::note(
-                        "tear down at service stop",
-                        "the engine lock was still held after abandoning; leftovers will be cleared by the sweep at the next service start",
-                    ),
-                }
-            }
+            Ok(Ok(Ok(()))) => {}
+            // The supervisor is already gone, which is only reachable
+            // while stopping. Nothing left to tear down for.
+            Ok(Err(_)) => {}
+            Err(_) => cleanup_log::note(
+                "tear down at service stop",
+                "the teardown did not finish in time; leftovers will be cleared by the sweep at \
+                 the next service start",
+            ),
         }
+
         // And the same for gaming mode, which has no tunnel to strand
         // but whose NRPT rules would outlive the only process that
         // knows what they are. The stub goes with them: it is the thing

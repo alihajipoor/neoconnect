@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use crate::lifecycle::client_watch::ClientWatch;
+use crate::lifecycle::supervisor::Supervisor;
 use std::time::{Duration, Instant};
 
 use neoconnect_ipc::{Request, Response, PIPE_NAME};
@@ -45,7 +46,7 @@ fn create_pipe_server(name: &str, first: bool) -> std::io::Result<NamedPipeServe
     unsafe { opts.create_with_security_attributes_raw(name, &mut attrs as *mut _ as *mut std::ffi::c_void) }
 }
 
-pub async fn serve(engines: Arc<Mutex<Engines>>) -> std::io::Result<()> {
+pub async fn serve(engines: Supervisor<Engines>) -> std::io::Result<()> {
     serve_on(PIPE_NAME, engines).await
 }
 
@@ -73,7 +74,7 @@ const IDLE_POLL: Duration = Duration::from_secs(10);
 /// Split out from [`serve`] so tests can drive the real server on a
 /// throwaway pipe name instead of the production one -- everything
 /// below this point, including the ACL, is the shipping code path.
-pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Result<()> {
+pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Result<()> {
     let mut server = create_pipe_server(name, true)?;
     // Last time the app asked this service anything. The tunnel is torn
     // down when the app has been silent long enough to be considered
@@ -82,7 +83,7 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
     // lower metric than the customer's real link, while the app --
     // having forgotten it -- offered no way to disconnect.
     let last_seen = Arc::new(Mutex::new(Instant::now()));
-    spawn_idle_watchdog(Arc::clone(&engines), Arc::clone(&last_seen));
+    spawn_idle_watchdog(engines.clone(), Arc::clone(&last_seen));
 
     // Which process is currently being watched, so the app's
     // connection-per-request habit does not produce a watch per
@@ -136,17 +137,15 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
 
         match watch {
             Some(watch) if newly_seen => {
-                let engines = Arc::clone(&engines);
+                let engines = engines.clone();
                 tokio::spawn(async move {
                     let signal = watch.exited().await;
                     crate::cleanup_log::note("the app went away", &signal.reason());
 
                     // Whatever it was doing is no longer wanted by
                     // anyone, so stop it before asking for the lock.
+                    engines.cancel_running();
                     crate::engines::abandon_current_operation();
-
-                    let mut engines = engines.lock().await;
-                    crate::engines::begin_operation();
 
                     // Phase one, the same one a Disconnect runs. The
                     // customer is not waiting on this -- they have
@@ -154,13 +153,21 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
                     // point here: the point is that it happens at all,
                     // promptly, and leaves nothing behind for them to
                     // find in Task Manager and distrust.
-                    let report = crate::lifecycle::teardown::hard_stop(&mut *engines);
-                    crate::cleanup_log::note("teardown after the app went away", &report.summary());
-
-                    // And the thorough pass, since nothing is waiting.
-                    if let Err(message) = engines.disconnect() {
-                        crate::cleanup_log::note("thorough teardown after the app went away", &message);
-                    }
+                    let _ = engines.run_detached(|engines: &mut Engines, _| {
+                        crate::engines::begin_operation();
+                        let report = crate::lifecycle::teardown::hard_stop(engines);
+                        crate::cleanup_log::note(
+                            "teardown after the app went away",
+                            &report.summary(),
+                        );
+                        // And the thorough pass, since nothing is waiting.
+                        if let Err(message) = engines.disconnect() {
+                            crate::cleanup_log::note(
+                                "thorough teardown after the app went away",
+                                &message,
+                            );
+                        }
+                    });
                 });
             }
             // Already watching this process, or there is nothing to
@@ -168,7 +175,7 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
             _ => {}
         }
 
-        let engines = Arc::clone(&engines);
+        let engines = engines.clone();
         let last_seen = Arc::clone(&last_seen);
         tokio::spawn(async move {
             *last_seen.lock().await = Instant::now();
@@ -182,7 +189,7 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
     }
 }
 
-async fn handle_connection(stream: NamedPipeServer, engines: Arc<Mutex<Engines>>) -> std::io::Result<()> {
+async fn handle_connection(stream: NamedPipeServer, engines: Supervisor<Engines>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
@@ -227,10 +234,11 @@ mod tests {
     /// `exe_dir` deliberately points somewhere with no engine binaries,
     /// so a connect attempt fails at the engine-resolution guard instead
     /// of actually reconfiguring this machine's network.
-    async fn start_server(name: &'static str) -> Arc<Mutex<Engines>> {
+    async fn start_server(name: &'static str) -> Supervisor<Engines> {
         let empty_dir = PathBuf::from(std::env::temp_dir()).join("neoconnect-test-no-engines");
-        let engines = Arc::new(Mutex::new(Engines::new(empty_dir.clone(), empty_dir)));
-        let serving = Arc::clone(&engines);
+        let engines =
+            Supervisor::spawn(Engines::new(empty_dir.clone(), empty_dir), "test-engines");
+        let serving = engines.clone();
         tokio::spawn(async move {
             let _ = serve_on(name, serving).await;
         });
@@ -405,15 +413,23 @@ mod tests {
     async fn status_is_answered_while_an_operation_holds_the_lock() {
         let name = r"\\.\pipe\neoconnect-test-status-while-busy";
         let engines = start_server(name).await;
-        let held = engines.lock().await;
+
+        // Occupy the owning thread, which is what "busy" means now that
+        // there is no lock to hold. The job parks until its token is
+        // cancelled, so the queue behind it cannot advance.
+        let busy = engines.run(|_engines: &mut Engines, token: &crate::lifecycle::cancel::CancelToken| {
+            let _ = token.sleep(std::time::Duration::from_secs(30));
+        });
 
         let reply = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             round_trip(name, r#"{"type":"status"}"#),
         )
         .await
-        .expect("status must not queue behind whatever holds the lock");
-        drop(held);
+        .expect("status must not queue behind whatever is running");
+
+        engines.cancel_running();
+        let _ = busy.await;
 
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "state");
@@ -570,133 +586,114 @@ const DISCONNECT_LOCK_WAIT: Duration = Duration::from_secs(2);
 /// one operation that does not return takes every later request with it,
 /// and the two that were lost that way -- "am I tunnelled" and "get me
 /// out" -- are exactly the two a stranded customer needs.
-async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
+/// Maps a supervisor that has gone away onto a reply.
+///
+/// Only reachable while the service is stopping, at which point nobody
+/// is waiting for a tunnel. Phrased for a log rather than for a
+/// customer, because no customer should see it.
+fn gone() -> Response {
+    Response::Error { message: "the service is shutting down".to_string() }
+}
+
+async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
     match request {
-        // Answered whether or not an operation is in flight. See
-        // `engines::os_visible_tunnel` for what the unlocked answer can
-        // and cannot say.
         Request::Status => {
-            let Ok(mut engines) = tokio::time::timeout(STATUS_LOCK_WAIT, engines.lock()).await
-            else {
-                let (connected, protocol, health) = crate::engines::os_visible_tunnel();
-                return Response::State {
-                    connected,
-                    protocol,
-                    health,
-                    split_tunnel_active: crate::split_tunnel::running_without_the_lock(),
-                    // The counters live behind the lock, so there is
-                    // nothing to report rather than nothing wrong.
-                    split_tunnel_problem: None,
-                    // Same reason, and the same rule: whether a block is
-                    // installed is only knowable behind the lock, so
-                    // this says "we are not asserting one" rather than
-                    // guessing from the protocol name.
-                    ipv6_blocked: false,
-                    // Same reason again, and the same rule. Whether an
-                    // engine asked for the tunnel's DNS rule and was
-                    // refused is a fact about the live session, and the
-                    // session is behind the lock. `false` here is "we
-                    // are not asserting a problem", which is the honest
-                    // answer -- and it is never read as "DNS is
-                    // protected", because nothing anywhere reads this
-                    // field that way.
-                    tunnel_dns_unprotected: false,
-                    // Same reason once more. The list is derived from
-                    // the live selection and a process scan, both of
-                    // which are behind the lock, so an empty list here
-                    // is "not asserting anything" -- and the next poll,
-                    // a second later, carries the real answer.
-                    split_tunnel_restart_needed: Vec::new(),
-                };
-            };
-            let (connected, protocol, health) = engines.status();
-            let split_tunnel_active = engines.split_tunnel_running();
-            let split_tunnel_problem = engines.split_tunnel_complaint();
-            let ipv6_blocked = engines.ipv6_blocked();
-            let tunnel_dns_unprotected = engines.tunnel_dns_unprotected();
-            let split_tunnel_restart_needed = engines.split_tunnel_restart_needed();
-            Response::State {
-                connected,
-                protocol,
-                health,
-                split_tunnel_active,
-                split_tunnel_problem,
-                ipv6_blocked,
-                tunnel_dns_unprotected,
-                split_tunnel_restart_needed,
+            // Raced against a deadline rather than waiting its turn.
+            //
+            // Status is the question a stranded customer asks, and an
+            // answer that arrives after a connect finishes is no answer.
+            // The queue guarantees it is *received*; this guarantees it
+            // is *answered*, by falling back to what the operating
+            // system can say without the engine state.
+            let answered = tokio::time::timeout(
+                STATUS_LOCK_WAIT,
+                engines.run(|engines: &mut Engines, _| {
+                    let (connected, protocol, health) = engines.status();
+                    Response::State {
+                        connected,
+                        protocol,
+                        health,
+                        split_tunnel_active: engines.split_tunnel_running(),
+                        split_tunnel_problem: engines.split_tunnel_complaint(),
+                        ipv6_blocked: engines.ipv6_blocked(),
+                        tunnel_dns_unprotected: engines.tunnel_dns_unprotected(),
+                        split_tunnel_restart_needed: engines.split_tunnel_restart_needed(),
+                    }
+                }),
+            )
+            .await;
+
+            match answered {
+                Ok(Ok(state)) => state,
+                // Busy or gone. See `engines::os_visible_tunnel` for what
+                // the engine-less answer can and cannot say.
+                _ => {
+                    let (connected, protocol, health) = crate::engines::os_visible_tunnel();
+                    Response::State {
+                        connected,
+                        protocol,
+                        health,
+                        split_tunnel_active: crate::split_tunnel::running_without_the_lock(),
+                        split_tunnel_problem: None,
+                        ipv6_blocked: false,
+                        tunnel_dns_unprotected: false,
+                        split_tunnel_restart_needed: Vec::new(),
+                    }
+                }
             }
         }
-        // Nothing here touches the machine, so there is no reason for
-        // the app's picker to go blank while a connect runs.
         Request::ListRunningApps => Response::RunningApps {
             apps: crate::split_tunnel::running_apps(),
         },
         Request::Disconnect => {
-            // Cancel first, and before waiting for anything.
+            // Cancel first, by both routes, and before queueing anything.
             //
-            // Cancelling does not need the lock, so there is no reason
-            // to spend two seconds discovering that somebody else holds
-            // it before reaching the operation that holds it. The old
-            // order abandoned only *after* the wait expired, which made
-            // every mid-connect disconnect two seconds slower than it
-            // had to be -- and mid-connect is when customers press it.
+            // `cancel_running` reaches the operation the owning thread is
+            // executing right now; `abandon_current_operation` is the
+            // older global flag the engine supervisors still poll
+            // internally. Both are needed until the engines take a token
+            // of their own, and neither waits for a queue.
+            engines.cancel_running();
             crate::engines::abandon_current_operation();
 
-            match tokio::time::timeout(DISCONNECT_LOCK_WAIT, engines.lock()).await {
-                Ok(mut held) => {
-                    // The in-flight operation has unwound, so the
-                    // abandon is spent. Clearing it now is what stops
-                    // the teardown below cancelling itself.
-                    crate::engines::begin_operation();
+            let hard = engines.run(|engines: &mut Engines, _| {
+                crate::engines::begin_operation();
+                crate::lifecycle::teardown::hard_stop(engines)
+            });
 
-                    // Phase one: everything the customer waits for.
-                    // Kill, close, delete, answer -- no process, no
-                    // cmdlet, nothing polled until it disappears.
-                    let report = crate::lifecycle::teardown::hard_stop(&mut *held);
+            match tokio::time::timeout(DISCONNECT_LOCK_WAIT, hard).await {
+                Ok(Ok(report)) => {
                     if !report.within_budget() {
                         crate::cleanup_log::note("disconnect", &report.summary());
                     }
-                    drop(held);
-
-                    // Phase two: the thorough pass, behind them. This is
-                    // the old `disconnect()` unchanged -- it removes the
-                    // tunnel service registration, runs the janitor, and
-                    // reaches the cmdlets if the registry could not be
-                    // read. It can take forty seconds and nobody
-                    // notices, because the machine's networking came
-                    // back in phase one.
-                    let thorough = Arc::clone(engines);
-                    tokio::spawn(async move {
-                        let mut engines = thorough.lock().await;
+                    // The thorough pass, behind the customer. Queued
+                    // rather than awaited: it removes the tunnel service
+                    // registration, runs the janitor and may reach the
+                    // cmdlets, which together can take forty seconds and
+                    // cost nothing once networking is already back.
+                    let _ = engines.run_detached(|engines: &mut Engines, _| {
                         if let Err(message) = engines.disconnect() {
                             crate::cleanup_log::note("thorough teardown after disconnect", &message);
                         }
                     });
-
                     if report.all_succeeded() {
                         Response::Ok
                     } else {
                         Response::Error { message: report.summary() }
                     }
                 }
+                Ok(Err(_)) => gone(),
                 Err(_) => {
-                    // Bounded, where this used to wait forever. An
-                    // unbounded second acquisition is how a disconnect
-                    // came to hang for as long as whatever held the lock
-                    // -- twenty-five minutes, in one field case -- with
-                    // the customer tunnelled and no way out.
-                    //
-                    // The teardown still happens: it is queued behind
-                    // whoever holds the lock, and the abandon above is
-                    // already unwinding them. What is not done is making
-                    // the customer wait for it with no idea whether
-                    // anything is happening.
-                    let queued = Arc::clone(engines);
-                    tokio::spawn(async move {
-                        let mut engines = queued.lock().await;
-                        crate::engines::begin_operation();
+                    // The hard stop is queued and the cancellation is
+                    // already unwinding whatever is ahead of it, so the
+                    // teardown will happen. What is not done is making
+                    // the customer wait on silence for it.
+                    let _ = engines.run_detached(|engines: &mut Engines, _| {
                         if let Err(message) = engines.disconnect() {
-                            crate::cleanup_log::note("deferred teardown after a busy disconnect", &message);
+                            crate::cleanup_log::note(
+                                "deferred teardown after a busy disconnect",
+                                &message,
+                            );
                         }
                     });
                     Response::Error {
@@ -707,22 +704,6 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             }
         }
         Request::Connect { profile, exits } => {
-            let mut engines = engines.lock().await;
-            // Mutual exclusion with gaming mode, and it is refused
-            // rather than resolved.
-            //
-            // Custom mode redirects *every* UDP/53 packet on the
-            // machine to 1.1.1.1 for as long as it runs, which would
-            // swallow the loopback stub whole -- and a full tunnel
-            // installs a `.` NRPT rule, which outranks nothing but
-            // certainly changes what the game's lookups do. Either way
-            // the two features would be quietly fighting over the same
-            // resolver.
-            //
-            // Tearing gaming mode down on the customer's behalf was the
-            // alternative and is worse: they asked for one thing and
-            // would silently lose another, with the app showing no
-            // trace of having done it. Saying so costs one tap.
             if crate::gaming::is_armed() {
                 return Response::Error {
                     message: "Gaming mode is on, and a VPN connection cannot run alongside it. \
@@ -730,103 +711,102 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
                         .to_string(),
                 };
             }
-            crate::engines::begin_operation();
-            match engines.connect(&profile, &exits) {
-                Ok(()) => Response::Ok,
-                Err(message) => Response::Error { message },
-            }
+            engines
+                .run(move |engines: &mut Engines, _| {
+                    crate::engines::begin_operation();
+                    match engines.connect(&profile, &exits) {
+                        Ok(()) => Response::Ok,
+                        Err(message) => Response::Error { message },
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| gone())
         }
-        // The `Engines` lock is held across the arm, and that is the
-        // other half of the mutual exclusion above: `Connect` cannot
-        // start while this runs, and this cannot start while a
-        // `Connect` runs, so "is a tunnel up" is a fact for the whole
-        // of the decision rather than a value that was true a moment
-        // ago. See the lock-order note in `gaming`.
         Request::ArmGaming { config } => {
             if let Err(e) = config.validate() {
                 return Response::Error { message: e.to_string() };
             }
-            let mut engines = engines.lock().await;
-            crate::engines::begin_operation();
-            let (tunnel_up, protocol, _) = engines.status();
-            if tunnel_up {
-                return Response::Error {
-                    message: format!(
-                        "A {} connection is running, and Gaming mode cannot run alongside it. Disconnect first.",
-                        protocol.unwrap_or_else(|| "VPN".to_string())
-                    ),
-                };
-            }
-            match crate::gaming::arm(config) {
-                Ok(report) => gaming_response(report),
-                Err(message) => Response::Error { message },
-            }
+            engines
+                .run(move |engines: &mut Engines, _| {
+                    crate::engines::begin_operation();
+                    let (tunnel_up, protocol, _) = engines.status();
+                    if tunnel_up {
+                        return Response::Error {
+                            message: format!(
+                                "A {} connection is running, and Gaming mode cannot run alongside it. Disconnect first.",
+                                protocol.unwrap_or_else(|| "VPN".to_string())
+                            ),
+                        };
+                    }
+                    match crate::gaming::arm(config) {
+                        Ok(report) => gaming_response(report),
+                        Err(message) => Response::Error { message },
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| gone())
         }
         Request::DisarmGaming => {
-            let _engines = engines.lock().await;
-            match crate::gaming::disarm() {
-                Ok(()) => Response::Ok,
-                Err(message) => Response::Error { message },
-            }
-        }
-        // Deliberately does not take the `Engines` lock, for the same
-        // reason `Status` does not queue behind it: this is the request
-        // that tells a customer whether their game's DNS is actually
-        // being redirected, and it is worth nothing if it can be
-        // starved by whatever is slow at the time.
-        Request::GamingStatus => gaming_response(crate::gaming::status()),
-        Request::ProbeSplitTunnel => {
-            let engines = engines.lock().await;
-            crate::engines::begin_operation();
-            match engines.probe_split_tunnel() {
-                Ok(()) => Response::Ok,
-                Err(message) => Response::Error { message },
-            }
-        }
-        // Reads the selection and one field beside it; touches nothing
-        // and starts nothing, so it does not call `begin_operation` the
-        // way the probe above does.
-        Request::SplitTunnelExits => {
-            let engines = engines.lock().await;
-            let (egress, apps) = engines.exit_placements();
-            Response::ExitPlacements { egress, apps }
-        }
-        Request::SetSplitTunnel { config } => match config.validate() {
-            // The result matters now: turning Custom mode on or off
-            // rebuilds the live tunnel, and a rebuild that fails must
-            // reach the customer rather than reading as applied.
-            Ok(()) => {
-                let mut engines = engines.lock().await;
-                crate::engines::begin_operation();
-                match engines.set_split_tunnel(config) {
+            // Queued rather than run here, for the reason the lock was
+            // taken before: disarming while a connect is building a
+            // tunnel is the race this serialisation exists to prevent,
+            // even though gaming state itself lives outside `Engines`.
+            engines
+                .run(|_engines: &mut Engines, _| match crate::gaming::disarm() {
                     Ok(()) => Response::Ok,
                     Err(message) => Response::Error { message },
-                }
-            }
+                })
+                .await
+                .unwrap_or_else(|_| gone())
+        }
+        Request::GamingStatus => gaming_response(crate::gaming::status()),
+        Request::ProbeSplitTunnel => {
+            engines
+                .run(|engines: &mut Engines, _| {
+                    crate::engines::begin_operation();
+                    match engines.probe_split_tunnel() {
+                        Ok(()) => Response::Ok,
+                        Err(message) => Response::Error { message },
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| gone())
+        }
+        Request::SplitTunnelExits => {
+            engines
+                .run(|engines: &mut Engines, _| {
+                    let (egress, apps) = engines.exit_placements();
+                    Response::ExitPlacements { egress, apps }
+                })
+                .await
+                .unwrap_or_else(|_| gone())
+        }
+        Request::SetSplitTunnel { config } => match config.validate() {
+            Ok(()) => engines
+                .run(move |engines: &mut Engines, _| {
+                    crate::engines::begin_operation();
+                    match engines.set_split_tunnel(config) {
+                        Ok(()) => Response::Ok,
+                        Err(message) => Response::Error { message },
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| gone()),
             Err(e) => Response::Error { message: e.to_string() },
         },
-        // Takes the lock on the ordinary terms and holds it for the
-        // whole pass, which is right: every step removes something a
-        // live tunnel depends on, so nothing else may touch the machine
-        // while it runs. `status` still answers throughout -- it has its
-        // own short wait and an unlocked fallback -- which matters here
-        // more than anywhere, because this is a customer watching to see
-        // whether their internet came back.
-        Request::Repair => {
-            let mut engines = engines.lock().await;
-            crate::engines::begin_operation();
-            Response::Repaired { report: crate::engines::repair::run(&mut engines) }
-        }
-        // Reads state and changes none, but still behind the lock: it
-        // enumerates the same routes and processes a connect is in the
-        // middle of rearranging, and a snapshot taken mid-connect would
-        // describe a machine that never existed.
-        Request::Diagnostics => {
-            let mut engines = engines.lock().await;
-            Response::Diagnostics {
-                diagnostics: Box::new(crate::engines::repair::diagnostics(&mut engines)),
-            }
-        }
+        Request::Repair => engines
+            .run(|engines: &mut Engines, _| {
+                crate::engines::begin_operation();
+                Response::Repaired { report: crate::engines::repair::run(engines) }
+            })
+            .await
+            .unwrap_or_else(|_| gone()),
+        Request::Diagnostics => engines
+            .run(|engines: &mut Engines, _| Response::Diagnostics {
+                diagnostics: Box::new(crate::engines::repair::diagnostics(engines)),
+            })
+            .await
+            .unwrap_or_else(|_| gone()),
     }
 }
 
@@ -853,52 +833,60 @@ fn gaming_response(report: crate::gaming::Report) -> Response {
 /// does not hold one open -- every request is its own short-lived
 /// connection, so "connected" is not a state this service can observe.
 /// What it can observe is silence.
-fn spawn_idle_watchdog(engines: Arc<Mutex<Engines>>, last_seen: Arc<Mutex<Instant>>) {
+fn spawn_idle_watchdog(engines: Supervisor<Engines>, last_seen: Arc<Mutex<Instant>>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(IDLE_POLL).await;
             if last_seen.lock().await.elapsed() < IDLE_GRACE {
                 continue;
             }
-            let mut engines = engines.lock().await;
-            crate::engines::begin_operation();
 
-            // Gaming mode first, and outside the tunnel check below --
-            // which is the whole point.
+            // The whole body is one job, and that is not a tidiness
+            // choice.
             //
-            // This watchdog keys on `status()` reporting a tunnel, and
-            // a gaming session reports none: no engine, no adapter, no
-            // route. So the `if !up { continue }` a few lines down
-            // would skip every gaming session forever, and an app that
-            // crashed or was killed would leave namespace-scoped NRPT
-            // rules on the machine pointing at a stub inside a service
-            // nobody is talking to. That is the same class of leftover
-            // as a tunnel outliving its app, only quieter: the game
-            // stops launching and nothing on screen suggests why.
+            // It used to hold the `Engines` lock across both halves, and
+            // a comment recorded why: that lock is the order gaming's own
+            // mutex is always taken under. The lock is gone, so the
+            // serialisation has to come from somewhere, and running both
+            // halves as a single unit on the owning thread is that
+            // somewhere. Splitting them into two jobs would let a connect
+            // interleave between disarming gaming and tearing the tunnel
+            // down, which is precisely the race the lock order prevented.
             //
-            // Decided deliberately: gaming rules must not outlive the
-            // app. The `Engines` lock is held here, which is the lock
-            // order gaming's own mutex is always taken under.
-            if crate::gaming::is_armed() {
-                eprintln!("app silent for {IDLE_GRACE:?} with gaming mode armed -- disarming it");
-                if let Err(err) = crate::gaming::disarm() {
-                    crate::cleanup_log::note(
-                        "disarm gaming mode after the app went away",
-                        &err,
-                    );
+            // Detached, because nobody is waiting: the app is gone by
+            // definition at this point.
+            let _ = engines.run_detached(|engines: &mut Engines, _| {
+                crate::engines::begin_operation();
+
+                // Gaming mode first, and outside the tunnel check below
+                // -- which is the whole point.
+                //
+                // This watchdog keys on `status()` reporting a tunnel,
+                // and a gaming session reports none: no engine, no
+                // adapter, no route. So the `if !up { return }` below
+                // would skip every gaming session forever, and an app
+                // that crashed or was killed would leave namespace-scoped
+                // NRPT rules on the machine pointing at a stub inside a
+                // service nobody is talking to. That is the same class of
+                // leftover as a tunnel outliving its app, only quieter:
+                // the game stops launching and nothing on screen suggests
+                // why.
+                if crate::gaming::is_armed() {
+                    eprintln!("app silent for {IDLE_GRACE:?} with gaming mode armed -- disarming it");
+                    if let Err(err) = crate::gaming::disarm() {
+                        crate::cleanup_log::note("disarm gaming mode after the app went away", &err);
+                    }
                 }
-            }
 
-            // status() consults the OS, so this asks "is anything
-            // actually tunnelling" rather than "did we start something".
-            let (up, _, _) = engines.status();
-            if !up {
-                continue;
-            }
-            eprintln!("app silent for {IDLE_GRACE:?} with a tunnel up -- tearing it down");
-            if let Err(err) = engines.disconnect() {
-                crate::cleanup_log::note("tear the tunnel down after the app went away", &err);
-            }
+                let (up, _, _) = engines.status();
+                if !up {
+                    return;
+                }
+                eprintln!("app silent for {IDLE_GRACE:?} with a tunnel up -- tearing it down");
+                if let Err(err) = engines.disconnect() {
+                    crate::cleanup_log::note("tear the tunnel down after the app went away", &err);
+                }
+            });
         }
     });
 }
