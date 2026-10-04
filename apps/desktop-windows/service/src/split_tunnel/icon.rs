@@ -13,11 +13,14 @@
 //! carried by a LocalSystem service for the sake of a settings screen.
 //! A PNG with stored (uncompressed) deflate blocks is a valid PNG, is
 //! about sixty lines, and an icon is small enough that the wasted bytes
-//! do not matter -- they are base64'd once and cached.
+//! do not matter -- they are base64'd once and cached, which as of this
+//! change is true rather than aspirational.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::Mutex;
 
 use windows_sys::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
@@ -26,11 +29,69 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
 use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
 
+/// The cache the module header has always claimed.
+///
+/// It said icons "are base64'd once and cached" and there was no cache
+/// anywhere, so every answer was recomputed from scratch: the shell
+/// consulted, GDI asked for pixels, a PNG built and base64'd, once per
+/// product. The picker re-lists every fifteen seconds while it is open
+/// (`RESCAN_INTERVAL_MS`), so on a machine with thirty user
+/// applications that is thirty icon extractions a quarter-minute,
+/// indefinitely, inside a LocalSystem service, for pictures that had
+/// not changed.
+///
+/// Keyed on the path *and* the file's modification time, so an
+/// application that updates gets its new icon without anything having
+/// to notice. That key is also why caching a `None` is safe here, where
+/// `OwnerLookup` learned the opposite lesson: its failures were keyed
+/// on a process id Windows reuses, so a cached miss answered for a
+/// different program. A path and an mtime identify exactly one set of
+/// bytes, and if those bytes have no icon today they have none in
+/// fifteen seconds either.
+static ICONS: Mutex<Option<HashMap<(String, Option<std::time::SystemTime>), Option<String>>>> =
+    Mutex::new(None);
+
+/// Beyond this the cache is cleared rather than grown.
+///
+/// Applications come and go, and a map that only ever grows inside a
+/// service that runs from boot is a leak with a slow fuse. Dropping
+/// everything is the right response rather than evicting cleverly: the
+/// cost of a miss is one extraction, and the picker will refill what it
+/// still needs on its next sweep.
+const MAX_CACHED_ICONS: usize = 512;
+
 /// The icon for an executable, as a base64 PNG ready for a `data:` URL.
 ///
 /// `None` when the shell has nothing to give, which is normal for some
 /// binaries -- the picker shows a placeholder rather than pretending.
 pub fn icon_png_base64(path: &str) -> Option<String> {
+    let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let key = (path.to_string(), stamp);
+
+    if let Ok(mut guard) = ICONS.lock() {
+        if let Some(found) = guard.as_ref().and_then(|m| m.get(&key)) {
+            return found.clone();
+        }
+        // A poisoned or absent map is rebuilt rather than propagated:
+        // losing the cache costs time, never an answer.
+        guard.get_or_insert_with(HashMap::new);
+    }
+
+    let encoded = encode_icon(path);
+
+    if let Ok(mut guard) = ICONS.lock() {
+        if let Some(map) = guard.as_mut() {
+            if map.len() >= MAX_CACHED_ICONS {
+                map.clear();
+            }
+            map.insert(key, encoded.clone());
+        }
+    }
+    encoded
+}
+
+/// The extraction itself, unchanged and uncached.
+fn encode_icon(path: &str) -> Option<String> {
     let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
 
     // SAFETY: zeroed is a valid SHFILEINFOW; the call fills it in.
@@ -85,23 +146,53 @@ fn rgba_from_icon(icon: *mut std::ffi::c_void) -> Option<(u32, u32, Vec<u8>)> {
         }
     }
 
-    let (width, height, mut bgra) = colour?;
+    let (width, height, bgra) = colour?;
+    let rgba = to_rgba(width, height, bgra, mask)?;
+    Some((width, height, rgba))
+}
+
+/// Turns what GDI hands over into straight-alpha RGBA.
+///
+/// Split out from the Win32 above because this part is arithmetic, and
+/// the rule it implements is the one the header calls "only obvious
+/// once every icon has come out blank". A 32-bit icon carries its own
+/// alpha; an older one carries none, and its transparency lives in a
+/// separate mask bitmap where black means *show this pixel*. Read an
+/// unmasked, alpha-less icon literally and every pixel is transparent,
+/// so the settings screen fills with nothing and looks like a rendering
+/// bug rather than a decoding one.
+///
+/// Takes buffers rather than handles so it can be tested without
+/// Windows, an icon, or a desktop -- the same reason `compile_filter`
+/// and the netsh argument list are their own functions.
+fn to_rgba(
+    width: u32,
+    height: u32,
+    mut bgra: Vec<u8>,
+    mask: Option<(u32, u32, Vec<u8>)>,
+) -> Option<Vec<u8>> {
     if bgra.len() < (width * height * 4) as usize {
         return None;
     }
 
+    // Any non-zero alpha means the icon brought its own, and inventing
+    // one over the top would flatten a transparent background to solid.
     let opaque = bgra.chunks_exact(4).any(|p| p[3] != 0);
     if !opaque {
-        if let Some((mw, mh, m)) = mask {
-            if mw == width && mh == height && m.len() >= bgra.len() {
+        match mask {
+            Some((mw, mh, m)) if mw == width && mh == height && m.len() >= bgra.len() => {
                 for (i, pixel) in bgra.chunks_exact_mut(4).enumerate() {
                     // Mask black (0) means show the colour pixel.
                     pixel[3] = if m[i * 4] == 0 { 255 } else { 0 };
                 }
             }
-        } else {
-            for pixel in bgra.chunks_exact_mut(4) {
-                pixel[3] = 255;
+            // No mask, or one that does not describe this bitmap. Fully
+            // opaque is the only safe reading: the alternative is an
+            // icon nobody can see.
+            _ => {
+                for pixel in bgra.chunks_exact_mut(4) {
+                    pixel[3] = 255;
+                }
             }
         }
     }
@@ -110,7 +201,7 @@ fn rgba_from_icon(icon: *mut std::ffi::c_void) -> Option<(u32, u32, Vec<u8>)> {
     for pixel in bgra.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
-    Some((width, height, bgra))
+    Some(bgra)
 }
 
 /// A GDI bitmap as top-down 32-bit BGRA.
@@ -256,6 +347,74 @@ fn base64(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::to_rgba;
+
+    /// Two pixels, BGRA, with the alpha the caller asks for.
+    fn bgra(alpha: [u8; 2]) -> Vec<u8> {
+        vec![
+            10, 20, 30, alpha[0], // blue, green, red, alpha
+            40, 50, 60, alpha[1],
+        ]
+    }
+
+    /// The bug the module header is about.
+    ///
+    /// An older icon carries no alpha at all. Read literally, every
+    /// pixel is transparent and the settings screen fills with nothing
+    /// -- which reads as a rendering fault rather than a decoding one,
+    /// and is "only obvious once every icon has come out blank".
+    #[test]
+    fn an_icon_with_no_alpha_and_no_mask_is_shown_rather_than_hidden() {
+        let out = to_rgba(2, 1, bgra([0, 0]), None).expect("should decode");
+        assert_eq!(out[3], 255);
+        assert_eq!(out[7], 255);
+    }
+
+    /// Black in the mask means show the pixel. Getting this inverted
+    /// produces an icon that is exactly its own negative space.
+    #[test]
+    fn the_mask_decides_which_pixels_show_when_there_is_no_alpha() {
+        // First pixel masked black (show), second white (hide).
+        let mask = vec![0, 0, 0, 0, 255, 255, 255, 255];
+        let out = to_rgba(2, 1, bgra([0, 0]), Some((2, 1, mask))).expect("should decode");
+        assert_eq!(out[3], 255, "a black mask pixel must be shown");
+        assert_eq!(out[7], 0, "a white mask pixel must be hidden");
+    }
+
+    /// A 32-bit icon brings its own alpha, and inventing one over the
+    /// top would flatten a transparent background into a solid block.
+    #[test]
+    fn an_icon_that_carries_alpha_keeps_it() {
+        let mask = vec![255, 255, 255, 255, 255, 255, 255, 255];
+        let out = to_rgba(2, 1, bgra([128, 0]), Some((2, 1, mask))).expect("should decode");
+        assert_eq!(out[3], 128, "the icon's own alpha was overwritten");
+        assert_eq!(out[7], 0);
+    }
+
+    /// A mask that does not describe this bitmap is not evidence about
+    /// it. Opaque beats invisible.
+    #[test]
+    fn a_mask_of_the_wrong_size_is_ignored_rather_than_trusted() {
+        let wrong = vec![255; 4];
+        let out = to_rgba(2, 1, bgra([0, 0]), Some((1, 1, wrong))).expect("should decode");
+        assert_eq!(out[3], 255);
+        assert_eq!(out[7], 255);
+    }
+
+    /// GDI hands over BGRA; PNG wants RGBA.
+    #[test]
+    fn the_channels_end_up_in_png_order() {
+        let out = to_rgba(1, 1, vec![10, 20, 30, 255], None).expect("should decode");
+        assert_eq!(&out[..3], &[30, 20, 10], "blue and red were not swapped");
+    }
+
+    /// A buffer shorter than its declared size is refused rather than
+    /// indexed past the end.
+    #[test]
+    fn a_truncated_bitmap_is_refused() {
+        assert!(to_rgba(4, 4, vec![0; 8], None).is_none());
+    }
+
     use super::*;
 
     #[test]
