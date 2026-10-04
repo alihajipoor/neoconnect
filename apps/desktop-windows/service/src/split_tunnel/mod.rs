@@ -52,6 +52,7 @@
 mod divert;
 pub(crate) mod firewall;
 mod flows;
+mod health;
 mod icon;
 mod owner;
 mod proxy;
@@ -774,7 +775,7 @@ fn install_verified_route(
                 }
             };
 
-        match proxy::probe(tunnel) {
+        match health::probe(tunnel) {
             Ok(()) => {
                 append(log_path, &format!("route {}: carries traffic", shape.label()));
                 return Ok(installed);
@@ -1462,7 +1463,7 @@ impl SplitTunnel {
     /// The app cannot answer this for itself in Custom mode: its own
     /// requests deliberately do not go through the tunnel, so its usual
     /// "did my address change" check correctly reports being bypassed
-    /// and would fail every protocol in turn. See [`proxy::probe`].
+    /// and would fail every protocol in turn. See [`health::probe`].
     /// What the live counters say is wrong, or `None` when nothing is.
     ///
     /// Read from the real path under the customer's own traffic, which
@@ -1515,7 +1516,7 @@ impl SplitTunnel {
         // Route selection still uses `probe`: it is asking whether a
         // route shape can be attached to at all, which is exactly what a
         // handshake settles.
-        let outcome = proxy::prove_carries(&active.tunnel);
+        let outcome = health::prove_carries(&active.tunnel);
 
         // Written down because this verdict is what decides whether the
         // ladder keeps this protocol or moves to the next one. Without
