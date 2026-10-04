@@ -86,7 +86,14 @@ pub fn connect(
 
     // The name has to be free before this runs, or wireguard.exe never
     // returns. See clear_tunnel_service.
-    clear_tunnel_service(limits)?;
+    //
+    // A share of the connect's time rather than all of it. This is the
+    // first stage, and `TUNNEL_SERVICE_GONE_WITHIN` is 45 seconds --
+    // more than the whole connect budget -- so clamping alone would let
+    // a tunnel service that is slow to stop spend every second the
+    // connect had and leave the engine nothing, reporting that the
+    // attempt ran out of time without ever having tried to connect.
+    clear_tunnel_service(&limits.share(CLEARING_THE_DECKS_SHARE))?;
 
     let status = run_hidden(&exe, &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
@@ -161,6 +168,25 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
 /// stopping". Forty-five seconds is generous for the first and still
 /// well short of the second.
 pub(super) const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(45);
+
+/// How much of a connect may go on waiting for the *previous* tunnel
+/// service to stop.
+///
+/// Not a second ceiling on the same thing -- it is a share, applied only
+/// on the connect path. [`TUNNEL_SERVICE_GONE_WITHIN`] still answers
+/// "when does still-stopping become never-stopping", and a teardown,
+/// where this wait is the only thing running, still gets all 45 seconds
+/// of it.
+///
+/// A connect is in a different position: it has 38 seconds for
+/// everything, and this stage runs before any of the work the customer
+/// actually asked for. Ten seconds covers the normal case by about three
+/// hundred times -- `/uninstalltunnelservice` was measured returning in
+/// 0.03s with the stop landing on the next poll -- and when it is not
+/// enough, the error already says the useful thing: wait a few seconds
+/// and connect again. That is a better answer than spending the whole
+/// budget and reporting that time ran out.
+const CLEARING_THE_DECKS_SHARE: Duration = Duration::from_secs(10);
 
 /// How often the service manager is asked whether it has gone yet.
 const TUNNEL_SERVICE_POLL: Duration = Duration::from_millis(250);

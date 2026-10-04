@@ -158,6 +158,27 @@ impl Limits {
         self.deadline.clamp(ceiling)
     }
 
+    /// A share of what is left, for one stage, keeping the cancellation.
+    ///
+    /// `clamp` stops a stage overrunning the operation. It does not stop
+    /// a stage *consuming* the operation, and for the first stage of a
+    /// connect those are different problems. Clearing the decks is
+    /// allowed 45 seconds, which under `clamp` alone means the whole
+    /// connect budget -- so a tunnel service that is slow to stop could
+    /// spend every second the connect had and leave the engine itself
+    /// nothing, reporting that the attempt ran out of time without ever
+    /// having tried.
+    ///
+    /// A sub-budget says "this stage gets at most this much of it". The
+    /// token is shared, not copied, so a disconnect still reaches
+    /// everything derived from the same operation.
+    pub fn share(&self, ceiling: Duration) -> Self {
+        Self {
+            cancel: self.cancel.clone(),
+            deadline: Deadline::starting_now(self.clamp(ceiling)),
+        }
+    }
+
     /// The token itself, for the two callers that need it rather than a
     /// question answered about it: `CancelToken::interruptible`, which
     /// moves an uncancellable syscall to its own thread, and the
@@ -346,6 +367,61 @@ mod tests {
             granted <= Duration::from_millis(100),
             "a stage was granted {granted:?}, which is more than the operation had"
         );
+    }
+
+    /// A share is bounded by the ceiling asked for *and* by what the
+    /// parent has, whichever is smaller.
+    #[test]
+    fn a_share_never_exceeds_either_bound() {
+        let token = crate::lifecycle::cancel::CancelToken::new();
+
+        // Parent has plenty; the ceiling is what binds.
+        let roomy = Limits::new(token.clone(), Duration::from_secs(38));
+        assert!(roomy.share(Duration::from_secs(10)).clamp(Duration::from_secs(45))
+            <= Duration::from_secs(10));
+
+        // Parent is nearly spent; the parent is what binds, even though
+        // the ceiling asked for more.
+        let spent = Limits::new(token, Duration::from_millis(50));
+        assert!(spent.share(Duration::from_secs(10)).clamp(Duration::from_secs(45))
+            <= Duration::from_millis(50));
+    }
+
+    /// The reason `share` exists: the first stage of a connect must not
+    /// be able to spend the whole connect.
+    #[test]
+    fn a_first_stage_cannot_consume_the_whole_connect() {
+        let connect = Limits::new(
+            crate::lifecycle::cancel::CancelToken::new(),
+            CONNECT_BUDGET.limit,
+        );
+        // WireGuard's clear-the-decks ceiling exceeds the whole budget,
+        // which is exactly the case clamping alone does not address.
+        assert!(WIREGUARD_SERVICE_GONE.limit > CONNECT_BUDGET.limit);
+
+        let granted = connect
+            .share(Duration::from_secs(10))
+            .clamp(WIREGUARD_SERVICE_GONE.limit);
+        assert!(
+            granted <= Duration::from_secs(10),
+            "the first stage was granted {granted:?} of a {:?} connect",
+            CONNECT_BUDGET.limit
+        );
+    }
+
+    /// Sharing splits the time and not the cancellation. A disconnect
+    /// has to reach a stage running inside a sub-budget, or `share`
+    /// would quietly reintroduce the unstoppable wait.
+    #[test]
+    fn a_share_still_answers_to_the_parents_cancellation() {
+        let token = crate::lifecycle::cancel::CancelToken::new();
+        let parent = Limits::new(token.clone(), Duration::from_secs(38));
+        let stage = parent.share(Duration::from_secs(10));
+
+        assert!(!stage.cancelled());
+        token.cancel();
+        assert!(stage.cancelled(), "cancelling the operation must reach its stages");
+        assert_eq!(stage.check(), Err(Stop::Cancelled));
     }
 
     #[test]
