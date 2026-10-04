@@ -502,9 +502,15 @@ pub fn connect(
     // than stopped never got to, and the pushed `0.0.0.0/1` and
     // `128.0.0.0/1` routes then outlive every later session -- silently
     // overriding Custom mode, because a /1 beats the demoted default.
-    // Cheap, and a no-op on a clean machine.
+    //
+    // By destination rather than by enumeration. This used to call
+    // `purge_interface`, which spawns PowerShell because enumerating is
+    // what it is for -- so a connect on a clean machine paid 4.4 to 6.5
+    // seconds, out of 38, to delete nothing. The two destinations are
+    // known, `route.exe` deletes them without looking anything up, and
+    // a route that is not there is the expected case.
     if let Ok(Some(adapter)) = adapters::find_by_name(ADAPTER_NAME) {
-        routing::purge_interface(adapter.index);
+        routing::purge_pushed_half_defaults(adapter.index);
     }
 
     let config_path = engines.config_path(CONFIG_FILE);

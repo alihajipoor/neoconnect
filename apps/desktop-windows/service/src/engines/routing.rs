@@ -85,6 +85,50 @@ pub fn purge_interface(interface_index: u32) {
     );
 }
 
+/// Removes just the two routes OpenVPN pushes, with `route.exe`.
+///
+/// The pre-connect sibling of [`purge_interface`], and the reason it
+/// exists is cost. `purge_interface` has to enumerate, so it uses
+/// PowerShell -- 4.4 to 6.5 seconds before the first statement runs --
+/// and `openvpn::connect` called it on *every* connect, inside a budget
+/// of 38 seconds, to delete nothing at all on a clean machine. The
+/// comment there called it cheap. It was the single most expensive
+/// no-op on the connect path.
+///
+/// Nothing has to be enumerated to delete a route whose destination is
+/// already known, and these two are known: they are the `0.0.0.0/1` and
+/// `128.0.0.0/1` pair OpenVPN pushes, named in `purge_interface`'s own
+/// rig transcript, and the pair that outlives a service that was killed
+/// rather than stopped. `route delete` by destination needs no
+/// enumeration and no parsing, so the localisation problem that put
+/// PowerShell there does not arise.
+///
+/// Scoped to the interface, like every other delete in this module: an
+/// unscoped `0.0.0.0/1` delete would take a competing VPN's route with
+/// it.
+///
+/// Best-effort, and a route that is not there is the expected case
+/// rather than a failure -- same contract as [`InstalledRoutes::remove`].
+/// The broad purge stays where enumerating is the point: the janitor's
+/// residue sweep and the thorough teardown.
+pub fn purge_pushed_half_defaults(interface_index: u32) {
+    let exe = route_exe();
+    let index = interface_index.to_string();
+    for (dest, mask) in HALF_DEFAULTS {
+        let _ = run_hidden(
+            &exe,
+            &[
+                OsStr::new("delete"),
+                OsStr::new(dest),
+                OsStr::new("mask"),
+                OsStr::new(mask),
+                OsStr::new("if"),
+                OsStr::new(&index),
+            ],
+        );
+    }
+}
+
 /// The IPv4 routes currently on one interface, as `destination/prefix`.
 ///
 /// Destinations only, deliberately. This feeds the diagnostics snapshot
