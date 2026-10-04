@@ -27,7 +27,16 @@ import {
 } from "../lib/connection-evidence";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
-import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
+import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
+import { probeCandidates } from "../lib/reachability";
+import {
+  loadChosenRoute,
+  loadConnectHistory,
+  loadLastGood,
+  saveChosenRoute,
+  saveConnectHistory,
+  saveLastGood,
+} from "../lib/failover-store";
 import {
   isEffective,
   loadSplitTunnel,
@@ -420,6 +429,9 @@ export function Dashboard({
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
   const [lastGood, setLastGood] = useState<LastGoodMap>({});
+  /** Per route and protocol, how recent attempts went on this network.
+   * Richer than `lastGood`, which holds one route and no outcome. */
+  const [history, setHistory] = useState<ConnectHistory>({});
   /** Names the protocol we ended up on when it is not the one we
    * started with. Landing somewhere else without saying so is the same
    * dishonesty as a false "Connected". */
@@ -835,6 +847,7 @@ export function Dashboard({
           .then(setNetworkId)
           .catch(() => setNetworkId(null));
         void loadLastGood().then(setLastGood);
+        void loadConnectHistory().then(setHistory);
         return;
       }
 
@@ -870,6 +883,7 @@ export function Dashboard({
       .then(setNetworkId)
       .catch(() => setNetworkId(null));
     void loadLastGood().then(setLastGood);
+    void loadConnectHistory().then(setHistory);
 
     // Purely to name the server the customer is actually on -- the
     // protocol-user row carries a routeId but no human-readable
@@ -1376,9 +1390,28 @@ export function Dashboard({
       // needs no server contact -- which is the point, since on a
       // filtered network the control plane is a plausible thing to lose
       // first.
+      // Asked of every candidate at once, before anything is dialled.
+      //
+      // About a second, against the tens of seconds a dead rung costs
+      // when the ladder discovers the same thing by dialling it. The
+      // answer only covers the TCP-carried protocols -- UDP cannot be
+      // probed this way -- and a probe that cannot be run leaves the
+      // candidate unknown rather than condemned.
+      //
+      // Placed after the teardown above, so this is dead time that
+      // would otherwise be spent dialling something that cannot answer.
+      // A cancel landing during it needs no handling here: the loop
+      // below checks `cancelRef` on its first pass and a superseded
+      // generation is caught after it, and adding a third exit would
+      // mean a third opinion about what that outcome is called.
+      const reachability = await probeCandidates(dialable).catch(() => ({}));
+
       const candidates = orderCandidates(dialable, {
         pinnedRouteId: chosenRouteId,
         lastGoodRouteId: lastGoodFor(lastGood, networkId),
+        history,
+        network: networkId,
+        reachability,
         preferredRouteId: null,
       });
 
@@ -1642,6 +1675,26 @@ export function Dashboard({
               const updated = rememberLastGood(lastGood, networkId, candidate.routeId);
               setLastGood(updated);
               void saveLastGood(updated);
+            }
+            // Both outcomes, and the failures are the valuable half.
+            //
+            // `lastGood` above only ever learns what worked, so the
+            // ladder could rediscover the same dead protocol every time
+            // it ran. Recording that this route and protocol did not
+            // carry traffic here is what lets the next attempt start
+            // somewhere else. `unverified` counts as a failure for the
+            // same reason it is excluded above: an engine that started
+            // and proved nothing is not evidence that it works.
+            {
+              const recorded = recordAttempt(
+                history,
+                networkId,
+                candidate.routeId,
+                candidate.protocol,
+                verdict === "connected",
+              );
+              setHistory(recorded);
+              void saveConnectHistory(recorded);
             }
             strikesRef.current = 0;
             // Successes are reported too, and they are not filler. A
@@ -2446,6 +2499,9 @@ export function Dashboard({
           // degraded states where a tunnel exists but is not
           // trusted yet.
           tunnelActive={connectionState !== "disconnected"}
+          // Already loaded here, so the picker opens on real content
+          // instead of a spinner.
+          initialRoutes={routes}
           onClose={() => setShowLocationPicker(false)}
           // Re-reads the provisioned connection rather than adopting the
           // switch response directly. Two reasons, one of which was a

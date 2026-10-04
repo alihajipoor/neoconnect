@@ -750,10 +750,21 @@ fn install_verified_route(
     tunnel_index: u32,
     tunnel: &proxy::TunnelInterface,
     log_path: &Path,
+    limits: &crate::lifecycle::budget::Limits,
 ) -> Result<InstalledRoutes, String> {
     let mut last_error = String::new();
 
     for shape in routing::PassiveRouteShape::ALL {
+        // Each shape is probed against two targets at 3.5 seconds each,
+        // so the pair of them is fourteen seconds of the bring-up. The
+        // check sits at the top of the loop rather than inside the probe
+        // because a connect that is over has no reason to try the second
+        // shape at all -- and it is over for either reason: somebody
+        // pressed Disconnect, or the first shape's fourteen seconds were
+        // the last the connect had. Twenty-eight seconds of probing is
+        // more than the whole budget, so without this the second shape
+        // was work nobody would read the answer to.
+        limits.check().map_err(|s| s.to_string())?;
         let mut installed =
             match routing::install_passive_default_shaped(tunnel_address, tunnel_index, shape) {
                 Ok(installed) => installed,
@@ -1148,6 +1159,7 @@ impl SplitTunnel {
         adapter_name: &str,
         node: Ipv4Addr,
         log_dir: &Path,
+        limits: &crate::lifecycle::budget::Limits,
     ) -> Result<(), String> {
         self.stop();
         if !self.wants_interception() {
@@ -1159,7 +1171,7 @@ impl SplitTunnel {
         // route writes to it.
         let log_path = log_dir.join(LOG_FILE);
 
-        let tunnel_adapter = wait_for_addressed_adapter(adapter_name)?;
+        let tunnel_adapter = wait_for_addressed_adapter(adapter_name, limits)?;
         let tunnel_address = tunnel_adapter
             .ipv4
             .ok_or_else(|| format!("{adapter_name} came up without an address"))?;
@@ -1199,7 +1211,7 @@ impl SplitTunnel {
         // The route is chosen by trying it, not by predicting it. See
         // install_verified_route.
         let route =
-            install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path)?;
+            install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path, limits)?;
         // Created here rather than inside `redirect::start`, because
         // the relay counts into the same table and the relay is started
         // first -- the firewall allowance and the reachability wait sit
@@ -1250,7 +1262,7 @@ impl SplitTunnel {
         // when it matters.
         proxy::set_relay_log(log_path.clone());
 
-        if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port) {
+        if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port, limits) {
             relays.stop();
             let mut route = route;
             route.remove();
@@ -1353,7 +1365,17 @@ impl SplitTunnel {
                 // left. Doing it earlier would simply hand it the
                 // same connection back.
                 let outcome = {
-                    let selection = self.selection.read().expect("selection lock");
+                    // Poison is survived here as it is at the other
+                    // nine read sites, and this is the site where it
+                    // matters most. `redirect::start` has already
+                    // returned by now, so a panic between here and
+                    // `Active` being assembled leaves interception
+                    // live, `RUNNING` false, and nothing in `active`
+                    // for `stop` to take -- a redirect the service no
+                    // longer knows it is running and cannot tear down.
+                    // That is the stranded-background-tunnel complaint,
+                    // reachable from one unwrap.
+                    let selection = self.selection.read().unwrap_or_else(|e| e.into_inner());
                     owner::reset_selected_connections(
                         &selection,
                         node,
@@ -1650,9 +1672,19 @@ fn install_ipv6_app_block(
 }
 
 /// Waits for an adapter to exist *and* to have an address.
-fn wait_for_addressed_adapter(name: &str) -> Result<adapters::Adapter, String> {
-    let deadline = std::time::Instant::now() + ADAPTER_WAIT;
+fn wait_for_addressed_adapter(
+    name: &str,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<adapters::Adapter, String> {
+    // Ten seconds is this wait's own ceiling and the longest single one
+    // in the bring-up; what the connect has left is the real bound, and
+    // by the time the split tunnel starts the engines have already spent
+    // most of it.
+    let deadline = std::time::Instant::now() + limits.clamp(ADAPTER_WAIT);
     loop {
+        // Up to ten seconds, and the longest single wait in the
+        // bring-up. Uninterruptible before this.
+        limits.check().map_err(|s| s.to_string())?;
         match adapters::find_by_name(name) {
             Ok(Some(adapter))
                 if adapter

@@ -78,6 +78,7 @@ pub fn connect(
     engines: &Engines,
     profile: &WireguardProfile,
     passive: bool,
+    limits: &crate::lifecycle::budget::Limits,
 ) -> Result<(), String> {
     let exe = engines.engine_path("wireguard.exe")?;
     let conf_path = engines.config_path(CONF_FILE);
@@ -85,10 +86,25 @@ pub fn connect(
 
     // The name has to be free before this runs, or wireguard.exe never
     // returns. See clear_tunnel_service.
-    clear_tunnel_service()?;
+    //
+    // A share of the connect's time rather than all of it. This is the
+    // first stage, and `TUNNEL_SERVICE_GONE_WITHIN` is 45 seconds --
+    // more than the whole connect budget -- so clamping alone would let
+    // a tunnel service that is slow to stop spend every second the
+    // connect had and leave the engine nothing, reporting that the
+    // attempt ran out of time without ever having tried to connect.
+    clear_tunnel_service(&limits.share(CLEARING_THE_DECKS_SHARE))?;
 
-    let status = run_hidden(&exe, &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()])
-        .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
+    // Clamped for the same reason as Xray's netsh: `HELPER_BUDGET`
+    // reads the ambient cancellation but not the deadline, so a
+    // wireguard.exe that wedges could carry a connect past the budget
+    // and finish after the app had stopped listening.
+    let status = super::run_hidden_within(
+        &exe,
+        &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()],
+        limits.clamp(super::HELPER_BUDGET),
+    )
+    .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
     if !status.success() {
         return Err(format!("wireguard.exe /installtunnelservice exited with {status}"));
     }
@@ -96,6 +112,29 @@ pub fn connect(
 }
 
 pub fn disconnect(engines: &Engines) -> Result<(), String> {
+    // A teardown is not cancellable, and this is the one place that
+    // tried to make it so.
+    //
+    // Reading the live token here looks right and is not:
+    // `pipe::dispatch` cancels the running operation *before* it runs
+    // the disconnect, so the token a disconnect would read is one it
+    // just had cancelled on its own behalf. The teardown then aborted
+    // itself at the first poll and reported failure -- caught by
+    // `disconnecting_twice_is_cheap_and_quiet`, and precisely how a
+    // machine ends up stranded with a tunnel service still running
+    // while the app says disconnected.
+    //
+    // So this pass is given a token nothing can cancel. The customer is
+    // not waiting on it: the hard stop already answered them inside
+    // 900ms and asked the service to stop. This is the thorough pass
+    // behind that, and its whole job is to establish that the thing is
+    // actually gone. Disconnecting twice stays cheap for the real
+    // reason rather than an accidental one -- the second call finds no
+    // service to open and returns immediately.
+    let uncancellable = crate::lifecycle::budget::Limits::new(
+        crate::lifecycle::cancel::CancelToken::new(),
+        TUNNEL_SERVICE_GONE_WITHIN,
+    );
     let exe = engines.engine_path("wireguard.exe")?;
     let status = run_hidden(&exe, &[OsStr::new("/uninstalltunnelservice"), OsStr::new(TUNNEL_NAME)])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
@@ -106,7 +145,7 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
     // clear_tunnel_service. Without this, a disconnect returns while the
     // machine is still tunnelled, and the very next status poll
     // correctly reports it as connected.
-    clear_tunnel_service()
+    clear_tunnel_service(&uncancellable)
 }
 
 /// How long the tunnel service is given to go away.
@@ -128,13 +167,34 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
 ///
 /// Forty-five seconds instead. This is not a process budget -- nothing
 /// is spawned, it is an SCM poll -- so the argument about one wedged
-/// child making the service deaf does not apply, and the loop reads
-/// `abandoned()` on every pass so a customer pressing Disconnect ends it
-/// immediately whatever the ceiling says. What is left is only: how long
+/// child making the service deaf does not apply. On the connect path
+/// the loop reads the caller's token on every pass, so a customer
+/// pressing Disconnect ends it immediately whatever the ceiling says;
+/// on the teardown path nothing can cancel it, deliberately, and the
+/// ceiling is the only bound there is. What is left is only: how long
 /// before "the service is still stopping" becomes "the service is never
-/// stopping". A minute is generous for the first and still short of the
-/// second.
+/// stopping". Forty-five seconds is generous for the first and still
+/// well short of the second.
 pub(super) const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(45);
+
+/// How much of a connect may go on waiting for the *previous* tunnel
+/// service to stop.
+///
+/// Not a second ceiling on the same thing -- it is a share, applied only
+/// on the connect path. [`TUNNEL_SERVICE_GONE_WITHIN`] still answers
+/// "when does still-stopping become never-stopping", and a teardown,
+/// where this wait is the only thing running, still gets all 45 seconds
+/// of it.
+///
+/// A connect is in a different position: it has 38 seconds for
+/// everything, and this stage runs before any of the work the customer
+/// actually asked for. Ten seconds covers the normal case by about three
+/// hundred times -- `/uninstalltunnelservice` was measured returning in
+/// 0.03s with the stop landing on the next poll -- and when it is not
+/// enough, the error already says the useful thing: wait a few seconds
+/// and connect again. That is a better answer than spending the whole
+/// budget and reporting that time ran out.
+const CLEARING_THE_DECKS_SHARE: Duration = Duration::from_secs(10);
 
 /// How often the service manager is asked whether it has gone yet.
 const TUNNEL_SERVICE_POLL: Duration = Duration::from_millis(250);
@@ -210,8 +270,13 @@ pub(super) fn request_stop_without_waiting() -> Result<(), String> {
     }
 }
 
-pub(super) fn clear_tunnel_service() -> Result<(), String> {
-    let deadline = Instant::now() + TUNNEL_SERVICE_GONE_WITHIN;
+pub(super) fn clear_tunnel_service(limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
+    // One pass always runs, even on a spent budget: the early returns
+    // below are the cheap-and-quiet case -- no service to open means the
+    // name is already free -- and refusing before asking would turn the
+    // common case into a failure.
+    let budget = limits.clamp(TUNNEL_SERVICE_GONE_WITHIN);
+    let deadline = Instant::now() + budget;
     loop {
         let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         else {
@@ -243,14 +308,20 @@ pub(super) fn clear_tunnel_service() -> Result<(), String> {
         // Disconnect must not queue behind the rest of it. Reported as
         // the abandonment rather than as a WireGuard fault, because that
         // is what happened.
-        if super::abandoned() {
+        if limits.cancelled() {
             return Err(super::ABANDONED.to_string());
         }
         if Instant::now() >= deadline {
+            // A spent budget is not WireGuard's fault and must not read
+            // as it: the stage that happens to notice the clock ran out
+            // is an accident of ordering.
+            if budget.is_zero() {
+                return Err(super::OUT_OF_TIME.to_string());
+            }
             return Err(format!(
                 "the previous WireGuard tunnel was still shutting down after {}s. \
                  Waiting a few seconds and connecting again usually clears it.",
-                TUNNEL_SERVICE_GONE_WITHIN.as_secs()
+                budget.as_secs()
             ));
         }
         std::thread::sleep(TUNNEL_SERVICE_POLL);

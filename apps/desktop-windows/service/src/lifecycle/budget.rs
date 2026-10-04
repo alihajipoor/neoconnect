@@ -63,6 +63,188 @@ pub fn violations<'a>(parent: &Budget, children: &'a [Budget]) -> Vec<&'a Budget
     children.iter().filter(|c| !c.fits_inside(parent)).collect()
 }
 
+/// A point in time the whole operation has to answer by.
+///
+/// The static check above catches a stage whose *ceiling* exceeds its
+/// parent's. It cannot catch the other half of the same mistake, which
+/// is what actually reaches customers: stages that each fit on their own
+/// and overrun once they run in sequence. A WireGuard connect waits up
+/// to 45 seconds for the old tunnel service to go, then spends up to 15
+/// installing the new one, then starts the split tunnel -- three
+/// defensible numbers that add up to an answer the app stopped waiting
+/// for half a minute ago.
+///
+/// So the ceilings stay as ceilings and a deadline is carried alongside
+/// the cancellation token. Each wait asks for the shorter of its own
+/// ceiling and whatever is left, which means the last stage of a slow
+/// connect gets the time that is actually available rather than the time
+/// its author imagined it would have.
+#[derive(Debug, Clone, Copy)]
+pub struct Deadline {
+    at: std::time::Instant,
+}
+
+impl Deadline {
+    /// A deadline `budget` from now.
+    pub fn starting_now(budget: Duration) -> Self {
+        Self { at: std::time::Instant::now() + budget }
+    }
+
+    /// How long is left, saturating at zero.
+    ///
+    /// Zero rather than a negative or a panic: a stage that asks after
+    /// the deadline has passed should get an answer it can act on, and
+    /// "you have no time" is that answer.
+    pub fn remaining(&self) -> Duration {
+        self.at.saturating_duration_since(std::time::Instant::now())
+    }
+
+    pub fn passed(&self) -> bool {
+        self.remaining().is_zero()
+    }
+
+    /// The shorter of a stage's own ceiling and what is left.
+    ///
+    /// The one method the engine waits actually call. A stage keeps its
+    /// own ceiling for the case where it is the only thing running, and
+    /// gives that ceiling up when the operation around it has already
+    /// spent the time.
+    pub fn clamp(&self, ceiling: Duration) -> Duration {
+        ceiling.min(self.remaining())
+    }
+}
+
+/// What an operation is allowed: whether to keep trying, and for how long.
+///
+/// Two facts, one argument. Every wait on the connect path needs both --
+/// a disconnect must end it now, and the app's deadline must end it
+/// eventually -- and passing them separately means each new wait gets to
+/// take one and forget the other. Forgetting the first is the dead
+/// Disconnect button; forgetting the second is the connect that answers
+/// after the app stopped listening. Neither is a mistake worth leaving
+/// available.
+///
+/// Cheap to clone, because the engine entry points hand it down by
+/// reference and the token behind it is already shared.
+#[derive(Debug, Clone)]
+pub struct Limits {
+    cancel: crate::lifecycle::cancel::CancelToken,
+    deadline: Deadline,
+}
+
+impl Limits {
+    pub fn new(cancel: crate::lifecycle::cancel::CancelToken, budget: Duration) -> Self {
+        Self { cancel, deadline: Deadline::starting_now(budget) }
+    }
+
+    /// Has somebody asked for this to stop.
+    pub fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// Has the operation run out of time.
+    pub fn expired(&self) -> bool {
+        self.deadline.passed()
+    }
+
+    /// The shorter of a stage's own ceiling and what the operation has
+    /// left. See [`Deadline::clamp`].
+    pub fn clamp(&self, ceiling: Duration) -> Duration {
+        self.deadline.clamp(ceiling)
+    }
+
+    /// A share of what is left, for one stage, keeping the cancellation.
+    ///
+    /// `clamp` stops a stage overrunning the operation. It does not stop
+    /// a stage *consuming* the operation, and for the first stage of a
+    /// connect those are different problems. Clearing the decks is
+    /// allowed 45 seconds, which under `clamp` alone means the whole
+    /// connect budget -- so a tunnel service that is slow to stop could
+    /// spend every second the connect had and leave the engine itself
+    /// nothing, reporting that the attempt ran out of time without ever
+    /// having tried.
+    ///
+    /// A sub-budget says "this stage gets at most this much of it". The
+    /// token is shared, not copied, so a disconnect still reaches
+    /// everything derived from the same operation.
+    pub fn share(&self, ceiling: Duration) -> Self {
+        Self {
+            cancel: self.cancel.clone(),
+            deadline: Deadline::starting_now(self.clamp(ceiling)),
+        }
+    }
+
+    /// The token itself, for the two callers that need it rather than a
+    /// question answered about it: `CancelToken::interruptible`, which
+    /// moves an uncancellable syscall to its own thread, and the
+    /// subsystems that keep their own deadline and only borrow the
+    /// cancellation.
+    pub fn token(&self) -> &crate::lifecycle::cancel::CancelToken {
+        &self.cancel
+    }
+
+    /// Stop now, with the reason, or carry on.
+    ///
+    /// For loops that poll between steps rather than computing a
+    /// deadline. It answers both questions at once because a loop that
+    /// asks only about cancellation will run past the deadline, and one
+    /// that asks only about the deadline will sit through a disconnect
+    /// -- and whichever one a given loop forgot is not discoverable by
+    /// reading that loop.
+    pub fn check(&self) -> Result<(), Stop> {
+        if self.cancelled() {
+            return Err(Stop::Cancelled);
+        }
+        if self.expired() {
+            return Err(Stop::OutOfTime);
+        }
+        Ok(())
+    }
+}
+
+/// Why a wait gave up.
+///
+/// Two reasons that look the same from inside a loop and must not look
+/// the same to whoever reads the error. "Somebody pressed Disconnect" is
+/// not a fault; "every stage was still working when the clock ran out"
+/// is, and it is the one worth telling a customer to try another server
+/// over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    Cancelled,
+    OutOfTime,
+}
+
+/// What an abandoned operation reports.
+///
+/// Written for the customer rather than as a status code, because it can
+/// reach them: pressing Disconnect while a connect is still running ends
+/// that connect, and the app shows whatever it said.
+pub const ABANDONED: &str = "this attempt was stopped so the disconnect could go ahead";
+
+/// What a connect that ran out of time reports.
+pub const OUT_OF_TIME: &str =
+    "this connection attempt ran out of time. Trying a different server usually helps.";
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Stop::Cancelled => ABANDONED,
+            Stop::OutOfTime => OUT_OF_TIME,
+        })
+    }
+}
+
+/// What a whole connect may spend before the app stops listening.
+///
+/// Seven seconds under [`APP_REPLY_DEADLINE`], which is not a round
+/// number chosen for comfort: the reply still has to be serialised and
+/// cross a named pipe, the app's own timer starts before the request is
+/// written, and a connect that answers at 44.9 seconds is a connect the
+/// customer sees fail. The headroom is the difference between "slow but
+/// it worked" and "it timed out", and those are not the same product.
+pub const CONNECT_BUDGET: Budget = Budget::new("a whole connect", Duration::from_secs(38));
+
 /// What the app waits for a reply to one request.
 ///
 /// `REPLY_TIMEOUT` in the Tauri layer. The ceiling every per-request
@@ -101,22 +283,42 @@ mod tests {
     /// The arithmetic that produced the dead Disconnect button, written
     /// down so it cannot quietly come back.
     ///
-    /// This asserts the bug rather than the fix, deliberately: the three
-    /// engine budgets still exceed the app's deadline on disk, and
-    /// changing them is a behavioural decision about how long a slow
-    /// connect may take, not a number to adjust in passing. When they
-    /// are brought under the deadline this test fails, and the right
-    /// response is to invert it -- at which point it becomes the
-    /// regression guard it should have been all along.
+    /// It still reads as a violation and that is still correct: all
+    /// three ceilings exceed the app's deadline on disk. What changed is
+    /// that the ceilings are no longer what bounds a connect. Each of
+    /// these waits now asks [`Limits::clamp`] for the shorter of its own
+    /// ceiling and what the operation has left, so a ceiling is what a
+    /// stage may spend when it is the only thing running, and the
+    /// deadline is what it actually gets.
+    ///
+    /// Which is why these numbers are deliberately *not* lowered to
+    /// pass. Lowering them would say "OpenVPN gets 40 seconds" in a
+    /// world where it might be the third stage of a connect with 6
+    /// seconds left, and would leave the same class of mistake
+    /// available to the next ceiling somebody adds. The clamping is the
+    /// fix; this test is the record of why it is needed, and it should
+    /// fail if somebody removes the clamping and tunes the constants
+    /// instead.
     #[test]
-    fn the_engine_budgets_still_exceed_the_reply_deadline() {
+    fn the_engine_ceilings_exceed_the_reply_deadline_and_are_clamped_not_lowered() {
         let engines = [OPENVPN_TUNNEL_UP, XRAY_ADAPTER_WAIT, WIREGUARD_SERVICE_GONE];
         let bad = violations(&APP_REPLY_DEADLINE, &engines);
         assert_eq!(
             bad.len(),
             3,
-            "all three still overrun; if this changed, invert the assertion rather than deleting it"
+            "all three still overrun, which is fine only because every one of them clamps"
         );
+
+        // The property that makes the overrun harmless, stated against
+        // the real ceilings rather than trusted.
+        let limits = Limits::new(crate::lifecycle::cancel::CancelToken::new(), Duration::from_secs(6));
+        for ceiling in engines {
+            assert!(
+                limits.clamp(ceiling.limit) <= Duration::from_secs(6),
+                "{} was granted more than the operation had left",
+                ceiling.name
+            );
+        }
     }
 
     /// Equality is not fitting. WireGuard's 45 seconds against the app's
@@ -136,6 +338,110 @@ mod tests {
         assert!(
             !per_endpoint.fits_inside(&refresh),
             "this is the arithmetic that stopped Windows reaching the control plane"
+        );
+    }
+
+    #[test]
+    fn the_connect_budget_leaves_the_app_headroom() {
+        assert!(CONNECT_BUDGET.fits_inside(&APP_REPLY_DEADLINE));
+        let headroom = APP_REPLY_DEADLINE.limit - CONNECT_BUDGET.limit;
+        assert!(
+            headroom >= Duration::from_secs(5),
+            "a connect that answers on the app's last millisecond reads as a failure"
+        );
+    }
+
+    /// The case the static check cannot see: stages that each fit and
+    /// do not fit in sequence.
+    #[test]
+    fn a_deadline_clamps_a_later_stage_to_what_is_left() {
+        let deadline = Deadline::starting_now(Duration::from_millis(100));
+        // A stage whose own ceiling is far longer than the operation has.
+        let granted = deadline.clamp(Duration::from_secs(45));
+        assert!(
+            granted <= Duration::from_millis(100),
+            "a stage was granted {granted:?}, which is more than the operation had"
+        );
+    }
+
+    /// A share is bounded by the ceiling asked for *and* by what the
+    /// parent has, whichever is smaller.
+    #[test]
+    fn a_share_never_exceeds_either_bound() {
+        let token = crate::lifecycle::cancel::CancelToken::new();
+
+        // Parent has plenty; the ceiling is what binds.
+        let roomy = Limits::new(token.clone(), Duration::from_secs(38));
+        assert!(roomy.share(Duration::from_secs(10)).clamp(Duration::from_secs(45))
+            <= Duration::from_secs(10));
+
+        // Parent is nearly spent; the parent is what binds, even though
+        // the ceiling asked for more.
+        let spent = Limits::new(token, Duration::from_millis(50));
+        assert!(spent.share(Duration::from_secs(10)).clamp(Duration::from_secs(45))
+            <= Duration::from_millis(50));
+    }
+
+    /// The reason `share` exists: the first stage of a connect must not
+    /// be able to spend the whole connect.
+    #[test]
+    fn a_first_stage_cannot_consume_the_whole_connect() {
+        let connect = Limits::new(
+            crate::lifecycle::cancel::CancelToken::new(),
+            CONNECT_BUDGET.limit,
+        );
+        // WireGuard's clear-the-decks ceiling exceeds the whole budget,
+        // which is exactly the case clamping alone does not address.
+        assert!(WIREGUARD_SERVICE_GONE.limit > CONNECT_BUDGET.limit);
+
+        let granted = connect
+            .share(Duration::from_secs(10))
+            .clamp(WIREGUARD_SERVICE_GONE.limit);
+        assert!(
+            granted <= Duration::from_secs(10),
+            "the first stage was granted {granted:?} of a {:?} connect",
+            CONNECT_BUDGET.limit
+        );
+    }
+
+    /// Sharing splits the time and not the cancellation. A disconnect
+    /// has to reach a stage running inside a sub-budget, or `share`
+    /// would quietly reintroduce the unstoppable wait.
+    #[test]
+    fn a_share_still_answers_to_the_parents_cancellation() {
+        let token = crate::lifecycle::cancel::CancelToken::new();
+        let parent = Limits::new(token.clone(), Duration::from_secs(38));
+        let stage = parent.share(Duration::from_secs(10));
+
+        assert!(!stage.cancelled());
+        token.cancel();
+        assert!(stage.cancelled(), "cancelling the operation must reach its stages");
+        assert_eq!(stage.check(), Err(Stop::Cancelled));
+    }
+
+    #[test]
+    fn a_stage_inside_a_generous_deadline_keeps_its_own_ceiling() {
+        let deadline = Deadline::starting_now(Duration::from_secs(60));
+        assert_eq!(deadline.clamp(Duration::from_secs(5)), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_passed_deadline_grants_nothing_rather_than_panicking() {
+        let deadline = Deadline::starting_now(Duration::ZERO);
+        assert!(deadline.passed());
+        assert_eq!(deadline.remaining(), Duration::ZERO);
+        assert_eq!(deadline.clamp(Duration::from_secs(45)), Duration::ZERO);
+    }
+
+    /// The three engine ceilings, run in the sequence a WireGuard
+    /// connect actually runs them in, against the budget for the whole
+    /// connect. This is the arithmetic the per-stage check misses.
+    #[test]
+    fn the_engine_ceilings_in_sequence_overrun_the_connect_budget() {
+        let sequence = WIREGUARD_SERVICE_GONE.limit + Duration::from_secs(15);
+        assert!(
+            sequence > CONNECT_BUDGET.limit,
+            "if this stopped being true the clamping below could be dropped; it has not"
         );
     }
 

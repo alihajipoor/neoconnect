@@ -26,7 +26,7 @@
 //! and a TCP connection can end in ways this never sees, so a table that
 //! only ever grew would be the outcome of leaving Custom mode on.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -438,7 +438,20 @@ impl Nat {
         let mut tables = self.tables.lock().unwrap();
 
         let mut dropped_udp = Vec::new();
-        let mut dropped_ports = Vec::new();
+        // Keyed on the transport as well as the port, which the sweep
+        // below needs and a bare port cannot give it.
+        //
+        // `allocate` only checks for a collision *within* one transport,
+        // so a TCP flow and a UDP flow can legitimately hold the same
+        // synthetic port. Matching `forward` on the port alone therefore
+        // retired the live TCP flow alongside the expired UDP one: its
+        // next packet read `Unknown`, took a second synthetic port, and
+        // left the relay holding an established connection keyed on the
+        // first -- a carried TCP connection breaking after sixty
+        // seconds because something unrelated went quiet. A set rather
+        // than a `Vec` because this was also a linear scan inside a
+        // `retain`.
+        let mut dropped: HashSet<(Transport, u16)> = HashSet::new();
         tables.reverse.retain(|(transport, port), entry| {
             let idle = match transport {
                 Transport::Tcp => TCP_IDLE,
@@ -446,14 +459,16 @@ impl Nat {
             };
             let alive = now.duration_since(entry.last_seen) < idle;
             if !alive {
-                dropped_ports.push(entry.nat_port);
+                dropped.insert((*transport, entry.nat_port));
                 if matches!(transport, Transport::Udp) {
                     dropped_udp.push(*port);
                 }
             }
             alive
         });
-        tables.forward.retain(|_, nat_port| !dropped_ports.contains(nat_port));
+        tables
+            .forward
+            .retain(|key, nat_port| !dropped.contains(&(key.transport, *nat_port)));
         tables.direct.retain(|_, decided| now.duration_since(*decided) < DIRECT_VERDICT_TTL);
 
         dropped_udp
@@ -629,6 +644,53 @@ mod tests {
         assert_eq!(
             nat.lookup(Transport::Tcp, 5400, Ipv4Addr::new(1, 1, 1, 1), 443),
             Verdict::Unknown
+        );
+    }
+
+    /// A UDP flow going quiet must not take a live TCP flow with it.
+    ///
+    /// `allocate` checks for a collision only within one transport, so
+    /// the same synthetic port can legitimately carry a TCP flow and a
+    /// UDP flow at once. `expire_idle` used to sweep `forward` by port
+    /// alone, so the UDP half expiring at sixty seconds deleted the
+    /// TCP half's forward entry too -- and the TCP entry's own reverse
+    /// half survived, because `TCP_IDLE` is three times longer.
+    ///
+    /// What the customer saw: a carried TCP connection breaking after a
+    /// minute because an unrelated datagram flow went quiet. Its next
+    /// packet looked unknown, took a second synthetic port, and the
+    /// relay was left holding an established connection keyed on the
+    /// first one.
+    #[test]
+    fn a_udp_flow_expiring_does_not_retire_a_tcp_flow_sharing_its_port() {
+        let nat = Nat::new();
+        let peer = Ipv4Addr::new(1, 1, 1, 1);
+
+        // One port, both transports. The allocator is rewound so the
+        // collision is deliberate rather than waiting for a wrap.
+        let tcp_port = nat.redirect(Transport::Tcp, origin_to(peer, 443, 5500)).unwrap();
+        {
+            let mut tables = nat.tables.lock().unwrap();
+            tables.next_port = tcp_port;
+        }
+        let udp_port = nat.redirect(Transport::Udp, origin_to(peer, 53, 5501)).unwrap();
+        assert_eq!(tcp_port, udp_port, "the test needs both transports on one port");
+
+        // Only the UDP half goes quiet.
+        {
+            let mut tables = nat.tables.lock().unwrap();
+            tables.reverse.get_mut(&(Transport::Udp, udp_port)).unwrap().last_seen =
+                Instant::now() - UDP_IDLE * 2;
+        }
+        assert_eq!(nat.expire_idle(), vec![udp_port]);
+
+        // The UDP flow is gone and the TCP flow is untouched -- still
+        // carried, and still on the port the relay knows it by.
+        assert_eq!(nat.origin(Transport::Udp, udp_port), None);
+        assert_eq!(
+            nat.lookup(Transport::Tcp, 5500, peer, 443),
+            Verdict::Redirect { nat_port: tcp_port },
+            "the TCP flow went with the UDP one"
         );
     }
 

@@ -284,7 +284,15 @@ impl Engines {
                     );
                 };
                 self.split_tunnel.stop();
-                return self.start_split_tunnel(&profile);
+                // A separate request, so its own boundary read rather
+                // than a token borrowed from a connect that has finished.
+                return self.start_split_tunnel(
+                    &profile,
+                    &crate::lifecycle::budget::Limits::new(
+                        current_token(),
+                        crate::lifecycle::budget::CONNECT_BUDGET.limit,
+                    ),
+                );
             }
             // Editing the list within a mode changes nothing about how
             // the tunnel is built, and the redirect reads the selection
@@ -427,7 +435,23 @@ impl Engines {
             ikev2::ENTRY_NAME,
         ])
         .unwrap_or_default();
-        let result = self.connect_inner(profile, exits).map_err(|e| with_rival_hint(e, &rivals));
+        // The one place the published token is read on this path.
+        //
+        // Below here cancellation is a parameter. That is the whole
+        // point: the split tunnel went thirty-eight seconds without
+        // checking for a disconnect because nothing was ever passed to
+        // it, and a global is a thing an author can simply not know
+        // about, where an argument is a thing they have to decide about.
+        // One lookup, at the boundary, and then it travels explicitly.
+        // The boundary builds both facts at once: the published
+        // token, and the clock the whole connect has to answer by.
+        let limits = crate::lifecycle::budget::Limits::new(
+            current_token(),
+            crate::lifecycle::budget::CONNECT_BUDGET.limit,
+        );
+        let result = self
+            .connect_inner(profile, exits, &limits)
+            .map_err(|e| with_rival_hint(e, &rivals));
         // Remembered only on success, so a failed attempt cannot leave a
         // profile behind for Custom mode to rebuild from.
         if result.is_ok() {
@@ -440,8 +464,24 @@ impl Engines {
         &mut self,
         profile: &ConnectProfile,
         exits: &[ExitProfile],
+        limits: &crate::lifecycle::budget::Limits,
     ) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
+
+        // Asked before the teardown, not only after it.
+        //
+        // The `disconnect` below is the clear-the-decks pass every
+        // connect starts with, and it is not cheap: it can stop a tunnel
+        // service, purge routes and sweep DNS. The first cancellation
+        // check used to sit after it, so a disconnect arriving in the
+        // instant a connect began was answered only once that whole pass
+        // had run. Asking first costs a mutex and is the difference
+        // between a button that responds and one that responds
+        // eventually.
+        if limits.cancelled() {
+            return Err(ABANDONED.to_string());
+        }
+
         self.disconnect()?;
         // Belt and braces with `disconnect`'s own reset: a connect that
         // fails part way must not leave the previous session's DNS
@@ -451,7 +491,7 @@ impl Engines {
         // customer who pressed Disconnect gets the tunnel left down
         // rather than watching it come back up because the request that
         // was already running finished its job.
-        if abandoned() {
+        if limits.cancelled() {
             return Err(ABANDONED.to_string());
         }
 
@@ -463,7 +503,7 @@ impl Engines {
 
         match profile {
             ConnectProfile::Wireguard(p) => {
-                wireguard::connect(self, p, passive)?;
+                wireguard::connect(self, p, passive, limits)?;
                 self.active.fill(Active::WireguardTunnel);
             }
             // Nothing is spawned: Windows brings the interface up and
@@ -545,9 +585,9 @@ impl Engines {
                 // with none has no source to send from -- but nothing is
                 // routed into it.
                 let prepared = if passive {
-                    xray::prepare_passive(&outbound).map(|_| InstalledRoutes::none())
+                    xray::prepare_passive(&outbound, limits).map(|_| InstalledRoutes::none())
                 } else {
-                    xray::install_routes(&outbound)
+                    xray::install_routes(&outbound, limits)
                 };
                 let routes = match prepared {
                     Ok(routes) => routes,
@@ -564,7 +604,7 @@ impl Engines {
                 });
             }
             ConnectProfile::Openvpn(p) => {
-                let child = openvpn::connect(self, p, passive)?;
+                let child = openvpn::connect(self, p, passive, limits)?;
                 self.active.fill(Active::Child {
                     protocol: "OPENVPN",
                     child,
@@ -573,18 +613,29 @@ impl Engines {
             }
         }
 
-        // Interception, not passivity. "Everything except these"
-        // deliberately builds a *full* tunnel and then pushes the chosen
-        // applications out of it, so asking whether the tunnel is
-        // passive answers no and skips the redirect entirely -- which
-        // presents as the excluded applications still being tunnelled,
-        // the setting doing nothing at all.
-        if abandoned() {
+        if limits.cancelled() {
             let _ = self.disconnect();
             return Err(ABANDONED.to_string());
         }
+
+        // Interception, not passivity -- and the reason is no longer the
+        // one this comment used to give.
+        //
+        // It claimed "everything except these" built a *full* tunnel and
+        // pushed the chosen applications out of it, so asking about
+        // passivity would answer no and skip the redirect. That belief
+        // was wrong and `SplitTunnel::wants_interception` says so at
+        // length: `mode` reaches two places in that file, the selection
+        // and the log header, so no branch anywhere builds a different
+        // shape of tunnel for AllExcept. One shape, proven by one route
+        // probe.
+        //
+        // The call is still the right one to make, because it is the
+        // question actually being asked here -- does anything need
+        // intercepting -- rather than because the two answers differ.
+        // They do not: `wants_passive_tunnel` is defined as this.
         if self.split_tunnel.wants_interception() {
-            self.start_split_tunnel(profile)?;
+            self.start_split_tunnel(profile, limits)?;
         }
         self.block_ipv6_if_needed(profile);
         // Whatever the engine above reported about the tunnel's DNS
@@ -642,9 +693,13 @@ impl Engines {
     /// all, so reporting success would tell the customer they were
     /// protected while every application, selected or not, went out in
     /// the clear.
-    fn start_split_tunnel(&mut self, profile: &ConnectProfile) -> Result<(), String> {
+    fn start_split_tunnel(
+        &mut self,
+        profile: &ConnectProfile,
+        limits: &crate::lifecycle::budget::Limits,
+    ) -> Result<(), String> {
         let adapter = adapter_name_for(profile);
-        let node = match node_address(profile) {
+        let node = match node_address(profile, limits) {
             Ok(node) => node,
             Err(e) => {
                 let _ = self.disconnect();
@@ -653,7 +708,11 @@ impl Engines {
         };
 
         let log_dir = self.config_dir.clone();
-        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir) {
+        // The subsystem that never had a token now gets the caller's.
+        // Every wait inside the bring-up unwinds on a disconnect instead
+        // of holding the engine state for the ~38 seconds those waits
+        // add up to.
+        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir, limits) {
             let _ = self.disconnect();
             return Err(e);
         }
@@ -1101,7 +1160,7 @@ fn adapter_name_for(profile: &ConnectProfile) -> &'static str {
 /// Custom mode's packet filter excludes it, which is not an
 /// optimisation: the tunnel's own encrypted traffic goes to this
 /// address, and redirecting that would put the tunnel inside itself.
-fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
+fn node_address(profile: &ConnectProfile, limits: &crate::lifecycle::budget::Limits) -> Result<Ipv4Addr, String> {
     let (host, port) = match profile {
         ConnectProfile::Wireguard(p) => split_host_port(&p.endpoint)?,
         ConnectProfile::Openvpn(p) => split_host_port(&p.endpoint)?,
@@ -1133,10 +1192,31 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
     //
     // The real hostname was here until 2026-08-26 and is redacted per
     // docs/node-address-hygiene.md -- this repository is public.
-    let deadline = std::time::Instant::now() + RESOLVE_RETRY_FOR;
+    // Clamped: the retry window is this stage's own ceiling, and what
+    // the connect has left is the real bound when earlier stages have
+    // already spent the budget.
+    let deadline = std::time::Instant::now() + limits.clamp(RESOLVE_RETRY_FOR);
     let mut last = String::new();
     loop {
-        match (host.as_str(), port).to_socket_addrs() {
+        // getaddrinfo, moved off this thread so a disconnect does not
+        // have to wait for it.
+        //
+        // It is a synchronous Win32 call with no timeout and no way in,
+        // and the loop around it only reads the abandon flag *after* it
+        // returns -- so the real bound here was the retry window plus
+        // one full resolver timeout, which on a node that is not
+        // answering is exactly when a customer gives up and presses
+        // Disconnect. The syscall still cannot be cancelled; what is
+        // cancelled is this operation's interest in it.
+        let resolving = {
+            let host = host.clone();
+            limits.token().interruptible(move || (host.as_str(), port).to_socket_addrs())
+        };
+        let resolving = match resolving {
+            Ok(result) => result,
+            Err(_) => return Err(ABANDONED.to_string()),
+        };
+        match resolving {
             Ok(mut addrs) => {
                 if let Some(v4) = addrs.find_map(|a| match a.ip() {
                     IpAddr::V4(v4) => Some(v4),
@@ -1150,7 +1230,15 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
             }
             Err(e) => last = e.to_string(),
         }
-        if std::time::Instant::now() >= deadline || abandoned() {
+        // Which of the three reasons it was, because they are not the
+        // same thing to whoever reads it. A resolver that answered with
+        // a failure is a DNS problem; a disconnect is not a problem at
+        // all; and a spent budget is a slow connect, where naming this
+        // lookup sends the reader after the wrong stage.
+        if let Err(stop) = limits.check() {
+            return Err(stop.to_string());
+        }
+        if std::time::Instant::now() >= deadline {
             return Err(format!("could not resolve {host}: {last}"));
         }
         std::thread::sleep(RESOLVE_RETRY_EVERY);
@@ -1252,11 +1340,11 @@ pub(crate) const HELPER_BUDGET: std::time::Duration = std::time::Duration::from_
 /// deafness this whole mechanism exists to prevent is no longer bounded
 /// by the budget at all: `Status` never queues behind the lock
 /// (`STATUS_LOCK_WAIT` in `pipe::dispatch`, with an unlocked OS-visible
-/// answer behind it), and `Disconnect` waits two seconds and then calls
-/// [`abandon_current_operation`], which [`wait_within`] reads every
-/// 50ms and kills the child on. A budget is still needed -- it is what
-/// turns an *unbounded* wait into a failure -- but it is a backstop now
-/// rather than the thing keeping the service answerable.
+/// answer behind it), and `Disconnect` waits two seconds and then
+/// cancels the running operation's token, which [`wait_within`] reads
+/// every 50ms and kills the child on. A budget is still needed -- it is
+/// what turns an *unbounded* wait into a failure -- but it is a backstop
+/// now rather than the thing keeping the service answerable.
 ///
 /// What chooses 35 specifically is one number up, not anything below:
 /// the app abandons a request after 45s (`REPLY_TIMEOUT`,
@@ -1294,34 +1382,102 @@ const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 /// tunnel now. `HELPER_BUDGET` bounds the wait, but bounded is not the
 /// same as immediate, and Disconnect is the one request that should
 /// never queue behind anything. See `pipe::dispatch`.
-static ABANDON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The operation currently in flight, as a token rather than a flag.
+///
+/// Still one global slot, which is the thing the rewrite is working
+/// towards removing -- but a token can be *handed to* code that needs to
+/// poll it, and a bare `static AtomicBool` could only be read by code
+/// that knew the static existed. That is the whole difference, and it is
+/// why the split tunnel never checked the flag once across a
+/// thirty-eight second window: nothing was ever passed to it.
+///
+/// A `std::sync::Mutex` holding a clonable token, replaced outright by
+/// each job rather than reset. Replacing is what stops one operation
+/// clearing another's cancellation -- the old flag's defining bug, where
+/// a retrying connect wiped the abandon a customer's disconnect had just
+/// set. There is no reset to call.
+static ABANDON: std::sync::Mutex<Option<crate::lifecycle::cancel::CancelToken>> =
+    std::sync::Mutex::new(None);
 
-/// Asks the operation in flight to stop waiting and fail.
+/// Publish the running operation's token, so ambient readers can poll it.
 ///
 /// Advisory, not a kill: it is read at the points where this service
 /// waits on something outside itself, so the operation unwinds through
 /// its own error paths and leaves the machine in a state it chose.
-pub fn abandon_current_operation() {
-    ABANDON.store(true, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Clears the flag. Called by every request once it holds the lock, so
-/// an abandonment aimed at the previous operation cannot be inherited by
-/// the next one.
-pub fn begin_operation() {
-    ABANDON.store(false, std::sync::atomic::Ordering::SeqCst);
-}
-
-fn abandoned() -> bool {
-    ABANDON.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// What an abandoned operation reports.
 ///
-/// Written for the customer rather than as a status code, because it can
-/// reach them: pressing Disconnect while a connect is still running ends
-/// that connect, and the app shows whatever it said.
-const ABANDONED: &str = "this attempt was stopped so the disconnect could go ahead";
+/// Called at the top of every job the supervisor runs, with that job's
+/// own token. The global and the per-operation token are then the same
+/// value rather than two mechanisms that have to be kept in step --
+/// which is what the two functions this replaced were, and why
+/// cancelling used to mean remembering to do both.
+///
+/// Cancelling is now `Supervisor::cancel_running`, which cancels the
+/// token this published, which is the one `abandoned()` reads. One
+/// signal, one owner, no reset.
+pub(crate) fn adopt_token(token: &crate::lifecycle::cancel::CancelToken) {
+    if let Ok(mut slot) = ABANDON.lock() {
+        *slot = Some(token.clone());
+    }
+}
+
+/// The token for the operation in flight.
+///
+/// Read at a boundary -- the top of [`Engines::connect`], a teardown, a
+/// Custom-mode toggle -- and then passed down as an argument. Reaching
+/// for this deeper than that is the habit it exists to replace.
+///
+/// Returns a cancelled token when there is no operation, which is the
+/// safe direction: code that asks for a token outside an operation is
+/// code that should not be starting long work.
+pub(super) fn current_token() -> crate::lifecycle::cancel::CancelToken {
+    match ABANDON.lock() {
+        Ok(slot) => slot.clone().unwrap_or_else(|| {
+            let spent = crate::lifecycle::cancel::CancelToken::new();
+            spent.cancel();
+            spent
+        }),
+        Err(_) => {
+            let spent = crate::lifecycle::cancel::CancelToken::new();
+            spent.cancel();
+            spent
+        }
+    }
+}
+
+/// The ambient read, now down to one caller: [`wait_within`].
+///
+/// Kept deliberately rather than threaded. `wait_within` is the floor of
+/// `run_hidden_within` and `capture_hidden`, the generic "run a process
+/// under a budget" primitive that DNS, routing, repair, the janitor and
+/// the firewall all sit on. Those are not connect-path functions and
+/// their authors have no cancellation decision to make: any process this
+/// service starts inside a cancelled operation should abort, always, and
+/// requiring every one of them to pass a token down would be ceremony
+/// that adds no choice. This is the one place where ambient is the
+/// correct answer rather than the lazy one.
+fn abandoned() -> bool {
+    ABANDON
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|t| t.is_cancelled()))
+        .unwrap_or(false)
+}
+
+/// What an abandoned operation reports. Defined with the other stop
+/// reason in [`crate::lifecycle::budget`], so the words a customer sees
+/// and the type that decides between them cannot drift apart.
+const ABANDONED: &str = crate::lifecycle::budget::ABANDONED;
+
+/// What a connect that ran out of time reports.
+///
+/// Distinct from [`ABANDONED`] because the causes are different and so
+/// is the advice: one means somebody pressed Disconnect, the other means
+/// every stage was still working when the clock ran out. Also distinct
+/// from a stage's own timeout message, which names that stage -- by the
+/// time the budget is gone the stage that happens to notice is an
+/// accident of ordering, and blaming OpenVPN for a slow DNS lookup
+/// three stages earlier sends whoever reads it to the wrong place.
+pub(super) const OUT_OF_TIME: &str = crate::lifecycle::budget::OUT_OF_TIME;
 
 /// The name to put in an error message, from the command being run.
 fn helper_name(command: &Command) -> String {

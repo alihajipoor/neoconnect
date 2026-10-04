@@ -1274,11 +1274,11 @@ fn worker(
         }
 
         if rewrote.is_some() {
-            recalculate_checksums(&mut packet[..len as usize], len, &mut address);
+            recalculate_checksums(&mut packet[..len as usize], &mut address);
         }
         // Sent whether or not anything was rewritten. A packet that
         // falls out of the logic above still has to reach the network.
-        let sent = handle.send(&packet[..len as usize], len, &address);
+        let sent = handle.send(&packet[..len as usize], &address);
 
         // Counted here rather than at the rewrite, so the numbers say
         // what was delivered rather than what was intended.
@@ -1708,10 +1708,9 @@ fn inject_v6_reset(
     address.set_ipv6(true);
 
     let mut packet = reset.to_vec();
-    let len = packet.len() as u32;
-    recalculate_checksums(&mut packet, len, &mut address);
+    recalculate_checksums(&mut packet, &mut address);
 
-    if handle.send(&packet, len, &address) {
+    if handle.send(&packet, &address) {
         stats.reset_v6.fetch_add(1, Ordering::Relaxed);
     }
     // A refusal is deliberately not counted anywhere. `rejected` is what
@@ -4345,7 +4344,17 @@ mod tests {
         let mut allowance =
             firewall::Allowance::install(&[local_addr], relays.tcp_port, relays.udp_port)
                 .expect("the inbound allowance must install");
-        firewall::wait_until_reachable(local_addr, relays.tcp_port).expect("relay must be up");
+        // A live token: this test wants the wait to run, not to be
+        // skipped, so it hands one that is not cancelled.
+        firewall::wait_until_reachable(
+            local_addr,
+            relays.tcp_port,
+            &crate::lifecycle::budget::Limits::new(
+                crate::lifecycle::cancel::CancelToken::new(),
+                std::time::Duration::from_secs(30),
+            ),
+        )
+        .expect("relay must be up");
 
         let selection: SharedSelection = Arc::new(RwLock::new(Selection::new(
             [curl.to_string()],

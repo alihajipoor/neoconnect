@@ -117,6 +117,118 @@ and Xray's 60s sit inside the app's 45s reply deadline, which
 *guarantees* the retry that clears the abandon flag a disconnect just
 set.
 
+**Resolved by clamping, not by lowering the constants** — and the
+distinction matters enough to write down, because lowering them is the
+obvious move and it is wrong.
+
+`lifecycle::budget::Limits` carries the cancellation token and the
+operation's deadline as one argument, built once at the boundary in
+`Engines::connect` from `CONNECT_BUDGET` (38s, seven under the app's
+45). Every wait asks `clamp` for the shorter of its own ceiling and
+what the operation has left. A ceiling therefore means "what this
+stage may spend when it is the only thing running"; the deadline is
+what it actually gets.
+
+Lowering the constants instead would say "OpenVPN gets 40 seconds" in
+a world where it may be the third stage of a connect with six seconds
+left — and it leaves the same mistake available to whatever ceiling is
+added next. The per-stage `fits_inside` check cannot see the real
+failure anyway, which is stages that each fit and overrun in sequence:
+a WireGuard connect is 45s of service-gone wait, then 15 installing,
+then a split tunnel whose own ceilings total 46.
+
+`budget.rs` keeps a test asserting the three ceilings still overrun,
+so that removing the clamping and tuning the numbers fails loudly.
+
+**What made the budget binding was removing PowerShell, not
+clamping harder.** `dns::force` is invoked from `xray::connect` and
+`ikev2::connect` and does not take `Limits`, so its 35-second
+`CMDLET_BUDGET` used to sit on top of the 38 the clamped stages share
+-- a connect could reach about seventy seconds.
+
+It was deliberately never clamped. Running out of time there means the
+tunnel comes up with the machine's lookups unpinned, which in Iran
+means an ISP resolver answering with a poisoned address: worse than a
+slow connect, and not a trade this product should make for
+punctuality. So the call was made fast instead. `dns::apply` writes the
+rule to the registry in 48-64ms where `Add-DnsClientNrptRule` measured
+10.0s, 16.3s, 43.9s and 55.1s, and there is no budget pressure left to
+resolve.
+
+### The connect path no longer spawns PowerShell
+
+For WireGuard, OpenVPN and all four Xray protocols it is now free of
+it entirely. What each of them used to pay:
+
+* `dns::force` -> the registry writer above. Every protocol paid this.
+* `openvpn::connect`'s route purge -> `route.exe` by destination
+  instead of `Get-NetRoute | Remove-NetRoute`, which had to enumerate
+  and so cost 4.4-6.5s per connect to usually delete nothing.
+* Xray's adapter setup was already `netsh.exe`, which is native.
+
+**IKEv2 is the exception and is left alone on purpose.**
+`ikev2::connect` still runs three cmdlets in one invocation to create
+the RAS entry, measured at 14.4s at best. Replacing it means writing a
+phonebook entry by hand -- about forty INI fields including generated
+GUIDs and timestamps, plus the IPsec configuration -- or binding
+`RasSetEntryPropertiesW` and its large version-dependent `RASENTRY`.
+A malformed entry cannot be dialled at all, it affects one protocol of
+five, and the measured cost is a tenth of what the DNS rule was. The
+cost-benefit says stop here.
+
+The PowerShell that remains is on paths where nobody is waiting: the
+DNS fallback when the registry refuses, `clear_with_cmdlets`, gaming
+mode, the janitor's residue sweep, the thorough teardown, and
+diagnostics.
+
+### What is still not bounded by the connect budget
+
+Audited rather than assumed, by listing every deadline in `engines/`
+and `split_tunnel/` and checking each against the reply path. Every
+engine wait clamps. Two that look like gaps are not: `BIND_RETRY_FOR`
+(6s) is in `proxy::bind_pending`, which is per-flow on the data path,
+and `redirect::ACTIVATION_GRACE` (3s) runs inside a spawned thread, so
+the constructor returns before it.
+
+`HELPER_BUDGET` was the one real residual and is now closed. Helper
+processes go through `run_hidden`, bounded at 15 seconds and reading
+the ambient cancellation every 50ms but not the *deadline* -- so a
+wedged `netsh` or `wireguard.exe` could carry a connect 15 seconds
+past its budget and finish after the app had stopped listening. Both
+call sites that could do it had the operation's limits in reach, so
+each takes `limits.clamp(HELPER_BUDGET)`: Xray's `configure_adapter`,
+which runs `netsh` twice, and WireGuard's `/installtunnelservice`.
+
+The generic primitive is deliberately left ambient. Threading `Limits`
+into `capture_hidden` would reach DNS, routing, repair, the janitor
+and the firewall, none of which has a cancellation decision to make,
+and for them the ambient read is the right answer: a process started
+inside a cancelled operation should abort, always. Clamping at the two
+sites that know about the deadline gets the benefit without the
+ceremony.
+
+**Every wait that can delay a connect reply is now bounded by the
+connect's own clock.** That is an audited statement, not an assumed
+one -- see the list above for the two that look like exceptions and
+are not.
+
+### Cancellation is a parameter, except once
+
+Threaded explicitly through the whole connect path. One ambient reader
+is kept deliberately: `wait_within`, the floor of `capture_hidden`,
+which DNS, routing, repair, the janitor and the firewall all sit on.
+Those authors have no cancellation decision to make — a process started
+inside a cancelled operation should abort, always — and threading a
+token through every one of them would be ceremony that adds no choice.
+
+**A teardown is never cancellable.** Cancellation is what *leads* to a
+teardown, so a teardown that honours it undoes its own purpose. This
+was learned the hard way: giving wireguard's teardown a boundary read
+of the live token made a disconnect abort its own teardown and report
+failure, because `pipe::dispatch` cancels the running operation before
+it runs the disconnect. That is the stranded-networking complaint,
+manufactured by the mechanism meant to prevent it.
+
 ## Rules
 
 1. **The IPC contract is frozen.** Shipped clients speak it. Every
@@ -155,14 +267,33 @@ set.
 
 Bottom-up, each landing green before the next starts.
 
-1. Foundation — cancellation, process supervision, RAII guard traits
-2. IPC and the pipe server — contract preserved exactly
-3. Service lifecycle — SCM, kernel liveness, two-phase stop
-4. Engine state machine
-5. The five engines
-6. DNS, routing, IPv6 block, janitor, repair
-7. Split tunnel — the largest, and the one with the most tests
+1. ~~Foundation — cancellation, process supervision, RAII guard traits~~
+2. ~~IPC and the pipe server — contract preserved exactly~~
+3. ~~Service lifecycle — SCM, kernel liveness, two-phase stop~~
+4. Engine state machine — *cancellation and budgets threaded; the
+   state machine proper is still the slot type it was*
+5. The five engines — *entry points take `Limits`; internals untouched*
+6. DNS, routing, IPv6 block, janitor, repair — *done as targeted cost
+   removal rather than wholesale rewrite: these modules are heavily
+   tested and the measured problem in them was PowerShell, not
+   structure.* The NRPT rule is written to the registry and verified by
+   `registry_rule_count`, so a rule this service creates is provably
+   one its sweep can remove. OpenVPN's pre-connect purge names its two
+   destinations to `route.exe`. `ikev2::is_connected` answers the idle
+   status poll from the phonebook file rather than a process. See "the
+   connect path no longer spawns PowerShell" above for what is left and
+   why.
+7. Split tunnel — the largest, and the one with the most tests.
+   *Already takes `Limits` and clamps its two long waits, so the
+   bring-up can no longer outlive the connect; the rewrite itself is
+   still ahead.*
 8. Gaming mode
+
+Steps 4, 5 and 7 were taken partly and out of order on purpose: the
+cancellation and budget work cuts across all three, and doing it once
+across the call path was cheaper than doing it three times as each
+module came up for rewrite. What remains in each is its own structure,
+not its deadlines.
 
 ## What this does not fix
 

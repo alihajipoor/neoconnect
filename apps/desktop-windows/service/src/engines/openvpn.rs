@@ -128,7 +128,7 @@ const TUNNEL_UP_MARK: &str = "Initialization Sequence Completed";
 /// a handshake still in progress at 50s is one the customer has already
 /// been told about, and the point of the ceiling is that the *service*
 /// does not sit on the `Engines` lock for ever, which is what
-/// `abandon_current_operation` and the 50ms poll below are really for.
+/// the caller's cancellation token and the 50ms poll below are really for.
 const TUNNEL_UP_WITHIN: std::time::Duration = std::time::Duration::from_secs(75);
 
 /// Makes sure a Wintun adapter exists for OpenVPN to attach to.
@@ -491,6 +491,7 @@ pub fn connect(
     engines: &Engines,
     profile: &OpenvpnProfile,
     passive: bool,
+    limits: &crate::lifecycle::budget::Limits,
 ) -> Result<Child, String> {
     let exe = engines.engine_path("openvpn.exe")?;
     engines.engine_path("wintun.dll")?;
@@ -501,9 +502,15 @@ pub fn connect(
     // than stopped never got to, and the pushed `0.0.0.0/1` and
     // `128.0.0.0/1` routes then outlive every later session -- silently
     // overriding Custom mode, because a /1 beats the demoted default.
-    // Cheap, and a no-op on a clean machine.
+    //
+    // By destination rather than by enumeration. This used to call
+    // `purge_interface`, which spawns PowerShell because enumerating is
+    // what it is for -- so a connect on a clean machine paid 4.4 to 6.5
+    // seconds, out of 38, to delete nothing. The two destinations are
+    // known, `route.exe` deletes them without looking anything up, and
+    // a route that is not there is the expected case.
     if let Ok(Some(adapter)) = adapters::find_by_name(ADAPTER_NAME) {
-        routing::purge_interface(adapter.index);
+        routing::purge_pushed_half_defaults(adapter.index);
     }
 
     let config_path = engines.config_path(CONFIG_FILE);
@@ -523,7 +530,7 @@ pub fn connect(
     .map_err(|e| format!("could not start openvpn.exe: {e}"))?;
 
     let child = confirm_started(child, "OpenVPN", &log_path)?;
-    wait_until_up(child, &log_path)
+    wait_until_up(child, &log_path, limits)
 }
 
 /// Waits until OpenVPN says its tunnel is up, rather than until it has
@@ -543,8 +550,22 @@ pub fn connect(
 /// consequence, not the event: it can be addressed before `PUSH_REPLY`
 /// has been applied, so waiting on the address would go back to
 /// reporting a tunnel that is not yet carrying anything.
-fn wait_until_up(mut child: Child, log_path: &std::path::Path) -> Result<Child, String> {
-    let deadline = std::time::Instant::now() + TUNNEL_UP_WITHIN;
+fn wait_until_up(
+    mut child: Child,
+    log_path: &std::path::Path,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<Child, String> {
+    // The ceiling stays a ceiling; the connect's remaining time is
+    // what actually bounds this when it runs last. Reported below as
+    // the budget that was really applied, because "did not connect
+    // within 75s" after giving up at 20 is a lie to whoever reads it.
+    let budget = limits.clamp(TUNNEL_UP_WITHIN);
+    if budget.is_zero() {
+        let _ = child.kill();
+        super::reap(&mut child);
+        return Err(super::OUT_OF_TIME.to_string());
+    }
+    let deadline = std::time::Instant::now() + budget;
     loop {
         let log = std::fs::read_to_string(log_path).unwrap_or_default();
         if log.contains(TUNNEL_UP_MARK) {
@@ -563,7 +584,7 @@ fn wait_until_up(mut child: Child, log_path: &std::path::Path) -> Result<Child, 
                 return Err(format!("could not check whether OpenVPN was still running: {e}"));
             }
         }
-        if super::abandoned() {
+        if limits.cancelled() {
             let _ = child.kill();
             super::reap(&mut child);
             return Err(super::ABANDONED.to_string());
@@ -573,7 +594,7 @@ fn wait_until_up(mut child: Child, log_path: &std::path::Path) -> Result<Child, 
             super::reap(&mut child);
             return Err(format!(
                 "OpenVPN did not finish connecting within {}s: {}",
-                TUNNEL_UP_WITHIN.as_secs(),
+                budget.as_secs(),
                 tail(&log)
             ));
         }

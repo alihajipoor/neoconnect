@@ -25,7 +25,7 @@ use neoconnect_ipc::{ShadowsocksProfile, TrojanProfile, VlessTlsProfile, XrayPro
 use serde_json::json;
 
 use super::routing::{self, InstalledRoutes};
-use super::{confirm_started, run_hidden, spawn_hidden, write_config, Engines};
+use super::{confirm_started, spawn_hidden, write_config, Engines};
 use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
@@ -56,7 +56,7 @@ pub const ADAPTER_NAME: &str = "neoconnect0";
 /// really binds -- see [`ADAPTER_ADDRESSED_WAIT`].
 ///
 /// The customer is not left staring at it for a minute in the ordinary
-/// failure either. The poll below reads `abandoned()`, so pressing
+/// failure either. The poll below reads the caller's token, so pressing
 /// Disconnect ends the wait rather than queueing behind it.
 const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -466,11 +466,23 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: b
 /// that the two engines ask the same named question in the same shape,
 /// which is what stopped being true the last time one of them was
 /// edited alone.
-fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
+fn configure_adapter(
+    tun_ip: Ipv4Addr,
+    passive: bool,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<(), String> {
     let netsh = PathBuf::from(r"C:\Windows\System32\netsh.exe");
     let name_arg = format!("name={ADAPTER_NAME}");
 
-    let status = run_hidden(
+    // Helpers are bounded by `HELPER_BUDGET`, which reads the ambient
+    // cancellation but not the deadline -- so a wedged netsh could push
+    // a connect past the budget and leave the app no longer listening
+    // while the service went on to succeed. Clamped here because this
+    // is one of the two connect-path helper calls with the operation's
+    // limits already in reach.
+    let helper = limits.clamp(super::HELPER_BUDGET);
+
+    let status = super::run_hidden_within(
         &netsh,
         &[
             OsStr::new("interface"),
@@ -483,13 +495,14 @@ fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
             // /30, matching TUN_GATEWAY.
             OsStr::new("255.255.255.252"),
         ],
+        helper,
     )
     .map_err(|e| format!("could not configure the tunnel adapter: {e}"))?;
     if !status.success() {
         return Err(format!("assigning the tunnel adapter's address failed ({status})"));
     }
 
-    let status = run_hidden(
+    let status = super::run_hidden_within(
         &netsh,
         &[
             OsStr::new("interface"),
@@ -501,6 +514,7 @@ fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
             OsStr::new(TUN_DNS),
             OsStr::new("primary"),
         ],
+        helper,
     )
     .map_err(|e| format!("could not set the tunnel's DNS: {e}"))?;
     if !status.success() {
@@ -541,15 +555,19 @@ fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
 
 /// Waits for Xray's TUN adapter to appear and returns its interface index.
 ///
-/// Reads `abandoned()` on every pass: with a ceiling this long, a
+/// Reads the caller's token on every pass: with a ceiling this long, a
 /// customer who has given up and pressed Disconnect must not queue
 /// behind the rest of it.
-fn wait_for_adapter() -> Result<u32, String> {
-    let deadline = std::time::Instant::now() + ADAPTER_WAIT;
+fn wait_for_adapter(limits: &crate::lifecycle::budget::Limits) -> Result<u32, String> {
+    let budget = limits.clamp(ADAPTER_WAIT);
+    if budget.is_zero() {
+        return Err(super::OUT_OF_TIME.to_string());
+    }
+    let deadline = std::time::Instant::now() + budget;
     loop {
         match adapters::find_by_name(ADAPTER_NAME) {
             Ok(Some(a)) => return Ok(a.index),
-            Ok(None) if super::abandoned() => return Err(super::ABANDONED.to_string()),
+            Ok(None) if limits.cancelled() => return Err(super::ABANDONED.to_string()),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
@@ -557,7 +575,7 @@ fn wait_for_adapter() -> Result<u32, String> {
                 return Err(format!(
                     "Xray started but its network adapter ({ADAPTER_NAME}) never appeared \
                      within {}s",
-                    ADAPTER_WAIT.as_secs()
+                    budget.as_secs()
                 ))
             }
             Err(e) => return Err(format!("could not enumerate network adapters: {e}")),
@@ -571,8 +589,12 @@ fn wait_for_adapter() -> Result<u32, String> {
 /// that the thing which follows -- installing routes whose next hop is
 /// that address -- fails *silently* if it runs too early. See
 /// [`ADAPTER_ADDRESSED_WAIT`].
-fn wait_for_address(expected: Ipv4Addr) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + ADAPTER_ADDRESSED_WAIT;
+fn wait_for_address(expected: Ipv4Addr, limits: &crate::lifecycle::budget::Limits) -> Result<(), String> {
+    let budget = limits.clamp(ADAPTER_ADDRESSED_WAIT);
+    if budget.is_zero() {
+        return Err(super::OUT_OF_TIME.to_string());
+    }
+    let deadline = std::time::Instant::now() + budget;
     loop {
         let found = adapters::find_by_name(ADAPTER_NAME)
             .map_err(|e| format!("could not enumerate network adapters: {e}"))?;
@@ -598,11 +620,11 @@ fn wait_for_address(expected: Ipv4Addr) -> Result<(), String> {
                 None => Err(format!(
                     "the tunnel adapter ({ADAPTER_NAME}) took no address within {}s, so the \
                      tunnel's routes would have had no next hop",
-                    ADAPTER_ADDRESSED_WAIT.as_secs()
+                    budget.as_secs()
                 )),
             };
         }
-        if super::abandoned() {
+        if limits.cancelled() {
             return Err(super::ABANDONED.to_string());
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -614,12 +636,23 @@ fn wait_for_address(expected: Ipv4Addr) -> Result<(), String> {
 /// Nodes are registered by IP today, but a hostname is resolved rather
 /// than rejected so a DNS-named node doesn't silently produce a tunnel
 /// with no escape route for its own uplink.
-fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn resolve_server(
+    host: &str,
+    port: u16,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<Ipv4Addr, String> {
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         return Ok(ip);
     }
-    (host, port)
-        .to_socket_addrs()
+    // Off this thread, so a disconnect does not wait for it. Unlike the
+    // sibling in `engines::mod`, this one has no retry loop and no bound
+    // at all -- a node that is not answering could hold it for however
+    // long the resolver takes to give up, with nothing able to interrupt.
+    let owned = host.to_owned();
+    limits
+        .token()
+        .interruptible(move || (owned.as_str(), port).to_socket_addrs())
+        .map_err(|_| super::ABANDONED.to_string())?
         .map_err(|e| format!("could not resolve {host}: {e}"))?
         .find_map(|a| match a.ip() {
             IpAddr::V4(v4) => Some(v4),
@@ -633,8 +666,11 @@ fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
 /// Split out from `connect` so a routing failure can tear down the engine
 /// it belongs to -- a running Xray with no routes is the exact state that
 /// previously looked connected while changing nothing.
-pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
-    let server_ip = resolve_server(outbound.host(), outbound.port())?;
+pub fn install_routes(
+    outbound: &Outbound,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<InstalledRoutes, String> {
+    let server_ip = resolve_server(outbound.host(), outbound.port(), limits)?;
 
     // Captured before the tunnel takes over: afterwards the best route to
     // the server would be the tunnel itself, and the bypass would point
@@ -646,7 +682,7 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
         .gateway
         .ok_or_else(|| "the active network connection has no gateway".to_string())?;
 
-    let tun_index = wait_for_adapter()?;
+    let tun_index = wait_for_adapter(limits)?;
     let tun_gateway: Ipv4Addr = TUN_GATEWAY
         .split('/')
         .next()
@@ -659,8 +695,8 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
     // is what establishes that the stack finished giving it.
     // `false`: this function *is* the full-tunnel branch -- `mod.rs`
     // picks between it and `prepare_passive` on the same flag.
-    configure_adapter(tun_gateway, false)?;
-    wait_for_address(tun_gateway)?;
+    configure_adapter(tun_gateway, false, limits)?;
+    wait_for_address(tun_gateway, limits)?;
 
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
 }
@@ -676,9 +712,9 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
 ///
 /// Returns the node's address, which the redirect filter excludes so the
 /// tunnel is never carried through itself.
-pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
-    let server_ip = resolve_server(outbound.host(), outbound.port())?;
-    wait_for_adapter()?;
+pub fn prepare_passive(outbound: &Outbound, limits: &crate::lifecycle::budget::Limits) -> Result<Ipv4Addr, String> {
+    let server_ip = resolve_server(outbound.host(), outbound.port(), limits)?;
+    wait_for_adapter(limits)?;
 
     let tun_gateway: Ipv4Addr = TUN_GATEWAY
         .split('/')
@@ -687,7 +723,7 @@ pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
     // `true`: this function is the Custom-mode branch. The DNS rule is
     // still installed -- see `dns::machine_wide_rule_wanted`.
-    configure_adapter(tun_gateway, true)?;
+    configure_adapter(tun_gateway, true, limits)?;
     // Custom mode installs no routes, so the silent-next-hop failure
     // does not apply here -- but `split_tunnel::start` runs immediately
     // after this returns and waits ten seconds for this adapter to hold
@@ -695,7 +731,7 @@ pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
     // here means the engine hands back something that is ready, rather
     // than handing back early and leaving the split tunnel to discover
     // it was not.
-    wait_for_address(tun_gateway)?;
+    wait_for_address(tun_gateway, limits)?;
 
     Ok(server_ip)
 }

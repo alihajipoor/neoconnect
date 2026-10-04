@@ -36,7 +36,7 @@ const POLL: Duration = Duration::from_millis(50);
 /// A one-way signal that one operation should stop.
 ///
 /// Cheap to clone; every clone observes the same cancellation.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct CancelToken {
     flag: Arc<AtomicBool>,
 }

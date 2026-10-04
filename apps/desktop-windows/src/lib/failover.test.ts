@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { recordAttempt, type ConnectHistory } from "./connect-history";
+import { reachabilityKey, type ReachabilityMap } from "./reachability";
 import { orderCandidates, lastGoodFor, rememberLastGood } from "./failover";
 import type { Protocol, ProtocolUser } from "./types";
 
@@ -107,5 +109,146 @@ describe("per-network memory", () => {
 
   it("has no opinion about a network it has not seen", () => {
     expect(lastGoodFor({}, "aa:bb:cc:dd:ee:ff")).toBeNull();
+  });
+});
+
+describe("ordering by what this device has seen", () => {
+  const NOW = 1_700_000_000_000;
+  const mins = (n: number) => n * 60 * 1000;
+
+  /** The reason this exists.
+   *
+   * `PROTOCOL_ORDER` puts WireGuard first for everybody. On a filtered
+   * network where WireGuard is blocked and Trojan is not, that order is
+   * wrong for this customer -- and it is wrong the same way every time
+   * they press Connect, because nothing in it learns.
+   */
+  it("puts what worked recently ahead of the fixed order", () => {
+    let h: ConnectHistory = {};
+    h = recordAttempt(h, "cell", "de-1", "WIREGUARD", false, NOW - mins(10));
+    h = recordAttempt(h, "cell", "de-1", "XRAY_TROJAN", true, NOW - mins(5));
+
+    const ordered = orderCandidates([user("de-1", "WIREGUARD"), user("de-1", "XRAY_TROJAN")], {
+      history: h,
+      network: "cell",
+      now: NOW,
+    });
+    expect(ordered[0].protocol).toBe("XRAY_TROJAN");
+  });
+
+  /** Evidence is per network, because the filtering is. */
+  it("does not carry one network's evidence onto another", () => {
+    let h: ConnectHistory = {};
+    h = recordAttempt(h, "cell", "de-1", "XRAY_TROJAN", true, NOW - mins(5));
+    h = recordAttempt(h, "cell", "de-1", "WIREGUARD", false, NOW - mins(5));
+
+    const ordered = orderCandidates([user("de-1", "WIREGUARD"), user("de-1", "XRAY_TROJAN")], {
+      history: h,
+      network: "home-wifi",
+      now: NOW,
+    });
+    // Nothing known here, so the fixed order decides again.
+    expect(ordered[0].protocol).toBe("WIREGUARD");
+  });
+
+  /** An untried protocol must not outrank one that is working. */
+  it("ranks a working protocol above an untried one", () => {
+    const h = recordAttempt({}, "cell", "de-1", "XRAY_TROJAN", true, NOW - mins(2));
+    const ordered = orderCandidates(
+      [user("de-1", "WIREGUARD"), user("de-1", "XRAY_TROJAN"), user("de-1", "OPENVPN")],
+      { history: h, network: "cell", now: NOW },
+    );
+    expect(ordered[0].protocol).toBe("XRAY_TROJAN");
+  });
+
+  /** And a failing one must sink below the untried. */
+  it("ranks a failing protocol below an untried one", () => {
+    const h = recordAttempt({}, "cell", "de-1", "WIREGUARD", false, NOW - mins(2));
+    const ordered = orderCandidates([user("de-1", "WIREGUARD"), user("de-1", "OPENVPN")], {
+      history: h,
+      network: "cell",
+      now: NOW,
+    });
+    expect(ordered[0].protocol).toBe("OPENVPN");
+  });
+
+  /** The customer's own choice still leads. Evidence orders what comes
+   * after it; it does not overrule the person. */
+  it("never moves ahead of a route the customer picked", () => {
+    const h = recordAttempt({}, "cell", "de-1", "XRAY_TROJAN", true, NOW - mins(2));
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("nl-9", "OPENVPN")], {
+      pinnedRouteId: "nl-9",
+      history: h,
+      network: "cell",
+      now: NOW,
+    });
+    expect(ordered[0].routeId).toBe("nl-9");
+  });
+
+  /** With no history at all the order is exactly what it was, which is
+   * what makes this safe to add. */
+  it("changes nothing when there is no evidence", () => {
+    const users = [user("de-1", "OPENVPN"), user("de-1", "WIREGUARD")];
+    expect(orderCandidates(users, { history: {}, network: "cell", now: NOW })).toEqual(
+      orderCandidates(users),
+    );
+  });
+});
+
+describe("ordering by what answers right now", () => {
+  const NOW = 1_700_000_000_000;
+  const reach = (entries: Array<[string, string, "reachable" | "unreachable"]>): ReachabilityMap =>
+    Object.fromEntries(entries.map(([r, p, v]) => [reachabilityKey(r, p as never), v]));
+
+  it("leads with what answered a handshake", () => {
+    const ordered = orderCandidates([user("de-1", "WIREGUARD"), user("de-1", "XRAY_TROJAN")], {
+      reachability: reach([["de-1", "XRAY_TROJAN", "reachable"]]),
+    });
+    expect(ordered[0].protocol).toBe("XRAY_TROJAN");
+  });
+
+  it("sinks what refused one", () => {
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("de-1", "XRAY_VLESS_TLS")], {
+      reachability: reach([["de-1", "XRAY_TROJAN", "unreachable"]]),
+    });
+    expect(ordered[0].protocol).toBe("XRAY_VLESS_TLS");
+  });
+
+  /** The one that would quietly ruin this.
+   *
+   * WireGuard is UDP and cannot be probed at all, so it is never asked.
+   * "Not asked" has to order like "unknown" -- above something that
+   * actively refused. Treating silence as failure would bury the
+   * protocol that is some customers' only working option.
+   */
+  it("does not punish a protocol that could not be probed", () => {
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("de-1", "WIREGUARD")], {
+      reachability: reach([["de-1", "XRAY_TROJAN", "unreachable"]]),
+    });
+    expect(ordered[0].protocol).toBe("WIREGUARD");
+  });
+
+  /** Live evidence outranks remembered evidence, because the network
+   * can have changed since this morning. */
+  it("prefers a live answer over an older success", () => {
+    const h: ConnectHistory = recordAttempt({}, "cell", "de-1", "XRAY_TROJAN", true, NOW - 60_000);
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("de-1", "XRAY_VLESS_TLS")], {
+      history: h,
+      network: "cell",
+      now: NOW,
+      reachability: reach([
+        ["de-1", "XRAY_TROJAN", "unreachable"],
+        ["de-1", "XRAY_VLESS_TLS", "reachable"],
+      ]),
+    });
+    expect(ordered[0].protocol).toBe("XRAY_VLESS_TLS");
+  });
+
+  it("still never moves ahead of the customer's own choice", () => {
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("nl-9", "OPENVPN")], {
+      pinnedRouteId: "nl-9",
+      reachability: reach([["de-1", "XRAY_TROJAN", "reachable"]]),
+    });
+    expect(ordered[0].routeId).toBe("nl-9");
   });
 });
