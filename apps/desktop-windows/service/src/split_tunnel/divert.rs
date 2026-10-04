@@ -115,10 +115,19 @@ impl Handle {
     /// accepted and none of them arrive, because the stack routed them
     /// by its own table and ignored the interface this asked for. So a
     /// `true` here is worth no more than "it was not rejected".
-    pub fn send(&self, packet: &[u8], len: u32, addr: &WINDIVERT_ADDRESS) -> bool {
+    pub fn send(&self, packet: &[u8], addr: &WINDIVERT_ADDRESS) -> bool {
         let mut sent: u32 = 0;
-        // SAFETY: `packet` is valid for `len` bytes (checked by the
-        // caller against what recv reported) and `addr` is owned by it.
+        // The length comes from the slice and cannot come from anywhere
+        // else. It used to be a separate `len: u32` argument, and the
+        // SAFETY note said it was "checked by the caller against what
+        // recv reported" -- which is an obligation written in a comment
+        // and enforced by nothing. A caller passing a length longer than
+        // the slice would have had the driver read past the end of a
+        // heap buffer. Both call sites were in fact correct; the point
+        // is that the signature allowed them not to be.
+        let len = packet.len() as u32;
+        // SAFETY: `packet` is valid for exactly `len` bytes by
+        // construction, and `addr` is owned by the caller.
         unsafe { WinDivertSend(self.0, packet.as_ptr() as *const _, len, &mut sent, addr).as_bool() }
     }
 
@@ -211,9 +220,11 @@ pub fn eval_filter(filter: &str, packet: &[u8], address: &WINDIVERT_ADDRESS) -> 
 /// Mandatory, not hygiene: a rewritten address changes the pseudo-header
 /// the transport checksum covers, so an uncorrected packet is discarded
 /// by the receiving stack without a word.
-pub fn recalculate_checksums(packet: &mut [u8], len: u32, addr: &mut WINDIVERT_ADDRESS) {
-    // SAFETY: `packet` is valid for `len` bytes; the helper only reads
-    // and writes within it and within `addr`.
+pub fn recalculate_checksums(packet: &mut [u8], addr: &mut WINDIVERT_ADDRESS) {
+    // Derived, not passed, for the reason given on [`Handle::send`].
+    let len = packet.len() as u32;
+    // SAFETY: `packet` is valid for exactly `len` bytes by construction;
+    // the helper only reads and writes within it and within `addr`.
     unsafe {
         WinDivertHelperCalcChecksums(packet.as_mut_ptr() as *mut _, len, addr, ChecksumFlags::new())
     };
