@@ -27,7 +27,15 @@ import {
 } from "../lib/connection-evidence";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
-import { loadChosenRoute, loadLastGood, saveChosenRoute, saveLastGood } from "../lib/failover-store";
+import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
+import {
+  loadChosenRoute,
+  loadConnectHistory,
+  loadLastGood,
+  saveChosenRoute,
+  saveConnectHistory,
+  saveLastGood,
+} from "../lib/failover-store";
 import {
   isEffective,
   loadSplitTunnel,
@@ -420,6 +428,9 @@ export function Dashboard({
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
   const [lastGood, setLastGood] = useState<LastGoodMap>({});
+  /** Per route and protocol, how recent attempts went on this network.
+   * Richer than `lastGood`, which holds one route and no outcome. */
+  const [history, setHistory] = useState<ConnectHistory>({});
   /** Names the protocol we ended up on when it is not the one we
    * started with. Landing somewhere else without saying so is the same
    * dishonesty as a false "Connected". */
@@ -835,6 +846,7 @@ export function Dashboard({
           .then(setNetworkId)
           .catch(() => setNetworkId(null));
         void loadLastGood().then(setLastGood);
+        void loadConnectHistory().then(setHistory);
         return;
       }
 
@@ -870,6 +882,7 @@ export function Dashboard({
       .then(setNetworkId)
       .catch(() => setNetworkId(null));
     void loadLastGood().then(setLastGood);
+    void loadConnectHistory().then(setHistory);
 
     // Purely to name the server the customer is actually on -- the
     // protocol-user row carries a routeId but no human-readable
@@ -1379,6 +1392,8 @@ export function Dashboard({
       const candidates = orderCandidates(dialable, {
         pinnedRouteId: chosenRouteId,
         lastGoodRouteId: lastGoodFor(lastGood, networkId),
+        history,
+        network: networkId,
         preferredRouteId: null,
       });
 
@@ -1642,6 +1657,26 @@ export function Dashboard({
               const updated = rememberLastGood(lastGood, networkId, candidate.routeId);
               setLastGood(updated);
               void saveLastGood(updated);
+            }
+            // Both outcomes, and the failures are the valuable half.
+            //
+            // `lastGood` above only ever learns what worked, so the
+            // ladder could rediscover the same dead protocol every time
+            // it ran. Recording that this route and protocol did not
+            // carry traffic here is what lets the next attempt start
+            // somewhere else. `unverified` counts as a failure for the
+            // same reason it is excluded above: an engine that started
+            // and proved nothing is not evidence that it works.
+            {
+              const recorded = recordAttempt(
+                history,
+                networkId,
+                candidate.routeId,
+                candidate.protocol,
+                verdict === "connected",
+              );
+              setHistory(recorded);
+              void saveConnectHistory(recorded);
             }
             strikesRef.current = 0;
             // Successes are reported too, and they are not filler. A

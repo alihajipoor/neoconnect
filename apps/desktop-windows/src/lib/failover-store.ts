@@ -1,4 +1,5 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
+import { CONNECT_HISTORY_STORE_KEY, type ConnectHistory } from "./connect-history";
 import type { LastGoodMap } from "./failover";
 
 // Which protocol last carried real traffic on each network, persisted so
@@ -83,6 +84,36 @@ export async function saveChosenRoute(routeId: string | null): Promise<void> {
     const store = await getStore();
     if (routeId) await store.set(CHOSEN_KEY, routeId);
     else await store.delete(CHOSEN_KEY);
+    await store.save();
+  } catch {
+    // Intentionally silent -- see above.
+  }
+}
+
+/** The richer memory that sits beside `lastGood`.
+ *
+ * Same store, same silence on failure, same reasoning: losing it costs
+ * one slower connect and must never cost the screen.
+ *
+ * Kept as a separate key rather than folded into `lastGood` so an older
+ * build reading this file still finds the shape it expects. The two
+ * answer different questions -- "which route last worked here" against
+ * "how has each route and protocol been doing lately" -- and the first
+ * is still what decides the headline.
+ */
+export async function loadConnectHistory(): Promise<ConnectHistory> {
+  try {
+    const store = await getStore();
+    return (await store.get<ConnectHistory>(CONNECT_HISTORY_STORE_KEY)) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export async function saveConnectHistory(history: ConnectHistory): Promise<void> {
+  try {
+    const store = await getStore();
+    await store.set(CONNECT_HISTORY_STORE_KEY, history);
     await store.save();
   } catch {
     // Intentionally silent -- see above.
