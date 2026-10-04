@@ -750,10 +750,17 @@ fn install_verified_route(
     tunnel_index: u32,
     tunnel: &proxy::TunnelInterface,
     log_path: &Path,
+    cancel: &crate::lifecycle::cancel::CancelToken,
 ) -> Result<InstalledRoutes, String> {
     let mut last_error = String::new();
 
     for shape in routing::PassiveRouteShape::ALL {
+        // Each shape is probed against two targets at 3.5 seconds each,
+        // so the pair of them is fourteen seconds of the bring-up. The
+        // check sits at the top of the loop rather than inside the probe
+        // because an abandoned connect has no reason to try the second
+        // shape at all.
+        cancel.check().map_err(|c| c.to_string())?;
         let mut installed =
             match routing::install_passive_default_shaped(tunnel_address, tunnel_index, shape) {
                 Ok(installed) => installed,
@@ -1200,7 +1207,7 @@ impl SplitTunnel {
         // The route is chosen by trying it, not by predicting it. See
         // install_verified_route.
         let route =
-            install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path)?;
+            install_verified_route(tunnel_address, tunnel_adapter.index, &tunnel, &log_path, cancel)?;
         // Created here rather than inside `redirect::start`, because
         // the relay counts into the same table and the relay is started
         // first -- the firewall allowance and the reachability wait sit
