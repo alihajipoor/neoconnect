@@ -252,6 +252,22 @@ mod tests {
         line
     }
 
+    /// What a disconnect must beat for these tests to pass.
+    ///
+    /// Ten seconds, which is nothing like the 900ms budget the hard stop
+    /// is actually held to, and deliberately so. This runs on a shared
+    /// runner alongside three hundred other tests, several of which
+    /// shell out to real Windows tooling, so a tight bound here fails on
+    /// scheduling rather than on the thing it is meant to catch -- which
+    /// it did at three seconds, on a run where everything else passed.
+    ///
+    /// What it is meant to catch overshoots this by a wide margin
+    /// anyway: a cmdlet costs 4.4 to 6.5 seconds just to start, a
+    /// tunnel-service wait is bounded at forty-five, and an unbounded
+    /// lock acquisition does not come back at all. Each of those fails
+    /// this comfortably; a busy runner does not.
+    const REPLY_MUST_BEAT: std::time::Duration = std::time::Duration::from_secs(10);
+
     /// The bar, as a test: a disconnect answers in about the time it
     /// takes to stop, not the time it takes to tidy.
     ///
@@ -283,7 +299,7 @@ mod tests {
             "a disconnect must answer, got {parsed}"
         );
         assert!(
-            took < std::time::Duration::from_secs(3),
+            took < REPLY_MUST_BEAT,
             "the disconnect took {took:?}; something slow is back on the reply path"
         );
     }
@@ -308,7 +324,7 @@ mod tests {
         let a: serde_json::Value = serde_json::from_str(first.trim()).unwrap();
         let b: serde_json::Value = serde_json::from_str(second.trim()).unwrap();
         assert_eq!(a["status"], b["status"], "the second disconnect must read the same as the first");
-        assert!(took < std::time::Duration::from_secs(3), "the second took {took:?}");
+        assert!(took < REPLY_MUST_BEAT, "the second took {took:?}");
     }
 
     #[tokio::test]
