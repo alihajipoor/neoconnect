@@ -218,6 +218,113 @@ pub fn force(resolver: &str) -> TunnelDns {
 /// what a failure means is made once here rather than once per engine.
 fn apply(resolver: &str) -> Result<(), String> {
     clear();
+    // The registry first, because it is the same edit four hundred
+    // times faster. The cmdlet stays as the fallback: a rule installed
+    // in 55 seconds still protects the customer, and no rule does not.
+    match apply_via_registry(resolver) {
+        Ok(()) => return Ok(()),
+        Err(why) => crate::cleanup_log::note("install the tunnel's DNS rule by registry", &why),
+    }
+    apply_via_cmdlet(resolver)
+}
+
+/// Our key under `DnsPolicyConfig`.
+///
+/// GUID-shaped because that is what `Add-DnsClientNrptRule` writes, and
+/// an enumerator that cares about the shape should find nothing
+/// surprising here. Fixed rather than fresh per connect so a rule can
+/// only ever be replaced, never stacked -- `clear` removes by comment
+/// and would catch duplicates anyway, but not creating them is better
+/// than sweeping them up.
+const OUR_RULE_KEY: &str = "{9F1C7E3A-5B42-4D18-A6E0-2C8B4F7D9A11}";
+
+/// Writes the `.` rule straight into the policy table.
+///
+/// Every value below was read off a rule `Add-DnsClientNrptRule` had
+/// just created, on Windows CI, rather than recalled -- see the probe
+/// this replaces. `ConfigOptions = 8` is the one that mattered: a rule
+/// with the wrong value there still exists, still counts, and silently
+/// pins nothing, which is a DNS leak wearing the costume of a working
+/// tunnel. `Name` stores the namespace verbatim, so `.` goes in as `.`.
+///
+/// `sc control dnscache paramchange` is what makes it take effect, and
+/// it is already here: [`poke_resolver`] has been running it on the
+/// removal side since the sweep became unconditional. Policy is re-read
+/// either way -- the service does not care which direction it moved.
+///
+/// Verified before it is believed. Reporting success means
+/// [`registry_rule_count`] can see the rule afterwards, which also
+/// proves the thing that matters at the far end of the session: that
+/// the teardown's sweep will find it. A rule this service can create
+/// and cannot remove is the fault that strands a machine's DNS, and it
+/// would be ours.
+fn apply_via_registry(resolver: &str) -> Result<(), String> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_WRITE};
+    use winreg::{RegKey, RegValue};
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let path = format!(r"{}\{}", NRPT_REGISTRY_PATHS[0], OUR_RULE_KEY);
+    let (rule, _) = hklm
+        .create_subkey_with_flags(&path, KEY_WRITE)
+        .map_err(|e| format!("could not create the NRPT rule key: {e}"))?;
+
+    write_rule_values(&rule, resolver)?;
+
+    drop(rule);
+    poke_resolver();
+
+    match registry_rule_count(NRPT_COMMENT) {
+        Ok(0) => Err("the rule was written and then could not be found again".to_string()),
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("the rule was written but could not be verified: {e}")),
+    }
+}
+
+/// The values themselves, against whichever key they are given.
+///
+/// Split from its caller for the same reason [`remove_tagged_rules`] is:
+/// what has to be *proved* is the shape, and it can be proved under
+/// HKCU where a test needs no elevation and cannot touch the machine's
+/// real policy table. The test below asserts every name, type and byte
+/// against what `Add-DnsClientNrptRule` actually wrote, so a well-meant
+/// tidy of these values fails loudly instead of shipping a rule that
+/// exists and pins nothing.
+fn write_rule_values(rule: &winreg::RegKey, resolver: &str) -> Result<(), String> {
+    use winreg::RegValue;
+
+    // REG_MULTI_SZ: the namespace, its own terminator, then the list's.
+    // Both nulls are present in the bytes the cmdlet wrote.
+    let mut namespaces: Vec<u8> = Vec::new();
+    for unit in ".".encode_utf16() {
+        namespaces.extend_from_slice(&unit.to_le_bytes());
+    }
+    namespaces.extend_from_slice(&[0, 0, 0, 0]);
+
+    rule.set_raw_value(
+        "Name",
+        &RegValue { bytes: namespaces, vtype: winreg::enums::RegType::REG_MULTI_SZ },
+    )
+    .map_err(|e| format!("could not set the NRPT namespace: {e}"))?;
+
+    for (name, value) in [("GenericDNSServers", resolver), ("Comment", NRPT_COMMENT)] {
+        rule.set_value(name, &value.to_string())
+            .map_err(|e| format!("could not set the NRPT {name}: {e}"))?;
+    }
+    // Present and empty on a cmdlet-written rule. Written rather than
+    // left absent, so ours is byte-for-byte the shape Windows made.
+    for name in ["DisplayName", "IPSECCARestriction"] {
+        rule.set_value(name, &String::new())
+            .map_err(|e| format!("could not set the NRPT {name}: {e}"))?;
+    }
+    for (name, value) in [("Version", 2u32), ("ConfigOptions", 8u32)] {
+        rule.set_value(name, &value)
+            .map_err(|e| format!("could not set the NRPT {name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The old path, now the fallback.
+fn apply_via_cmdlet(resolver: &str) -> Result<(), String> {
     let script = format!(
         "Add-DnsClientNrptRule -Namespace '.' -NameServers '{resolver}' -Comment '{NRPT_COMMENT}' -ErrorAction Stop"
     );
@@ -1168,80 +1275,63 @@ mod tests {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
     use winreg::RegKey;
 
-    /// Prints the registry shape of a real NRPT rule. Asserts nothing.
+
+    /// The NRPT rule's shape, pinned to what Windows actually wrote.
     ///
-    /// Groundwork, not a test, and it is here rather than in a scratch
-    /// file because this crate only compiles on Windows and CI is the
-    /// only Windows there is. `apply` installs the tunnel's DNS rule
-    /// with `Add-DnsClientNrptRule`, measured on the rig at 10.0s,
-    /// 16.3s, 43.9s and 55.1s -- two of those past the app's own 45s
-    /// deadline, on the one call that stops a poisoned ISP resolver
-    /// answering first. Writing the same rule to the registry is what
-    /// the teardown side already does, at 48 to 64 milliseconds.
+    /// Every expectation here was read off a rule
+    /// `Add-DnsClientNrptRule` had just created, on Windows CI, by the
+    /// probe this replaces. It is asserted rather than remembered
+    /// because of the failure mode: a rule with the wrong
+    /// `ConfigOptions` still exists, still counts, and silently pins
+    /// nothing -- a DNS leak wearing the costume of a working tunnel,
+    /// on the one call that stops a poisoned ISP resolver answering
+    /// first.
     ///
-    /// The reason that change cannot be written from memory: a rule
-    /// whose `ConfigOptions` is wrong still *exists*, still counts, and
-    /// silently does not pin anything. That is a DNS leak presented as
-    /// a working tunnel, which is the worst failure this module has, so
-    /// the values get read off a real one instead of recalled.
-    ///
-    /// Namespace is a `.invalid` suffix and never `.`, so the rule
-    /// cannot affect the runner's own lookups while it exists, and it
-    /// is removed either way.
+    /// Under HKCU, so it needs no elevation and cannot touch the
+    /// machine's real policy table.
     #[test]
-    fn windows_probe_the_registry_shape_of_a_real_nrpt_rule() {
-        const PROBE_COMMENT: &str = "Neoxify schema probe";
-        const LOCAL: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
+    fn the_written_rule_has_the_shape_the_cmdlet_produces() {
+        const ROOT: &str = r"Software\Neoxify\nrpt-write";
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let _ = hkcu.delete_subkey_all(ROOT);
+        // The rule is a *subkey* of the policy table, which is what the
+        // sweep enumerates -- so the test builds it the same way round.
+        let (rule, _) = hkcu
+            .create_subkey(format!(r"{ROOT}\{OUR_RULE_KEY}"))
+            .expect("should create the test rule key");
 
-        let made = powershell(
-            &format!(
-                "Add-DnsClientNrptRule -Namespace 'neoxify-schema-probe.invalid' \
-                 -NameServers '10.255.255.254' -Comment '{PROBE_COMMENT}' -ErrorAction Stop"
-            ),
-            super::super::CMDLET_BUDGET,
-        );
-        println!("NRPT-PROBE cmdlet: {made:?}");
-        if made.is_err() {
-            println!("NRPT-PROBE: no rule was created, so there is nothing to read");
-            return;
+        write_rule_values(&rule, "10.77.0.1").expect("should write every value");
+
+        // REG_MULTI_SZ holding one namespace: "." in UTF-16, then the
+        // string's terminator, then the list's. Four zero bytes, not two.
+        let name = rule.get_raw_value("Name").expect("Name should be set");
+        assert_eq!(name.vtype, winreg::enums::RegType::REG_MULTI_SZ);
+        assert_eq!(name.bytes, vec![b'.', 0, 0, 0, 0, 0]);
+
+        // The one that decides whether the rule does anything.
+        let config: u32 = rule.get_value("ConfigOptions").expect("ConfigOptions should be set");
+        assert_eq!(config, 8, "8 is what the cmdlet wrote; any other value pins nothing");
+
+        let version: u32 = rule.get_value("Version").expect("Version should be set");
+        assert_eq!(version, 2);
+
+        let servers: String = rule.get_value("GenericDNSServers").unwrap();
+        assert_eq!(servers, "10.77.0.1");
+
+        // The tag the teardown sweeps on. A rule we can create and
+        // cannot remove is the fault that strands a machine's DNS.
+        let comment: String = rule.get_value("Comment").unwrap();
+        assert_eq!(comment, NRPT_COMMENT);
+        assert_eq!(count_tagged_rules(&hkcu, &[ROOT], NRPT_COMMENT), Ok(1));
+
+        // Present and empty, as Windows leaves them.
+        for name in ["DisplayName", "IPSECCARestriction"] {
+            let value: String = rule.get_value(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(value.is_empty(), "{name} should be present and empty");
         }
 
-        let hklm = RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
-        match hklm.open_subkey_with_flags(LOCAL, KEY_READ) {
-            Ok(parent) => {
-                for name in parent.enum_keys().filter_map(Result::ok) {
-                    let Ok(rule) = parent.open_subkey(&name) else { continue };
-                    let comment: String = rule.get_value("Comment").unwrap_or_default();
-                    if comment != PROBE_COMMENT {
-                        continue;
-                    }
-                    println!("NRPT-PROBE key: {name}");
-                    for (vname, data) in rule.enum_values().filter_map(Result::ok) {
-                        // UTF-16 decoded by hand rather than through a
-                        // trait this crate may not implement: the point
-                        // is to read the values, not to be elegant about
-                        // it, and a probe that does not compile tells me
-                        // nothing.
-                        let wide: Vec<u16> = data
-                            .bytes
-                            .chunks_exact(2)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                            .collect();
-                        let text = String::from_utf16_lossy(&wide);
-                        println!(
-                            "NRPT-PROBE   {vname} vtype={:?} bytes={:?} utf16={text:?}",
-                            data.vtype, data.bytes
-                        );
-                    }
-                }
-            }
-            Err(e) => println!("NRPT-PROBE could not open {LOCAL}: {e}"),
-        }
-
-        // Removed by our own sweep, which is also a check that the
-        // registry path can delete what the cmdlet created.
-        let swept = remove_tagged_rules(&hklm, &[LOCAL], PROBE_COMMENT);
-        println!("NRPT-PROBE swept: {swept:?}");
+        drop(rule);
+        let _ = hkcu.delete_subkey_all(ROOT);
     }
 
     /// The regression this whole change is about.
