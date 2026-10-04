@@ -12,11 +12,22 @@ not carry anything between them.
 
 ## Where this repo lives
 
-`/Users/alihajipoor/Developer/neoconnect`. **Not** the old path under
-`~/Desktop/Claude/Neoxify/`.
+Two checkouts, one per machine (see *Two machines again* below):
 
-It was moved on 2026-09-23 because macOS syncs Desktop to iCloud, and
-that actively corrupts a build tree. Two distinct failures in one day:
+- **Windows (the main machine):** `C:\Users\aliha\Claude\neoconnect`.
+  **Not** under the Desktop: on that PC the Desktop is itself a
+  OneDrive folder (`C:\Users\aliha\OneDrive\Desktop`), and a synced
+  folder is the wrong place for a build tree. Moving the checkout out
+  of it with `Move-Item` fell back to copy-and-delete and stalled on
+  pnpm's `node_modules` junctions; `robocopy /MOVE` finished it, and
+  afterwards `target\` needed a `cargo clean` because Tauri's build
+  output records absolute paths.
+- **Mac:** `/Users/alihajipoor/Developer/neoconnect`. **Not** the old
+  path under `~/Desktop/Claude/Neoxify/`.
+
+The Mac copy was moved on 2026-09-23 because macOS syncs Desktop to
+iCloud, and that actively corrupts a build tree. Two distinct failures
+in one day:
 
 - **Eviction.** Under disk pressure macOS turns file contents into
   `dataless` placeholders. 97 tracked files and part of `node_modules`
@@ -40,35 +51,64 @@ instead and copy back only what is gitignored and expensive -- the Go
 xcframework (`plugins/vpn/tunnel/Frameworks`) and the fetched
 `seed-bundle.json`. That took two minutes.
 
-## One machine now — read this first
+## Two machines again — read this first
 
-Until 2026-08-30 work ran on two machines in parallel: a **Windows** box
-(desktop client, backend, panel, installer, Android) and a **MacBook**
-(iOS). **The Windows machine is gone.** Everything now runs from the
-Mac.
+From 2026-08-30 to 2026-10-04 everything ran from the Mac, because the
+old Windows box was gone. **Since 2026-10-04 there is a Windows PC
+again, and it is the main machine**: the desktop client, the service,
+and day-to-day work. The Mac stays for what only it can do -- Xcode,
+the Apple Developer ID and the iOS signing certificates. Setting up a
+new Windows machine is written down in `docs/new-machine-setup.md`.
 
-What that changes, concretely:
+What carries over from the one-machine period, unchanged:
 
 - **The ownership table is retired.** No area belongs to another
   session. Nothing is "held" for anyone.
-- **The two-machine journal protocol is retired.** See
-  `docs/journal/README.md` — there is one log now.
-- **The test rig is gone.** `Neoxify-Test2` (VirtualBox), the packet
-  captures, and the `C:/nxcme` worktree all lived on that machine. This
+- **One journal.** See `docs/journal/README.md` — there is one log.
+- **The test rig is still gone.** `Neoxify-Test2` (VirtualBox), the
+  packet captures, and the `C:/nxcme` worktree lived on the old Windows
+  box, and having a Windows PC again does not bring them back. This
   matters more than anything else in this file; see *How work is
   expected to be done here* below.
-- **Fleet SSH keys are gone** (`ovh_neo`, `azs_vps`, `neo_tr1`).
-  Node access has to be re-established before any node-side work.
+- **Fleet SSH keys** (`ovh_neo`, `azs_vps`, `neo_tr1`) went with the
+  old box. Node access has to be re-established before any node-side
+  work.
 
-`docs/journal/log.md` records the full recovery assessment, including
-what was lost and what was recovered.
+`docs/journal/log.md` records the 2026-08-30 recovery assessment,
+including what was lost and what was recovered.
 
-### What can and cannot be built here
+### What can be built where
 
-The Mac **can type-check** the Windows desktop service, and cannot build
-or run it. `cargo check` does not link, so with the
-`x86_64-pc-windows-gnu` target and mingw-w64 supplying the C
-cross-compiler `ring` needs:
+**On the Windows PC, everything in `apps/desktop-windows` builds and
+runs its tests**, which it could not do anywhere for five weeks:
+
+```bash
+cd apps/desktop-windows
+powershell -ExecutionPolicy Bypass -File src-tauri\scripts\fetch-binaries.ps1
+cargo check --workspace --all-targets
+cargo test --workspace
+pnpm test
+```
+
+`fetch-binaries.ps1` has to have run once before `--workspace` will
+check, because the Tauri crate's build script refuses to run until
+every bundled resource is on disk. Two Windows-only traps:
+
+- **`pnpm test` fails under the default shell.** Its `pretest` hook is
+  written `VAR=1 node ...`, which `cmd.exe` cannot run. Point pnpm at
+  Git Bash first: `$env:npm_config_script_shell = 'C:\Program
+  Files\Git\bin\bash.exe'`. CI never hits this, because it runs the
+  desktop JS tests on Linux. Use `pnpm test`, never `npx vitest` -- the
+  hook patches generated files, and skipping it fails a capability-scope
+  test on a perfectly good checkout.
+- **Socket teardown needs a concurrent test.** A `try_clone` of a
+  socket was measured losing sight of its connection under load; a
+  single-instance test passed every time while 8 to 20 of 32 concurrent
+  stops failed. See `docs/split-tunnel-rewrite.md`.
+
+**On the Mac, the Windows service type-checks and nothing more.**
+`cargo check` does not link, so with the `x86_64-pc-windows-gnu` target
+and mingw-w64 supplying the C cross-compiler `ring` needs:
 
 ```bash
 cd apps/desktop-windows
@@ -79,16 +119,9 @@ cargo check --target x86_64-pc-windows-gnu -p neoconnect-service --all-targets
 cargo check --target x86_64-pc-windows-gnu -p neoconnect-ipc --all-targets
 ```
 
-Those two crates only. **`neoconnect-desktop` (the Tauri crate) does not
-check here** -- its build script refuses to run until every bundled
-resource is on disk, and fetching those is a CI step. `--workspace` fails
-for that reason and not because of your change.
-
-That catches every type and borrow error before CI does, on a crate whose
-round trip is otherwise twenty minutes. It does **not** link and does
-**not** run -- `windivert-sys` links against `WinDivert.lib`, so the test
-binary still needs Windows and `cargo test` here is not an option. Check
-locally to know it compiles; read the desktop job to know the tests pass.
+Those two crates only -- the Tauri crate needs the bundled resources --
+and `cargo test` is not an option there, since `windivert-sys` links
+against `WinDivert.lib`.
 
 iOS needs a full Xcode (not Command Line Tools). But **every release workflow runs on a
 GitHub-hosted runner**, so shipping does not depend on local toolchains:
@@ -101,23 +134,22 @@ GitHub-hosted runner**, so shipping does not depend on local toolchains:
 | iOS (compile only) | `ci-ios.yml` | `macos-latest` | push to `main` |
 | Lint/typecheck/build/test | `ci.yml` | ubuntu + `windows-latest` | push to `main`/`claude/**`/`rig/**`, PR to `main`, `workflow_dispatch` |
 
-So: **releases are unaffected by losing the Windows box.** What was lost
-is the ability to *debug* the desktop client locally and to *prove*
-anything against real traffic.
-
 `ci.yml` runs on `main`, on PRs to `main`, and on pushes to `claude/**`
-and `rig/**`. That branch coverage is load-bearing rather than a
-convenience: **CI is the only way this machine can verify a desktop
-change at all.** `workflow_dispatch` covers anything on a different
-branch name — that escape hatch exists because the desktop job once sat
-broken from the day it was added, only testable by merging to main.
+and `rig/**`. A branch named anything else gets no CI at all, silently;
+`workflow_dispatch` is the escape hatch, and it exists because the
+desktop job once sat broken from the day it was added, only testable by
+merging to main.
 
-So the working rule for `apps/desktop-windows/**`: write it, push it,
-and read the desktop job. Do not call such a change verified on the
-strength of review alone.
+So the working rule for `apps/desktop-windows/**`: **verify it locally
+on the Windows PC first** -- seconds, where a CI round trip is about
+sixteen minutes -- then push once per meaningful chunk and read the
+desktop job before merging. Windows runners bill at 2x and twenty
+pushes in one session once exhausted the Actions quota mid-release.
+Neither a local pass nor a green job is evidence about real traffic;
+that still needs the rig.
 
-Backend, panel, web portal and the Go agent all build and test locally
-on the Mac once the toolchains are installed.
+Backend, panel, web portal and the Go agent build and test on either
+machine once the toolchains are installed.
 
 ## How work is expected to be done here
 
@@ -163,9 +195,11 @@ Client-side changes and new releases are fine.
   on the desktop client and a hotfix has to be cuttable the minute it is
   needed.
 - Work on a branch, push small commits often, merge when verified.
-- Two branches are open and unmerged: `claude/concurrent-multi-exit-v2`
-  and `rig/cme-v2-verify`. The second carries the measurement run for
-  the first. Read their journal entries before touching either.
+- `claude/service-rewrite` is the open branch: the Windows service
+  rewrite (`docs/windows-service-rewrite.md`) and, inside it, the
+  split-tunnel rewrite (`docs/split-tunnel-rewrite.md`, whose *Where it
+  stands* section lists what has landed). `claude/concurrent-multi-exit-v2`
+  and `rig/cme-v2-verify`, named here before, are both merged.
 
 ## Versions and tags
 
@@ -180,7 +214,7 @@ Tag prefixes are load-bearing and must not be shared: `desktop-v*`,
 prefix, and a desktop release once hijacked the agent installer's
 download URL precisely because they collided.
 
-Current: desktop `0.9.36`, mobile `0.2.18`, agent `v0.2.9` — each
+Current: desktop `0.9.41`, mobile `0.2.21`, agent `v0.2.9` — each
 matching its latest released tag.
 
 ## iOS
