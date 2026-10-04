@@ -31,6 +31,43 @@ const ENDPOINT_TIMEOUT_MS = 8_000;
  * Throws if none answered, so the callers below keep their existing
  * "could not reach Neoxify" handling unchanged.
  */
+/** Walks the endpoints, one at a time, and returns the first that answers.
+ *
+ * The shape every request had before 0.9.39, kept for the ones that must
+ * not be duplicated. "Answers" means the transport completed -- any HTTP
+ * status counts, because a 401 is the server telling us the password was
+ * wrong and must not send us looking for a mirror that says something
+ * nicer.
+ *
+ * Each address gets its own `ENDPOINT_TIMEOUT_MS`. That was a real
+ * problem for the pre-connect config refresh, whose own budget is
+ * shorter than one endpoint's timeout, so the refresh expired inside the
+ * first address and never tried the rest. That path is a GET and still
+ * races; nothing here is inside a shorter budget.
+ */
+async function fetchOneEndpointAtATime(
+  path: string,
+  init: RequestInit,
+  endpoints: string[],
+): Promise<Response> {
+  let lastError: unknown;
+  for (const base of endpoints) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ENDPOINT_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${base}${path}`, { ...init, signal: controller.signal });
+      void rememberEndpoint(base);
+      void maybeRefreshBundle(base);
+      return response;
+    } catch (err) {
+      lastError = err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError ?? new Error("no API endpoint answered");
+}
+
 async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Response> {
   const endpoints = await apiEndpoints();
   if (endpoints.length === 0) throw new Error("no API endpoint is configured");
@@ -59,6 +96,31 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
   // round trip rather than in however many dead addresses precede the
   // live one. A config refresh is a handful of small GETs; running them
   // together is well within what the network and the service will carry.
+  // Raced only when racing is safe, which means only when the request
+  // can be sent more than once without the server minding.
+  //
+  // A race sends the request to *every* mirror. For a config GET that is
+  // the whole point. For a sign-in it means one click becomes eleven
+  // login attempts, and that breaks login in two ways at once. The
+  // proof-of-work challenge is single-use, so the first request to
+  // arrive spends it and the server answers the rest with 400 "this
+  // security check was already used" -- refused before any password
+  // hashing, so those 400s come back *faster* than the one real answer
+  // and win the race. And the endpoint is throttled at five attempts a
+  // minute per address, so a single click is already over budget and
+  // starts collecting 429s.
+  //
+  // So anything that is not a plain read goes to one endpoint at a
+  // time, which is what 0.9.38 did for every request and what sign-in
+  // has always needed. The endpoint list and its failover are
+  // unchanged -- a blocked address still steps to the next one -- it is
+  // only the simultaneity that is withdrawn, and only where it was
+  // never safe.
+  const method = (init.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") {
+    return await fetchOneEndpointAtATime(path, init, endpoints);
+  }
+
   const controllers = endpoints.map(() => new AbortController());
   const timers = controllers.map((c) => setTimeout(() => c.abort(), ENDPOINT_TIMEOUT_MS));
 
