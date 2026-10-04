@@ -653,7 +653,12 @@ impl Engines {
         };
 
         let log_dir = self.config_dir.clone();
-        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir) {
+        // The token for the operation in flight, handed to the one
+        // subsystem that never had one. Every wait inside the bring-up
+        // now unwinds on a disconnect instead of holding the engine
+        // state for the ~38 seconds those waits add up to.
+        let cancel = current_token();
+        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir, &cancel) {
             let _ = self.disconnect();
             return Err(e);
         }
@@ -1294,7 +1299,22 @@ const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 /// tunnel now. `HELPER_BUDGET` bounds the wait, but bounded is not the
 /// same as immediate, and Disconnect is the one request that should
 /// never queue behind anything. See `pipe::dispatch`.
-static ABANDON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The operation currently in flight, as a token rather than a flag.
+///
+/// Still one global slot, which is the thing the rewrite is working
+/// towards removing -- but a token can be *handed to* code that needs to
+/// poll it, and a bare `static AtomicBool` could only be read by code
+/// that knew the static existed. That is the whole difference, and it is
+/// why the split tunnel never checked the flag once across a
+/// thirty-eight second window: nothing was ever passed to it.
+///
+/// A `std::sync::Mutex` holding a clonable token, so `begin_operation`
+/// can replace it outright. Replacing rather than resetting is what
+/// stops one operation clearing another's cancellation -- the old flag's
+/// defining bug, where a retrying connect wiped the abandon a customer's
+/// disconnect had just set.
+static ABANDON: std::sync::Mutex<Option<crate::lifecycle::cancel::CancelToken>> =
+    std::sync::Mutex::new(None);
 
 /// Asks the operation in flight to stop waiting and fail.
 ///
@@ -1302,18 +1322,49 @@ static ABANDON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// waits on something outside itself, so the operation unwinds through
 /// its own error paths and leaves the machine in a state it chose.
 pub fn abandon_current_operation() {
-    ABANDON.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(slot) = ABANDON.lock() {
+        if let Some(token) = slot.as_ref() {
+            token.cancel();
+        }
+    }
 }
 
 /// Clears the flag. Called by every request once it holds the lock, so
 /// an abandonment aimed at the previous operation cannot be inherited by
 /// the next one.
 pub fn begin_operation() {
-    ABANDON.store(false, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut slot) = ABANDON.lock() {
+        *slot = Some(crate::lifecycle::cancel::CancelToken::new());
+    }
+}
+
+/// The token for the operation in flight, for handing to code that has
+/// to poll it.
+///
+/// Returns a cancelled token when there is no operation, which is the
+/// safe direction: code that asks for a token outside an operation is
+/// code that should not be starting long work.
+pub(super) fn current_token() -> crate::lifecycle::cancel::CancelToken {
+    match ABANDON.lock() {
+        Ok(slot) => slot.clone().unwrap_or_else(|| {
+            let spent = crate::lifecycle::cancel::CancelToken::new();
+            spent.cancel();
+            spent
+        }),
+        Err(_) => {
+            let spent = crate::lifecycle::cancel::CancelToken::new();
+            spent.cancel();
+            spent
+        }
+    }
 }
 
 fn abandoned() -> bool {
-    ABANDON.load(std::sync::atomic::Ordering::SeqCst)
+    ABANDON
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|t| t.is_cancelled()))
+        .unwrap_or(false)
 }
 
 /// What an abandoned operation reports.

@@ -188,7 +188,11 @@ pub(crate) fn delete_rule() {
 /// afterwards -- the relay refuses anything with no recorded flow, which
 /// is correct and does not matter here, because the handshake completing
 /// is the whole answer.
-pub fn wait_until_reachable(local: Ipv4Addr, tcp_port: u16) -> Result<(), String> {
+pub fn wait_until_reachable(
+    local: Ipv4Addr,
+    tcp_port: u16,
+    cancel: &crate::lifecycle::cancel::CancelToken,
+) -> Result<(), String> {
     const BUDGET: Duration = Duration::from_secs(8);
     const STEP: Duration = Duration::from_millis(100);
     const ATTEMPT: Duration = Duration::from_millis(400);
@@ -197,6 +201,11 @@ pub fn wait_until_reachable(local: Ipv4Addr, tcp_port: u16) -> Result<(), String
     let deadline = Instant::now() + BUDGET;
     let mut last = String::from("never attempted");
     while Instant::now() < deadline {
+        // Eight seconds of waiting for a socket to answer, and before
+        // this it could not be interrupted. A customer pressing
+        // Disconnect during a connect waited it out along with
+        // everything else in this file.
+        cancel.check().map_err(|c| c.to_string())?;
         match TcpStream::connect_timeout(&target, ATTEMPT) {
             Ok(stream) => {
                 drop(stream);

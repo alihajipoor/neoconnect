@@ -1148,6 +1148,7 @@ impl SplitTunnel {
         adapter_name: &str,
         node: Ipv4Addr,
         log_dir: &Path,
+        cancel: &crate::lifecycle::cancel::CancelToken,
     ) -> Result<(), String> {
         self.stop();
         if !self.wants_interception() {
@@ -1159,7 +1160,7 @@ impl SplitTunnel {
         // route writes to it.
         let log_path = log_dir.join(LOG_FILE);
 
-        let tunnel_adapter = wait_for_addressed_adapter(adapter_name)?;
+        let tunnel_adapter = wait_for_addressed_adapter(adapter_name, cancel)?;
         let tunnel_address = tunnel_adapter
             .ipv4
             .ok_or_else(|| format!("{adapter_name} came up without an address"))?;
@@ -1250,7 +1251,7 @@ impl SplitTunnel {
         // when it matters.
         proxy::set_relay_log(log_path.clone());
 
-        if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port) {
+        if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port, cancel) {
             relays.stop();
             let mut route = route;
             route.remove();
@@ -1650,9 +1651,15 @@ fn install_ipv6_app_block(
 }
 
 /// Waits for an adapter to exist *and* to have an address.
-fn wait_for_addressed_adapter(name: &str) -> Result<adapters::Adapter, String> {
+fn wait_for_addressed_adapter(
+    name: &str,
+    cancel: &crate::lifecycle::cancel::CancelToken,
+) -> Result<adapters::Adapter, String> {
     let deadline = std::time::Instant::now() + ADAPTER_WAIT;
     loop {
+        // Up to ten seconds, and the longest single wait in the
+        // bring-up. Uninterruptible before this.
+        cancel.check().map_err(|c| c.to_string())?;
         match adapters::find_by_name(name) {
             Ok(Some(adapter))
                 if adapter
