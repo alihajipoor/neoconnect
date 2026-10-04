@@ -87,6 +87,9 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
     void maybeRefreshBundle(base);
     return response;
   } catch (err) {
+    // Nothing won, so there is no body anyone is still reading and
+    // every straggler can be cut loose here.
+    controllers.forEach((c) => c.abort());
     // AggregateError when every endpoint failed. Its `errors` carries
     // one entry per address, which is more than the caller needs, so the
     // first is surfaced to keep the existing "could not reach Neoxify"
@@ -95,8 +98,19 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
       err instanceof AggregateError ? (err.errors as unknown[])[0] : err;
     throw first ?? new Error("no API endpoint answered");
   } finally {
+    // Timers only. Aborting every controller here is what broke login
+    // in 0.9.39: `return response` runs this block *before* the value
+    // reaches the caller, so the winner was aborted along with the
+    // losers -- while its body was still unread. `Promise.any` resolves
+    // when the headers arrive, not when the body does, so the caller's
+    // `response.json()` was left waiting on a stream that had just been
+    // cancelled. The sign-in button sat on "Signing in..." for ever and
+    // nginx recorded 499 for the winning request as well as the losing
+    // ones, because the client had indeed hung up first.
+    //
+    // The losers are already aborted in the success path above, where
+    // the winner is known and can be spared.
     timers.forEach(clearTimeout);
-    controllers.forEach((c) => c.abort());
   }
 }
 
