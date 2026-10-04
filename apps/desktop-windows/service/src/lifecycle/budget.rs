@@ -63,6 +63,67 @@ pub fn violations<'a>(parent: &Budget, children: &'a [Budget]) -> Vec<&'a Budget
     children.iter().filter(|c| !c.fits_inside(parent)).collect()
 }
 
+/// A point in time the whole operation has to answer by.
+///
+/// The static check above catches a stage whose *ceiling* exceeds its
+/// parent's. It cannot catch the other half of the same mistake, which
+/// is what actually reaches customers: stages that each fit on their own
+/// and overrun once they run in sequence. A WireGuard connect waits up
+/// to 45 seconds for the old tunnel service to go, then spends up to 15
+/// installing the new one, then starts the split tunnel -- three
+/// defensible numbers that add up to an answer the app stopped waiting
+/// for half a minute ago.
+///
+/// So the ceilings stay as ceilings and a deadline is carried alongside
+/// the cancellation token. Each wait asks for the shorter of its own
+/// ceiling and whatever is left, which means the last stage of a slow
+/// connect gets the time that is actually available rather than the time
+/// its author imagined it would have.
+#[derive(Debug, Clone, Copy)]
+pub struct Deadline {
+    at: std::time::Instant,
+}
+
+impl Deadline {
+    /// A deadline `budget` from now.
+    pub fn starting_now(budget: Duration) -> Self {
+        Self { at: std::time::Instant::now() + budget }
+    }
+
+    /// How long is left, saturating at zero.
+    ///
+    /// Zero rather than a negative or a panic: a stage that asks after
+    /// the deadline has passed should get an answer it can act on, and
+    /// "you have no time" is that answer.
+    pub fn remaining(&self) -> Duration {
+        self.at.saturating_duration_since(std::time::Instant::now())
+    }
+
+    pub fn passed(&self) -> bool {
+        self.remaining().is_zero()
+    }
+
+    /// The shorter of a stage's own ceiling and what is left.
+    ///
+    /// The one method the engine waits actually call. A stage keeps its
+    /// own ceiling for the case where it is the only thing running, and
+    /// gives that ceiling up when the operation around it has already
+    /// spent the time.
+    pub fn clamp(&self, ceiling: Duration) -> Duration {
+        ceiling.min(self.remaining())
+    }
+}
+
+/// What a whole connect may spend before the app stops listening.
+///
+/// Seven seconds under [`APP_REPLY_DEADLINE`], which is not a round
+/// number chosen for comfort: the reply still has to be serialised and
+/// cross a named pipe, the app's own timer starts before the request is
+/// written, and a connect that answers at 44.9 seconds is a connect the
+/// customer sees fail. The headroom is the difference between "slow but
+/// it worked" and "it timed out", and those are not the same product.
+pub const CONNECT_BUDGET: Budget = Budget::new("a whole connect", Duration::from_secs(38));
+
 /// What the app waits for a reply to one request.
 ///
 /// `REPLY_TIMEOUT` in the Tauri layer. The ceiling every per-request
@@ -136,6 +197,55 @@ mod tests {
         assert!(
             !per_endpoint.fits_inside(&refresh),
             "this is the arithmetic that stopped Windows reaching the control plane"
+        );
+    }
+
+    #[test]
+    fn the_connect_budget_leaves_the_app_headroom() {
+        assert!(CONNECT_BUDGET.fits_inside(&APP_REPLY_DEADLINE));
+        let headroom = APP_REPLY_DEADLINE.limit - CONNECT_BUDGET.limit;
+        assert!(
+            headroom >= Duration::from_secs(5),
+            "a connect that answers on the app's last millisecond reads as a failure"
+        );
+    }
+
+    /// The case the static check cannot see: stages that each fit and
+    /// do not fit in sequence.
+    #[test]
+    fn a_deadline_clamps_a_later_stage_to_what_is_left() {
+        let deadline = Deadline::starting_now(Duration::from_millis(100));
+        // A stage whose own ceiling is far longer than the operation has.
+        let granted = deadline.clamp(Duration::from_secs(45));
+        assert!(
+            granted <= Duration::from_millis(100),
+            "a stage was granted {granted:?}, which is more than the operation had"
+        );
+    }
+
+    #[test]
+    fn a_stage_inside_a_generous_deadline_keeps_its_own_ceiling() {
+        let deadline = Deadline::starting_now(Duration::from_secs(60));
+        assert_eq!(deadline.clamp(Duration::from_secs(5)), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_passed_deadline_grants_nothing_rather_than_panicking() {
+        let deadline = Deadline::starting_now(Duration::ZERO);
+        assert!(deadline.passed());
+        assert_eq!(deadline.remaining(), Duration::ZERO);
+        assert_eq!(deadline.clamp(Duration::from_secs(45)), Duration::ZERO);
+    }
+
+    /// The three engine ceilings, run in the sequence a WireGuard
+    /// connect actually runs them in, against the budget for the whole
+    /// connect. This is the arithmetic the per-stage check misses.
+    #[test]
+    fn the_engine_ceilings_in_sequence_overrun_the_connect_budget() {
+        let sequence = WIREGUARD_SERVICE_GONE.limit + Duration::from_secs(15);
+        assert!(
+            sequence > CONNECT_BUDGET.limit,
+            "if this stopped being true the clamping below could be dropped; it has not"
         );
     }
 

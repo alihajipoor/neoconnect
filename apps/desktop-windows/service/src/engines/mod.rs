@@ -1309,9 +1309,9 @@ pub(crate) const HELPER_BUDGET: std::time::Duration = std::time::Duration::from_
 /// (`STATUS_LOCK_WAIT` in `pipe::dispatch`, with an unlocked OS-visible
 /// answer behind it), and `Disconnect` waits two seconds and then
 /// cancels the running operation's token, which [`wait_within`] reads
-/// every 50ms and kills the child on. A budget is still needed -- it is what
-/// turns an *unbounded* wait into a failure -- but it is a backstop now
-/// rather than the thing keeping the service answerable.
+/// every 50ms and kills the child on. A budget is still needed -- it is
+/// what turns an *unbounded* wait into a failure -- but it is a backstop
+/// now rather than the thing keeping the service answerable.
 ///
 /// What chooses 35 specifically is one number up, not anything below:
 /// the app abandons a request after 45s (`REPLY_TIMEOUT`,

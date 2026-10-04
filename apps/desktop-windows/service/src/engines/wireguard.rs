@@ -135,12 +135,12 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
 ///
 /// Forty-five seconds instead. This is not a process budget -- nothing
 /// is spawned, it is an SCM poll -- so the argument about one wedged
-/// child making the service deaf does not apply, and the loop reads
-/// the caller's token on every pass so a customer pressing Disconnect ends it
-/// immediately whatever the ceiling says. What is left is only: how long
-/// before "the service is still stopping" becomes "the service is never
-/// stopping". A minute is generous for the first and still short of the
-/// second.
+/// child making the service deaf does not apply, and the loop reads the
+/// caller's token on every pass, so a customer pressing Disconnect ends
+/// it immediately whatever the ceiling says. What is left is only: how
+/// long before "the service is still stopping" becomes "the service is
+/// never stopping". Forty-five seconds is generous for the first and
+/// still well short of the second.
 pub(super) const TUNNEL_SERVICE_GONE_WITHIN: Duration = Duration::from_secs(45);
 
 /// How often the service manager is asked whether it has gone yet.
