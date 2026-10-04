@@ -46,6 +46,13 @@ export const KEEP_PER_KEY = 8;
  */
 export const KEEP_KEYS = 400;
 
+/** How far back a prune cuts once the ceiling is reached.
+ *
+ * Three quarters, so roughly a hundred inserts pass before the next
+ * sort rather than every single one of them paying for it.
+ */
+export const PRUNE_TO = 300;
+
 /** How fast evidence stops counting.
  *
  * Twelve hours, so something that worked this morning still carries
@@ -78,14 +85,20 @@ export function recordAttempt(
 
   if (Object.keys(next).length <= KEEP_KEYS) return next;
 
-  // Oldest-touched first, by the newest attempt each key holds.
+  // Pruned down to the low-water mark, not back to the ceiling.
+  //
+  // Trimming to exactly `KEEP_KEYS` leaves the map full, so the *next*
+  // insert is over again and sorts every entry a second time -- and so
+  // does the one after that, for ever. Cutting deeper buys a run of
+  // cheap inserts before the next sort, which turns a cost paid on
+  // every call into one paid occasionally.
   //
   // Indexed rather than `.at(-1)`: these tsconfigs target ES2021 and
   // raising the lib would reach every `@shared` consumer, which is a
   // lot of blast radius for one array access.
   const newest = (a: Attempt[]): number => (a.length === 0 ? 0 : a[a.length - 1].at);
   const byRecency = Object.entries(next).sort((a, b) => newest(b[1]) - newest(a[1]));
-  return Object.fromEntries(byRecency.slice(0, KEEP_KEYS));
+  return Object.fromEntries(byRecency.slice(0, PRUNE_TO));
 }
 
 /** How well this combination has been going, or `null` for no evidence.
