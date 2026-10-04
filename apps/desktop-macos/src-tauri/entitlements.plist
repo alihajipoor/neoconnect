@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Container-app entitlements for the Developer ID build.
+
+  The tunnel itself is NOT entitled here. It lives in a System
+  Extension with its own entitlements, and on a Developer ID build that
+  extension needs the -systemextension variants of the Network Extension
+  keys rather than the plain ones an App Store build uses. Those go in
+  the extension's own plist when it is added; putting them here would be
+  signing the wrong binary for them.
+
+  What the container app needs is the right to install that extension,
+  which is com.apple.developer.system-extension.install.
+
+  Deliberately NOT sandboxed. App Sandbox is required for the Mac App
+  Store and forbids the System Extension model entirely. The App Store
+  build uses a sandboxed .appex instead, which is a different target
+  with a different plist, not a flag flipped on this one.
+-->
+<!-- Note: a double hyphen is illegal inside an XML comment, however
+     ordinary it is as an em dash elsewhere in this codebase. plutil
+     accepts it; xmllint and Apple's AMFI parser do not, and codesign
+     then fails with "AMFIUnserializeXML: syntax error". The same
+     mistake once shipped as ITMS-91056 on a privacy manifest. -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.system-extension.install</key>
+	<true/>
+
+	<!-- Hardened runtime is mandatory for notarisation. The JIT
+	     exception is for the WebView: WKWebView runs JavaScript through
+	     JIT, and without this the renderer is killed on launch. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- Outbound network for the API and the update feed. The tunnel's
+	     own traffic does not pass through this process. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

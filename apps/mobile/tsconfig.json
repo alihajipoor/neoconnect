@@ -2,7 +2,12 @@
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // ES2021, matching the desktop app. This project compiles
+    // @shared/lib from there, including the API client that races
+    // endpoints with Promise.any and AggregateError, so the two
+    // tsconfigs have to agree about what the language provides.
+    // Chromium 85 / Safari 14, far below any Tauri v2 target.
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
 

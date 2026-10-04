@@ -30,10 +30,35 @@
 //! * config files holding private keys live in a directory ACL'd to
 //!   SYSTEM and Administrators only.
 
+/// How long the SCM is asked to wait while this service stops.
+///
+/// The teardown's worst case is dominated by WireGuard's
+/// TUNNEL_SERVICE_GONE_WITHIN (45s), with DNS clearing and the janitor on
+/// top. 90s is comfortably above that and comfortably below the
+/// three-minute preshutdown default, so a slow stop reads as progress
+/// rather than as a hang.
+const STOP_WAIT_HINT: Duration = Duration::from_secs(90);
+
+/// How long the stop path waits for the engine lock before concluding
+/// that something else is holding it and abandoning that operation.
+///
+/// Deliberately short. Whatever holds the lock at this point is work
+/// nobody is waiting for any more -- the client is gone and the service is
+/// going away -- so there is nothing to be gained by being patient.
+const STOP_LOCK_WAIT: Duration = Duration::from_secs(3);
+
+/// The second wait, after the in-flight operation has been abandoned.
+///
+/// Longer than the first because the holder now has a reason to let go:
+/// the abandon flag is polled every 50ms by the engine supervisors, and
+/// this is the window for them to notice, unwind and release.
+const STOP_LOCK_WAIT_AFTER_ABANDON: Duration = Duration::from_secs(10);
+
 mod adapters;
 mod cleanup_log;
 mod engines;
 mod gaming;
+mod lifecycle;
 mod pipe;
 mod security;
 mod split_tunnel;
@@ -44,6 +69,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 use windows_service::service::{
     ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceErrorControl,
     ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState,
@@ -506,7 +532,7 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
 
     let status_handle = service_control_handler::register(SERVICE_NAME, move |control| match control {
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-        ServiceControl::Stop | ServiceControl::Shutdown => {
+        ServiceControl::Stop | ServiceControl::Shutdown | ServiceControl::Preshutdown => {
             if let Some(tx) = shutdown_tx.take() {
                 let _ = tx.send(());
             }
@@ -524,7 +550,29 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         wait_hint: Duration::default(),
         process_id: None,
     };
-    status_handle.set_service_status(running(ServiceState::Running, ServiceControlAccept::STOP))?;
+    // STOP alone was a hole, and it was the common case rather than an
+    // edge one.
+    //
+    // The handler above has always matched `Shutdown`, but the SCM only
+    // delivers controls a service has registered for -- so with STOP
+    // alone that arm was dead code and an OS restart killed the process
+    // outright. Every reboot-while-connected was therefore an unclean
+    // exit, which is the path that strands a machine: the NRPT `.` rule
+    // and the WireGuard tunnel service both survive it, and the tunnel
+    // service is AutoStart, so it comes back at boot and retakes the
+    // default route.
+    //
+    // PRESHUTDOWN rather than SHUTDOWN, and they are mutually exclusive
+    // so it is one or the other. A shutdown control gives a service very
+    // little time on modern Windows; preshutdown is the one meant for
+    // services that need to do real work first, and this teardown can
+    // legitimately take tens of seconds -- `clear_tunnel_service` alone
+    // is bounded at TUNNEL_SERVICE_GONE_WITHIN (45s). The preshutdown
+    // timeout defaults to three minutes, which fits.
+    status_handle.set_service_status(running(
+        ServiceState::Running,
+        ServiceControlAccept::STOP | ServiceControlAccept::PRESHUTDOWN,
+    ))?;
 
     let config_dir = config_dir();
     security::create_protected_dir(&config_dir)?;
@@ -583,10 +631,74 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ = shutdown_rx => {}
         }
+
+        // End the client watches first.
+        //
+        // Each one holds a blocking thread waiting on a live client's
+        // process handle, and dropping a tokio runtime waits for its
+        // blocking pool -- so without this a service with the app still
+        // running could not finish stopping. That is the fault this
+        // whole stop path exists to remove, reached from the other
+        // direction.
+        crate::lifecycle::client_watch::stop_watching();
+
+        // Tell the SCM we are stopping, and roughly how long to allow.
+        //
+        // Without this the service stayed `Running` until the teardown
+        // below returned, and the teardown's worst case is far longer
+        // than the SCM's default 30s control timeout -- so a stop that
+        // was merely slow was reported to the caller as a failure, and
+        // `sc stop` appearing to fail is what makes a customer reach for
+        // Task Manager. A wait hint is the documented way to say "still
+        // working", and the checkpoint increments so the SCM can tell
+        // progress from a hang.
+        let _ = status_handle.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::StopPending,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 1,
+            wait_hint: STOP_WAIT_HINT,
+            process_id: None,
+        });
+
         // Leaving a tunnel up after the service that manages it has gone
         // away would strand the machine's routing table pointed at an
         // engine nothing is tracking.
-        let _ = engines.lock().await.disconnect();
+        //
+        // Bounded, because an unbounded `lock()` here could keep the
+        // process alive forever and that is precisely the "it will not
+        // die" report. Cancelling the `serving` future only stops the
+        // accept loop; the per-connection handlers and the idle watchdog
+        // are detached tasks that keep running and can hold this lock --
+        // the watchdog can hold it for up to HELPER_BUDGET on every
+        // 10s tick. `Request::Disconnect` already has an escape hatch
+        // for exactly this (wait briefly, then abandon); this path had
+        // none.
+        //
+        // On timeout we abandon the in-flight operation and try once
+        // more. If that still cannot get the lock we give up and stop
+        // anyway: a service that refuses to stop is worse than one that
+        // stops without having cleaned up, because the start-up sweep
+        // above heals the leftovers at the next boot, and this service
+        // is AutoStart. Refusing to stop heals nothing.
+        match timeout(STOP_LOCK_WAIT, engines.lock()).await {
+            Ok(mut guard) => {
+                let _ = guard.disconnect();
+            }
+            Err(_) => {
+                engines::abandon_current_operation();
+                match timeout(STOP_LOCK_WAIT_AFTER_ABANDON, engines.lock()).await {
+                    Ok(mut guard) => {
+                        let _ = guard.disconnect();
+                    }
+                    Err(_) => cleanup_log::note(
+                        "tear down at service stop",
+                        "the engine lock was still held after abandoning; leftovers will be cleared by the sweep at the next service start",
+                    ),
+                }
+            }
+        }
         // And the same for gaming mode, which has no tunnel to strand
         // but whose NRPT rules would outlive the only process that
         // knows what they are. The stub goes with them: it is the thing

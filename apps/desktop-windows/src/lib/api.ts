@@ -33,32 +33,71 @@ const ENDPOINT_TIMEOUT_MS = 8_000;
  */
 async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Response> {
   const endpoints = await apiEndpoints();
-  let lastError: unknown;
+  if (endpoints.length === 0) throw new Error("no API endpoint is configured");
 
-  for (const base of endpoints) {
-    // Its own deadline per endpoint rather than one shared across the
-    // list: a first address that hangs would otherwise consume the whole
-    // budget and leave the working one no time to answer.
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ENDPOINT_TIMEOUT_MS);
-    try {
-      const response = await fetch(`${base}${path}`, { ...init, signal: controller.signal });
-      // Remembered before returning: the next request should start here
-      // rather than paying the blocked address's timeout again.
-      void rememberEndpoint(base);
-      // The endpoint answered, so it can also serve the next address
-      // list. This is the only trigger the bundle has; without it a
-      // published rotation never reaches a single client.
-      void maybeRefreshBundle(base);
-      return response;
-    } catch (err) {
-      lastError = err;
-    } finally {
-      clearTimeout(timer);
-    }
+  // Raced, not walked, and the sequential version is why Windows
+  // customers could not connect on networks where Android could.
+  //
+  // Each endpoint used to get its own ENDPOINT_TIMEOUT_MS of 8 seconds,
+  // tried one after another, with the comment explaining that a single
+  // hanging address must not consume the budget. The arithmetic went the
+  // other way: the pre-connect config refresh wraps this in a 6 second
+  // budget (REFRESH_BUDGET_MS), which is *shorter* than one endpoint's
+  // timeout -- so if the first address did not answer, the budget
+  // expired inside it and the other seven were never tried at all. One
+  // blocked address meant the refresh always failed.
+  //
+  // It bit Windows and not Android because the lists differ in length.
+  // The desktop build bakes in a seed bundle of eight endpoints and puts
+  // them ahead of the compiled-in base; the mobile build has no seed, so
+  // its first address is the one that works. Same code, same network,
+  // opposite outcome -- and 162 CONTROL_PLANE_UNREACHABLE reports from
+  // Windows in thirty days against 43 from Android.
+  //
+  // Racing removes the arithmetic entirely. The slowest address costs
+  // nothing because nobody waits for it, and the result arrives in one
+  // round trip rather than in however many dead addresses precede the
+  // live one. A config refresh is a handful of small GETs; running them
+  // together is well within what the network and the service will carry.
+  const controllers = endpoints.map(() => new AbortController());
+  const timers = controllers.map((c) => setTimeout(() => c.abort(), ENDPOINT_TIMEOUT_MS));
+
+  const attempts = endpoints.map(async (base, i) => {
+    const response = await fetch(`${base}${path}`, { ...init, signal: controllers[i].signal });
+    // Only a real answer counts as a win. A request that fails rejects,
+    // and Promise.any moves on to whichever endpoint actually replied.
+    return { base, response };
+  });
+
+  try {
+    const { base, response } = await Promise.any(attempts);
+
+    // Everyone else can stop; the answer is in hand.
+    controllers.forEach((c, i) => {
+      if (endpoints[i] !== base) c.abort();
+    });
+
+    // Remembered so the next request starts here. With a race this is no
+    // longer about avoiding a timeout -- it is about not opening eight
+    // connections for every request once a good address is known.
+    void rememberEndpoint(base);
+    // The endpoint answered, so it can also serve the next address list.
+    // This is the only trigger the bundle has; without it a published
+    // rotation never reaches a single client.
+    void maybeRefreshBundle(base);
+    return response;
+  } catch (err) {
+    // AggregateError when every endpoint failed. Its `errors` carries
+    // one entry per address, which is more than the caller needs, so the
+    // first is surfaced to keep the existing "could not reach Neoxify"
+    // handling unchanged.
+    const first =
+      err instanceof AggregateError ? (err.errors as unknown[])[0] : err;
+    throw first ?? new Error("no API endpoint answered");
+  } finally {
+    timers.forEach(clearTimeout);
+    controllers.forEach((c) => c.abort());
   }
-
-  throw lastError ?? new Error("no API endpoint is configured");
 }
 
 /** The failure half of every result shape below.

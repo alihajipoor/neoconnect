@@ -1,3 +1,4 @@
+import { attemptedEndpoints } from "./api-endpoints";
 import { reportAttempt } from "./attempts";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
@@ -282,6 +283,11 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   void reportAttempt({
     kind: "CONNECT",
     outcome: "CONTROL_PLANE_UNREACHABLE",
+    // Which addresses were in play when nothing answered. Without this
+    // the row says "the control plane was unreachable" and nothing
+    // about *what* was unreachable, which is the difference between a
+    // blocked domain and a client carrying the wrong mirror list.
+    apiEndpoint: await attemptedEndpoints(),
     reason:
       `pre-connect config refresh failed (${detail}); connecting on cached credentials ` +
       (ageMs === null ? "of unknown age" : `${Math.round(ageMs / 60_000)} min old`) +

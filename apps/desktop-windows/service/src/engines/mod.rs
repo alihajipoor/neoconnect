@@ -13,6 +13,7 @@
 pub(crate) mod dns;
 mod ikev2;
 pub(crate) mod ipv6_block;
+mod hard_stop;
 mod janitor;
 mod ras;
 mod openvpn;
@@ -51,11 +52,18 @@ enum Active {
     /// there is no child process for us to hold -- liveness is queried
     /// from the service manager instead.
     WireguardTunnel,
-    /// Windows owns the IKEv2 tunnel: it is a RAS phonebook entry, not a
-    /// process, so there is nothing here to hold. Liveness is asked of
-    /// the operating system, the same way WireGuard's is asked of the
-    /// service manager.
-    Ikev2,
+    /// Windows owns the IKEv2 tunnel, so liveness is asked of the
+    /// operating system the same way WireGuard's is asked of the service
+    /// manager -- but the dial's own connection handle is held here.
+    ///
+    /// It used to be discarded, and the tunnel hung up later by running
+    /// `rasdial.exe <entry> /disconnect`. A process launch is 4.4 to 6.5
+    /// seconds on the machines this was measured on, which is more than
+    /// the entire budget for a disconnect. Holding the handle makes the
+    /// teardown one API call, and because `ras::Connection` hangs up in
+    /// `Drop` it also happens on the paths nobody wrote: a cancelled
+    /// connect, an early return, a panic.
+    Ikev2(ras::Connection),
     Child {
         protocol: &'static str,
         child: Child,
@@ -464,8 +472,8 @@ impl Engines {
             // route alone, and the split tunnel pins to the RAS
             // interface like it pins to any other adapter.
             ConnectProfile::Ikev2(p) => {
-                ikev2::connect(p, passive)?;
-                self.active.fill(Active::Ikev2);
+                let live = ikev2::connect(p, passive)?;
+                self.active.fill(Active::Ikev2(live));
             }
             // Both Xray protocols take the same path: one engine, one
             // adapter, one set of routes -- only the outbound differs.
@@ -734,7 +742,24 @@ impl Engines {
                 Ok(())
             }
             Some(Active::WireguardTunnel) => wireguard::disconnect(self),
-            Some(Active::Ikev2) => ikev2::disconnect(),
+            Some(Active::Ikev2(live)) => {
+                // Hanging up is the urgent half and it is now a single
+                // API call with no process behind it. Removing the
+                // phonebook entry is tidying -- it only matters so that
+                // "Neoxify" does not sit in the customer's Windows VPN
+                // list, dialable by hand -- so it stays here with the
+                // rest of the thorough work rather than on the path a
+                // customer is waiting on.
+                let code = live.hang_up();
+                let removed = ikev2::remove_entry();
+                if code != 0 {
+                    crate::cleanup_log::note(
+                        "hang up the IKEv2 tunnel",
+                        &ikev2::dial_error(code),
+                    );
+                }
+                removed
+            }
             Some(Active::Child {
                 mut child,
                 mut routes,
@@ -882,7 +907,7 @@ impl Engines {
                     Verdict::Dead
                 }
             }
-            Some(Active::Ikev2) => {
+            Some(Active::Ikev2(_)) => {
                 // Windows owns this tunnel, so its own view is the only
                 // truth available. There is no handshake to read the way
                 // WireGuard has, so health stays Unknown and the app's
@@ -957,13 +982,42 @@ impl Engines {
             // ordinary networking back, not a machine still held by a
             // redirect that has nowhere to send anything.
             Verdict::Dead => {
-                if let Some(Active::Ikev2) = self.end_session() {
+                if let Some(Active::Ikev2(_)) = self.end_session() {
                     // The phonebook entry outlives the tunnel, and
                     // somebody who is no longer connected must not be
                     // left with "Neoxify" in their Windows VPN list.
                     let _ = ikev2::disconnect();
                 }
                 self.unblock_ipv6();
+
+                // The machine-wide DNS rule outlives everything above,
+                // and leaving it is how a machine ends up with no
+                // internet at all.
+                //
+                // This arm used to stop at unblock_ipv6(), which meant
+                // an engine that died on its own left the NRPT `.` rule
+                // pointing every lookup on the machine at a resolver
+                // that no longer exists -- while reporting `false` here,
+                // so the app showed "disconnected" and the customer had
+                // no reason to press Disconnect. The idle watchdog did
+                // not catch it either: it gates on `if !up { continue; }`
+                // and status had just said down. Nothing cleared it
+                // until the next connect, an explicit disconnect, Repair,
+                // or a reboot.
+                //
+                // Unconditional, like the calls above it: this is the
+                // fail-open path. `clear()` reports its own failures
+                // through cleanup_log and returns nothing, so there is
+                // no result to handle here.
+                dns::clear();
+
+                // Same reasoning for everything else that only
+                // disconnect() reached: a dead engine can leave an
+                // orphaned xray.exe or openvpn.exe holding routes and,
+                // in OpenVPN's case, block-outside-dns filters that drop
+                // every lookup off the tunnel adapter.
+                janitor::reconcile(&self.exe_dir);
+
                 (false, None, TunnelHealth::Down)
             }
         }

@@ -171,3 +171,65 @@ mod tests {
         );
     }
 }
+
+/// A live RAS connection, hung up when it is dropped.
+///
+/// `RasDialW` hands back a handle to the connection it made, and the
+/// service used to discard it on success and hang up later by running
+/// `rasdial.exe <entry> /disconnect`. That cost a process launch on the
+/// disconnect path, and a process launch is 4.4 to 6.5 seconds on the
+/// machines this was measured on -- more than the whole budget a
+/// customer is promised for a disconnect.
+///
+/// Keeping the handle makes the teardown one API call with no process,
+/// no PowerShell and no wait. Hanging up in `Drop` rather than from a
+/// method means it also happens on the paths nobody wrote: a cancelled
+/// connect, an error return halfway through, a panic. Cleanup that lives
+/// only at the end of a successful disconnect is the defect this whole
+/// rewrite exists to remove.
+///
+/// Dropping does **not** remove the phonebook entry. That is deliberate:
+/// hanging up is urgent and belongs in the fast half of a teardown,
+/// while removing the entry is tidying and belongs in the slow half.
+/// They are separated so the customer waits only for the first.
+pub struct Connection(*mut c_void);
+
+// SAFETY: an HRASCONN is a process-wide handle, not thread-affine --
+// RasHangUpW is documented as callable from any thread, and the service
+// dials on its engine thread while teardown may run from another.
+unsafe impl Send for Connection {}
+
+impl Connection {
+    /// Takes ownership of a handle returned by `RasDialW`.
+    ///
+    /// Returns `None` for a null handle, which RAS can hand back even on
+    /// a successful-looking call.
+    pub fn from_raw(handle: *mut c_void) -> Option<Self> {
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self(handle))
+        }
+    }
+
+    /// Hangs up now, consuming the handle.
+    ///
+    /// Only needed where the result matters; otherwise let it drop.
+    pub fn hang_up(self) -> u32 {
+        let code = unsafe { ras_hang_up(self.0) };
+        // Already hung up by this call, so the Drop below must not run.
+        std::mem::forget(self);
+        code
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from RasDialW, is non-null by
+        // construction, and is hung up exactly once -- Connection is
+        // neither Clone nor Copy, and `hang_up` forgets itself.
+        unsafe {
+            ras_hang_up(self.0);
+        }
+    }
+}

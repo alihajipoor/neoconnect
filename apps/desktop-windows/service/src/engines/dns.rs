@@ -696,6 +696,33 @@ fn clear_within(budget: std::time::Duration) -> DnsCleared {
     Sweep::tunnel(&hklm).clear_within(|sweep, cleared| sweep.clear_with_cmdlets(budget, cleared))
 }
 
+/// Remove our NRPT rules using the registry alone, never a cmdlet.
+///
+/// The fast half of a teardown. The measurements this module already
+/// records make the case on their own: the registry delete is 48 to 64
+/// milliseconds, while merely *starting* PowerShell is 4.4 to 6.5
+/// seconds -- more than the whole budget a customer is promised for a
+/// disconnect. A teardown that can spawn a process is a teardown that
+/// can miss the bar on a machine that is otherwise fine.
+///
+/// [`clear`] keeps the cmdlet fallback, and that fallback exists for a
+/// real reason: "the registry could not be read" is not "there is
+/// nothing there", and collapsing the two is how a rule survives a
+/// disconnect and takes the machine's DNS with it. Nothing is given up
+/// by skipping it here, because the thorough pass runs immediately
+/// afterwards in the background and the service-start sweep catches
+/// whatever is left on the next boot. The rule is removed sooner in
+/// every ordinary case and no later in the unreadable-registry one.
+pub(super) fn clear_registry_only() -> DnsCleared {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    // The closure is the cmdlet fallback; returning `cleared` untouched
+    // is what declines it.
+    Sweep::tunnel(&hklm).clear_within(|_, cleared| cleared)
+}
+
 /// How many NRPT rules of ours exist right now, without removing any.
 ///
 /// For the diagnostics snapshot. Reads the registry directly rather than

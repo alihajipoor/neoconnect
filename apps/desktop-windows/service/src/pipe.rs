@@ -16,6 +16,8 @@
 //! [`dispatch`].
 
 use std::sync::Arc;
+
+use crate::lifecycle::client_watch::ClientWatch;
 use std::time::{Duration, Instant};
 
 use neoconnect_ipc::{Request, Response, PIPE_NAME};
@@ -82,6 +84,15 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
     let last_seen = Arc::new(Mutex::new(Instant::now()));
     spawn_idle_watchdog(Arc::clone(&engines), Arc::clone(&last_seen));
 
+    // Which process is currently being watched, so the app's
+    // connection-per-request habit does not produce a watch per
+    // request. The idle watchdog above stays as the backstop for the
+    // cases a process handle cannot cover -- a client that is alive but
+    // has stopped asking anything, which is what a wedged app looks
+    // like -- but it is no longer the only thing standing between a
+    // closed window and a tunnel nobody owns.
+    let watched: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+
     loop {
         server.connect().await?;
         let connected = server;
@@ -89,6 +100,73 @@ pub async fn serve_on(name: &str, engines: Arc<Mutex<Engines>>) -> std::io::Resu
         // reconnecting immediately after a disconnect never finds the
         // pipe missing.
         server = create_pipe_server(name, false)?;
+
+        // Watch whoever opened this, so the kernel tells us when the
+        // app stops existing.
+        //
+        // One watch at a time, keyed on the process id: the app opens a
+        // fresh connection per request, so a watch per connection would
+        // mean dozens on the same process. A new id means the app was
+        // restarted, which is the only time this is replaced.
+        //
+        // The watch is on the *process*, not the connection, which is
+        // what makes it right where the idle timer was wrong -- a
+        // connection closing is the app going quiet between requests,
+        // and a process ending is the app being gone.
+        let watched = Arc::clone(&watched);
+        // The pid is taken out before the lock is awaited, deliberately.
+        //
+        // Holding a `&ClientWatch` across an await makes the whole task
+        // non-Send: a shared reference is only Send when the type is
+        // Sync, and the watch owns a raw Win32 handle that is Send but
+        // not Sync. Marking it Sync to get past that would be widening
+        // an unsafe promise to satisfy the borrow checker, which is
+        // exactly the wrong direction. Only a `u32` crosses the await
+        // here; the watch itself is owned, Send, and moved into the task
+        // below.
+        let watch = ClientWatch::of(&connected).ok();
+        let pid = watch.as_ref().map(|w| w.pid);
+        let newly_seen = match pid {
+            Some(pid) => watched.lock().await.replace(pid) != Some(pid),
+            // The client is already gone, or the handle could not be
+            // opened. The connection will fail on its first read, and
+            // any previous watch still stands.
+            None => false,
+        };
+
+        match watch {
+            Some(watch) if newly_seen => {
+                let engines = Arc::clone(&engines);
+                tokio::spawn(async move {
+                    let signal = watch.exited().await;
+                    crate::cleanup_log::note("the app went away", &signal.reason());
+
+                    // Whatever it was doing is no longer wanted by
+                    // anyone, so stop it before asking for the lock.
+                    crate::engines::abandon_current_operation();
+
+                    let mut engines = engines.lock().await;
+                    crate::engines::begin_operation();
+
+                    // Phase one, the same one a Disconnect runs. The
+                    // customer is not waiting on this -- they have
+                    // closed the window -- but the speed is not the
+                    // point here: the point is that it happens at all,
+                    // promptly, and leaves nothing behind for them to
+                    // find in Task Manager and distrust.
+                    let report = crate::lifecycle::teardown::hard_stop(&mut *engines);
+                    crate::cleanup_log::note("teardown after the app went away", &report.summary());
+
+                    // And the thorough pass, since nothing is waiting.
+                    if let Err(message) = engines.disconnect() {
+                        crate::cleanup_log::note("thorough teardown after the app went away", &message);
+                    }
+                });
+            }
+            // Already watching this process, or there is nothing to
+            // watch. Either way there is nothing to do.
+            _ => {}
+        }
 
         let engines = Arc::clone(&engines);
         let last_seen = Arc::clone(&last_seen);
@@ -172,6 +250,81 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         line
+    }
+
+    /// What a disconnect must beat for these tests to pass.
+    ///
+    /// Ten seconds, which is nothing like the 900ms budget the hard stop
+    /// is actually held to, and deliberately so. This runs on a shared
+    /// runner alongside three hundred other tests, several of which
+    /// shell out to real Windows tooling, so a tight bound here fails on
+    /// scheduling rather than on the thing it is meant to catch -- which
+    /// it did at three seconds, on a run where everything else passed.
+    ///
+    /// What it is meant to catch overshoots this by a wide margin
+    /// anyway: a cmdlet costs 4.4 to 6.5 seconds just to start, a
+    /// tunnel-service wait is bounded at forty-five, and an unbounded
+    /// lock acquisition does not come back at all. Each of those fails
+    /// this comfortably; a busy runner does not.
+    const REPLY_MUST_BEAT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The bar, as a test: a disconnect answers in about the time it
+    /// takes to stop, not the time it takes to tidy.
+    ///
+    /// Nothing is connected here, so this measures the arm itself rather
+    /// than a real teardown -- which is the point. The old arm called
+    /// `disconnect()` and replied only when the thorough pass was done,
+    /// so its reply time was whatever the slowest leftover took: a DNS
+    /// sweep that can reach PowerShell at 4.4 to 6.5 seconds just to
+    /// start, a tunnel-service wait bounded at forty-five. The new arm
+    /// replies after phase one and leaves that behind it.
+    ///
+    /// The budget here is deliberately loose. It is not trying to prove
+    /// 900ms on a contended CI runner; it is trying to fail loudly if
+    /// somebody puts a cmdlet, a process spawn or an unbounded wait back
+    /// on the path a customer waits on, and any of those blows this by a
+    /// wide margin.
+    #[tokio::test]
+    async fn a_disconnect_is_answered_promptly() {
+        let name = r"\\.\pipe\neoconnect-test-disconnect-speed";
+        start_server(name).await;
+
+        let began = std::time::Instant::now();
+        let reply = round_trip(name, r#"{"type":"disconnect"}"#).await;
+        let took = began.elapsed();
+
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert!(
+            parsed["status"] == "ok" || parsed["status"] == "error",
+            "a disconnect must answer, got {parsed}"
+        );
+        assert!(
+            took < REPLY_MUST_BEAT,
+            "the disconnect took {took:?}; something slow is back on the reply path"
+        );
+    }
+
+    /// A second disconnect, with nothing to disconnect, must be as cheap
+    /// as the first and must not error differently.
+    ///
+    /// The app sends one defensively on startup and when switching
+    /// accounts, so this is a common path rather than an edge case, and
+    /// an arm that got slower or louder the second time would show up as
+    /// a sluggish launch.
+    #[tokio::test]
+    async fn disconnecting_twice_is_cheap_and_quiet() {
+        let name = r"\\.\pipe\neoconnect-test-disconnect-twice";
+        start_server(name).await;
+
+        let first = round_trip(name, r#"{"type":"disconnect"}"#).await;
+        let began = std::time::Instant::now();
+        let second = round_trip(name, r#"{"type":"disconnect"}"#).await;
+        let took = began.elapsed();
+
+        let a: serde_json::Value = serde_json::from_str(first.trim()).unwrap();
+        let b: serde_json::Value = serde_json::from_str(second.trim()).unwrap();
+        assert_eq!(a["status"], b["status"], "the second disconnect must read the same as the first");
+        assert!(took < REPLY_MUST_BEAT, "the second took {took:?}");
     }
 
     #[tokio::test]
@@ -479,18 +632,78 @@ async fn dispatch(request: Request, engines: &Arc<Mutex<Engines>>) -> Response {
             apps: crate::split_tunnel::running_apps(),
         },
         Request::Disconnect => {
-            let mut engines = match tokio::time::timeout(DISCONNECT_LOCK_WAIT, engines.lock()).await
-            {
-                Ok(engines) => engines,
-                Err(_) => {
-                    crate::engines::abandon_current_operation();
-                    engines.lock().await
+            // Cancel first, and before waiting for anything.
+            //
+            // Cancelling does not need the lock, so there is no reason
+            // to spend two seconds discovering that somebody else holds
+            // it before reaching the operation that holds it. The old
+            // order abandoned only *after* the wait expired, which made
+            // every mid-connect disconnect two seconds slower than it
+            // had to be -- and mid-connect is when customers press it.
+            crate::engines::abandon_current_operation();
+
+            match tokio::time::timeout(DISCONNECT_LOCK_WAIT, engines.lock()).await {
+                Ok(mut held) => {
+                    // The in-flight operation has unwound, so the
+                    // abandon is spent. Clearing it now is what stops
+                    // the teardown below cancelling itself.
+                    crate::engines::begin_operation();
+
+                    // Phase one: everything the customer waits for.
+                    // Kill, close, delete, answer -- no process, no
+                    // cmdlet, nothing polled until it disappears.
+                    let report = crate::lifecycle::teardown::hard_stop(&mut *held);
+                    if !report.within_budget() {
+                        crate::cleanup_log::note("disconnect", &report.summary());
+                    }
+                    drop(held);
+
+                    // Phase two: the thorough pass, behind them. This is
+                    // the old `disconnect()` unchanged -- it removes the
+                    // tunnel service registration, runs the janitor, and
+                    // reaches the cmdlets if the registry could not be
+                    // read. It can take forty seconds and nobody
+                    // notices, because the machine's networking came
+                    // back in phase one.
+                    let thorough = Arc::clone(engines);
+                    tokio::spawn(async move {
+                        let mut engines = thorough.lock().await;
+                        if let Err(message) = engines.disconnect() {
+                            crate::cleanup_log::note("thorough teardown after disconnect", &message);
+                        }
+                    });
+
+                    if report.all_succeeded() {
+                        Response::Ok
+                    } else {
+                        Response::Error { message: report.summary() }
+                    }
                 }
-            };
-            crate::engines::begin_operation();
-            match engines.disconnect() {
-                Ok(()) => Response::Ok,
-                Err(message) => Response::Error { message },
+                Err(_) => {
+                    // Bounded, where this used to wait forever. An
+                    // unbounded second acquisition is how a disconnect
+                    // came to hang for as long as whatever held the lock
+                    // -- twenty-five minutes, in one field case -- with
+                    // the customer tunnelled and no way out.
+                    //
+                    // The teardown still happens: it is queued behind
+                    // whoever holds the lock, and the abandon above is
+                    // already unwinding them. What is not done is making
+                    // the customer wait for it with no idea whether
+                    // anything is happening.
+                    let queued = Arc::clone(engines);
+                    tokio::spawn(async move {
+                        let mut engines = queued.lock().await;
+                        crate::engines::begin_operation();
+                        if let Err(message) = engines.disconnect() {
+                            crate::cleanup_log::note("deferred teardown after a busy disconnect", &message);
+                        }
+                    });
+                    Response::Error {
+                        message: "the tunnel is still shutting down; it will be torn down in a moment"
+                            .to_string(),
+                    }
+                }
             }
         }
         Request::Connect { profile, exits } => {
