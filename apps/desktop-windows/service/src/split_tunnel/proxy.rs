@@ -806,8 +806,14 @@ impl Relays {
 /// quiet -- teardown depended on the other side breaking rather than on
 /// this side closing anything.
 ///
-/// Holds a clone of each half. Shutting a clone shuts the socket, which
-/// is what wakes a copy loop blocked reading the other clone.
+/// Holds each half by the *same* handle `pump` copies through -- an
+/// `Arc`, never a `try_clone`. A clone is a second handle made by
+/// `WSADuplicateSocket`, and on Windows such a handle was measured to
+/// lose sight of its connection while the original kept carrying it:
+/// with 32 relays stopping at once, 8 to 20 of the stops shut a clone
+/// that answered `NotConnected` and left the live connection to its far
+/// end untouched -- the exact failure this type exists to remove, back
+/// again at random. One handle has nothing to disagree with.
 #[derive(Default)]
 struct Carried {
     inner: Mutex<CarriedInner>,
@@ -819,7 +825,7 @@ struct CarriedInner {
     /// to are finished.
     closed: bool,
     next: u64,
-    live: HashMap<u64, [TcpStream; 2]>,
+    live: HashMap<u64, [Arc<TcpStream>; 2]>,
 }
 
 impl Carried {
@@ -837,22 +843,18 @@ impl Carried {
     /// connection can spend up to `UPSTREAM_CONNECT_TIMEOUT` dialling,
     /// and one that finishes after the stop has swept the map would
     /// otherwise be carried by nobody's leave, for good.
-    fn adopt(self: &Arc<Self>, client: &TcpStream, upstream: &TcpStream) -> Option<CarriedGuard> {
+    fn adopt(
+        self: &Arc<Self>,
+        client: &Arc<TcpStream>,
+        upstream: &Arc<TcpStream>,
+    ) -> Option<CarriedGuard> {
         let mut inner = self.lock();
         if inner.closed {
             return None;
         }
         let id = inner.next;
         inner.next += 1;
-        match (client.try_clone(), upstream.try_clone()) {
-            (Ok(client), Ok(upstream)) => {
-                inner.live.insert(id, [client, upstream]);
-            }
-            // Fail open: carried without a handle rather than refused.
-            // A stop then leaves this one to its far end, as every
-            // connection used to be.
-            (Err(e), _) | (_, Err(e)) => note(&format!("carrying a connection the stop cannot close: {e}")),
-        }
+        inner.live.insert(id, [client.clone(), upstream.clone()]);
         Some(CarriedGuard { carried: self.clone(), id })
     }
 
@@ -1032,6 +1034,7 @@ fn accept_tcp(
             if let Ok((upstream, _registration)) =
                 connect_upstream(target, &tunnel, &own, &exits, origin.exit)
             {
+                let (client, upstream) = (Arc::new(client), Arc::new(upstream));
                 // Refused when the relays stopped while this was still
                 // dialling. Dropping both halves here closes them.
                 let Some(_carried) = carried.adopt(&client, &upstream) else { return };
@@ -1078,7 +1081,13 @@ fn disable_nagle(stream: &TcpStream, side: &str) {
 /// Two threads rather than one loop because either direction can block
 /// indefinitely, and a TLS handshake talks both ways before either side
 /// has finished saying anything.
-fn pump(client: TcpStream, upstream: TcpStream) {
+///
+/// Both threads use the one handle each socket has, shared by `Arc`:
+/// std reads and writes through `&TcpStream`, and a socket takes a send
+/// and a receive from two threads at once. It used to split each socket
+/// with `try_clone`, whose duplicated handles were measured losing sight
+/// of their connection on Windows -- see `Carried`.
+fn pump(client: Arc<TcpStream>, upstream: Arc<TcpStream>) {
     // Here rather than at the accept and the connect because this is the
     // one place both halves of a relayed connection are in scope
     // together, and because it is the function that does the forwarding
@@ -1087,22 +1096,18 @@ fn pump(client: TcpStream, upstream: TcpStream) {
     disable_nagle(&client, "app-facing");
     disable_nagle(&upstream, "upstream");
 
-    let (mut client_read, mut upstream_write) = (client, upstream);
-    let (Ok(mut client_write), Ok(mut upstream_read)) =
-        (client_read.try_clone(), upstream_write.try_clone())
-    else {
-        return;
+    let outbound = {
+        let (client, upstream) = (client.clone(), upstream.clone());
+        std::thread::spawn(move || {
+            let _ = io::copy(&mut &*client, &mut &*upstream);
+            // Half-close rather than drop: the far end may still have a
+            // reply in flight, and tearing the whole socket down here
+            // would truncate it.
+            let _ = upstream.shutdown(std::net::Shutdown::Write);
+        })
     };
-
-    let outbound = std::thread::spawn(move || {
-        let _ = io::copy(&mut client_read, &mut upstream_write);
-        // Half-close rather than drop: the far end may still have a
-        // reply in flight, and tearing the whole socket down here would
-        // truncate it.
-        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
-    });
-    let _ = io::copy(&mut upstream_read, &mut client_write);
-    let _ = client_write.shutdown(std::net::Shutdown::Write);
+    let _ = io::copy(&mut &*upstream, &mut &*client);
+    let _ = client.shutdown(std::net::Shutdown::Write);
     let _ = outbound.join();
 }
 
@@ -1551,16 +1556,14 @@ mod tests {
 
     #[test]
     fn both_halves_of_a_relayed_connection_have_nagle_disabled() {
-        // The sockets are inspected through clones rather than through
-        // the originals, because `pump` takes ownership of those. A
-        // cloned `TcpStream` is a duplicated handle onto the same
-        // socket, so `nodelay()` on the clone reads the option `pump`
-        // set on the original -- which is the point: this asserts on the
+        // The sockets are inspected through a second `Arc` on the same
+        // handle `pump` is given, so `nodelay()` here reads the option
+        // `pump` set -- which is the point: this asserts on the
         // production path, not on a helper called in isolation.
         let (client, client_peer) = connected_pair();
         let (upstream, upstream_peer) = connected_pair();
-        let client_view = client.try_clone().unwrap();
-        let upstream_view = upstream.try_clone().unwrap();
+        let (client, upstream) = (Arc::new(client), Arc::new(upstream));
+        let (client_view, upstream_view) = (client.clone(), upstream.clone());
 
         // Both start Nagled, which is the Windows default and the state
         // this whole change is about. Asserted rather than assumed, so
@@ -2008,10 +2011,9 @@ mod tests {
     /// True when a read ended because the connection did, and false when
     /// it only gave up waiting. The difference is the whole assertion:
     /// a timeout here means the relay is still holding the connection.
-    fn ended(result: io::Result<usize>) -> bool {
+    fn ended(result: &io::Result<usize>) -> bool {
         match result {
-            Ok(0) => true,
-            Ok(_) => false,
+            Ok(n) => *n == 0,
             Err(e) => !matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock),
         }
     }
@@ -2053,10 +2055,64 @@ mod tests {
 
         app.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         far_end.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        assert!(ended(app.read(&mut buffer)), "the application's side must be closed by the stop");
-        assert!(ended(far_end.read(&mut buffer)), "the upstream side must be closed by the stop");
+        let app_side = app.read(&mut buffer);
+        assert!(ended(&app_side), "the application's side must be closed by the stop: {app_side:?}");
+        let upstream_side = far_end.read(&mut buffer);
+        assert!(ended(&upstream_side), "the upstream side must be closed by the stop: {upstream_side:?}");
     }
 
+    /// The same stop, with many relays stopping at once.
+    ///
+    /// This is the test that caught the first version of the fix. With
+    /// one relay at a time it passed every run; with 32 at once, 8 to 20
+    /// of the stops closed the application's side and left the upstream
+    /// open, because the handle being shut was a `try_clone` that had
+    /// lost sight of its connection. A single-relay test cannot see that,
+    /// so this one exists beside it.
+    #[test]
+    fn stopping_many_relays_at_once_closes_every_connection() {
+        use std::io::{Read, Write};
+        const RELAYS: usize = 16;
+        let outcomes: Vec<Result<(), String>> = (0..RELAYS)
+            .map(|_| {
+                std::thread::spawn(|| -> Result<(), String> {
+                    let quiet = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                    let quiet_port = quiet.local_addr().unwrap().port();
+                    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        if let Ok((stream, _)) = quiet.accept() {
+                            let _ = accepted_tx.send(stream);
+                        }
+                    });
+                    let nat = Arc::new(Nat::new());
+                    let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
+                        .map_err(|e| format!("bind: {e}"))?;
+                    let mut app = connect_as_flow(&nat, relays.tcp_port, quiet_port);
+                    app.write_all(b"hello").map_err(|e| format!("send: {e}"))?;
+                    let mut far_end = accepted_rx.recv_timeout(Duration::from_secs(10)).map_err(|e| format!("no dial: {e}"))?;
+                    let mut buffer = [0u8; 5];
+                    far_end.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                    far_end.read_exact(&mut buffer).map_err(|e| format!("not carried: {e}"))?;
+
+                    relays.stop();
+
+                    app.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    far_end.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let (app_side, upstream_side) = (app.read(&mut buffer), far_end.read(&mut buffer));
+                    if ended(&app_side) && ended(&upstream_side) {
+                        Ok(())
+                    } else {
+                        Err(format!("app {app_side:?}, upstream {upstream_side:?}"))
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("a relay thread panicked"))
+            .collect();
+        let failures: Vec<String> = outcomes.into_iter().filter_map(Result::err).collect();
+        assert!(failures.is_empty(), "{} of {RELAYS} stops left a connection open: {failures:?}", failures.len());
+    }
     /// A connection that finishes dialling after the stop has swept the
     /// table must be refused, or it is carried by nothing that can end
     /// it -- the dial can take up to `UPSTREAM_CONNECT_TIMEOUT`.
@@ -2065,7 +2121,7 @@ mod tests {
         let (one, two) = connected_pair();
         let carried = Arc::new(Carried::default());
         carried.close_all();
-        assert!(carried.adopt(&one, &two).is_none());
+        assert!(carried.adopt(&Arc::new(one), &Arc::new(two)).is_none());
     }
 
     /// The table holds what is live, not every connection ever carried.
@@ -2073,6 +2129,7 @@ mod tests {
     fn a_finished_connection_leaves_the_table() {
         let (one, two) = connected_pair();
         let carried = Arc::new(Carried::default());
+        let (one, two) = (Arc::new(one), Arc::new(two));
         let guard = carried.adopt(&one, &two).expect("a running relay adopts");
         assert_eq!(carried.lock().live.len(), 1);
         drop(guard);
