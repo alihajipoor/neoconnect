@@ -712,9 +712,35 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                             );
                         }
                     });
-                    Response::Error {
-                        message: "the tunnel is still shutting down; it will be torn down in a moment"
-                            .to_string(),
+
+                    // Then ask the operating system, rather than
+                    // reporting a failure that cannot be substantiated.
+                    //
+                    // The two seconds expiring means the owning thread
+                    // was busy, and it says nothing about whether the
+                    // customer is tunnelled. The most common thing it is
+                    // busy with is the *previous* disconnect's thorough
+                    // pass -- which may reach the cmdlets, so several
+                    // seconds of housekeeping with no tunnel behind it.
+                    // The app also sends a disconnect defensively on
+                    // startup and when switching accounts, so the
+                    // unconditional error here was telling people their
+                    // disconnect had failed at the moment they opened
+                    // the app, while they were connected to nothing.
+                    //
+                    // So the state decides the answer. If a tunnel is
+                    // visible the error is true and stays; if none is,
+                    // "disconnected" is the honest reply and the queued
+                    // pass is tidying.
+                    let (still_tunnelled, _, _) = crate::engines::os_visible_tunnel();
+                    if still_tunnelled {
+                        Response::Error {
+                            message:
+                                "the tunnel is still shutting down; it will be torn down in a moment"
+                                    .to_string(),
+                        }
+                    } else {
+                        Response::Ok
                     }
                 }
             }
