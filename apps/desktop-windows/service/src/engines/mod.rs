@@ -1326,11 +1326,11 @@ const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 /// why the split tunnel never checked the flag once across a
 /// thirty-eight second window: nothing was ever passed to it.
 ///
-/// A `std::sync::Mutex` holding a clonable token, so `begin_operation`
-/// can replace it outright. Replacing rather than resetting is what
-/// stops one operation clearing another's cancellation -- the old flag's
-/// defining bug, where a retrying connect wiped the abandon a customer's
-/// disconnect had just set.
+/// A `std::sync::Mutex` holding a clonable token, replaced outright by
+/// each job rather than reset. Replacing is what stops one operation
+/// clearing another's cancellation -- the old flag's defining bug, where
+/// a retrying connect wiped the abandon a customer's disconnect had just
+/// set. There is no reset to call.
 static ABANDON: std::sync::Mutex<Option<crate::lifecycle::cancel::CancelToken>> =
     std::sync::Mutex::new(None);
 
@@ -1339,23 +1339,26 @@ static ABANDON: std::sync::Mutex<Option<crate::lifecycle::cancel::CancelToken>> 
 /// Advisory, not a kill: it is read at the points where this service
 /// waits on something outside itself, so the operation unwinds through
 /// its own error paths and leaves the machine in a state it chose.
-pub fn abandon_current_operation() {
-    if let Ok(slot) = ABANDON.lock() {
-        if let Some(token) = slot.as_ref() {
-            token.cancel();
-        }
+/// Publish the running operation's token, so engine code can poll it.
+///
+/// Called at the top of every job the supervisor runs, with that job's
+/// own token. The global and the per-operation token are then the same
+/// value rather than two mechanisms that have to be kept in step --
+/// which is what `begin_operation` and `abandon_current_operation` were,
+/// and why cancelling used to mean remembering to do both.
+///
+/// Cancelling is now `Supervisor::cancel_running`, which cancels the
+/// token this published, which is the one `abandoned()` reads. One
+/// signal, one owner, no reset.
+pub(crate) fn adopt_token(token: &crate::lifecycle::cancel::CancelToken) {
+    if let Ok(mut slot) = ABANDON.lock() {
+        *slot = Some(token.clone());
     }
 }
 
 /// Clears the flag. Called by every request once it holds the lock, so
 /// an abandonment aimed at the previous operation cannot be inherited by
 /// the next one.
-pub fn begin_operation() {
-    if let Ok(mut slot) = ABANDON.lock() {
-        *slot = Some(crate::lifecycle::cancel::CancelToken::new());
-    }
-}
-
 /// The token for the operation in flight, for handing to code that has
 /// to poll it.
 ///

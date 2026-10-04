@@ -145,7 +145,6 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
                     // Whatever it was doing is no longer wanted by
                     // anyone, so stop it before asking for the lock.
                     engines.cancel_running();
-                    crate::engines::abandon_current_operation();
 
                     // Phase one, the same one a Disconnect runs. The
                     // customer is not waiting on this -- they have
@@ -153,8 +152,8 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
                     // point here: the point is that it happens at all,
                     // promptly, and leaves nothing behind for them to
                     // find in Task Manager and distrust.
-                    let _ = engines.run_detached(|engines: &mut Engines, _| {
-                        crate::engines::begin_operation();
+                    let _ = engines.run_detached(|engines: &mut Engines, token| {
+                        crate::engines::adopt_token(token);
                         let report = crate::lifecycle::teardown::hard_stop(engines);
                         crate::cleanup_log::note(
                             "teardown after the app went away",
@@ -663,18 +662,18 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
             apps: crate::split_tunnel::running_apps(),
         },
         Request::Disconnect => {
-            // Cancel first, by both routes, and before queueing anything.
+            // Cancel first, and before queueing anything.
             //
-            // `cancel_running` reaches the operation the owning thread is
-            // executing right now; `abandon_current_operation` is the
-            // older global flag the engine supervisors still poll
-            // internally. Both are needed until the engines take a token
-            // of their own, and neither waits for a queue.
+            // This reaches the operation the owning thread is executing
+            // right now, without waiting for the queue -- which is the
+            // point, because a disconnect behind a thirty-second connect
+            // would be useless if it had to wait for it. The token it
+            // cancels is the one that job published, and the one engine
+            // code polls, so a single call reaches every layer.
             engines.cancel_running();
-            crate::engines::abandon_current_operation();
 
-            let hard = engines.run(|engines: &mut Engines, _| {
-                crate::engines::begin_operation();
+            let hard = engines.run(|engines: &mut Engines, token| {
+                crate::engines::adopt_token(token);
                 crate::lifecycle::teardown::hard_stop(engines)
             });
 
@@ -729,8 +728,8 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 };
             }
             engines
-                .run(move |engines: &mut Engines, _| {
-                    crate::engines::begin_operation();
+                .run(move |engines: &mut Engines, token| {
+                    crate::engines::adopt_token(token);
                     match engines.connect(&profile, &exits) {
                         Ok(()) => Response::Ok,
                         Err(message) => Response::Error { message },
@@ -744,8 +743,8 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 return Response::Error { message: e.to_string() };
             }
             engines
-                .run(move |engines: &mut Engines, _| {
-                    crate::engines::begin_operation();
+                .run(move |engines: &mut Engines, token| {
+                    crate::engines::adopt_token(token);
                     let (tunnel_up, protocol, _) = engines.status();
                     if tunnel_up {
                         return Response::Error {
@@ -779,8 +778,8 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
         Request::GamingStatus => gaming_response(crate::gaming::status()),
         Request::ProbeSplitTunnel => {
             engines
-                .run(|engines: &mut Engines, _| {
-                    crate::engines::begin_operation();
+                .run(|engines: &mut Engines, token| {
+                    crate::engines::adopt_token(token);
                     match engines.probe_split_tunnel() {
                         Ok(()) => Response::Ok,
                         Err(message) => Response::Error { message },
@@ -800,8 +799,8 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
         }
         Request::SetSplitTunnel { config } => match config.validate() {
             Ok(()) => engines
-                .run(move |engines: &mut Engines, _| {
-                    crate::engines::begin_operation();
+                .run(move |engines: &mut Engines, token| {
+                    crate::engines::adopt_token(token);
                     match engines.set_split_tunnel(config) {
                         Ok(()) => Response::Ok,
                         Err(message) => Response::Error { message },
@@ -812,8 +811,8 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
             Err(e) => Response::Error { message: e.to_string() },
         },
         Request::Repair => engines
-            .run(|engines: &mut Engines, _| {
-                crate::engines::begin_operation();
+            .run(|engines: &mut Engines, token| {
+                crate::engines::adopt_token(token);
                 Response::Repaired { report: crate::engines::repair::run(engines) }
             })
             .await
@@ -872,8 +871,8 @@ fn spawn_idle_watchdog(engines: Supervisor<Engines>, last_seen: Arc<Mutex<Instan
             //
             // Detached, because nobody is waiting: the app is gone by
             // definition at this point.
-            let _ = engines.run_detached(|engines: &mut Engines, _| {
-                crate::engines::begin_operation();
+            let _ = engines.run_detached(|engines: &mut Engines, token| {
+                crate::engines::adopt_token(token);
 
                 // Gaming mode first, and outside the tunnel check below
                 // -- which is the whole point.

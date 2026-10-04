@@ -693,10 +693,9 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         // healed by the sweep at the next start, and this service is
         // AutoStart.
         engines.cancel_running();
-        engines::abandon_current_operation();
 
-        let torn_down = engines.run(|engines: &mut engines::Engines, _| {
-            engines::begin_operation();
+        let torn_down = engines.run(|engines: &mut engines::Engines, token| {
+            engines::adopt_token(token);
             engines.disconnect()
         });
 
