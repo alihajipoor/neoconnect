@@ -314,9 +314,23 @@ jobs:
             echo "TAGMSG_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # Published to the releases repository, not to this one.
+      #
+      # This repository is private: it carried production node addresses
+      # in source comments and tests for two months, and the fix was to
+      # close it. But the download URLs in updates.service.ts go straight
+      # to a customer's browser, which carries no credentials, so the
+      # binaries have to live somewhere public -- and a private repo's
+      # release assets 404 for everyone.
+      #
+      # Needs a token of its own: GITHUB_TOKEN is scoped to the
+      # repository the workflow runs in, so it cannot write to another
+      # one however the permissions block is set.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          repository: alihajipoor/neoxify-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
           files: |
             apps/desktop-windows/target/release/bundle/nsis/*.exe
             apps/desktop-windows/target/release/bundle/nsis/*.sig
