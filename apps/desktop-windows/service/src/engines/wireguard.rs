@@ -95,8 +95,16 @@ pub fn connect(
     // attempt ran out of time without ever having tried to connect.
     clear_tunnel_service(&limits.share(CLEARING_THE_DECKS_SHARE))?;
 
-    let status = run_hidden(&exe, &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()])
-        .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
+    // Clamped for the same reason as Xray's netsh: `HELPER_BUDGET`
+    // reads the ambient cancellation but not the deadline, so a
+    // wireguard.exe that wedges could carry a connect past the budget
+    // and finish after the app had stopped listening.
+    let status = super::run_hidden_within(
+        &exe,
+        &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()],
+        limits.clamp(super::HELPER_BUDGET),
+    )
+    .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
     if !status.success() {
         return Err(format!("wireguard.exe /installtunnelservice exited with {status}"));
     }

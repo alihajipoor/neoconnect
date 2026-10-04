@@ -25,7 +25,7 @@ use neoconnect_ipc::{ShadowsocksProfile, TrojanProfile, VlessTlsProfile, XrayPro
 use serde_json::json;
 
 use super::routing::{self, InstalledRoutes};
-use super::{confirm_started, run_hidden, spawn_hidden, write_config, Engines};
+use super::{confirm_started, spawn_hidden, write_config, Engines};
 use crate::adapters;
 
 const CONFIG_FILE: &str = "xray-client.json";
@@ -466,11 +466,23 @@ fn build_multi_exit_config(primary: &Outbound, extra: &[ExitInbound], passive: b
 /// that the two engines ask the same named question in the same shape,
 /// which is what stopped being true the last time one of them was
 /// edited alone.
-fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
+fn configure_adapter(
+    tun_ip: Ipv4Addr,
+    passive: bool,
+    limits: &crate::lifecycle::budget::Limits,
+) -> Result<(), String> {
     let netsh = PathBuf::from(r"C:\Windows\System32\netsh.exe");
     let name_arg = format!("name={ADAPTER_NAME}");
 
-    let status = run_hidden(
+    // Helpers are bounded by `HELPER_BUDGET`, which reads the ambient
+    // cancellation but not the deadline -- so a wedged netsh could push
+    // a connect past the budget and leave the app no longer listening
+    // while the service went on to succeed. Clamped here because this
+    // is one of the two connect-path helper calls with the operation's
+    // limits already in reach.
+    let helper = limits.clamp(super::HELPER_BUDGET);
+
+    let status = super::run_hidden_within(
         &netsh,
         &[
             OsStr::new("interface"),
@@ -483,13 +495,14 @@ fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
             // /30, matching TUN_GATEWAY.
             OsStr::new("255.255.255.252"),
         ],
+        helper,
     )
     .map_err(|e| format!("could not configure the tunnel adapter: {e}"))?;
     if !status.success() {
         return Err(format!("assigning the tunnel adapter's address failed ({status})"));
     }
 
-    let status = run_hidden(
+    let status = super::run_hidden_within(
         &netsh,
         &[
             OsStr::new("interface"),
@@ -501,6 +514,7 @@ fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
             OsStr::new(TUN_DNS),
             OsStr::new("primary"),
         ],
+        helper,
     )
     .map_err(|e| format!("could not set the tunnel's DNS: {e}"))?;
     if !status.success() {
@@ -681,7 +695,7 @@ pub fn install_routes(
     // is what establishes that the stack finished giving it.
     // `false`: this function *is* the full-tunnel branch -- `mod.rs`
     // picks between it and `prepare_passive` on the same flag.
-    configure_adapter(tun_gateway, false)?;
+    configure_adapter(tun_gateway, false, limits)?;
     wait_for_address(tun_gateway, limits)?;
 
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
@@ -709,7 +723,7 @@ pub fn prepare_passive(outbound: &Outbound, limits: &crate::lifecycle::budget::L
         .ok_or_else(|| "internal error: bad TUN gateway".to_string())?;
     // `true`: this function is the Custom-mode branch. The DNS rule is
     // still installed -- see `dns::machine_wide_rule_wanted`.
-    configure_adapter(tun_gateway, true)?;
+    configure_adapter(tun_gateway, true, limits)?;
     // Custom mode installs no routes, so the silent-next-hop failure
     // does not apply here -- but `split_tunnel::start` runs immediately
     // after this returns and waits ten seconds for this adapter to hold
