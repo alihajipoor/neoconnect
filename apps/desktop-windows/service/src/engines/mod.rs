@@ -1141,7 +1141,25 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
     let deadline = std::time::Instant::now() + RESOLVE_RETRY_FOR;
     let mut last = String::new();
     loop {
-        match (host.as_str(), port).to_socket_addrs() {
+        // getaddrinfo, moved off this thread so a disconnect does not
+        // have to wait for it.
+        //
+        // It is a synchronous Win32 call with no timeout and no way in,
+        // and the loop around it only reads the abandon flag *after* it
+        // returns -- so the real bound here was the retry window plus
+        // one full resolver timeout, which on a node that is not
+        // answering is exactly when a customer gives up and presses
+        // Disconnect. The syscall still cannot be cancelled; what is
+        // cancelled is this operation's interest in it.
+        let resolving = {
+            let host = host.clone();
+            current_token().interruptible(move || (host.as_str(), port).to_socket_addrs())
+        };
+        let resolving = match resolving {
+            Ok(result) => result,
+            Err(_) => return Err(ABANDONED.to_string()),
+        };
+        match resolving {
             Ok(mut addrs) => {
                 if let Some(v4) = addrs.find_map(|a| match a.ip() {
                     IpAddr::V4(v4) => Some(v4),

@@ -618,8 +618,14 @@ fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         return Ok(ip);
     }
-    (host, port)
-        .to_socket_addrs()
+    // Off this thread, so a disconnect does not wait for it. Unlike the
+    // sibling in `engines::mod`, this one has no retry loop and no bound
+    // at all -- a node that is not answering could hold it for however
+    // long the resolver takes to give up, with nothing able to interrupt.
+    let owned = host.to_owned();
+    super::current_token()
+        .interruptible(move || (owned.as_str(), port).to_socket_addrs())
+        .map_err(|_| super::ABANDONED.to_string())?
         .map_err(|e| format!("could not resolve {host}: {e}"))?
         .find_map(|a| match a.ip() {
             IpAddr::V4(v4) => Some(v4),
