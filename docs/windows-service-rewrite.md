@@ -140,6 +140,20 @@ then a split tunnel whose own ceilings total 46.
 `budget.rs` keeps a test asserting the three ceilings still overrun,
 so that removing the clamping and tuning the numbers fails loudly.
 
+**The budget is not yet binding, and the reason is one call.**
+`dns::force` is invoked from `xray::connect` and `ikev2::connect`, on
+the connect path, and does not take `Limits` -- so its 35-second
+`CMDLET_BUDGET` sits on top of the 38 the clamped stages share. A
+connect can still reach about seventy seconds.
+
+It is deliberately *not* clamped. Running out of time there means the
+tunnel comes up with the machine's lookups unpinned, which in Iran
+means an ISP resolver answering with a poisoned address: a worse
+outcome than a slow connect, and not a trade this product should make
+for punctuality. The fix is to make the call fast rather than to cut
+it short -- see the NRPT registry writer below -- after which there is
+no budget pressure left to resolve.
+
 ### Cancellation is a parameter, except once
 
 Threaded explicitly through the whole connect path. One ambient reader
@@ -201,7 +215,16 @@ Bottom-up, each landing green before the next starts.
 4. Engine state machine — *cancellation and budgets threaded; the
    state machine proper is still the slot type it was*
 5. The five engines — *entry points take `Limits`; internals untouched*
-6. DNS, routing, IPv6 block, janitor, repair
+6. DNS, routing, IPv6 block, janitor, repair — *in progress, as
+   targeted cost removal rather than wholesale rewrite: these modules
+   are heavily tested and the measured problem in them is PowerShell,
+   not structure.* Done: OpenVPN's pre-connect route purge deletes two
+   known destinations with `route.exe` instead of enumerating with
+   PowerShell. Next: `dns::apply` writes the NRPT rule to the registry
+   (48-64ms) instead of `Add-DnsClientNrptRule` (10.0-55.1s measured),
+   verified by `registry_rule_count` so a rule we create is provably
+   one the sweep can remove. Then `ikev2::is_connected`, which spawns
+   PowerShell on every idle status poll.
 7. Split tunnel — the largest, and the one with the most tests.
    *Already takes `Limits` and clamps its two long waits, so the
    bring-up can no longer outlive the connect; the rewrite itself is
