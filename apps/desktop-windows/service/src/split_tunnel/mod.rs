@@ -55,6 +55,7 @@ mod flows;
 mod health;
 mod icon;
 mod owner;
+mod picker;
 mod proxy;
 mod redirect;
 mod socks;
@@ -70,7 +71,8 @@ use crate::adapters;
 use crate::engines::ipv6_block;
 use crate::engines::routing::{self, InstalledRoutes};
 
-pub use owner::{running_apps, Selection, SharedSelection};
+pub use owner::{Selection, SharedSelection};
+pub use picker::running_apps;
 
 /// How long to wait for a tunnel adapter to appear and be given an
 /// address after its engine starts.
