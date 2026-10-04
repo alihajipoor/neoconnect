@@ -84,12 +84,55 @@ const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Whether Custom mode is running, readable without the `Engines` lock.
 ///
-/// A shadow of `SplitTunnel::active`, written at the two places that set
-/// and clear it and nowhere else. It exists for one caller: the status
-/// poll, which has to be answerable while an operation holds the lock --
-/// see `pipe::dispatch`. Anything that holds the lock asks
-/// [`SplitTunnel::is_running`], which reads the real thing.
+/// A shadow of `SplitTunnel::active`, written only by [`ActiveSlot`],
+/// whose two mutators are the only ways to fill or empty it. It exists
+/// for one caller: the status poll, which has to be answerable while an
+/// operation holds the lock -- see `pipe::dispatch`. Anything that holds
+/// the lock asks [`SplitTunnel::is_running`], which reads the real thing.
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The running session, and the only code that writes [`RUNNING`].
+///
+/// The flag used to be kept in step by hand, "at the two places that set
+/// and clear it and nowhere else" -- an invariant held by prose, which
+/// the next place to assign `active` would not have read. Now the slot
+/// cannot change without the flag changing with it.
+struct ActiveSlot(Option<Active>);
+
+impl ActiveSlot {
+    fn empty() -> Self {
+        Self(None)
+    }
+
+    /// Filled, then announced -- the order it always had, so the
+    /// lock-free reader never sees "running" with nothing behind it.
+    fn fill(&mut self, active: Active) {
+        self.0 = Some(active);
+        RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Emptied, and the flag cleared only if there was something to
+    /// clear, exactly as `stop` did.
+    fn take(&mut self) -> Option<Active> {
+        let active = self.0.take();
+        if active.is_some() {
+            RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        active
+    }
+
+    fn as_ref(&self) -> Option<&Active> {
+        self.0.as_ref()
+    }
+
+    fn as_mut(&mut self) -> Option<&mut Active> {
+        self.0.as_mut()
+    }
+
+    fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+}
 
 /// Whether Custom mode is running, for a caller that cannot take the
 /// `Engines` lock.
@@ -132,7 +175,7 @@ pub struct SplitTunnel {
     /// session where the customer placed no game. Empty is the state in
     /// which this feature costs one length check per carried packet.
     exits: Arc<proxy::ExitRelays>,
-    active: Option<Active>,
+    active: ActiveSlot,
     /// Processes that were already running when the customer selected
     /// them, as `(lowercased image path, pid)`.
     ///
@@ -887,7 +930,7 @@ impl SplitTunnel {
             selection: SharedSelection::default(),
             egress: None,
             exits: Arc::new(proxy::ExitRelays::default()),
-            active: None,
+            active: ActiveSlot::empty(),
             pre_existing: Vec::new(),
             #[cfg(test)]
             stops: std::sync::atomic::AtomicU32::new(0),
@@ -1428,7 +1471,7 @@ impl SplitTunnel {
                     watchdog_tripped.clone(),
                 );
 
-                self.active = Some(Active {
+                self.active.fill(Active {
                     redirect: running,
                     nat: nat_for_active,
                     relays,
@@ -1443,7 +1486,6 @@ impl SplitTunnel {
                     log_path,
                     started: Instant::now(),
                 });
-                RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
             Err(e) => {
@@ -1487,7 +1529,7 @@ impl SplitTunnel {
     }
 
     pub fn probe(&self) -> Result<(), String> {
-        let Some(active) = &self.active else {
+        let Some(active) = self.active.as_ref() else {
             return Err("custom mode is not running".into());
         };
 
@@ -1568,7 +1610,6 @@ impl SplitTunnel {
         #[cfg(test)]
         self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let Some(active) = self.active.take() else { return };
-        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
         // First of all, and before the join below can take any time:
         // the backstop must not be looking for a vanished adapter while
         // the session it would complain about is being taken down on
