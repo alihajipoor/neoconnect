@@ -260,7 +260,7 @@ const OUR_RULE_KEY: &str = "{9F1C7E3A-5B42-4D18-A6E0-2C8B4F7D9A11}";
 /// would be ours.
 fn apply_via_registry(resolver: &str) -> Result<(), String> {
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_WRITE};
-    use winreg::{RegKey, RegValue};
+    use winreg::RegKey;
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let path = format!(r"{}\{}", NRPT_REGISTRY_PATHS[0], OUR_RULE_KEY);
