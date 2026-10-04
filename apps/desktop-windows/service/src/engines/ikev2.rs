@@ -465,6 +465,101 @@ fn escape_single_quotes(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Finds the all-user RAS phonebook and times `Get-VpnConnection`.
+    /// Asserts nothing.
+    ///
+    /// Groundwork for the second-worst call in the service.
+    /// `status()`'s untracked arm -- which is the *idle* case, the one
+    /// the app's status poll asks about constantly -- falls through to
+    /// [`is_connected`], and that spawns PowerShell. The comment there
+    /// says "two cheap calls"; `Get-VpnConnection` is CIM-backed and is
+    /// not one. This prints how long it really takes on a cold runner.
+    ///
+    /// The cheap replacement is the phonebook: a connection cannot
+    /// exist without an entry, and an entry is a line in a file. What
+    /// stops that being written from memory is that guessing the path
+    /// wrong makes a missing file look like a missing entry, which
+    /// reports not-connected while tunnelled -- the exact field bug of
+    /// 2026-08-17 that put this cmdlet call here. So the path gets
+    /// found rather than recalled: the probe creates an entry with the
+    /// same cmdlet `connect` uses, then reports which candidate file
+    /// grew the entry and what the entry looks like.
+    #[test]
+    fn print_the_phonebook_location_and_the_cost_of_asking_windows() {
+        const PROBE_ENTRY: &str = "Neoxify schema probe entry";
+
+        let candidates: Vec<(&str, std::path::PathBuf)> = ["PROGRAMDATA", "APPDATA", "SYSTEMROOT"]
+            .iter()
+            .filter_map(|var| std::env::var(var).ok().map(|v| (*var, v)))
+            .flat_map(|(var, root)| {
+                [
+                    r"Microsoft\Network\Connections\Pbk\rasphone.pbk",
+                    r"System32\ras\rasphone.pbk",
+                ]
+                .iter()
+                .map(move |tail| (var, std::path::PathBuf::from(&root).join(tail)))
+                .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let describe = |label: &str| {
+            for (var, path) in &candidates {
+                let shape = match std::fs::metadata(path) {
+                    Ok(m) => format!("{} bytes", m.len()),
+                    Err(e) => format!("absent ({e})"),
+                };
+                println!("PBK-PROBE {label} %{var}% {} -> {shape}", path.display());
+            }
+        };
+        describe("before");
+
+        let made = powershell(&format!(
+            "Add-VpnConnection -Name '{PROBE_ENTRY}' -ServerAddress 'probe.invalid' \
+             -TunnelType Ikev2 -AuthenticationMethod Eap -AllUserConnection -Force \
+             -ErrorAction Stop"
+        ));
+        println!("PBK-PROBE create: {made:?}");
+        describe("after");
+
+        for (_, path) in &candidates {
+            let Ok(text) = std::fs::read_to_string(path) else { continue };
+            if !text.contains(PROBE_ENTRY) {
+                continue;
+            }
+            println!("PBK-PROBE the entry is in {}", path.display());
+            // The section, so the entry's shape is on the record rather
+            // than assumed: how the name is delimited and what a reader
+            // would have to match on.
+            let mut printing = false;
+            for line in text.lines() {
+                if line.starts_with('[') {
+                    if printing {
+                        break;
+                    }
+                    printing = line.contains(PROBE_ENTRY);
+                }
+                if printing {
+                    println!("PBK-PROBE   | {line}");
+                }
+            }
+        }
+
+        // What the idle status poll pays today, measured rather than
+        // asserted about.
+        let began = std::time::Instant::now();
+        let asked = is_connected();
+        println!(
+            "PBK-PROBE Get-VpnConnection took {:?} and said {asked}",
+            began.elapsed()
+        );
+
+        let removed = powershell(&format!(
+            "Remove-VpnConnection -Name '{PROBE_ENTRY}' -AllUserConnection -Force \
+             -ErrorAction SilentlyContinue"
+        ));
+        println!("PBK-PROBE remove: {removed:?}");
+    }
+
     /// The script is a PowerShell program written by string formatting
     /// in another language, and it now carries control flow. A stray
     /// brace in it would fail *every* IKEv2 connect with a message about
