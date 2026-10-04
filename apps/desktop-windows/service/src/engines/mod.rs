@@ -284,7 +284,9 @@ impl Engines {
                     );
                 };
                 self.split_tunnel.stop();
-                return self.start_split_tunnel(&profile);
+                // A separate request, so its own boundary read rather
+                // than a token borrowed from a connect that has finished.
+                return self.start_split_tunnel(&profile, &current_token());
             }
             // Editing the list within a mode changes nothing about how
             // the tunnel is built, and the redirect reads the selection
@@ -427,7 +429,18 @@ impl Engines {
             ikev2::ENTRY_NAME,
         ])
         .unwrap_or_default();
-        let result = self.connect_inner(profile, exits).map_err(|e| with_rival_hint(e, &rivals));
+        // The one place the published token is read on this path.
+        //
+        // Below here cancellation is a parameter. That is the whole
+        // point: the split tunnel went thirty-eight seconds without
+        // checking for a disconnect because nothing was ever passed to
+        // it, and a global is a thing an author can simply not know
+        // about, where an argument is a thing they have to decide about.
+        // One lookup, at the boundary, and then it travels explicitly.
+        let cancel = current_token();
+        let result = self
+            .connect_inner(profile, exits, &cancel)
+            .map_err(|e| with_rival_hint(e, &rivals));
         // Remembered only on success, so a failed attempt cannot leave a
         // profile behind for Custom mode to rebuild from.
         if result.is_ok() {
@@ -440,8 +453,24 @@ impl Engines {
         &mut self,
         profile: &ConnectProfile,
         exits: &[ExitProfile],
+        cancel: &crate::lifecycle::cancel::CancelToken,
     ) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
+
+        // Asked before the teardown, not only after it.
+        //
+        // The `disconnect` below is the clear-the-decks pass every
+        // connect starts with, and it is not cheap: it can stop a tunnel
+        // service, purge routes and sweep DNS. The first cancellation
+        // check used to sit after it, so a disconnect arriving in the
+        // instant a connect began was answered only once that whole pass
+        // had run. Asking first costs a mutex and is the difference
+        // between a button that responds and one that responds
+        // eventually.
+        if cancel.is_cancelled() {
+            return Err(ABANDONED.to_string());
+        }
+
         self.disconnect()?;
         // Belt and braces with `disconnect`'s own reset: a connect that
         // fails part way must not leave the previous session's DNS
@@ -451,7 +480,7 @@ impl Engines {
         // customer who pressed Disconnect gets the tunnel left down
         // rather than watching it come back up because the request that
         // was already running finished its job.
-        if abandoned() {
+        if cancel.is_cancelled() {
             return Err(ABANDONED.to_string());
         }
 
@@ -463,7 +492,7 @@ impl Engines {
 
         match profile {
             ConnectProfile::Wireguard(p) => {
-                wireguard::connect(self, p, passive)?;
+                wireguard::connect(self, p, passive, cancel)?;
                 self.active.fill(Active::WireguardTunnel);
             }
             // Nothing is spawned: Windows brings the interface up and
@@ -545,9 +574,9 @@ impl Engines {
                 // with none has no source to send from -- but nothing is
                 // routed into it.
                 let prepared = if passive {
-                    xray::prepare_passive(&outbound).map(|_| InstalledRoutes::none())
+                    xray::prepare_passive(&outbound, cancel).map(|_| InstalledRoutes::none())
                 } else {
-                    xray::install_routes(&outbound)
+                    xray::install_routes(&outbound, cancel)
                 };
                 let routes = match prepared {
                     Ok(routes) => routes,
@@ -564,7 +593,7 @@ impl Engines {
                 });
             }
             ConnectProfile::Openvpn(p) => {
-                let child = openvpn::connect(self, p, passive)?;
+                let child = openvpn::connect(self, p, passive, cancel)?;
                 self.active.fill(Active::Child {
                     protocol: "OPENVPN",
                     child,
@@ -579,12 +608,12 @@ impl Engines {
         // passive answers no and skips the redirect entirely -- which
         // presents as the excluded applications still being tunnelled,
         // the setting doing nothing at all.
-        if abandoned() {
+        if cancel.is_cancelled() {
             let _ = self.disconnect();
             return Err(ABANDONED.to_string());
         }
         if self.split_tunnel.wants_interception() {
-            self.start_split_tunnel(profile)?;
+            self.start_split_tunnel(profile, cancel)?;
         }
         self.block_ipv6_if_needed(profile);
         // Whatever the engine above reported about the tunnel's DNS
@@ -642,9 +671,13 @@ impl Engines {
     /// all, so reporting success would tell the customer they were
     /// protected while every application, selected or not, went out in
     /// the clear.
-    fn start_split_tunnel(&mut self, profile: &ConnectProfile) -> Result<(), String> {
+    fn start_split_tunnel(
+        &mut self,
+        profile: &ConnectProfile,
+        cancel: &crate::lifecycle::cancel::CancelToken,
+    ) -> Result<(), String> {
         let adapter = adapter_name_for(profile);
-        let node = match node_address(profile) {
+        let node = match node_address(profile, cancel) {
             Ok(node) => node,
             Err(e) => {
                 let _ = self.disconnect();
@@ -653,12 +686,11 @@ impl Engines {
         };
 
         let log_dir = self.config_dir.clone();
-        // The token for the operation in flight, handed to the one
-        // subsystem that never had one. Every wait inside the bring-up
-        // now unwinds on a disconnect instead of holding the engine
-        // state for the ~38 seconds those waits add up to.
-        let cancel = current_token();
-        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir, &cancel) {
+        // The subsystem that never had a token now gets the caller's.
+        // Every wait inside the bring-up unwinds on a disconnect instead
+        // of holding the engine state for the ~38 seconds those waits
+        // add up to.
+        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir, cancel) {
             let _ = self.disconnect();
             return Err(e);
         }
@@ -1106,7 +1138,7 @@ fn adapter_name_for(profile: &ConnectProfile) -> &'static str {
 /// Custom mode's packet filter excludes it, which is not an
 /// optimisation: the tunnel's own encrypted traffic goes to this
 /// address, and redirecting that would put the tunnel inside itself.
-fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
+fn node_address(profile: &ConnectProfile, cancel: &crate::lifecycle::cancel::CancelToken) -> Result<Ipv4Addr, String> {
     let (host, port) = match profile {
         ConnectProfile::Wireguard(p) => split_host_port(&p.endpoint)?,
         ConnectProfile::Openvpn(p) => split_host_port(&p.endpoint)?,
@@ -1153,7 +1185,7 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
         // cancelled is this operation's interest in it.
         let resolving = {
             let host = host.clone();
-            current_token().interruptible(move || (host.as_str(), port).to_socket_addrs())
+            cancel.interruptible(move || (host.as_str(), port).to_socket_addrs())
         };
         let resolving = match resolving {
             Ok(result) => result,
@@ -1173,7 +1205,7 @@ fn node_address(profile: &ConnectProfile) -> Result<Ipv4Addr, String> {
             }
             Err(e) => last = e.to_string(),
         }
-        if std::time::Instant::now() >= deadline || abandoned() {
+        if std::time::Instant::now() >= deadline || cancel.is_cancelled() {
             return Err(format!("could not resolve {host}: {last}"));
         }
         std::thread::sleep(RESOLVE_RETRY_EVERY);
@@ -1275,9 +1307,9 @@ pub(crate) const HELPER_BUDGET: std::time::Duration = std::time::Duration::from_
 /// deafness this whole mechanism exists to prevent is no longer bounded
 /// by the budget at all: `Status` never queues behind the lock
 /// (`STATUS_LOCK_WAIT` in `pipe::dispatch`, with an unlocked OS-visible
-/// answer behind it), and `Disconnect` waits two seconds and then calls
-/// [`abandon_current_operation`], which [`wait_within`] reads every
-/// 50ms and kills the child on. A budget is still needed -- it is what
+/// answer behind it), and `Disconnect` waits two seconds and then
+/// cancels the running operation's token, which [`wait_within`] reads
+/// every 50ms and kills the child on. A budget is still needed -- it is what
 /// turns an *unbounded* wait into a failure -- but it is a backstop now
 /// rather than the thing keeping the service answerable.
 ///
@@ -1334,18 +1366,17 @@ const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 static ABANDON: std::sync::Mutex<Option<crate::lifecycle::cancel::CancelToken>> =
     std::sync::Mutex::new(None);
 
-/// Asks the operation in flight to stop waiting and fail.
+/// Publish the running operation's token, so ambient readers can poll it.
 ///
 /// Advisory, not a kill: it is read at the points where this service
 /// waits on something outside itself, so the operation unwinds through
 /// its own error paths and leaves the machine in a state it chose.
-/// Publish the running operation's token, so engine code can poll it.
 ///
 /// Called at the top of every job the supervisor runs, with that job's
 /// own token. The global and the per-operation token are then the same
 /// value rather than two mechanisms that have to be kept in step --
-/// which is what `begin_operation` and `abandon_current_operation` were,
-/// and why cancelling used to mean remembering to do both.
+/// which is what the two functions this replaced were, and why
+/// cancelling used to mean remembering to do both.
 ///
 /// Cancelling is now `Supervisor::cancel_running`, which cancels the
 /// token this published, which is the one `abandoned()` reads. One
@@ -1356,11 +1387,11 @@ pub(crate) fn adopt_token(token: &crate::lifecycle::cancel::CancelToken) {
     }
 }
 
-/// Clears the flag. Called by every request once it holds the lock, so
-/// an abandonment aimed at the previous operation cannot be inherited by
-/// the next one.
-/// The token for the operation in flight, for handing to code that has
-/// to poll it.
+/// The token for the operation in flight.
+///
+/// Read at a boundary -- the top of [`Engines::connect`], a teardown, a
+/// Custom-mode toggle -- and then passed down as an argument. Reaching
+/// for this deeper than that is the habit it exists to replace.
 ///
 /// Returns a cancelled token when there is no operation, which is the
 /// safe direction: code that asks for a token outside an operation is
@@ -1380,6 +1411,17 @@ pub(super) fn current_token() -> crate::lifecycle::cancel::CancelToken {
     }
 }
 
+/// The ambient read, now down to one caller: [`wait_within`].
+///
+/// Kept deliberately rather than threaded. `wait_within` is the floor of
+/// `run_hidden_within` and `capture_hidden`, the generic "run a process
+/// under a budget" primitive that DNS, routing, repair, the janitor and
+/// the firewall all sit on. Those are not connect-path functions and
+/// their authors have no cancellation decision to make: any process this
+/// service starts inside a cancelled operation should abort, always, and
+/// requiring every one of them to pass a token down would be ceremony
+/// that adds no choice. This is the one place where ambient is the
+/// correct answer rather than the lazy one.
 fn abandoned() -> bool {
     ABANDON
         .lock()

@@ -56,7 +56,7 @@ pub const ADAPTER_NAME: &str = "neoconnect0";
 /// really binds -- see [`ADAPTER_ADDRESSED_WAIT`].
 ///
 /// The customer is not left staring at it for a minute in the ordinary
-/// failure either. The poll below reads `abandoned()`, so pressing
+/// failure either. The poll below reads the caller's token, so pressing
 /// Disconnect ends the wait rather than queueing behind it.
 const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -541,15 +541,15 @@ fn configure_adapter(tun_ip: Ipv4Addr, passive: bool) -> Result<(), String> {
 
 /// Waits for Xray's TUN adapter to appear and returns its interface index.
 ///
-/// Reads `abandoned()` on every pass: with a ceiling this long, a
+/// Reads the caller's token on every pass: with a ceiling this long, a
 /// customer who has given up and pressed Disconnect must not queue
 /// behind the rest of it.
-fn wait_for_adapter() -> Result<u32, String> {
+fn wait_for_adapter(cancel: &crate::lifecycle::cancel::CancelToken) -> Result<u32, String> {
     let deadline = std::time::Instant::now() + ADAPTER_WAIT;
     loop {
         match adapters::find_by_name(ADAPTER_NAME) {
             Ok(Some(a)) => return Ok(a.index),
-            Ok(None) if super::abandoned() => return Err(super::ABANDONED.to_string()),
+            Ok(None) if cancel.is_cancelled() => return Err(super::ABANDONED.to_string()),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
@@ -571,7 +571,7 @@ fn wait_for_adapter() -> Result<u32, String> {
 /// that the thing which follows -- installing routes whose next hop is
 /// that address -- fails *silently* if it runs too early. See
 /// [`ADAPTER_ADDRESSED_WAIT`].
-fn wait_for_address(expected: Ipv4Addr) -> Result<(), String> {
+fn wait_for_address(expected: Ipv4Addr, cancel: &crate::lifecycle::cancel::CancelToken) -> Result<(), String> {
     let deadline = std::time::Instant::now() + ADAPTER_ADDRESSED_WAIT;
     loop {
         let found = adapters::find_by_name(ADAPTER_NAME)
@@ -602,7 +602,7 @@ fn wait_for_address(expected: Ipv4Addr) -> Result<(), String> {
                 )),
             };
         }
-        if super::abandoned() {
+        if cancel.is_cancelled() {
             return Err(super::ABANDONED.to_string());
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -614,7 +614,11 @@ fn wait_for_address(expected: Ipv4Addr) -> Result<(), String> {
 /// Nodes are registered by IP today, but a hostname is resolved rather
 /// than rejected so a DNS-named node doesn't silently produce a tunnel
 /// with no escape route for its own uplink.
-fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn resolve_server(
+    host: &str,
+    port: u16,
+    cancel: &crate::lifecycle::cancel::CancelToken,
+) -> Result<Ipv4Addr, String> {
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         return Ok(ip);
     }
@@ -623,7 +627,7 @@ fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
     // at all -- a node that is not answering could hold it for however
     // long the resolver takes to give up, with nothing able to interrupt.
     let owned = host.to_owned();
-    super::current_token()
+    cancel
         .interruptible(move || (owned.as_str(), port).to_socket_addrs())
         .map_err(|_| super::ABANDONED.to_string())?
         .map_err(|e| format!("could not resolve {host}: {e}"))?
@@ -639,8 +643,11 @@ fn resolve_server(host: &str, port: u16) -> Result<Ipv4Addr, String> {
 /// Split out from `connect` so a routing failure can tear down the engine
 /// it belongs to -- a running Xray with no routes is the exact state that
 /// previously looked connected while changing nothing.
-pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
-    let server_ip = resolve_server(outbound.host(), outbound.port())?;
+pub fn install_routes(
+    outbound: &Outbound,
+    cancel: &crate::lifecycle::cancel::CancelToken,
+) -> Result<InstalledRoutes, String> {
+    let server_ip = resolve_server(outbound.host(), outbound.port(), cancel)?;
 
     // Captured before the tunnel takes over: afterwards the best route to
     // the server would be the tunnel itself, and the bypass would point
@@ -652,7 +659,7 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
         .gateway
         .ok_or_else(|| "the active network connection has no gateway".to_string())?;
 
-    let tun_index = wait_for_adapter()?;
+    let tun_index = wait_for_adapter(cancel)?;
     let tun_gateway: Ipv4Addr = TUN_GATEWAY
         .split('/')
         .next()
@@ -666,7 +673,7 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
     // `false`: this function *is* the full-tunnel branch -- `mod.rs`
     // picks between it and `prepare_passive` on the same flag.
     configure_adapter(tun_gateway, false)?;
-    wait_for_address(tun_gateway)?;
+    wait_for_address(tun_gateway, cancel)?;
 
     routing::install_full_tunnel(tun_gateway, tun_index, server_ip, gateway, uplink.index)
 }
@@ -682,9 +689,9 @@ pub fn install_routes(outbound: &Outbound) -> Result<InstalledRoutes, String> {
 ///
 /// Returns the node's address, which the redirect filter excludes so the
 /// tunnel is never carried through itself.
-pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
-    let server_ip = resolve_server(outbound.host(), outbound.port())?;
-    wait_for_adapter()?;
+pub fn prepare_passive(outbound: &Outbound, cancel: &crate::lifecycle::cancel::CancelToken) -> Result<Ipv4Addr, String> {
+    let server_ip = resolve_server(outbound.host(), outbound.port(), cancel)?;
+    wait_for_adapter(cancel)?;
 
     let tun_gateway: Ipv4Addr = TUN_GATEWAY
         .split('/')
@@ -701,7 +708,7 @@ pub fn prepare_passive(outbound: &Outbound) -> Result<Ipv4Addr, String> {
     // here means the engine hands back something that is ready, rather
     // than handing back early and leaving the split tunnel to discover
     // it was not.
-    wait_for_address(tun_gateway)?;
+    wait_for_address(tun_gateway, cancel)?;
 
     Ok(server_ip)
 }

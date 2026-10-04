@@ -78,6 +78,7 @@ pub fn connect(
     engines: &Engines,
     profile: &WireguardProfile,
     passive: bool,
+    cancel: &crate::lifecycle::cancel::CancelToken,
 ) -> Result<(), String> {
     let exe = engines.engine_path("wireguard.exe")?;
     let conf_path = engines.config_path(CONF_FILE);
@@ -85,7 +86,7 @@ pub fn connect(
 
     // The name has to be free before this runs, or wireguard.exe never
     // returns. See clear_tunnel_service.
-    clear_tunnel_service()?;
+    clear_tunnel_service(cancel)?;
 
     let status = run_hidden(&exe, &[OsStr::new("/installtunnelservice"), conf_path.as_os_str()])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
@@ -96,6 +97,12 @@ pub fn connect(
 }
 
 pub fn disconnect(engines: &Engines) -> Result<(), String> {
+    // A teardown's own boundary read, not a token borrowed from the
+    // connect path. A disconnect is what cancellation *leads to*, so it
+    // is never handed someone else's cancellation -- but it still reads
+    // the live one, because a customer who pressed Disconnect twice
+    // should not queue behind the first one's ten-second wait.
+    let cancel = super::current_token();
     let exe = engines.engine_path("wireguard.exe")?;
     let status = run_hidden(&exe, &[OsStr::new("/uninstalltunnelservice"), OsStr::new(TUNNEL_NAME)])
         .map_err(|e| format!("could not start wireguard.exe: {e}"))?;
@@ -106,7 +113,7 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
     // clear_tunnel_service. Without this, a disconnect returns while the
     // machine is still tunnelled, and the very next status poll
     // correctly reports it as connected.
-    clear_tunnel_service()
+    clear_tunnel_service(&cancel)
 }
 
 /// How long the tunnel service is given to go away.
@@ -129,7 +136,7 @@ pub fn disconnect(engines: &Engines) -> Result<(), String> {
 /// Forty-five seconds instead. This is not a process budget -- nothing
 /// is spawned, it is an SCM poll -- so the argument about one wedged
 /// child making the service deaf does not apply, and the loop reads
-/// `abandoned()` on every pass so a customer pressing Disconnect ends it
+/// the caller's token on every pass so a customer pressing Disconnect ends it
 /// immediately whatever the ceiling says. What is left is only: how long
 /// before "the service is still stopping" becomes "the service is never
 /// stopping". A minute is generous for the first and still short of the
@@ -210,7 +217,7 @@ pub(super) fn request_stop_without_waiting() -> Result<(), String> {
     }
 }
 
-pub(super) fn clear_tunnel_service() -> Result<(), String> {
+pub(super) fn clear_tunnel_service(cancel: &crate::lifecycle::cancel::CancelToken) -> Result<(), String> {
     let deadline = Instant::now() + TUNNEL_SERVICE_GONE_WITHIN;
     loop {
         let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
@@ -243,7 +250,7 @@ pub(super) fn clear_tunnel_service() -> Result<(), String> {
         // Disconnect must not queue behind the rest of it. Reported as
         // the abandonment rather than as a WireGuard fault, because that
         // is what happened.
-        if super::abandoned() {
+        if cancel.is_cancelled() {
             return Err(super::ABANDONED.to_string());
         }
         if Instant::now() >= deadline {

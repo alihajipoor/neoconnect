@@ -128,7 +128,7 @@ const TUNNEL_UP_MARK: &str = "Initialization Sequence Completed";
 /// a handshake still in progress at 50s is one the customer has already
 /// been told about, and the point of the ceiling is that the *service*
 /// does not sit on the `Engines` lock for ever, which is what
-/// `abandon_current_operation` and the 50ms poll below are really for.
+/// the caller's cancellation token and the 50ms poll below are really for.
 const TUNNEL_UP_WITHIN: std::time::Duration = std::time::Duration::from_secs(75);
 
 /// Makes sure a Wintun adapter exists for OpenVPN to attach to.
@@ -491,6 +491,7 @@ pub fn connect(
     engines: &Engines,
     profile: &OpenvpnProfile,
     passive: bool,
+    cancel: &crate::lifecycle::cancel::CancelToken,
 ) -> Result<Child, String> {
     let exe = engines.engine_path("openvpn.exe")?;
     engines.engine_path("wintun.dll")?;
@@ -523,7 +524,7 @@ pub fn connect(
     .map_err(|e| format!("could not start openvpn.exe: {e}"))?;
 
     let child = confirm_started(child, "OpenVPN", &log_path)?;
-    wait_until_up(child, &log_path)
+    wait_until_up(child, &log_path, cancel)
 }
 
 /// Waits until OpenVPN says its tunnel is up, rather than until it has
@@ -543,7 +544,11 @@ pub fn connect(
 /// consequence, not the event: it can be addressed before `PUSH_REPLY`
 /// has been applied, so waiting on the address would go back to
 /// reporting a tunnel that is not yet carrying anything.
-fn wait_until_up(mut child: Child, log_path: &std::path::Path) -> Result<Child, String> {
+fn wait_until_up(
+    mut child: Child,
+    log_path: &std::path::Path,
+    cancel: &crate::lifecycle::cancel::CancelToken,
+) -> Result<Child, String> {
     let deadline = std::time::Instant::now() + TUNNEL_UP_WITHIN;
     loop {
         let log = std::fs::read_to_string(log_path).unwrap_or_default();
@@ -563,7 +568,7 @@ fn wait_until_up(mut child: Child, log_path: &std::path::Path) -> Result<Child, 
                 return Err(format!("could not check whether OpenVPN was still running: {e}"));
             }
         }
-        if super::abandoned() {
+        if cancel.is_cancelled() {
             let _ = child.kill();
             super::reap(&mut child);
             return Err(super::ABANDONED.to_string());
