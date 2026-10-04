@@ -46,6 +46,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// The only version this speaks.
@@ -71,6 +72,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 /// an open proxy on the customer's machine, and that is a property this
 /// module should not accept an argument about.
 pub const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
+
+/// The largest datagram a UDP association can deliver, header included:
+/// the largest UDP payload there is, plus the longest header SOCKS5 can
+/// put in front of it (a 255-byte name, its length, the port and the
+/// four fixed bytes). Sized for the worst case once, so no datagram is
+/// ever cut short by the buffer it is read into.
+const MAX_FRAMED: usize = 65_535 + 262;
 
 fn protocol_error(what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("SOCKS5: {what}"))
@@ -198,6 +206,17 @@ pub struct UdpAssociation {
     relay: SocketAddrV4,
     /// The association's lifetime. See the type note.
     _control: TcpStream,
+    /// Where a framed datagram lands before its header is stripped.
+    ///
+    /// Allocated once per association. It used to be allocated per
+    /// call, at the caller's buffer size plus a header -- and the reply
+    /// reader's buffer is 64KB, so every datagram of every game on an
+    /// exit, and every one-second read timeout of an idle flow, zeroed
+    /// a fresh 64KB on the way in. A mutex rather than `&mut self`
+    /// because the association is shared between the flow's sending and
+    /// receiving threads; only the receiver ever takes it, so it is
+    /// never contended.
+    scratch: Mutex<Vec<u8>>,
 }
 
 impl UdpAssociation {
@@ -234,7 +253,7 @@ impl UdpAssociation {
         // cannot be delivered to a game as though its server had sent
         // it.
         socket.connect(SocketAddr::V4(relay))?;
-        Ok(Self { socket, relay, _control: control })
+        Ok(Self { socket, relay, _control: control, scratch: Mutex::new(vec![0u8; MAX_FRAMED]) })
     }
 
     /// Bounds how long a read blocks, so a relay thread notices its
@@ -270,10 +289,19 @@ impl UdpAssociation {
     /// Returns the peer that sent it, which the caller needs because a
     /// carried UDP flow's replies are rewritten to look as though they
     /// came from the address the application asked for.
+    ///
+    /// A datagram larger than `buffer` is an error, not a shorter
+    /// datagram -- the same answer a plain `UdpSocket` gives on Windows,
+    /// so the pinned and exit paths in `proxy.rs` agree. Truncating it
+    /// would hand an application part of a packet as though it were
+    /// whole, which is the reason fragments are refused below.
     pub fn recv_from(&self, buffer: &mut [u8]) -> io::Result<(usize, SocketAddrV4)> {
-        let mut framed = vec![0u8; buffer.len() + 262];
-        let len = self.socket.recv(&mut framed)?;
-        let framed = &framed[..len];
+        // The contents are overwritten by every receive and never read
+        // past `len`, so a panic elsewhere leaves nothing in here worth
+        // refusing over.
+        let mut scratch = self.scratch.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let len = self.socket.recv(&mut scratch)?;
+        let framed = &scratch[..len];
         if framed.len() < 10 {
             return Err(protocol_error("a datagram arrived too short to hold a header"));
         }
@@ -317,11 +345,16 @@ impl UdpAssociation {
             _ => return Err(protocol_error("a datagram names an address type that does not exist")),
         };
         let payload = &framed[header_len..];
-        let copied = payload.len().min(buffer.len());
-        buffer[..copied].copy_from_slice(&payload[..copied]);
-        Ok((copied, from))
+        if payload.len() > buffer.len() {
+            return Err(protocol_error(&format!(
+                "a {}-byte datagram does not fit the {}-byte buffer it was read for",
+                payload.len(),
+                buffer.len()
+            )));
+        }
+        buffer[..payload.len()].copy_from_slice(payload);
+        Ok((payload.len(), from))
     }
-
 }
 
 #[cfg(test)]
@@ -528,6 +561,41 @@ mod tests {
             .send_to(b"0123456789", SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 1))
             .unwrap();
         assert_eq!(sent, 10);
+    }
+
+    /// Part of a datagram delivered as though it were all of it is the
+    /// failure fragments are refused for. The old reader returned the
+    /// first four bytes of this as a complete four-byte datagram.
+    #[test]
+    fn a_datagram_larger_than_the_buffer_is_refused_rather_than_cut_short() {
+        let (port, _rx) = fake_server();
+        let association = UdpAssociation::open(port).unwrap();
+        association.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        association.send_to(b"0123456789", SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 1)).unwrap();
+
+        let mut small = [0u8; 4];
+        let error = association.recv_from(&mut small).expect_err("a truncated datagram must not look whole");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The buffer is reused, so what one datagram leaves in it must not
+    /// reach the next -- and a refused datagram must not end the flow.
+    #[test]
+    fn a_refused_datagram_leaves_the_association_carrying() {
+        let (port, _rx) = fake_server();
+        let association = UdpAssociation::open(port).unwrap();
+        association.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let target = SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 5), 27015);
+
+        association.send_to(b"a long first datagram", target).unwrap();
+        let mut small = [0u8; 4];
+        assert!(association.recv_from(&mut small).is_err());
+
+        association.send_to(b"ok", target).unwrap();
+        let mut buffer = [0u8; 64];
+        let (len, from) = association.recv_from(&mut buffer).unwrap();
+        assert_eq!(&buffer[..len], b"ok");
+        assert_eq!(from, target);
     }
 
     #[test]
