@@ -1189,7 +1189,7 @@ mod tests {
     /// cannot affect the runner's own lookups while it exists, and it
     /// is removed either way.
     #[test]
-    fn print_the_registry_shape_of_a_real_nrpt_rule() {
+    fn windows_probe_the_registry_shape_of_a_real_nrpt_rule() {
         const PROBE_COMMENT: &str = "Neoxify schema probe";
         const LOCAL: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
 

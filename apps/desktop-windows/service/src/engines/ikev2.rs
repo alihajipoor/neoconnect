@@ -485,7 +485,7 @@ mod tests {
     /// same cmdlet `connect` uses, then reports which candidate file
     /// grew the entry and what the entry looks like.
     #[test]
-    fn print_the_phonebook_location_and_the_cost_of_asking_windows() {
+    fn windows_probe_the_phonebook_location_and_the_cost_of_asking() {
         const PROBE_ENTRY: &str = "Neoxify schema probe entry";
 
         let candidates: Vec<(&str, std::path::PathBuf)> = ["PROGRAMDATA", "APPDATA", "SYSTEMROOT"]

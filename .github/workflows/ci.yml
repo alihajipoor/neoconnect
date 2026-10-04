@@ -226,12 +226,14 @@ jobs:
       # This crate only compiles on Windows, so CI is the only place a
       # question about Windows can be *asked* -- and `cargo test` hides
       # stdout for tests that pass, which is every probe, because they
-      # assert nothing on purpose. Scoped to test names containing
-      # "probe" so the other 376 stay quiet, and single-threaded so the
-      # printed blocks do not interleave. Never fails the job: the
-      # probes are groundwork, and a missing answer is not a broken
+      # assert nothing on purpose. Scoped to the `windows_probe_`
+      # prefix so the other 382 stay quiet -- a plain "probe" filter
+      # matched two unrelated tests and none of these, and reported
+      # success for a step that had run nothing -- and single-threaded
+      # so the printed blocks do not interleave. Never fails the job:
+      # the probes are groundwork, and a missing answer is not a broken
       # build.
       - name: Probe Windows behaviour (temporary)
         working-directory: apps/desktop-windows
         continue-on-error: true
-        run: cargo test -p neoconnect-service probe -- --nocapture --test-threads=1
+        run: cargo test -p neoconnect-service windows_probe_ -- --nocapture --test-threads=1
