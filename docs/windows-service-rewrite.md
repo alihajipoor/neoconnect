@@ -190,23 +190,27 @@ engine wait clamps. Two that look like gaps are not: `BIND_RETRY_FOR`
 and `redirect::ACTIVATION_GRACE` (3s) runs inside a spawned thread, so
 the constructor returns before it.
 
-**The one real residual is `HELPER_BUDGET`.** Helper processes on the
-connect path -- `netsh` for Xray's adapter, `wireguard.exe
-/installtunnelservice` -- go through `run_hidden`, which bounds them at
-15 seconds and reads the ambient cancellation every 50ms. It does not
-read the *deadline*. So a helper that wedges can push a connect up to
-15 seconds past the budget, and the app will have stopped listening
-while the service goes on to succeed -- the app-and-service-disagree
-state, reached by a different road.
+`HELPER_BUDGET` was the one real residual and is now closed. Helper
+processes go through `run_hidden`, bounded at 15 seconds and reading
+the ambient cancellation every 50ms but not the *deadline* -- so a
+wedged `netsh` or `wireguard.exe` could carry a connect 15 seconds
+past its budget and finish after the app had stopped listening. Both
+call sites that could do it had the operation's limits in reach, so
+each takes `limits.clamp(HELPER_BUDGET)`: Xray's `configure_adapter`,
+which runs `netsh` twice, and WireGuard's `/installtunnelservice`.
 
-Closing it means threading `Limits` into `capture_hidden`, and from
-there into DNS, routing, repair, the janitor and the firewall: the
-ceremony this document argues against for exactly those callers, since
-none of them has a cancellation decision to make. The cheaper option
-is to pass `limits.clamp(HELPER_BUDGET)` at the two connect-path call
-sites that have limits in reach. Neither has been done. It is written
-down here because the commits read as though the budget were airtight,
-and it is not quite.
+The generic primitive is deliberately left ambient. Threading `Limits`
+into `capture_hidden` would reach DNS, routing, repair, the janitor
+and the firewall, none of which has a cancellation decision to make,
+and for them the ambient read is the right answer: a process started
+inside a cancelled operation should abort, always. Clamping at the two
+sites that know about the deadline gets the benefit without the
+ceremony.
+
+**Every wait that can delay a connect reply is now bounded by the
+connect's own clock.** That is an audited statement, not an assumed
+one -- see the list above for the two that look like exceptions and
+are not.
 
 ### Cancellation is a parameter, except once
 
