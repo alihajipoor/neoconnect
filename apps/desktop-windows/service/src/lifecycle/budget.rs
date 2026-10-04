@@ -271,22 +271,42 @@ mod tests {
     /// The arithmetic that produced the dead Disconnect button, written
     /// down so it cannot quietly come back.
     ///
-    /// This asserts the bug rather than the fix, deliberately: the three
-    /// engine budgets still exceed the app's deadline on disk, and
-    /// changing them is a behavioural decision about how long a slow
-    /// connect may take, not a number to adjust in passing. When they
-    /// are brought under the deadline this test fails, and the right
-    /// response is to invert it -- at which point it becomes the
-    /// regression guard it should have been all along.
+    /// It still reads as a violation and that is still correct: all
+    /// three ceilings exceed the app's deadline on disk. What changed is
+    /// that the ceilings are no longer what bounds a connect. Each of
+    /// these waits now asks [`Limits::clamp`] for the shorter of its own
+    /// ceiling and what the operation has left, so a ceiling is what a
+    /// stage may spend when it is the only thing running, and the
+    /// deadline is what it actually gets.
+    ///
+    /// Which is why these numbers are deliberately *not* lowered to
+    /// pass. Lowering them would say "OpenVPN gets 40 seconds" in a
+    /// world where it might be the third stage of a connect with 6
+    /// seconds left, and would leave the same class of mistake
+    /// available to the next ceiling somebody adds. The clamping is the
+    /// fix; this test is the record of why it is needed, and it should
+    /// fail if somebody removes the clamping and tunes the constants
+    /// instead.
     #[test]
-    fn the_engine_budgets_still_exceed_the_reply_deadline() {
+    fn the_engine_ceilings_exceed_the_reply_deadline_and_are_clamped_not_lowered() {
         let engines = [OPENVPN_TUNNEL_UP, XRAY_ADAPTER_WAIT, WIREGUARD_SERVICE_GONE];
         let bad = violations(&APP_REPLY_DEADLINE, &engines);
         assert_eq!(
             bad.len(),
             3,
-            "all three still overrun; if this changed, invert the assertion rather than deleting it"
+            "all three still overrun, which is fine only because every one of them clamps"
         );
+
+        // The property that makes the overrun harmless, stated against
+        // the real ceilings rather than trusted.
+        let limits = Limits::new(crate::lifecycle::cancel::CancelToken::new(), Duration::from_secs(6));
+        for ceiling in engines {
+            assert!(
+                limits.clamp(ceiling.limit) <= Duration::from_secs(6),
+                "{} was granted more than the operation had left",
+                ceiling.name
+            );
+        }
     }
 
     /// Equality is not fitting. WireGuard's 45 seconds against the app's
