@@ -158,10 +158,6 @@ impl Limits {
         self.deadline.clamp(ceiling)
     }
 
-    pub fn remaining(&self) -> Duration {
-        self.deadline.remaining()
-    }
-
     /// The token itself, for the two callers that need it rather than a
     /// question answered about it: `CancelToken::interruptible`, which
     /// moves an uncancellable syscall to its own thread, and the
