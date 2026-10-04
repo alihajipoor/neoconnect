@@ -151,9 +151,154 @@ Dependency order, each green before the next:
 8. `mod.rs` — the orchestrator, last, because its shape falls out of
    what the others became.
 
+## What the reading found
+
+Four analyses, one per group of files. The headline is that the
+*algorithms* are sound and hard-won — almost every odd-looking line
+turns out to record a measured field bug — and the problem is that
+five or six unrelated jobs share each file, so the invariants holding
+them apart are prose rather than types.
+
+### Files that are several modules each
+
+`owner.rs` is five: the customer's policy object (`Selection`), CIDR
+scope arithmetic, the port→pid→image cache, the settings-screen picker
+(product names, icons, primary-binary scoring), and connection-table
+mutation plus the escape audit. The file admits it — it carries two
+separate `#[cfg(test)]` modules bridged by a `#[cfg(test)]` free
+function hoisted to file scope because "the call sites are in the
+second one". The picker half has no packet-path role at all, and its
+doc comment is already stale because the visible-window filter it
+describes moved to the Tauri client (a LocalSystem service in session
+0 sees no windows).
+
+`proxy.rs` is four: egress placement primitives, the exit table,
+own-socket bookkeeping, and the relays — plus ~300 lines of tunnel
+health verification (`probe`, `prove_carries`, `client_hello`,
+`round_trip_pinned`) that relays nothing and is consumed by `mod.rs`
+and the status poll.
+
+### Invariants that should be types
+
+* **`decide` is a 393-line policy ladder whose ordering is the safety
+  property.** Eight sequential early returns; the rule that every
+  refusal precedes the only `Origin` that acquires an exit is held by
+  layout plus one test. One place in the file does enforce it properly
+  — `exit_for`'s signature, where "the signature is the enforcement" —
+  and that is the shape the rest should take.
+* **The `MIB_*_OWNER_PID` row layout is hand-decoded six times**, with
+  the port byte-swap open-coded seven times. The file documents the
+  hazard itself: passing `AF_INET6` to the IPv4 reader "would parse
+  address bytes as a port and return a plausible number for the wrong
+  socket". Three hand-written parsers of one layout is three chances
+  at exactly that.
+* **"Is this the internet" exists in three places** kept in step by
+  hand: `is_public_v4`, the WinDivert filter string, and a literal
+  list in two tests. Drift would report "a number that looks like a
+  leak and is really a disagreement between two lists".
+* **Lock poisoning is handled two different ways** with nothing saying
+  which applies where. Every method on `Nat` uses `.lock().unwrap()`,
+  so one panic in any relay thread poisons the mutex and every
+  subsequent packet panics the redirect loop.
+* **`Redirect::activated` is a field that lies until `start` runs**, so
+  both construction sites carry a comment saying so.
+* **`RUNNING` is a hand-maintained shadow of `active.is_some()`**, its
+  invariant stated as prose: written "at the two places that set and
+  clear it and nowhere else".
+
+### Lifecycle
+
+`start` is 286 lines doing eight jobs, with teardown-on-failure
+written out by hand at four exit paths — and `InstalledRoutes` has no
+`Drop` while `Allowance` and the IPv6 block do, so one function runs
+two cleanup disciplines and the dangerous one is the manual one.
+`stop` is a hand-ordered ten-step sequence where four steps carry a
+comment explaining why *that position*, and nothing in the types
+enforces any of it; `Active`'s field order does not match, so drop
+order would be wrong.
+
+**Relay connections are not owned.** Each accepted TCP connection gets
+a detached thread running `pump`, which sets no timeouts and never
+reads the stop flag, and `Relays::stop` does not close those sockets.
+They do end — the upstream is always pinned to the tunnel or to a local
+inbound, so engine teardown breaks them — but teardown depends on the
+far end breaking rather than on us closing anything. A rewrite should
+own them and close them.
+
+### Performance, where it is visible to a customer
+
+* **The hot path allocates per packet.** `Selection`'s doc says paths
+  are "lowercased once at construction so matching is a plain
+  comparison rather than a case-insensitive scan per packet".
+  `matches` then calls `to_lowercase()` — a heap allocation — and
+  scans a `Vec<String>` linearly. `destination_scope` and
+  `preferred_exit` each lowercase again: three allocations per packet
+  for one string.
+* **`icon.rs` claims a cache that does not exist.** Its doc says icons
+  "are base64'd once and cached"; there is no cache anywhere. Every
+  `ListRunningApps` re-runs `SHGetFileInfoW`, `GetDIBits` and a full
+  hand-written PNG encode per product, and `running_apps` does two
+  complete version-resource file reads per process on the machine.
+* **The same packet is parsed up to three times** — once on the
+  dispatcher for worker affinity, then again in `handle_packet`, then
+  again in `handle_ipv6` — because `Job` carries only the raw bytes.
+
+### What has no test behind it
+
+The whole picker half of `owner.rs`, all of `icon.rs`'s GDI path
+(including the mask-vs-alpha rule its doc says is "only obvious once
+every icon has come out blank"), `start`, `stop`'s ordering, `probe`,
+`complaint`, and the `Limits` cancellation and deadline paths. Every
+one of those has a bug story recorded in prose with nothing pinning it.
+
+Two tests are `#[ignore]`d with a documented wrong premise, and they
+matter: the property Custom mode's honesty rests on — that a pinned
+socket does not fall back to the ordinary route — has **no running
+test**. Its only evidence is a customer log quoted in a comment. A
+rewrite must not read those names as coverage.
+
+### Possible defects found, not yet acted on
+
+Logged rather than fixed, because each needs its own verification:
+
+* `OwnerLookup::rebuild` marks a snapshot fresh even when all four
+  table walks failed, so stale maps are declared current for another
+  200ms. No comment acknowledges it.
+* `parse_table` keys on port alone, so two rows sharing a local port
+  resolve to whichever came last.
+* `last_seen` is refreshed only by outbound packets, so a
+  receive-only UDP flow is retired after 60s while still live — which
+  is exactly what the comment motivating `TCP_IDLE` says must not
+  happen.
+
+One found this way is already fixed: `expire_idle` swept `forward` by
+port alone while ports are only unique per transport, so an expiring
+UDP flow retired a live TCP flow sharing its number.
+
 ## Target design
 
-To be written once the per-file analyses are in. It is deliberately
-not guessed here: the point of reading 15,000 lines first is that the
-structural problems should come from the code rather than from an
-opinion about how split tunnelling ought to look.
+Follows from the above, and the rule is one job per module:
+
+1. **`policy/`** — `Selection`, scopes, the three verdict vocabularies.
+   Pure, no Windows, fully testable off-platform. Paths stored
+   pre-lowercased in a set, so `matches` is a hash lookup and the
+   doc comment becomes true.
+2. **`tables/`** — one typed reader for the `MIB_*_OWNER_PID` layouts,
+   replacing six hand-decodes, plus the port→pid→image cache.
+3. **`picker/`** — `running_apps`, product naming, icons. Settings-screen
+   presentation, off the packet path entirely, with the cache its doc
+   already claims.
+4. **`net/`** — `divert`, `firewall`, pinning primitives: the thin
+   Windows layer.
+5. **`flows/`** — the NAT table, unchanged in shape; it is the one file
+   whose single responsibility is already clean.
+6. **`relay/`** — the relays and owned connection lifetimes. Tunnel
+   health verification moves out to its own module; it is not relaying.
+7. **`intercept/`** — the WinDivert loop, with `decide` restructured so
+   the ladder's ordering is carried by types the way `exit_for` already
+   does.
+8. **`session/`** — `start`/`stop` as RAII acquisition in order, so
+   teardown is drop order rather than a hand-written sequence, and the
+   four manual unwind paths disappear.
+
+`SplitTunnel` stays exactly as the boundary above defines it.
