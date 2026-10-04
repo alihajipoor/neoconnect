@@ -804,6 +804,46 @@ pub async fn probe_ipv6_egress() -> bool {
 ///
 /// Returns None rather than a sentinel number when the server does not
 /// answer, so the UI can show "--" instead of inventing a value.
+/// How long one reachability probe gets.
+///
+/// Short on purpose. This runs against every candidate at once before
+/// anything is dialled, and its whole value is being over before a
+/// customer notices. A filtered endpoint in Iran does not refuse -- it
+/// blackholes -- so the timeout *is* the answer for the blocked case,
+/// and every extra second is a second added to every connect.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// Whether a TCP endpoint will complete a handshake right now.
+///
+/// The ladder used to find this out by dialling: spawn the engine,
+/// install routes, wait out a settle budget, fail, tear down, try the
+/// next. On a filtered network that is tens of seconds per dead
+/// protocol, in series, which is why people try three or four and
+/// decide the app is broken.
+///
+/// A TCP handshake answers the same question -- can this machine reach
+/// this port at all -- for a fraction of the cost and with nothing to
+/// clean up afterwards, and dozens can run at once.
+///
+/// **It only answers for TCP-carried protocols.** WireGuard, OpenVPN
+/// and IKEv2 are UDP, and a TCP connect against them always fails
+/// whether the network is filtered or not. Callers must not read a
+/// `false` here as evidence about those -- see `probeable()` on the
+/// client side, which is what decides who gets asked.
+///
+/// A completed handshake is also not proof the tunnel will carry
+/// traffic: DPI can allow the handshake and drop the stream, which is
+/// the `NOT_CARRYING_TRAFFIC` outcome. This narrows the field; it does
+/// not settle it.
+#[tauri::command]
+pub async fn probe_tcp(host: String, port: u16) -> bool {
+    use tokio::net::TcpStream;
+    matches!(
+        tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect((host.as_str(), port))).await,
+        Ok(Ok(_))
+    )
+}
+
 #[tauri::command]
 pub async fn measure_latency(host: String, port: u16) -> Option<u32> {
     use tokio::net::TcpStream;

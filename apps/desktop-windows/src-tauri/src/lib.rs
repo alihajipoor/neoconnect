@@ -142,6 +142,7 @@ pub fn run() {
             // would always answer "no IPv6". See vpn::probe_ipv6_egress.
             vpn::probe_ipv6_egress,
             vpn::measure_latency,
+            vpn::probe_tcp,
             vpn::network_fingerprint,
             get_launch_deep_link
         ])

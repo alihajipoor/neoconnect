@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { recordAttempt, type ConnectHistory } from "./connect-history";
+import { reachabilityKey, type ReachabilityMap } from "./reachability";
 import { orderCandidates, lastGoodFor, rememberLastGood } from "./failover";
 import type { Protocol, ProtocolUser } from "./types";
 
@@ -191,5 +192,63 @@ describe("ordering by what this device has seen", () => {
     expect(orderCandidates(users, { history: {}, network: "cell", now: NOW })).toEqual(
       orderCandidates(users),
     );
+  });
+});
+
+describe("ordering by what answers right now", () => {
+  const NOW = 1_700_000_000_000;
+  const reach = (entries: Array<[string, string, "reachable" | "unreachable"]>): ReachabilityMap =>
+    Object.fromEntries(entries.map(([r, p, v]) => [reachabilityKey(r, p as never), v]));
+
+  it("leads with what answered a handshake", () => {
+    const ordered = orderCandidates([user("de-1", "WIREGUARD"), user("de-1", "XRAY_TROJAN")], {
+      reachability: reach([["de-1", "XRAY_TROJAN", "reachable"]]),
+    });
+    expect(ordered[0].protocol).toBe("XRAY_TROJAN");
+  });
+
+  it("sinks what refused one", () => {
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("de-1", "XRAY_VLESS_TLS")], {
+      reachability: reach([["de-1", "XRAY_TROJAN", "unreachable"]]),
+    });
+    expect(ordered[0].protocol).toBe("XRAY_VLESS_TLS");
+  });
+
+  /** The one that would quietly ruin this.
+   *
+   * WireGuard is UDP and cannot be probed at all, so it is never asked.
+   * "Not asked" has to order like "unknown" -- above something that
+   * actively refused. Treating silence as failure would bury the
+   * protocol that is some customers' only working option.
+   */
+  it("does not punish a protocol that could not be probed", () => {
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("de-1", "WIREGUARD")], {
+      reachability: reach([["de-1", "XRAY_TROJAN", "unreachable"]]),
+    });
+    expect(ordered[0].protocol).toBe("WIREGUARD");
+  });
+
+  /** Live evidence outranks remembered evidence, because the network
+   * can have changed since this morning. */
+  it("prefers a live answer over an older success", () => {
+    const h: ConnectHistory = recordAttempt({}, "cell", "de-1", "XRAY_TROJAN", true, NOW - 60_000);
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("de-1", "XRAY_VLESS_TLS")], {
+      history: h,
+      network: "cell",
+      now: NOW,
+      reachability: reach([
+        ["de-1", "XRAY_TROJAN", "unreachable"],
+        ["de-1", "XRAY_VLESS_TLS", "reachable"],
+      ]),
+    });
+    expect(ordered[0].protocol).toBe("XRAY_VLESS_TLS");
+  });
+
+  it("still never moves ahead of the customer's own choice", () => {
+    const ordered = orderCandidates([user("de-1", "XRAY_TROJAN"), user("nl-9", "OPENVPN")], {
+      pinnedRouteId: "nl-9",
+      reachability: reach([["de-1", "XRAY_TROJAN", "reachable"]]),
+    });
+    expect(ordered[0].routeId).toBe("nl-9");
   });
 });

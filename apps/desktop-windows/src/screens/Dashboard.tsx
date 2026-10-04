@@ -28,6 +28,7 @@ import {
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
 import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
+import { probeCandidates } from "../lib/reachability";
 import {
   loadChosenRoute,
   loadConnectHistory,
@@ -1389,11 +1390,28 @@ export function Dashboard({
       // needs no server contact -- which is the point, since on a
       // filtered network the control plane is a plausible thing to lose
       // first.
+      // Asked of every candidate at once, before anything is dialled.
+      //
+      // About a second, against the tens of seconds a dead rung costs
+      // when the ladder discovers the same thing by dialling it. The
+      // answer only covers the TCP-carried protocols -- UDP cannot be
+      // probed this way -- and a probe that cannot be run leaves the
+      // candidate unknown rather than condemned.
+      //
+      // Placed after the teardown above, so this is dead time that
+      // would otherwise be spent dialling something that cannot answer.
+      // A cancel landing during it needs no handling here: the loop
+      // below checks `cancelRef` on its first pass and a superseded
+      // generation is caught after it, and adding a third exit would
+      // mean a third opinion about what that outcome is called.
+      const reachability = await probeCandidates(dialable).catch(() => ({}));
+
       const candidates = orderCandidates(dialable, {
         pinnedRouteId: chosenRouteId,
         lastGoodRouteId: lastGoodFor(lastGood, networkId),
         history,
         network: networkId,
+        reachability,
         preferredRouteId: null,
       });
 

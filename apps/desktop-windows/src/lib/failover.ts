@@ -1,4 +1,5 @@
 import { scoreFor, type ConnectHistory } from "./connect-history";
+import { reachabilityOf, type ReachabilityMap } from "./reachability";
 import type { Protocol, ProtocolUser } from "./types";
 
 /** Order to try protocols in when nothing better is known.
@@ -72,9 +73,13 @@ export function orderCandidates(
     history?: ConnectHistory;
     network?: string | null;
     now?: number;
+    /** What answered a handshake just now, for the ones that could be
+     * asked. */
+    reachability?: ReachabilityMap;
   } = {},
 ): ProtocolUser[] {
-  const { pinnedRouteId, lastGoodRouteId, preferredRouteId, history, network, now } = opts;
+  const { pinnedRouteId, lastGoodRouteId, preferredRouteId, history, network, now, reachability } =
+    opts;
 
   // A chosen route leads; it does not exclude the others.
   //
@@ -127,9 +132,30 @@ export function orderCandidates(
     return place(y) - place(x);
   };
 
+  // What answered a moment ago, ahead of what worked yesterday.
+  //
+  // Live beats remembered: a protocol that has just refused a handshake
+  // is not going to carry a tunnel, however well it did this morning,
+  // and filtering in Iran changes within a day. Only three states, and
+  // the middle one is load-bearing -- a candidate that could not be
+  // probed, because it is UDP, must sit exactly where an unknown sits
+  // rather than below something that failed. Burying WireGuard for not
+  // being TCP would take away the one option some customers have.
+  const liveness = (u: ProtocolUser): number => {
+    switch (reachabilityOf(reachability, u.routeId, u.protocol)) {
+      case "reachable":
+        return -1;
+      case "unreachable":
+        return 1;
+      default:
+        return 0;
+    }
+  };
+
   return [...users].sort(
     (a, b) =>
       priority(a) - priority(b) ||
+      liveness(a) - liveness(b) ||
       byEvidence(a, b) ||
       rank(a.protocol) - rank(b.protocol) ||
       wsLast(a) - wsLast(b) ||
