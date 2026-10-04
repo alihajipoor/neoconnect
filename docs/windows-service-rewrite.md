@@ -117,6 +117,46 @@ and Xray's 60s sit inside the app's 45s reply deadline, which
 *guarantees* the retry that clears the abandon flag a disconnect just
 set.
 
+**Resolved by clamping, not by lowering the constants** — and the
+distinction matters enough to write down, because lowering them is the
+obvious move and it is wrong.
+
+`lifecycle::budget::Limits` carries the cancellation token and the
+operation's deadline as one argument, built once at the boundary in
+`Engines::connect` from `CONNECT_BUDGET` (38s, seven under the app's
+45). Every wait asks `clamp` for the shorter of its own ceiling and
+what the operation has left. A ceiling therefore means "what this
+stage may spend when it is the only thing running"; the deadline is
+what it actually gets.
+
+Lowering the constants instead would say "OpenVPN gets 40 seconds" in
+a world where it may be the third stage of a connect with six seconds
+left — and it leaves the same mistake available to whatever ceiling is
+added next. The per-stage `fits_inside` check cannot see the real
+failure anyway, which is stages that each fit and overrun in sequence:
+a WireGuard connect is 45s of service-gone wait, then 15 installing,
+then a split tunnel whose own ceilings total 46.
+
+`budget.rs` keeps a test asserting the three ceilings still overrun,
+so that removing the clamping and tuning the numbers fails loudly.
+
+### Cancellation is a parameter, except once
+
+Threaded explicitly through the whole connect path. One ambient reader
+is kept deliberately: `wait_within`, the floor of `capture_hidden`,
+which DNS, routing, repair, the janitor and the firewall all sit on.
+Those authors have no cancellation decision to make — a process started
+inside a cancelled operation should abort, always — and threading a
+token through every one of them would be ceremony that adds no choice.
+
+**A teardown is never cancellable.** Cancellation is what *leads* to a
+teardown, so a teardown that honours it undoes its own purpose. This
+was learned the hard way: giving wireguard's teardown a boundary read
+of the live token made a disconnect abort its own teardown and report
+failure, because `pipe::dispatch` cancels the running operation before
+it runs the disconnect. That is the stranded-networking complaint,
+manufactured by the mechanism meant to prevent it.
+
 ## Rules
 
 1. **The IPC contract is frozen.** Shipped clients speak it. Every
@@ -155,14 +195,24 @@ set.
 
 Bottom-up, each landing green before the next starts.
 
-1. Foundation — cancellation, process supervision, RAII guard traits
-2. IPC and the pipe server — contract preserved exactly
-3. Service lifecycle — SCM, kernel liveness, two-phase stop
-4. Engine state machine
-5. The five engines
+1. ~~Foundation — cancellation, process supervision, RAII guard traits~~
+2. ~~IPC and the pipe server — contract preserved exactly~~
+3. ~~Service lifecycle — SCM, kernel liveness, two-phase stop~~
+4. Engine state machine — *cancellation and budgets threaded; the
+   state machine proper is still the slot type it was*
+5. The five engines — *entry points take `Limits`; internals untouched*
 6. DNS, routing, IPv6 block, janitor, repair
-7. Split tunnel — the largest, and the one with the most tests
+7. Split tunnel — the largest, and the one with the most tests.
+   *Already takes `Limits` and clamps its two long waits, so the
+   bring-up can no longer outlive the connect; the rewrite itself is
+   still ahead.*
 8. Gaming mode
+
+Steps 4, 5 and 7 were taken partly and out of order on purpose: the
+cancellation and budget work cuts across all three, and doing it once
+across the call path was cheaper than doing it three times as each
+module came up for rewrite. What remains in each is its own structure,
+not its deadlines.
 
 ## What this does not fix
 
