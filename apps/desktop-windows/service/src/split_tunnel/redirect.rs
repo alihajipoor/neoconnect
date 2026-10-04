@@ -735,12 +735,12 @@ pub struct Redirect {
     /// process-wide clock would let the outgoing session's age decide
     /// what the incoming one does with a packet.
     ///
-    /// Whatever the caller puts here is overwritten by [`start`]. The
-    /// window has to begin when packets begin arriving, not when the
-    /// struct was assembled, and the gap between the two is a route
+    /// A caller can only supply [`Activation::pending`]; [`start`] begins
+    /// it. The window has to begin when packets begin arriving, not when
+    /// the struct was assembled, and the gap between the two is a route
     /// probe and a firewall wait -- seconds, on the path where this
     /// matters most.
-    pub activated: Instant,
+    pub activated: Activation,
     /// The concurrent exits the running engine offers.
     ///
     /// Empty for every session that does not use them, which is all of
@@ -760,7 +760,38 @@ impl Redirect {
     /// Whether the activation reset is still converging, so a
     /// pre-existing connection should be refused rather than exempted.
     fn within_activation_grace(&self) -> bool {
-        self.activated.elapsed() < ACTIVATION_GRACE
+        self.activated.within_grace()
+    }
+}
+
+/// When interception began, or that it has not.
+///
+/// This used to be a plain `Instant` field that every caller filled in
+/// and [`start`] then overwrote -- so until `start` ran it held a time
+/// that meant nothing, and both places that built a `Redirect` carried a
+/// comment saying so. Now a caller can only say "not begun", and only
+/// this module can begin it: the value cannot be wrong, because there is
+/// no way to supply one.
+#[derive(Debug, Clone, Copy)]
+pub struct Activation(Option<Instant>);
+
+impl Activation {
+    /// Not begun yet, which is all a caller building a `Redirect` knows.
+    pub fn pending() -> Self {
+        Self(None)
+    }
+
+    /// Begun now. Called by [`start`], as interception starts.
+    fn begun_now() -> Self {
+        Self(Some(Instant::now()))
+    }
+
+    /// Inside the window only once begun. A redirect that never started
+    /// has no window, so it gets the long-standing mid-connection rule
+    /// rather than the converging one -- the side on which a miss can
+    /// never become a drop.
+    fn within_grace(&self) -> bool {
+        self.0.is_some_and(|began| began.elapsed() < ACTIVATION_GRACE)
     }
 }
 
@@ -980,7 +1011,7 @@ pub fn start(
     // probe and a wait for the firewall rule to become effective, which
     // on the path where any of this matters take seconds -- long enough
     // to spend the whole grace window before a single packet is seen.
-    redirect.activated = Instant::now();
+    redirect.activated = Activation::begun_now();
 
     let filter = filter_for(&redirect);
     // Checked before opening so a filter problem is reported as one.
@@ -3525,7 +3556,17 @@ mod tests {
         // what the incoming one does with a packet.
         let mut redirect = sample_redirect();
         assert!(redirect.within_activation_grace());
-        redirect.activated = Instant::now() - ACTIVATION_GRACE - Duration::from_millis(1);
+        redirect.activated = Activation(Some(Instant::now() - ACTIVATION_GRACE - Duration::from_millis(1)));
+        assert!(!redirect.within_activation_grace());
+    }
+
+    /// A redirect that has not been started has no window to be inside.
+    /// It used to report whatever time its builder happened to write in,
+    /// which `start` would later overwrite.
+    #[test]
+    fn a_redirect_that_never_started_is_not_inside_the_window() {
+        let mut redirect = sample_redirect();
+        redirect.activated = Activation::pending();
         assert!(!redirect.within_activation_grace());
     }
 
@@ -3951,7 +3992,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
-            activated: Instant::now(),
+            activated: Activation::begun_now(),
             exits: Arc::new(ExitRelays::default()),
         });
 
@@ -4039,7 +4080,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
-            activated: Instant::now(),
+            activated: Activation::begun_now(),
             exits: Arc::new(ExitRelays::default()),
         }
     }
@@ -4448,7 +4489,7 @@ mod tests {
                 carry_dns: false,
                 dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
                 // Overwritten by `start`; see ACTIVATION_GRACE.
-                activated: Instant::now(),
+                activated: Activation::begun_now(),
                 exits: Arc::new(ExitRelays::default()),
             },
             nat,
@@ -4502,7 +4543,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
-            activated: Instant::now(),
+            activated: Activation::begun_now(),
             exits: Arc::new(ExitRelays::default()),
         });
         super::super::divert::compile_filter(&filter).expect("the filter must compile");

@@ -1293,10 +1293,9 @@ impl SplitTunnel {
             // whatever is not carried resolves on the local network
             // otherwise, which is the leak this closes.
             carry_dns: true,
-            // Overwritten by `redirect::start`, which stamps it when
-            // interception actually begins -- the route probe and the
-            // firewall wait sit between here and there.
-            activated: Instant::now(),
+            // Begun by `redirect::start` as interception starts -- the
+            // route probe and the firewall wait sit between here and there.
+            activated: redirect::Activation::pending(),
             exits: self.exits.clone(),
         };
 
