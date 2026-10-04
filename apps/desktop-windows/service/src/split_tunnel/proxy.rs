@@ -1073,6 +1073,7 @@ pub struct Relays {
     pub own_sockets: Arc<OwnSockets>,
     stop: Arc<AtomicBool>,
     upstreams: Arc<UdpUpstreams>,
+    carried: Arc<Carried>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -1081,13 +1082,106 @@ impl Relays {
     ///
     /// The TCP acceptor is woken by connecting to it: `accept` blocks,
     /// and a flag it never gets round to reading is not a stop.
+    ///
+    /// Carried connections are closed, not waited for. Their copy threads
+    /// unblock when their sockets shut and finish on their own; joining
+    /// them here would put "wait for something to disappear" on the
+    /// disconnect path, which is the one thing it may not do.
     pub fn stop(self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.tcp_port));
+        self.carried.close_all();
         self.upstreams.close_all();
         for thread in self.threads {
             let _ = thread.join();
         }
+    }
+}
+
+/// The TCP connections the relay is carrying, so a stop can close them.
+///
+/// Before this, nothing owned them. Each ran on a detached thread whose
+/// copy loop had no timeout and never read the stop flag, so a
+/// connection outlived its relay for as long as its far end stayed
+/// quiet -- teardown depended on the other side breaking rather than on
+/// this side closing anything.
+///
+/// Holds a clone of each half. Shutting a clone shuts the socket, which
+/// is what wakes a copy loop blocked reading the other clone.
+#[derive(Default)]
+struct Carried {
+    inner: Mutex<CarriedInner>,
+}
+
+#[derive(Default)]
+struct CarriedInner {
+    /// Set once by `close_all` and never cleared: the relays it belongs
+    /// to are finished.
+    closed: bool,
+    next: u64,
+    live: HashMap<u64, [TcpStream; 2]>,
+}
+
+impl Carried {
+    /// Never refused over a poisoned lock. The map is only ever inserted
+    /// into or removed from whole, so a panic elsewhere cannot leave it
+    /// half-written -- and the caller that most needs it is `stop`.
+    fn lock(&self) -> std::sync::MutexGuard<'_, CarriedInner> {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Records a connection for the life of the returned guard, or
+    /// refuses it if the relays have already stopped.
+    ///
+    /// The check and the insert are one critical section on purpose. A
+    /// connection can spend up to `UPSTREAM_CONNECT_TIMEOUT` dialling,
+    /// and one that finishes after the stop has swept the map would
+    /// otherwise be carried by nobody's leave, for good.
+    fn adopt(self: &Arc<Self>, client: &TcpStream, upstream: &TcpStream) -> Option<CarriedGuard> {
+        let mut inner = self.lock();
+        if inner.closed {
+            return None;
+        }
+        let id = inner.next;
+        inner.next += 1;
+        match (client.try_clone(), upstream.try_clone()) {
+            (Ok(client), Ok(upstream)) => {
+                inner.live.insert(id, [client, upstream]);
+            }
+            // Fail open: carried without a handle rather than refused.
+            // A stop then leaves this one to its far end, as every
+            // connection used to be.
+            (Err(e), _) | (_, Err(e)) => note(&format!("carrying a connection the stop cannot close: {e}")),
+        }
+        Some(CarriedGuard { carried: self.clone(), id })
+    }
+
+    fn close_all(&self) {
+        let live = {
+            let mut inner = self.lock();
+            inner.closed = true;
+            std::mem::take(&mut inner.live)
+        };
+        // Outside the lock: a copy thread finishing at the same moment
+        // takes it to remove its own entry.
+        for halves in live.values() {
+            for half in halves {
+                let _ = half.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+}
+
+/// Removes a finished connection from `Carried`, so the map holds only
+/// what is live rather than every connection the relay ever carried.
+struct CarriedGuard {
+    carried: Arc<Carried>,
+    id: u64,
+}
+
+impl Drop for CarriedGuard {
+    fn drop(&mut self) {
+        self.carried.lock().live.remove(&self.id);
     }
 }
 
@@ -1172,12 +1266,13 @@ pub fn start(
     let stop = Arc::new(AtomicBool::new(false));
     let upstreams = Arc::new(UdpUpstreams::default());
     let own_sockets = Arc::new(OwnSockets::default());
+    let carried = Arc::new(Carried::default());
     let mut threads = Vec::new();
 
     threads.push({
-        let (nat, tunnel, stop, own, exits) =
-            (nat.clone(), tunnel.clone(), stop.clone(), own_sockets.clone(), exits.clone());
-        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own, exits))
+        let (nat, tunnel, stop, own, exits, carried) =
+            (nat.clone(), tunnel.clone(), stop.clone(), own_sockets.clone(), exits.clone(), carried.clone());
+        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own, exits, carried))
     });
     threads.push({
         let (nat, stop, upstreams, own, stats) =
@@ -1189,7 +1284,7 @@ pub fn start(
         std::thread::spawn(move || expire_flows(nat, stop, upstreams))
     });
 
-    Ok(Relays { tcp_port, udp_port, own_sockets, stop, upstreams, threads })
+    Ok(Relays { tcp_port, udp_port, own_sockets, stop, upstreams, carried, threads })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1200,6 +1295,7 @@ fn accept_tcp(
     stop: Arc<AtomicBool>,
     own: Arc<OwnSockets>,
     exits: Arc<ExitRelays>,
+    carried: Arc<Carried>,
 ) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
@@ -1227,6 +1323,7 @@ fn accept_tcp(
         let tunnel = tunnel.clone();
         let own = own.clone();
         let exits = exits.clone();
+        let carried = carried.clone();
         std::thread::spawn(move || {
             let target = origin.upstream.unwrap_or_else(|| SocketAddrV4::new(origin.addr, origin.port));
             // The registration is held for the life of the connection,
@@ -1235,6 +1332,9 @@ fn accept_tcp(
             if let Ok((upstream, _registration)) =
                 connect_upstream(target, &tunnel, &own, &exits, origin.exit)
             {
+                // Refused when the relays stopped while this was still
+                // dialling. Dropping both halves here closes them.
+                let Some(_carried) = carried.adopt(&client, &upstream) else { return };
                 pump(client, upstream);
             }
         });
@@ -2304,6 +2404,108 @@ mod tests {
         stream.read_exact(&mut buffer).expect("the echo server must have been reached");
         assert_eq!(&buffer, b"through");
         relays.stop();
+    }
+
+    /// Connects to the relay from `nat_port`, standing in for the
+    /// rewrite the redirect loop would have done.
+    fn connect_as_flow(nat: &Nat, relay_port: u16, target_port: u16) -> TcpStream {
+        let client = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        client.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into()).unwrap();
+        let client_port = client.local_addr().unwrap().as_socket_ipv4().unwrap().port();
+        let nat_port = nat
+            .redirect(
+                Transport::Tcp,
+                Origin {
+                    addr: Ipv4Addr::LOCALHOST,
+                    port: target_port,
+                    client: Ipv4Addr::LOCALHOST,
+                    client_port,
+                    interface_id: 1,
+                    upstream: None,
+                    exit: None,
+                },
+            )
+            .unwrap();
+        drop(client);
+        let source = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        source.set_reuse_address(true).unwrap();
+        source.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, nat_port)).into()).unwrap();
+        source.connect(&SocketAddr::from((Ipv4Addr::LOCALHOST, relay_port)).into()).unwrap();
+        source.into()
+    }
+
+    /// True when a read ended because the connection did, and false when
+    /// it only gave up waiting. The difference is the whole assertion:
+    /// a timeout here means the relay is still holding the connection.
+    fn ended(result: io::Result<usize>) -> bool {
+        match result {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(e) => !matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock),
+        }
+    }
+
+    /// Stopping the relays closes the connections they are carrying.
+    ///
+    /// They used to outlive it: each ran on a detached thread with no
+    /// timeout and no stop flag, so a connection whose far end stayed
+    /// quiet -- a game between rounds, a chat app's idle socket -- went
+    /// on holding both sockets after a disconnect, until the far end
+    /// happened to break. Teardown was something that happened *to* the
+    /// relay rather than something it did.
+    #[test]
+    fn stopping_the_relays_closes_the_connections_they_carry() {
+        use std::io::{Read, Write};
+
+        // An upstream that accepts, says nothing, and never hangs up.
+        let quiet = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let quiet_port = quiet.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = quiet.accept() {
+                let _ = accepted_tx.send(stream);
+            }
+        });
+
+        let nat = Arc::new(Nat::new());
+        let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
+            .expect("relays should bind");
+        let mut app = connect_as_flow(&nat, relays.tcp_port, quiet_port);
+        app.write_all(b"hello").unwrap();
+
+        let mut far_end = accepted_rx.recv_timeout(Duration::from_secs(5)).expect("the relay must dial the upstream");
+        let mut buffer = [0u8; 5];
+        far_end.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        far_end.read_exact(&mut buffer).expect("the relay is carrying the connection");
+
+        relays.stop();
+
+        app.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        far_end.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        assert!(ended(app.read(&mut buffer)), "the application's side must be closed by the stop");
+        assert!(ended(far_end.read(&mut buffer)), "the upstream side must be closed by the stop");
+    }
+
+    /// A connection that finishes dialling after the stop has swept the
+    /// table must be refused, or it is carried by nothing that can end
+    /// it -- the dial can take up to `UPSTREAM_CONNECT_TIMEOUT`.
+    #[test]
+    fn a_connection_that_arrives_after_the_stop_is_refused() {
+        let (one, two) = connected_pair();
+        let carried = Arc::new(Carried::default());
+        carried.close_all();
+        assert!(carried.adopt(&one, &two).is_none());
+    }
+
+    /// The table holds what is live, not every connection ever carried.
+    #[test]
+    fn a_finished_connection_leaves_the_table() {
+        let (one, two) = connected_pair();
+        let carried = Arc::new(Carried::default());
+        let guard = carried.adopt(&one, &two).expect("a running relay adopts");
+        assert_eq!(carried.lock().live.len(), 1);
+        drop(guard);
+        assert!(carried.lock().live.is_empty());
     }
 
     // -----------------------------------------------------------------
