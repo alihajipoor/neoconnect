@@ -1168,6 +1168,82 @@ mod tests {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
     use winreg::RegKey;
 
+    /// Prints the registry shape of a real NRPT rule. Asserts nothing.
+    ///
+    /// Groundwork, not a test, and it is here rather than in a scratch
+    /// file because this crate only compiles on Windows and CI is the
+    /// only Windows there is. `apply` installs the tunnel's DNS rule
+    /// with `Add-DnsClientNrptRule`, measured on the rig at 10.0s,
+    /// 16.3s, 43.9s and 55.1s -- two of those past the app's own 45s
+    /// deadline, on the one call that stops a poisoned ISP resolver
+    /// answering first. Writing the same rule to the registry is what
+    /// the teardown side already does, at 48 to 64 milliseconds.
+    ///
+    /// The reason that change cannot be written from memory: a rule
+    /// whose `ConfigOptions` is wrong still *exists*, still counts, and
+    /// silently does not pin anything. That is a DNS leak presented as
+    /// a working tunnel, which is the worst failure this module has, so
+    /// the values get read off a real one instead of recalled.
+    ///
+    /// Namespace is a `.invalid` suffix and never `.`, so the rule
+    /// cannot affect the runner's own lookups while it exists, and it
+    /// is removed either way.
+    #[test]
+    fn print_the_registry_shape_of_a_real_nrpt_rule() {
+        const PROBE_COMMENT: &str = "Neoxify schema probe";
+        const LOCAL: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
+
+        let made = powershell(
+            &format!(
+                "Add-DnsClientNrptRule -Namespace 'neoxify-schema-probe.invalid' \
+                 -NameServers '10.255.255.254' -Comment '{PROBE_COMMENT}' -ErrorAction Stop"
+            ),
+            super::super::CMDLET_BUDGET,
+        );
+        println!("NRPT-PROBE cmdlet: {made:?}");
+        if made.is_err() {
+            println!("NRPT-PROBE: no rule was created, so there is nothing to read");
+            return;
+        }
+
+        let hklm = RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE);
+        match hklm.open_subkey_with_flags(LOCAL, KEY_READ) {
+            Ok(parent) => {
+                for name in parent.enum_keys().filter_map(Result::ok) {
+                    let Ok(rule) = parent.open_subkey(&name) else { continue };
+                    let comment: String = rule.get_value("Comment").unwrap_or_default();
+                    if comment != PROBE_COMMENT {
+                        continue;
+                    }
+                    println!("NRPT-PROBE key: {name}");
+                    for (vname, data) in rule.enum_values().filter_map(Result::ok) {
+                        // UTF-16 decoded by hand rather than through a
+                        // trait this crate may not implement: the point
+                        // is to read the values, not to be elegant about
+                        // it, and a probe that does not compile tells me
+                        // nothing.
+                        let wide: Vec<u16> = data
+                            .bytes
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                            .collect();
+                        let text = String::from_utf16_lossy(&wide);
+                        println!(
+                            "NRPT-PROBE   {vname} vtype={:?} bytes={:?} utf16={text:?}",
+                            data.vtype, data.bytes
+                        );
+                    }
+                }
+            }
+            Err(e) => println!("NRPT-PROBE could not open {LOCAL}: {e}"),
+        }
+
+        // Removed by our own sweep, which is also a check that the
+        // registry path can delete what the cmdlet created.
+        let swept = remove_tagged_rules(&hklm, &[LOCAL], PROBE_COMMENT);
+        println!("NRPT-PROBE swept: {swept:?}");
+    }
+
     /// The regression this whole change is about.
     ///
     /// IKEv2 gated `dns::force` on `!passive` and Xray called it
