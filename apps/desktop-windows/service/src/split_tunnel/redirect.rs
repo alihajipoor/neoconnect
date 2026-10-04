@@ -4350,7 +4350,10 @@ mod tests {
         firewall::wait_until_reachable(
             local_addr,
             relays.tcp_port,
-            &crate::lifecycle::cancel::CancelToken::new(),
+            &crate::lifecycle::budget::Limits::new(
+                crate::lifecycle::cancel::CancelToken::new(),
+                std::time::Duration::from_secs(30),
+            ),
         )
         .expect("relay must be up");
 

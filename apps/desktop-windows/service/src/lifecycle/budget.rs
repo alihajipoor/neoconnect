@@ -170,6 +170,57 @@ impl Limits {
     pub fn token(&self) -> &crate::lifecycle::cancel::CancelToken {
         &self.cancel
     }
+
+    /// Stop now, with the reason, or carry on.
+    ///
+    /// For loops that poll between steps rather than computing a
+    /// deadline. It answers both questions at once because a loop that
+    /// asks only about cancellation will run past the deadline, and one
+    /// that asks only about the deadline will sit through a disconnect
+    /// -- and whichever one a given loop forgot is not discoverable by
+    /// reading that loop.
+    pub fn check(&self) -> Result<(), Stop> {
+        if self.cancelled() {
+            return Err(Stop::Cancelled);
+        }
+        if self.expired() {
+            return Err(Stop::OutOfTime);
+        }
+        Ok(())
+    }
+}
+
+/// Why a wait gave up.
+///
+/// Two reasons that look the same from inside a loop and must not look
+/// the same to whoever reads the error. "Somebody pressed Disconnect" is
+/// not a fault; "every stage was still working when the clock ran out"
+/// is, and it is the one worth telling a customer to try another server
+/// over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    Cancelled,
+    OutOfTime,
+}
+
+/// What an abandoned operation reports.
+///
+/// Written for the customer rather than as a status code, because it can
+/// reach them: pressing Disconnect while a connect is still running ends
+/// that connect, and the app shows whatever it said.
+pub const ABANDONED: &str = "this attempt was stopped so the disconnect could go ahead";
+
+/// What a connect that ran out of time reports.
+pub const OUT_OF_TIME: &str =
+    "this connection attempt ran out of time. Trying a different server usually helps.";
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Stop::Cancelled => ABANDONED,
+            Stop::OutOfTime => OUT_OF_TIME,
+        })
+    }
 }
 
 /// What a whole connect may spend before the app stops listening.

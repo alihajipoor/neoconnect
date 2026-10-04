@@ -191,21 +191,21 @@ pub(crate) fn delete_rule() {
 pub fn wait_until_reachable(
     local: Ipv4Addr,
     tcp_port: u16,
-    cancel: &crate::lifecycle::cancel::CancelToken,
+    limits: &crate::lifecycle::budget::Limits,
 ) -> Result<(), String> {
     const BUDGET: Duration = Duration::from_secs(8);
     const STEP: Duration = Duration::from_millis(100);
     const ATTEMPT: Duration = Duration::from_millis(400);
 
     let target = SocketAddr::from((local, tcp_port));
-    let deadline = Instant::now() + BUDGET;
+    let deadline = Instant::now() + limits.clamp(BUDGET);
     let mut last = String::from("never attempted");
     while Instant::now() < deadline {
         // Eight seconds of waiting for a socket to answer, and before
         // this it could not be interrupted. A customer pressing
         // Disconnect during a connect waited it out along with
         // everything else in this file.
-        cancel.check().map_err(|c| c.to_string())?;
+        limits.check().map_err(|s| s.to_string())?;
         match TcpStream::connect_timeout(&target, ATTEMPT) {
             Ok(stream) => {
                 drop(stream);

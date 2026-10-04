@@ -701,7 +701,7 @@ impl Engines {
         // Every wait inside the bring-up unwinds on a disconnect instead
         // of holding the engine state for the ~38 seconds those waits
         // add up to.
-        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir, limits.token()) {
+        if let Err(e) = self.split_tunnel.start(adapter, node, &log_dir, limits) {
             let _ = self.disconnect();
             return Err(e);
         }
@@ -1444,12 +1444,10 @@ fn abandoned() -> bool {
         .unwrap_or(false)
 }
 
-/// What an abandoned operation reports.
-///
-/// Written for the customer rather than as a status code, because it can
-/// reach them: pressing Disconnect while a connect is still running ends
-/// that connect, and the app shows whatever it said.
-const ABANDONED: &str = "this attempt was stopped so the disconnect could go ahead";
+/// What an abandoned operation reports. Defined with the other stop
+/// reason in [`crate::lifecycle::budget`], so the words a customer sees
+/// and the type that decides between them cannot drift apart.
+const ABANDONED: &str = crate::lifecycle::budget::ABANDONED;
 
 /// What a connect that ran out of time reports.
 ///
@@ -1460,8 +1458,7 @@ const ABANDONED: &str = "this attempt was stopped so the disconnect could go ahe
 /// time the budget is gone the stage that happens to notice is an
 /// accident of ordering, and blaming OpenVPN for a slow DNS lookup
 /// three stages earlier sends whoever reads it to the wrong place.
-pub(super) const OUT_OF_TIME: &str =
-    "this connection attempt ran out of time. Trying a different server usually helps.";
+pub(super) const OUT_OF_TIME: &str = crate::lifecycle::budget::OUT_OF_TIME;
 
 /// The name to put in an error message, from the command being run.
 fn helper_name(command: &Command) -> String {
