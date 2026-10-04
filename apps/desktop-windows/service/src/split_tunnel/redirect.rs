@@ -4341,8 +4341,14 @@ mod tests {
         let stats = Arc::new(Stats::default());
         let relays =
             proxy::start(nat.clone(), tunnel, stats.clone(), Arc::new(ExitRelays::default())).expect("relays must start");
+        // Both sources are the local address here, and that is not a
+        // shortcut. The relay's upstream socket is normally bound to the
+        // tunnel's address, which is what makes the second allowance
+        // necessary -- but this test builds `TunnelInterface::new(0,
+        // UNSPECIFIED)` on purpose, so there is no tunnel address to
+        // allow and the relay binds locally like everything else.
         let mut allowance =
-            firewall::Allowance::install(&[local_addr], relays.tcp_port, relays.udp_port)
+            firewall::Allowance::install(local_addr, local_addr, relays.tcp_port, relays.udp_port)
                 .expect("the inbound allowance must install");
         // A live token: this test wants the wait to run, not to be
         // skipped, so it hands one that is not cancelled.

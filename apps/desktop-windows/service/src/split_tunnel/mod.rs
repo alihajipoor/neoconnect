@@ -1230,7 +1230,12 @@ impl SplitTunnel {
         // Before the redirect starts, so that no packet is ever sent
         // to a port the firewall is still dropping.
         let allowance =
-            match firewall::Allowance::install(&[local_addr, tunnel_address], relays.tcp_port, relays.udp_port) {
+            match firewall::Allowance::install(
+                local_addr,
+                tunnel_address,
+                relays.tcp_port,
+                relays.udp_port,
+            ) {
                 Ok(allowance) => allowance,
                 Err(e) => {
                     relays.stop();
