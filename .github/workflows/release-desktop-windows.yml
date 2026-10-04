@@ -336,4 +336,10 @@ jobs:
             apps/desktop-windows/target/release/bundle/nsis/*.sig
             apps/desktop-windows/target/release/bundle/nsis/sha256sums.txt
           body: ${{ steps.tagmsg.outputs.body }}
-          generate_release_notes: true
+          # No generated notes. They are built from commits in the
+          # repository the release lands in, and that one holds binaries
+          # only -- so there is no history to summarise and the API
+          # refuses the call outright with a 403. The tag message is the
+          # release note and always was; this only ever appended a list
+          # of commits nobody reads.
+          generate_release_notes: false
