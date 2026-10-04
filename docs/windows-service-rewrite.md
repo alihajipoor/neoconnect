@@ -140,19 +140,46 @@ then a split tunnel whose own ceilings total 46.
 `budget.rs` keeps a test asserting the three ceilings still overrun,
 so that removing the clamping and tuning the numbers fails loudly.
 
-**The budget is not yet binding, and the reason is one call.**
-`dns::force` is invoked from `xray::connect` and `ikev2::connect`, on
-the connect path, and does not take `Limits` -- so its 35-second
-`CMDLET_BUDGET` sits on top of the 38 the clamped stages share. A
-connect can still reach about seventy seconds.
+**What made the budget binding was removing PowerShell, not
+clamping harder.** `dns::force` is invoked from `xray::connect` and
+`ikev2::connect` and does not take `Limits`, so its 35-second
+`CMDLET_BUDGET` used to sit on top of the 38 the clamped stages share
+-- a connect could reach about seventy seconds.
 
-It is deliberately *not* clamped. Running out of time there means the
+It was deliberately never clamped. Running out of time there means the
 tunnel comes up with the machine's lookups unpinned, which in Iran
-means an ISP resolver answering with a poisoned address: a worse
-outcome than a slow connect, and not a trade this product should make
-for punctuality. The fix is to make the call fast rather than to cut
-it short -- see the NRPT registry writer below -- after which there is
-no budget pressure left to resolve.
+means an ISP resolver answering with a poisoned address: worse than a
+slow connect, and not a trade this product should make for
+punctuality. So the call was made fast instead. `dns::apply` writes the
+rule to the registry in 48-64ms where `Add-DnsClientNrptRule` measured
+10.0s, 16.3s, 43.9s and 55.1s, and there is no budget pressure left to
+resolve.
+
+### The connect path no longer spawns PowerShell
+
+For WireGuard, OpenVPN and all four Xray protocols it is now free of
+it entirely. What each of them used to pay:
+
+* `dns::force` -> the registry writer above. Every protocol paid this.
+* `openvpn::connect`'s route purge -> `route.exe` by destination
+  instead of `Get-NetRoute | Remove-NetRoute`, which had to enumerate
+  and so cost 4.4-6.5s per connect to usually delete nothing.
+* Xray's adapter setup was already `netsh.exe`, which is native.
+
+**IKEv2 is the exception and is left alone on purpose.**
+`ikev2::connect` still runs three cmdlets in one invocation to create
+the RAS entry, measured at 14.4s at best. Replacing it means writing a
+phonebook entry by hand -- about forty INI fields including generated
+GUIDs and timestamps, plus the IPsec configuration -- or binding
+`RasSetEntryPropertiesW` and its large version-dependent `RASENTRY`.
+A malformed entry cannot be dialled at all, it affects one protocol of
+five, and the measured cost is a tenth of what the DNS rule was. The
+cost-benefit says stop here.
+
+The PowerShell that remains is on paths where nobody is waiting: the
+DNS fallback when the registry refuses, `clear_with_cmdlets`, gaming
+mode, the janitor's residue sweep, the thorough teardown, and
+diagnostics.
 
 ### Cancellation is a parameter, except once
 
@@ -215,16 +242,16 @@ Bottom-up, each landing green before the next starts.
 4. Engine state machine — *cancellation and budgets threaded; the
    state machine proper is still the slot type it was*
 5. The five engines — *entry points take `Limits`; internals untouched*
-6. DNS, routing, IPv6 block, janitor, repair — *in progress, as
-   targeted cost removal rather than wholesale rewrite: these modules
-   are heavily tested and the measured problem in them is PowerShell,
-   not structure.* Done: OpenVPN's pre-connect route purge deletes two
-   known destinations with `route.exe` instead of enumerating with
-   PowerShell. Next: `dns::apply` writes the NRPT rule to the registry
-   (48-64ms) instead of `Add-DnsClientNrptRule` (10.0-55.1s measured),
-   verified by `registry_rule_count` so a rule we create is provably
-   one the sweep can remove. Then `ikev2::is_connected`, which spawns
-   PowerShell on every idle status poll.
+6. DNS, routing, IPv6 block, janitor, repair — *done as targeted cost
+   removal rather than wholesale rewrite: these modules are heavily
+   tested and the measured problem in them was PowerShell, not
+   structure.* The NRPT rule is written to the registry and verified by
+   `registry_rule_count`, so a rule this service creates is provably
+   one its sweep can remove. OpenVPN's pre-connect purge names its two
+   destinations to `route.exe`. `ikev2::is_connected` answers the idle
+   status poll from the phonebook file rather than a process. See "the
+   connect path no longer spawns PowerShell" above for what is left and
+   why.
 7. Split tunnel — the largest, and the one with the most tests.
    *Already takes `Limits` and clamps its two long waits, so the
    bring-up can no longer outlive the connect; the rewrite itself is
