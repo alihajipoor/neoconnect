@@ -1113,6 +1113,15 @@ impl OwnerLookup {
         if let Some(table) = udp6_table() {
             self.udp6 = table;
         }
+        // Marked fresh even if every walk above failed, and that is a
+        // decision rather than an oversight. A failed walk keeps the
+        // previous table, which is the best answer there is; the other
+        // choice -- leaving the snapshot stale so the next lookup walks
+        // again -- turns a failing API into a table walk per packet on
+        // the redirect loop. The cost is that a stale table answers for
+        // one more `SNAPSHOT_TTL`. A SYN does not pay it:
+        // `image_for_new_connection` walks again on any miss, whatever
+        // this says.
         let now = Instant::now();
         self.built_at = now;
         self.last_refresh = now;
@@ -1265,7 +1274,25 @@ fn parse_table(
         };
         // dwLocalPort holds the port in network byte order in its low
         // half, so the bytes come out swapped on a little-endian host.
-        map.insert((raw_port as u16).swap_bytes(), pid);
+        let port = (raw_port as u16).swap_bytes();
+        // Several rows can share a local port, and keyed on the port
+        // alone the last one used to win. The common case is TIME_WAIT:
+        // Windows lists those rows with owner pid 0, and a busy port
+        // routinely has dozens of them beside the one live socket that
+        // owns it -- measured on a development machine, one listener
+        // and forty-odd TIME_WAIT rows on the same port. Whichever came
+        // last decided, and pid 0 has no image, so the live owner read
+        // as nobody. For a SYN under OnlySelected that is a connection
+        // left outside the tunnel for its whole life.
+        //
+        // So a row with no owner never replaces one with an owner. Two
+        // *different* live owners on one port remain ambiguous by port
+        // alone -- telling them apart needs the local address, which
+        // the callers do not pass yet -- and keep the old rule.
+        if pid == 0 && map.get(&port).is_some_and(|&known| known != 0) {
+            continue;
+        }
+        map.insert(port, pid);
     }
     map
 }
@@ -2138,6 +2165,27 @@ mod tests {
         let map = parse_table(&words, 3, 1, 2);
         assert_eq!(map.get(&0x1110), Some(&4242));
         assert_eq!(map.get(&80), Some(&777));
+    }
+
+    /// A TIME_WAIT row is owned by pid 0, and a busy port carries many
+    /// of them next to its one live socket. Whichever row came last used
+    /// to decide -- so the order of the table, not the owner, chose
+    /// whether the port had one.
+    #[test]
+    fn a_row_with_no_owner_does_not_hide_the_live_one_on_its_port() {
+        let port = |p: u32| p.swap_bytes() >> 16;
+        let words = vec![
+            4, // dwNumEntries
+            0x0100_007F, port(49303), 0,    // TIME_WAIT before the owner
+            0x0100_007F, port(49303), 2688, // the live socket
+            0x0100_007F, port(49303), 0,    // TIME_WAIT after it
+            0x0100_007F, port(50000), 0,    // a port with nothing but TIME_WAIT
+        ];
+        let map = parse_table(&words, 3, 1, 2);
+        assert_eq!(map.get(&49303), Some(&2688), "the live owner must survive rows on either side");
+        // Nothing better is known, so the zero stands: it resolves to no
+        // image, which is the honest answer for a port nobody holds.
+        assert_eq!(map.get(&50000), Some(&0));
     }
 
     #[test]
