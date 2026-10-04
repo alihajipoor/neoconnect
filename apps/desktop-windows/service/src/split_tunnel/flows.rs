@@ -105,6 +105,31 @@ const NAT_PORT_LAST: u16 = 60_000;
 /// A live connection that goes quiet mid-session must not lose its
 /// entry: the app already holds a socket to the proxy, and forgetting
 /// where it was going would strand it.
+///
+/// **"Idle" means no *outbound* packet, which is not quite the same as
+/// idle.** `last_seen` is refreshed in [`Nat::lookup_flow`] and nowhere
+/// else, so it tracks what the application sends. A flow that is only
+/// receiving ages as though nothing were happening, and when it is
+/// retired `rewrite_return_leg` stops finding it and the replies are
+/// dropped -- the flow dies while it is in use, which is precisely what
+/// the paragraph above says must not happen.
+///
+/// It is left alone deliberately rather than from not having noticed.
+/// TCP acknowledges, so a downloading connection is sending packets
+/// through the loop the whole time and never reaches this at all. UDP
+/// has no acknowledgement, but the protocols carried over it in
+/// practice -- QUIC, WebRTC, game traffic -- all talk back within
+/// seconds. A genuinely one-directional UDP flow lasting longer than
+/// `UDP_IDLE` is possible and has never been observed here.
+///
+/// Refreshing on the return leg would fix it and would put a write,
+/// under the table's one mutex, on the hottest path in the subsystem --
+/// every inbound packet of every carried flow. That is a real cost to
+/// pay for a case nobody has seen, in a codebase whose rule is not to
+/// act on numbers nobody has checked against the wire. If a customer
+/// ever reports a stream dying after a minute while data is still
+/// arriving, this is the first thing to look at, and the fix is one
+/// line.
 const TCP_IDLE: Duration = Duration::from_secs(180);
 
 /// UDP has no close, so this is the only thing that ever retires a flow.
@@ -154,9 +179,14 @@ struct FlowKey {
     destination_port: u16,
 }
 
+/// What a synthetic port is carrying.
+///
+/// No `nat_port` field: it is the second half of this entry's own key
+/// in `reverse`, and a copy of a key stored beside it is a value that
+/// can disagree with where it lives. Nothing kept them in step except
+/// the one line that wrote both.
 struct Redirected {
     origin: Origin,
-    nat_port: u16,
     last_seen: Instant,
 }
 
@@ -411,7 +441,7 @@ impl Nat {
         tables.forward.insert(key, nat_port);
         tables
             .reverse
-            .insert((transport, nat_port), Redirected { origin, nat_port, last_seen: Instant::now() });
+            .insert((transport, nat_port), Redirected { origin, last_seen: Instant::now() });
         // A flow cannot be both left alone and redirected. A TCP SYN
         // re-decides from scratch, so this is how a stale verdict from
         // the port's previous owner is cleared. With the verdict keyed
@@ -459,7 +489,7 @@ impl Nat {
             };
             let alive = now.duration_since(entry.last_seen) < idle;
             if !alive {
-                dropped.insert((*transport, entry.nat_port));
+                dropped.insert((*transport, *port));
                 if matches!(transport, Transport::Udp) {
                     dropped_udp.push(*port);
                 }
