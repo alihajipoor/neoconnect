@@ -1,3 +1,4 @@
+import { scoreFor, type ConnectHistory } from "./connect-history";
 import type { Protocol, ProtocolUser } from "./types";
 
 /** Order to try protocols in when nothing better is known.
@@ -63,9 +64,17 @@ function rank(protocol: Protocol): number {
  */
 export function orderCandidates(
   users: ProtocolUser[],
-  opts: { pinnedRouteId?: string | null; lastGoodRouteId?: string | null; preferredRouteId?: string | null } = {},
+  opts: {
+    pinnedRouteId?: string | null;
+    lastGoodRouteId?: string | null;
+    preferredRouteId?: string | null;
+    /** What this device has seen work lately, if anything. */
+    history?: ConnectHistory;
+    network?: string | null;
+    now?: number;
+  } = {},
 ): ProtocolUser[] {
-  const { pinnedRouteId, lastGoodRouteId, preferredRouteId } = opts;
+  const { pinnedRouteId, lastGoodRouteId, preferredRouteId, history, network, now } = opts;
 
   // A chosen route leads; it does not exclude the others.
   //
@@ -93,9 +102,35 @@ export function orderCandidates(
   // separates them.
   const wsLast = (u: ProtocolUser) => (u.connection?.transport === "WS" ? 1 : 0);
 
+  // Measured evidence, ahead of the fixed order and behind the
+  // customer's own choice.
+  //
+  // `PROTOCOL_ORDER` is one list for everybody, and for Iran it cannot
+  // be right: filtering differs between two subscribers on the same ISP
+  // and changes from one day to the next, so an order derived from
+  // anyone else's experience -- or from last week's -- is a guess. What
+  // this device saw in the last few hours is not.
+  //
+  // Only combinations with evidence are moved. `scoreFor` returns null
+  // when nothing is known, and those keep their place in the fixed
+  // order rather than being sorted against a number they do not have;
+  // an untried protocol must not outrank one that has been working.
+  const evidence = (u: ProtocolUser): number | null =>
+    history ? scoreFor(history, network ?? null, u.routeId, u.protocol, now) : null;
+
+  const byEvidence = (a: ProtocolUser, b: ProtocolUser): number => {
+    const [x, y] = [evidence(a), evidence(b)];
+    if (x === null && y === null) return 0;
+    // Something known to work leads something unknown; something known
+    // to fail follows it. The midpoint is where "no idea" sits.
+    const place = (v: number | null) => (v === null ? 0.5 : v);
+    return place(y) - place(x);
+  };
+
   return [...users].sort(
     (a, b) =>
       priority(a) - priority(b) ||
+      byEvidence(a, b) ||
       rank(a.protocol) - rank(b.protocol) ||
       wsLast(a) - wsLast(b) ||
       a.routeId.localeCompare(b.routeId),
