@@ -1219,7 +1219,15 @@ fn node_address(profile: &ConnectProfile, limits: &crate::lifecycle::budget::Lim
             }
             Err(e) => last = e.to_string(),
         }
-        if std::time::Instant::now() >= deadline || limits.done() {
+        // Which of the three reasons it was, because they are not the
+        // same thing to whoever reads it. A resolver that answered with
+        // a failure is a DNS problem; a disconnect is not a problem at
+        // all; and a spent budget is a slow connect, where naming this
+        // lookup sends the reader after the wrong stage.
+        if let Err(stop) = limits.check() {
+            return Err(stop.to_string());
+        }
+        if std::time::Instant::now() >= deadline {
             return Err(format!("could not resolve {host}: {last}"));
         }
         std::thread::sleep(RESOLVE_RETRY_EVERY);

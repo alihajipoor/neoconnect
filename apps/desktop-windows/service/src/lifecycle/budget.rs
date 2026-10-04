@@ -147,11 +147,6 @@ impl Limits {
         self.deadline.passed()
     }
 
-    /// Either reason to stop. What a wait's loop condition reads.
-    pub fn done(&self) -> bool {
-        self.cancelled() || self.expired()
-    }
-
     /// The shorter of a stage's own ceiling and what the operation has
     /// left. See [`Deadline::clamp`].
     pub fn clamp(&self, ceiling: Duration) -> Duration {
