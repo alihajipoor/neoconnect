@@ -181,6 +181,33 @@ DNS fallback when the registry refuses, `clear_with_cmdlets`, gaming
 mode, the janitor's residue sweep, the thorough teardown, and
 diagnostics.
 
+### What is still not bounded by the connect budget
+
+Audited rather than assumed, by listing every deadline in `engines/`
+and `split_tunnel/` and checking each against the reply path. Every
+engine wait clamps. Two that look like gaps are not: `BIND_RETRY_FOR`
+(6s) is in `proxy::bind_pending`, which is per-flow on the data path,
+and `redirect::ACTIVATION_GRACE` (3s) runs inside a spawned thread, so
+the constructor returns before it.
+
+**The one real residual is `HELPER_BUDGET`.** Helper processes on the
+connect path -- `netsh` for Xray's adapter, `wireguard.exe
+/installtunnelservice` -- go through `run_hidden`, which bounds them at
+15 seconds and reads the ambient cancellation every 50ms. It does not
+read the *deadline*. So a helper that wedges can push a connect up to
+15 seconds past the budget, and the app will have stopped listening
+while the service goes on to succeed -- the app-and-service-disagree
+state, reached by a different road.
+
+Closing it means threading `Limits` into `capture_hidden`, and from
+there into DNS, routing, repair, the janitor and the firewall: the
+ceremony this document argues against for exactly those callers, since
+none of them has a cancellation decision to make. The cheaper option
+is to pass `limits.clamp(HELPER_BUDGET)` at the two connect-path call
+sites that have limits in reach. Neither has been done. It is written
+down here because the commits read as though the budget were airtight,
+and it is not quite.
+
 ### Cancellation is a parameter, except once
 
 Threaded explicitly through the whole connect path. One ambient reader
