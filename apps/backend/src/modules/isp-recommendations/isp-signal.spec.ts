@@ -13,13 +13,13 @@ const ROUTE = "route-germany";
 const OTHER = "route-france";
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000);
 
-/** A connect that worked first time: no ladder, just the route. */
+/** A connect that worked first time: one rung, proven. */
 const connected = (customerId: string | null, at = hoursAgo(2), routeId = ROUTE): EvidenceRow => ({
   customerId,
   kind: "CONNECT",
   outcome: "SUCCESS",
   routeId,
-  attemptsJson: null,
+  attemptsJson: [{ protocol: "Stealth", result: "connected", routeId, carried: true }],
   sessionSeconds: null,
   createdAt: at,
 });
@@ -162,12 +162,14 @@ describe("dialsOf", () => {
     ]);
   });
 
-  /** Older clients send rungs with no route at all. Their success still
-   * counts once, by the report's own route. */
-  it("counts a success once whether or not the ladder named it", () => {
+  /** A SUCCESS is also what a client reports when it settled on a tunnel
+   * it could not prove carried anything. Only an explicit, proven rung
+   * counts as getting through. */
+  it("does not read the report's own outcome as a dial", () => {
     expect(dialsOf(connected("c"))).toEqual([{ routeId: ROUTE, carried: true }]);
     expect(
       dialsOf({ ...connected("c"), attemptsJson: [{ protocol: "Fast", result: "connected" }] }),
-    ).toEqual([{ routeId: ROUTE, carried: true }]);
+    ).toEqual([]);
+    expect(dialsOf({ ...connected("c"), attemptsJson: null })).toEqual([]);
   });
 });

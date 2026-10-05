@@ -42,6 +42,20 @@ const en = {
   // false: it told customers to disconnect while they already were.
   "loc.pickHint": "Pick a server and protocol",
   "loc.retry": "Retry",
+  // The first row of the picker, and what a new install starts on. It
+  // promises only what the ladder does: an order, and moving on by
+  // itself. Not "the best" or "the fastest" server.
+  "loc.automatic": "Automatic (recommended)",
+  "loc.automaticHint": "Tries what is most likely to work on your network first, and moves on by itself if it fails",
+  "loc.automaticShort": "Automatic",
+  // Hedged and dated on purpose: filtering differs between two people on
+  // the same ISP and changes day to day, so this is what others saw
+  // recently -- never a promise about this customer.
+  "loc.ispWorks": "Worked for most people on your network recently",
+  "loc.ispFailing": "Failing for most people on your network recently",
+  "loc.ispCount": "{customers} of {outOf} people, last {hours} hours",
+  "loc.recommendedOnly": "Only show what worked on my network",
+  "dash.serverAuto": "Server (auto)",
 
   "nav.settings": "Settings",
   "nav.signOut": "Sign out",
@@ -862,6 +876,14 @@ const fa: Record<TranslationKey, string> = {
   "loc.disconnectFirst": "برای تغییر سرور ابتدا قطع کنید",
   "loc.pickHint": "یک سرور و پروتکل انتخاب کنید",
   "loc.retry": "تلاش دوباره",
+  "loc.automatic": "خودکار (پیشنهادی)",
+  "loc.automaticHint": "ابتدا گزینه‌ای را امتحان می‌کند که در شبکهٔ شما احتمال کار کردنش بیشتر است، و اگر کار نکرد خودش سراغ گزینهٔ بعدی می‌رود",
+  "loc.automaticShort": "خودکار",
+  "loc.ispWorks": "اخیراً برای بیشتر کاربران شبکهٔ شما کار کرده است",
+  "loc.ispFailing": "اخیراً برای بیشتر کاربران شبکهٔ شما کار نمی‌کند",
+  "loc.ispCount": "{customers} نفر از {outOf} نفر، {hours} ساعت گذشته",
+  "loc.recommendedOnly": "فقط گزینه‌هایی که در شبکهٔ من کار کرده‌اند",
+  "dash.serverAuto": "سرور (خودکار)",
 
   "nav.settings": "تنظیمات",
   "nav.signOut": "خروج",

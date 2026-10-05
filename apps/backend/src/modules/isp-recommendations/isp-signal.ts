@@ -24,10 +24,10 @@
  * * a **dial**: the route was tried and either carried traffic (the
  *   egress check passed) or did not. Taken from the ladder rungs a
  *   CONNECT report carries, each of which now names its route and says
- *   whether it carried; and from the report's own route on a SUCCESS.
- *   Rungs that were skipped, or that failed for reasons that are not the
- *   network's (quota, an engine that would not start), carry no route
- *   and count for nothing.
+ *   whether it carried. Rungs that were skipped, that failed for reasons
+ *   that are not the network's (quota, an engine that would not start),
+ *   or that came up without proof of traffic, carry no route and count
+ *   for nothing.
  * * a **sustained session**: a SESSION report saying the tunnel kept
  *   passing its health checks for at least `SUSTAINED_SECONDS`.
  *
@@ -128,15 +128,13 @@ export function dialsOf(row: EvidenceRow): Dial[] {
       }
     }
   }
-  // A connect that worked first time sends no ladder at all, so the
-  // report's own route is the only record of the dial. Added only when
-  // the rungs did not already end on it, so one success is one dial.
-  if (row.outcome === "SUCCESS" && row.routeId) {
-    const last = dials[dials.length - 1];
-    if (!last || last.routeId !== row.routeId || !last.carried) {
-      dials.push({ routeId: row.routeId, carried: true });
-    }
-  }
+  // Rungs only -- the report's own `outcome` and `routeId` are not read
+  // as a dial. A SUCCESS is also what a client reports when it settled
+  // on a tunnel it could not prove was carrying traffic ("unverified"),
+  // and counting that as "got through" would put exactly the unproven
+  // connections into a claim about what works. Clients that attach a
+  // network (the only rows this reads) send an explicit rung for every
+  // dial, the successful one included.
   return dials;
 }
 

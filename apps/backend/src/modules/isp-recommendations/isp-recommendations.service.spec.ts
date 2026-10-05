@@ -56,7 +56,7 @@ describe("IspRecommendationsService.networkFor", () => {
 describe("IspRecommendationsService.tagsFor", () => {
   const now = Date.UTC(2026, 9, 5, 12, 0, 0);
   const rows = Array.from({ length: MIN_CUSTOMERS }, (_, i) => [
-    { customerId: `c${i}`, kind: "CONNECT", outcome: "SUCCESS", routeId: "r1", attemptsJson: null, sessionSeconds: null, createdAt: new Date(now - 3_600_000) },
+    { customerId: `c${i}`, kind: "CONNECT", outcome: "SUCCESS", routeId: "r1", attemptsJson: [{ protocol: "Fast", result: "connected", routeId: "r1", carried: true }], sessionSeconds: null, createdAt: new Date(now - 3_600_000) },
     { customerId: `c${i}`, kind: "SESSION", outcome: "SUCCESS", routeId: "r1", attemptsJson: null, sessionSeconds: SUSTAINED_SECONDS, createdAt: new Date(now - 1_800_000) },
   ]).flat();
 

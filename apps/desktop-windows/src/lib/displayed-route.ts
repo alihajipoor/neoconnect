@@ -79,3 +79,29 @@ export function displayedRoute<T extends RouteLike>(
     null
   );
 }
+
+/** Whether the SERVER and PROTOCOL tiles should say "Automatic" rather
+ * than name a route.
+ *
+ * With nothing pinned, the route a connect will use is not decided until
+ * the ladder has walked to one that carries traffic -- so naming the
+ * provisioned route beforehand (what the tiles used to do) promised a
+ * server the app might never dial, which is the 0.2.18 lie in a new
+ * place. And while the ladder is still walking, the candidate it is on
+ * may be abandoned a second later.
+ *
+ * So: "Automatic" until a tunnel has settled, then the settled route.
+ * `connected` is the verified case. `unverified` and `degraded` name the
+ * route too, because a tunnel *is* up on it and where traffic is going
+ * is a fact the customer is owed; whether it is confirmed to flow is the
+ * orb's to say, as `TUNNEL_UP` explains. `verifying` does not: the
+ * ladder may still move on from it.
+ *
+ * A pin is always named -- it is the customer's own choice, and the rule
+ * above already handles it. */
+export function showsAutomatic(connectionState: ConnectionState, pinnedRouteId: string | null | undefined): boolean {
+  if (pinnedRouteId) return false;
+  return !SETTLED.has(connectionState);
+}
+
+const SETTLED: ReadonlySet<ConnectionState> = new Set<ConnectionState>(["connected", "unverified", "degraded"]);
