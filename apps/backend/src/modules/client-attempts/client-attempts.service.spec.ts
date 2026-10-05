@@ -6,6 +6,7 @@ import {
 } from "./client-attempts.service";
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { ReportAttemptDto } from "./dto/report-attempt.dto";
+import type { NetworkIdentityService } from "../network-identity/network-identity.service";
 
 const report = (over: Partial<ReportAttemptDto> = {}): ReportAttemptDto => ({
   kind: ClientAttemptKind.CONNECT,
@@ -22,11 +23,46 @@ const build = () => {
   const deleteMany = jest.fn().mockResolvedValue({ count: 0 });
   const findMany = jest.fn().mockResolvedValue([]);
   const groupBy = jest.fn().mockResolvedValue([]);
-  const service = new ClientAttemptsService({
-    clientAttempt: { create, deleteMany, findMany, groupBy },
-  } as unknown as PrismaService);
+  // Vouches for exactly one token, as the real attestor vouches only for
+  // its own signatures.
+  const identity = { verify: (token?: string) => (token === "signed-for-64500" ? 64500 : null) };
+  const service = new ClientAttemptsService(
+    { clientAttempt: { create, deleteMany, findMany, groupBy } } as unknown as PrismaService,
+    identity as unknown as NetworkIdentityService,
+  );
   return { service, create, deleteMany, findMany, groupBy };
 };
+
+/** The per-ISP tags count people by network, so the network on a row has
+ * to be one the server itself vouched for. */
+describe("ClientAttemptsService.record network", () => {
+  it("stores the ASN a valid attestation vouches for", async () => {
+    const { service, create } = build();
+    await service.record(report({ network: "signed-for-64500" }), {});
+    expect(create.mock.calls[0][0].data.asn).toBe(64500);
+  });
+
+  /** A forged, expired or foreign token is dropped, and the report with
+   * it is kept -- the failure it describes is still worth having. */
+  it("keeps the report but not the network when the token does not verify", async () => {
+    const { service, create } = build();
+    await service.record(report({ network: "made-up" }), { ip: "198.51.100.7" });
+    const data = create.mock.calls[0][0].data;
+    expect(data.asn).toBeNull();
+    expect(data.outcome).toBe(ClientAttemptOutcome.NOT_CARRYING_TRAFFIC);
+  });
+
+  it("keeps a session length only on a SESSION report", async () => {
+    const { service, create } = build();
+    await service.record(
+      report({ kind: ClientAttemptKind.SESSION, outcome: ClientAttemptOutcome.SUCCESS, sessionSeconds: 900 }),
+      {},
+    );
+    await service.record(report({ sessionSeconds: 900 }), {});
+    expect(create.mock.calls[0][0].data.sessionSeconds).toBe(900);
+    expect(create.mock.calls[1][0].data.sessionSeconds).toBeNull();
+  });
+});
 
 describe("ClientAttemptsService.record", () => {
   /** The whole point of this endpoint is a client that is already

@@ -2,12 +2,16 @@ import { ClientAttemptKind, ClientAttemptOutcome } from "@prisma/client";
 import { Type } from "class-transformer";
 import {
   IsArray,
+  IsBoolean,
   IsDateString,
   IsEnum,
+  IsInt,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
+  Min,
   ValidateNested,
 } from "class-validator";
 
@@ -25,6 +29,20 @@ export class AttemptRungDto {
   @IsString()
   @MaxLength(200)
   result!: string;
+
+  /** Which route this rung dialled. Present only on a rung that actually
+   * reached the network -- a skipped rung, or one refused for reasons
+   * that are not the network's (quota, an engine that would not start),
+   * carries none, so it counts for nothing in the per-ISP tags. */
+  @IsOptional()
+  @IsUUID()
+  routeId?: string;
+
+  /** Whether that dial carried traffic, by the egress check. Only
+   * meaningful alongside `routeId`. */
+  @IsOptional()
+  @IsBoolean()
+  carried?: boolean;
 }
 
 /** A client reporting what happened to it.
@@ -42,7 +60,7 @@ export class ReportAttemptDto {
   @IsEnum(ClientAttemptOutcome)
   outcome!: ClientAttemptOutcome;
 
-  /** "windows" | "android". Not an enum: a new platform should show up
+  /** "windows" | "macos" | "android" | "ios". Not an enum: a new platform should show up
    * in the panel as itself rather than be rejected by a server that has
    * not been redeployed. */
   @IsString()
@@ -94,4 +112,22 @@ export class ReportAttemptDto {
   @IsOptional()
   @IsDateString()
   occurredAt?: string;
+
+  /** The network attestation the client was handed by /health/ip before
+   * its tunnel came up (see network-attestation.ts). Opaque to the
+   * client; verified here, and only the ASN it vouches for is stored. A
+   * token that does not verify is dropped and the report kept. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  network?: string;
+
+  /** For a SESSION report: seconds the tunnel had been carrying traffic.
+   * Capped at a week -- the client sends this once, ten minutes in, so
+   * anything near the cap is a broken clock rather than a long session. */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(7 * 86_400)
+  sessionSeconds?: number;
 }

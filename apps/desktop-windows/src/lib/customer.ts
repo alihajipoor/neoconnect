@@ -1,5 +1,6 @@
 import { apiRequest, apiRequestRevalidated } from "./api";
 import type { ApiResult } from "./api";
+import { networkHeaders } from "./network-identity";
 import type {
   AppLinks,
   Customer,
@@ -39,8 +40,11 @@ export const redeemVoucher = (code: string) =>
   });
 export const getReferrals = () => apiRequest<ReferralOverview>("/customer/referrals");
 
+// Carries this device's network attestation, so each route comes back
+// tagged with what other people on the same network recently got
+// through on. See network-identity.ts.
 export const getAvailableRoutes = (subscriptionId: string) =>
-  apiRequest<RouteOption[]>(`/customer/subscriptions/${subscriptionId}/routes`);
+  apiRequest<RouteOption[]>(`/customer/subscriptions/${subscriptionId}/routes`, { headers: networkHeaders() });
 
 export const switchRoute = (subscriptionId: string, routeId: string) =>
   apiRequest<ProtocolUser>(`/customer/subscriptions/${subscriptionId}/route`, {

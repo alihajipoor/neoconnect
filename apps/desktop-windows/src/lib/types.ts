@@ -193,6 +193,23 @@ export interface RouteOption {
   /** What the control plane knows from agent heartbeats. Distinct from
    * latency: "is it up" rather than "is it fast for me". */
   nodeStatus: "ONLINE" | "OFFLINE" | "PENDING" | "DISABLED";
+  /** What other people on this device's network recently experienced on
+   * this route, when enough of them did to say anything. A code and
+   * counts; the words are the client's, in the customer's language.
+   * Absent from an older backend, null when there is nothing to say. */
+  ispTag?: IspTag | null;
+}
+
+/** See `RouteOption.ispTag`. `customers` is always at least five: the
+ * server says nothing about fewer people than that. */
+export interface IspTag {
+  code: "worksOnYourIsp" | "failingOnYourIsp";
+  /** Distinct people the claim is about -- those it worked for, or those
+   * it failed for. */
+  customers: number;
+  /** Distinct people on this network who tried the route. */
+  outOf: number;
+  windowHours: number;
 }
 
 /** What GET /customer/referrals returns.

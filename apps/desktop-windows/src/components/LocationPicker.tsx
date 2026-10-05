@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Loader2, Repeat, X } from "lucide-react";
+import { Check, Loader2, Repeat, Sparkles, X } from "lucide-react";
 import { getAvailableRoutes, switchRoute } from "../lib/customer";
+import { hasRecommended, pickerRows } from "../lib/isp-tags";
+import { IspTagLine } from "./IspTagLine";
 import { customerProtocolLabel } from "../lib/protocol-labels";
 import type { RouteOption } from "../lib/types";
 import { cn } from "../lib/utils";
@@ -20,7 +22,18 @@ export function LocationPicker({
   onSwitched,
   tunnelActive = false,
   initialRoutes,
+  automatic = false,
+  onChooseAutomatic,
 }: {
+  /** Whether nothing is pinned, so the ladder chooses -- what a new
+   * install starts on. Marks the Automatic row as the current choice and
+   * leaves every server row pickable, since picking one is how a
+   * customer pins it. */
+  automatic?: boolean;
+  /** Offers the Automatic row first, and is called when it is chosen.
+   * No server call: Automatic means "no pin", which lives on the device.
+   * Absent, the row is not shown. */
+  onChooseAutomatic?: () => void;
   subscriptionId: string;
   currentRouteId: string | undefined;
   /** Whether a tunnel is up right now.
@@ -71,6 +84,16 @@ export function LocationPicker({
    * which renders as "--" -- distinct from a measured failure, which is
    * an explicit null. Both are honest; neither invents a number. */
   const [latencies, setLatencies] = useState<Record<string, number | null>>({});
+  /** Narrow the list to routes that worked for most people on this
+   * network. Off by default: the tags are information, and hiding
+   * everything else unasked would make the choice for the customer. */
+  const [recommendedOnly, setRecommendedOnly] = useState(false);
+  // What the list actually shows. Every index below -- focus, selection
+  // -- is into this, not into `routes`.
+  const rows = pickerRows(routes, recommendedOnly);
+  // With Automatic chosen, no server row is "the current one": the ladder
+  // decides at connect time, and every row stays a way to pin a server.
+  const pinnedRouteId = automatic ? undefined : currentRouteId;
 
   useEffect(() => {
     void load();
@@ -137,18 +160,18 @@ export function LocationPicker({
   const [focusedIndex, setFocusedIndex] = useState(0);
 
   function selectable(i: number) {
-    return Boolean(routes[i]) && routes[i].id !== currentRouteId && switchingId === null;
+    return Boolean(rows[i]) && rows[i].id !== pinnedRouteId && switchingId === null;
   }
 
   useEffect(() => {
-    if (routes.length === 0 || selectable(focusedIndex)) return;
-    const next = routes.findIndex((_, i) => selectable(i));
+    if (rows.length === 0 || selectable(focusedIndex)) return;
+    const next = rows.findIndex((_, i) => selectable(i));
     if (next >= 0) setFocusedIndex(next);
     // Deliberately not depending on focusedIndex: this only exists to
     // rescue a stop that has become unreachable, and re-running it on
     // every focus change would drag focus back the moment the customer
     // arrowed onto a different row.
-  }, [routes, currentRouteId, switchingId]);
+  }, [routes, recommendedOnly, pinnedRouteId, switchingId]);
 
   /* Put focus on a row as soon as there are rows.
    *
@@ -164,8 +187,8 @@ export function LocationPicker({
    * away, which is the same bug wearing a different hat. */
   const autoFocusedRef = useRef(false);
   useEffect(() => {
-    if (loading || routes.length === 0 || autoFocusedRef.current) return;
-    const first = routes.findIndex((_, i) => selectable(i));
+    if (loading || rows.length === 0 || autoFocusedRef.current) return;
+    const first = rows.findIndex((_, i) => selectable(i));
     if (first < 0) return;
     autoFocusedRef.current = true;
     setFocusedIndex(first);
@@ -194,10 +217,10 @@ export function LocationPicker({
   }, [switchingId, onClose]);
 
   function moveFocus(delta: number) {
-    if (routes.length === 0) return;
+    if (rows.length === 0) return;
     let i = focusedIndex;
-    for (let n = 0; n < routes.length; n += 1) {
-      i = (i + delta + routes.length) % routes.length;
+    for (let n = 0; n < rows.length; n += 1) {
+      i = (i + delta + rows.length) % rows.length;
       if (selectable(i)) break;
     }
     setFocusedIndex(i);
@@ -215,7 +238,7 @@ export function LocationPicker({
   }
 
   async function handlePick(route: RouteOption) {
-    if (route.id === currentRouteId || switchingId) return;
+    if (route.id === pinnedRouteId || switchingId) return;
     setSwitchError(null);
     setSwitchingId(route.id);
     const result = await switchRoute(subscriptionId, route.id);
@@ -264,9 +287,62 @@ export function LocationPicker({
             No locations available on your current plan.
           </p>
         ) : (
+          <>
+          {/* Automatic first, because the people this exists for are the
+              ones who open the list, try the first few rows by hand, hit
+              a blocked one and decide the app is broken. Choosing it
+              hands the order back to the ladder, which already moves on
+              by itself -- and on a network this device has never seen,
+              now leans on what worked for others there. */}
+          {onChooseAutomatic ? (
+            <button
+              type="button"
+              onClick={() => {
+                if (automatic || switchingId) return;
+                onChooseAutomatic();
+                onClose();
+              }}
+              disabled={switchingId !== null}
+              aria-pressed={automatic}
+              className={cn(
+                "mb-2 flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-start transition-colors disabled:cursor-default",
+                automatic
+                  ? "border-primary/50 bg-primary/10"
+                  : "border-white/10 bg-card/60 hover:border-white/20 hover:bg-card",
+              )}
+            >
+              <div
+                className={cn(
+                  "flex size-9 shrink-0 items-center justify-center rounded-full",
+                  automatic ? "bg-primary/20 text-primary" : "bg-highlight/10 text-highlight",
+                )}
+              >
+                <Sparkles className="size-4" />
+              </div>
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate text-sm font-medium">{t("loc.automatic")}</span>
+                <span className="text-xs text-muted-foreground">{t("loc.automaticHint")}</span>
+              </div>
+              {automatic ? <Check className="size-4 shrink-0 text-primary" /> : null}
+            </button>
+          ) : null}
+          {/* Only offered when there is something to narrow to. A filter
+              that empties the list would read as "nothing works here",
+              which is not what an absence of evidence means. */}
+          {hasRecommended(routes) ? (
+            <label className="mb-2 flex cursor-pointer items-center gap-2 px-1 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={recommendedOnly}
+                onChange={(event) => setRecommendedOnly(event.target.checked)}
+                className="accent-primary"
+              />
+              {t("loc.recommendedOnly")}
+            </label>
+          ) : null}
           <div className="flex flex-col gap-2" onKeyDown={onListKeyDown}>
-            {routes.map((route, index) => {
-              const isCurrent = route.id === currentRouteId;
+            {rows.map((route, index) => {
+              const isCurrent = route.id === pinnedRouteId;
               const isSwitching = switchingId === route.id;
               return (
                 <button
@@ -303,6 +379,7 @@ export function LocationPicker({
                     <span className="truncate text-xs text-muted-foreground">
                       {route.location.region} &middot; {customerProtocolLabel(route.protocol, route.transport)}
                     </span>
+                    <IspTagLine tag={route.ispTag} t={t} />
                   </div>
                   <Latency ms={route.id in latencies ? latencies[route.id] : null} />
                   {route.isRelay ? (
@@ -320,6 +397,7 @@ export function LocationPicker({
               );
             })}
           </div>
+          </>
         )}
         {switchError ? <p className="px-2 pt-2 text-xs text-destructive">{switchError}</p> : null}
       </div>

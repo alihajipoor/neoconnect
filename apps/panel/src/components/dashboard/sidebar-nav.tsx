@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2, SatelliteDish } from "lucide-react";
+import { LayoutDashboard, Users, CreditCard, ShieldCheck, Settings, Server, Radio, Route as RouteIcon, Megaphone, ReceiptText, Ticket, LifeBuoy, Activity, Handshake, Gamepad2, SatelliteDish, Network } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AdminRole } from "@/lib/session";
 
@@ -35,6 +35,10 @@ const NAV_ITEMS: { href: string; label: string; icon: typeof Users; roles?: Admi
   // reachable from Iran at all. Running the probe is SUPERADMIN-only,
   // gated per-page via `canProbe` rather than at the nav level.
   { href: "/reachability", label: "Iran Reachability", icon: SatelliteDish },
+  // The third angle on the same question: per network, which routes
+  // people actually got through on and stayed up on -- and which tag the
+  // customer's picker is showing because of it. Same open read.
+  { href: "/isp-recommendations", label: "ISP Recommendations", icon: Network },
   { href: "/announcements", label: "Announcements", icon: Megaphone, roles: ["SUPERADMIN"] },
   { href: "/admins", label: "Admins", icon: ShieldCheck, roles: ["SUPERADMIN"] },
   // The reseller's own section: their balances, their codes. Also shown

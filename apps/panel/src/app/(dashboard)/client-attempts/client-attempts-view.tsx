@@ -91,6 +91,7 @@ const KINDS: Record<ClientAttemptKind, string> = {
   REGISTER: "Sign-up",
   SIGN_IN: "Sign-in",
   CONNECT: "Connect",
+  SESSION: "Stayed up",
 };
 
 export function ClientAttemptsView({

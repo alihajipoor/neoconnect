@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints } from "./api-endpoints";
+import { rememberNetwork } from "./network-identity";
 
 /** Proving a tunnel actually carries traffic, rather than merely existing.
  *
@@ -60,13 +61,13 @@ export const EGRESS_TIMEOUT_MS = 6000;
  */
 type IpReading = { ip: string; from: string };
 
-async function publicIp(): Promise<IpReading | null> {
+async function publicIp(onBody?: (body: Record<string, unknown>) => void): Promise<IpReading | null> {
   // The same endpoint list the rest of the app uses, and for a sharper
   // reason here: this check decides whether the customer is told they
   // are protected. Pinned to one address, a blocked control plane would
   // report a perfectly working tunnel as carrying nothing -- turning a
   // reachability problem into a false accusation against the VPN.
-  return readFrom(await apiEndpoints(), EGRESS_TIMEOUT_MS);
+  return readFrom(await apiEndpoints(), EGRESS_TIMEOUT_MS, onBody);
 }
 
 /** The first answer from `bases`, tried in order.
@@ -75,7 +76,11 @@ async function publicIp(): Promise<IpReading | null> {
  * address that is blocked burns the whole timeout doing nothing, and a
  * shared deadline would leave the working one no time to answer.
  */
-async function readFrom(bases: string[], timeoutMs: number): Promise<IpReading | null> {
+async function readFrom(
+  bases: string[],
+  timeoutMs: number,
+  onBody?: (body: Record<string, unknown>) => void,
+): Promise<IpReading | null> {
   for (const base of bases) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -83,7 +88,10 @@ async function readFrom(bases: string[], timeoutMs: number): Promise<IpReading |
       const res = await fetch(`${base}/health/ip`, { signal: controller.signal });
       if (!res.ok) continue;
       const body = (await res.json()) as { ip?: string };
-      if (body.ip) return { ip: body.ip, from: base };
+      if (body.ip) {
+        onBody?.(body);
+        return { ip: body.ip, from: base };
+      }
     } catch {
       // Try the next one. Exhausting the list returns null, which the
       // caller already treats as "no evidence" rather than as failure.
@@ -101,7 +109,16 @@ async function readFrom(bases: string[], timeoutMs: number): Promise<IpReading |
  * compare against and must not claim the tunnel is broken.
  */
 export type BaselineIp = IpReading;
-export const captureBaselineIp = publicIp;
+
+/** Takes the baseline, and keeps what the server said about the
+ * network while it is at it.
+ *
+ * Only here, never in the after-connect check: a baseline is taken with
+ * no tunnel up, so it is the one reading whose network is the customer's
+ * own. See network-identity.ts. A baseline that could not be taken at
+ * all leaves the held network alone -- no answer is not evidence of a
+ * different network. */
+export const captureBaselineIp = (): Promise<IpReading | null> => publicIp((body) => rememberNetwork(body));
 
 export type EgressVerdict =
   /** The exit address changed: traffic is provably leaving via the VPN. */

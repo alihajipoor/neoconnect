@@ -3,6 +3,7 @@ import type { Request } from "express";
 import { SkipThrottle } from "@nestjs/throttler";
 import { PrismaService } from "../../prisma/prisma.service";
 import { clientIpOf } from "../../common/client-ip";
+import { NetworkIdentityService } from "../network-identity/network-identity.service";
 
 /** The caller's country, as a two-letter code, when the CDN told us.
  *
@@ -29,7 +30,10 @@ function countryOf(req: Request): string | undefined {
 
 @Controller("health")
 export class HealthController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly identity: NetworkIdentityService,
+  ) {}
 
   /** The public IP this request arrived from.
    *
@@ -55,8 +59,40 @@ export class HealthController {
    */
   @SkipThrottle()
   @Get("ip")
-  ip(@Ip() ip: string, @Req() req: Request) {
-    return { ip: clientIpOf(req) || ip, country: countryOf(req) };
+  async ip(@Ip() ip: string, @Req() req: Request) {
+    const address = clientIpOf(req) || ip;
+    return { ip: address, country: countryOf(req), ...(await this.networkOf(address)) };
+  }
+
+  /** Which network the caller is on, and a signed note saying so.
+   *
+   * Added for the per-ISP tags in the location picker. The pre-connect
+   * baseline is the one request in a connect where the server sees the
+   * customer's own address -- everything afterwards goes through the
+   * tunnel -- so it is where the network is read, and the client keeps
+   * `network` (an opaque attestation, see network-attestation.ts) to
+   * hand back with its reports and route-list requests.
+   *
+   * The network only: the autonomous system's number and registered
+   * name, from an offline table. No city, no coordinates -- the comment
+   * on `countryOf` explains why this file avoided a GeoIP database, and
+   * an ASN table is not one: it says "Irancell", which the customer
+   * already knows, and nothing about where they are.
+   *
+   * Omitted entirely when the address is one of our own nodes -- the
+   * after-connect reading, or a node mirror answering the baseline --
+   * because then it would name a data centre, not the customer's ISP.
+   * Also omitted while the table has not loaded. Never throws: this
+   * endpoint is what the egress check depends on, and a lookup problem
+   * must cost the tags, not the connection. */
+  private async networkOf(address: string | undefined) {
+    try {
+      const info = await this.identity.identify(address);
+      if (!info) return {};
+      return { asn: info.asn, asnOrg: info.org || undefined, network: this.identity.attest(info.asn) ?? undefined };
+    } catch {
+      return {};
+    }
   }
 
   @Get()

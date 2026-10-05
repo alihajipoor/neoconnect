@@ -35,6 +35,25 @@ pub async fn measure_latency(host: String, port: u16) -> Option<u32> {
         .flatten()
 }
 
+/// Whether a TCP handshake to exactly this host and port completes.
+///
+/// The connect ladder's pre-dial probe (`probeCandidates` in the shared
+/// `reachability.ts`), which until now only the Windows client could
+/// answer -- on the phones every call rejected and every candidate stayed
+/// "unknown". Deliberately not `measure_latency`: that falls back to port
+/// 443 when the route's own port fails, which is right for a distance
+/// figure and wrong here, where a blocked port with a reachable 443 must
+/// read as unreachable rather than fine.
+///
+/// The same handshake a dial would open, against a server the ladder is
+/// about to dial anyway -- nothing a censor would not see a moment later.
+#[tauri::command]
+pub async fn probe_tcp(host: String, port: u16) -> bool {
+    tauri::async_runtime::spawn_blocking(move || connect_ms(&host, port).is_some())
+        .await
+        .unwrap_or(false)
+}
+
 fn probe(host: &str, port: u16) -> Option<u32> {
     // WireGuard listens on 51820/udp and OpenVPN on 1194/udp, and a TCP
     // connect can only ever succeed against a TCP listener -- so for

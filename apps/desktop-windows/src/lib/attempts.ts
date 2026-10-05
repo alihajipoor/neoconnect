@@ -2,6 +2,7 @@ import { load, type Store } from "@tauri-apps/plugin-store";
 import { getVersion } from "@tauri-apps/api/app";
 import { publicRequest } from "./api";
 import { getTokens } from "./session";
+import { currentAttestation } from "./network-identity";
 
 /** Telling the panel how an attempt went, so a beta can be watched from
  * somewhere other than screenshots.
@@ -24,7 +25,8 @@ import { getTokens } from "./session";
  *    `occurredAt`.
  */
 
-export type AttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT";
+/** SESSION is "the tunnel kept carrying traffic" -- see session-report.ts. */
+export type AttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT" | "SESSION";
 
 export type AttemptOutcome =
   | "SUCCESS"
@@ -38,6 +40,31 @@ export type AttemptOutcome =
 export interface AttemptRung {
   protocol: string;
   result: string;
+  /** The route this rung dialled -- only on a rung that actually reached
+   * the network. See `Dial`. */
+  routeId?: string;
+  /** Whether that dial carried traffic, by the egress check. */
+  carried?: boolean;
+}
+
+/** One rung's dial, for the per-ISP tags: which route was tried from
+ * this network and whether traffic got through.
+ *
+ * Null for a rung that says nothing about the network -- skipped before
+ * dialling, or refused for a reason that is the account's or the
+ * device's rather than the network's. Counting those against a route
+ * would tell other customers a route is failing when it is this
+ * customer's quota that ran out. */
+export type Dial = { routeId: string; carried: boolean } | null;
+
+/** The dial a failed rung represents, by how it was classified.
+ *
+ * Only `serverUnreachable` is the network's doing -- a handshake that
+ * never completed, or a tunnel that came up and carried nothing. Quota,
+ * concurrency, an inactive subscription, a missing engine and an
+ * unclassified error are not, and record no dial. */
+export function failedDial(routeId: string, kind: string): Dial {
+  return kind === "serverUnreachable" ? { routeId, carried: false } : null;
 }
 
 /** What a caller supplies. Platform, version and time are filled in
@@ -63,12 +90,16 @@ export interface AttemptReport {
    * Hostnames rather than full URLs: the path adds nothing and the
    * column is read by a person scanning for a pattern. */
   apiEndpoint?: string;
+  /** For a SESSION report: seconds the tunnel has carried traffic. */
+  sessionSeconds?: number;
 }
 
 interface QueuedReport extends AttemptReport {
   platform: string;
   appVersion: string;
   occurredAt: string;
+  /** The network attestation held when it happened. */
+  network?: string;
 }
 
 /** Which build this is.
@@ -83,8 +114,19 @@ interface QueuedReport extends AttemptReport {
  * on Android says so. A wrong guess costs a mislabelled row, so it is
  * not worth a new dependency in two apps to improve on.
  */
-function detectPlatform(): string {
-  return /android/i.test(navigator.userAgent) ? "android" : "windows";
+export function detectPlatform(
+  userAgent: string = typeof navigator === "undefined" ? "" : navigator.userAgent,
+  maxTouchPoints: number = typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints ?? 0,
+): string {
+  if (/android/i.test(userAgent)) return "android";
+  // This used to stop at android-or-windows, so every iPhone and Mac
+  // report was filed as a Windows one -- which would have folded three
+  // platforms' failures into one row of the per-ISP data. The iOS test
+  // is the same one `apps/mobile/src/lib/platform.ts` uses: iPadOS
+  // reports itself as a Mac and only a touchscreen gives it away.
+  if (/iphone|ipad|ipod/i.test(userAgent)) return "ios";
+  if (/macintosh/i.test(userAgent)) return maxTouchPoints > 1 ? "ios" : "macos";
+  return "windows";
 }
 
 /** How many unsent reports are kept.
@@ -172,6 +214,30 @@ async function send(report: QueuedReport): Promise<boolean> {
   return !result.error.startsWith("Could not reach Neoxify");
 }
 
+/** Attaches the network, or strips what only a new server understands.
+ *
+ * The per-ISP fields -- the attestation, routes and outcomes on ladder
+ * rungs, and the SESSION kind itself -- are rejected outright by a
+ * backend that predates them: its validation refuses unknown fields with
+ * a 400, and `send` counts a 400 as delivered and drops the report. So a
+ * client released before the backend would quietly lose every connect
+ * report it sends.
+ *
+ * Holding an attestation is the proof the server is new enough, since
+ * only a server with the feature issues one. With one, everything goes.
+ * Without, the report is sent in the shape every server accepts, and a
+ * SESSION report -- which says nothing useful without a network -- is
+ * not sent at all. Returns null for "do not send". */
+export function withNetwork(report: AttemptReport, attestation = currentAttestation()): (AttemptReport & { network?: string }) | null {
+  if (attestation) return { ...report, network: attestation };
+  if (report.kind === "SESSION") return null;
+  const { sessionSeconds: _unused, ...rest } = report;
+  return {
+    ...rest,
+    attempts: report.attempts?.map(({ protocol, result }) => ({ protocol, result })),
+  };
+}
+
 /** Records how an attempt went, and tries to send it.
  *
  * Fire and forget: call it with `void`. It resolves when it is done and
@@ -179,8 +245,10 @@ async function send(report: QueuedReport): Promise<boolean> {
  */
 export async function reportAttempt(report: AttemptReport): Promise<void> {
   try {
+    const shaped = withNetwork(report);
+    if (shaped === null) return;
     const queued: QueuedReport = {
-      ...report,
+      ...shaped,
       platform: detectPlatform(),
       appVersion: await appVersion(),
       // Stamped now, even for the report that goes out immediately. The
@@ -289,11 +357,16 @@ export function outcomeFromError(kind: string): AttemptOutcome {
  * sees under "show details", and having the report say something
  * different from the screen would defeat the purpose of collecting it.
  */
-export function rungsFrom(lines: string[]): AttemptRung[] {
-  return lines.map((line) => {
+export function rungsFrom(lines: string[], dials: Dial[] = []): AttemptRung[] {
+  return lines.map((line, i) => {
     const split = line.indexOf(": ");
-    return split === -1
-      ? { protocol: line.slice(0, 64), result: "" }
-      : { protocol: line.slice(0, split).slice(0, 64), result: line.slice(split + 2).slice(0, 200) };
+    const rung: AttemptRung =
+      split === -1
+        ? { protocol: line.slice(0, 64), result: "" }
+        : { protocol: line.slice(0, split).slice(0, 64), result: line.slice(split + 2).slice(0, 200) };
+    // Parallel to the lines, by index: the dashboards push one of each
+    // per rung. A missing or null entry leaves the rung as it always was.
+    const dial = dials[i];
+    return dial ? { ...rung, routeId: dial.routeId, carried: dial.carried } : rung;
   });
 }

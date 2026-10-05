@@ -2606,3 +2606,45 @@ production.
 - VirtualBox's trace stamps frames relative to when tracing began, and
   grew ~90 MB a minute from Windows Update; it is now off in the VM's
   saved config.
+
+## 2026-10-05 — per-ISP tags, Automatic, and the phones get the ladder
+
+Branch `claude/isp-recommendations`, not merged, nothing deployed.
+
+**What exists now.** `/health/ip` also returns the caller's ASN and a
+signed attestation of it (`n1.<asn>.<time>.<mac>`, 24h), read from an
+offline iptoasn.com table (public domain) loaded in memory and fetched
+daily -- 581,644 ranges, under a second, about 40 MB of heap, measured
+against the real file. Our node and mirror addresses are never anyone's
+network (exact match, fails closed). Clients keep the attestation from
+the *pre-connect* baseline and attach it to attempt reports and the
+route-list request; ladder rungs now name their route and whether it
+carried; one SESSION report goes out after ten minutes of continuous
+health. Per (ASN, route) over 48h, distinct signed-in customers by
+their latest attempt: "worked" needs >= 5 who got through and stayed
+up and >= 60% of those who tried; "failing" needs >= 5 failures and
+<= 25% getting through. Codes go out as `ispTag` on the route list; the
+panel has an ISP Recommendations page.
+
+Picker: "Automatic (recommended)" is the first row and the default for
+anyone without a pin; tiles say "Automatic" until a tunnel settles,
+then "Server (auto)" and where it landed. Tags sit in each row, with a
+filter. In `orderCandidates` tags are a tie-break below pin, last-good,
+live probe and device history, and only on a network the device has no
+evidence for -- the first run. Mobile now uses last-good, history and
+the TCP probe (new `probe_tcp` in the mobile Rust side), keyed on
+`asn:<n>` because the phones have no gateway fingerprint.
+
+**Proven:** backend unit tests (aggregation thresholds, ASN table incl.
+IPv6 and corrupt gzip, attestation, own-node rule, DTO), desktop and
+mobile JS tests, typechecks of Windows/macOS/mobile/web-portal, mobile
+`cargo check` on the host. **Unverified:** everything end to end -- no
+backend was run against a database here (no Postgres/Docker on this
+PC), no real ASN has produced a tag, no client was run, no phone used.
+Not proven either: whether the production container can reach
+iptoasn.com.
+
+**Deploy order matters:** backend (with migration
+`20261005_isp_recommendations`) before clients. Clients only send the
+new fields once the server has issued an attestation, so the reverse
+order loses nothing -- but it also collects nothing.

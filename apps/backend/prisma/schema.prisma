@@ -911,6 +911,11 @@ enum ClientAttemptKind {
   REGISTER
   SIGN_IN
   CONNECT
+  /// A tunnel that kept passing its health checks. Sent once per session,
+  /// when it has carried traffic for long enough to count -- the "and it
+  /// kept working" half that a CONNECT success cannot say. `outcome` is
+  /// SUCCESS and `sessionSeconds` says for how long.
+  SESSION
 }
 
 /// How it went, in the app's own vocabulary rather than an HTTP status.
@@ -962,7 +967,7 @@ model ClientAttempt {
   /// sign-in failures, which are the ones worth having.
   customerId String?
 
-  /// "windows" | "android", and the app version, so a fault can be tied
+  /// "windows" | "macos" | "android" | "ios", and the app version, so a fault can be tied
   /// to a release rather than guessed at.
   platform   String
   appVersion String
@@ -1000,6 +1005,19 @@ model ClientAttempt {
   /// and sweeps by. This is shown, not relied on.
   occurredAt DateTime?
 
+  /// The network (autonomous system number) the client was on before its
+  /// tunnel came up, taken from a signed attestation the server issued at
+  /// /health/ip -- never a number the client asserted. Null when there was
+  /// none, or it had expired, or the baseline was answered from one of our
+  /// own nodes. Feeds the per-ISP tags in the location picker.
+  ///
+  /// The network only, never finer: "TCI", not a place. Swept with the row.
+  asn Int?
+
+  /// For a SESSION report: how long the tunnel had been carrying traffic,
+  /// by its own health checks, when the report was sent.
+  sessionSeconds Int?
+
   createdAt DateTime @default(now())
 
   customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
@@ -1007,6 +1025,7 @@ model ClientAttempt {
   @@index([createdAt])
   @@index([outcome, createdAt])
   @@index([customerId])
+  @@index([asn, createdAt])
   @@map("client_attempts")
 }
 
