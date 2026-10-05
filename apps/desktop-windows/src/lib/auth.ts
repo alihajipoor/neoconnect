@@ -1,4 +1,5 @@
 import { apiRequest, publicRequest } from "./api";
+import { attemptedEndpoints } from "./api-endpoints";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { setTokens } from "./session";
 import { endCustomerSession } from "./session-end";
@@ -24,13 +25,31 @@ import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from 
  * dangerous to hold one. A verified session attaches the customer
  * server-side; a failed sign-in has no session, and that is the honest
  * answer.
+ *
+ * An unreachable control plane carries the addresses that were tried,
+ * as the pre-connect refresh's report already does. Sign-in was the
+ * other source of CONTROL_PLANE_UNREACHABLE and sent none, so those
+ * rows read "could not reach Neoxify" with no hint of *what* could not
+ * be reached -- a blocked domain and a client carrying a stale mirror
+ * list look identical without it, and sign-in on a filtered network is
+ * exactly when it is needed. Still fire-and-forget: the lookup reads
+ * the endpoint list the request itself just used, and it is only made
+ * when there is something to say.
  */
 function reportAuth(kind: AttemptKind, result: ApiResult<unknown>): void {
-  void reportAttempt(
-    result.ok
-      ? { kind, outcome: "SUCCESS" }
-      : { kind, outcome: outcomeFromApiError(result.error), reason: result.error },
-  );
+  void (async () => {
+    if (result.ok) {
+      await reportAttempt({ kind, outcome: "SUCCESS" });
+      return;
+    }
+    const outcome = outcomeFromApiError(result.error);
+    await reportAttempt({
+      kind,
+      outcome,
+      reason: result.error,
+      apiEndpoint: outcome === "CONTROL_PLANE_UNREACHABLE" ? await attemptedEndpoints() : undefined,
+    });
+  })();
 }
 
 /** Never returns a usable session -- see RequiresVerification's doc

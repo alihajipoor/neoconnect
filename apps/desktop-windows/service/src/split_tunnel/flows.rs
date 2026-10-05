@@ -105,6 +105,31 @@ const NAT_PORT_LAST: u16 = 60_000;
 /// A live connection that goes quiet mid-session must not lose its
 /// entry: the app already holds a socket to the proxy, and forgetting
 /// where it was going would strand it.
+///
+/// **"Idle" means no *outbound* packet, which is not quite the same as
+/// idle.** `last_seen` is refreshed in [`Nat::lookup_flow`] and nowhere
+/// else, so it tracks what the application sends. A flow that is only
+/// receiving ages as though nothing were happening, and when it is
+/// retired `rewrite_return_leg` stops finding it and the replies are
+/// dropped -- the flow dies while it is in use, which is precisely what
+/// the paragraph above says must not happen.
+///
+/// It is left alone deliberately rather than from not having noticed.
+/// TCP acknowledges, so a downloading connection is sending packets
+/// through the loop the whole time and never reaches this at all. UDP
+/// has no acknowledgement, but the protocols carried over it in
+/// practice -- QUIC, WebRTC, game traffic -- all talk back within
+/// seconds. A genuinely one-directional UDP flow lasting longer than
+/// `UDP_IDLE` is possible and has never been observed here.
+///
+/// Refreshing on the return leg would fix it and would put a write,
+/// under the table's one mutex, on the hottest path in the subsystem --
+/// every inbound packet of every carried flow. That is a real cost to
+/// pay for a case nobody has seen, in a codebase whose rule is not to
+/// act on numbers nobody has checked against the wire. If a customer
+/// ever reports a stream dying after a minute while data is still
+/// arriving, this is the first thing to look at, and the fix is one
+/// line.
 const TCP_IDLE: Duration = Duration::from_secs(180);
 
 /// UDP has no close, so this is the only thing that ever retires a flow.
@@ -154,9 +179,14 @@ struct FlowKey {
     destination_port: u16,
 }
 
+/// What a synthetic port is carrying.
+///
+/// No `nat_port` field: it is the second half of this entry's own key
+/// in `reverse`, and a copy of a key stored beside it is a value that
+/// can disagree with where it lives. Nothing kept them in step except
+/// the one line that wrote both.
 struct Redirected {
     origin: Origin,
-    nat_port: u16,
     last_seen: Instant,
 }
 
@@ -220,6 +250,24 @@ impl Nat {
         Self { tables: Mutex::new(Tables { next_port: NAT_PORT_FIRST, ..Tables::default() }) }
     }
 
+    /// The tables, whether or not a panic elsewhere poisoned the lock.
+    ///
+    /// Every method here took it with `.lock().unwrap()`, so one panic in
+    /// any thread holding it -- a relay, the expiry sweep -- poisoned the
+    /// table for good, and every packet after that panicked the redirect
+    /// worker that asked. A worker that dies stops re-injecting what
+    /// WinDivert hands it, which is the machine's traffic black-holed:
+    /// failing closed, in a feature whose decided rule is to fail open.
+    ///
+    /// Recovering is safe because of how the lock is used. Each method
+    /// does its whole update inside one short critical section of map
+    /// operations, so the worst a panic can leave is one flow's entry
+    /// half-written -- that flow misdirected, against every flow on the
+    /// machine stopped.
+    fn tables(&self) -> std::sync::MutexGuard<'_, Tables> {
+        self.tables.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// What to do with an outbound packet, keeping alive whatever it
     /// hits.
     pub fn lookup(
@@ -236,7 +284,7 @@ impl Nat {
         }
 
         let key = FlowKey { transport, client_port, destination, destination_port };
-        let tables = self.tables.lock().unwrap();
+        let tables = self.tables();
         match tables.direct.get(&key) {
             Some(decided) if decided.elapsed() < DIRECT_VERDICT_TTL => Verdict::Direct,
             _ => Verdict::Unknown,
@@ -258,7 +306,7 @@ impl Nat {
         destination_port: u16,
     ) -> Option<u16> {
         let key = FlowKey { transport, client_port, destination, destination_port };
-        let mut tables = self.tables.lock().unwrap();
+        let mut tables = self.tables();
         let &nat_port = tables.forward.get(&key)?;
 
         match tables.reverse.get_mut(&(transport, nat_port)) {
@@ -296,7 +344,7 @@ impl Nat {
         destination_port: u16,
     ) -> bool {
         let key = FlowKey { transport, client_port, destination, destination_port };
-        let tables = self.tables.lock().unwrap();
+        let tables = self.tables();
         match tables.forward.get(&key) {
             // The same orphan check `lookup_flow` makes: a forward entry
             // whose reverse half has been retired carries nothing, so
@@ -321,7 +369,7 @@ impl Nat {
         destination_port: u16,
     ) {
         let key = FlowKey { transport, client_port, destination, destination_port };
-        let mut tables = self.tables.lock().unwrap();
+        let mut tables = self.tables();
         if tables.direct.len() >= DIRECT_MAX_ENTRIES {
             let now = Instant::now();
             tables.direct.retain(|_, decided| now.duration_since(*decided) < DIRECT_VERDICT_TTL);
@@ -388,7 +436,7 @@ impl Nat {
     /// does -- see `SplitTunnel::set_selection` for what the customer is
     /// told about the half that cannot be moved.
     pub fn forget_direct(&self) {
-        let mut tables = self.tables.lock().unwrap();
+        let mut tables = self.tables();
         tables.direct.clear();
     }
 
@@ -405,13 +453,13 @@ impl Nat {
             destination: origin.addr,
             destination_port: origin.port,
         };
-        let mut tables = self.tables.lock().unwrap();
+        let mut tables = self.tables();
         let nat_port = tables.allocate(transport)?;
 
         tables.forward.insert(key, nat_port);
         tables
             .reverse
-            .insert((transport, nat_port), Redirected { origin, nat_port, last_seen: Instant::now() });
+            .insert((transport, nat_port), Redirected { origin, last_seen: Instant::now() });
         // A flow cannot be both left alone and redirected. A TCP SYN
         // re-decides from scratch, so this is how a stale verdict from
         // the port's previous owner is cleared. With the verdict keyed
@@ -425,7 +473,7 @@ impl Nat {
     /// The origin behind a synthetic port. Used by the proxy to learn
     /// where to connect, and by the return leg to undo the rewrite.
     pub fn origin(&self, transport: Transport, nat_port: u16) -> Option<Origin> {
-        let tables = self.tables.lock().unwrap();
+        let tables = self.tables();
         Some(tables.reverse.get(&(transport, nat_port))?.origin)
     }
 
@@ -435,7 +483,7 @@ impl Nat {
     /// behind.
     pub fn expire_idle(&self) -> Vec<u16> {
         let now = Instant::now();
-        let mut tables = self.tables.lock().unwrap();
+        let mut tables = self.tables();
 
         let mut dropped_udp = Vec::new();
         // Keyed on the transport as well as the port, which the sweep
@@ -459,7 +507,7 @@ impl Nat {
             };
             let alive = now.duration_since(entry.last_seen) < idle;
             if !alive {
-                dropped.insert((*transport, entry.nat_port));
+                dropped.insert((*transport, *port));
                 if matches!(transport, Transport::Udp) {
                     dropped_udp.push(*port);
                 }
@@ -583,7 +631,7 @@ mod tests {
         );
 
         {
-            let mut tables = nat.tables.lock().unwrap();
+            let mut tables = nat.tables();
             let key = FlowKey {
                 transport: Transport::Udp,
                 client_port: 5350,
@@ -625,7 +673,7 @@ mod tests {
         let nat_port = nat.redirect(Transport::Udp, origin).unwrap();
 
         {
-            let mut tables = nat.tables.lock().unwrap();
+            let mut tables = nat.tables();
             tables.reverse.get_mut(&(Transport::Udp, nat_port)).unwrap().last_seen =
                 Instant::now() - UDP_IDLE * 2;
         }
@@ -670,7 +718,7 @@ mod tests {
         // collision is deliberate rather than waiting for a wrap.
         let tcp_port = nat.redirect(Transport::Tcp, origin_to(peer, 443, 5500)).unwrap();
         {
-            let mut tables = nat.tables.lock().unwrap();
+            let mut tables = nat.tables();
             tables.next_port = tcp_port;
         }
         let udp_port = nat.redirect(Transport::Udp, origin_to(peer, 53, 5501)).unwrap();
@@ -678,7 +726,7 @@ mod tests {
 
         // Only the UDP half goes quiet.
         {
-            let mut tables = nat.tables.lock().unwrap();
+            let mut tables = nat.tables();
             tables.reverse.get_mut(&(Transport::Udp, udp_port)).unwrap().last_seen =
                 Instant::now() - UDP_IDLE * 2;
         }
@@ -704,7 +752,7 @@ mod tests {
         let nat_port = nat.redirect(Transport::Udp, origin).unwrap();
 
         {
-            let mut tables = nat.tables.lock().unwrap();
+            let mut tables = nat.tables();
             let entry = tables.reverse.get_mut(&(Transport::Udp, nat_port)).unwrap();
             entry.last_seen = Instant::now() - UDP_IDLE * 2;
         }
@@ -721,7 +769,7 @@ mod tests {
     fn port_allocation_wraps_without_reusing_a_live_flow() {
         let nat = Nat::new();
         {
-            let mut tables = nat.tables.lock().unwrap();
+            let mut tables = nat.tables();
             tables.next_port = NAT_PORT_LAST;
         }
         let first = nat.redirect(Transport::Tcp, origin_to(Ipv4Addr::new(1, 1, 1, 1), 1, 1)).unwrap();
@@ -813,7 +861,7 @@ mod tests {
             );
         }
 
-        let held = nat.tables.lock().unwrap().direct.len();
+        let held = nat.tables().direct.len();
         assert!(
             held <= DIRECT_MAX_ENTRIES,
             "the leave-alone cache grew to {held}, past its cap of {DIRECT_MAX_ENTRIES}"
@@ -830,7 +878,7 @@ mod tests {
         nat.record_direct(Transport::Udp, 5950, Ipv4Addr::new(203, 0, 113, 9), 443);
 
         {
-            let mut tables = nat.tables.lock().unwrap();
+            let mut tables = nat.tables();
             for decided in tables.direct.values_mut() {
                 *decided = Instant::now() - DIRECT_VERDICT_TTL * 2;
             }
@@ -838,7 +886,7 @@ mod tests {
 
         nat.expire_idle();
         assert!(
-            nat.tables.lock().unwrap().direct.is_empty(),
+            nat.tables().direct.is_empty(),
             "an expired verdict must be reclaimed, not merely ignored"
         );
     }
@@ -908,5 +956,37 @@ mod tests {
             Verdict::Direct,
             "one flow, one verdict, one entry"
         );
+    }
+
+    /// A panic while the table is held must not take every later packet
+    /// with it. Poisoned for real -- a thread panics holding the lock --
+    /// and then every path a packet takes through the table is asked.
+    #[test]
+    fn a_panic_holding_the_table_does_not_stop_every_packet_after_it() {
+        let nat = std::sync::Arc::new(Nat::new());
+        let poisoner = nat.clone();
+        let outcome = std::thread::spawn(move || {
+            let _held = poisoner.tables.lock().unwrap();
+            panic!("a relay thread panicking with the table held");
+        })
+        .join();
+        assert!(outcome.is_err() && nat.tables.is_poisoned(), "the table must really be poisoned");
+
+        let peer = Ipv4Addr::new(203, 0, 113, 9);
+        assert_eq!(nat.lookup(Transport::Udp, 50_000, peer, 27_015), Verdict::Unknown);
+        let origin = Origin {
+            addr: peer,
+            port: 27_015,
+            client: Ipv4Addr::new(192, 168, 1, 20),
+            client_port: 50_001,
+            interface_id: 1,
+            upstream: None,
+            exit: None,
+        };
+        let nat_port = nat.redirect(Transport::Udp, origin).expect("a new flow is still recorded");
+        assert_eq!(nat.origin(Transport::Udp, nat_port).map(|o| o.client_port), Some(50_001));
+        nat.record_direct(Transport::Tcp, 50_002, peer, 443);
+        assert_eq!(nat.lookup(Transport::Tcp, 50_002, peer, 443), Verdict::Direct);
+        let _ = nat.expire_idle();
     }
 }

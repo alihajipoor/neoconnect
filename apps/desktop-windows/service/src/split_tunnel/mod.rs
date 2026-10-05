@@ -52,8 +52,10 @@
 mod divert;
 pub(crate) mod firewall;
 mod flows;
+mod health;
 mod icon;
 mod owner;
+mod picker;
 mod proxy;
 mod redirect;
 mod socks;
@@ -69,7 +71,8 @@ use crate::adapters;
 use crate::engines::ipv6_block;
 use crate::engines::routing::{self, InstalledRoutes};
 
-pub use owner::{running_apps, Selection, SharedSelection};
+pub use owner::{Selection, SharedSelection};
+pub use picker::running_apps;
 
 /// How long to wait for a tunnel adapter to appear and be given an
 /// address after its engine starts.
@@ -81,12 +84,55 @@ const ADAPTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Whether Custom mode is running, readable without the `Engines` lock.
 ///
-/// A shadow of `SplitTunnel::active`, written at the two places that set
-/// and clear it and nowhere else. It exists for one caller: the status
-/// poll, which has to be answerable while an operation holds the lock --
-/// see `pipe::dispatch`. Anything that holds the lock asks
-/// [`SplitTunnel::is_running`], which reads the real thing.
+/// A shadow of `SplitTunnel::active`, written only by [`ActiveSlot`],
+/// whose two mutators are the only ways to fill or empty it. It exists
+/// for one caller: the status poll, which has to be answerable while an
+/// operation holds the lock -- see `pipe::dispatch`. Anything that holds
+/// the lock asks [`SplitTunnel::is_running`], which reads the real thing.
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The running session, and the only code that writes [`RUNNING`].
+///
+/// The flag used to be kept in step by hand, "at the two places that set
+/// and clear it and nowhere else" -- an invariant held by prose, which
+/// the next place to assign `active` would not have read. Now the slot
+/// cannot change without the flag changing with it.
+struct ActiveSlot(Option<Active>);
+
+impl ActiveSlot {
+    fn empty() -> Self {
+        Self(None)
+    }
+
+    /// Filled, then announced -- the order it always had, so the
+    /// lock-free reader never sees "running" with nothing behind it.
+    fn fill(&mut self, active: Active) {
+        self.0 = Some(active);
+        RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Emptied, and the flag cleared only if there was something to
+    /// clear, exactly as `stop` did.
+    fn take(&mut self) -> Option<Active> {
+        let active = self.0.take();
+        if active.is_some() {
+            RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        active
+    }
+
+    fn as_ref(&self) -> Option<&Active> {
+        self.0.as_ref()
+    }
+
+    fn as_mut(&mut self) -> Option<&mut Active> {
+        self.0.as_mut()
+    }
+
+    fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+}
 
 /// Whether Custom mode is running, for a caller that cannot take the
 /// `Engines` lock.
@@ -129,7 +175,7 @@ pub struct SplitTunnel {
     /// session where the customer placed no game. Empty is the state in
     /// which this feature costs one length check per carried packet.
     exits: Arc<proxy::ExitRelays>,
-    active: Option<Active>,
+    active: ActiveSlot,
     /// Processes that were already running when the customer selected
     /// them, as `(lowercased image path, pid)`.
     ///
@@ -684,11 +730,18 @@ impl Audit {
 /// sitting on "Disconnecting..." with the tunnel already gone --
 /// reported as exactly that. Waiting in short steps costs nothing and
 /// bounds the delay at one step.
+///
+/// The step was 200ms, and one step is what each joined thread costs a
+/// stop -- the flow-expiry thread was measured at 150ms of a 150ms
+/// `Relays::stop`, and `SplitTunnel::stop` joins four users of this one
+/// after another inside phase one's 900ms. Twenty milliseconds is fifty
+/// wake-ups a second per thread, each a load and a comparison, against
+/// a tenth of the wait on every join.
 pub(super) fn sleep_unless_stopped(
     stop: &std::sync::atomic::AtomicBool,
     total: std::time::Duration,
 ) -> bool {
-    const STEP: std::time::Duration = std::time::Duration::from_millis(200);
+    const STEP: std::time::Duration = std::time::Duration::from_millis(20);
     let deadline = std::time::Instant::now() + total;
     loop {
         if stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -774,7 +827,7 @@ fn install_verified_route(
                 }
             };
 
-        match proxy::probe(tunnel) {
+        match health::probe(tunnel) {
             Ok(()) => {
                 append(log_path, &format!("route {}: carries traffic", shape.label()));
                 return Ok(installed);
@@ -884,7 +937,7 @@ impl SplitTunnel {
             selection: SharedSelection::default(),
             egress: None,
             exits: Arc::new(proxy::ExitRelays::default()),
-            active: None,
+            active: ActiveSlot::empty(),
             pre_existing: Vec::new(),
             #[cfg(test)]
             stops: std::sync::atomic::AtomicU32::new(0),
@@ -1221,8 +1274,7 @@ impl SplitTunnel {
         {
             Ok(relays) => relays,
             Err(e) => {
-                let mut route = route;
-                route.remove();
+                // `route` is removed by its Drop on the way out.
                 return Err(format!("could not start the local relay: {e}"));
             }
         };
@@ -1230,12 +1282,16 @@ impl SplitTunnel {
         // Before the redirect starts, so that no packet is ever sent
         // to a port the firewall is still dropping.
         let allowance =
-            match firewall::Allowance::install(&[local_addr, tunnel_address], relays.tcp_port, relays.udp_port) {
+            match firewall::Allowance::install(
+                local_addr,
+                tunnel_address,
+                relays.tcp_port,
+                relays.udp_port,
+            ) {
                 Ok(allowance) => allowance,
                 Err(e) => {
                     relays.stop();
-                    let mut route = route;
-                    route.remove();
+                    // `route` is removed by its Drop on the way out.
                     return Err(e);
                 }
             };
@@ -1264,8 +1320,7 @@ impl SplitTunnel {
 
         if let Err(e) = firewall::wait_until_reachable(local_addr, relays.tcp_port, limits) {
             relays.stop();
-            let mut route = route;
-            route.remove();
+            // `route` is removed by its Drop on the way out.
             return Err(e);
         }
 
@@ -1285,10 +1340,9 @@ impl SplitTunnel {
             // whatever is not carried resolves on the local network
             // otherwise, which is the leak this closes.
             carry_dns: true,
-            // Overwritten by `redirect::start`, which stamps it when
-            // interception actually begins -- the route probe and the
-            // firewall wait sit between here and there.
-            activated: Instant::now(),
+            // Begun by `redirect::start` as interception starts -- the
+            // route probe and the firewall wait sit between here and there.
+            activated: redirect::Activation::pending(),
             exits: self.exits.clone(),
         };
 
@@ -1424,7 +1478,7 @@ impl SplitTunnel {
                     watchdog_tripped.clone(),
                 );
 
-                self.active = Some(Active {
+                self.active.fill(Active {
                     redirect: running,
                     nat: nat_for_active,
                     relays,
@@ -1439,13 +1493,11 @@ impl SplitTunnel {
                     log_path,
                     started: Instant::now(),
                 });
-                RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
             Err(e) => {
                 relays.stop();
-                let mut route = route;
-                route.remove();
+                // `route` is removed by its Drop on the way out.
                 Err(e)
             }
         }
@@ -1457,7 +1509,7 @@ impl SplitTunnel {
     /// The app cannot answer this for itself in Custom mode: its own
     /// requests deliberately do not go through the tunnel, so its usual
     /// "did my address change" check correctly reports being bypassed
-    /// and would fail every protocol in turn. See [`proxy::probe`].
+    /// and would fail every protocol in turn. See [`health::probe`].
     /// What the live counters say is wrong, or `None` when nothing is.
     ///
     /// Read from the real path under the customer's own traffic, which
@@ -1484,7 +1536,7 @@ impl SplitTunnel {
     }
 
     pub fn probe(&self) -> Result<(), String> {
-        let Some(active) = &self.active else {
+        let Some(active) = self.active.as_ref() else {
             return Err("custom mode is not running".into());
         };
 
@@ -1510,7 +1562,7 @@ impl SplitTunnel {
         // Route selection still uses `probe`: it is asking whether a
         // route shape can be attached to at all, which is exactly what a
         // handshake settles.
-        let outcome = proxy::prove_carries(&active.tunnel);
+        let outcome = health::prove_carries(&active.tunnel);
 
         // Written down because this verdict is what decides whether the
         // ladder keeps this protocol or moves to the next one. Without
@@ -1565,7 +1617,6 @@ impl SplitTunnel {
         #[cfg(test)]
         self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let Some(active) = self.active.take() else { return };
-        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
         // First of all, and before the join below can take any time:
         // the backstop must not be looking for a vanished adapter while
         // the session it would complain about is being taken down on
@@ -1755,6 +1806,47 @@ fn own_images() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No adapter on any machine is called this, so the wait below can
+    /// only end by cancellation or by running out of time.
+    const NO_SUCH_ADAPTER: &str = "Neoxify-test-adapter-that-does-not-exist";
+
+    /// The longest single wait in Custom mode's bring-up, up to ten
+    /// seconds, must give way to a Disconnect. This is the path the
+    /// rewrite notes list as untested: a split tunnel that ignored the
+    /// abandon flag for its whole bring-up is how Disconnect once did
+    /// nothing for thirty-eight seconds.
+    #[test]
+    fn a_cancelled_connect_stops_waiting_for_the_adapter() {
+        let token = crate::lifecycle::cancel::CancelToken::new();
+        let limits = crate::lifecycle::budget::Limits::new(token.clone(), std::time::Duration::from_secs(30));
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            token.cancel();
+        });
+        let began = std::time::Instant::now();
+        let outcome = wait_for_addressed_adapter(NO_SUCH_ADAPTER, &limits);
+        let took = began.elapsed();
+        canceller.join().unwrap();
+        assert!(outcome.is_err(), "a cancelled wait must not produce an adapter");
+        assert!(took < std::time::Duration::from_secs(3), "the wait outlived its cancellation: {took:?}");
+    }
+
+    /// And it fits inside what the connect has left, not only inside its
+    /// own ten-second ceiling -- the clamping the rewrite chose over
+    /// lowering constants.
+    #[test]
+    fn the_adapter_wait_ends_when_the_connect_runs_out_of_time() {
+        let limits = crate::lifecycle::budget::Limits::new(
+            crate::lifecycle::cancel::CancelToken::new(),
+            std::time::Duration::from_millis(400),
+        );
+        let began = std::time::Instant::now();
+        let outcome = wait_for_addressed_adapter(NO_SUCH_ADAPTER, &limits);
+        let took = began.elapsed();
+        assert!(outcome.is_err());
+        assert!(took < std::time::Duration::from_secs(3), "waited past the connect's budget: {took:?}");
+    }
 
     /// A selection with no destination scoping, which is what every
     /// test in this file is about.

@@ -35,22 +35,12 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::windows::ffi::OsStrExt;
 use std::sync::{Arc, RwLock};
 
 use neoconnect_ipc::{AppPlacement, ExitPlacement, SplitTunnelMode, MAX_SCOPE_PREFIXES};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, HWND, NO_ERROR,
-};
-use windows_sys::Win32::Storage::FileSystem::{
-    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
-};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
-    GW_OWNER,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, SetTcpEntry, TCP_TABLE_OWNER_PID_ALL,
     UDP_TABLE_OWNER_PID,
@@ -148,6 +138,23 @@ pub struct Selection {
     /// not ask it. See `docs/design/per-game-exits.md` for why that
     /// separation is the safety argument rather than an optimisation.
     exits: HashMap<String, String>,
+}
+
+/// Whether `image_path`, lowercased, is exactly `lowered` -- without
+/// building the lowercased copy.
+///
+/// ASCII only, and the callers check that first. For an ASCII string
+/// `to_lowercase` is byte-for-byte `to_ascii_lowercase`, so comparing
+/// byte by byte with the case folded on the fly gives exactly the answer
+/// the allocating version gave. A path with anything else in it -- a
+/// customer's user folder named in their own script -- takes the
+/// allocating route unchanged, because Unicode lowercasing is not a
+/// per-byte operation and a cheaper answer that differs from it would
+/// change which applications are carried.
+fn same_ascii_path(lowered: &str, image_path: &str) -> bool {
+    debug_assert!(image_path.is_ascii());
+    lowered.len() == image_path.len()
+        && lowered.bytes().zip(image_path.bytes()).all(|(l, i)| l == i.to_ascii_lowercase())
 }
 
 impl Selection {
@@ -366,7 +373,15 @@ impl Selection {
     }
 
     /// Whether an executable path is one the customer selected.
+    ///
+    /// Asked on every packet, so it must not allocate -- and it did: the
+    /// type's own doc promised "a plain comparison" while this lowercased
+    /// the whole path into a fresh `String` each time. See
+    /// [`same_ascii_path`] for how the comparison is now made without one.
     pub fn matches(&self, image_path: &str) -> bool {
+        if image_path.is_ascii() {
+            return self.paths.iter().any(|p| same_ascii_path(p, image_path));
+        }
         let lowered = image_path.to_lowercase();
         self.paths.iter().any(|p| *p == lowered)
     }
@@ -455,7 +470,15 @@ impl Selection {
         if self.scopes.is_empty() {
             return Scoped::Unscoped;
         }
-        let Some(scope) = self.scopes.get(&image_path.to_lowercase()) else {
+        // A walk rather than a hash lookup for the same reason `matches`
+        // is: the key would have to be lowercased into a new `String`
+        // first, per packet. Scopes are a handful of games at most.
+        let found = if image_path.is_ascii() {
+            self.scopes.iter().find(|(p, _)| same_ascii_path(p, image_path)).map(|(_, s)| s)
+        } else {
+            self.scopes.get(&image_path.to_lowercase())
+        };
+        let Some(scope) = found else {
             return Scoped::Unscoped;
         };
         match scope.contains(destination) {
@@ -1080,6 +1103,15 @@ impl OwnerLookup {
         if let Some(table) = udp6_table() {
             self.udp6 = table;
         }
+        // Marked fresh even if every walk above failed, and that is a
+        // decision rather than an oversight. A failed walk keeps the
+        // previous table, which is the best answer there is; the other
+        // choice -- leaving the snapshot stale so the next lookup walks
+        // again -- turns a failing API into a table walk per packet on
+        // the redirect loop. The cost is that a stale table answers for
+        // one more `SNAPSHOT_TTL`. A SYN does not pay it:
+        // `image_for_new_connection` walks again on any miss, whatever
+        // this says.
         let now = Instant::now();
         self.built_at = now;
         self.last_refresh = now;
@@ -1119,16 +1151,7 @@ fn tcp_table() -> Option<HashMap<u16, u32>> {
             )
         }
     })?;
-
-    // MIB_TCPTABLE_OWNER_PID: a u32 count followed by that many
-    // 6 x u32 rows. Read field by field rather than by casting to the
-    // generated struct, whose trailing array is declared with length 1
-    // and would make an indexed read into the rest of the table
-    // out of bounds.
-    const ROW_WORDS: usize = 6;
-    const LOCAL_PORT: usize = 2;
-    const OWNING_PID: usize = 5;
-    Some(parse_table(&bytes, ROW_WORDS, LOCAL_PORT, OWNING_PID))
+    Some(parse_table(&bytes, Layout::Tcp4))
 }
 
 /// Local port -> owning process id, for every IPv4 UDP socket.
@@ -1137,12 +1160,7 @@ fn udp_table() -> Option<HashMap<u16, u32>> {
         // SAFETY: as above.
         unsafe { GetExtendedUdpTable(buf, size, 0, AF_INET as u32, UDP_TABLE_OWNER_PID, 0) }
     })?;
-
-    // MIB_UDPTABLE_OWNER_PID rows are {dwLocalAddr, dwLocalPort, dwOwningPid}.
-    const ROW_WORDS: usize = 3;
-    const LOCAL_PORT: usize = 1;
-    const OWNING_PID: usize = 2;
-    Some(parse_table(&bytes, ROW_WORDS, LOCAL_PORT, OWNING_PID))
+    Some(parse_table(&bytes, Layout::Udp4))
 }
 
 /// Local port -> owning process id, for every IPv6 TCP connection.
@@ -1159,14 +1177,7 @@ fn tcp6_table() -> Option<HashMap<u16, u32>> {
         // SAFETY: `buf` is null (sizing) or valid for `*size` bytes.
         unsafe { GetExtendedTcpTable(buf, size, 0, AF_INET6 as u32, TCP_TABLE_OWNER_PID_ALL, 0) }
     })?;
-
-    // MIB_TCP6ROW_OWNER_PID: ucLocalAddr[16], dwLocalScopeId,
-    // dwLocalPort, ucRemoteAddr[16], dwRemoteScopeId, dwRemotePort,
-    // dwState, dwOwningPid -- fourteen 32-bit words in all.
-    const ROW_WORDS: usize = 14;
-    const LOCAL_PORT: usize = 5;
-    const OWNING_PID: usize = 13;
-    Some(parse_table(&bytes, ROW_WORDS, LOCAL_PORT, OWNING_PID))
+    Some(parse_table(&bytes, Layout::Tcp6))
 }
 
 /// Local port -> owning process id, for every IPv6 UDP socket.
@@ -1175,13 +1186,7 @@ fn udp6_table() -> Option<HashMap<u16, u32>> {
         // SAFETY: as above.
         unsafe { GetExtendedUdpTable(buf, size, 0, AF_INET6 as u32, UDP_TABLE_OWNER_PID, 0) }
     })?;
-
-    // MIB_UDP6ROW_OWNER_PID rows are {ucLocalAddr[16], dwLocalScopeId,
-    // dwLocalPort, dwOwningPid}.
-    const ROW_WORDS: usize = 7;
-    const LOCAL_PORT: usize = 5;
-    const OWNING_PID: usize = 6;
-    Some(parse_table(&bytes, ROW_WORDS, LOCAL_PORT, OWNING_PID))
+    Some(parse_table(&bytes, Layout::Udp6))
 }
 
 /// Runs the size-then-fetch dance both table APIs require.
@@ -1210,136 +1215,155 @@ where
     None
 }
 
-/// Turns a raw `MIB_*TABLE_OWNER_PID` buffer into a port -> pid map.
-fn parse_table(
-    words: &[u32],
-    row_words: usize,
-    port_offset: usize,
-    pid_offset: usize,
-) -> HashMap<u16, u32> {
-    let mut map = HashMap::new();
-    let Some(&count) = words.first() else {
-        return map;
-    };
-
-    for row in 0..count as usize {
-        let base = 1 + row * row_words;
-        let Some(&raw_port) = words.get(base + port_offset) else {
-            break;
-        };
-        let Some(&pid) = words.get(base + pid_offset) else {
-            break;
-        };
-        // dwLocalPort holds the port in network byte order in its low
-        // half, so the bytes come out swapped on a little-endian host.
-        map.insert((raw_port as u16).swap_bytes(), pid);
-    }
-    map
+/// The four `MIB_*ROW_OWNER_PID` layouts, and where each field sits in
+/// them.
+///
+/// These rows used to be decoded by hand at six call sites, each with
+/// its own row width, its own offsets and its own port byte-swap. The
+/// hazard that invites is the one the IPv6 reader's comment names --
+/// the wrong layout for a family "would parse address bytes as a port
+/// and return a plausible number for the wrong socket" -- and six
+/// hand-written decoders are six chances at it. Now each layout is
+/// written down once, here, and a caller asks for a field by name.
+///
+/// Read field by field rather than by casting to the generated structs,
+/// whose trailing arrays are declared with length 1 and would make an
+/// indexed read into the rest of the table out of bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// `MIB_TCPROW_OWNER_PID`: dwState, dwLocalAddr, dwLocalPort,
+    /// dwRemoteAddr, dwRemotePort, dwOwningPid.
+    Tcp4,
+    /// `MIB_UDPROW_OWNER_PID`: dwLocalAddr, dwLocalPort, dwOwningPid.
+    Udp4,
+    /// `MIB_TCP6ROW_OWNER_PID`: ucLocalAddr[16], dwLocalScopeId,
+    /// dwLocalPort, ucRemoteAddr[16], dwRemoteScopeId, dwRemotePort,
+    /// dwState, dwOwningPid.
+    Tcp6,
+    /// `MIB_UDP6ROW_OWNER_PID`: ucLocalAddr[16], dwLocalScopeId,
+    /// dwLocalPort, dwOwningPid.
+    Udp6,
 }
 
-/// The full path of a running process's executable.
-///
-/// `PROCESS_QUERY_LIMITED_INFORMATION` rather than the fuller access
-/// right on purpose: it is the least this needs, and it is the one that
-/// works against protected processes, which some anti-cheat-guarded
-/// games are.
-/// The applications running right now, for the picker to offer.
-///
-/// Deduplicated by path, because a modern application is many processes
-/// and a list with chrome.exe in it eleven times is not a list. Sorted
-/// by name so the order does not shuffle between refreshes.
-///
-/// Filtered to what a person would recognise as a program: anything
-/// under the Windows system directories is the operating system going
-/// about its business, and offering it invites a customer to route
-/// their own machinery through a VPN. The path is what a selection is
-/// actually made of -- see `Selection` -- so the path is returned, with
-/// the file name alongside only for display.
-/// The applications a customer would actually recognise, grouped one
-/// entry per product.
-///
-/// Two things decide what appears here, and the previous version had
-/// neither. It listed every process whose image was not under System32,
-/// which is a definition of "not a Windows binary" rather than of "an
-/// app" -- so background helpers, update services and telemetry hosts
-/// filled the list -- and it listed each executable separately, so one
-/// product appeared two or three times under names nobody recognises.
-///
-/// A **visible window with a title** is what a person means by "an app
-/// that is open". Everything without one is exactly the noise being
-/// complained about.
-///
-/// Grouping is by the product name recorded in the executable itself,
-/// falling back to the install directory when there is none. That is
-/// what puts `Discord.exe` and `Update.exe` under a single "Discord".
-pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp> {
-    let mut by_product: HashMap<String, (String, Vec<String>, Vec<u32>)> = HashMap::new();
-
-    // SAFETY: a plain call; an invalid handle is checked below.
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot.is_null() {
-        return Vec::new();
-    }
-    // SAFETY: zeroed is a valid PROCESSENTRY32W once dwSize is set, and
-    // setting it is what the API uses to version the struct.
-    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-
-    // SAFETY: the handle is valid until CloseHandle below.
-    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
-    while ok != 0 {
-        let pid = entry.th32ProcessID;
-        if let Some(path) = image_path(pid) {
-            if is_user_application(&path) {
-                let (key, label) = product_of(&path);
-                let slot = by_product
-                    .entry(key)
-                    .or_insert_with(|| (label, Vec::new(), Vec::new()));
-                let lowered = path.to_lowercase();
-                if !slot.1.iter().any(|p| p.to_lowercase() == lowered) {
-                    slot.1.push(path);
-                }
-                slot.2.push(pid);
-            }
+impl Layout {
+    /// The row's width in 32-bit words.
+    const fn words(self) -> usize {
+        match self {
+            Layout::Tcp4 => 6,
+            Layout::Udp4 => 3,
+            Layout::Tcp6 => 14,
+            Layout::Udp6 => 7,
         }
-        // SAFETY: same handle and entry as above.
-        ok = unsafe { Process32NextW(snapshot, &mut entry) };
     }
-    // SAFETY: the snapshot handle is valid and not used again.
-    unsafe { CloseHandle(snapshot) };
+}
 
-    // Every sibling goes with the group, so choosing one product routes
-    // all of it -- but siblings that are not running are unknown here,
-    // which is why the group is built from what the product is rather
-    // than from what happens to be on screen.
-    let mut apps: Vec<neoconnect_ipc::RunningApp> = by_product
-        .into_values()
-        .filter_map(|(name, mut paths, pids)| {
-            paths.sort();
-            // The executable a person associates with the product, not
-            // whichever sorts first. Microsoft Edge ships an
-            // `elevation_service.exe` that sorts before `msedge.exe`,
-            // and taking the first put a service's icon and path under
-            // the name "Microsoft Edge".
-            //
-            // The closest match to the product's own name wins: it is
-            // what publishers name their main binary after, and the one
-            // whose icon is the product's.
-            let path = pick_primary(&name, &paths)?;
-            // Taken from the executable shown, which is the one whose
-            // icon a person associates with the product.
-            let icon = super::icon::icon_png_base64(&path);
-            Some(neoconnect_ipc::RunningApp { path, name, paths, icon, pids })
+/// One row of a connection table, borrowed from the buffer it arrived in.
+#[derive(Clone, Copy)]
+struct Row<'a> {
+    layout: Layout,
+    /// Exactly `layout.words()` long -- `rows` hands out nothing shorter.
+    fields: &'a [u32],
+}
+
+/// A port as these tables store it: network byte order in the low half
+/// of a DWORD, so its bytes come out swapped on a little-endian host.
+/// Getting it wrong yields a plausible port rather than an obvious
+/// failure, which is why it is done here and nowhere else.
+fn table_port(word: u32) -> u16 {
+    (word as u16).swap_bytes()
+}
+
+impl Row<'_> {
+    fn local_port(&self) -> u16 {
+        table_port(match self.layout {
+            Layout::Tcp4 => self.fields[2],
+            Layout::Udp4 => self.fields[1],
+            Layout::Tcp6 | Layout::Udp6 => self.fields[5],
         })
-        .collect();
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    apps
+    }
+
+    fn pid(&self) -> u32 {
+        // Last in every layout.
+        self.fields[self.layout.words() - 1]
+    }
+
+    /// The connection state. UDP has none.
+    fn state(&self) -> Option<u32> {
+        match self.layout {
+            Layout::Tcp4 => Some(self.fields[0]),
+            Layout::Tcp6 => Some(self.fields[12]),
+            Layout::Udp4 | Layout::Udp6 => None,
+        }
+    }
+
+    /// The far end. UDP has none.
+    ///
+    /// An address is already a network-order byte sequence, so a DWORD's
+    /// own bytes are its octets in order -- unlike a port.
+    fn remote(&self) -> Option<(IpAddr, u16)> {
+        match self.layout {
+            Layout::Tcp4 => Some((
+                IpAddr::V4(Ipv4Addr::from(self.fields[3].to_ne_bytes())),
+                table_port(self.fields[4]),
+            )),
+            Layout::Tcp6 => {
+                let mut octets = [0u8; 16];
+                for (i, word) in self.fields[6..10].iter().enumerate() {
+                    octets[i * 4..i * 4 + 4].copy_from_slice(&word.to_ne_bytes());
+                }
+                Some((IpAddr::V6(Ipv6Addr::from(octets)), table_port(self.fields[11])))
+            }
+            Layout::Udp4 | Layout::Udp6 => None,
+        }
+    }
+}
+
+/// The rows of a raw `MIB_*TABLE_OWNER_PID` buffer: a u32 count, then
+/// that many rows.
+///
+/// The count is what the API reported and the buffer is what actually
+/// arrived, so iteration stops at the first row the buffer does not hold
+/// in full. Trusting the count would read past the end, in a service
+/// running as LocalSystem.
+fn rows(words: &[u32], layout: Layout) -> impl Iterator<Item = Row<'_>> {
+    let count = words.first().copied().unwrap_or(0) as usize;
+    let width = layout.words();
+    (0..count)
+        .map_while(move |row| words.get(1 + row * width..1 + (row + 1) * width))
+        .map(move |fields| Row { layout, fields })
+}
+
+/// Turns a raw `MIB_*TABLE_OWNER_PID` buffer into a port -> pid map.
+fn parse_table(words: &[u32], layout: Layout) -> HashMap<u16, u32> {
+    let mut map = HashMap::new();
+    for row in rows(words, layout) {
+        let (port, pid) = (row.local_port(), row.pid());
+        // Several rows can share a local port, and keyed on the port
+        // alone the last one used to win. The common case is TIME_WAIT:
+        // Windows lists those rows with owner pid 0, and a busy port
+        // routinely has dozens of them beside the one live socket that
+        // owns it -- measured on a development machine, one listener
+        // and forty-odd TIME_WAIT rows on the same port. Whichever came
+        // last decided, and pid 0 has no image, so the live owner read
+        // as nobody. For a SYN under OnlySelected that is a connection
+        // left outside the tunnel for its whole life.
+        //
+        // So a row with no owner never replaces one with an owner. Two
+        // *different* live owners on one port remain ambiguous by port
+        // alone -- telling them apart needs the local address, which
+        // the callers do not pass yet -- and keep the old rule.
+        if pid == 0 && map.get(&port).is_some_and(|&known| known != 0) {
+            continue;
+        }
+        map.insert(port, pid);
+    }
+    map
 }
 
 /// The processes running right now whose image is one of `images`,
 /// as `(image path, pid)` pairs.
 ///
-/// Deliberately not [`running_apps`], which groups by product, builds a
+/// Deliberately not [`super::picker::running_apps`], which groups by product, builds a
 /// display name and extracts an icon for every user application on the
 /// machine. The caller here has a handful of paths and one question
 /// about each of them, and asks it on a path that holds the `Engines`
@@ -1406,274 +1430,13 @@ pub fn still_running(recorded: &[(String, u32)]) -> Vec<(String, u32)> {
     live
 }
 
-/// The executable that best represents a product.
+/// The full path of a running process's executable.
 ///
-/// Scored rather than guessed: an exact stem match first, then one that
-/// contains the product's letters, then the shortest name -- helpers are
-/// almost always the longer, more qualified ones
-/// (`elevation_service`, `crashpad_handler`, `Update`).
-fn pick_primary(product: &str, paths: &[String]) -> Option<String> {
-    let wanted: String = product
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect();
-
-    paths
-        .iter()
-        .min_by_key(|path| {
-            let stem: String = std::path::Path::new(path.as_str())
-                .file_stem()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default()
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .collect();
-            let rank = if stem == wanted {
-                0
-            } else if !wanted.is_empty() && (wanted.contains(&stem) || stem.contains(&wanted)) {
-                1
-            } else {
-                2
-            };
-            (rank, stem.len())
-        })
-        .cloned()
-}
-
-/// Process ids that own a visible, titled, top-level window.
-///
-/// The closest thing Windows offers to "this is an application the
-/// person can see". Owned windows and tool windows are skipped: a
-/// splash screen or a tray tooltip is not an app someone chose to open.
-fn pids_with_windows() -> std::collections::HashSet<u32> {
-    let mut set: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    // SAFETY: `set` outlives the enumeration, which is synchronous, and
-    // the callback only ever touches it through this pointer.
-    unsafe {
-        EnumWindows(Some(collect_window_pid), &mut set as *mut _ as isize);
-    }
-    set
-}
-
-unsafe extern "system" fn collect_window_pid(window: HWND, param: isize) -> i32 {
-    // SAFETY: the pointer is the &mut HashSet handed to EnumWindows.
-    let set = unsafe { &mut *(param as *mut std::collections::HashSet<u32>) };
-
-    // SAFETY: `window` is supplied by the enumeration and valid here.
-    unsafe {
-        if IsWindowVisible(window) == 0 || GetWindowTextLengthW(window) == 0 {
-            return 1;
-        }
-        // A window owned by another one is a dialog or a splash, not the
-        // application itself.
-        if !GetWindow(window, GW_OWNER).is_null() {
-            return 1;
-        }
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(window, &mut pid);
-        if pid != 0 {
-            set.insert(pid);
-        }
-    }
-    1
-}
-
-/// A grouping key and a display name for whatever product owns this
-/// executable.
-///
-/// The product name inside the binary is the only thing that reliably
-/// ties several executables together -- file names do not (`Update.exe`
-/// is a dozen different products) and neither do directories, since a
-/// launcher and the program it launches often sit in different folders
-/// under one install root.
-fn product_of(path: &str) -> (String, String) {
-    // The friendly name first: "Notepad" rather than "Microsoft(R)
-    // Windows(R) Operating System", which is what ProductName says for
-    // every accessory Windows ships.
-    let description = version_string(path, "FileDescription");
-
-    if let Some(product) = product_name(path) {
-        let trimmed = product.trim();
-        // Some publishers put the platform in ProductName rather than
-        // the program, and Microsoft puts it on everything from Notepad
-        // to Explorer. Grouping on that collapses a dozen unrelated
-        // accessories into one entry -- measured here as a single
-        // "Windows Operating System" holding nine executables, which a
-        // customer selecting it would have tunnelled all of.
-        //
-        // Those are not one product to anybody using them, so they are
-        // kept apart and named individually.
-        if !trimmed.is_empty() && !is_platform_product(trimmed) {
-            let label = description.unwrap_or_else(|| trimmed.to_string());
-            return (trimmed.to_lowercase(), label);
-        }
-        if !trimmed.is_empty() {
-            let label = description.unwrap_or_else(|| file_label(path));
-            // Keyed by the executable, so each accessory stands alone.
-            return (path.to_lowercase(), label);
-        }
-    }
-    if let Some(label) = description {
-        return (path.to_lowercase(), label);
-    }
-    // No version block: fall back to the folder, which at least keeps
-    // one program's pieces together, and show the file name.
-    let file = std::path::Path::new(path);
-    let label = file
-        .file_stem()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string());
-    let key = file
-        .parent()
-        .map(|d| d.to_string_lossy().to_lowercase())
-        .unwrap_or_else(|| label.to_lowercase());
-    (key, label)
-}
-
-/// Whether this names the platform rather than the program.
-///
-/// Windows stamps one ProductName across everything it ships, so it is
-/// a grouping key that means "made by the OS" rather than "the same
-/// application".
-fn is_platform_product(product: &str) -> bool {
-    let lowered = product.to_lowercase();
-    lowered.contains("operating system") || lowered == "microsoft windows"
-}
-
-/// The last path segment without its extension, for a display name of
-/// last resort.
-fn file_label(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_stem()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string())
-}
-
-/// `ProductName` from the executable's version resource.
-fn product_name(path: &str) -> Option<String> {
-    version_string(path, "ProductName")
-}
-
-/// One named string from an executable's version resource.
-fn version_string(path: &str, field: &str) -> Option<String> {
-    let wide: Vec<u16> = std::ffi::OsStr::new(path)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    // SAFETY: `wide` is a valid null-terminated wide string.
-    let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), std::ptr::null_mut()) };
-    if size == 0 {
-        return None;
-    }
-    let mut buffer = vec![0u8; size as usize];
-    // SAFETY: the buffer is `size` bytes, which is what the call asked
-    // for above.
-    if unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, buffer.as_mut_ptr() as *mut _) } == 0 {
-        return None;
-    }
-
-    // The translation table says which language block the strings are
-    // in. Assuming one is how this returns nothing for half the
-    // machines it runs on.
-    let mut lang_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let mut lang_len: u32 = 0;
-    let translation: Vec<u16> = std::ffi::OsStr::new("\\VarFileInfo\\Translation")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // SAFETY: buffer came from GetFileVersionInfoW; the out params are
-    // owned here.
-    let ok = unsafe {
-        VerQueryValueW(
-            buffer.as_ptr() as *const _,
-            translation.as_ptr(),
-            &mut lang_ptr,
-            &mut lang_len,
-        )
-    };
-    if ok == 0 || lang_ptr.is_null() || lang_len < 4 {
-        return None;
-    }
-    // SAFETY: the block is at least one 4-byte language/codepage pair.
-    let (language, codepage) = unsafe {
-        let pair = lang_ptr as *const u16;
-        (*pair, *pair.add(1))
-    };
-
-    let query = format!("\\StringFileInfo\\{language:04x}{codepage:04x}\\{field}");
-    let query: Vec<u16> = std::ffi::OsStr::new(&query)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut value: *mut std::ffi::c_void = std::ptr::null_mut();
-    let mut chars: u32 = 0;
-    // SAFETY: as above.
-    let ok = unsafe {
-        VerQueryValueW(
-            buffer.as_ptr() as *const _,
-            query.as_ptr(),
-            &mut value,
-            &mut chars,
-        )
-    };
-    if ok == 0 || value.is_null() || chars == 0 {
-        return None;
-    }
-    // SAFETY: `chars` UTF-16 units, trailing null included.
-    let text = unsafe { std::slice::from_raw_parts(value as *const u16, chars as usize) };
-    let text = String::from_utf16_lossy(text);
-    Some(text.trim_end_matches('\0').to_string())
-}
-
-/// Whether this is a program a customer would recognise, rather than a
-/// part of Windows.
-fn is_user_application(path: &str) -> bool {
-    let lowered = path.to_lowercase();
-    if !lowered.ends_with(".exe") {
-        return false;
-    }
-    // Excluded rather than merely sorted last: a customer who routes
-    // svchost through a VPN has not made a choice, they have made a
-    // mistake, and an offered list is where that starts.
-    const SYSTEM: [&str; 4] = [
-        r"\windows\system32\",
-        r"\windows\syswow64\",
-        r"\windows\winsxs\",
-        r"\windows\servicing\",
-    ];
-    if SYSTEM.iter().any(|dir| lowered.contains(dir)) {
-        return false;
-    }
-
-    // Traps rather than choices, and each one was really offered.
-    //
-    // `msedgewebview2.exe` is this application's own window: Tauri runs
-    // on WebView2, so it is always in the list, and it sits one letter
-    // away from the browser somebody actually means. A tester picked
-    // from this list, opened Edge, and reported that Custom mode did
-    // nothing -- correctly, because Edge was never what got selected.
-    // Edge itself is absent unless it happens to be running, which is
-    // what makes the near-miss so easy.
-    //
-    // The other two are the app and the service. Routing the client
-    // that manages the tunnel through its own tunnel is not a setting
-    // anybody wants, and the redirect excludes the service anyway --
-    // so offering them can only mislead.
-    const NEVER_OFFER: [&str; 3] = [
-        "msedgewebview2.exe",
-        "neoconnect-desktop.exe",
-        "neoconnect-service.exe",
-    ];
-    let file_name = std::path::Path::new(&lowered)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    !NEVER_OFFER.contains(&file_name.as_str())
-}
-
-fn image_path(pid: u32) -> Option<String> {
+/// `PROCESS_QUERY_LIMITED_INFORMATION` rather than the fuller access
+/// right on purpose: it is the least this needs, and it is the one that
+/// works against protected processes, which some anti-cheat-guarded
+/// games are.
+pub(super) fn image_path(pid: u32) -> Option<String> {
     // SAFETY: a plain call; a failure returns a null handle.
     let process: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
@@ -1927,6 +1690,53 @@ mod tests {
         );
     }
 
+    /// Matching no longer lowercases the path into a new string per
+    /// packet, and the cheaper comparison must give exactly the answer
+    /// the old one did -- a disagreement changes which applications are
+    /// carried. So the old rule is written out here as the oracle and
+    /// every case is asked of both.
+    ///
+    /// The non-ASCII rows are the ones that matter most: a customer's
+    /// user folder is named in their own script, and those paths still
+    /// take the allocating route on purpose.
+    #[test]
+    fn matching_without_allocating_agrees_with_lowercasing_first() {
+        let selected = [
+            r"C:\Games\Game.exe",
+            r"C:\Users\ÄLI\AppData\Local\Game\game.exe",
+            r"C:\Users\علی\Desktop\launcher.exe",
+        ];
+        let selection = Selection::new(selected.iter().map(|s| s.to_string()), SplitTunnelMode::OnlySelected);
+        let oracle = |image: &str| selected.iter().any(|s| s.to_lowercase() == image.to_lowercase());
+
+        for image in [
+            r"C:\Games\Game.exe",
+            r"c:\games\game.exe",
+            r"C:\GAMES\GAME.EXE",
+            r"C:\Games\Game.exe2",
+            r"C:\Games\Game.ex",
+            r"C:\Games\Gamf.exe",
+            r"D:\Games\Game.exe",
+            r"C:\Users\ÄLI\AppData\Local\Game\game.exe",
+            r"c:\users\äli\appdata\local\game\GAME.EXE",
+            r"c:\users\ali\appdata\local\game\game.exe",
+            r"C:\Users\علی\Desktop\LAUNCHER.exe",
+            r"C:\Users\علی\Desktop\launcher.exe.bak",
+            "",
+        ] {
+            assert_eq!(selection.matches(image), oracle(image), "{image}");
+        }
+
+        let scoped = Selection::with_scopes(
+            [r"C:\Users\ÄLI\Game\game.exe".to_string()],
+            SplitTunnelMode::OnlySelected,
+            [scope_of(r"c:\users\äli\game\GAME.exe", &["203.0.113.0/24"])],
+        );
+        let inside: IpAddr = "203.0.113.7".parse().unwrap();
+        assert_eq!(scoped.destination_scope(r"C:\USERS\ÄLI\GAME\game.exe", inside), Scoped::InScope);
+        assert_eq!(scoped.destination_scope(r"C:\Users\ALI\Game\game.exe", inside), Scoped::Unscoped);
+    }
+
     /// The rule, spelled out as a table, because every cell of it is a
     /// decision somebody could reasonably make differently and three of
     /// them are the difference between a leak and an outage.
@@ -2055,9 +1865,79 @@ mod tests {
             0x0050_u32.swap_bytes() >> 16,
             777,
         ];
-        let map = parse_table(&words, 3, 1, 2);
+        let map = parse_table(&words, Layout::Udp4);
         assert_eq!(map.get(&0x1110), Some(&4242));
         assert_eq!(map.get(&80), Some(&777));
+    }
+
+    /// A TIME_WAIT row is owned by pid 0, and a busy port carries many
+    /// of them next to its one live socket. Whichever row came last used
+    /// to decide -- so the order of the table, not the owner, chose
+    /// whether the port had one.
+    #[test]
+    fn a_row_with_no_owner_does_not_hide_the_live_one_on_its_port() {
+        let port = |p: u32| p.swap_bytes() >> 16;
+        let words = vec![
+            4, // dwNumEntries
+            0x0100_007F, port(49303), 0,    // TIME_WAIT before the owner
+            0x0100_007F, port(49303), 2688, // the live socket
+            0x0100_007F, port(49303), 0,    // TIME_WAIT after it
+            0x0100_007F, port(50000), 0,    // a port with nothing but TIME_WAIT
+        ];
+        let map = parse_table(&words, Layout::Udp4);
+        assert_eq!(map.get(&49303), Some(&2688), "the live owner must survive rows on either side");
+        // Nothing better is known, so the zero stands: it resolves to no
+        // image, which is the honest answer for a port nobody holds.
+        assert_eq!(map.get(&50000), Some(&0));
+    }
+
+    /// Both TCP layouts, field by field. The IPv6 row is the one the old
+    /// comment warned about: read with the IPv4 offsets it produces a
+    /// plausible port from address bytes, so every field is checked
+    /// against a value that could not have come from anywhere else.
+    #[test]
+    fn each_tcp_layout_is_read_at_its_own_offsets() {
+        let port = |p: u32| p.swap_bytes() >> 16;
+        let v4 = vec![
+            1, // dwNumEntries
+            5, // dwState: ESTABLISHED
+            u32::from_ne_bytes([127, 0, 0, 1]),
+            port(50123),
+            u32::from_ne_bytes([203, 0, 113, 9]),
+            port(443),
+            4242,
+        ];
+        let row = rows(&v4, Layout::Tcp4).next().expect("one row");
+        assert_eq!(row.state(), Some(5));
+        assert_eq!(row.local_port(), 50123);
+        assert_eq!(row.remote(), Some((IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 443)));
+        assert_eq!(row.pid(), 4242);
+
+        let remote: Ipv6Addr = "2001:db8::1:2".parse().unwrap();
+        let o = remote.octets();
+        let word = |i: usize| u32::from_ne_bytes([o[i], o[i + 1], o[i + 2], o[i + 3]]);
+        let v6 = vec![
+            1, // dwNumEntries
+            0xAAAA_AAAA, 0xAAAA_AAAA, 0xAAAA_AAAA, 0xAAAA_AAAA, // ucLocalAddr
+            7,           // dwLocalScopeId
+            port(50124), // dwLocalPort
+            word(0), word(4), word(8), word(12), // ucRemoteAddr
+            9,           // dwRemoteScopeId
+            port(8443),  // dwRemotePort
+            2,           // dwState: SYN_SENT
+            31337,       // dwOwningPid
+        ];
+        let row = rows(&v6, Layout::Tcp6).next().expect("one row");
+        assert_eq!(row.state(), Some(2));
+        assert_eq!(row.local_port(), 50124);
+        assert_eq!(row.remote(), Some((IpAddr::V6(remote), 8443)));
+        assert_eq!(row.pid(), 31337);
+
+        // A UDP row has neither, and saying so is the answer rather
+        // than a zero that reads as a real state or a real address.
+        let udp = vec![1, 0, port(53), 99];
+        let row = rows(&udp, Layout::Udp4).next().expect("one row");
+        assert_eq!((row.state(), row.remote(), row.local_port(), row.pid()), (None, None, 53, 99));
     }
 
     #[test]
@@ -2066,7 +1946,7 @@ mod tests {
         // actually arrived. Trusting the former over the latter would
         // read past the end, in a service running as LocalSystem.
         let words = vec![10, 0, 1, 2];
-        let map = parse_table(&words, 3, 1, 2);
+        let map = parse_table(&words, Layout::Udp4);
         assert_eq!(map.len(), 1);
     }
 
@@ -2276,21 +2156,10 @@ fn reset_with(
         return outcome;
     };
 
-    let Some(&count) = words.first() else {
-        return outcome;
-    };
-
-    // MIB_TCPROW_OWNER_PID: state, local addr, local port, remote addr,
-    // remote port, owning pid -- six DWORDs.
-    const ROW: usize = 6;
     let mut images: HashMap<u32, Option<String>> = HashMap::new();
 
-    for row in 0..count as usize {
-        let base = 1 + row * ROW;
-        let Some(fields) = words.get(base..base + ROW) else {
-            break;
-        };
-        let (state, pid) = (fields[0], fields[5]);
+    for row in rows(&words, Layout::Tcp4) {
+        let (Some(state), pid) = (row.state(), row.pid()) else { continue };
 
         // Only connections that actually carry traffic. A listener has
         // no peer to re-route and killing one would stop a program
@@ -2308,8 +2177,7 @@ fn reset_with(
 
         // Where the far end is, decided before the more expensive
         // question of who owns the row.
-        let remote = Ipv4Addr::from(fields[3].to_ne_bytes());
-        let remote_port = (fields[4] as u16).swap_bytes();
+        let Some((IpAddr::V4(remote), remote_port)) = row.remote() else { continue };
 
         // The node is the tunnel itself; everything else excluded here
         // is a destination the kernel filter would never have handed to
@@ -2323,7 +2191,7 @@ fn reset_with(
         // function's own work -- see the doc comment. Asked before the
         // owner is resolved, because this is a hash lookup under a
         // mutex and `image_path` opens a process handle.
-        let local_port = (fields[2] as u16).swap_bytes();
+        let local_port = row.local_port();
         if carried(Transport::Tcp, local_port, remote, remote_port) {
             continue;
         }
@@ -2351,8 +2219,11 @@ fn reset_with(
             continue;
         }
 
-        // MIB_TCPROW is the same five leading fields without the pid.
-        let mut set = [MIB_TCP_STATE_DELETE_TCB, fields[1], fields[2], fields[3], fields[4]];
+        // MIB_TCPROW is the same five leading fields without the pid,
+        // handed back to Windows exactly as they arrived -- the one
+        // place a row is wanted raw rather than decoded.
+        let f = row.fields;
+        let mut set = [MIB_TCP_STATE_DELETE_TCB, f[1], f[2], f[3], f[4]];
         let ret = close(&mut set);
         if ret == NO_ERROR {
             outcome.closed += 1;
@@ -2444,31 +2315,23 @@ fn tcp_connections_v4() -> Vec<TcpConnection> {
     }) else {
         return Vec::new();
     };
-    let Some(&count) = words.first() else {
-        return Vec::new();
-    };
+    tcp_connections(&words, Layout::Tcp4)
+}
 
-    // MIB_TCPROW_OWNER_PID: state, local addr, local port, remote addr,
-    // remote port, owning pid -- six DWORDs.
-    const ROW: usize = 6;
-    let mut rows = Vec::new();
-    for row in 0..count as usize {
-        let base = 1 + row * ROW;
-        let Some(fields) = words.get(base..base + ROW) else {
-            break;
-        };
-        rows.push(TcpConnection {
-            state: fields[0],
-            // A port sits network-order in the low half of its DWORD; an
-            // address is already a network-order byte sequence, so the
-            // DWORD's own bytes are the octets in order.
-            local_port: (fields[2] as u16).swap_bytes(),
-            remote: IpAddr::V4(Ipv4Addr::from(fields[3].to_ne_bytes())),
-            remote_port: (fields[4] as u16).swap_bytes(),
-            pid: fields[5],
-        });
-    }
-    rows
+/// The rows of a TCP table, kept whole for the audit.
+fn tcp_connections(words: &[u32], layout: Layout) -> Vec<TcpConnection> {
+    rows(words, layout)
+        .filter_map(|row| {
+            let (remote, remote_port) = row.remote()?;
+            Some(TcpConnection {
+                state: row.state()?,
+                local_port: row.local_port(),
+                remote,
+                remote_port,
+                pid: row.pid(),
+            })
+        })
+        .collect()
 }
 
 /// Every IPv6 TCP row.
@@ -2485,33 +2348,7 @@ fn tcp_connections_v6() -> Vec<TcpConnection> {
     }) else {
         return Vec::new();
     };
-    let Some(&count) = words.first() else {
-        return Vec::new();
-    };
-
-    // MIB_TCP6ROW_OWNER_PID: ucLocalAddr[16], dwLocalScopeId,
-    // dwLocalPort, ucRemoteAddr[16], dwRemoteScopeId, dwRemotePort,
-    // dwState, dwOwningPid -- fourteen 32-bit words.
-    const ROW: usize = 14;
-    let mut rows = Vec::new();
-    for row in 0..count as usize {
-        let base = 1 + row * ROW;
-        let Some(fields) = words.get(base..base + ROW) else {
-            break;
-        };
-        let mut octets = [0u8; 16];
-        for (i, word) in fields[6..10].iter().enumerate() {
-            octets[i * 4..i * 4 + 4].copy_from_slice(&word.to_ne_bytes());
-        }
-        rows.push(TcpConnection {
-            state: fields[12],
-            local_port: (fields[5] as u16).swap_bytes(),
-            remote: IpAddr::V6(Ipv6Addr::from(octets)),
-            remote_port: (fields[11] as u16).swap_bytes(),
-            pid: fields[13],
-        });
-    }
-    rows
+    tcp_connections(&words, Layout::Tcp6)
 }
 
 /// A connection living outside the tunnel that should be inside it.

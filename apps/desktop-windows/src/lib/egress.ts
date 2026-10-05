@@ -34,7 +34,7 @@ import { apiEndpoints } from "./api-endpoints";
 
 /** Short: this runs while the customer is watching a spinner, and a
  * server that will not answer quickly has already failed the check. */
-const EGRESS_TIMEOUT_MS = 6000;
+export const EGRESS_TIMEOUT_MS = 6000;
 
 /** One answer to "what address does the world see", together with who
  * gave it.
@@ -66,22 +66,29 @@ async function publicIp(): Promise<IpReading | null> {
   // are protected. Pinned to one address, a blocked control plane would
   // report a perfectly working tunnel as carrying nothing -- turning a
   // reachability problem into a false accusation against the VPN.
-  //
-  // Each endpoint gets its own budget rather than sharing one. A first
-  // address that is blocked burns the whole timeout doing nothing, and a
-  // shared deadline would leave the working one no time to answer.
-  for (const base of await apiEndpoints()) {
+  return readFrom(await apiEndpoints(), EGRESS_TIMEOUT_MS);
+}
+
+/** The first answer from `bases`, tried in order.
+ *
+ * Each endpoint gets its own budget rather than sharing one. A first
+ * address that is blocked burns the whole timeout doing nothing, and a
+ * shared deadline would leave the working one no time to answer.
+ */
+async function readFrom(bases: string[], timeoutMs: number): Promise<IpReading | null> {
+  for (const base of bases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), EGRESS_TIMEOUT_MS);
       const res = await fetch(`${base}/health/ip`, { signal: controller.signal });
-      clearTimeout(timer);
       if (!res.ok) continue;
       const body = (await res.json()) as { ip?: string };
       if (body.ip) return { ip: body.ip, from: base };
     } catch {
       // Try the next one. Exhausting the list returns null, which the
       // caller already treats as "no evidence" rather than as failure.
+    } finally {
+      clearTimeout(timer);
     }
   }
   return null;
@@ -112,6 +119,22 @@ export type EgressVerdict =
    * direction. */
   | { state: "indeterminate"; exitIp: string | null };
 
+export type VerifyOptions = {
+  /** How long each endpoint gets. Defaults to the full
+   * `EGRESS_TIMEOUT_MS`; the connect path passes what is left of its
+   * budget when that is less. */
+  attemptMs?: number;
+  /** Ask only the baseline's endpoint, with no fallback.
+   *
+   * Any other endpoint can at best answer `indeterminate`, and while
+   * another protocol is waiting to be tried that is rejected exactly as
+   * "unreachable" is -- so the fallback can only spend time. Where
+   * `indeterminate` does change the outcome (the ladder's last rung, the
+   * health poll) the fallback stays.
+   */
+  sameEndpointOnly?: boolean;
+};
+
 /** Compares the address the world sees now against the one it saw before
  * connecting.
  *
@@ -131,9 +154,33 @@ export type EgressVerdict =
  * is tried in a fixed order and the first entry answers -- so the guard
  * costs nothing until the fallback actually shifts, which is exactly the
  * moment the comparison stops being valid.
+ *
+ * With `sameEndpointOnly`, the baseline's endpoint is the only one asked.
+ * It is the only one whose answer can prove anything, and its name was
+ * resolved moments ago for the baseline, so it is also the one request
+ * that does not have to wait on DNS. That second point was measured, not
+ * assumed: in OpenVPN's first seconds -- the new adapter's address still
+ * settling, every connection refused for about two seconds -- the first
+ * endpoint failed at once, the second hung for the full six-second
+ * timeout, and the third answered with the node's address from the
+ * wrong endpoint. The tunnel had been carrying traffic for four of those
+ * seconds and the ladder threw it away.
+ *
+ * Without it the list keeps its fixed order rather than moving the
+ * baseline's endpoint to the front. A baseline can come from a mirror
+ * that reports its own node's address to everyone; asked again it
+ * answers the same, and comparing those two would accuse a working
+ * tunnel of leaking where the list order lets the CDN answer and the
+ * guard above say, correctly, that nothing was compared.
  */
-export async function verifyEgress(baseline: BaselineIp | null): Promise<EgressVerdict> {
-  const reading = await publicIp();
+export async function verifyEgress(
+  baseline: BaselineIp | null,
+  options: VerifyOptions = {},
+): Promise<EgressVerdict> {
+  const { attemptMs = EGRESS_TIMEOUT_MS, sameEndpointOnly = false } = options;
+  const bases =
+    sameEndpointOnly && baseline !== null ? [baseline.from] : await apiEndpoints();
+  const reading = await readFrom(bases, attemptMs);
 
   if (reading === null) return { state: "unreachable" };
   if (baseline === null) return { state: "indeterminate", exitIp: reading.ip };
@@ -141,6 +188,79 @@ export async function verifyEgress(baseline: BaselineIp | null): Promise<EgressV
   return reading.ip === baseline.ip
     ? { state: "bypassingTunnel", exitIp: reading.ip }
     : { state: "throughTunnel", exitIp: reading.ip };
+}
+
+/** How often a new attempt starts while a tunnel is being checked. */
+export const VERIFY_INTERVAL_MS = 1_500;
+
+/** Waits up to `budgetMs` for proof that traffic leaves through the
+ * tunnel, rather than asking once.
+ *
+ * Retries even on a definite-looking "bypassing" answer, because early in
+ * a connection it is not definite at all: OpenVPN's routes arrive from
+ * the server partway through negotiation, so traffic genuinely does go
+ * around the tunnel for a moment before it goes through it.
+ *
+ * Returns as soon as it has proof, so a fast protocol stays fast.
+ * Otherwise it returns the most recent answer once the budget is spent.
+ *
+ * **Attempts overlap.** A new one starts every `intervalMs` whether or
+ * not the previous one has finished, and none is cancelled for being
+ * slow; each is bounded only by what is left of the budget. This is the
+ * whole of the change from asking in sequence, and the reason was
+ * measured on a Windows 11 guest. For two or three seconds after
+ * OpenVPN's routes appear, the new adapter's address is still settling:
+ * a request made then is refused outright or, worse, stalls -- its SYN
+ * is lost, Windows retransmits at three seconds and next at nine, so it
+ * sits there long after the tunnel has started carrying traffic. Asked
+ * in sequence, that one stalled request was the whole six-second
+ * failover check, and a working OpenVPN was rejected every time on a
+ * first connect. Cutting it off sooner does not help either; a fresh
+ * request made after the address settles is what succeeds, and starting
+ * one every interval guarantees there is one.
+ *
+ * The cost is a few extra `/health/ip` requests during a connect, to our
+ * own API.
+ */
+export function confirmEgressWithin(
+  baseline: BaselineIp | null,
+  budgetMs: number,
+  options: { sameEndpointOnly?: boolean; intervalMs?: number } = {},
+): Promise<EgressVerdict> {
+  const { sameEndpointOnly = false, intervalMs = VERIFY_INTERVAL_MS } = options;
+  const deadline = Date.now() + budgetMs;
+  let last: EgressVerdict = { state: "unreachable" };
+
+  return new Promise((resolve) => {
+    let done = false;
+    let next: ReturnType<typeof setTimeout> | undefined;
+    const finish = (verdict: EgressVerdict) => {
+      if (done) return;
+      done = true;
+      clearTimeout(next);
+      clearTimeout(cutoff);
+      resolve(verdict);
+    };
+    const cutoff = setTimeout(() => finish(last), budgetMs);
+
+    const attempt = () => {
+      const remaining = deadline - Date.now();
+      if (done || remaining <= 0) return;
+      verifyEgress(baseline, {
+        attemptMs: Math.min(EGRESS_TIMEOUT_MS, remaining),
+        sameEndpointOnly,
+      })
+        .then((verdict) => {
+          if (verdict.state === "throughTunnel") finish(verdict);
+          else last = verdict;
+        })
+        // A rejection is no evidence either way; the next attempt is
+        // already scheduled.
+        .catch(() => undefined);
+      next = setTimeout(attempt, intervalMs);
+    };
+    attempt();
+  });
 }
 
 /* ------------------------------------------------------------------ *

@@ -12,7 +12,7 @@
 //! [`Engines::disconnect`], which still exists unchanged and still runs
 //! -- just behind the customer rather than in front of them.
 
-use super::{dns, wireguard, Active, Engines};
+use super::{adapters, dns, openvpn, routing, wireguard, Active, Engines};
 use crate::lifecycle::teardown::HardStopSteps;
 
 impl HardStopSteps for Engines {
@@ -58,6 +58,29 @@ impl HardStopSteps for Engines {
                 // behind is worse than one removed from an engine that
                 // was already gone.
                 routes.remove();
+
+                // OpenVPN's own routes, which `routes` does not hold:
+                // openvpn.exe adds the server's pushed `0.0.0.0/1` and
+                // `128.0.0.0/1` itself. "The adapter goes with the
+                // process" is true of Xray's and false of this one --
+                // the OpenVPN adapter is kept between sessions on
+                // purpose -- so they outlive the kill. The thorough pass
+                // was meant to take them, but it runs on an empty slot
+                // after this step and reaches them only through the
+                // janitor's PowerShell purge, seconds behind a reply
+                // that has already told the customer their networking
+                // is back, while two /1 routes beat their real default.
+                //
+                // By destination, with `route.exe`: the same two deletes
+                // the connect path makes, no enumeration and no cmdlet.
+                // OpenVPN installs no routes of ours, so `routes` above
+                // was empty and this stays inside the three `route.exe`
+                // runs phase one allows.
+                if protocol == "OPENVPN" {
+                    if let Ok(Some(adapter)) = adapters::find_by_name(openvpn::ADAPTER_NAME) {
+                        routing::purge_pushed_half_defaults(adapter.index);
+                    }
+                }
                 killed
             }
 

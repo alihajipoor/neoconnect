@@ -101,7 +101,7 @@ impl TunnelInterface {
         self.address.store(0, Ordering::Relaxed);
     }
 
-    fn get(&self) -> Option<(u32, Ipv4Addr)> {
+    pub(super) fn get(&self) -> Option<(u32, Ipv4Addr)> {
         match self.index.load(Ordering::Relaxed) {
             0 => None,
             index => Some((index, Ipv4Addr::from(self.address.load(Ordering::Relaxed)))),
@@ -763,306 +763,6 @@ fn bind_upstream(
     Ok((UpstreamUdp::Pinned(socket.into()), registration))
 }
 
-/// Addresses used only to prove the tunnel carries traffic.
-///
-/// Two, because one being down or filtered is not evidence about the
-/// tunnel. Both are anycast resolvers that answer on 443 from
-/// essentially everywhere, so a refusal here really does say something
-/// about the path rather than about the destination.
-const PROBE_TARGETS: [(Ipv4Addr, u16); 2] =
-    [(Ipv4Addr::new(1, 1, 1, 1), 443), (Ipv4Addr::new(8, 8, 8, 8), 443)];
-
-/// Short on purpose: this runs inside the connect ladder, and a slow
-/// answer costs the customer the same as a wrong one.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(3500);
-
-/// Proves the tunnel is actually carrying traffic, over the exact path a
-/// selected app's traffic takes.
-///
-/// This exists because Custom mode broke the app's own connection check
-/// and the reason is structural, not a bug to patch: the check works by
-/// requesting its own address and seeing the server's. In Custom mode
-/// the app is not a selected app, so that request correctly goes out the
-/// ordinary route -- and the check correctly reports the tunnel being
-/// bypassed. Every protocol therefore "failed", the ladder walked all
-/// five, and the customer was told it could not connect while the tunnel
-/// was in fact up and working.
-///
-/// A socket pinned exactly as the proxy's are is the honest replacement,
-/// for the path that actually matters rather than for the app's own
-/// traffic, which deliberately does not use it.
-///
-/// **What a pass here does and does not mean.** It means a socket could
-/// be attached to this tunnel and complete a TCP handshake through it,
-/// which is what route selection needs to know and is why
-/// `install_verified_route` uses this. It does **not** mean the node is
-/// reachable: under Xray's own `tun` inbound the handshake is answered
-/// by xray.exe's userspace stack, and nothing is sent afterwards for the
-/// outbound to have to carry. This comment used to claim the opposite --
-/// "proves the tunnel has a route to the internet and that the far end
-/// answered" -- and the customer-facing verdict was built on that claim.
-/// See `prove_carries` for the check that earns it.
-pub fn probe(tunnel: &TunnelInterface) -> Result<(), String> {
-    // No tunnel means the fail-open state: selected apps are going out
-    // unprotected. Reporting that as reachable would be the exact
-    // dishonesty this whole function exists to remove.
-    let Some((index, address)) = tunnel.get() else {
-        return Err("no tunnel is up, so nothing is being routed through one".into());
-    };
-
-    let mut last = String::new();
-    for (target, port) in PROBE_TARGETS {
-        match connect_pinned(target, port, index, address) {
-            Ok(()) => return Ok(()),
-            Err(e) => last = format!("{target}:{port} {e}"),
-        }
-    }
-    Err(format!("the tunnel did not carry a test connection ({last})"))
-}
-
-/// Deliberately does **not** disable Nagle, unlike every relayed
-/// connection. Nagle governs when queued application data is released,
-/// and this socket never writes a byte: it completes a handshake and is
-/// dropped. Setting the option here would cost a syscall inside the
-/// connect ladder -- where `PROBE_TIMEOUT` is deliberately short because
-/// a slow answer costs the customer as much as a wrong one -- and change
-/// nothing observable.
-fn connect_pinned(
-    target: Ipv4Addr,
-    port: u16,
-    index: u32,
-    source: Ipv4Addr,
-) -> Result<(), String> {
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
-        .map_err(|e| e.to_string())?;
-    attach_to_tunnel(&socket, index, source).map_err(|e| e.to_string())?;
-    socket
-        .connect_timeout(&SocketAddr::from((target, port)).into(), PROBE_TIMEOUT)
-        .map_err(|e| e.to_string())
-}
-
-/* ------------------------------------------------------------------ *
- * Proving the tunnel carries traffic, as opposed to proving a socket
- * can be attached to it.
- *
- * `probe` above answers the second question, and route selection is the
- * right consumer for it: it is asking whether a route shape works at
- * all, and a completed TCP handshake settles that.
- *
- * It is not enough to put "You're protected" on a customer's screen, for
- * two reasons that compound.
- *
- * **The handshake need never leave the machine.** Xray on Windows runs
- * its own `tun` inbound -- a userspace TCP stack inside xray.exe (see
- * `engines/xray.rs`). The SYN this probe emits is answered by that
- * stack, not by 1.1.1.1. It completes as soon as xray.exe is running
- * with a live Wintun adapter, whether or not the VLESS session to the
- * node exists, and since the old probe sent zero bytes the outbound was
- * never asked to carry anything. For the kernel tunnels -- WireGuard,
- * OpenVPN, IKEv2 -- the SYN really does traverse the tunnel, so the hole
- * is narrower there but the check is still weaker than it reads.
- *
- * **REALITY does not refuse an unknown SNI; it proxies to the decoy.**
- * A node whose `dest` was changed while a client holds a stale
- * `serverName` hands that client's connection straight to a third-party
- * website. The outer TLS keeps succeeding and looks perfectly healthy
- * while the customer's traffic goes nowhere. Any far-end
- * misconfiguration produces the same shape, so a check that stops at TCP
- * cannot tell a working node from a broken one.
- *
- * What distinguishes them is **bytes coming back from the destination**.
- * Both probe targets are DNS-over-HTTPS resolvers, so a ClientHello sent
- * to them is answered with a TLS record. Nothing local can forge that:
- * xray's userspace stack will ACK a SYN, but it has no ServerHello to
- * invent, and a REALITY session handed to a decoy fails client-side
- * before any payload is relayed. So the connection is closed with
- * nothing read, and this check comes back negative -- which is the
- * behaviour the old one could not produce.
- * ------------------------------------------------------------------ */
-
-/// Total budget for one target: connect, write, and read a reply.
-///
-/// Kept equal to `PROBE_TIMEOUT` rather than added to it. This runs
-/// inside the connect ladder and on every health poll, and a check that
-/// doubles the time a customer waits has traded one complaint for
-/// another.
-const CARRY_TIMEOUT: Duration = PROBE_TIMEOUT;
-
-/// A minimal but genuine TLS 1.2+ ClientHello for `cloudflare-dns.com`.
-///
-/// Genuine matters. A random blob would be answered with a TLS `alert`
-/// record, which is still a record and would therefore still pass -- a
-/// check that cannot fail, which is the recurring defect in this
-/// codebase. A well-formed ClientHello draws a `handshake` record from a
-/// working path and nothing at all from a broken one.
-///
-/// The SNI is a real Cloudflare name because the target is 1.1.1.1;
-/// 8.8.8.8 answers a ClientHello for it regardless, since a name it does
-/// not serve still produces a record.
-fn client_hello() -> Vec<u8> {
-    const SNI: &[u8] = b"cloudflare-dns.com";
-
-    // server_name extension: list length, type 0 (host_name), name.
-    let mut server_name = Vec::new();
-    server_name.extend_from_slice(&((SNI.len() + 3) as u16).to_be_bytes());
-    server_name.push(0);
-    server_name.extend_from_slice(&(SNI.len() as u16).to_be_bytes());
-    server_name.extend_from_slice(SNI);
-
-    let mut extensions = Vec::new();
-    // server_name
-    extensions.extend_from_slice(&0x0000u16.to_be_bytes());
-    extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
-    extensions.extend_from_slice(&server_name);
-    // supported_versions: TLS 1.3, TLS 1.2
-    extensions.extend_from_slice(&0x002bu16.to_be_bytes());
-    extensions.extend_from_slice(&5u16.to_be_bytes());
-    extensions.push(4);
-    extensions.extend_from_slice(&0x0304u16.to_be_bytes());
-    extensions.extend_from_slice(&0x0303u16.to_be_bytes());
-    // supported_groups: x25519, secp256r1
-    extensions.extend_from_slice(&0x000au16.to_be_bytes());
-    extensions.extend_from_slice(&6u16.to_be_bytes());
-    extensions.extend_from_slice(&4u16.to_be_bytes());
-    extensions.extend_from_slice(&0x001du16.to_be_bytes());
-    extensions.extend_from_slice(&0x0017u16.to_be_bytes());
-    // signature_algorithms: ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256
-    extensions.extend_from_slice(&0x000du16.to_be_bytes());
-    extensions.extend_from_slice(&6u16.to_be_bytes());
-    extensions.extend_from_slice(&4u16.to_be_bytes());
-    extensions.extend_from_slice(&0x0403u16.to_be_bytes());
-    extensions.extend_from_slice(&0x0804u16.to_be_bytes());
-
-    let mut body = Vec::new();
-    // client_version: TLS 1.2, as TLS 1.3 requires on the wire.
-    body.extend_from_slice(&0x0303u16.to_be_bytes());
-    // random. Fixed rather than sampled: nothing here is cryptographic,
-    // the session is abandoned after one record, and a probe with no
-    // entropy source is one fewer thing that can fail.
-    body.extend_from_slice(&[0x4e; 32]);
-    // session_id: empty.
-    body.push(0);
-    // cipher_suites: TLS_AES_128_GCM_SHA256, TLS_ECDHE_RSA_AES_128_GCM_SHA256
-    body.extend_from_slice(&4u16.to_be_bytes());
-    body.extend_from_slice(&0x1301u16.to_be_bytes());
-    body.extend_from_slice(&0xc02fu16.to_be_bytes());
-    // compression_methods: null only.
-    body.extend_from_slice(&[1, 0]);
-    body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
-    body.extend_from_slice(&extensions);
-
-    let mut handshake = Vec::new();
-    handshake.push(1); // client_hello
-    let len = body.len();
-    handshake.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
-    handshake.extend_from_slice(&body);
-
-    let mut record = Vec::new();
-    record.push(0x16); // handshake
-    record.extend_from_slice(&0x0301u16.to_be_bytes());
-    record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
-    record.extend_from_slice(&handshake);
-    record
-}
-
-/// Whether the first bytes off the wire are the start of a TLS record a
-/// real server sent.
-///
-/// Deliberately narrow. `handshake` (0x16) is what a working path
-/// returns; `alert` (0x15) is accepted too, because a server that
-/// dislikes the ClientHello still had to receive it and reply, which is
-/// the fact being established. Anything else -- an HTTP error page from
-/// a captive portal, a decoy site's response, a truncated read -- is
-/// not evidence that the intended destination answered.
-///
-/// The version check is what keeps this from accepting arbitrary bytes:
-/// a record whose type byte happens to be 0x16 but whose version is not
-/// a TLS one is not a TLS record.
-pub(super) fn looks_like_tls(reply: &[u8]) -> bool {
-    let [kind, major, minor, ..] = reply else {
-        return false;
-    };
-    matches!(kind, 0x16 | 0x15) && *major == 0x03 && matches!(minor, 0x00..=0x04)
-}
-
-/// Proves the tunnel carried a request *and brought back an answer*.
-///
-/// The verdict the app turns into "You're protected" in Custom mode. See
-/// the comment block above for why a completed handshake is not enough
-/// on its own.
-pub fn prove_carries(tunnel: &TunnelInterface) -> Result<(), String> {
-    // No tunnel means the fail-open state: selected apps are going out
-    // unprotected. Reporting that as carrying traffic would be the exact
-    // dishonesty this whole function exists to remove.
-    let Some((index, address)) = tunnel.get() else {
-        return Err("no tunnel is up, so nothing is being routed through one".into());
-    };
-
-    let mut last = String::new();
-    for (target, port) in PROBE_TARGETS {
-        match round_trip_pinned(target, port, index, address) {
-            Ok(()) => return Ok(()),
-            Err(e) => last = format!("{target}:{port} {e}"),
-        }
-    }
-    Err(format!("the tunnel did not carry a test connection ({last})"))
-}
-
-fn round_trip_pinned(
-    target: Ipv4Addr,
-    port: u16,
-    index: u32,
-    source: Ipv4Addr,
-) -> Result<(), String> {
-    use std::io::{Read, Write};
-
-    let started = Instant::now();
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
-        .map_err(|e| e.to_string())?;
-    attach_to_tunnel(&socket, index, source).map_err(|e| e.to_string())?;
-    socket
-        .connect_timeout(&SocketAddr::from((target, port)).into(), CARRY_TIMEOUT)
-        .map_err(|e| format!("connect: {e}"))?;
-
-    // Whatever is left of the budget, never zero -- a zero timeout on a
-    // Windows socket means "block forever", which is how a check with a
-    // deadline becomes one without.
-    let remaining = CARRY_TIMEOUT
-        .checked_sub(started.elapsed())
-        .filter(|d| !d.is_zero())
-        .ok_or_else(|| "connect used the whole budget".to_string())?;
-    socket.set_write_timeout(Some(remaining)).map_err(|e| e.to_string())?;
-    socket.set_read_timeout(Some(remaining)).map_err(|e| e.to_string())?;
-
-    let mut stream: TcpStream = socket.into();
-    stream.write_all(&client_hello()).map_err(|e| format!("send: {e}"))?;
-
-    // Five bytes is a whole TLS record header and all this needs; the
-    // rest of the handshake is of no interest and reading it would only
-    // cost time on a slow link.
-    let mut header = [0u8; 5];
-    let mut filled = 0;
-    while filled < header.len() {
-        match stream.read(&mut header[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) => return Err(format!("read: {e}")),
-        }
-    }
-
-    if looks_like_tls(&header[..filled]) {
-        return Ok(());
-    }
-    // Named precisely, because this is the case the old probe could not
-    // see: the connection was made and the far end sent nothing back
-    // that the destination could have sent. That is what a tunnel
-    // terminating in a decoy site, or in xray's own userspace stack,
-    // looks like from here.
-    Err(format!(
-        "the tunnel completed a connection but carried no reply from {target} ({filled} byte(s))"
-    ))
-}
-
 /// Handles on the running relays, so the controller can stop them.
 pub struct Relays {
     pub tcp_port: u16,
@@ -1073,6 +773,7 @@ pub struct Relays {
     pub own_sockets: Arc<OwnSockets>,
     stop: Arc<AtomicBool>,
     upstreams: Arc<UdpUpstreams>,
+    carried: Arc<Carried>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -1081,13 +782,116 @@ impl Relays {
     ///
     /// The TCP acceptor is woken by connecting to it: `accept` blocks,
     /// and a flag it never gets round to reading is not a stop.
+    ///
+    /// Carried connections are closed, not waited for. Their copy threads
+    /// unblock when their sockets shut and finish on their own; joining
+    /// them here would put "wait for something to disappear" on the
+    /// disconnect path, which is the one thing it may not do.
     pub fn stop(self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.tcp_port));
+        // The UDP receive is woken the same way, by being given
+        // something to receive. It used to be left to notice the flag on
+        // its next read timeout, and that wait was measured at 455 to
+        // 465ms on every stop -- half of the 900ms phase one of a
+        // disconnect is held to, spent waiting for a socket to time out.
+        if let Ok(waker) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)) {
+            let _ = waker.send_to(&[0], (Ipv4Addr::LOCALHOST, self.udp_port));
+        }
+        self.carried.close_all();
         self.upstreams.close_all();
         for thread in self.threads {
             let _ = thread.join();
         }
+    }
+}
+
+/// The TCP connections the relay is carrying, so a stop can close them.
+///
+/// Before this, nothing owned them. Each ran on a detached thread whose
+/// copy loop had no timeout and never read the stop flag, so a
+/// connection outlived its relay for as long as its far end stayed
+/// quiet -- teardown depended on the other side breaking rather than on
+/// this side closing anything.
+///
+/// Holds each half by the *same* handle `pump` copies through -- an
+/// `Arc`, never a `try_clone`. A clone is a second handle made by
+/// `WSADuplicateSocket`, and on Windows such a handle was measured to
+/// lose sight of its connection while the original kept carrying it:
+/// with 32 relays stopping at once, 8 to 20 of the stops shut a clone
+/// that answered `NotConnected` and left the live connection to its far
+/// end untouched -- the exact failure this type exists to remove, back
+/// again at random. One handle has nothing to disagree with.
+#[derive(Default)]
+struct Carried {
+    inner: Mutex<CarriedInner>,
+}
+
+#[derive(Default)]
+struct CarriedInner {
+    /// Set once by `close_all` and never cleared: the relays it belongs
+    /// to are finished.
+    closed: bool,
+    next: u64,
+    live: HashMap<u64, [Arc<TcpStream>; 2]>,
+}
+
+impl Carried {
+    /// Never refused over a poisoned lock. The map is only ever inserted
+    /// into or removed from whole, so a panic elsewhere cannot leave it
+    /// half-written -- and the caller that most needs it is `stop`.
+    fn lock(&self) -> std::sync::MutexGuard<'_, CarriedInner> {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Records a connection for the life of the returned guard, or
+    /// refuses it if the relays have already stopped.
+    ///
+    /// The check and the insert are one critical section on purpose. A
+    /// connection can spend up to `UPSTREAM_CONNECT_TIMEOUT` dialling,
+    /// and one that finishes after the stop has swept the map would
+    /// otherwise be carried by nobody's leave, for good.
+    fn adopt(
+        self: &Arc<Self>,
+        client: &Arc<TcpStream>,
+        upstream: &Arc<TcpStream>,
+    ) -> Option<CarriedGuard> {
+        let mut inner = self.lock();
+        if inner.closed {
+            return None;
+        }
+        let id = inner.next;
+        inner.next += 1;
+        inner.live.insert(id, [client.clone(), upstream.clone()]);
+        Some(CarriedGuard { carried: self.clone(), id })
+    }
+
+    fn close_all(&self) {
+        let live = {
+            let mut inner = self.lock();
+            inner.closed = true;
+            std::mem::take(&mut inner.live)
+        };
+        // Outside the lock: a copy thread finishing at the same moment
+        // takes it to remove its own entry.
+        for halves in live.values() {
+            for half in halves {
+                let _ = half.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+}
+
+/// Removes a finished connection from `Carried`, so the map holds only
+/// what is live rather than every connection the relay ever carried.
+struct CarriedGuard {
+    carried: Arc<Carried>,
+    id: u64,
+}
+
+impl Drop for CarriedGuard {
+    fn drop(&mut self) {
+        self.carried.lock().live.remove(&self.id);
     }
 }
 
@@ -1172,12 +976,13 @@ pub fn start(
     let stop = Arc::new(AtomicBool::new(false));
     let upstreams = Arc::new(UdpUpstreams::default());
     let own_sockets = Arc::new(OwnSockets::default());
+    let carried = Arc::new(Carried::default());
     let mut threads = Vec::new();
 
     threads.push({
-        let (nat, tunnel, stop, own, exits) =
-            (nat.clone(), tunnel.clone(), stop.clone(), own_sockets.clone(), exits.clone());
-        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own, exits))
+        let (nat, tunnel, stop, own, exits, carried) =
+            (nat.clone(), tunnel.clone(), stop.clone(), own_sockets.clone(), exits.clone(), carried.clone());
+        std::thread::spawn(move || accept_tcp(tcp, nat, tunnel, stop, own, exits, carried))
     });
     threads.push({
         let (nat, stop, upstreams, own, stats) =
@@ -1189,7 +994,7 @@ pub fn start(
         std::thread::spawn(move || expire_flows(nat, stop, upstreams))
     });
 
-    Ok(Relays { tcp_port, udp_port, own_sockets, stop, upstreams, threads })
+    Ok(Relays { tcp_port, udp_port, own_sockets, stop, upstreams, carried, threads })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1200,6 +1005,7 @@ fn accept_tcp(
     stop: Arc<AtomicBool>,
     own: Arc<OwnSockets>,
     exits: Arc<ExitRelays>,
+    carried: Arc<Carried>,
 ) {
     for stream in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
@@ -1227,6 +1033,7 @@ fn accept_tcp(
         let tunnel = tunnel.clone();
         let own = own.clone();
         let exits = exits.clone();
+        let carried = carried.clone();
         std::thread::spawn(move || {
             let target = origin.upstream.unwrap_or_else(|| SocketAddrV4::new(origin.addr, origin.port));
             // The registration is held for the life of the connection,
@@ -1235,6 +1042,10 @@ fn accept_tcp(
             if let Ok((upstream, _registration)) =
                 connect_upstream(target, &tunnel, &own, &exits, origin.exit)
             {
+                let (client, upstream) = (Arc::new(client), Arc::new(upstream));
+                // Refused when the relays stopped while this was still
+                // dialling. Dropping both halves here closes them.
+                let Some(_carried) = carried.adopt(&client, &upstream) else { return };
                 pump(client, upstream);
             }
         });
@@ -1278,7 +1089,13 @@ fn disable_nagle(stream: &TcpStream, side: &str) {
 /// Two threads rather than one loop because either direction can block
 /// indefinitely, and a TLS handshake talks both ways before either side
 /// has finished saying anything.
-fn pump(client: TcpStream, upstream: TcpStream) {
+///
+/// Both threads use the one handle each socket has, shared by `Arc`:
+/// std reads and writes through `&TcpStream`, and a socket takes a send
+/// and a receive from two threads at once. It used to split each socket
+/// with `try_clone`, whose duplicated handles were measured losing sight
+/// of their connection on Windows -- see `Carried`.
+fn pump(client: Arc<TcpStream>, upstream: Arc<TcpStream>) {
     // Here rather than at the accept and the connect because this is the
     // one place both halves of a relayed connection are in scope
     // together, and because it is the function that does the forwarding
@@ -1287,22 +1104,18 @@ fn pump(client: TcpStream, upstream: TcpStream) {
     disable_nagle(&client, "app-facing");
     disable_nagle(&upstream, "upstream");
 
-    let (mut client_read, mut upstream_write) = (client, upstream);
-    let (Ok(mut client_write), Ok(mut upstream_read)) =
-        (client_read.try_clone(), upstream_write.try_clone())
-    else {
-        return;
+    let outbound = {
+        let (client, upstream) = (client.clone(), upstream.clone());
+        std::thread::spawn(move || {
+            let _ = io::copy(&mut &*client, &mut &*upstream);
+            // Half-close rather than drop: the far end may still have a
+            // reply in flight, and tearing the whole socket down here
+            // would truncate it.
+            let _ = upstream.shutdown(std::net::Shutdown::Write);
+        })
     };
-
-    let outbound = std::thread::spawn(move || {
-        let _ = io::copy(&mut client_read, &mut upstream_write);
-        // Half-close rather than drop: the far end may still have a
-        // reply in flight, and tearing the whole socket down here would
-        // truncate it.
-        let _ = upstream_write.shutdown(std::net::Shutdown::Write);
-    });
-    let _ = io::copy(&mut upstream_read, &mut client_write);
-    let _ = client_write.shutdown(std::net::Shutdown::Write);
+    let _ = io::copy(&mut &*upstream, &mut &*client);
+    let _ = client.shutdown(std::net::Shutdown::Write);
     let _ = outbound.join();
 }
 
@@ -1325,6 +1138,14 @@ fn serve_udp(
         let Ok((len, from)) = local.recv_from(&mut buffer) else {
             continue; // read timeout, or a transient error worth retrying
         };
+        // Before the datagram is looked at, not only at the top of the
+        // loop: `Relays::stop` wakes this receive by sending one, and a
+        // wake-up must never be read as a flow's traffic -- whatever
+        // port it happened to leave from. The flag is set before the
+        // wake is sent, so this sees it.
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
         let SocketAddr::V4(from) = from else { continue };
         let nat_port = from.port();
 
@@ -1659,135 +1480,6 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_refuses_to_pass_when_no_tunnel_is_up() {
-        // The fail-open state: selected apps are going out unprotected.
-        // Reporting that as reachable would let the ladder settle on a
-        // "connection" carrying nothing through the tunnel -- the exact
-        // false-Connected this project keeps having to remove.
-        let error = probe(&TunnelInterface::default()).expect_err("no tunnel means no proof");
-        assert!(error.contains("no tunnel"), "got {error}");
-    }
-
-    #[test]
-    fn proving_carriage_refuses_to_pass_when_no_tunnel_is_up() {
-        // The same fail-open guard as above, on the stricter check --
-        // written out rather than assumed, because this is the one whose
-        // verdict becomes "You're protected".
-        let error =
-            prove_carries(&TunnelInterface::default()).expect_err("no tunnel means no proof");
-        assert!(error.contains("no tunnel"), "got {error}");
-    }
-
-    #[test]
-    fn a_completed_connection_that_answers_nothing_is_not_proof() {
-        // The whole point of the stricter probe, exercised against a
-        // listener that behaves exactly as the failure modes do: it
-        // accepts the connection and never sends a byte.
-        //
-        // That is what xray-core's own `tun` inbound does when its
-        // outbound cannot be dialled -- it has already ACKed the SYN
-        // locally -- and it is what a REALITY session handed to a decoy
-        // site produces, because the client aborts before any payload is
-        // relayed. The old probe passed both. This is the control that
-        // shows it: `looks_like_tls` on what such a peer sends back is
-        // false, so `round_trip_pinned` cannot return Ok.
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        let accepted = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            // Read the ClientHello so the write side cannot fail, then
-            // hang up without answering.
-            let mut sink = [0u8; 1024];
-            let _ = std::io::Read::read(&mut stream, &mut sink);
-            drop(stream);
-        });
-
-        // Loopback, unpinned: the interface machinery is not what is
-        // under test here and cannot be stood up in a unit test.
-        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("connect");
-        std::io::Write::write_all(&mut stream, &client_hello()).expect("send");
-        stream.set_read_timeout(Some(Duration::from_secs(2))).expect("timeout");
-        let mut header = [0u8; 5];
-        let filled = std::io::Read::read(&mut stream, &mut header).unwrap_or(0);
-        accepted.join().expect("listener");
-
-        assert_eq!(filled, 0, "a silent peer must not send anything");
-        assert!(!looks_like_tls(&header[..filled]), "silence is not a TLS reply");
-    }
-
-    #[test]
-    fn only_a_tls_record_from_the_far_end_counts_as_a_reply() {
-        // The other half of the same guard, and the reason it is written
-        // as a table: a check that accepts anything is the recurring
-        // defect this file keeps producing. Each rejected case is a real
-        // thing that arrives on port 443 through a broken path.
-        assert!(looks_like_tls(&[0x16, 0x03, 0x03, 0x00, 0x5a]), "a TLS 1.2 handshake record");
-        assert!(looks_like_tls(&[0x16, 0x03, 0x01, 0x00, 0x2a]), "a TLS 1.0-framed record");
-        assert!(looks_like_tls(&[0x15, 0x03, 0x03, 0x00, 0x02]), "an alert is still a reply");
-
-        assert!(!looks_like_tls(&[]), "nothing came back");
-        assert!(!looks_like_tls(&[0x16, 0x03]), "a truncated read is not a record");
-        // A captive portal or a decoy site answering HTTP: "HTTP/1.1".
-        assert!(!looks_like_tls(b"HTTP/1"), "an HTTP response is not a TLS record");
-        // The type byte alone must not carry the decision.
-        assert!(!looks_like_tls(&[0x16, 0x09, 0x09, 0x00, 0x01]), "0x16 with no TLS version");
-        assert!(!looks_like_tls(&[0x17, 0x03, 0x03, 0x00, 0x01]), "application data unprompted");
-    }
-
-    #[test]
-    fn the_client_hello_is_one_well_formed_tls_record() {
-        // Not cosmetic. A malformed blob would draw an `alert` record,
-        // which `looks_like_tls` accepts -- so the check would pass on
-        // any path that reaches a TLS server at all and would have
-        // nothing to say about whether it reached the right one. Worse,
-        // it would still pass through a decoy, which is the failure this
-        // exists to catch.
-        let hello = client_hello();
-        assert_eq!(hello[0], 0x16, "handshake record");
-        assert_eq!(&hello[1..3], &[0x03, 0x01], "record version TLS 1.0, as TLS 1.3 requires");
-
-        let record_len = u16::from_be_bytes([hello[3], hello[4]]) as usize;
-        assert_eq!(record_len, hello.len() - 5, "the record header must describe the record");
-
-        assert_eq!(hello[5], 0x01, "client_hello");
-        let handshake_len = ((hello[6] as usize) << 16) | ((hello[7] as usize) << 8) | hello[8] as usize;
-        assert_eq!(handshake_len, hello.len() - 9, "the handshake header likewise");
-
-        // Small enough to leave in one segment on any path, which is
-        // what keeps this cheap on a slow censored link.
-        assert!(hello.len() < 512, "the ClientHello is {} bytes", hello.len());
-    }
-
-    #[test]
-    #[ignore = "u32::MAX is not a reliable stand-in for an unreachable interface -- see the comment"]
-    fn the_probe_fails_rather_than_falling_back_to_the_normal_route() {
-        // Pinned to an interface that does not exist, so there should be
-        // no route to reach anything.
-        //
-        // Ignored because the premise is not a guarantee. This is the
-        // second time this same test has been written against an assumed
-        // Windows behaviour and been wrong: first `setsockopt` was
-        // expected to reject a bogus index and did not, and now `connect`
-        // over one is observed to succeed on a real machine -- an invalid
-        // index appears to leave the socket unconstrained rather than
-        // constrained to nothing.
-        //
-        // The property itself does hold for indices that name a real
-        // adapter, which is the only case production has. The evidence is
-        // a customer's own log: on one machine, at one moment, sockets
-        // pinned to the Xray and OpenVPN adapters failed with
-        // WSAEHOSTUNREACH while a socket pinned to the WireGuard adapter
-        // connected. If pinning were being ignored, all three would have
-        // gone out the physical link and all three would have succeeded.
-        //
-        // Left in place rather than deleted so the next person does not
-        // write it a third time.
-        let error = probe(&TunnelInterface::new(u32::MAX, Ipv4Addr::new(10, 66, 0, 3)))
-            .expect_err("nothing can be reached");
-        assert!(error.contains("did not carry"), "got {error}");
-    }
-
-    #[test]
     fn an_onward_socket_is_known_by_its_address_and_not_by_its_port_alone() {
         // The onward sockets are bound to the tunnel's address and
         // applications to the machine's LAN address, so the same port
@@ -1880,16 +1572,14 @@ mod tests {
 
     #[test]
     fn both_halves_of_a_relayed_connection_have_nagle_disabled() {
-        // The sockets are inspected through clones rather than through
-        // the originals, because `pump` takes ownership of those. A
-        // cloned `TcpStream` is a duplicated handle onto the same
-        // socket, so `nodelay()` on the clone reads the option `pump`
-        // set on the original -- which is the point: this asserts on the
+        // The sockets are inspected through a second `Arc` on the same
+        // handle `pump` is given, so `nodelay()` here reads the option
+        // `pump` set -- which is the point: this asserts on the
         // production path, not on a helper called in isolation.
         let (client, client_peer) = connected_pair();
         let (upstream, upstream_peer) = connected_pair();
-        let client_view = client.try_clone().unwrap();
-        let upstream_view = upstream.try_clone().unwrap();
+        let (client, upstream) = (Arc::new(client), Arc::new(upstream));
+        let (client_view, upstream_view) = (client.clone(), upstream.clone());
 
         // Both start Nagled, which is the Windows default and the state
         // this whole change is about. Asserted rather than assumed, so
@@ -2304,6 +1994,226 @@ mod tests {
         stream.read_exact(&mut buffer).expect("the echo server must have been reached");
         assert_eq!(&buffer, b"through");
         relays.stop();
+    }
+
+    /// Connects to the relay from `nat_port`, standing in for the
+    /// rewrite the redirect loop would have done.
+    fn connect_as_flow(nat: &Nat, relay_port: u16, target_port: u16) -> TcpStream {
+        let client = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        client.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into()).unwrap();
+        let client_port = client.local_addr().unwrap().as_socket_ipv4().unwrap().port();
+        let nat_port = nat
+            .redirect(
+                Transport::Tcp,
+                Origin {
+                    addr: Ipv4Addr::LOCALHOST,
+                    port: target_port,
+                    client: Ipv4Addr::LOCALHOST,
+                    client_port,
+                    interface_id: 1,
+                    upstream: None,
+                    exit: None,
+                },
+            )
+            .unwrap();
+        drop(client);
+        let source = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        source.set_reuse_address(true).unwrap();
+        source.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, nat_port)).into()).unwrap();
+        source.connect(&SocketAddr::from((Ipv4Addr::LOCALHOST, relay_port)).into()).unwrap();
+        source.into()
+    }
+
+    /// True when a read ended because the connection did, and false when
+    /// it only gave up waiting. The difference is the whole assertion:
+    /// a timeout here means the relay is still holding the connection.
+    /// Stopping the relays is part of phase one of a disconnect, which
+    /// is held to 900ms. It measured 455 to 465ms on every stop -- the
+    /// UDP receive waiting out its read timeout -- then 150ms from the
+    /// expiry thread's sleep step; with both fixed it is about 10ms.
+    ///
+    /// The bound is the median of eight against 200ms: loose enough for
+    /// a busy runner, and still failed outright by either of the waits
+    /// this replaced.
+    #[test]
+    fn stopping_the_relays_does_not_wait_out_a_timeout() {
+        let mut took: Vec<Duration> = (0..8)
+            .map(|_| {
+                let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
+                    .expect("relays should bind");
+                std::thread::sleep(Duration::from_millis(50));
+                let began = Instant::now();
+                relays.stop();
+                began.elapsed()
+            })
+            .collect();
+        took.sort();
+        let median = took[took.len() / 2];
+        assert!(median < Duration::from_millis(200), "relays.stop took {took:?}");
+    }
+
+    /// The property Custom mode's honesty rests on, with a running test
+    /// at last: a socket pinned to a real interface that has no route to
+    /// a destination fails, rather than quietly leaving by the ordinary
+    /// route. If it fell back, a selected app's traffic would go out in
+    /// the clear the moment the tunnel stopped carrying it, while every
+    /// check said it was pinned.
+    ///
+    /// The two earlier attempts pinned to an index that names nothing,
+    /// and Windows treated that as no pin at all -- see the ignored test
+    /// in `health.rs`. Loopback is a real adapter on every Windows
+    /// machine and carries no route to the internet, so it is the
+    /// stand-in for a tunnel adapter with nowhere to send.
+    ///
+    /// Measured first on 2026-10-04: unpinned, the connect to a public
+    /// resolver succeeded; pinned to loopback, it failed in 59µs with
+    /// WSAENETUNREACH. The unpinned control is what makes the pinned
+    /// failure mean something -- on a machine with no network at all
+    /// both fail, and the assertion that matters still holds.
+    #[test]
+    fn a_socket_pinned_to_an_interface_with_no_route_fails_instead_of_falling_back() {
+        const LOOPBACK_INTERFACE: u32 = 1;
+        let target: SocketAddr = "1.1.1.1:443".parse().unwrap();
+
+        let pinned = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        pin_to_interface(&pinned, LOOPBACK_INTERFACE).expect("loopback is a real interface to pin to");
+        let error = pinned
+            .connect_timeout(&target.into(), Duration::from_secs(4))
+            .expect_err("a pinned socket must not reach a destination its interface has no route to");
+        assert!(
+            matches!(error.kind(), io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable),
+            "it must fail as unreachable, not by timing out on some other path: {error:?}"
+        );
+
+        let plain = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        if plain.connect_timeout(&target.into(), Duration::from_secs(4)).is_err() {
+            eprintln!("no ordinary route to {target} here, so the pinned failure proves less than it could");
+        }
+    }
+
+    fn ended(result: &io::Result<usize>) -> bool {
+        match result {
+            Ok(n) => *n == 0,
+            Err(e) => !matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock),
+        }
+    }
+
+    /// Stopping the relays closes the connections they are carrying.
+    ///
+    /// They used to outlive it: each ran on a detached thread with no
+    /// timeout and no stop flag, so a connection whose far end stayed
+    /// quiet -- a game between rounds, a chat app's idle socket -- went
+    /// on holding both sockets after a disconnect, until the far end
+    /// happened to break. Teardown was something that happened *to* the
+    /// relay rather than something it did.
+    #[test]
+    fn stopping_the_relays_closes_the_connections_they_carry() {
+        use std::io::{Read, Write};
+
+        // An upstream that accepts, says nothing, and never hangs up.
+        let quiet = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let quiet_port = quiet.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = quiet.accept() {
+                let _ = accepted_tx.send(stream);
+            }
+        });
+
+        let nat = Arc::new(Nat::new());
+        let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
+            .expect("relays should bind");
+        let mut app = connect_as_flow(&nat, relays.tcp_port, quiet_port);
+        app.write_all(b"hello").unwrap();
+
+        let mut far_end = accepted_rx.recv_timeout(Duration::from_secs(5)).expect("the relay must dial the upstream");
+        let mut buffer = [0u8; 5];
+        far_end.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        far_end.read_exact(&mut buffer).expect("the relay is carrying the connection");
+
+        relays.stop();
+
+        app.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        far_end.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let app_side = app.read(&mut buffer);
+        assert!(ended(&app_side), "the application's side must be closed by the stop: {app_side:?}");
+        let upstream_side = far_end.read(&mut buffer);
+        assert!(ended(&upstream_side), "the upstream side must be closed by the stop: {upstream_side:?}");
+    }
+
+    /// The same stop, with many relays stopping at once.
+    ///
+    /// This is the test that caught the first version of the fix. With
+    /// one relay at a time it passed every run; with 32 at once, 8 to 20
+    /// of the stops closed the application's side and left the upstream
+    /// open, because the handle being shut was a `try_clone` that had
+    /// lost sight of its connection. A single-relay test cannot see that,
+    /// so this one exists beside it.
+    #[test]
+    fn stopping_many_relays_at_once_closes_every_connection() {
+        use std::io::{Read, Write};
+        const RELAYS: usize = 16;
+        let outcomes: Vec<Result<(), String>> = (0..RELAYS)
+            .map(|_| {
+                std::thread::spawn(|| -> Result<(), String> {
+                    let quiet = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                    let quiet_port = quiet.local_addr().unwrap().port();
+                    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        if let Ok((stream, _)) = quiet.accept() {
+                            let _ = accepted_tx.send(stream);
+                        }
+                    });
+                    let nat = Arc::new(Nat::new());
+                    let relays = start(nat.clone(), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
+                        .map_err(|e| format!("bind: {e}"))?;
+                    let mut app = connect_as_flow(&nat, relays.tcp_port, quiet_port);
+                    app.write_all(b"hello").map_err(|e| format!("send: {e}"))?;
+                    let mut far_end = accepted_rx.recv_timeout(Duration::from_secs(10)).map_err(|e| format!("no dial: {e}"))?;
+                    let mut buffer = [0u8; 5];
+                    far_end.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                    far_end.read_exact(&mut buffer).map_err(|e| format!("not carried: {e}"))?;
+
+                    relays.stop();
+
+                    app.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    far_end.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let (app_side, upstream_side) = (app.read(&mut buffer), far_end.read(&mut buffer));
+                    if ended(&app_side) && ended(&upstream_side) {
+                        Ok(())
+                    } else {
+                        Err(format!("app {app_side:?}, upstream {upstream_side:?}"))
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("a relay thread panicked"))
+            .collect();
+        let failures: Vec<String> = outcomes.into_iter().filter_map(Result::err).collect();
+        assert!(failures.is_empty(), "{} of {RELAYS} stops left a connection open: {failures:?}", failures.len());
+    }
+    /// A connection that finishes dialling after the stop has swept the
+    /// table must be refused, or it is carried by nothing that can end
+    /// it -- the dial can take up to `UPSTREAM_CONNECT_TIMEOUT`.
+    #[test]
+    fn a_connection_that_arrives_after_the_stop_is_refused() {
+        let (one, two) = connected_pair();
+        let carried = Arc::new(Carried::default());
+        carried.close_all();
+        assert!(carried.adopt(&Arc::new(one), &Arc::new(two)).is_none());
+    }
+
+    /// The table holds what is live, not every connection ever carried.
+    #[test]
+    fn a_finished_connection_leaves_the_table() {
+        let (one, two) = connected_pair();
+        let carried = Arc::new(Carried::default());
+        let (one, two) = (Arc::new(one), Arc::new(two));
+        let guard = carried.adopt(&one, &two).expect("a running relay adopts");
+        assert_eq!(carried.lock().live.len(), 1);
+        drop(guard);
+        assert!(carried.lock().live.is_empty());
     }
 
     // -----------------------------------------------------------------

@@ -13,6 +13,7 @@ import {
   captureIpv6Baseline,
   checkIpv6,
   verifyEgress,
+  confirmEgressWithin,
   type BaselineIp,
   type EgressVerdict,
 } from "../lib/egress";
@@ -257,31 +258,15 @@ async function confirmReachable(): Promise<ConnectionState> {
  * still short enough that a genuinely dead server is called out while
  * the customer is watching. */
 const VERIFY_TIMEOUT_MS = 30_000;
-const VERIFY_INTERVAL_MS = 1_500;
 
 /** Waits for traffic to actually start flowing, rather than asking once.
- *
- * Retries even on a definite-looking "bypassing" answer, because early in
- * a connection it is not definite at all: OpenVPN's routes arrive from
- * the server partway through negotiation, so traffic genuinely does go
- * around the tunnel for a moment before it goes through it.
- *
- * Returns as soon as it has proof, so a fast protocol stays fast.
- */
-async function confirmEgress(
+ * See `confirmEgressWithin` for how the attempts are made. */
+function confirmEgress(
   baseline: BaselineIp | null,
   budgetMs = VERIFY_TIMEOUT_MS,
+  sameEndpointOnly = false,
 ): Promise<EgressVerdict> {
-  const deadline = Date.now() + budgetMs;
-  let last: EgressVerdict = { state: "unreachable" };
-
-  while (Date.now() < deadline) {
-    const verdict = await verifyEgress(baseline);
-    if (verdict.state === "throughTunnel") return verdict;
-    last = verdict;
-    await new Promise((r) => setTimeout(r, VERIFY_INTERVAL_MS));
-  }
-  return last;
+  return confirmEgressWithin(baseline, budgetMs, { sameEndpointOnly });
 }
 
 /** How long to wait for ordinary networking to come back after tearing
@@ -521,6 +506,15 @@ export function Dashboard({
    * toggle here would tell them only their game is routed when the whole
    * machine is. */
   const [splitTunnelActive, setSplitTunnelActive] = useState(false);
+  /** Whether the saved settings ask for Custom mode -- what the *next*
+   * connect will do. Used only while no tunnel is up, for the line under
+   * the mode switch; once one is, `splitTunnelActive` is the truth. */
+  const [customConfigured, setCustomConfigured] = useState(false);
+  useEffect(() => {
+    loadSplitTunnel()
+      .then((settings) => setCustomConfigured(isEffective(settings)))
+      .catch(() => undefined);
+  }, []);
   const [splitTunnelProblem, setSplitTunnelProblem] = useState<string | null>(null);
   // Whether the service asked for the tunnel's DNS rule and did not get
   // it. Read from the service, never derived: only it knows whether an
@@ -1010,9 +1004,21 @@ export function Dashboard({
       const generation = intentRef.current.generation;
 
       let fromStatus: ConnectionState;
+      // Read from the status this check just took, not from the
+      // `splitTunnelActive` this effect closed over. On the first check
+      // after a connect that captured value is still the `false` from
+      // before the tunnel existed -- the setter below changes the next
+      // render, not this closure -- so Custom mode was judged by the
+      // full-tunnel egress check, saw this app's own (correctly direct)
+      // address, and showed "Not carrying traffic" over a tunnel that
+      // was carrying the selected apps. Measured on a Windows 11 guest:
+      // curl.exe selected and exiting through the node, the screen
+      // yellow for one poll.
+      let customMode: boolean;
       try {
         const status = await serviceStatus();
-        setSplitTunnelActive(Boolean(status.splitTunnelActive));
+        customMode = Boolean(status.splitTunnelActive);
+        setSplitTunnelActive(customMode);
         setSplitTunnelProblem(status.splitTunnelProblem ?? null);
     setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
     setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
@@ -1059,7 +1065,7 @@ export function Dashboard({
       // The same fix as the connect path, which had this corrected
       // already -- this poll was simply missed.
       let verdict: ConnectionState;
-      if (splitTunnelActive) {
+      if (customMode) {
         // A failed probe is never grounds to change protocol -- see
         // `customModePollState`, and the "no matter which protocol I
         // pick it ends up on Fast" report behind it. But it is not
@@ -1131,11 +1137,10 @@ export function Dashboard({
     const id = setInterval(() => void check(), HEALTH_POLL_MS);
 
     return () => clearInterval(id);
-    // splitTunnelActive is a dependency, not incidental: the poll picks
-    // its evidence from it, and a stale `false` would send a Custom-mode
-    // session straight back down the egress-check path this exists to
-    // avoid.
-  }, [connectionState, splitTunnelActive]);
+    // Not `splitTunnelActive`: the poll picks its evidence from the
+    // status each check reads, because a value captured here is stale on
+    // exactly the check that matters -- the first one after a connect.
+  }, [connectionState]);
 
   // Nothing that is only passing through gets to stay.
   //
@@ -1542,6 +1547,15 @@ export function Dashboard({
             // Nothing this app does goes through the tunnel, so it has
             // no way to observe an exit address. Blank is honest.
             setExitIp(null);
+            // The service's word on whether the redirect is running,
+            // read now rather than left to the first health poll. Until
+            // that poll the screen otherwise said "Everything on this
+            // computer goes through Neoxify" for about fifteen seconds
+            // of a Custom-mode session -- seen on a Windows 11 guest
+            // with only curl.exe selected.
+            await serviceStatus()
+              .then((status) => setSplitTunnelActive(Boolean(status.splitTunnelActive)))
+              .catch(() => undefined);
 
             if (carried) {
               verdict = "connected";
@@ -1582,7 +1596,9 @@ export function Dashboard({
               }
             }
           } else {
-            const egress = await confirmEgress(baselineIpRef.current, verifyBudget);
+            // Only the last rung can use an answer from an endpoint other
+            // than the baseline's; see `VerifyOptions.sameEndpointOnly`.
+            const egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast);
             setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
             // The reachability check is worth its eight seconds only
@@ -1975,7 +1991,11 @@ export function Dashboard({
                 only the services you chose are carried, and the game
                 itself is left on the direct path. */}
             <p className="text-[11px] text-muted-foreground">
-              {appMode === "gaming" ? t("dash.modeGamingHint") : t("dash.modeVpnHint")}
+              {appMode === "gaming"
+                ? t("dash.modeGamingHint")
+                : (isTunnelUp(connectionState) ? splitTunnelActive : customConfigured)
+                  ? t("dash.modeCustomHint")
+                  : t("dash.modeVpnHint")}
             </p>
           </div>
 

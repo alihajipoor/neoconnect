@@ -2455,3 +2455,154 @@ seed bundle. Two minutes.
 
 **Still unproven: that any tunnel carries a packet.** Nothing here
 changes that.
+
+## 2026-10-04 — a test VM on the Windows PC, and what it found
+
+### The rig, such as it is
+
+A VirtualBox guest, `Neoxify-Test` (Windows 11 Home, NAT, 4 vCPU/8 GB),
+on the Windows PC. Its tooling lives outside the repo, in
+`C:\Users\aliha\Claude\vm\tools`, and drives it entirely from the host:
+`VBoxManage guestcontrol` for commands, guest-side `SetCursorPos` +
+`mouse_event` for clicks (the bootstrapper is mouse-only), `controlvm
+screenshotpng` to look. Installs use the branded bootstrapper built the
+way `release-desktop-windows.yml` builds it, not the bare NSIS installer.
+
+Ground truth is the exit country from Cloudflare's trace, **from a fresh
+process every time** (see below), plus routes, NRPT, adapters, engines
+and firewall rules read inside the guest. The app's own reasoning is
+read by starting it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=
+--remote-debugging-port=9222` and wrapping `window.fetch`, which is
+Tauri 2's IPC on Windows -- every command, its timing and its answer.
+`__TAURI_INTERNALS__.invoke` cannot be wrapped: it is non-writable.
+
+**There are no packet captures yet**, and NAT gives the guest no IPv6,
+so every IPv6 check here is vacuous. Anything that needs either is
+still unverified.
+
+### Results, all on fi-finland
+
+All eight protocols carried traffic out through the node and tore down
+clean: Stealth, Fast, Compatible, Shadowsocks, Stealth Web, Built-in,
+Stealth HTTPS, Stealth Lite. Disconnect replies 19ms (WireGuard) to
+781ms (first Xray). Killing the app, and closing it with the window's
+X, both left nothing within 3s -- in Custom mode too, including its
+firewall rules and the ping block. An upgrade over a live tunnel took
+it down and the relaunched app said so.
+
+### Fixed today, found only by running it
+
+- **A working OpenVPN was rejected on every first connect** (b5cb2cb).
+  The verify asked one `/health/ip` at a time; the one made as the new
+  adapter's address settled stalled past the whole six-second failover
+  budget. Attempts now overlap. Before: three of three rejected. After:
+  kept, proof 4.0s after connect.
+- **Custom mode said "Not carrying traffic"** over a tunnel carrying the
+  selected app (c329c5b) -- a stale closure in the health poll -- and
+  the header said "Everything on this computer goes through Neoxify".
+
+### Seen, not acted on
+
+- `Neoxify-OpenVPN` disappears whenever an Xray protocol starts, and an
+  upgrade removes it too, so OpenVPN recreates it far more often than
+  "first connect only". About a second each time; recorded in
+  `openvpn.rs`.
+- With Compatible selected, a rejected first OpenVPN rung followed by an
+  accepted second one is announced as "Your usual protocol didn't get
+  through. Now using Compatible" -- true of the rung, odd to read.
+- Once, before the OpenVPN fix, WireGuard tried right after a rejected
+  OpenVPN carried nothing for 20s. **Not reproduced** by switching by
+  hand; the ladder path that produced it no longer runs in that order.
+
+### Traps that cost time
+
+- A long-lived PowerShell `Invoke-WebRequest` loop reported "US" for a
+  minute through a working tunnel: keep-alive reuses a connection made
+  before the tunnel, and that connection stays on the physical NIC. Use
+  `curl.exe` or `-DisableKeepAlive`.
+- The guest's Widgets panel and the desktop wallpaper's "learn more"
+  both open on stray clicks and steal the next ones.
+- VirtualBox allows 32 guest sessions; timed-out calls leak them.
+- `screenshotpng` fails with E_FAIL once the guest display sleeps; a
+  Shift keypress wakes it.
+- The bootstrapper's window opens somewhere different each run --
+  `click-install.ps1` finds it by handle.
+
+### Blocked
+
+- **Gaming mode**: the test account's plan does not include it.
+- CI's "TypeScript (backend + panel)" job failed once on
+  `api-endpoints.scope.test` and passed on rerun with no change -- it
+  reads a seed bundle fetched live, so it can flake on that.
+
+## 2026-10-05 — captures in the VM, and DNS confined on seven engines
+
+### The capture, and the one that lied
+
+The rig now captures. Not where the old one did -- outside the guest,
+on the host side of its vNIC -- because VirtualBox's own `--nic-trace`
+turned out to **silently drop the guest's outgoing global IPv6**: an
+IPv6 ping that `pktmon` inside the guest showed going out, and VirtualBox's
+NAT answering "unreachable", was simply absent from its trace. IPv4 it
+records fine, which is what makes it dangerous: it would have passed
+every IPv6 leak test by not seeing the packets.
+
+What is used instead is `pktmon start --capture --comp nics` in the
+guest: the NIC miniport, below WFP, the Neoxify filters and WinDivert,
+so anything there left the machine and anything blocked never reached
+it. The tooling is `nic-leaks.ps1` / `leak-test.ps1` (IPv6 and IPv4
+destinations, outliers printed in full) and `dns-bound.ps1` (below),
+all in `C:\Users\aliha\Claude\vm\tools`. Every check was run once with
+the VPN off first, to prove it can see a leak at all.
+
+IPv6: this PC has none, so nothing can ever answer the guest. The guest
+already had VirtualBox's ULA prefix and a default route (and got a
+documentation-range address on top, active-store only); a leak shows
+as packets *sent*. That is enough for "does IPv6 escape the tunnel" and
+says nothing about a real dual-stack path.
+
+### What it found
+
+- **IPv6: nothing escapes, on all eight protocols** in full tunnel. In
+  Custom mode a selected app's IPv6 is refused and `ping -6` is blocked,
+  as the app says; unselected apps' IPv6 goes direct, by design.
+- **IPv4 in full tunnel: only to the node**, apart from single one-byte
+  TCP keep-alives on connections opened before the tunnel came up --
+  the "flows already open are not re-examined" gap `ipv6_block.rs`
+  already states.
+- **DNS leaked on three engines -- seven of the eight protocols** (cfa67eb). Windows'
+  connectivity probes query per interface, bound to the NIC's address,
+  which skips NRPT and the routes: on Xray they went out in clear text.
+  Asked for on purpose -- a query bound to the NIC, one to the on-link
+  resolver -- WireGuard let the first out (its kill-switch permits DNS to
+  its resolver on any interface) and IKEv2 the second. OpenVPN refused
+  both: `block-outside-dns`. Now every engine but OpenVPN gets the same
+  filters from `ipv6_block.rs`, and all eight show 0 queries at the NIC
+  where 4 of 4 left with the VPN off.
+
+### Gaming mode cannot be tested, and that is not a gap
+
+The test account's plan lacks `GAMING_DNS`, but granting it would only
+change the app's message from "not in your plan" to "no resolver":
+`gaming.module.ts` says there is no node-side resolver at all and the
+DNS half is a dead branch, decided 2026-08-25. Nothing was changed in
+production.
+
+### Traps
+
+- **An upgrade hung once**, "Installing..." for 14 minutes, while the
+  guest was exhausted (32 guest-control sessions leaked) and Windows
+  Security showed "Threats found". Defender had **no** detection,
+  quarantine or event to back that toast up, so it is not blamed. A
+  power cycle mid-install left the app without its service; a clean
+  reinstall took 26s and four upgrades since took 20-39s. Not
+  reproduced; watch for it.
+- The picker re-sorts by latency, so clicking rows by position picked
+  the wrong protocol. `app-js.ps1` drives the app by label over
+  DevTools (`ui.js`: `clickLabel`, `pickProtocol`).
+- NRPT redirects even an explicit `Resolve-DnsName -Server 10.0.2.3`
+  into the tunnel, so the resolver API cannot show this leak; only a
+  raw socket can.
+- VirtualBox's trace stamps frames relative to when tracing began, and
+  grew ~90 MB a minute from Windows Update; it is now off in the VM's
+  saved config.

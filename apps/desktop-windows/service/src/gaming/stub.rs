@@ -594,6 +594,32 @@ mod tests {
     // finds. Redacted per docs/node-address-hygiene.md; this repository
     // is public.
 
+    /// [`Stub::start`] on a loopback port the OS chooses, retried on a new
+    /// one when Windows refuses TCP on the number it gave UDP.
+    ///
+    /// It does that when the number lands in a TCP excluded port range
+    /// (Hyper-V and WinNAT reserve blocks of them), and the refusal is
+    /// `WSAEACCES`, 10013 -- which is how two of these tests failed on a
+    /// CI runner, on ports 49814 and 49815, having passed the run before.
+    /// Tests only: in service the stub's port is fixed, because an NRPT
+    /// rule cannot name one, and moving it is exactly what `start` must
+    /// never do.
+    pub(super) fn start_on_any_port(
+        doh_url: &str,
+        namespaces: &[String],
+        excludes: &[String],
+    ) -> Result<Stub, String> {
+        let mut last = String::new();
+        for _ in 0..10 {
+            let any_port = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            match Stub::start(any_port, doh_url, namespaces, excludes) {
+                Err(e) if e.contains("(TCP)") => last = e,
+                other => return other,
+            }
+        }
+        Err(last)
+    }
+
     fn policy(namespaces: &[&str], excludes: &[&str]) -> Policy {
         Policy::new(
             "https://example.invalid/dns-query",
@@ -682,8 +708,7 @@ mod tests {
 
     #[test]
     fn a_stub_binds_and_stops_on_a_non_privileged_port() {
-        let stub = Stub::start(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        let stub = start_on_any_port(
             "https://example.invalid/dns-query",
             &["blizzard.com".to_string()],
             &[],
@@ -698,8 +723,7 @@ mod tests {
     /// nothing was forwarded.
     #[test]
     fn the_running_stub_refuses_a_name_outside_its_namespaces() {
-        let stub = Stub::start(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        let stub = start_on_any_port(
             "https://example.invalid/dns-query",
             &["blizzard.com".to_string()],
             &["dist.blizzard.com".to_string()],
@@ -791,14 +815,14 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
+    use super::tests::start_on_any_port;
 
     const PUBLIC_DOH: &str = "https://cloudflare-dns.com/dns-query";
 
     #[test]
     #[ignore = "needs the internet; run with --ignored"]
     fn serves_a_real_doh_endpoint_and_refuses_everything_else() {
-        let stub = Stub::start(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        let stub = start_on_any_port(
             PUBLIC_DOH,
             &["example.com".to_string()],
             &["excluded.example.com".to_string()],
@@ -852,8 +876,7 @@ mod live {
     #[test]
     #[ignore = "needs the internet; run with --ignored"]
     fn an_unreachable_resolver_is_servfail_and_never_a_fallback() {
-        let stub = Stub::start(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        let stub = start_on_any_port(
             "https://this-resolver-does-not-exist.invalid/dns-query",
             &["example.com".to_string()],
             &[],

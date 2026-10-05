@@ -125,7 +125,17 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
         // exactly the wrong direction. Only a `u32` crosses the await
         // here; the watch itself is owned, Send, and moved into the task
         // below.
-        let watch = ClientWatch::of(&connected).ok();
+        //
+        // Only Neoxify's own app is watched. Any authenticated local
+        // process may open this pipe, and watching whichever connected
+        // last meant a status probe or another tool, finishing and
+        // exiting, was read as the customer closing Neoxify -- the
+        // tunnel came down while the app still showed it up. Measured on
+        // the test VM; see `client_watch::is_the_app`. Anything else that
+        // connects is served normally and simply not watched.
+        let watch = ClientWatch::of(&connected)
+            .ok()
+            .filter(|w| crate::lifecycle::client_watch::is_the_app(w.pid));
         let pid = watch.as_ref().map(|w| w.pid);
         let newly_seen = match pid {
             Some(pid) => watched.lock().await.replace(pid) != Some(pid),
@@ -154,6 +164,25 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
                     // find in Task Manager and distrust.
                     let _ = engines.run_detached(|engines: &mut Engines, token| {
                         crate::engines::adopt_token(token);
+
+                        // Gaming mode as well, and first. This path
+                        // knows the app is gone the instant the kernel
+                        // says so, but it only ever took the tunnel
+                        // down -- gaming was left to the idle watchdog
+                        // below, a full IDLE_GRACE later. An app that
+                        // crashed or was killed with gaming armed left
+                        // the game's NRPT rules pointed at a stub
+                        // nobody was talking to for that long: the game
+                        // will not resolve and nothing on screen says
+                        // why. Closing the window disarms it from the
+                        // app's side; this is the case where the app
+                        // never got to.
+                        if crate::gaming::is_armed() {
+                            if let Err(err) = crate::gaming::disarm() {
+                                crate::cleanup_log::note("disarm gaming mode after the app went away", &err);
+                            }
+                        }
+
                         let report = crate::lifecycle::teardown::hard_stop(engines);
                         crate::cleanup_log::note(
                             "teardown after the app went away",
@@ -498,6 +527,19 @@ mod tests {
     /// of it is a cleanup path -- the idle watchdog, the window
     /// closing, service stop -- and a cleanup that reports failure on a
     /// clean machine is one people learn to ignore.
+    /// The picker's listing, over a real pipe, now that it runs on the
+    /// blocking pool: it still answers, with the shape the app reads, and
+    /// the machine running the tests has applications to list.
+    #[tokio::test]
+    async fn listing_running_apps_answers_over_the_pipe() {
+        let name = r"\\.\pipe\neoconnect-test-running-apps";
+        start_server(name).await;
+        let reply = round_trip(name, r#"{"type":"listRunningApps"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "runningApps", "{parsed}");
+        assert!(parsed["apps"].is_array(), "{parsed}");
+    }
+
     #[tokio::test]
     async fn disarming_leaves_gaming_mode_reporting_off() {
         let name = r"\\.\pipe\neoconnect-test-gaming-lifecycle";
@@ -643,8 +685,22 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 Ok(Ok(state)) => state,
                 // Busy or gone. See `engines::os_visible_tunnel` for what
                 // the engine-less answer can and cannot say.
+                //
+                // On the blocking pool, because "busy" is exactly when
+                // this runs: during a connect. During an IKEv2 connect
+                // the phonebook entry already exists, so asking whether
+                // it is up launches PowerShell -- and inline, that held a
+                // runtime worker on every status poll of the connect, the
+                // one moment this fallback exists to stay responsive in.
                 _ => {
-                    let (connected, protocol, health) = crate::engines::os_visible_tunnel();
+                    // A failed join is a question nobody answered, and is
+                    // reported as one: never as "disconnected", which
+                    // would be a tunnel state nothing verified.
+                    let Ok((connected, protocol, health)) =
+                        tokio::task::spawn_blocking(crate::engines::os_visible_tunnel).await
+                    else {
+                        return Response::Error { message: "could not read the tunnel state".to_string() };
+                    };
                     Response::State {
                         connected,
                         protocol,
@@ -658,8 +714,19 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 }
             }
         }
-        Request::ListRunningApps => Response::RunningApps {
-            apps: crate::split_tunnel::running_apps(),
+        // On the blocking pool, not inline. This walks every process on
+        // the machine, opens each one, reads version resources and draws
+        // icons -- hundreds of milliseconds of synchronous Win32 -- and
+        // run inline it held one of the runtime's workers for all of it,
+        // every fifteen seconds while the picker is open. Rule 5 of the
+        // rewrite: nothing blocking inside an async task, because on a
+        // two-core machine a held worker is how the accept loop stopped
+        // being polled and a Disconnect could not even be read. Not the
+        // engine queue either: listing apps must not wait behind a
+        // connect.
+        Request::ListRunningApps => match tokio::task::spawn_blocking(crate::split_tunnel::running_apps).await {
+            Ok(apps) => Response::RunningApps { apps },
+            Err(_) => Response::Error { message: "could not list running applications".to_string() },
         },
         Request::Disconnect => {
             // Cancel first, and before queueing anything.
@@ -732,7 +799,13 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                     // visible the error is true and stays; if none is,
                     // "disconnected" is the honest reply and the queued
                     // pass is tidying.
-                    let (still_tunnelled, _, _) = crate::engines::os_visible_tunnel();
+                    // Blocking pool, as in the Status fallback. Unknown is
+                    // answered as still tunnelled: "it will be torn down
+                    // in a moment" is true either way, and "disconnected"
+                    // would be a state nothing checked.
+                    let still_tunnelled = tokio::task::spawn_blocking(crate::engines::os_visible_tunnel)
+                        .await
+                        .map_or(true, |(up, _, _)| up);
                     if still_tunnelled {
                         Response::Error {
                             message:
@@ -801,7 +874,14 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 .await
                 .unwrap_or_else(|_| gone())
         }
-        Request::GamingStatus => gaming_response(crate::gaming::status()),
+        // The blocking pool, for the reason `ListRunningApps` gives: the
+        // three checks resolve a name through Windows and open a TCP
+        // connection, each bounded at three seconds, and inline that was
+        // up to six seconds of a runtime worker held on a poll.
+        Request::GamingStatus => match tokio::task::spawn_blocking(crate::gaming::status).await {
+            Ok(report) => gaming_response(report),
+            Err(_) => Response::Error { message: "could not read gaming mode's state".to_string() },
+        },
         Request::ProbeSplitTunnel => {
             engines
                 .run(|engines: &mut Engines, token| {

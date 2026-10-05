@@ -71,11 +71,16 @@ arrive through it, and the two long waits inside clamp against it — see
 
 ```rust
 pub fn running_without_the_lock() -> bool        // mod.rs — pipe.rs status fallback
-pub use owner::{running_apps, Selection, SharedSelection}
-pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp>  // owner.rs — pipe.rs
+pub use owner::{Selection, SharedSelection}
+pub use picker::running_apps
+pub fn running_apps() -> Vec<neoconnect_ipc::RunningApp>  // picker.rs — pipe.rs
 pub(crate) const firewall::RULE: &str            // repair.rs
 pub(crate) fn firewall::delete_rule()            // janitor.rs, repair.rs
 ```
+
+`running_apps` moved from `owner.rs` to `picker.rs` (040f80f). What
+callers outside the subsystem see -- `split_tunnel::running_apps` --
+did not change, which is the boundary; only the re-export line did.
 
 `running_without_the_lock` exists because `Status` must be answerable
 while the engine lock is held; it is the split-tunnel half of the same
@@ -253,27 +258,100 @@ one of those has a bug story recorded in prose with nothing pinning it.
 
 Two tests are `#[ignore]`d with a documented wrong premise, and they
 matter: the property Custom mode's honesty rests on — that a pinned
-socket does not fall back to the ordinary route — has **no running
-test**. Its only evidence is a customer log quoted in a comment. A
+socket does not fall back to the ordinary route — had **no running
+test**. Its only evidence was a customer log quoted in a comment. A
 rewrite must not read those names as coverage.
 
-### Possible defects found, not yet acted on
+**It has one now** (`proxy.rs`,
+`a_socket_pinned_to_an_interface_with_no_route_fails_instead_of_falling_back`).
+The ignored tests pinned to an index that names nothing, which Windows
+treats as no pin. Pinned instead to loopback -- a real adapter with no
+route to the internet -- a connect to a public resolver fails at once
+with WSAENETUNREACH, where the same connect unpinned succeeds. Measured
+on Windows on 2026-10-04 before it was written as a test. It proves the
+stack honours the pin; it is not a capture of a tunnel going away
+under a live game, which is still unverified.
 
-Logged rather than fixed, because each needs its own verification:
+### Possible defects found, and what became of them
+
+Logged first rather than fixed, because each needed its own
+verification. Each has since had it:
 
 * `OwnerLookup::rebuild` marks a snapshot fresh even when all four
-  table walks failed, so stale maps are declared current for another
-  200ms. No comment acknowledges it.
+  table walks failed. **A decision, now written down** (7113163): the
+  alternative walks a failing API on every packet, and a SYN does not
+  pay for it because it walks again on any miss.
 * `parse_table` keys on port alone, so two rows sharing a local port
-  resolve to whichever came last.
-* `last_seen` is refreshed only by outbound packets, so a
-  receive-only UDP flow is retired after 60s while still live — which
-  is exactly what the comment motivating `TCP_IDLE` says must not
-  happen.
+  resolve to whichever came last. **Real, and fixed** (7113163).
+  Checked against a live table first: one listener sat beside forty-odd
+  TIME_WAIT rows on its port, each with owner pid 0, so the table's
+  order decided whether the port had an owner. A row with no owner no
+  longer replaces one with an owner. Two *different* live owners on one
+  port remain ambiguous by port alone -- separating them needs the
+  local address, which no caller passes yet.
+* `last_seen` is refreshed only by outbound packets. **Left as it is,
+  with the reasoning recorded** (c7af95d): TCP acknowledges, and no
+  one-directional UDP flow outliving sixty seconds has been observed;
+  the fix would put a write on the hottest path in the subsystem.
 
-One found this way is already fixed: `expire_idle` swept `forward` by
-port alone while ports are only unique per transport, so an expiring
-UDP flow retired a live TCP flow sharing its number.
+One found this way was fixed before the list was written: `expire_idle`
+swept `forward` by port alone while ports are only unique per
+transport, so an expiring UDP flow retired a live TCP flow sharing its
+number.
+
+## Where it stands
+
+Every finding above has been acted on or deliberately declined, each
+in its own commit on `claude/service-rewrite`, each with the full
+service suite passing **on Windows** -- this work was the first done
+on a Windows machine since 2026-08-30, so `cargo test` ran locally
+rather than only in CI.
+
+| Finding | Commit |
+|---|---|
+| `firewall.rs`: both sources by name, not by slice | 5337095 |
+| `icon.rs`: the cache the header claimed; the mask rule tested | ab3467f |
+| `flows.rs`: the NAT field that duplicated its key | c7af95d |
+| `socks.rs`: a 64KB allocation per exit datagram; truncation | 37e951c |
+| `proxy.rs`: relayed connections not owned, not closed by stop | 5b2da61, eb181a7 |
+| `proxy.rs`: health verification is not relaying | 32ae978 (`health.rs`) |
+| `owner.rs`: three allocations per packet for one string | bd52eda |
+| `owner.rs`: one row layout hand-decoded six times | deae091 |
+| `owner.rs`: the picker has no packet-path role | 040f80f (`picker.rs`) |
+| "Is this the internet" in three places | 71c8a1b |
+| `Nat` lock poisoning | cc48a42 |
+| `Redirect::activated` lies until `start` | e36a0ca |
+| The same packet parsed more than once | 4a844c2 |
+| `decide`: the refusal-before-exit ordering held by layout | 5ed0c29 |
+| `InstalledRoutes` had no `Drop`; four manual unwinds | 51339ac |
+| `RUNNING` a hand-kept shadow of `active` | b311629 |
+
+**A finding nobody had made, worth knowing before touching any socket
+here.** The relay's stop fix first shut a `try_clone` of each socket.
+On Windows a cloned handle (`WSADuplicateSocket`) was measured losing
+sight of its connection while the original kept carrying it: with 32
+relays stopping at once, 8 to 20 left a connection open, every run. A
+single-relay test passed every time. The fix (eb181a7) shares one
+handle by `Arc` everywhere in the relay, `pump` included -- `pump` had
+split every relayed socket with `try_clone` long before this work. The
+lesson for anything here that tears down: test it with many instances
+at once, not one.
+
+### What this did not do
+
+* **The directory re-organisation below.** Findings were fixed where
+  they lived; only `health.rs` and `picker.rs` were split out, because
+  those were whole jobs with no packet-path role. The remaining moves
+  are mechanical and can be made whenever they stop being churn.
+* **`start`'s eight jobs and `stop`'s hand-ordered sequence.** The
+  dangerous half -- a route left behind by a forgotten unwind -- is
+  closed by `Drop`. Restructuring the rest means changing the bring-up
+  sequence itself, which cannot be checked without a VPN session and
+  the rig.
+* **Anything against real packets.** All of the above is proven by
+  unit tests on Windows and by reading. No change here has carried a
+  game's traffic through a real tunnel since it was made, and per
+  `CLAUDE.md` that stays **unverified** until a capture says otherwise.
 
 ## Target design
 

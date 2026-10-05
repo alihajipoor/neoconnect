@@ -65,9 +65,9 @@ features = [
     # can choose from what is running instead of hunting through
     # Program Files for an executable.
     "Win32_System_Diagnostics_ToolHelp",
-    # EnumWindows and friends: the picker asks "does this process
-    # own a window a person can see", which is the only reliable
-    # difference between an application and a background helper.
+    # GetIconInfo and DestroyIcon, for the picker's icons. The window
+    # check this was first enabled for lives in the Tauri client now:
+    # a session-0 service sees none of the customer's windows.
     "Win32_UI_WindowsAndMessaging",
     # SHGetFileInfoW: the icon Windows already draws for an exe,
     # so the picker shows what the taskbar shows.

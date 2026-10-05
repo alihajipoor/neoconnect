@@ -59,11 +59,22 @@ impl Allowance {
     /// Any rule left over from a previous session is deleted first: the
     /// ports are ephemeral, so a stale rule allows something arbitrary
     /// while failing to allow what this session needs.
-    pub fn install(sources: &[Ipv4Addr], tcp_port: u16, udp_port: u16) -> Result<Self, String> {
+    /// Both addresses are named rather than passed as a list, because
+    /// the second is not optional and a slice cannot say so. See
+    /// [`add_rule`] for what happens when only one is allowed: the
+    /// packets are rewritten and sent, the counters climb, and Windows
+    /// drops every one before the proxy is offered a connection.
+    pub fn install(
+        application_source: Ipv4Addr,
+        relay_source: Ipv4Addr,
+        tcp_port: u16,
+        udp_port: u16,
+    ) -> Result<Self, String> {
         delete_rule();
 
-        add_rule("TCP", sources, tcp_port)?;
-        if let Err(e) = add_rule("UDP", sources, udp_port) {
+        let sources = [application_source, relay_source];
+        add_rule("TCP", &sources, tcp_port)?;
+        if let Err(e) = add_rule("UDP", &sources, udp_port) {
             delete_rule();
             return Err(e);
         }
@@ -106,6 +117,38 @@ impl Drop for Allowance {
 /// counters climb, and Windows drops every one of them before the proxy
 /// is ever offered the connection. Measured: redirected=10, returned=0,
 /// and not a single accept.
+/// The netsh command line, built where a test can read it.
+///
+/// Split out because this module has no tests and cannot easily have
+/// many: it shells out to a real firewall, and there is nothing to
+/// assert without one. The argument list is the exception -- it is a
+/// pure function of three values, and every hazard this file documents
+/// at length shows up in it. `remoteip` carrying both sources, the
+/// `profile=any` that stops a Public-network customer getting a tunnel
+/// that silently carries nothing: all of it is visible here and in
+/// nothing else.
+fn add_rule_args(protocol: &str, remote: &str, port: u16) -> Vec<String> {
+    vec![
+        "advfirewall".into(),
+        "firewall".into(),
+        "add".into(),
+        "rule".into(),
+        format!("name={RULE}"),
+        "dir=in".into(),
+        "action=allow".into(),
+        format!("protocol={protocol}"),
+        format!("localport={port}"),
+        format!("remoteip={remote}"),
+        // `profile=any` because the rule has to hold whichever profile
+        // Windows has decided the network is; a customer on a Public
+        // network would otherwise get a tunnel that silently carries
+        // nothing, which is the exact failure this module exists to
+        // stop.
+        "profile=any".into(),
+        "enable=yes".into(),
+    ]
+}
+
 fn add_rule(protocol: &str, sources: &[Ipv4Addr], port: u16) -> Result<(), String> {
     let remote = sources
         .iter()
@@ -121,20 +164,7 @@ fn add_rule(protocol: &str, sources: &[Ipv4Addr], port: u16) -> Result<(), Strin
     // `Engines` lock held, so a netsh that never returned would stop the
     // service answering anything at all. See engines::HELPER_BUDGET.
     let mut command = Command::new(NETSH);
-    command.args([
-        "advfirewall",
-        "firewall",
-        "add",
-        "rule",
-        &format!("name={RULE}"),
-        "dir=in",
-        "action=allow",
-        &format!("protocol={protocol}"),
-        &format!("localport={port}"),
-        &format!("remoteip={remote}"),
-        "profile=any",
-        "enable=yes",
-    ]);
+    command.args(add_rule_args(protocol, &remote, port));
     let out = crate::engines::capture_hidden(command, HELPER_BUDGET)
         .map_err(|e| format!("could not run netsh: {e}"))?;
 
@@ -220,4 +250,66 @@ pub fn wait_until_reachable(
          Custom mode would have dropped your chosen apps' traffic instead of carrying it.",
         BUDGET.as_secs()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(sources: &[Ipv4Addr]) -> Vec<String> {
+        let remote = sources.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
+        add_rule_args("TCP", &remote, 41234)
+    }
+
+    /// The failure this module exists to prevent, as an assertion.
+    ///
+    /// Two different packets arrive at these ports from two different
+    /// places: the redirected packet, whose source is still the
+    /// application's own, and the return leg from the relay's upstream
+    /// socket, bound to the tunnel's address. Allow one and Windows
+    /// drops the other before the proxy is ever offered a connection --
+    /// measured on the rig as redirected=10, returned=0, not a single
+    /// accept, with every visible signal saying the code worked.
+    #[test]
+    fn both_sources_reach_the_rule() {
+        let a = Ipv4Addr::new(192, 168, 1, 50);
+        let b = Ipv4Addr::new(10, 77, 0, 2);
+        let remote = args(&[a, b]).into_iter().find(|x| x.starts_with("remoteip=")).unwrap();
+
+        assert!(remote.contains(&a.to_string()), "the application's source is missing");
+        assert!(remote.contains(&b.to_string()), "the relay's source is missing");
+    }
+
+    /// `profile=any`, because the rule has to hold whichever profile
+    /// Windows decided the network is. Without it a customer on a
+    /// Public network gets a tunnel that silently carries nothing.
+    #[test]
+    fn the_rule_holds_on_every_network_profile() {
+        assert!(args(&[Ipv4Addr::LOCALHOST]).iter().any(|a| a == "profile=any"));
+    }
+
+    /// Inbound and allow. A rule that defaulted to outbound, or to
+    /// block, would read as installed and do the opposite of its job.
+    #[test]
+    fn the_rule_allows_inbound() {
+        let a = args(&[Ipv4Addr::LOCALHOST]);
+        assert!(a.iter().any(|x| x == "dir=in"));
+        assert!(a.iter().any(|x| x == "action=allow"));
+        assert!(a.iter().any(|x| x == "enable=yes"));
+    }
+
+    /// Named, so `delete_rule` and the janitor can find it again. A rule
+    /// this service cannot name is one it cannot remove, and a stale
+    /// allowance outlives the ephemeral ports it was written for.
+    #[test]
+    fn the_rule_carries_the_name_the_sweep_looks_for() {
+        assert!(args(&[Ipv4Addr::LOCALHOST]).iter().any(|a| a == &format!("name={RULE}")));
+    }
+
+    #[test]
+    fn the_port_and_protocol_are_the_ones_asked_for() {
+        let a = add_rule_args("UDP", "127.0.0.1", 51820);
+        assert!(a.iter().any(|x| x == "protocol=UDP"));
+        assert!(a.iter().any(|x| x == "localport=51820"));
+    }
 }

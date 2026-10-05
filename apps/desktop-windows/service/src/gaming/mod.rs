@@ -106,6 +106,26 @@ impl Drop for InFlight {
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 
+/// The session, whether or not a panic poisoned its lock.
+///
+/// Every caller used to refuse on poison -- `arm` and `disarm` with
+/// "restart the Neoxify service", `status` with `Unknown` -- and the
+/// refusal in `disarm` came *before* the teardown. Service stop calls
+/// `disarm`, so one panic while the lock was held left the NRPT rules in
+/// the registry with nothing to remove them until the service next
+/// started: the game's lookups, and on the `.` rule the whole machine's,
+/// pointed at a stub that is no longer there. That is the
+/// network-corruption complaint class, reachable from one panic.
+///
+/// Recovering is safe because of what the lock guards. `disarm_locked`
+/// clears the rules unconditionally whatever the session says, and
+/// `arm` only stores a session once it is whole -- so the worst a panic
+/// can leave behind is an `Option` that is either a complete session or
+/// none, and either is something the next caller can act on.
+fn lock_session() -> std::sync::MutexGuard<'static, Option<Session>> {
+    SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct Session {
     config: GamingConfig,
     /// The suffixes as actually installed (`.battle.net`), which is
@@ -178,7 +198,7 @@ pub fn arm(config: GamingConfig) -> Result<Report, String> {
     // one port NRPT can name -- and a status poll landing in the middle
     // would read a session that is half built. While it is held,
     // `status` reports `arming` rather than blocking; see there.
-    let mut session = SESSION.lock().map_err(|_| poisoned())?;
+    let mut session = lock_session();
 
     // Anything from a previous session goes first, rules and stub both.
     // Re-arming with a different game profile is an ordinary action and
@@ -227,7 +247,7 @@ pub fn arm(config: GamingConfig) -> Result<Report, String> {
 /// machine trains the next person to ignore it.
 pub fn disarm() -> Result<(), String> {
     let _in_flight = InFlight::disarming();
-    let mut session = SESSION.lock().map_err(|_| poisoned())?;
+    let mut session = lock_session();
     disarm_locked(&mut session);
     Ok(())
 }
@@ -313,14 +333,14 @@ pub fn status() -> Report {
             // is a bug rather than a state. Saying so beats guessing.
             _ => Report::unknown("Gaming mode's state is being changed."),
         },
-        Err(std::sync::TryLockError::Poisoned(_)) => {
-            Report::unknown("The background service could not read gaming mode's state.")
-        }
+        // Read through, for the reason `lock_session` gives: the session
+        // is whole or absent, and reporting `Unknown` for the rest of the
+        // process's life would hide rules that may well still be up.
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => match poisoned.into_inner().as_ref() {
+            None => Report::off(),
+            Some(session) => assess(session),
+        },
     }
-}
-
-fn poisoned() -> String {
-    "Gaming mode's state could not be read; restart the Neoxify service.".to_string()
 }
 
 /// Runs all three checks and decides what may be claimed.
@@ -479,6 +499,16 @@ fn check_canary(session: &Session) -> (bool, Option<String>) {
 mod tests {
     use super::*;
 
+    /// Serialises the tests that touch `SESSION`. It is a process-wide
+    /// static, so one test holding it -- to poison it, say -- is seen by
+    /// another polling `status` at the same moment as an operation in
+    /// flight, and reads `Unknown`. Correct behaviour, wrong test.
+    static SESSION_TESTS: Mutex<()> = Mutex::new(());
+
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        SESSION_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     // The addresses and hostnames in the fixtures below are RFC 5737 and
     // RFC 2606 stand-ins. A real node's exit address and DoH hostname
     // were here until 2026-08-26; redacted per
@@ -506,8 +536,31 @@ mod tests {
     /// machine.
     #[test]
     fn status_with_nothing_armed_is_off() {
+        let _serial = one_at_a_time();
         assert!(!is_armed());
         assert_eq!(status().state, GamingPhase::Off);
+    }
+
+    /// A panic holding the session lock must not lock gaming mode out
+    /// for the life of the process. Poisoned for real, then asked.
+    ///
+    /// `disarm` is not called here because it writes to this machine's
+    /// registry; it reaches the session through `lock_session`, which is
+    /// what this exercises. Poisoning a process-wide static is safe for
+    /// the other tests precisely because of the fix: afterwards every
+    /// reader recovers, so `status_with_nothing_armed_is_off` still holds.
+    #[test]
+    fn a_panic_holding_the_session_does_not_lock_gaming_mode_out() {
+        let _serial = one_at_a_time();
+        let outcome = std::thread::spawn(|| {
+            let _held = SESSION.lock();
+            panic!("an arm panicking with the session held");
+        })
+        .join();
+        assert!(outcome.is_err() && SESSION.is_poisoned(), "the lock must really be poisoned");
+
+        assert_eq!(status().state, GamingPhase::Off, "nothing armed is off, not unknown");
+        assert!(lock_session().is_none(), "the session is still readable and still empty");
     }
 
     /// A config the validator refuses must never reach the point where

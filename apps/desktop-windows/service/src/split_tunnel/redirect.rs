@@ -735,12 +735,12 @@ pub struct Redirect {
     /// process-wide clock would let the outgoing session's age decide
     /// what the incoming one does with a packet.
     ///
-    /// Whatever the caller puts here is overwritten by [`start`]. The
-    /// window has to begin when packets begin arriving, not when the
-    /// struct was assembled, and the gap between the two is a route
+    /// A caller can only supply [`Activation::pending`]; [`start`] begins
+    /// it. The window has to begin when packets begin arriving, not when
+    /// the struct was assembled, and the gap between the two is a route
     /// probe and a firewall wait -- seconds, on the path where this
     /// matters most.
-    pub activated: Instant,
+    pub activated: Activation,
     /// The concurrent exits the running engine offers.
     ///
     /// Empty for every session that does not use them, which is all of
@@ -760,7 +760,38 @@ impl Redirect {
     /// Whether the activation reset is still converging, so a
     /// pre-existing connection should be refused rather than exempted.
     fn within_activation_grace(&self) -> bool {
-        self.activated.elapsed() < ACTIVATION_GRACE
+        self.activated.within_grace()
+    }
+}
+
+/// When interception began, or that it has not.
+///
+/// This used to be a plain `Instant` field that every caller filled in
+/// and [`start`] then overwrote -- so until `start` ran it held a time
+/// that meant nothing, and both places that built a `Redirect` carried a
+/// comment saying so. Now a caller can only say "not begun", and only
+/// this module can begin it: the value cannot be wrong, because there is
+/// no way to supply one.
+#[derive(Debug, Clone, Copy)]
+pub struct Activation(Option<Instant>);
+
+impl Activation {
+    /// Not begun yet, which is all a caller building a `Redirect` knows.
+    pub fn pending() -> Self {
+        Self(None)
+    }
+
+    /// Begun now. Called by [`start`], as interception starts.
+    fn begun_now() -> Self {
+        Self(Some(Instant::now()))
+    }
+
+    /// Inside the window only once begun. A redirect that never started
+    /// has no window, so it gets the long-standing mid-connection rule
+    /// rather than the converging one -- the side on which a miss can
+    /// never become a drop.
+    fn within_grace(&self) -> bool {
+        self.0.is_some_and(|began| began.elapsed() < ACTIVATION_GRACE)
     }
 }
 
@@ -980,7 +1011,7 @@ pub fn start(
     // probe and a wait for the firewall rule to become effective, which
     // on the path where any of this matters take seconds -- long enough
     // to spend the whole grace window before a single packet is seen.
-    redirect.activated = Instant::now();
+    redirect.activated = Activation::begun_now();
 
     let filter = filter_for(&redirect);
     // Checked before opening so a filter problem is reported as one.
@@ -1032,6 +1063,38 @@ struct Job {
     packet: Vec<u8>,
     length: u32,
     address: WINDIVERT_ADDRESS,
+    /// What the dispatcher read the packet as, so the worker decides
+    /// about the same thing the dispatcher hashed rather than reading the
+    /// bytes a second time.
+    header: Header,
+}
+
+/// What a packet is, read once.
+///
+/// The dispatcher used to parse every packet to choose its worker, and
+/// the worker then parsed it again to decide what to do with it -- an
+/// IPv6 packet's extension-header chain walked twice. Beyond the cost,
+/// that was two independent readings of one packet that nothing held to
+/// agreement. Now the dispatcher reads it, the hash uses that reading,
+/// and the worker is handed it.
+///
+/// `None` inside a family is the same answer each parser has always
+/// given: a header this code cannot read, which every caller already
+/// treats as an unknown owner rather than as permission.
+enum Header {
+    V4(Option<Parsed>),
+    V6(Option<ParsedV6>),
+    Other,
+}
+
+impl Header {
+    fn read(packet: &[u8]) -> Self {
+        match packet.first().map(|first| first >> 4) {
+            Some(4) => Header::V4(parse(packet)),
+            Some(6) => Header::V6(parse_v6(packet)),
+            _ => Header::Other,
+        }
+    }
 }
 
 // SAFETY: `WINDIVERT_ADDRESS` is a plain `repr(C)` record of integers and
@@ -1069,14 +1132,15 @@ impl Fanout {
     /// Hands a packet to its worker, returning false once that worker
     /// has gone.
     fn hand_over(&self, packet: &[u8], length: u32, address: WINDIVERT_ADDRESS) -> bool {
-        let slot = affinity(packet, self.queues.len());
+        let header = Header::read(packet);
+        let slot = affinity_of(&header, packet, self.queues.len());
         // A full queue blocks rather than drops. A worker cannot be
         // behind for long without the driver's own queue -- thirty times
         // deeper -- absorbing it, and this file's whole position is that
         // a packet which disappears without a counter moving is the
         // failure that cannot be argued about afterwards. Blocking is
         // visible as latency; dropping is visible as nothing.
-        self.queues[slot].send(Job { packet: packet.to_vec(), length, address }).is_ok()
+        self.queues[slot].send(Job { packet: packet.to_vec(), length, address, header }).is_ok()
     }
 }
 
@@ -1112,12 +1176,12 @@ fn fold(key: u64, word: u64) -> u64 {
 /// refuses to make decisions about -- a truncated header, an IPv6
 /// fragment after the first, an extension header chain this does not
 /// follow. There are not enough of them to unbalance anything.
-fn affinity(packet: &[u8], workers: usize) -> usize {
+fn affinity_of(header: &Header, packet: &[u8], workers: usize) -> usize {
     if workers <= 1 {
         return 0;
     }
-    let key = match packet.first().map(|byte| byte >> 4) {
-        Some(4) => parse(packet).map(|parsed| {
+    let key = match header {
+        Header::V4(parsed) => parsed.as_ref().map(|parsed| {
             let mut key = fold(0, u32::from(parsed.source) as u64);
             key = fold(key, u32::from(parsed.destination) as u64);
             key = fold(key, ((parsed.source_port as u64) << 16) | parsed.destination_port as u64);
@@ -1128,12 +1192,12 @@ fn affinity(packet: &[u8], workers: usize) -> usize {
         // walked still lands consistently -- with the rest of the
         // traffic between the same two hosts, which is more than enough
         // to keep it in order.
-        Some(6) if packet.len() >= IPV6_HEADER => {
+        Header::V6(parsed) if packet.len() >= IPV6_HEADER => {
             let mut key = 0u64;
             for chunk in packet[8..IPV6_HEADER].chunks_exact(4) {
                 key = fold(key, u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64);
             }
-            if let Some(parsed) = parse_v6(packet) {
+            if let Some(parsed) = parsed {
                 key = fold(
                     key,
                     ((parsed.source_port as u64) << 16) | parsed.destination_port as u64,
@@ -1232,7 +1296,7 @@ fn worker(
     let mut owner = OwnerLookup::new();
 
     while let Ok(job) = queue.recv() {
-        let Job { mut packet, length: len, mut address } = job;
+        let Job { mut packet, length: len, mut address, header } = job;
 
         // Read per packet, not captured once at startup. Editing the
         // chosen applications while Custom mode stays on does not
@@ -1242,8 +1306,9 @@ fn worker(
         // restarted the app.
         let chosen = selection.read().unwrap_or_else(|e| e.into_inner());
         let mut reset = None;
-        let rewrote = handle_packet(
+        let rewrote = handle_parsed(
             &mut packet[..len as usize],
+            &header,
             &mut address,
             &redirect,
             &nat,
@@ -1388,10 +1453,12 @@ struct Parsed {
 /// the machine. The alternative was an address disclosure the customer
 /// could not see, and a visible broken feature beats an invisible leak.
 ///
-/// **Known gap:** an ICMPv6 echo request behind an extension-header
-/// chain is not recognised here and passes through. Windows' own ICMP
-/// helper never emits one, so this has never been observed, but it is a
-/// hole rather than a proof.
+/// An ICMPv6 echo request behind an extension-header chain is recognised
+/// too: the IPv6 arms read the same chain walk as `parse_v6`. That used
+/// to be a stated gap -- only the fixed header was looked at, so a ping
+/// behind a hop-by-hop or destination-options header went out in the
+/// clear. Windows' own ICMP helper was never seen to emit one; it was a
+/// hole rather than a proof, and now it is neither.
 /// Whether this is ICMP at all, on either family.
 ///
 /// Separate from [`icmp_echo_request`] because the two answers are used
@@ -1401,7 +1468,7 @@ struct Parsed {
 fn is_icmp(packet: &[u8]) -> bool {
     match packet.first().map(|first| first >> 4) {
         Some(4) => packet.get(9) == Some(&IPPROTO_ICMP),
-        Some(6) => packet.get(6) == Some(&IPPROTO_ICMPV6),
+        Some(6) => v6_upper_layer(packet).is_some_and(|(next, _)| next == IPPROTO_ICMPV6),
         _ => false,
     }
 }
@@ -1420,12 +1487,9 @@ fn icmp_echo_request(packet: &[u8]) -> bool {
             }
             packet.get(header_len) == Some(&ICMP_ECHO_REQUEST)
         }
-        Some(6) => {
-            if *packet.get(6).unwrap_or(&0) != IPPROTO_ICMPV6 {
-                return false;
-            }
-            packet.get(IPV6_HEADER) == Some(&ICMPV6_ECHO_REQUEST)
-        }
+        Some(6) => v6_upper_layer(packet).is_some_and(|(next, offset)| {
+            next == IPPROTO_ICMPV6 && packet.get(offset) == Some(&ICMPV6_ECHO_REQUEST)
+        }),
         _ => false,
     }
 }
@@ -1521,29 +1585,56 @@ const MAX_EXTENSION_HEADERS: usize = 8;
 /// transport header at all. The caller must treat that as an unknown
 /// owner rather than as permission to pass the packet on.
 fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
-    if packet.len() < IPV6_HEADER || packet.first()? >> 4 != 6 {
-        return None;
-    }
+    let (next, offset) = v6_upper_layer(packet)?;
+    let transport = match next {
+        IPPROTO_TCP => Transport::Tcp,
+        IPPROTO_UDP => Transport::Udp,
+        _ => return None,
+    };
 
-    // Bytes 24..40 of the fixed header, which the length check above
-    // has already guaranteed are there.
+    // Bytes 24..40 of the fixed header, which `v6_upper_layer` has
+    // already required to be there.
     let mut destination = [0u8; 16];
     destination.copy_from_slice(&packet[24..40]);
     let destination = Ipv6Addr::from(destination);
 
+    // Flags sit at offset 13 of a TCP header, so 14 bytes covers
+    // both reads -- the same reasoning as the IPv4 parser.
+    let ports = packet.get(offset..offset + 14)?;
+    Some(ParsedV6 {
+        transport,
+        destination,
+        source_port: u16::from_be_bytes([ports[0], ports[1]]),
+        destination_port: u16::from_be_bytes([ports[2], ports[3]]),
+        tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
+        transport_offset: offset,
+    })
+}
+
+/// Walks an IPv6 packet's extension headers to the protocol after them,
+/// returning that protocol and where its header begins -- or `None` when
+/// the chain cannot be followed: an unknown extension header, a fragment
+/// after the first, or more headers than [`MAX_EXTENSION_HEADERS`].
+///
+/// Split out of `parse_v6` so the ICMPv6 checks read the same walk. They
+/// used to look only at the fixed header's Next Header and at byte 40,
+/// so an echo request behind any extension header was not recognised
+/// and went out in the clear -- the gap the old note on
+/// `icmp_echo_request` stated rather than closed.
+fn v6_upper_layer(packet: &[u8]) -> Option<(u8, usize)> {
+    if packet.len() < IPV6_HEADER || packet.first()? >> 4 != 6 {
+        return None;
+    }
     let mut next = packet[6];
     let mut offset = IPV6_HEADER;
 
     for _ in 0..MAX_EXTENSION_HEADERS {
-        let transport = match next {
-            IPPROTO_TCP => Transport::Tcp,
-            IPPROTO_UDP => Transport::Udp,
+        match next {
             // Header length is in 8-byte units, not counting the first.
             IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
                 let header = packet.get(offset..offset + 2)?;
                 next = header[0];
                 offset += (header[1] as usize + 1) * 8;
-                continue;
             }
             // Authentication headers count in 4-byte units and subtract
             // two rather than one, which is the sort of detail that
@@ -1552,33 +1643,20 @@ fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
                 let header = packet.get(offset..offset + 2)?;
                 next = header[0];
                 offset += (header[1] as usize + 2) * 4;
-                continue;
             }
             IPPROTO_FRAGMENT => {
                 let header = packet.get(offset..offset + 8)?;
-                // Only the first fragment carries the transport header;
-                // the rest have no ports to read and no owner to find.
+                // Only the first fragment carries the upper-layer
+                // header; the rest have nothing to read and no owner to
+                // find.
                 if u16::from_be_bytes([header[2], header[3]]) & 0xFFF8 != 0 {
                     return None;
                 }
                 next = header[0];
                 offset += 8;
-                continue;
             }
-            _ => return None,
-        };
-
-        // Flags sit at offset 13 of a TCP header, so 14 bytes covers
-        // both reads -- the same reasoning as the IPv4 parser.
-        let ports = packet.get(offset..offset + 14)?;
-        return Some(ParsedV6 {
-            transport,
-            destination,
-            source_port: u16::from_be_bytes([ports[0], ports[1]]),
-            destination_port: u16::from_be_bytes([ports[2], ports[3]]),
-            tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
-            transport_offset: offset,
-        });
+            upper => return Some((upper, offset)),
+        }
     }
     None
 }
@@ -1730,8 +1808,9 @@ fn inject_v6_reset(
 /// the IPv4 path. Nothing needs remembering: the verdict is the same
 /// every time it is asked, so there is no earlier answer to stay
 /// consistent with and nothing a reused port could inherit.
-fn handle_ipv6(
+fn handle_ipv6_parsed(
     packet: &[u8],
+    parsed: Option<&ParsedV6>,
     redirect: &Redirect,
     selection: &Selection,
     owner: &mut OwnerLookup,
@@ -1746,7 +1825,7 @@ fn handle_ipv6(
     // A packet whose ports could not be read. Answered the same way the
     // IPv4 path answers an unknown owner, and for the same reason: which
     // way to fail depends on which way the customer's list reads.
-    let Some(parsed) = parse_v6(packet) else {
+    let Some(parsed) = parsed else {
         return if selection.tunnel_when_owner_unknown() { block(stats) } else { None };
     };
 
@@ -1876,8 +1955,13 @@ fn handle_ipv6(
 /// Rewrites the packet in place if it should be redirected. Returns
 /// whether anything changed, which is what decides if the checksums need
 /// recomputing.
-fn handle_packet(
+///
+/// `header` is the dispatcher's reading of these same bytes -- see
+/// [`Header`].
+#[allow(clippy::too_many_arguments)]
+fn handle_parsed(
     packet: &mut [u8],
+    header: &Header,
     address: &mut WINDIVERT_ADDRESS,
     redirect: &Redirect,
     nat: &Nat,
@@ -1915,11 +1999,13 @@ fn handle_packet(
     // carry an IPv6 packet: the NAT table, the rewrite and the proxy's
     // upstream socket are all IPv4, and so is the address on the tunnel
     // adapter they would send it to.
-    if packet.first().map(|first| first >> 4) == Some(6) {
-        return handle_ipv6(packet, redirect, selection, owner, stats, reset);
-    }
-
-    let parsed = parse(packet)?;
+    let parsed = match header {
+        Header::V6(parsed) => {
+            return handle_ipv6_parsed(packet, parsed.as_ref(), redirect, selection, owner, stats, reset);
+        }
+        Header::V4(Some(parsed)) => parsed,
+        Header::V4(None) | Header::Other => return None,
+    };
 
     let proxy_port = match parsed.transport {
         Transport::Tcp => redirect.tcp_proxy_port,
@@ -1978,9 +2064,10 @@ fn handle_packet(
 /// refuse -- 13 of 15 datagrams in the clear on one rig run, 14 on the
 /// next.
 ///
-/// The other half of the ordering is positional and is asserted by
-/// test: every `return` in [`decide`] that refuses, drops or leaves a
-/// packet alone comes *before* the only `Origin` that reads this.
+/// The other half of the ordering used to be positional, held by
+/// layout and one test. It is now this function's argument: it takes a
+/// [`carry::Carry`], which only [`carry::settle`] can make, after both
+/// refusals in [`decide`] have run.
 ///
 /// # Fail-open, on both of its two axes
 ///
@@ -1991,14 +2078,16 @@ fn handle_packet(
 ///   the session's adapter. `ExitPlacement::Fallback` reports it, and a
 ///   game that keeps working from the wrong address beats a game that
 ///   stops.
-fn exit_for(image_path: &str, selection: &Selection, exits: &ExitRelays) -> Option<u8> {
+fn exit_for(carry: &carry::Carry, selection: &Selection, exits: &ExitRelays) -> Option<u8> {
     // Checked first so a session with no concurrent exits -- which is
     // every WireGuard, OpenVPN and IKEv2 session, and most Xray ones --
     // never lowercases a path or touches the preference map.
     if exits.is_empty() {
         return None;
     }
-    exits.index_of(selection.preferred_exit(image_path)?)
+    // A carried datagram with no application behind it has no
+    // preference to look up, so it takes the session's exit.
+    exits.index_of(selection.preferred_exit(carry.owner_image()?)?)
 }
 
 fn decide(
@@ -2274,89 +2363,17 @@ fn decide(
         };
     }
 
-    // Nothing on this machine can say who sent this datagram, and in
-    // `OnlySelected` the honest answer is to refuse it rather than to
-    // let it out in the clear on the chance it was not the selected
-    // app's. See `Selection::verdict_for_unattributed`.
-    //
-    // Nothing is recorded against the port. A leave-alone verdict here
-    // would exempt whatever opens that port next, and the whole point
-    // of this branch is that the port is not evidence of anything -- it
-    // had no owner a moment ago and may have a perfectly ordinary one
-    // by the next datagram, which then gets decided on its merits.
-    if matches!(unattributed, Some(Unattributed::Refuse)) {
-        stats.refused_unattributed.fetch_add(1, Ordering::Relaxed);
-        return Verdict::Drop;
-    }
+    // The two refusals, and the only way past them. `settle` is the one
+    // thing that makes a `Carry`, and an exit can only be read through a
+    // `Carry` -- see `carry`.
+    let carry = match carry::settle(owner_image, unattributed, selected, known_owner, parsed, nat, stats) {
+        Ok(carry) => carry,
+        Err(verdict) => return verdict,
+    };
 
-    if !selected {
-        // Only remember the decision when the owner was actually known.
-        //
-        // Recording it on a miss was a real, reported bug: a TCP SYN can
-        // reach here in the moment between the socket being created and
-        // the connection table showing it, and pinning that connection
-        // to Direct meant it stayed unprotected for its whole life --
-        // however many times a lookup would have succeeded afterwards.
-        // Browsers keep connections alive and reuse them, so one lost
-        // race left Chrome showing the real IP until enough reloads
-        // happened to open a fresh connection that won it. Reported
-        // exactly that way: "had to refresh a few times until I see the
-        // VPN ip".
-        //
-        // This is the same poisoning that OwnerLookup's image cache had
-        // and it survived here, one layer up, because the cache fix
-        // only stopped the *lookup* from going permanently wrong.
-        //
-        // Not recording it was only ever half the answer, and the half
-        // that was written down here was wrong: it said the cost was a
-        // repeat lookup on the SYN retransmit a second later. There is
-        // no retransmit. A SYN that reaches here unredirected is sent
-        // to the real destination, **which answers it**, so the
-        // connection is established outside the tunnel and there is
-        // never a second packet to decide about. That is why the miss
-        // itself had to stop happening -- see
-        // `OwnerLookup::image_for_new_connection`, which is what the
-        // lookup above uses for a SYN.
-        //
-        // Recorded against this flow rather than this port, and for UDP
-        // that is the difference between remembering an answer and
-        // inventing one. The old key covered every destination the port
-        // reached for five seconds, on the strength of one decision
-        // about one peer -- so a port that had been left alone once
-        // short-circuited `Nat::lookup` for a name lookup sent from it
-        // afterwards, and the DNS branch above, which carries a lookup
-        // whoever makes it, never ran. The query went to whichever
-        // resolver the network supplied. See `Tables::direct`.
-        //
-        // That flow key is also what lets a *scoped* application reach
-        // this line at all. `docs/design/gaming-mode.md` §5.3 lists it
-        // as a trap -- "a per-destination policy must not call
-        // `record_direct`" -- and that was true when it was written,
-        // because the cache was keyed on `(transport, source port)`.
-        // One out-of-scope packet would then have exempted the whole
-        // port for five seconds, game-server traffic included, and a
-        // game scoped to its servers would have been carried for
-        // whichever destination it happened to reach first. Keyed on
-        // the flow, "this app does not send *here* through the tunnel"
-        // is all it says, and the same port's next packet to a
-        // destination that *is* in scope is decided on its own merits.
-        // The trap is spent; the note stays because the shape of this
-        // key is now load-bearing for two features rather than one.
-        if known_owner {
-            nat.record_direct(
-                parsed.transport,
-                parsed.source_port,
-                parsed.destination,
-                parsed.destination_port,
-            );
-        }
-        return Verdict::Direct;
-    }
-
-    // Past every `return` above, so this line is reached only for a
-    // packet that has already been decided to be carried. See
-    // `exit_for` for why that ordering is the safety property and not
-    // an accident of layout.
+    // Past both refusals, so this is reached only for a packet already
+    // decided to be carried -- and that is now a property of the types
+    // rather than of where this line sits.
     let origin = Origin {
         addr: parsed.destination,
         port: parsed.destination_port,
@@ -2364,7 +2381,7 @@ fn decide(
         client_port: parsed.source_port,
         interface_id,
         upstream: None,
-        exit: owner_image.and_then(|image| exit_for(image, selection, &redirect.exits)),
+        exit: exit_for(&carry, selection, &redirect.exits),
     };
     match nat.redirect(parsed.transport, origin) {
         Some(nat_port) => {
@@ -2392,6 +2409,132 @@ fn decide(
             );
             Verdict::Direct
         }
+    }
+}
+
+/// The end of [`decide`]'s ladder, as a type.
+///
+/// The ladder's safety property is an ordering: every refusal must come
+/// before the only place a carried flow can acquire a concurrent exit,
+/// because deciding *where* to send a packet presupposes having decided
+/// to carry it -- and giving an exit to a datagram that should have been
+/// refused is the fire-and-forget leak with a destination attached. That
+/// ordering used to be held by layout, eight early returns and one test.
+///
+/// Now [`exit_for`] takes a [`carry::Carry`], and this module is the only
+/// thing that can make one -- its field is private to it, so not even
+/// `decide` can build one by hand. A future branch that wants an exit has
+/// to come through [`carry::settle`], and `settle` runs both refusals
+/// first. The rule is enforced by the compiler instead of by position.
+mod carry {
+    use super::*;
+
+    /// A packet that has passed every refusal and is to be carried.
+    pub(super) struct Carry<'a> {
+        /// The application behind it, when there is one. `None` is a
+        /// datagram carried without attribution -- `AllExcept`'s answer
+        /// for an owner nobody can see -- which has no preference and so
+        /// can never reach an exit.
+        owner_image: Option<&'a str>,
+    }
+
+    impl<'a> Carry<'a> {
+        pub(super) fn owner_image(&self) -> Option<&'a str> {
+            self.owner_image
+        }
+    }
+
+    /// The two refusals, in order, and the only constructor of [`Carry`].
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn settle<'a>(
+        owner_image: Option<&'a str>,
+        unattributed: Option<Unattributed>,
+        selected: bool,
+        known_owner: bool,
+        parsed: &Parsed,
+        nat: &Nat,
+        stats: &Stats,
+    ) -> Result<Carry<'a>, Verdict> {
+        // Nothing on this machine can say who sent this datagram, and in
+        // `OnlySelected` the honest answer is to refuse it rather than to
+        // let it out in the clear on the chance it was not the selected
+        // app's. See `Selection::verdict_for_unattributed`.
+        //
+        // Nothing is recorded against the port. A leave-alone verdict here
+        // would exempt whatever opens that port next, and the whole point
+        // of this branch is that the port is not evidence of anything -- it
+        // had no owner a moment ago and may have a perfectly ordinary one
+        // by the next datagram, which then gets decided on its merits.
+        if matches!(unattributed, Some(Unattributed::Refuse)) {
+            stats.refused_unattributed.fetch_add(1, Ordering::Relaxed);
+            return Err(Verdict::Drop);
+        }
+
+        if !selected {
+            // Only remember the decision when the owner was actually known.
+            //
+            // Recording it on a miss was a real, reported bug: a TCP SYN can
+            // reach here in the moment between the socket being created and
+            // the connection table showing it, and pinning that connection
+            // to Direct meant it stayed unprotected for its whole life --
+            // however many times a lookup would have succeeded afterwards.
+            // Browsers keep connections alive and reuse them, so one lost
+            // race left Chrome showing the real IP until enough reloads
+            // happened to open a fresh connection that won it. Reported
+            // exactly that way: "had to refresh a few times until I see the
+            // VPN ip".
+            //
+            // This is the same poisoning that OwnerLookup's image cache had
+            // and it survived here, one layer up, because the cache fix
+            // only stopped the *lookup* from going permanently wrong.
+            //
+            // Not recording it was only ever half the answer, and the half
+            // that was written down here was wrong: it said the cost was a
+            // repeat lookup on the SYN retransmit a second later. There is
+            // no retransmit. A SYN that reaches here unredirected is sent
+            // to the real destination, **which answers it**, so the
+            // connection is established outside the tunnel and there is
+            // never a second packet to decide about. That is why the miss
+            // itself had to stop happening -- see
+            // `OwnerLookup::image_for_new_connection`, which is what the
+            // lookup above uses for a SYN.
+            //
+            // Recorded against this flow rather than this port, and for UDP
+            // that is the difference between remembering an answer and
+            // inventing one. The old key covered every destination the port
+            // reached for five seconds, on the strength of one decision
+            // about one peer -- so a port that had been left alone once
+            // short-circuited `Nat::lookup` for a name lookup sent from it
+            // afterwards, and the DNS branch above, which carries a lookup
+            // whoever makes it, never ran. The query went to whichever
+            // resolver the network supplied. See `Tables::direct`.
+            //
+            // That flow key is also what lets a *scoped* application reach
+            // this line at all. `docs/design/gaming-mode.md` §5.3 lists it
+            // as a trap -- "a per-destination policy must not call
+            // `record_direct`" -- and that was true when it was written,
+            // because the cache was keyed on `(transport, source port)`.
+            // One out-of-scope packet would then have exempted the whole
+            // port for five seconds, game-server traffic included, and a
+            // game scoped to its servers would have been carried for
+            // whichever destination it happened to reach first. Keyed on
+            // the flow, "this app does not send *here* through the tunnel"
+            // is all it says, and the same port's next packet to a
+            // destination that *is* in scope is decided on its own merits.
+            // The trap is spent; the note stays because the shape of this
+            // key is now load-bearing for two features rather than one.
+            if known_owner {
+                nat.record_direct(
+                    parsed.transport,
+                    parsed.source_port,
+                    parsed.destination,
+                    parsed.destination_port,
+                );
+            }
+            return Err(Verdict::Direct);
+        }
+
+        Ok(Carry { owner_image })
     }
 }
 
@@ -2476,6 +2619,40 @@ fn rewrite_return_leg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The production path reads a packet once, in the dispatcher, and
+    // hands that reading on. These read it the same way at the point of
+    // use, so the tests below keep asking about bytes rather than about
+    // a header built to suit them.
+    fn affinity(packet: &[u8], workers: usize) -> usize {
+        affinity_of(&Header::read(packet), packet, workers)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_packet(
+        packet: &mut [u8],
+        address: &mut WINDIVERT_ADDRESS,
+        redirect: &Redirect,
+        nat: &Nat,
+        selection: &Selection,
+        owner: &mut OwnerLookup,
+        stats: &Stats,
+        reset: &mut Option<Vec<u8>>,
+    ) -> Option<Leg> {
+        let header = Header::read(packet);
+        handle_parsed(packet, &header, address, redirect, nat, selection, owner, stats, reset)
+    }
+
+    fn handle_ipv6(
+        packet: &[u8],
+        redirect: &Redirect,
+        selection: &Selection,
+        owner: &mut OwnerLookup,
+        stats: &Stats,
+        reset: &mut Option<Vec<u8>>,
+    ) -> Option<Leg> {
+        handle_ipv6_parsed(packet, parse_v6(packet).as_ref(), redirect, selection, owner, stats, reset)
+    }
 
     fn stats(seen: u64, matched: u64, redirected: u64, returned: u64, rejected: u64) -> Stats {
         Stats {
@@ -3525,7 +3702,17 @@ mod tests {
         // what the incoming one does with a packet.
         let mut redirect = sample_redirect();
         assert!(redirect.within_activation_grace());
-        redirect.activated = Instant::now() - ACTIVATION_GRACE - Duration::from_millis(1);
+        redirect.activated = Activation(Some(Instant::now() - ACTIVATION_GRACE - Duration::from_millis(1)));
+        assert!(!redirect.within_activation_grace());
+    }
+
+    /// A redirect that has not been started has no window to be inside.
+    /// It used to report whatever time its builder happened to write in,
+    /// which `start` would later overwrite.
+    #[test]
+    fn a_redirect_that_never_started_is_not_inside_the_window() {
+        let mut redirect = sample_redirect();
+        redirect.activated = Activation::pending();
         assert!(!redirect.within_activation_grace());
     }
 
@@ -3951,7 +4138,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
-            activated: Instant::now(),
+            activated: Activation::begun_now(),
             exits: Arc::new(ExitRelays::default()),
         });
 
@@ -3967,6 +4154,67 @@ mod tests {
         assert!(filter.contains("udp.SrcPort == 19998"));
     }
 
+    /// The kernel filter and the leak audit are the same list seen from
+    /// opposite ends: the filter decides what the loop is handed, and
+    /// `owner::is_public_v4` decides what the audit may call an escape.
+    /// If they drift, the audit reports "escapes" the loop never had a
+    /// chance to carry -- a number that looks like a leak.
+    ///
+    /// They were held together by two hand-written address lists, one per
+    /// side, which drift exactly as the code does. This reads the
+    /// exclusions out of the filter string the driver is actually given
+    /// and asks `is_public_v4` about each range's edges, so editing either
+    /// side alone fails here.
+    #[test]
+    fn the_filter_and_the_audit_agree_at_every_edge_of_every_range() {
+        use crate::split_tunnel::owner::is_public_v4;
+
+        let redirect = sample_redirect();
+        let filter = filter_for(&redirect);
+        let v4 = filter.split("or (outbound and ipv6").next().expect("an IPv4 clause");
+
+        let addr = |text: &str| -> u32 { u32::from(text.trim().parse::<Ipv4Addr>().expect(text)) };
+        let ranges: Vec<(u32, u32)> = v4
+            .split("(ip.DstAddr < ")
+            .skip(1)
+            .map(|clause| {
+                let (low, rest) = clause.split_once(" or ip.DstAddr > ").expect("a paired bound");
+                (addr(low), addr(rest.split(')').next().expect("a closing paren")))
+            })
+            .collect();
+        let ceiling = addr(
+            v4.split("and ip.DstAddr < ").nth(1).expect("a ceiling").split(')').next().expect("a closing paren"),
+        );
+        assert!(ranges.len() >= 5, "the filter's ranges were not found: {v4}");
+
+        let admitted = |a: u32| a < ceiling && !ranges.iter().any(|&(low, high)| (low..=high).contains(&a));
+
+        let mut probes = vec![ceiling - 1, ceiling, u32::MAX, u32::from(Ipv4Addr::new(1, 1, 1, 1))];
+        for &(low, high) in &ranges {
+            probes.extend([low - 1, low, low + (high - low) / 2, high, high + 1]);
+        }
+        for a in probes {
+            let address = Ipv4Addr::from(a);
+            assert_eq!(
+                is_public_v4(address),
+                admitted(a),
+                "{address}: the filter {} it and the audit calls it {}",
+                if admitted(a) { "admits" } else { "excludes" },
+                if is_public_v4(address) { "public" } else { "local" },
+            );
+        }
+
+        // The one known difference, and why it is harmless. The audit
+        // treats the unspecified address as local; the filter has no
+        // clause for it, because no packet addressed to 0.0.0.0 ever
+        // leaves a host for the loop to be handed. The node is the other
+        // exclusion the filter makes by address, and the audit excludes
+        // it by name -- `reset_with` and `escaped_connections` both
+        // compare against it -- so it is not a range to agree on here.
+        assert!(admitted(0) && !is_public_v4(Ipv4Addr::UNSPECIFIED));
+        assert!(filter.contains(&format!("ip.DstAddr != {}", redirect.node_addr)));
+    }
+
     fn sample_redirect() -> Redirect {
         Redirect {
             local_addr: Ipv4Addr::new(192, 168, 1, 20),
@@ -3978,7 +4226,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
-            activated: Instant::now(),
+            activated: Activation::begun_now(),
             exits: Arc::new(ExitRelays::default()),
         }
     }
@@ -4341,8 +4589,14 @@ mod tests {
         let stats = Arc::new(Stats::default());
         let relays =
             proxy::start(nat.clone(), tunnel, stats.clone(), Arc::new(ExitRelays::default())).expect("relays must start");
+        // Both sources are the local address here, and that is not a
+        // shortcut. The relay's upstream socket is normally bound to the
+        // tunnel's address, which is what makes the second allowance
+        // necessary -- but this test builds `TunnelInterface::new(0,
+        // UNSPECIFIED)` on purpose, so there is no tunnel address to
+        // allow and the relay binds locally like everything else.
         let mut allowance =
-            firewall::Allowance::install(&[local_addr], relays.tcp_port, relays.udp_port)
+            firewall::Allowance::install(local_addr, local_addr, relays.tcp_port, relays.udp_port)
                 .expect("the inbound allowance must install");
         // A live token: this test wants the wait to run, not to be
         // skipped, so it hands one that is not cancelled.
@@ -4381,7 +4635,7 @@ mod tests {
                 carry_dns: false,
                 dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
                 // Overwritten by `start`; see ACTIVATION_GRACE.
-                activated: Instant::now(),
+                activated: Activation::begun_now(),
                 exits: Arc::new(ExitRelays::default()),
             },
             nat,
@@ -4435,7 +4689,7 @@ mod tests {
             dns_resolver: Ipv4Addr::new(1, 1, 1, 1),
             carry_dns: true,
             local_interface: 5,
-            activated: Instant::now(),
+            activated: Activation::begun_now(),
             exits: Arc::new(ExitRelays::default()),
         });
         super::super::divert::compile_filter(&filter).expect("the filter must compile");
@@ -4640,6 +4894,46 @@ mod tests {
         packet[24..40].copy_from_slice(&dst.octets());
         packet[IPV6_HEADER] = icmp_type;
         packet
+    }
+
+    /// An ICMPv6 message behind a hop-by-hop and a destination-options
+    /// header, written out byte by byte rather than through the walker
+    /// under test.
+    fn icmpv6_behind_extensions(icmp_type: u8) -> Vec<u8> {
+        let mut packet = vec![0u8; IPV6_HEADER + 8 + 8 + 8];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&24u16.to_be_bytes());
+        packet[6] = IPPROTO_HOPOPTS;
+        packet[7] = 64;
+        let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+        packet[8..24].copy_from_slice(&src.octets());
+        packet[24..40].copy_from_slice(&dst.octets());
+        // Hop-by-hop: next header, length 0 (eight bytes in all).
+        packet[40] = IPPROTO_DSTOPTS;
+        packet[41] = 0;
+        // Destination options: next header ICMPv6, length 0.
+        packet[48] = IPPROTO_ICMPV6;
+        packet[49] = 0;
+        packet[56] = icmp_type;
+        packet
+    }
+
+    /// The gap the ping refusal used to state: an echo request behind an
+    /// extension-header chain went out unrecognised. It is refused now,
+    /// and -- the other half -- a non-echo ICMPv6 message behind the
+    /// same chain is still passed through untouched, as every ICMP
+    /// message other than a ping is.
+    #[test]
+    fn a_ping_behind_extension_headers_is_refused_and_other_icmpv6_still_passes() {
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+
+        let mut ping = icmpv6_behind_extensions(ICMPV6_ECHO_REQUEST);
+        assert_eq!(icmp_verdict(&mut ping, true, &selection), (Some(Leg::Swallowed), 1));
+
+        // 2 is Packet Too Big, which path-MTU discovery depends on.
+        let mut too_big = icmpv6_behind_extensions(2);
+        assert_eq!(icmp_verdict(&mut too_big, true, &selection), (None, 0));
     }
 
     /// Drives the real entry point rather than the classifier, so what
