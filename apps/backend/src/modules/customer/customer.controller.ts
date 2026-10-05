@@ -25,6 +25,9 @@ import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { PlansService } from "../plans/plans.service";
 import { RoutesService } from "../routes/routes.service";
+import { IspRecommendationsService } from "../isp-recommendations/isp-recommendations.service";
+import type { IspTag } from "../isp-recommendations/isp-signal";
+import { clientIpOf } from "../../common/client-ip";
 import { BillingService } from "../billing/billing.service";
 import { InvoicesService } from "../invoices/invoices.service";
 import { PaymentSettingsService } from "../payment-settings/payment-settings.service";
@@ -71,6 +74,7 @@ export class CustomerController {
     private readonly invoicesService: InvoicesService,
     private readonly paymentSettings: PaymentSettingsService,
     private readonly gamingService: GamingService,
+    private readonly ispRecommendations: IspRecommendationsService,
   ) {}
 
   @Get("me")
@@ -312,11 +316,27 @@ export class CustomerController {
   // picker that offers more than that produces a customer tapping a
   // server and being told no, which looks like a bug rather than a plan
   // boundary.
+  //
+  // Each option also carries `ispTag`: what other customers on the
+  // caller's network recently experienced on it, when enough of them did
+  // to say anything (see isp-recommendations/isp-signal.ts). A code and
+  // counts, never prose -- the client words it in the customer's
+  // language. Information for the person choosing; the client's
+  // automatic failover order does not read it.
+  //
+  // The network comes from the `X-Neoxify-Network` attestation the
+  // client was handed at /health/ip before its tunnel came up, because
+  // this list is often fetched through the tunnel. Without one, from the
+  // request's address unless that is one of our nodes.
   @Get("subscriptions/:id/routes")
-  async availableRoutes(@CurrentCustomer() customer: AuthenticatedCustomer, @Param("id") id: string) {
+  async availableRoutes(
+    @CurrentCustomer() customer: AuthenticatedCustomer,
+    @Param("id") id: string,
+    @Req() req: Request,
+  ) {
     const subscription = await this.subscriptionsService.getOwned(id, customer.sub);
     const plan = await this.plansService.get(subscription.planId);
-    return this.routesService.listAvailableForPlan(
+    const routes = await this.routesService.listAvailableForPlan(
       plan.protocolsAllowed,
       plan.allowedRoutes.map((r) => r.id),
       // Salts each option's opaque exit handle. Taken from the verified
@@ -324,6 +344,20 @@ export class CustomerController {
       // another's handles and the two views can never be joined.
       customer.sub,
     );
+
+    // Best-effort: a failure here costs the tags, never the list.
+    let tags = new Map<string, IspTag>();
+    try {
+      const header = req.headers["x-neoxify-network"];
+      const asn = await this.ispRecommendations.networkFor(
+        Array.isArray(header) ? header[0] : header,
+        clientIpOf(req) || req.ip,
+      );
+      tags = await this.ispRecommendations.tagsFor(asn);
+    } catch {
+      // Fall through with no tags.
+    }
+    return routes.map((route) => ({ ...route, ispTag: tags.get(route.id) ?? null }));
   }
 
   // Location picker: switch this subscription's VPN account to a

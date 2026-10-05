@@ -103,6 +103,15 @@ services:
       # Unset, every SUPERADMIN in admin_users is mailed, which is the
       # right default because it needs no maintenance.
       REACHABILITY_ALERT_EMAILS: ${REACHABILITY_ALERT_EMAILS:-}
+      # Per-ISP recommendations: an offline IP-to-ASN table (iptoasn.com,
+      # public domain), downloaded once a day. All optional and on by
+      # default. ASN_LOOKUP_ENABLED=false turns the feature off (no tags,
+      # nothing else changes); ASN_DATASET_URL=none skips the download and
+      # uses only the file at ASN_DATASET_PATH, which defaults to the
+      # container's temp directory -- fetched again after a restart.
+      ASN_LOOKUP_ENABLED: ${ASN_LOOKUP_ENABLED:-}
+      ASN_DATASET_URL: ${ASN_DATASET_URL:-}
+      ASN_DATASET_PATH: ${ASN_DATASET_PATH:-}
       # Shared secret machine callers present as X-Service-Token. Must reach
       # the backend as well as the bot: the guard fails closed, so with this
       # set only on the bot side every request is rejected with a 401.

@@ -402,7 +402,7 @@ export interface Subscription {
 }
 
 /** What a client was trying to do when it reported an attempt. */
-export type ClientAttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT";
+export type ClientAttemptKind = "REGISTER" | "SIGN_IN" | "CONNECT" | "SESSION";
 
 /** How it went, in the app's own vocabulary rather than an HTTP status.
  *
@@ -422,6 +422,9 @@ export type ClientAttemptOutcome =
 export interface AttemptRung {
   protocol: string;
   result: string;
+  /** The route this rung dialled, on clients new enough to say. */
+  routeId?: string;
+  carried?: boolean;
 }
 
 export interface ClientAttempt {
@@ -443,12 +446,54 @@ export interface ClientAttempt {
    * A report queued while the control plane was unreachable can be hours
    * late, and those are the ones worth reading. */
   occurredAt: string | null;
+  /** The network the client was on before connecting, from a signed
+   * attestation. Null for older clients and unknown networks. */
+  asn?: number | null;
+  /** For a SESSION report: how long the tunnel had carried traffic. */
+  sessionSeconds?: number | null;
   createdAt: string;
 }
 
 export interface ClientAttemptSummaryRow {
   outcome: ClientAttemptOutcome;
   count: number;
+}
+
+/** What customers see in the picker, per route, on one network. */
+export interface IspTag {
+  code: "worksOnYourIsp" | "failingOnYourIsp";
+  customers: number;
+  outOf: number;
+  windowHours: number;
+}
+
+/** One route's evidence on one network, as /isp-recommendations reports it.
+ * Counts are distinct signed-in customers inside the window. */
+export interface IspRouteStats {
+  routeId: string;
+  routeName: string | null;
+  nodeName: string | null;
+  protocol: string | null;
+  transport: string | null;
+  isRelay: boolean | null;
+  tried: number;
+  carried: number;
+  sustained: number;
+  worked: number;
+  tag: IspTag | null;
+}
+
+export interface IspNetwork {
+  asn: number;
+  org: string | null;
+  routes: IspRouteStats[];
+}
+
+export interface IspRecommendationsSummary {
+  windowHours: number;
+  truncated: boolean;
+  networks: IspNetwork[];
+  dataset: { loaded: boolean; ranges: number; loadedAt: string | null };
 }
 
 // --------------------------------------------------------------- reseller
