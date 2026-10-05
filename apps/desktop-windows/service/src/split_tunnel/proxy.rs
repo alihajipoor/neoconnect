@@ -790,6 +790,14 @@ impl Relays {
     pub fn stop(self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.tcp_port));
+        // The UDP receive is woken the same way, by being given
+        // something to receive. It used to be left to notice the flag on
+        // its next read timeout, and that wait was measured at 455 to
+        // 465ms on every stop -- half of the 900ms phase one of a
+        // disconnect is held to, spent waiting for a socket to time out.
+        if let Ok(waker) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)) {
+            let _ = waker.send_to(&[0], (Ipv4Addr::LOCALHOST, self.udp_port));
+        }
         self.carried.close_all();
         self.upstreams.close_all();
         for thread in self.threads {
@@ -1130,6 +1138,14 @@ fn serve_udp(
         let Ok((len, from)) = local.recv_from(&mut buffer) else {
             continue; // read timeout, or a transient error worth retrying
         };
+        // Before the datagram is looked at, not only at the top of the
+        // loop: `Relays::stop` wakes this receive by sending one, and a
+        // wake-up must never be read as a flow's traffic -- whatever
+        // port it happened to leave from. The flag is set before the
+        // wake is sent, so this sees it.
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
         let SocketAddr::V4(from) = from else { continue };
         let nat_port = from.port();
 
@@ -2011,6 +2027,31 @@ mod tests {
     /// True when a read ended because the connection did, and false when
     /// it only gave up waiting. The difference is the whole assertion:
     /// a timeout here means the relay is still holding the connection.
+    /// Stopping the relays is part of phase one of a disconnect, which
+    /// is held to 900ms. It measured 455 to 465ms on every stop -- the
+    /// UDP receive waiting out its read timeout -- then 150ms from the
+    /// expiry thread's sleep step; with both fixed it is about 10ms.
+    ///
+    /// The bound is the median of eight against 200ms: loose enough for
+    /// a busy runner, and still failed outright by either of the waits
+    /// this replaced.
+    #[test]
+    fn stopping_the_relays_does_not_wait_out_a_timeout() {
+        let mut took: Vec<Duration> = (0..8)
+            .map(|_| {
+                let relays = start(Arc::new(Nat::new()), Arc::new(TunnelInterface::default()), counters(), Arc::new(ExitRelays::default()))
+                    .expect("relays should bind");
+                std::thread::sleep(Duration::from_millis(50));
+                let began = Instant::now();
+                relays.stop();
+                began.elapsed()
+            })
+            .collect();
+        took.sort();
+        let median = took[took.len() / 2];
+        assert!(median < Duration::from_millis(200), "relays.stop took {took:?}");
+    }
+
     fn ended(result: &io::Result<usize>) -> bool {
         match result {
             Ok(n) => *n == 0,
