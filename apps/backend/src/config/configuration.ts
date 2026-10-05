@@ -151,4 +151,31 @@ export default () => ({
     // precisely because it needs no maintenance.
     recipients: process.env.REACHABILITY_ALERT_EMAILS,
   },
+  asn: {
+    // Which network (autonomous system) a caller is on, for the per-ISP
+    // recommendations in the location picker. See modules/network-identity.
+    //
+    // An offline table rather than a lookup service: nothing about a
+    // customer's address leaves this process, no request waits on a
+    // third party, and the dataset (iptoasn.com, public domain under
+    // PDDL 1.0) costs nothing to use or redistribute. It is fetched once
+    // a day, not per request.
+    //
+    // Off under test, so a test run never reaches the internet. Off
+    // entirely with ASN_LOOKUP_ENABLED=false, which leaves every ASN
+    // null: no tags in the picker, nothing else changes.
+    enabled: process.env.ASN_LOOKUP_ENABLED !== "false" && process.env.NODE_ENV !== "test",
+    // "none" disables the download and uses only the file at
+    // `datasetPath` -- for a host that cannot reach iptoasn.com and has
+    // the file put there by other means. Not the empty string for that:
+    // Compose's `${ASN_DATASET_URL:-}` passes an unset variable through
+    // as empty, and that must mean "default", not "off".
+    datasetUrl:
+      process.env.ASN_DATASET_URL === "none"
+        ? ""
+        : process.env.ASN_DATASET_URL || "https://iptoasn.com/data/ip2asn-combined.tsv.gz",
+    // Where the downloaded file is kept, so a restart with the download
+    // unreachable still has yesterday's table rather than none.
+    datasetPath: process.env.ASN_DATASET_PATH,
+  },
 });

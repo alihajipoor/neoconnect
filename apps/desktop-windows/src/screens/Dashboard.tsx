@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Tag } from "lucide-react";
-import { displayedRoute } from "../lib/displayed-route";
+import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Sparkles, Tag } from "lucide-react";
+import { displayedRoute, showsAutomatic } from "../lib/displayed-route";
 import { getAvailableRoutes, getMe, getProtocolUsers, getSubscriptions } from "../lib/customer";
 import { logout } from "../lib/auth";
 import type { Customer, ProtocolUser, RouteOption, Subscription } from "../lib/types";
@@ -27,7 +27,7 @@ import {
   type VpnStatus,
 } from "../lib/connection-evidence";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
-import { orderCandidates, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
+import { orderCandidates, ispTagsOf, lastGoodFor, rememberLastGood, type LastGoodMap } from "../lib/failover";
 import { recordAttempt, type ConnectHistory } from "../lib/connect-history";
 import { probeCandidates } from "../lib/reachability";
 import {
@@ -52,7 +52,8 @@ import { refreshConnectionConfig } from "../lib/connection-config";
 import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
-import { outcomeFromError, reportAttempt, rungsFrom } from "../lib/attempts";
+import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
+import { createSessionTracker } from "../lib/session-report";
 import { isServiceTimeout, withTimeout } from "../lib/service-call";
 import {
   concludeIntent,
@@ -411,6 +412,13 @@ export function Dashboard({
   /** The server the customer picked from the list, if any. Tried
    * first; deliberately does not disable the others. */
   const [chosenRouteId, setChosenRouteId] = useState<string | null>(null);
+  /** Counts a session that keeps passing its health checks, once, for
+   * the per-ISP tags. See session-report.ts. */
+  const sessionTrackerRef = useRef(createSessionTracker());
+  /** The route the tunnel is on, readable from inside the health poll's
+   * interval without depending on which render created it. */
+  const settledRouteRef = useRef<string | null>(null);
+  settledRouteRef.current = protocolUser?.routeId ?? null;
   /** Which network we are on, so "what worked here last time" means
    * here and not somewhere else. Null when it cannot be determined. */
   const [networkId, setNetworkId] = useState<string | null>(null);
@@ -1045,6 +1053,7 @@ export function Dashboard({
       }
 
       if (fromStatus === "disconnected") {
+        sessionTrackerRef.current.broken();
         if (publishObserved(generation, "disconnected") === null) return;
         setConnectedAt(null);
         strikesRef.current = 0;
@@ -1089,6 +1098,13 @@ export function Dashboard({
         if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
         verdict = fullTunnelPollState(fromStatus, egress);
       }
+
+      // "It kept working", for the per-ISP tags: a proven check advances
+      // the session clock, a failed one restarts it. `unverified` does
+      // neither -- an abstention is not evidence either way, the same
+      // reasoning as the strike count below.
+      if (verdict === "connected") sessionTrackerRef.current.healthy(settledRouteRef.current);
+      else if (verdict !== "unverified") sessionTrackerRef.current.broken();
 
       if (verdict === "connected" || verdict === "unverified") {
         // `unverified` resets the strike count with the same authority
@@ -1138,7 +1154,14 @@ export function Dashboard({
     if (Date.now() - lastCheckAtRef.current >= MIN_CHECK_GAP_MS) void check();
     const id = setInterval(() => void check(), HEALTH_POLL_MS);
 
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      // Any change of state ends the stretch of continuous health being
+      // timed -- a disconnect, a reconnect onto the same route, or a dip
+      // to degraded. Without this a reconnect to the same server would
+      // inherit the previous session's clock.
+      sessionTrackerRef.current.broken();
+    };
     // Not `splitTunnelActive`: the poll picks its evidence from the
     // status each check reads, because a value captured here is stale on
     // exactly the check that matters -- the first one after a connect.
@@ -1424,6 +1447,10 @@ export function Dashboard({
         network: networkId,
         reachability,
         preferredRouteId: null,
+        // What others on this network got through on. A tie-break only,
+        // and only while this device has no history here -- the first
+        // run, which is when a wrong guess makes people quit.
+        ispTags: ispTagsOf(routes),
       });
 
       // What the dashboard was promising before any of this ran.
@@ -1455,6 +1482,11 @@ export function Dashboard({
       // first version of this needed a firewall rule and the server's
       // own logs -- the app knew and said nothing.
       const attempts: string[] = [];
+      // One per entry in `attempts`, by index: which route that rung
+      // dialled and whether it carried, or null when the rung says
+      // nothing about the network. Feeds the per-ISP tags; see
+      // `failedDial`.
+      const dials: Dial[] = [];
 
       for (const [index, candidate] of candidates.entries()) {
         if (cancelRef.current || sessionGeneration() !== sessionAtStart) break;
@@ -1733,17 +1765,27 @@ export function Dashboard({
             // this network while Fast does not" is a fact only the
             // successes can establish. The ladder is attached whenever
             // something had to be walked past to get here.
+            //
+            // Always with the ladder now, even a one-rung one: the
+            // per-ISP tags count only explicit, proven rungs, so the rung
+            // that worked has to be there to be counted -- and an
+            // `unverified` landing is a SUCCESS that proved nothing, so
+            // its rung carries no dial.
             void reportAttempt({
               kind: "CONNECT",
               outcome: "SUCCESS",
               protocol: label,
               routeId: candidate.routeId,
-              attempts: attempts.length > 0 ? rungsFrom([...attempts, `${label}: connected`]) : undefined,
+              attempts: rungsFrom(
+                [...attempts, `${label}: connected`],
+                [...dials, verdict === "connected" ? { routeId: candidate.routeId, carried: true } : null],
+              ),
             });
             return "connected";
           }
 
           attempts.push(`${label}: up but ${reason}`);
+          dials.push({ routeId: candidate.routeId, carried: false });
           lastError = {
             kind: "serverUnreachable",
             messageKey: candidates.length > 1 ? "err.allProtocolsFailed" : "err.notCarryingTraffic",
@@ -1752,6 +1794,7 @@ export function Dashboard({
         } catch (err) {
           const classified = classifyConnectionError(err);
           attempts.push(`${label}: ${classified.detail}`);
+          dials.push(failedDial(candidate.routeId, classified.kind));
           lastError = { ...classified, detail: describeAttempts(attempts, candidates.length) };
         }
 
@@ -1783,7 +1826,7 @@ export function Dashboard({
           kind: "CONNECT",
           outcome: lastError ? outcomeFromError(lastError.kind) : "OTHER",
           reason: lastError?.detail,
-          attempts: rungsFrom(attempts),
+          attempts: rungsFrom(attempts, dials),
         });
       }
       // No "Disconnecting..." here, and this line is the whole reported
@@ -1867,6 +1910,10 @@ export function Dashboard({
     () => displayedRoute(routes, connectionState, protocolUser?.routeId, chosenRouteId, protocolUser?.routeId),
     [routes, protocolUser, chosenRouteId, connectionState],
   );
+  /** Nothing pinned and no settled tunnel yet: the honest name for the
+   * next connect's server is "Automatic", not whichever route happens to
+   * be provisioned. */
+  const automaticPending = showsAutomatic(connectionState, chosenRouteId);
 
   /** Null cap means unlimited, and that is a different thing from a
    * cap we could not read. Both end up without a bar -- there is no
@@ -2364,16 +2411,22 @@ export function Dashboard({
                     and the protocol it speaks are one choice here. Two
                     entry points because people look for the word they
                     have in mind. */}
+                {/* With nothing pinned the tiles say "Automatic" until a
+                    tunnel has settled, then name where it landed with the
+                    caption saying it was the app's pick. See
+                    `showsAutomatic` for which states count as settled. */}
                 <Stat
                   icon={
-                    currentRoute ? (
+                    automaticPending ? (
+                      <Sparkles className="size-3" />
+                    ) : currentRoute ? (
                       <Flag region={currentRoute.location.region} className="h-3 w-[1rem]" />
                     ) : (
                       <Globe className="size-3" />
                     )
                   }
-                  label={t("dash.server")}
-                  value={currentRoute ? currentRoute.location.region : "—"}
+                  label={t(!chosenRouteId && !automaticPending ? "dash.serverAuto" : "dash.server")}
+                  value={automaticPending ? t("loc.automaticShort") : currentRoute ? currentRoute.location.region : "—"}
                   onClick={() => setShowLocationPicker(true)}
                   actionLabel={t("dash.change")}
                   disabledReason={
@@ -2383,7 +2436,13 @@ export function Dashboard({
                 <Stat
                   icon={<Shield className="size-3" />}
                   label={t("dash.protocol")}
-                  value={protocolUser ? customerProtocolLabel(protocolUser.protocol, protocolUser.connection?.transport) : "—"}
+                  value={
+                    automaticPending
+                      ? t("loc.automaticShort")
+                      : protocolUser
+                        ? customerProtocolLabel(protocolUser.protocol, protocolUser.connection?.transport)
+                        : "—"
+                  }
                   onClick={() => setShowLocationPicker(true)}
                   actionLabel={t("dash.change")}
                   disabledReason={
@@ -2551,6 +2610,15 @@ export function Dashboard({
           // Already loaded here, so the picker opens on real content
           // instead of a spinner.
           initialRoutes={routes}
+          // Nothing pinned is Automatic, and it is what a new install
+          // starts on. Choosing it clears the pin on this device; there is
+          // no server call, because every route's credential is already
+          // provisioned and the ladder chooses among them at connect time.
+          automatic={!chosenRouteId}
+          onChooseAutomatic={() => {
+            setChosenRouteId(null);
+            void saveChosenRoute(null);
+          }}
           onClose={() => setShowLocationPicker(false)}
           // Re-reads the provisioned connection rather than adopting the
           // switch response directly. Two reasons, one of which was a

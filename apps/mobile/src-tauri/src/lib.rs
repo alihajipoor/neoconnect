@@ -33,7 +33,11 @@ pub fn run() {
             // where its latency should be -- for the whole life of the
             // Android client, because the command was only ever added
             // to the Windows one.
-            latency::measure_latency
+            latency::measure_latency,
+            // The connect ladder's pre-dial reachability probe, shared
+            // with the Windows client. Same story as the line above: it
+            // only existed there, so on the phones it always rejected.
+            latency::probe_tcp
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

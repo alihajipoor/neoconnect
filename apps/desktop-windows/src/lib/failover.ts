@@ -1,6 +1,15 @@
 import { scoreFor, type ConnectHistory } from "./connect-history";
 import { reachabilityOf, type ReachabilityMap } from "./reachability";
-import type { Protocol, ProtocolUser } from "./types";
+import type { IspTag, Protocol, ProtocolUser } from "./types";
+
+export type IspTagCode = IspTag["code"];
+
+/** The route list's tags, in the shape `orderCandidates` takes. */
+export function ispTagsOf(routes: ReadonlyArray<{ id: string; ispTag?: IspTag | null }>): Record<string, IspTagCode> {
+  const tags: Record<string, IspTagCode> = {};
+  for (const route of routes) if (route.ispTag) tags[route.id] = route.ispTag.code;
+  return tags;
+}
 
 /** Order to try protocols in when nothing better is known.
  *
@@ -76,9 +85,13 @@ export function orderCandidates(
     /** What answered a handshake just now, for the ones that could be
      * asked. */
     reachability?: ReachabilityMap;
+    /** What other people on this network recently saw, per route (the
+     * route list's `ispTag` codes). Consulted only while this device
+     * has no evidence of its own here -- see `fromOthers`. */
+    ispTags?: Record<string, IspTagCode | undefined>;
   } = {},
 ): ProtocolUser[] {
-  const { pinnedRouteId, lastGoodRouteId, preferredRouteId, history, network, now, reachability } =
+  const { pinnedRouteId, lastGoodRouteId, preferredRouteId, history, network, now, reachability, ispTags } =
     opts;
 
   // A chosen route leads; it does not exclude the others.
@@ -152,11 +165,47 @@ export function orderCandidates(
     }
   };
 
+  // Other people's experience, as a tie-break -- and only on a network
+  // this device knows nothing about.
+  //
+  // ac56993 refused to order by anyone else's data, and on a network the
+  // device has history for, that still holds without exception: filtering
+  // differs between two people on one ISP and from day to day, so this
+  // device's own results are the better guide, and they alone order the
+  // ladder here.
+  //
+  // The case it left open is the one people quit over: a first run, or a
+  // network never seen before, where there is no evidence at all and the
+  // order falls to `PROTOCOL_ORDER` -- one list for the whole world. A
+  // customer on a carrier where that list's first entries are blocked
+  // waits through each of them, decides the app is broken, and leaves.
+  // There, "most people on this network got through on X recently" is
+  // strictly better than a global constant. So it ranks below everything
+  // the device itself knows (a pin, a last-good, the live probe, its own
+  // history) and above the fixed order. The moment the device has any
+  // evidence on this network, this returns 0 for everyone and the order
+  // is exactly what it was before tags existed.
+  const deviceKnowsNetwork =
+    Boolean(lastGoodRouteId && users.some((u) => u.routeId === lastGoodRouteId)) ||
+    users.some((u) => evidence(u) !== null);
+  const fromOthers = (u: ProtocolUser): number => {
+    if (deviceKnowsNetwork || !ispTags) return 0;
+    switch (ispTags[u.routeId]) {
+      case "worksOnYourIsp":
+        return -1;
+      case "failingOnYourIsp":
+        return 1;
+      default:
+        return 0;
+    }
+  };
+
   return [...users].sort(
     (a, b) =>
       priority(a) - priority(b) ||
       liveness(a) - liveness(b) ||
       byEvidence(a, b) ||
+      fromOthers(a) - fromOthers(b) ||
       rank(a.protocol) - rank(b.protocol) ||
       wsLast(a) - wsLast(b) ||
       a.routeId.localeCompare(b.routeId),

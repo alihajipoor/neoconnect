@@ -39,6 +39,8 @@ import { ClientAttemptsModule } from "./modules/client-attempts/client-attempts.
 import { ReachabilityModule } from "./modules/reachability/reachability.module";
 import { GamingModule } from "./modules/gaming/gaming.module";
 import { EndpointsModule } from "./modules/endpoints/endpoints.module";
+import { NetworkIdentityModule } from "./modules/network-identity/network-identity.module";
+import { IspRecommendationsModule } from "./modules/isp-recommendations/isp-recommendations.module";
 
 @Module({
   imports: [
@@ -90,6 +92,8 @@ import { EndpointsModule } from "./modules/endpoints/endpoints.module";
     ReachabilityModule,
     GamingModule,
     EndpointsModule,
+    NetworkIdentityModule,
+    IspRecommendationsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

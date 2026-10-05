@@ -13,6 +13,7 @@ import { BillingModule } from "../billing/billing.module";
 import { InvoicesModule } from "../invoices/invoices.module";
 import { PaymentSettingsModule } from "../payment-settings/payment-settings.module";
 import { GamingModule } from "../gaming/gaming.module";
+import { IspRecommendationsModule } from "../isp-recommendations/isp-recommendations.module";
 
 @Module({
   imports: [
@@ -29,6 +30,8 @@ import { GamingModule } from "../gaming/gaming.module";
     AppLinksModule,
     SupportModule,
     GamingModule,
+    // Tags on the route list: what others on the caller's network saw.
+    IspRecommendationsModule,
   ],
   controllers: [CustomerController],
 })

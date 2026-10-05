@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ClientAttemptKind, ClientAttemptOutcome, Prisma } from "@prisma/client";
 import { PrismaService } from "../../prisma/prisma.service";
 import { ReportAttemptDto } from "./dto/report-attempt.dto";
+import { NetworkIdentityService } from "../network-identity/network-identity.service";
 
 /** How long a report is kept.
  *
@@ -46,7 +47,10 @@ export function plausibleOccurredAt(value: string | undefined, now = Date.now())
 export class ClientAttemptsService {
   private readonly logger = new Logger(ClientAttemptsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly identity: NetworkIdentityService,
+  ) {}
 
   /** Records one report. Never throws to the caller.
    *
@@ -78,6 +82,12 @@ export class ClientAttemptsService {
       // future date or an ancient one is a broken clock or a bored
       // stranger, and either way is worse than no answer.
       occurredAt: plausibleOccurredAt(dto.occurredAt),
+      // Only what the server's own signature vouches for. The request's
+      // address is deliberately not looked up as a fallback: most of
+      // these arrive through the tunnel, from a node, and the attestation
+      // is the one reading taken before that.
+      asn: this.identity.verify(dto.network),
+      sessionSeconds: dto.kind === ClientAttemptKind.SESSION ? (dto.sessionSeconds ?? null) : null,
     });
 
     try {

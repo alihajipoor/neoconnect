@@ -6,9 +6,25 @@ import {
   MapPin,
   Settings as SettingsIcon,
   Shield,
+  Sparkles,
   Tag,
 } from "lucide-react";
-import { displayedRoute } from "@shared/lib/displayed-route";
+import { displayedRoute, showsAutomatic } from "@shared/lib/displayed-route";
+import {
+  ispTagsOf,
+  lastGoodFor,
+  rememberLastGood,
+} from "@shared/lib/failover";
+import { recordAttempt } from "@shared/lib/connect-history";
+import {
+  loadConnectHistory,
+  loadLastGood,
+  saveConnectHistory,
+  saveLastGood,
+} from "@shared/lib/failover-store";
+import { probeCandidates } from "@shared/lib/reachability";
+import { networkKeyFromAsn } from "@shared/lib/network-identity";
+import { createSessionTracker } from "@shared/lib/session-report";
 import {
   getAvailableRoutes,
   getMe,
@@ -56,9 +72,11 @@ import {
 import { refreshConnectionConfig } from "@shared/lib/connection-config";
 import { useRefreshOnResume } from "@shared/lib/resume";
 import {
+  failedDial,
   outcomeFromError,
   reportAttempt,
   rungsFrom,
+  type Dial,
 } from "@shared/lib/attempts";
 import { loadAllowedApps } from "../lib/per-app";
 import { protocolSupported } from "../lib/platform";
@@ -273,6 +291,12 @@ export function Dashboard({
   const [protocolUsers, setProtocolUsers] = useState<ProtocolUser[]>([]);
   const [chosenRouteId, setChosenRouteId] = useState<string | null>(null);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
+  /** Counts a session that keeps passing its health checks, once, for the
+   * per-ISP tags. See session-report.ts. */
+  const sessionTrackerRef = useRef(createSessionTracker());
+  /** The route the tunnel is on, for the health poll's interval. */
+  const settledRouteRef = useRef<string | null>(null);
+  settledRouteRef.current = protocolUser?.routeId ?? null;
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("disconnected");
   const [connectionError, setConnectionError] =
@@ -471,6 +495,7 @@ export function Dashboard({
       }
 
       if (fromStatus === "disconnected") {
+        sessionTrackerRef.current.broken();
         setConnectionState("disconnected");
         setConnectedAt(null);
         return;
@@ -480,12 +505,25 @@ export function Dashboard({
       const carrying =
         egress.state === "throughTunnel" || egress.state === "indeterminate";
       if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
+      // "It kept working", for the per-ISP tags. Only a changed exit
+      // address advances the clock; an indeterminate reading neither
+      // advances nor resets it, and anything else starts it over.
+      if (egress.state === "throughTunnel" && fromStatus === "connected") {
+        sessionTrackerRef.current.healthy(settledRouteRef.current);
+      } else if (egress.state !== "indeterminate") {
+        sessionTrackerRef.current.broken();
+      }
       setConnectionState(
         carrying && fromStatus === "connected" ? "connected" : "degraded",
       );
     }, HEALTH_POLL_MS);
 
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      // A change of state ends the stretch being timed, so a reconnect
+      // to the same server does not inherit the last session's clock.
+      sessionTrackerRef.current.broken();
+    };
   }, [connectionState, baselineIp]);
 
   async function handleConnectToggle() {
@@ -641,15 +679,59 @@ export function Dashboard({
     }
 
     setConnectionState("connecting");
+
+    // The same ladder order the Windows client uses, which this screen
+    // did not: it walked "pin, then the fixed protocol list" with no
+    // memory and no probe, so a phone on a filtered network re-tried the
+    // same blocked protocols first on every single connect.
+    //
+    // The baseline is taken first because the network is read from it.
+    // Android and iOS have no gateway fingerprint like the Windows
+    // service's, so the per-network memories here are keyed on the ASN
+    // the server reports for the pre-connect address (`asn:<number>`;
+    // see `networkKeyFromAsn`) -- coarser than per-Wi-Fi, but it does
+    // separate mobile data from home broadband and one carrier from
+    // another, which is what makes filtering differ. Unknown shares one
+    // bucket, as on Windows. Reused as the first candidate's baseline
+    // below rather than asked for twice.
+    let pendingBaseline: BaselineIp | null | undefined = await captureBaselineIp();
+    setBaselineIp(pendingBaseline);
+    const networkId = networkKeyFromAsn();
+    const [lastGood, history, reachability] = await Promise.all([
+      loadLastGood(),
+      loadConnectHistory(),
+      // About a second, all candidates at once, before anything is
+      // dialled; UDP protocols are not asked and stay "unknown". See
+      // reachability.ts.
+      probeCandidates(usable).catch(() => ({})),
+    ]);
+    // Stopped before anything was dialled: the toggle that set the flag
+    // owns the state from here, as it does for every cancel below.
+    if (cancelRef.current) return;
+
     const candidates = orderCandidates(usable, {
       pinnedRouteId: chosenRouteId,
-      lastGoodRouteId: null,
+      lastGoodRouteId: lastGoodFor(lastGood, networkId),
+      history,
+      network: networkId,
+      reachability,
       preferredRouteId: null,
+      // A tie-break only on a network this phone has no history for --
+      // the first run, which is when people give up. See failover.ts.
+      ispTags: ispTagsOf(routes),
     });
+    let historyNow = history;
+    const remember = (routeId: string, protocol: ProtocolUser["protocol"], ok: boolean) => {
+      historyNow = recordAttempt(historyNow, networkId, routeId, protocol, ok);
+      void saveConnectHistory(historyNow);
+    };
 
     const allowedApps = await loadAllowedApps();
     let lastError: ClassifiedError | null = null;
     const attempts: string[] = [];
+    // Parallel to `attempts`: which route each rung dialled and whether
+    // it carried, or null for a rung that says nothing about the network.
+    const dials: Dial[] = [];
 
     /* Someone giving up is a result, and it used to be recorded as
      * nothing at all.
@@ -688,7 +770,9 @@ export function Dashboard({
       // Taken while nothing is up. Captured through a live tunnel it
       // would record the exit address as the "before" value, and every
       // later comparison would read a working connection as a leak.
-      const baseline = await captureBaselineIp();
+      const baseline =
+        pendingBaseline !== undefined ? pendingBaseline : await captureBaselineIp();
+      pendingBaseline = undefined;
       setBaselineIp(baseline);
 
       // Android's platform VPN profile has no per-app allowlist -- the
@@ -699,6 +783,8 @@ export function Dashboard({
       // "Connected".
       if (candidate.protocol === "IKEV2" && allowedApps.length > 0) {
         attempts.push(`${label}: not available with selected apps`);
+        // Skipped, not dialled: says nothing about the network.
+        dials.push(null);
         // iOS carries Xray in a packet-tunnel extension and nothing else.
         // WireGuard and IKEv2 would each need their own provider and
         // neither is built, so attempting one fails at the system
@@ -707,6 +793,7 @@ export function Dashboard({
         // feature. Skipped with a reason, like the case above.
         if (!protocolSupported(candidate.protocol)) {
           attempts.push(`${label}: not supported on this platform`);
+          dials.push(null);
           continue;
         }
         continue;
@@ -778,23 +865,36 @@ export function Dashboard({
           if (chosenRouteId && candidate.routeId !== chosenRouteId)
             setFailedOverTo(label);
           setConnectionState("connected");
+          // `confirmEgress` also accepts an indeterminate reading (no
+          // baseline to compare), so "carried" here is not always proof.
+          // Only a changed exit address is, and only that is remembered
+          // as working on this network or counted for the per-ISP tags --
+          // the same rule the Windows ladder follows for `unverified`.
+          const proven = verdict.state === "throughTunnel";
+          remember(candidate.routeId, candidate.protocol, proven);
+          if (proven) {
+            void saveLastGood(rememberLastGood(lastGood, networkId, candidate.routeId));
+          }
           // Successes carry the denominator. A failure count without one
           // cannot distinguish "the tablet build is broken" from "one
-          // person tried once".
+          // person tried once". Always with the ladder now, even one
+          // rung, because the per-ISP tags count only explicit rungs.
           void reportAttempt({
             kind: "CONNECT",
             outcome: "SUCCESS",
             protocol: label,
             routeId: candidate.routeId,
-            attempts:
-              attempts.length > 0
-                ? rungsFrom([...attempts, `${label}: connected`])
-                : undefined,
+            attempts: rungsFrom(
+              [...attempts, `${label}: connected`],
+              [...dials, proven ? { routeId: candidate.routeId, carried: true } : null],
+            ),
           });
           return;
         }
 
         attempts.push(`${label}: up but not carrying traffic`);
+        dials.push({ routeId: candidate.routeId, carried: false });
+        remember(candidate.routeId, candidate.protocol, false);
         lastError = {
           kind: "serverUnreachable",
           messageKey:
@@ -806,6 +906,11 @@ export function Dashboard({
       } catch (err) {
         const classified = classifyConnectionError(err);
         attempts.push(`${label}: ${classified.detail}`);
+        const dial = failedDial(candidate.routeId, classified.kind);
+        dials.push(dial);
+        // Only a network failure teaches the per-network memory anything;
+        // an exhausted quota on this route is not evidence about it.
+        if (dial) remember(candidate.routeId, candidate.protocol, false);
         lastError = {
           ...classified,
           detail: `tried ${attempts.length} of ${candidates.length} available\n${attempts.join("\n")}`,
@@ -828,7 +933,7 @@ export function Dashboard({
       kind: "CONNECT",
       outcome: lastError ? outcomeFromError(lastError.kind) : "OTHER",
       reason: lastError?.detail,
-      attempts: rungsFrom(attempts),
+      attempts: rungsFrom(attempts, dials),
     });
   }
 
@@ -867,6 +972,9 @@ export function Dashboard({
       ),
     [routes, protocolUser, chosenRouteId, connectionState],
   );
+  /** Nothing pinned and no settled tunnel yet: the next connect's server
+   * is "Automatic", not whichever route happens to be provisioned. */
+  const automaticPending = showsAutomatic(connectionState, chosenRouteId);
 
   /** Null cap means unlimited, which is a different thing from a cap we
    * could not read. Both end up without a bar, but only one of them
@@ -1117,7 +1225,9 @@ export function Dashboard({
                     text. The tile is the control now. */}
                 <Stat
                   icon={
-                    currentRoute ? (
+                    automaticPending ? (
+                      <Sparkles className="size-3" />
+                    ) : currentRoute ? (
                       <Flag
                         region={currentRoute.location.region}
                         className="h-3 w-[1rem]"
@@ -1126,8 +1236,21 @@ export function Dashboard({
                       <Globe className="size-3" />
                     )
                   }
-                  label={t("dash.server")}
-                  value={currentRoute ? currentRoute.location.region : "—"}
+                  // With nothing pinned: "Automatic" until a tunnel has
+                  // settled, then where it landed, captioned as the app's
+                  // pick. See `showsAutomatic`.
+                  label={t(
+                    !chosenRouteId && !automaticPending
+                      ? "dash.serverAuto"
+                      : "dash.server",
+                  )}
+                  value={
+                    automaticPending
+                      ? t("loc.automaticShort")
+                      : currentRoute
+                        ? currentRoute.location.region
+                        : "—"
+                  }
                   onClick={() => setShowLocationPicker(true)}
                   actionLabel={t("dash.change")}
                   disabledReason={
@@ -1140,7 +1263,9 @@ export function Dashboard({
                   icon={<Shield className="size-3" />}
                   label={t("dash.protocol")}
                   value={
-                    protocolUser
+                    automaticPending
+                      ? t("loc.automaticShort")
+                      : protocolUser
                       ? customerProtocolLabel(
                           protocolUser.protocol,
                           protocolUser.connection?.transport,
@@ -1320,6 +1445,14 @@ export function Dashboard({
             // degraded states where a tunnel exists but is not
             // trusted yet.
             tunnelActive={connectionState !== "disconnected"}
+            // Nothing pinned is Automatic, which is what a new install
+            // starts on; choosing it clears the pin on this device. Every
+            // route is already provisioned, so there is no server call.
+            automatic={!chosenRouteId}
+            onChooseAutomatic={() => {
+              setChosenRouteId(null);
+              void saveChosenRoute(null);
+            }}
             onClose={() => setShowLocationPicker(false)}
             onSwitched={(routeId) => {
               setChosenRouteId(routeId ?? null);
