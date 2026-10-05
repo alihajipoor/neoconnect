@@ -2,7 +2,7 @@ import { apiRequest, publicRequest } from "./api";
 import { attemptedEndpoints } from "./api-endpoints";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
 import { setTokens } from "./session";
-import { endCustomerSession } from "./session-end";
+import { endCustomerSession, type SessionEnd } from "./session-end";
 import { clearGamingProfileCache } from "./customer";
 import { solveChallengeFor } from "./pow";
 import { currentLanguage } from "./i18n";
@@ -198,13 +198,26 @@ export async function resendVerification(email: string) {
   });
 }
 
-export async function logout(): Promise<void> {
-  await apiRequest<void>("/customer-auth/logout", { method: "POST" });
-  // The server call goes first and this runs regardless of what it said:
-  // a sign-out the network refused is still a sign-out on this machine,
-  // and leaving the previous customer's credentials and entitlement
-  // behind because a request failed is the wrong way to fail.
-  await endCustomerSession();
+/** How long a sign-out waits for the server to hear about it.
+ *
+ * The request is a POST, so it walks the endpoints one at a time at up
+ * to eight seconds each -- on a filtered network, over a minute -- and
+ * the tunnel stays up for all of it, because the tunnel comes down after
+ * this call and not before. One endpoint's worth is what the customer
+ * waits; the request carries on unwatched after that. */
+const LOGOUT_SERVER_BUDGET_MS = 8_000;
+
+export async function logout(): Promise<SessionEnd> {
+  // The server call goes first, while the tunnel is still up: on a
+  // filtered network the tunnel is the likeliest route to the control
+  // plane, and this is what revokes the refresh token there.
+  const told = apiRequest<void>("/customer-auth/logout", { method: "POST" }).catch(() => undefined);
+  await Promise.race([told, new Promise((r) => setTimeout(r, LOGOUT_SERVER_BUDGET_MS))]);
+  // And this runs regardless of what it said: a sign-out the network
+  // refused is still a sign-out on this machine, and leaving the tunnel
+  // up, or the previous customer's credentials and entitlement behind,
+  // because a request failed is the wrong way to fail.
+  return await endCustomerSession();
 }
 
 /** Deletes the signed-in customer's own account, permanently.

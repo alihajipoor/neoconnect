@@ -67,17 +67,21 @@ vi.mock("./api-endpoints", () => ({
 }));
 
 const cleared = { tokens: 0, snapshot: 0 };
+/** Everything the session end did, in the order it did it. */
+const order: string[] = [];
 vi.mock("./session", () => ({
   getTokens: () => Promise.resolve({ accessToken: "access", refreshToken: "refresh" }),
   setTokens: () => Promise.resolve(),
   clearTokens: () => {
     cleared.tokens += 1;
+    order.push("clearTokens");
     return Promise.resolve();
   },
 }));
 vi.mock("./credential-cache", () => ({
   clearSnapshot: () => {
     cleared.snapshot += 1;
+    order.push("clearSnapshot");
     return Promise.resolve();
   },
 }));
@@ -85,7 +89,14 @@ vi.mock("./credential-cache", () => ({
 // After the mocks: the cache under test is module-level state created at
 // import time, so importing earlier would bind the real transport.
 const { getGamingProfile, clearGamingProfileCache } = await import("./customer");
-const { endCustomerSession } = await import("./session-end");
+const { endCustomerSession, sessionGeneration, setTunnelTeardown } = await import("./session-end");
+
+/** What the platform's teardown will answer, set per test. */
+let teardownAnswer: () => Promise<"down" | "unconfirmed"> = () => Promise.resolve("down");
+setTunnelTeardown(() => {
+  order.push("teardown");
+  return teardownAnswer();
+});
 
 const TAG = 'W/"gaming-abcdefghijklmnopqrstuvwxy12"';
 
@@ -114,6 +125,8 @@ beforeEach(() => {
   holdNext = false;
   cleared.tokens = 0;
   cleared.snapshot = 0;
+  order.length = 0;
+  teardownAnswer = () => Promise.resolve("down");
   clearGamingProfileCache();
 });
 
@@ -244,5 +257,55 @@ describe("ending a session forgets the customer it belonged to", () => {
     replies.push({ kind: "respond", status: 200, body: B, etag: TAG });
     const after = await getGamingProfile();
     expect(after.ok && after.data.entitled).toBe(false);
+  });
+});
+
+/** The bug this half exists for: an Android tester signed out and the
+ * VPN stayed up, carrying traffic. The same was true on Windows, where
+ * nothing on any of the three exits touched the tunnel at all. */
+describe("ending a session ends the tunnel", () => {
+  it("takes the tunnel down before it deletes the credentials", async () => {
+    await endCustomerSession();
+    // Teardown first. A session whose tokens are gone while its tunnel
+    // is still up is the state that was reported.
+    expect(order).toEqual(["teardown", "clearTokens", "clearSnapshot"]);
+  });
+
+  it("reports a teardown it could not confirm instead of hiding it", async () => {
+    teardownAnswer = () => Promise.resolve("unconfirmed");
+    const ended = await endCustomerSession();
+    expect(ended.tunnel).toBe("unconfirmed");
+    // And still signs out: keeping the credentials would not make the
+    // tunnel any less up, and the customer asked to leave.
+    expect(cleared.tokens).toBe(1);
+    expect(cleared.snapshot).toBe(1);
+  });
+
+  it("treats a teardown that threw as unconfirmed, never as down", async () => {
+    teardownAnswer = () => Promise.reject(new Error("vpn_disconnect did not answer in time"));
+    const ended = await endCustomerSession();
+    expect(ended.tunnel).toBe("unconfirmed");
+    expect(cleared.tokens).toBe(1);
+  });
+
+  it("says down only when the platform did", async () => {
+    const ended = await endCustomerSession();
+    expect(ended.tunnel).toBe("down");
+  });
+
+  it("marks the session over before the teardown starts", async () => {
+    // A connect ladder still running checks this after each engine it
+    // brings up. If it only moved once the teardown had finished, a
+    // ladder that finished its connect during the teardown would see its
+    // session as live, keep the tunnel, and nothing would ever take it
+    // down again.
+    const before = sessionGeneration();
+    let seenDuringTeardown = -1;
+    teardownAnswer = () => {
+      seenDuringTeardown = sessionGeneration();
+      return Promise.resolve("down");
+    };
+    await endCustomerSession();
+    expect(seenDuringTeardown).toBe(before + 1);
   });
 });

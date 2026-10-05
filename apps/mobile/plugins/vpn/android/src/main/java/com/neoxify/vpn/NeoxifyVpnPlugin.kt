@@ -456,6 +456,33 @@ class NeoxifyVpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     /**
+     * Everything `disconnect` does, and then forgets what the platform
+     * would otherwise keep. Called when the customer's session ends.
+     *
+     * Of the three engines only IKEv2 leaves anything behind: the
+     * WireGuard and Xray services hold their configuration in memory and
+     * are started with it by this app, so an always-on restart of either
+     * arrives with no configuration and brings up no tunnel. The platform
+     * IKEv2 profile is different -- see Ikev2Engine.forget.
+     *
+     * A separate command rather than a flag on `disconnect`, because the
+     * connect ladder disconnects between every rung and must never
+     * delete the profile it is about to dial.
+     */
+    @Command
+    fun forgetProfiles(invoke: Invoke) {
+        offMainThread(invoke, "forgetProfiles") {
+            runCatching { backend.setState(tunnel, Tunnel.State.DOWN, null) }
+            stopTunService()
+            Ikev2Engine.forget(activity)
+            activeProtocol = null
+            // As with disconnect, confirming the tunnel is gone is the
+            // caller's job: it polls tunnelGone before it says anything.
+            JSObject()
+        }
+    }
+
+    /**
      * What is actually true about the tunnel right now.
      *
      * The handshake age is the part worth having. "A tunnel exists" is a

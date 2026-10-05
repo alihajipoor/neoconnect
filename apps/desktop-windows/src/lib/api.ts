@@ -2,6 +2,7 @@ import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, rememberEndpoint } from "./api-endpoints";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import { clearTokens, getTokens, setTokens } from "./session";
+import { announceSessionRevoked } from "./session-revoked";
 import type { TokenPair } from "./types";
 
 /** How long one endpoint gets before the next is tried.
@@ -181,7 +182,15 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
  * Named because two result unions share it verbatim, and a caller that
  * has narrowed on `ok === false` must read the same way whichever
  * request function produced it. */
-export type RequestFailure = { ok: false; error: string; sessionExpired?: boolean };
+export type RequestFailure = {
+  ok: false;
+  error: string;
+  sessionExpired?: boolean;
+  /** The HTTP status, when the server answered at all. Absent for a
+   * transport failure, which is the distinction the token refresh needs:
+   * a refusal ends the session, a request that never arrived must not. */
+  status?: number;
+};
 
 export type ApiResult<T> = { ok: true; data: T } | RequestFailure;
 
@@ -215,24 +224,47 @@ export async function publicRequest<T>(path: string, init?: RequestInit): Promis
   }
 
   if (!res.ok) {
-    return { ok: false, error: await parseErrorMessage(res) };
+    return { ok: false, error: await parseErrorMessage(res), status: res.status };
   }
   if (res.status === 204) return { ok: true, data: undefined as T };
   return { ok: true, data: (await res.json()) as T };
 }
 
-async function refreshTokens(): Promise<TokenPair | null> {
+/** The status with which the server says this refresh token is no good.
+ *
+ * `customer-auth.service.ts` answers 401 for both of its refusals --
+ * a token that does not verify and one whose version was revoked -- and
+ * only that ends the session. Everything else says nothing about the
+ * token: a 429 from the throttle, a 5xx, a 403 from a CDN's bot check, a
+ * request that never arrived. Every one of those used to sign the
+ * customer out, and now that signing out takes the tunnel down it would
+ * also disconnect somebody because a network in Iran dropped one
+ * request. */
+const REFRESH_REFUSED = 401;
+
+type Refresh =
+  | { kind: "renewed"; tokens: TokenPair }
+  /** The server refused the refresh token: the session is over. */
+  | { kind: "refused" }
+  /** Nothing stored to refresh -- already signed out, which is not news. */
+  | { kind: "none" }
+  /** The refresh could not be completed; the session may well be fine. */
+  | { kind: "unavailable" };
+
+async function refreshTokens(): Promise<Refresh> {
   const current = await getTokens();
-  if (!current) return null;
+  if (!current) return { kind: "none" };
 
   const result = await publicRequest<TokenPair>("/customer-auth/refresh", {
     method: "POST",
     body: JSON.stringify({ refreshToken: current.refreshToken }),
   });
-  if (!result.ok) return null;
+  if (!result.ok) {
+    return result.status === REFRESH_REFUSED ? { kind: "refused" } : { kind: "unavailable" };
+  }
 
   await setTokens(result.data);
-  return result.data;
+  return { kind: "renewed", tokens: result.data };
 }
 
 /** Either a real HTTP response, or a failure already phrased for the
@@ -243,10 +275,12 @@ type Attempt = { answered: true; res: Response } | { answered: false; failure: R
 /** Everything an authenticated request does *around* the response:
  * attach the stored access token, and on a 401 (expired access token,
  * the normal case ~every 15 minutes) try exactly one silent
- * refresh-and-retry before giving up. If the refresh itself fails
- * (revoked/expired refresh token), clear the stored session and report
+ * refresh-and-retry before giving up. If the server refuses the refresh
+ * (revoked/expired refresh token), clear the stored session, report
  * `sessionExpired: true` so the UI can drop back to the login screen
- * instead of showing a raw error.
+ * instead of showing a raw error, and announce it so the app ends the
+ * session -- tunnel included -- whichever screen asked. A refresh that
+ * merely failed to complete does none of that.
  *
  * Split out from `apiRequest` so a second interpretation of the
  * response -- conditional requests, below -- cannot drift from this one.
@@ -277,15 +311,29 @@ async function authenticatedAttempt(path: string, init?: RequestInit): Promise<A
 
   if (res.status === 401) {
     const refreshed = await refreshTokens();
-    if (!refreshed) {
+    if (refreshed.kind === "unavailable") {
+      // Not a verdict on the session, so neither the tokens nor the
+      // screen change. The next request tries the refresh again.
+      return {
+        answered: false,
+        failure: { ok: false, error: "Could not renew your session just now. Try again in a moment." },
+      };
+    }
+    if (refreshed.kind !== "renewed") {
       await clearTokens();
+      // Told to the app as a whole, not only to this caller -- most
+      // callers would otherwise drop it. Not for `none`: that is a
+      // request from a session that has already ended, finishing late,
+      // and announcing it would put "your session ended" over a sign-in
+      // screen the customer reached by signing out.
+      if (refreshed.kind === "refused") announceSessionRevoked();
       return {
         answered: false,
         failure: { ok: false, error: "Your session expired. Please sign in again.", sessionExpired: true },
       };
     }
     try {
-      res = await doFetch(refreshed.accessToken);
+      res = await doFetch(refreshed.tokens.accessToken);
     } catch {
       return { answered: false, failure: unreachable() };
     }

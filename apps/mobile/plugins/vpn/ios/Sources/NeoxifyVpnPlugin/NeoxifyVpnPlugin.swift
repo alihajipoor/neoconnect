@@ -212,6 +212,49 @@ class NeoxifyVpnPlugin: Plugin {
         }
     }
 
+    /// Everything `disconnect` does, and then forgets the credentials the
+    /// system would otherwise keep. Called when the customer's session
+    /// ends.
+    ///
+    /// Stopping is not enough on iOS. Both profiles stay in Settings >
+    /// VPN after a disconnect, and both can be switched on from there
+    /// with the app signed out: the packet tunnel reads its engine
+    /// config from `providerConfiguration` when the system starts it
+    /// without options -- PacketTunnelProvider says so, it is the
+    /// on-demand path -- and IKEv2 reads its password from the keychain.
+    /// Either way the device tunnels through our node under an account
+    /// the app no longer shows.
+    ///
+    /// The tunnel-provider profile is kept and emptied rather than
+    /// removed, so the next customer to sign in is not asked to allow a
+    /// VPN configuration again; with no configuration the extension
+    /// refuses to start (`missingConfiguration`). The IKEv2 profile is
+    /// rebuilt on every connect anyway, so it is removed outright.
+    ///
+    /// A separate command rather than part of `disconnect`, because the
+    /// connect ladder disconnects between rungs and must not erase what
+    /// it is about to dial.
+    @objc public func forgetProfiles(_ invoke: Invoke) {
+        Task {
+            let managers = (try? await NETunnelProviderManager.loadAllFromPreferences()) ?? []
+            for manager in managers {
+                manager.connection.stopVPNTunnel()
+                if let proto = manager.protocolConfiguration as? NETunnelProviderProtocol {
+                    proto.providerConfiguration = nil
+                    manager.protocolConfiguration = proto
+                }
+                // Never set by this app, and cleared anyway: a rule left
+                // by anything earlier would let the system start the
+                // tunnel by itself, which is the case being closed here.
+                manager.isOnDemandEnabled = false
+                manager.onDemandRules = nil
+                try? await manager.saveToPreferences()
+            }
+            await Ikev2Engine.forget()
+            invoke.resolve()
+        }
+    }
+
     /// Whether the tunnel is really down, which is not what
     /// `disconnect` returning means.
     ///

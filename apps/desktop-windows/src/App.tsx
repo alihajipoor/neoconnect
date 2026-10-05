@@ -4,7 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { getTokens } from "./lib/session";
 import { verifyEmailByToken } from "./lib/auth";
 import { flushAttempts } from "./lib/attempts";
-import { endCustomerSession } from "./lib/session-end";
+import { endCustomerSession, type SessionEnd } from "./lib/session-end";
+import { onSessionRevoked } from "./lib/session-revoked";
+import { useI18n } from "./lib/i18n";
 import { Login } from "./screens/Login";
 import { Register } from "./screens/Register";
 import { VerifyEmail } from "./screens/VerifyEmail";
@@ -29,6 +31,7 @@ const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 
 type Screen =
   | "loading"
+  | "signingOut"
   | "login"
   | "register"
   | "forgot"
@@ -58,6 +61,8 @@ export default function App() {
   // not-yet-verified and each try to grant a trial), not just a
   // cosmetic double-render.
   const handledDeepLinkUrls = useRef(new Set<string>());
+  const endingRef = useRef(false);
+  const { t } = useI18n();
 
   useEffect(() => {
     // getTokens() swallows its own read failures, but a catch here too
@@ -197,21 +202,56 @@ export default function App() {
    * Both screens that can drop the customer back to sign-in route
    * through here, and they arrive by more routes than the Sign out
    * button: `Dashboard.loadAll` calls it when the API reports the
-   * session expired, and `DeleteAccountSection` calls it after the
-   * account is gone. `logout()` and `deleteAccount()` do their own
-   * teardown, so for those this is a second, idempotent pass -- the
-   * expired-session route is the one that had none, because it never
-   * goes through either function.
+   * session expired, `DeleteAccountSection` calls it after the account
+   * is gone, and the API announces a refresh the server refused from
+   * whichever screen made the request. `logout()` and `deleteAccount()`
+   * do their own teardown, so for those this is a second, idempotent
+   * pass -- the expired-session routes are the ones that had none,
+   * because they never go through either function.
    *
-   * Not awaited: this is a render-path handler and the screen change
-   * must not wait on two store writes. The in-memory entitlement cache
-   * is cleared synchronously inside `endCustomerSession` before its
-   * first await, which is the part a newly signed-in customer could
-   * otherwise read. */
-  function handleLoggedOut() {
-    void endCustomerSession();
-    setScreen("login");
+   * The sign-in screen waits for the tunnel. It used to be drawn at
+   * once, over a tunnel that was still up and that nothing on the
+   * sign-in screen can disconnect; a screen that says "signed out" has
+   * to mean the device has stopped sending traffic under that account,
+   * or that the customer is told it could not be confirmed. The
+   * teardown is bounded (see tunnel-teardown.ts), so this cannot strand
+   * anybody on "Signing out...".
+   *
+   * One at a time: the routes above can fire together -- a refused
+   * refresh during the Dashboard's first load is both of the first and
+   * third -- and two passes would race each other's notices. */
+  async function handleLoggedOut(reason: "signedOut" | "revoked" = "signedOut") {
+    if (endingRef.current) return;
+    endingRef.current = true;
+    setScreen("signingOut");
+    try {
+      let ended: SessionEnd;
+      try {
+        ended = await endCustomerSession();
+      } catch {
+        // The tokens or the snapshot could not be deleted. Not a reason
+        // to keep showing a signed-in screen, but nothing was confirmed.
+        ended = { tunnel: "unconfirmed" };
+      }
+      setPendingAuth(null);
+      setLoginNotice(
+        ended.tunnel === "unconfirmed"
+          ? t("signout.tunnelUnconfirmed")
+          : reason === "revoked"
+            ? t("signout.sessionEnded")
+            : null,
+      );
+      setScreen("login");
+    } finally {
+      endingRef.current = false;
+    }
   }
+
+  // Read through a ref so the listener, registered once, always calls
+  // the current render's handler -- and with it the current language.
+  const handleLoggedOutRef = useRef(handleLoggedOut);
+  handleLoggedOutRef.current = handleLoggedOut;
+  useEffect(() => onSessionRevoked(() => void handleLoggedOutRef.current("revoked")), []);
 
   // Every screen goes through one function so the transition can see
   // both halves of a navigation: the one leaving and the one
@@ -222,6 +262,13 @@ export default function App() {
   const renderScreen = () => {
   if (screen === "loading") {
     return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading...</div>;
+  }
+  if (screen === "signingOut") {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        {t("nav.signingOut")}
+      </div>
+    );
   }
   if (screen === "login") {
     return (
@@ -277,7 +324,7 @@ export default function App() {
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
         onOpenSupport={() => setScreen("support")}
-        onLoggedOut={handleLoggedOut}
+        onLoggedOut={() => void handleLoggedOut()}
         customSection={<CustomModeCard />}
         // Supplied here rather than imported by the screen, the same way
         // Custom mode is: gaming mode drives the Windows helper service
@@ -314,7 +361,7 @@ export default function App() {
       />
       <div className="min-h-0 flex-1">
         <Dashboard
-          onLoggedOut={handleLoggedOut}
+          onLoggedOut={() => void handleLoggedOut()}
           onBrowsePlans={() => setScreen("plans")}
           onOpenSettings={() => setScreen("settings")}
         />

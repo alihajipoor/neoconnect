@@ -45,7 +45,18 @@ const en = {
 
   "nav.settings": "Settings",
   "nav.signOut": "Sign out",
+  "nav.signingOut": "Signing out...",
   "nav.back": "Back",
+  // Shown on the sign-in screen when the tunnel could not be confirmed
+  // down. It must not reassure: the customer may still be connected
+  // under the account they just left, and a restart is what certainly
+  // ends it.
+  "signout.tunnelUnconfirmed":
+    "You're signed out, but the app couldn't confirm the VPN was switched off. Restart Neoxify or this device to be sure.",
+  // The server ended the session (signed out elsewhere, password
+  // changed, account removed). Says nothing about the VPN: that it is
+  // off is what reaching this screen without the line above means.
+  "signout.sessionEnded": "Your session ended. Sign in again to continue.",
 
   "auth.welcomeBack": "Welcome back",
   "auth.signIn": "Sign in",
@@ -865,7 +876,11 @@ const fa: Record<TranslationKey, string> = {
 
   "nav.settings": "تنظیمات",
   "nav.signOut": "خروج",
+  "nav.signingOut": "در حال خروج...",
   "nav.back": "بازگشت",
+  "signout.tunnelUnconfirmed":
+    "از حساب خارج شدید، اما برنامه نتوانست خاموش شدن VPN را تأیید کند. برای اطمینان، Neoxify یا این دستگاه را دوباره راه‌اندازی کنید.",
+  "signout.sessionEnded": "نشست شما به پایان رسید. برای ادامه دوباره وارد شوید.",
 
   "auth.welcomeBack": "خوش آمدید",
   "auth.signIn": "ورود",
