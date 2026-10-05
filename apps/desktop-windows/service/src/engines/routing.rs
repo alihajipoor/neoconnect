@@ -26,6 +26,13 @@ use std::ffi::OsStr;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
+use windows_sys::Win32::Foundation::NO_ERROR;
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    DeleteIpForwardEntry2, FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2,
+};
+use windows_sys::Win32::Networking::WinSock::AF_INET;
+
 use super::run_hidden;
 
 /// Routes installed for the current tunnel, removed by an explicit
@@ -66,35 +73,81 @@ pub struct InstalledRoutes {
 ///
 /// Scoped to the interface, never to a destination -- see the note on
 /// `destinations` for what deleting `0.0.0.0/0` machine-wide does.
+///
+/// Native, not PowerShell. It used to be `Get-NetRoute | Remove-NetRoute`,
+/// chosen over `route print` because that output is localised and
+/// parsing it in Turkish or Persian would quietly stop working for the
+/// customers who matter. The IP Helper API returns structures, so it
+/// keeps that property -- and it costs no process. That matters because
+/// this is on the connect path: every connect begins with a disconnect,
+/// which with nothing live runs the janitor, which purges every adapter
+/// of ours that exists -- and the OpenVPN adapter is never deleted. So
+/// anyone who had used OpenVPN once paid two PowerShell launches (this
+/// and [`interface_routes`]) on every connect, whatever the protocol:
+/// 1.2 to 1.7 seconds each on a fast development machine, 4.4 to 6.5 on
+/// the rig's guest, out of a 38-second budget.
+///
+/// Best-effort, as before: a route that will not delete is skipped.
 pub fn purge_interface(interface_index: u32) {
-    // PowerShell rather than route.exe because this has to enumerate
-    // first, and `route print` is localised -- parsing it in Turkish or
-    // Persian is how this would quietly stop working for exactly the
-    // customers who matter. Get-NetRoute returns objects, so it does not
-    // care what language the machine speaks.
-    let script = format!(
-        "Get-NetRoute -InterfaceIndex {interface_index} -AddressFamily IPv4          -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false          -ErrorAction SilentlyContinue"
-    );
-    let _ = run_hidden(
-        &PathBuf::from("powershell"),
-        &[
-            OsStr::new("-NoProfile"),
-            OsStr::new("-NonInteractive"),
-            OsStr::new("-Command"),
-            OsStr::new(&script),
-        ],
-    );
+    let Ok(routes) = ipv4_routes_on(interface_index) else { return };
+    for route in &routes {
+        // SAFETY: `route` is a row GetIpForwardTable2 returned, copied
+        // out whole; the call only reads it.
+        let _ = unsafe { DeleteIpForwardEntry2(route) };
+    }
+}
+
+/// The IPv4 routes on one interface, as the API's own rows -- which is
+/// what `DeleteIpForwardEntry2` wants back, so nothing has to be
+/// re-described to be deleted.
+///
+/// Interface 0 is no interface at all, and is refused rather than
+/// matched: a caller that passes it has failed to find its adapter, and
+/// "every route whose index happens to read 0" is not a thing to delete.
+fn ipv4_routes_on(interface_index: u32) -> Result<Vec<MIB_IPFORWARD_ROW2>, String> {
+    if interface_index == 0 {
+        return Err("interface index 0 names no interface".to_string());
+    }
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    // SAFETY: `table` is an out parameter the call fills with a buffer it
+    // allocates, freed below with the matching FreeMibTable.
+    let rc = unsafe { GetIpForwardTable2(AF_INET, &mut table) };
+    if rc != NO_ERROR || table.is_null() {
+        return Err(format!("GetIpForwardTable2 failed ({rc})"));
+    }
+    // SAFETY: on success `table` points at a header followed by
+    // `NumEntries` rows -- the declared `[_; 1]` is the C idiom for a
+    // trailing array -- and they stay valid until FreeMibTable.
+    let ours = unsafe {
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        let ours = rows.iter().filter(|row| row.InterfaceIndex == interface_index).copied().collect();
+        FreeMibTable(table as *const core::ffi::c_void);
+        ours
+    };
+    Ok(ours)
+}
+
+/// A route row's destination as `Get-NetRoute` writes it: `10.0.0.0/8`.
+fn destination_prefix(route: &MIB_IPFORWARD_ROW2) -> String {
+    // SAFETY: every row came from an AF_INET table, so the IPv4 arm of
+    // the union is the live one. The address is in network byte order,
+    // so its in-memory bytes are the octets in order.
+    let raw = unsafe { route.DestinationPrefix.Prefix.Ipv4.sin_addr.S_un.S_addr };
+    format!("{}/{}", Ipv4Addr::from(raw.to_ne_bytes()), route.DestinationPrefix.PrefixLength)
 }
 
 /// Removes just the two routes OpenVPN pushes, with `route.exe`.
 ///
 /// The pre-connect sibling of [`purge_interface`], and the reason it
-/// exists is cost. `purge_interface` has to enumerate, so it uses
-/// PowerShell -- 4.4 to 6.5 seconds before the first statement runs --
-/// and `openvpn::connect` called it on *every* connect, inside a budget
-/// of 38 seconds, to delete nothing at all on a clean machine. The
-/// comment there called it cheap. It was the single most expensive
-/// no-op on the connect path.
+/// exists is cost. `purge_interface` has to enumerate, and when this was
+/// written it did so with PowerShell -- 4.4 to 6.5 seconds before the
+/// first statement runs -- which `openvpn::connect` paid on *every*
+/// connect, inside a budget of 38 seconds, to delete nothing at all on a
+/// clean machine. `purge_interface` is native now and costs no process,
+/// but this stays the narrower tool: it touches the two routes OpenVPN
+/// pushes and nothing else on the adapter, and phase one of a teardown
+/// can afford it by count.
 ///
 /// Nothing has to be enumerated to delete a route whose destination is
 /// already known, and these two are known: they are the `0.0.0.0/1` and
@@ -137,28 +190,17 @@ pub fn purge_pushed_half_defaults(interface_index: u32) {
 /// their own LAN address -- which says where they are and is no part of
 /// answering "did Neoxify leave a route behind".
 ///
-/// Best-effort: an interface that has gone, or a PowerShell that will
-/// not run, reads as no routes. Callers use this to decide whether there
+/// Best-effort: an interface that has gone, or a table that cannot be
+/// read, reads as no routes. Callers use this to decide whether there
 /// was anything to remove, never to promise there was not.
+///
+/// Native for the same reasons as [`purge_interface`], and written in
+/// the same `destination/prefix` form `Get-NetRoute` produced, which the
+/// parity test below holds it to.
 pub fn interface_routes(interface_index: u32) -> Vec<String> {
-    // Same reasoning as `purge_interface`: `route print` is localised
-    // and Get-NetRoute returns objects, so this does not depend on what
-    // language the machine speaks.
-    let script = format!(
-        "Get-NetRoute -InterfaceIndex {interface_index} -AddressFamily IPv4 \
-         -ErrorAction SilentlyContinue | ForEach-Object {{ $_.DestinationPrefix }}"
-    );
-    let mut command = std::process::Command::new("powershell");
-    command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
-    let Ok(out) = super::capture_hidden(command, super::HELPER_BUDGET) else {
-        return Vec::new();
-    };
-    out.stdout
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect()
+    ipv4_routes_on(interface_index)
+        .map(|routes| routes.iter().map(destination_prefix).collect())
+        .unwrap_or_default()
 }
 
 fn route_exe() -> PathBuf {
@@ -310,6 +352,47 @@ mod tests {
                 "{probe} matched neither half-default route"
             );
         }
+    }
+
+    /// The native reader against the PowerShell it replaced, on a real
+    /// routing table: the loopback interface's IPv4 routes, read both
+    /// ways, must be the same set in the same notation. Loopback because
+    /// it exists on every machine and reading it needs no elevation;
+    /// nothing is deleted here -- a test that removes real routes has no
+    /// business running on somebody's machine.
+    #[test]
+    fn the_native_route_reader_sees_what_get_netroute_saw() {
+        let loopback = 1;
+        let mut native = interface_routes(loopback);
+        assert!(!native.is_empty(), "loopback always carries routes");
+
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-NetRoute -InterfaceIndex 1 -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.DestinationPrefix }",
+            ])
+            .output()
+            .expect("powershell should run");
+        let mut scripted: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        native.sort();
+        native.dedup();
+        scripted.sort();
+        scripted.dedup();
+        assert_eq!(native, scripted, "the native reader must see exactly what Get-NetRoute saw");
+    }
+
+    #[test]
+    fn interface_zero_is_refused_rather_than_matched() {
+        assert!(ipv4_routes_on(0).is_err());
+        assert!(interface_routes(0).is_empty());
     }
 
     #[test]
