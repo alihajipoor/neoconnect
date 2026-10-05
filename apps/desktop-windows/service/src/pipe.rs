@@ -154,6 +154,25 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
                     // find in Task Manager and distrust.
                     let _ = engines.run_detached(|engines: &mut Engines, token| {
                         crate::engines::adopt_token(token);
+
+                        // Gaming mode as well, and first. This path
+                        // knows the app is gone the instant the kernel
+                        // says so, but it only ever took the tunnel
+                        // down -- gaming was left to the idle watchdog
+                        // below, a full IDLE_GRACE later. An app that
+                        // crashed or was killed with gaming armed left
+                        // the game's NRPT rules pointed at a stub
+                        // nobody was talking to for that long: the game
+                        // will not resolve and nothing on screen says
+                        // why. Closing the window disarms it from the
+                        // app's side; this is the case where the app
+                        // never got to.
+                        if crate::gaming::is_armed() {
+                            if let Err(err) = crate::gaming::disarm() {
+                                crate::cleanup_log::note("disarm gaming mode after the app went away", &err);
+                            }
+                        }
+
                         let report = crate::lifecycle::teardown::hard_stop(engines);
                         crate::cleanup_log::note(
                             "teardown after the app went away",
