@@ -87,9 +87,11 @@ pub const ADAPTER_NAME: &str = "Neoxify-OpenVPN";
 /// sentence is true the connect failed with "could not create the
 /// OpenVPN network adapter" for no reason but the clock.
 ///
-/// This is the first connect only -- the adapter is left in place
-/// afterwards, so no later connect pays it -- which is also why a long
-/// budget here costs nothing in the ordinary case.
+/// A long budget costs nothing in the ordinary case, because the
+/// ordinary creation is quick: about a second, measured on a Windows 11
+/// guest that already had the driver. It is not paid only once, though
+/// -- see [`ensure_adapter`] for what deletes the adapter between
+/// sessions.
 const ADAPTER_CREATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What OpenVPN prints when the tunnel is actually up.
@@ -140,9 +142,20 @@ const TUNNEL_UP_WITHIN: std::time::Duration = std::time::Duration::from_secs(75)
 /// the supported way to create one.
 ///
 /// Left in place after disconnect rather than deleted: creating an
-/// adapter is slow and churns the network stack, and a dormant Wintun
-/// adapter costs nothing. That also makes this a no-op on every
-/// connection after the first.
+/// adapter churns the network stack, and a dormant Wintun adapter costs
+/// nothing.
+///
+/// That does not make this a no-op after the first connect, which this
+/// comment used to claim. Measured on a Windows 11 guest:
+/// `Neoxify-OpenVPN` was present while disconnected and gone within a
+/// second of an Xray protocol starting, every time. Nothing in this
+/// service deletes it outside uninstall, so the likely culprit is the
+/// orphan sweep Xray's `wintun.dll` runs when it creates its own adapter
+/// -- likely, not proven: the sweep's log line in `xray.log` names
+/// `neoconnect0 1`, not this adapter. Either way, any OpenVPN connect
+/// that follows an Xray session creates the adapter again. It took about
+/// a second each time there, which is why this is recorded rather than
+/// worked around.
 ///
 /// The creation gets [`ADAPTER_CREATE_BUDGET`] rather than the ordinary
 /// helper budget; the listing keeps the ordinary one, because listing is
@@ -343,8 +356,9 @@ const DRIVER_INSTALL_ADAPTER: &str = "Neoxify-DriverSetup";
 /// Removes the Wintun adapter this engine attaches to.
 ///
 /// The opposite of [`ensure_adapter`], and deliberately *not* called on
-/// disconnect -- creating an adapter is slow and churns the network
-/// stack, so a dormant one is left in place between sessions.
+/// disconnect -- creating an adapter churns the network stack, so a
+/// dormant one is left in place between sessions (for as long as an Xray
+/// session leaves it alone; see [`ensure_adapter`]).
 ///
 /// Uninstall is the one moment where that reasoning inverts. An adapter
 /// nothing created it can explain is left behind on a machine whose VPN
