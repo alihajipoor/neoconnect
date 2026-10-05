@@ -2570,7 +2570,7 @@ says nothing about a real dual-stack path.
   TCP keep-alives on connections opened before the tunnel came up --
   the "flows already open are not re-examined" gap `ipv6_block.rs`
   already states.
-- **DNS leaked on four engines' worth of protocols** (cfa67eb). Windows'
+- **DNS leaked on three engines -- seven of the eight protocols** (cfa67eb). Windows'
   connectivity probes query per interface, bound to the NIC's address,
   which skips NRPT and the routes: on Xray they went out in clear text.
   Asked for on purpose -- a query bound to the NIC, one to the on-link
