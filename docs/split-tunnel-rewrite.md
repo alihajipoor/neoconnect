@@ -258,9 +258,19 @@ one of those has a bug story recorded in prose with nothing pinning it.
 
 Two tests are `#[ignore]`d with a documented wrong premise, and they
 matter: the property Custom mode's honesty rests on — that a pinned
-socket does not fall back to the ordinary route — has **no running
-test**. Its only evidence is a customer log quoted in a comment. A
+socket does not fall back to the ordinary route — had **no running
+test**. Its only evidence was a customer log quoted in a comment. A
 rewrite must not read those names as coverage.
+
+**It has one now** (`proxy.rs`,
+`a_socket_pinned_to_an_interface_with_no_route_fails_instead_of_falling_back`).
+The ignored tests pinned to an index that names nothing, which Windows
+treats as no pin. Pinned instead to loopback -- a real adapter with no
+route to the internet -- a connect to a public resolver fails at once
+with WSAENETUNREACH, where the same connect unpinned succeeds. Measured
+on Windows on 2026-10-04 before it was written as a test. It proves the
+stack honours the pin; it is not a capture of a tunnel going away
+under a live game, which is still unverified.
 
 ### Possible defects found, and what became of them
 

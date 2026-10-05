@@ -2052,6 +2052,45 @@ mod tests {
         assert!(median < Duration::from_millis(200), "relays.stop took {took:?}");
     }
 
+    /// The property Custom mode's honesty rests on, with a running test
+    /// at last: a socket pinned to a real interface that has no route to
+    /// a destination fails, rather than quietly leaving by the ordinary
+    /// route. If it fell back, a selected app's traffic would go out in
+    /// the clear the moment the tunnel stopped carrying it, while every
+    /// check said it was pinned.
+    ///
+    /// The two earlier attempts pinned to an index that names nothing,
+    /// and Windows treated that as no pin at all -- see the ignored test
+    /// in `health.rs`. Loopback is a real adapter on every Windows
+    /// machine and carries no route to the internet, so it is the
+    /// stand-in for a tunnel adapter with nowhere to send.
+    ///
+    /// Measured first on 2026-10-04: unpinned, the connect to a public
+    /// resolver succeeded; pinned to loopback, it failed in 59µs with
+    /// WSAENETUNREACH. The unpinned control is what makes the pinned
+    /// failure mean something -- on a machine with no network at all
+    /// both fail, and the assertion that matters still holds.
+    #[test]
+    fn a_socket_pinned_to_an_interface_with_no_route_fails_instead_of_falling_back() {
+        const LOOPBACK_INTERFACE: u32 = 1;
+        let target: SocketAddr = "1.1.1.1:443".parse().unwrap();
+
+        let pinned = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        pin_to_interface(&pinned, LOOPBACK_INTERFACE).expect("loopback is a real interface to pin to");
+        let error = pinned
+            .connect_timeout(&target.into(), Duration::from_secs(4))
+            .expect_err("a pinned socket must not reach a destination its interface has no route to");
+        assert!(
+            matches!(error.kind(), io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable),
+            "it must fail as unreachable, not by timing out on some other path: {error:?}"
+        );
+
+        let plain = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        if plain.connect_timeout(&target.into(), Duration::from_secs(4)).is_err() {
+            eprintln!("no ordinary route to {target} here, so the pinned failure proves less than it could");
+        }
+    }
+
     fn ended(result: &io::Result<usize>) -> bool {
         match result {
             Ok(n) => *n == 0,
