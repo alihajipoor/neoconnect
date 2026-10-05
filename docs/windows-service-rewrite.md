@@ -307,10 +307,17 @@ Bottom-up, each landing green before the next starts.
    connect path no longer spawns PowerShell" above for what is left and
    why.
 7. Split tunnel — the largest, and the one with the most tests.
-   *Already takes `Limits` and clamps its two long waits, so the
-   bring-up can no longer outlive the connect; the rewrite itself is
-   still ahead.*
-8. Gaming mode
+   *Takes `Limits` and clamps its two long waits, and every finding in
+   `docs/split-tunnel-rewrite.md` has since been acted on or declined;
+   its "Where it stands" section maps each to a commit. Its stop now
+   fits phase one: `Relays::stop` went from about 460ms to about 10ms.*
+8. Gaming mode — *its state lock survives a panic so it can always be
+   turned off (2b6ee4c); its NRPT rules are written by registry with the
+   cmdlet as fallback, the values pinned to what the cmdlet wrote on a
+   real machine (2bf484b, 0bb7733); and it is disarmed the moment the
+   app's process ends rather than by the idle watchdog a minute later
+   (b417589). The DNS stub was checked for a teardown hazard and found
+   not to have one.*
 
 Steps 4, 5 and 7 were taken partly and out of order on purpose: the
 cancellation and budget work cuts across all three, and doing it once
