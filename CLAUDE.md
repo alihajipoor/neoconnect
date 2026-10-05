@@ -226,6 +226,14 @@ download URL precisely because they collided.
 Current: desktop `0.9.42`, mobile `0.2.21`, agent `v0.2.9` — each
 matching its latest released tag.
 
+**Pending deploy, and it gates the next client release.** `main` carries
+backend migrations `20261005_isp_recommendations` and
+`20261006_customer_sessions`, not yet applied in production. Deploy the
+backend with them **before** releasing desktop or mobile from `main`:
+those clients end a session the server rejects, and against the old
+backend a sign-out on one device still revokes every device's session,
+so it would drop their tunnels. Remove this paragraph once deployed.
+
 ## iOS
 
 The app is four pieces, and only the first is shared with Android:
