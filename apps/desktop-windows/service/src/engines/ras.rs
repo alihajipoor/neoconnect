@@ -173,12 +173,20 @@ mod tests {
         assert_eq!(std::mem::size_of::<RASCONNSTATUSW>(), 608);
     }
 
-    /// A handle RAS never issued is a tunnel that is not there -- not a
-    /// question that could not be asked, and not a crash. Asked of the
-    /// real API on this machine.
+    /// A handle RAS never issued must never read as a connected tunnel,
+    /// and must not crash. Asked of the real API.
+    ///
+    /// Which of the other two answers comes back depends on the machine,
+    /// and the first version of this test pinned the wrong thing: this
+    /// development PC answers `ERROR_INVALID_HANDLE`, read as
+    /// `Some(false)`, while the Windows Server CI runner answers some
+    /// other code, read as `None` -- "could not ask", which the status
+    /// poll answers by falling back to the cmdlet. Both are safe. Only
+    /// `Some(true)` would be a lie, so that is what is asserted.
     #[test]
-    fn a_handle_ras_never_issued_reads_as_not_connected() {
-        assert_eq!(connect_status(0x5EED_usize as *mut c_void), Some(false));
+    fn a_handle_ras_never_issued_never_reads_as_connected() {
+        let answer = connect_status(0x5EED_usize as *mut c_void);
+        assert_ne!(answer, Some(true), "a handle RAS never issued was reported connected");
     }
 
     #[test]
