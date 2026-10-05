@@ -966,13 +966,21 @@ impl Engines {
                     Verdict::Dead
                 }
             }
-            Some(Active::Ikev2(_)) => {
+            Some(Active::Ikev2(live)) => {
                 // Windows owns this tunnel, so its own view is the only
                 // truth available. There is no handshake to read the way
                 // WireGuard has, so health stays Unknown and the app's
                 // egress check is what actually proves traffic flows --
                 // the same position the Xray protocols are in.
-                if ikev2::is_connected() {
+                //
+                // Asked of the connection's own handle first: one RAS
+                // call, where `ikev2::is_connected` launches PowerShell
+                // for `Get-VpnConnection` once the entry exists -- which,
+                // on this arm, it always does. That ran on every status
+                // poll for as long as an IKEv2 tunnel was up. The cmdlet
+                // stays only for the answer RAS could not give.
+                let up = live.is_connected().unwrap_or_else(ikev2::is_connected);
+                if up {
                     Verdict::Reported(true, Some("IKEV2".to_string()), TunnelHealth::Unknown)
                 } else {
                     // This arm used to report Down and leave the session

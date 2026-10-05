@@ -163,6 +163,24 @@ mod tests {
         assert_eq!(std::mem::offset_of!(RASDIALPARAMSW, szEncPassword), 2112);
     }
 
+    /// The status structure RAS validates by `dwSize`: 608 bytes is the
+    /// Windows 7 and later layout, with both tunnel endpoints and the
+    /// substate. A different size is answered with an error rather than
+    /// a status, which the status poll would read as "cannot tell".
+    #[test]
+    fn the_status_layout_is_the_one_ras_validates() {
+        use windows_sys::Win32::NetworkManagement::Rras::RASCONNSTATUSW;
+        assert_eq!(std::mem::size_of::<RASCONNSTATUSW>(), 608);
+    }
+
+    /// A handle RAS never issued is a tunnel that is not there -- not a
+    /// question that could not be asked, and not a crash. Asked of the
+    /// real API on this machine.
+    #[test]
+    fn a_handle_ras_never_issued_reads_as_not_connected() {
+        assert_eq!(connect_status(0x5EED_usize as *mut c_void), Some(false));
+    }
+
     #[test]
     fn params_report_their_own_size() {
         assert_eq!(
@@ -212,6 +230,22 @@ impl Connection {
         }
     }
 
+    /// Whether this connection is up, asked of RAS by its own handle.
+    ///
+    /// For the status poll, which the app makes continuously. While an
+    /// IKEv2 tunnel was up, every poll asked by launching PowerShell for
+    /// `Get-VpnConnection` -- 511ms on a warm CI runner, more on a
+    /// customer's machine -- when the service was holding the handle
+    /// that answers the same question in one call with no process.
+    ///
+    /// `Some(false)` when RAS says the connection is not connected, or
+    /// no longer recognises the handle at all (`ERROR_INVALID_HANDLE`):
+    /// both mean the tunnel is gone. `None` when the question could not
+    /// be asked, which the caller must not read as either answer.
+    pub fn is_connected(&self) -> Option<bool> {
+        connect_status(self.0)
+    }
+
     /// Hangs up now, consuming the handle.
     ///
     /// Only needed where the result matters; otherwise let it drop.
@@ -220,6 +254,29 @@ impl Connection {
         // Already hung up by this call, so the Drop below must not run.
         std::mem::forget(self);
         code
+    }
+}
+
+/// `RasGetConnectStatusW` for one handle, read the way
+/// [`Connection::is_connected`] documents. Free of `Connection` so a test
+/// can ask about a handle RAS has never issued without that test owning
+/// -- and on drop hanging up -- a handle it made up.
+fn connect_status(handle: *mut c_void) -> Option<bool> {
+    use windows_sys::Win32::NetworkManagement::Rras::{
+        RasGetConnectStatusW, RASCONNSTATUSW, RASCS_Connected,
+    };
+    const ERROR_INVALID_HANDLE: u32 = 6;
+
+    // SAFETY: every field is plain data, for which all-zero is valid;
+    // `dwSize` is what RAS checks the layout against.
+    let mut status: RASCONNSTATUSW = unsafe { std::mem::zeroed() };
+    status.dwSize = std::mem::size_of::<RASCONNSTATUSW>() as u32;
+    // SAFETY: `status` is a correctly sized, writable RASCONNSTATUSW.
+    let rc = unsafe { RasGetConnectStatusW(handle as _, &mut status) };
+    match rc {
+        0 => Some(status.rasconnstate == RASCS_Connected),
+        ERROR_INVALID_HANDLE => Some(false),
+        _ => None,
     }
 }
 
