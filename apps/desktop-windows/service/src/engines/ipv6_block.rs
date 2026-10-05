@@ -125,13 +125,14 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterAdd0, FwpmFreeMemory0,
     FwpmGetAppIdFromFileName0, FwpmProviderAdd0, FwpmSubLayerAdd0, FwpmTransactionAbort0,
     FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0, FWPM_CONDITION_ALE_APP_ID,
-    FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
-    FWPM_FILTER_FLAG_NONE, FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
-    FWPM_PROVIDER0, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC, FWPM_SUBLAYER0, FWP_ACTION_BLOCK,
-    FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
-    FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL,
-    FWP_MATCH_FLAGS_ALL_SET, FWP_UINT32, FWP_UINT8, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK,
-    FWP_VALUE0, FWP_VALUE0_0,
+    FWPM_CONDITION_FLAGS, FWPM_CONDITION_IP_LOCAL_INTERFACE, FWPM_CONDITION_IP_REMOTE_ADDRESS,
+    FWPM_CONDITION_IP_REMOTE_PORT, FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAG_NONE,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6, FWPM_PROVIDER0, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC,
+    FWPM_SUBLAYER0, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWP_BYTE_BLOB,
+    FWP_BYTE_BLOB_TYPE, FWP_CONDITION_FLAG_IS_LOOPBACK, FWP_CONDITION_VALUE0,
+    FWP_CONDITION_VALUE0_0, FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET, FWP_UINT16, FWP_UINT32,
+    FWP_UINT64, FWP_UINT8, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
 };
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
@@ -179,7 +180,98 @@ const SUBLAYER_NAME: &str = "Neoxify IPv6 block";
 
 const LOG_FILE: &str = "ipv6-block.log";
 
-/// A machine-wide IPv6 block that lasts exactly as long as this value.
+/// DNS confined to the tunnel: the IPv4 half of the same problem, for the
+/// engines that do not confine it themselves.
+///
+/// # What was measured
+///
+/// Windows 11 guest, Xray full tunnel up and carrying traffic through the
+/// node, capture at the NIC miniport (`pktmon --comp nics`, below WFP and
+/// everything else on the machine): plaintext DNS left the physical NIC,
+/// from the NIC's own address to `1.1.1.1:53` --
+///
+/// ```text
+/// 10.0.2.15.50856 > 1.1.1.1.53: A? dns.msftncsi.com.
+/// 10.0.2.15.49834 > 1.1.1.1.53: AAAA? ipv6.msftncsi.com.
+/// ```
+///
+/// -- in three of five Xray protocols' runs, intermittently. Those are
+/// Windows' own connectivity probes, which query *per interface*, bound
+/// to that interface's address; a query bound to the physical NIC leaves
+/// by it whatever the routes say. Their content is harmless. The
+/// mechanism is not: any interface-bound lookup goes out around the
+/// tunnel in clear text, readable by the network it was meant to hide
+/// from.
+///
+/// Made deliberately afterwards -- a raw query from a socket bound to the
+/// NIC's address, and one to the on-link resolver, same capture point --
+/// it reached further than the probes had shown:
+///
+/// ```text
+/// engine      bound to the NIC -> 1.1.1.1:53   on-link resolver:53
+/// Xray        left, answered                   left, answered
+/// WireGuard   left, answered                   refused
+/// IKEv2       refused                          left, answered
+/// OpenVPN     refused                          refused
+/// ```
+///
+/// (Xray's row is from before this existed.) OpenVPN is refused because
+/// its config carries `block-outside-dns`, which is exactly this filter
+/// set. WireGuard's kill-switch permits DNS to its configured resolver
+/// on *any* interface; IKEv2 has nothing. This is `block-outside-dns` in
+/// our code, for every engine that lacks it -- see
+/// `Engines::dns_confinement_for`.
+///
+/// # The filters
+///
+/// At `FWPM_LAYER_ALE_AUTH_CONNECT_V4`, in the same session and sublayer
+/// as the IPv6 block so it shares that block's lifetime, teardown and
+/// crash-safety: port 53 is permitted through the tunnel adapter, on
+/// loopback, and from the engine itself (which is what OpenVPN's version
+/// permits too -- a node that listens on 53 must stay reachable), and
+/// blocked everywhere else. By port rather than by protocol, so TCP DNS
+/// is covered with UDP. IPv6 DNS needs nothing new: the IPv6 block above
+/// already refuses every global v6 destination.
+pub struct DnsConfinement {
+    /// The tunnel adapter's interface LUID.
+    tunnel_luid: u64,
+    /// The engine's executable, permitted to reach port 53 wherever it
+    /// lives. `None` for an engine with no process of ours on the path
+    /// -- IKEv2 is the kernel's RAS client.
+    engine_exe: Option<PathBuf>,
+}
+
+impl DnsConfinement {
+    /// For a tunnel on the adapter with this interface index.
+    pub fn new(tunnel_index: u32, engine_exe: Option<PathBuf>) -> Result<Self, String> {
+        use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceIndexToLuid;
+        use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+        let mut luid = NET_LUID_LH { Value: 0 };
+        // SAFETY: `luid` is a valid out-parameter for the duration of the
+        // call; the union is read only through `Value`, which is how
+        // every LUID consumer treats it.
+        let err = unsafe { ConvertInterfaceIndexToLuid(tunnel_index, &mut luid) };
+        if err != 0 {
+            return Err(format!(
+                "could not resolve the tunnel adapter's LUID (interface {tunnel_index}, {err})"
+            ));
+        }
+        // SAFETY: just written by the call above.
+        Ok(Self { tunnel_luid: unsafe { luid.Value }, engine_exe })
+    }
+}
+
+/// Records why DNS was *not* confined for a tunnel, in the same log the
+/// installs go to. A service has no console, so a reason left on stderr
+/// is a reason nobody reads -- which is how WireGuard went unconfined
+/// unnoticed until a capture showed its DNS leaving.
+pub fn note_not_confined(log_dir: &Path, reason: &str) {
+    note(&log_dir.join(LOG_FILE), &format!("DNS not confined to the tunnel: {reason}"));
+}
+
+/// A machine-wide IPv6 block that lasts exactly as long as this value --
+/// and, when asked for, the tunnel's DNS confinement with it (see
+/// [`DnsConfinement`]).
 pub struct Ipv6Block {
     /// The WFP engine handle, kept as an integer rather than as
     /// `HANDLE`.
@@ -195,6 +287,9 @@ pub struct Ipv6Block {
     /// two lines in `ipv6-block.log` naming the same count is the
     /// cheapest possible check that the teardown matched the setup.
     filters: usize,
+    /// What removing it gives back, for the log line: "IPv6", "DNS", or
+    /// both. A DNS-only session (WireGuard) restores no IPv6.
+    restores: &'static str,
     log: PathBuf,
 }
 
@@ -208,20 +303,54 @@ impl Ipv6Block {
     /// missing -- which stops neighbour discovery and takes the local
     /// network down with it. Either all of it applies or none of it
     /// does.
-    pub fn install(log_dir: &Path) -> Result<Self, String> {
+    pub fn install(log_dir: &Path, dns: Option<&DnsConfinement>) -> Result<Self, String> {
+        Self::install_with(log_dir, true, dns)
+    }
+
+    /// DNS confinement alone, with no IPv6 block -- for WireGuard, whose
+    /// own kill-switch blocks IPv6 but permits DNS to its configured
+    /// resolver on *every* interface. Measured: a query bound to the
+    /// physical NIC's address left it in clear text and was answered,
+    /// while the same test was refused on OpenVPN.
+    ///
+    /// Held apart from the IPv6 block by the caller, so that what the app
+    /// is told about IPv6 still follows only the IPv6 block.
+    pub fn install_dns_only(log_dir: &Path, dns: &DnsConfinement) -> Result<Self, String> {
+        Self::install_with(log_dir, false, Some(dns))
+    }
+
+    fn install_with(log_dir: &Path, ipv6: bool, dns: Option<&DnsConfinement>) -> Result<Self, String> {
         let log = log_dir.join(LOG_FILE);
+        // Resolved before the session opens and held until the
+        // transaction has committed: the filter that permits the engine
+        // points into this blob. An engine that cannot be resolved loses
+        // only its own permit, which matters only on a node listening on
+        // 53 -- recorded rather than fatal.
+        let engine_app = dns.and_then(|dns| dns.engine_exe.as_ref()).and_then(|exe| {
+            AppId::resolve(&exe.to_string_lossy())
+                .map_err(|e| note(&log, &format!("engine not permitted for DNS: {e}")))
+                .ok()
+        });
         let engine = open_dynamic_session()?;
 
-        match unsafe { build(engine) } {
+        let dns_filters = dns.map(|dns| (dns.tunnel_luid, engine_app.as_ref().map(|a| a.blob as *const _)));
+        match unsafe { build(engine, ipv6, dns_filters) } {
             Ok(filters) => {
                 note(
                     &log,
                     &format!(
                         "installed: {filters} filters in a dynamic session, \
-                         provider {PROVIDER_NAME}, sublayer {SUBLAYER_NAME}"
+                         provider {PROVIDER_NAME}, sublayer {SUBLAYER_NAME}{}{}",
+                        if ipv6 { "" } else { ", no IPv6 block" },
+                        if dns.is_some() { ", DNS confined to the tunnel" } else { "" }
                     ),
                 );
-                Ok(Self { engine: engine as isize, filters, log })
+                let restores = match (ipv6, dns.is_some()) {
+                    (true, true) => "IPv6 and DNS",
+                    (true, false) => "IPv6",
+                    (false, _) => "DNS",
+                };
+                Ok(Self { engine: engine as isize, filters, restores, log })
             }
             Err(e) => {
                 // The session dies with the handle, so closing it here
@@ -250,7 +379,7 @@ impl Ipv6Block {
         let engine = std::mem::replace(&mut self.engine, 0) as HANDLE;
         let err = unsafe { FwpmEngineClose0(engine) };
         if err == 0 {
-            note(&self.log, &format!("removed: {} filters, IPv6 restored", self.filters));
+            note(&self.log, &format!("removed: {} filters, {} restored", self.filters, self.restores));
         } else {
             // Reported rather than swallowed, but not returned: a
             // disconnect must not fail because a log-worthy teardown
@@ -311,13 +440,13 @@ fn open_dynamic_session_named(session_name: &str, purpose: &str) -> Result<HANDL
 ///
 /// # Safety
 /// `engine` must be a live handle from [`open_dynamic_session`].
-unsafe fn build(engine: HANDLE) -> Result<usize, String> {
+unsafe fn build(engine: HANDLE, ipv6: bool, dns: Option<DnsFilters>) -> Result<usize, String> {
     let err = FwpmTransactionBegin0(engine, 0);
     if err != 0 {
         return Err(format!("could not begin a filtering transaction ({err:#010x})"));
     }
 
-    match add_everything(engine) {
+    match add_everything(engine, ipv6, dns) {
         Ok(filters) => {
             let err = FwpmTransactionCommit0(engine);
             if err != 0 {
@@ -333,12 +462,31 @@ unsafe fn build(engine: HANDLE) -> Result<usize, String> {
     }
 }
 
+/// What [`add_everything`] needs to confine DNS: the tunnel's LUID, and
+/// the engine's application id when it resolved.
+type DnsFilters = (u64, Option<*const FWP_BYTE_BLOB>);
+
 /// # Safety
-/// Called only from [`build`], inside an open transaction.
-unsafe fn add_everything(engine: HANDLE) -> Result<usize, String> {
+/// Called only from [`build`], inside an open transaction. An app-id
+/// pointer in `dns` must be alive for the duration.
+unsafe fn add_everything(engine: HANDLE, ipv6: bool, dns: Option<DnsFilters>) -> Result<usize, String> {
     add_provider(engine)?;
     add_sublayer(engine)?;
+    let mut filters = 0usize;
+    if ipv6 {
+        filters += add_ipv6_filters(engine)?;
+    }
+    if let Some(dns) = dns {
+        filters += add_dns_filters(engine, dns)?;
+    }
+    Ok(filters)
+}
 
+/// The IPv6 block proper: five filters per direction.
+///
+/// # Safety
+/// Called only from [`add_everything`].
+unsafe fn add_ipv6_filters(engine: HANDLE) -> Result<usize, String> {
     // The set, and why it is this set.
     //
     // It is deliberately the same shape the WireGuard provider installs,
@@ -427,6 +575,61 @@ unsafe fn add_everything(engine: HANDLE) -> Result<usize, String> {
     Ok(filters)
 }
 
+/// DNS confined to the tunnel. See [`DnsConfinement`].
+///
+/// # Safety
+/// Called only from [`add_everything`]; an app-id pointer in `dns` must
+/// be alive for the duration.
+unsafe fn add_dns_filters(engine: HANDLE, dns: DnsFilters) -> Result<usize, String> {
+    let mut filters = 0usize;
+    {
+        let (tunnel_luid, engine_app) = dns;
+        let layer = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+        add_filter(
+            engine,
+            "Neoxify: permit DNS through the tunnel",
+            layer,
+            SUBLAYER_KEY,
+            FWP_ACTION_PERMIT,
+            WEIGHT_PERMIT,
+            &[Scope::RemotePort(53), Scope::LocalInterface(tunnel_luid)],
+        )?;
+        add_filter(
+            engine,
+            "Neoxify: permit loopback DNS",
+            layer,
+            SUBLAYER_KEY,
+            FWP_ACTION_PERMIT,
+            WEIGHT_PERMIT,
+            &[Scope::RemotePort(53), Scope::Loopback],
+        )?;
+        filters += 2;
+        if let Some(app) = engine_app {
+            add_filter(
+                engine,
+                "Neoxify: permit the tunnel engine on port 53",
+                layer,
+                SUBLAYER_KEY,
+                FWP_ACTION_PERMIT,
+                WEIGHT_PERMIT,
+                &[Scope::RemotePort(53), Scope::App(app)],
+            )?;
+            filters += 1;
+        }
+        add_filter(
+            engine,
+            "Neoxify: block DNS outside the tunnel",
+            layer,
+            SUBLAYER_KEY,
+            FWP_ACTION_BLOCK,
+            WEIGHT_BLOCK,
+            &[Scope::RemotePort(53)],
+        )?;
+        filters += 1;
+    }
+    Ok(filters)
+}
+
 /// # Safety
 /// Called only from [`add_everything`].
 unsafe fn add_provider(engine: HANDLE) -> Result<(), String> {
@@ -494,6 +697,11 @@ enum Scope {
     /// `FwpmFilterAdd0` call, which is why [`AppId`] is a guard held by
     /// the caller rather than something built here.
     App(*const FWP_BYTE_BLOB),
+    /// A remote port, whatever the transport -- so one condition covers
+    /// DNS over both UDP and TCP.
+    RemotePort(u16),
+    /// The interface the flow leaves by, as an interface LUID.
+    LocalInterface(u64),
 }
 
 /// # Safety
@@ -517,6 +725,8 @@ unsafe fn add_filter(
     // cannot reallocate and leave an earlier condition pointing at freed
     // memory -- the whole reason this is a separate buffer at all.
     let mut addresses: Vec<FWP_V6_ADDR_AND_MASK> = Vec::with_capacity(scopes.len());
+    // The same arrangement for LUIDs: `FWP_UINT64` is carried by pointer.
+    let mut luids: Vec<u64> = Vec::with_capacity(scopes.len());
 
     let mut conditions: Vec<FWPM_FILTER_CONDITION0> = Vec::with_capacity(scopes.len());
     for scope in scopes {
@@ -559,6 +769,26 @@ unsafe fn add_filter(
                     },
                 },
             },
+            Scope::RemotePort(port) => FWPM_FILTER_CONDITION0 {
+                fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_UINT16,
+                    Anonymous: FWP_CONDITION_VALUE0_0 { uint16: *port },
+                },
+            },
+            Scope::LocalInterface(luid) => {
+                luids.push(*luid);
+                let luid = luids.last_mut().expect("just pushed");
+                FWPM_FILTER_CONDITION0 {
+                    fieldKey: FWPM_CONDITION_IP_LOCAL_INTERFACE,
+                    matchType: FWP_MATCH_EQUAL,
+                    conditionValue: FWP_CONDITION_VALUE0 {
+                        r#type: FWP_UINT64,
+                        Anonymous: FWP_CONDITION_VALUE0_0 { uint64: luid },
+                    },
+                }
+            }
         };
         conditions.push(condition);
     }
@@ -1181,7 +1411,7 @@ mod tests {
                 eprintln!("skipped: no filtering transaction ({begun:#010x})");
                 return;
             }
-            let result = add_everything(engine);
+            let result = add_everything(engine, true, None);
             // Unconditionally, and before the assertion below, so a
             // failing assertion cannot leave a transaction open. Closing
             // the handle would end the dynamic session anyway, which is
@@ -1197,6 +1427,46 @@ mod tests {
                 "five filters per layer, two layers -- see add_everything"
             ),
             Err(e) => panic!("the Windows Filtering Platform rejected our filter set: {e}"),
+        }
+    }
+
+    /// The same, with DNS confinement: the four IPv4 filters are new
+    /// condition shapes (a port, a LUID by pointer, an app id) at a new
+    /// layer, and each is a structure WFP validates on add. A real LUID
+    /// -- loopback's, which every machine has -- and this test binary's
+    /// own app id, so nothing is fabricated. Aborted like the one above.
+    #[test]
+    fn wfp_accepts_the_dns_confinement_filters_then_they_are_aborted() {
+        let Ok(confinement) =
+            DnsConfinement::new(1, Some(std::env::current_exe().expect("test binary path")))
+        else {
+            eprintln!("skipped: no interface 1 to take a LUID from");
+            return;
+        };
+        let app = AppId::resolve(&confinement.engine_exe.as_ref().expect("given above").to_string_lossy())
+            .expect("the test binary resolves to an app id");
+        let Ok(engine) = open_dynamic_session() else {
+            eprintln!("skipped: the filtering engine would not open (needs administrator)");
+            return;
+        };
+
+        let result = unsafe {
+            let begun = FwpmTransactionBegin0(engine, 0);
+            if begun != 0 {
+                FwpmEngineClose0(engine);
+                eprintln!("skipped: no filtering transaction ({begun:#010x})");
+                return;
+            }
+            let result =
+                add_everything(engine, true, Some((confinement.tunnel_luid, Some(app.blob as *const _))));
+            FwpmTransactionAbort0(engine);
+            FwpmEngineClose0(engine);
+            result
+        };
+
+        match result {
+            Ok(filters) => assert_eq!(filters, 14, "ten IPv6 filters and four for DNS"),
+            Err(e) => panic!("the Windows Filtering Platform rejected the DNS filters: {e}"),
         }
     }
 

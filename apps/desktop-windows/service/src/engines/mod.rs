@@ -183,6 +183,11 @@ pub struct Engines {
     /// it. See `ipv6_block` for the measurement, and for why WireGuard
     /// is the one engine that never has one here.
     ipv6_block: Option<Ipv6Block>,
+    /// DNS confined to the tunnel with no IPv6 block, for WireGuard --
+    /// whose own kill-switch blocks IPv6 but lets DNS out by the physical
+    /// NIC. A field of its own so that `ipv6_blocked`, and what the app
+    /// tells the customer about IPv6, still follows only `ipv6_block`.
+    dns_only_block: Option<Ipv6Block>,
     /// The profile the live tunnel was built from.
     ///
     /// Kept so Custom mode can be switched without the customer
@@ -216,6 +221,7 @@ impl Engines {
             active: Slot::empty(),
             split_tunnel: SplitTunnel::new(),
             ipv6_block: None,
+            dns_only_block: None,
             last_profile: None,
             dns_state: dns::TunnelDns::NotRequested,
         }
@@ -677,12 +683,97 @@ impl Engines {
     /// status follows the field.
     fn block_ipv6_if_needed(&mut self, profile: &ConnectProfile) {
         self.ipv6_block = None;
-        if self.split_tunnel.wants_interception() || !ipv6_block::needed_for(profile) {
+        self.dns_only_block = None;
+        if self.split_tunnel.wants_interception() {
             return;
         }
-        match Ipv6Block::install(&self.config_dir) {
+        let dns = self.dns_confinement_for(profile);
+        if !ipv6_block::needed_for(profile) {
+            // WireGuard: its own kill-switch blocks IPv6, but not DNS
+            // leaving by the physical NIC. See `Ipv6Block::install_dns_only`.
+            if let Some(dns) = dns {
+                match Ipv6Block::install_dns_only(&self.config_dir, &dns) {
+                    Ok(block) => self.dns_only_block = Some(block),
+                    Err(e) => eprintln!("DNS could not be confined to the tunnel: {e}"),
+                }
+            }
+            return;
+        }
+        let installed = match Ipv6Block::install(&self.config_dir, dns.as_ref()) {
+            // The DNS filters share the IPv6 block's transaction, so a
+            // rejection of theirs would take the IPv6 block down with
+            // them. Losing DNS confinement must not cost the IPv6 block,
+            // which was measured leaking on its own -- so try again with
+            // the block alone. The failure is in ipv6-block.log either
+            // way.
+            Err(e) if dns.is_some() => {
+                eprintln!("DNS could not be confined to the tunnel: {e}");
+                Ipv6Block::install(&self.config_dir, None)
+            }
+            other => other,
+        };
+        match installed {
             Ok(block) => self.ipv6_block = Some(block),
             Err(e) => eprintln!("IPv6 could not be blocked for this tunnel: {e}"),
+        }
+    }
+
+    /// Whether this tunnel's DNS needs confining to it, and to what.
+    ///
+    /// Every engine but OpenVPN, whose config already carries
+    /// `block-outside-dns`. Measured on a Windows 11 guest with a query
+    /// deliberately made the way Windows' own connectivity probes make
+    /// theirs, capture at the NIC miniport: Xray leaked those probes;
+    /// WireGuard let a query bound to the physical NIC reach its
+    /// configured resolver in clear text; IKEv2 let a query to the
+    /// on-link resolver -- on a real network, the router, and from there
+    /// the ISP -- out and answered. OpenVPN refused all three. See
+    /// `ipv6_block::DnsConfinement`.
+    ///
+    /// `None` when the adapter cannot be found, which is logged rather
+    /// than fatal for the same reason the IPv6 block's own failure is:
+    /// the tunnel is carrying traffic, and refusing it over a filter
+    /// would leave the customer with less, not more.
+    fn dns_confinement_for(&self, profile: &ConnectProfile) -> Option<ipv6_block::DnsConfinement> {
+        use neoconnect_ipc::ConnectProfile as P;
+        let skip = |reason: String| {
+            ipv6_block::note_not_confined(&self.config_dir, &reason);
+            None
+        };
+        let engine_exe = match profile {
+            P::Openvpn(_) => return None,
+            P::XrayVlessReality(_) | P::XrayVlessTls(_) | P::XrayTrojan(_) | P::Shadowsocks(_) => {
+                match self.engine_path("xray.exe") {
+                    Ok(exe) => Some(exe),
+                    Err(e) => return skip(e),
+                }
+            }
+            // wireguard.exe talks to its peer, never to port 53, and the
+            // IKEv2 client is the kernel's: no process of ours to permit.
+            P::Wireguard(_) | P::Ikev2(_) => None,
+        };
+        let name = adapter_name_for(profile);
+        // Polled, briefly. wireguard.exe's tunnel service brings its
+        // adapter up on its own schedule, and the first version of this
+        // looked once, found nothing, and left WireGuard's DNS unconfined
+        // on every connect -- measured, a query bound to the physical NIC
+        // still leaving after the fix had landed for every other engine.
+        // Every other engine's adapter is up by now, so this costs them
+        // one lookup.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let adapter = loop {
+            match crate::adapters::find_by_name(name) {
+                Ok(Some(adapter)) => break adapter,
+                Err(e) => return skip(format!("could not list adapters: {e}")),
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    return skip(format!("the tunnel adapter {name} did not appear within 5s"));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        };
+        match ipv6_block::DnsConfinement::new(adapter.index, engine_exe) {
+            Ok(confinement) => Some(confinement),
+            Err(e) => skip(e),
         }
     }
 
@@ -748,6 +839,11 @@ impl Engines {
     /// customer's networking.
     fn unblock_ipv6(&mut self) {
         if let Some(mut block) = self.ipv6_block.take() {
+            block.remove();
+        }
+        // WireGuard's DNS-only confinement, released at the same moment
+        // for the same reasons.
+        if let Some(mut block) = self.dns_only_block.take() {
             block.remove();
         }
     }
