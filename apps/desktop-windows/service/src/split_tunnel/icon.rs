@@ -92,6 +92,16 @@ pub fn icon_png_base64(path: &str) -> Option<String> {
 
 /// The extraction itself, unchanged and uncached.
 fn encode_icon(path: &str) -> Option<String> {
+    let (width, height, rgba) = icon_rgba(path)?;
+    Some(base64(&png(width, height, &rgba)))
+}
+
+/// The shell's large icon for `path`, as straight-alpha RGBA.
+///
+/// Split from the PNG encoding so the GDI half -- the half the header's
+/// "every icon has come out blank" story is about -- can be tested
+/// against a real executable rather than only against buffers.
+fn icon_rgba(path: &str) -> Option<(u32, u32, Vec<u8>)> {
     let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
 
     // SAFETY: zeroed is a valid SHFILEINFOW; the call fills it in.
@@ -113,9 +123,7 @@ fn encode_icon(path: &str) -> Option<String> {
     let pixels = rgba_from_icon(icon);
     // SAFETY: the icon came from SHGetFileInfoW and is ours to free.
     unsafe { DestroyIcon(icon) };
-
-    let (width, height, rgba) = pixels?;
-    Some(base64(&png(width, height, &rgba)))
+    pixels
 }
 
 /// Straight-alpha RGBA for an icon, with the mask applied.
@@ -416,6 +424,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// The whole GDI path against a real executable, which nothing ran
+    /// before: the shell's icon, its bitmaps, the mask rule, the channel
+    /// swap. What is asserted is the failure the header names -- an icon
+    /// that decodes to nothing visible -- and its opposite, an icon whose
+    /// transparent background was flattened to opaque. Explorer's icon
+    /// has both a shape and a background around it on every Windows.
+    #[test]
+    fn a_real_executable_gives_an_icon_that_is_neither_blank_nor_a_solid_block() {
+        let (width, height, rgba) =
+            icon_rgba(r"C:\Windows\explorer.exe").expect("the shell has an icon for explorer.exe");
+        assert!(width >= 16 && height >= 16, "a large icon, got {width}x{height}");
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+
+        let alphas: Vec<u8> = rgba.chunks_exact(4).map(|pixel| pixel[3]).collect();
+        let visible = alphas.iter().filter(|&&a| a > 0).count();
+        let transparent = alphas.iter().filter(|&&a| a == 0).count();
+        assert!(visible > alphas.len() / 10, "the icon came out blank: {visible} visible pixels");
+        assert!(transparent > 0, "the background was flattened: no transparent pixel at all");
+
+        // And it survives the encode the picker actually sends.
+        let encoded = encode_icon(r"C:\Windows\explorer.exe").expect("encodes");
+        assert!(encoded.starts_with("iVBORw0KGgo"), "a base64 PNG signature");
+    }
 
     #[test]
     fn base64_matches_the_known_answers() {
