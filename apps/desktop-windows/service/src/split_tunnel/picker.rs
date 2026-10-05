@@ -328,3 +328,74 @@ fn is_user_application(path: &str) -> bool {
         .unwrap_or_default();
     !NEVER_OFFER.contains(&file_name.as_str())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The case that put scoring here: Edge ships an
+    /// `elevation_service.exe` that sorts before `msedge.exe`, and taking
+    /// the first put a service's path and icon under "Microsoft Edge".
+    #[test]
+    fn the_primary_binary_is_the_one_named_after_the_product() {
+        let paths = vec![
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\elevation_service.exe".to_string(),
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".to_string(),
+        ];
+        assert_eq!(pick_primary("Microsoft Edge", &paths).as_deref(), Some(paths[1].as_str()));
+
+        // An exact stem beats a longer helper that merely contains it.
+        let discord = vec![r"C:\D\Update.exe".to_string(), r"C:\D\Discord.exe".to_string()];
+        assert_eq!(pick_primary("Discord", &discord).as_deref(), Some(r"C:\D\Discord.exe"));
+
+        assert_eq!(pick_primary("Anything", &[]), None);
+    }
+
+    /// Traps rather than choices, each of which was really offered: the
+    /// operating system's own binaries, and the three names one letter
+    /// or one click away from a mistake -- WebView2 beside the browser
+    /// somebody meant, and this product's own app and service.
+    #[test]
+    fn the_picker_offers_programs_and_never_the_traps() {
+        assert!(is_user_application(r"C:\Program Files\Game\game.exe"));
+        assert!(is_user_application(r"D:\Games\Steam\steam.EXE"), "case does not matter");
+
+        assert!(!is_user_application(r"C:\Windows\System32\svchost.exe"));
+        assert!(!is_user_application(r"C:\WINDOWS\SysWOW64\cmd.exe"));
+        assert!(!is_user_application(r"C:\Program Files\Game\readme.txt"), "not an executable");
+        for trap in [
+            r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\msedgewebview2.exe",
+            r"C:\Program Files\Neoxify\neoconnect-desktop.exe",
+            r"C:\Program Files\Neoxify\neoconnect-service.exe",
+        ] {
+            assert!(!is_user_application(trap), "{trap} must never be offered");
+        }
+    }
+
+    /// Windows stamps one ProductName on everything it ships. Grouping on
+    /// it once put nine unrelated accessories under a single entry that a
+    /// customer selecting it would have tunnelled all of.
+    #[test]
+    fn the_platform_name_is_not_a_product() {
+        assert!(is_platform_product("Microsoft® Windows® Operating System"));
+        assert!(is_platform_product("Microsoft Windows"));
+        assert!(!is_platform_product("Discord"));
+    }
+
+    /// The version-resource path against real binaries, which nothing ran
+    /// before. Two Windows accessories share a ProductName and must still
+    /// come out as two products, each keyed by its own path.
+    #[test]
+    fn two_windows_accessories_are_two_products_not_one() {
+        let explorer = r"C:\Windows\explorer.exe";
+        let notepad = r"C:\Windows\System32\notepad.exe";
+        let (explorer_key, explorer_label) = product_of(explorer);
+        let (notepad_key, _) = product_of(notepad);
+        assert_ne!(explorer_key, notepad_key, "one platform name must not group them");
+        assert!(!explorer_label.trim().is_empty(), "a name a person can read");
+        assert!(
+            version_string(explorer, "ProductName").is_some(),
+            "the version resource should be readable from a real binary"
+        );
+    }
+}
