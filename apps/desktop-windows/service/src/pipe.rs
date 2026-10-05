@@ -125,7 +125,17 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
         // exactly the wrong direction. Only a `u32` crosses the await
         // here; the watch itself is owned, Send, and moved into the task
         // below.
-        let watch = ClientWatch::of(&connected).ok();
+        //
+        // Only Neoxify's own app is watched. Any authenticated local
+        // process may open this pipe, and watching whichever connected
+        // last meant a status probe or another tool, finishing and
+        // exiting, was read as the customer closing Neoxify -- the
+        // tunnel came down while the app still showed it up. Measured on
+        // the test VM; see `client_watch::is_the_app`. Anything else that
+        // connects is served normally and simply not watched.
+        let watch = ClientWatch::of(&connected)
+            .ok()
+            .filter(|w| crate::lifecycle::client_watch::is_the_app(w.pid));
         let pid = watch.as_ref().map(|w| w.pid);
         let newly_seen = match pid {
             Some(pid) => watched.lock().await.replace(pid) != Some(pid),

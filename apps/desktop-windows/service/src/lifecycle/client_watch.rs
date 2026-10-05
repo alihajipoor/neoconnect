@@ -210,6 +210,66 @@ impl ClientWatch {
     }
 }
 
+/// The desktop app's executable, as the installer lays it down: beside
+/// the `resources` directory the service runs from.
+const APP_EXE: &str = "neoconnect-desktop.exe";
+
+/// Whether the process at the other end of the pipe is Neoxify's own app.
+///
+/// Only the app's exit means "the customer closed Neoxify". The pipe's
+/// ACL admits any authenticated local process, and the watch used to be
+/// placed on whichever one connected last -- so a status probe, a second
+/// tool, anything that opened the pipe and then exited, was read as the
+/// app going away and tore the customer's tunnel down while the app still
+/// showed it connected. Found on the test VM on 2026-10-04: three
+/// teardowns in the service's own log, each logged as "the app exited",
+/// each actually a test script finishing.
+///
+/// Decided by the executable path, which a look-alike cannot fake: the
+/// install directory is under Program Files, where writing needs the
+/// elevation that would make faking it pointless.
+pub fn is_the_app(pid: u32) -> bool {
+    let Some(client) = process_image(pid) else { return false };
+    let Ok(service) = std::env::current_exe() else { return false };
+    names_the_app(std::path::Path::new(&client), &service)
+}
+
+/// The rule, apart from the lookups so it can be tested: the client is
+/// `neoconnect-desktop.exe`, in the service's own directory or in the one
+/// above it (the installed layout puts the service in `resources\`).
+/// Compared without regard to case, as Windows paths are.
+fn names_the_app(client: &std::path::Path, service: &std::path::Path) -> bool {
+    let lower = |p: Option<&std::path::Path>| p.map(|p| p.to_string_lossy().to_lowercase());
+    let named_right = client
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(APP_EXE));
+    let client_dir = lower(client.parent());
+    let service_dir = service.parent();
+    named_right
+        && client_dir.is_some()
+        && (client_dir == lower(service_dir) || client_dir == lower(service_dir.and_then(|d| d.parent())))
+}
+
+/// The full path of a process's executable, or `None` if it cannot be
+/// asked -- which `is_the_app` reads as "not the app".
+fn process_image(pid: u32) -> Option<String> {
+    use windows_sys::Win32::System::Threading::{
+        QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: no pointers; the call returns a handle or null.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        return None;
+    }
+    let handle = OwnedHandle(raw);
+    let mut buffer = [0u16; 1024];
+    let mut len = buffer.len() as u32;
+    // SAFETY: the buffer is valid for `len` wide characters, and the call
+    // writes at most that many and updates `len`.
+    let ok = unsafe { QueryFullProcessImageNameW(handle.0, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len) };
+    (ok != 0).then(|| String::from_utf16_lossy(&buffer[..len as usize]))
+}
+
 /// Why a watch ended. Every variant means "do not keep this client's
 /// tunnel up"; they differ only in what gets written to the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,6 +384,40 @@ mod tests {
             "a killed client must read as exited, got {signal:?}"
         );
         let _ = child.wait();
+    }
+
+    /// Only the installed app's own executable counts as the app. The
+    /// failure this guards against was measured, not imagined: on the
+    /// test VM every short-lived pipe client was taken for the app and
+    /// its exit tore the tunnel down.
+    #[test]
+    fn only_the_installed_app_counts_as_the_app() {
+        use std::path::Path;
+        let service = Path::new(r"C:\Program Files\Neoxify\resources\neoconnect-service.exe");
+
+        assert!(names_the_app(Path::new(r"C:\Program Files\Neoxify\neoconnect-desktop.exe"), service));
+        assert!(names_the_app(Path::new(r"c:\program files\neoxify\NEOCONNECT-DESKTOP.EXE"), service), "case-blind");
+        // A layout with the service beside the app also counts.
+        assert!(names_the_app(
+            Path::new(r"D:\Neoxify\neoconnect-desktop.exe"),
+            Path::new(r"D:\Neoxify\neoconnect-service.exe")
+        ));
+
+        for stranger in [
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Users\someone\Downloads\neoconnect-desktop.exe",
+            r"C:\Program Files\Neoxify\resources\neoconnect-desktop.exe.bak",
+            r"C:\Program Files\Neoxify\neoconnect-desktop2.exe",
+        ] {
+            assert!(!names_the_app(Path::new(stranger), service), "{stranger} is not the app");
+        }
+    }
+
+    /// The test process is not the app, so it must not be watched as one --
+    /// which is also what keeps the pipe tests from tearing anything down.
+    #[test]
+    fn this_test_process_is_not_the_app() {
+        assert!(!is_the_app(std::process::id()));
     }
 
     /// Every variant has to mean "tear down", so every variant needs a
