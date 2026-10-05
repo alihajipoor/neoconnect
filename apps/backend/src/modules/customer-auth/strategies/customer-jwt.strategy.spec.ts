@@ -22,6 +22,16 @@ describe("CustomerJwtStrategy.validate", () => {
     expect(strategy.validate({ sub: "cust-1", email: "a@b.c" })).toEqual({ sub: "cust-1", email: "a@b.c" });
   });
 
+  // Signing out ends the session this names, and only that one -- so it
+  // has to reach the request, or logout would have nothing to revoke.
+  it("carries the device's session id through to the request", () => {
+    expect(strategy.validate({ sub: "cust-1", email: "a@b.c", sid: "session-1" })).toEqual({
+      sub: "cust-1",
+      email: "a@b.c",
+      sid: "session-1",
+    });
+  });
+
   it("refuses an email-verification token presented as a session", () => {
     expect(() => strategy.validate({ sub: "cust-1", purpose: "verify-email" } as never)).toThrow(
       UnauthorizedException,

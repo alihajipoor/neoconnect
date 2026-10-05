@@ -50,6 +50,8 @@ export class CustomerJwtStrategy extends PassportStrategy(Strategy, "customer-jw
     if (typeof payload.sub !== "string" || typeof payload.email !== "string" || payload.email === "") {
       throw new UnauthorizedException("This token is not an access token");
     }
-    return { sub: payload.sub, email: payload.email };
+    return typeof payload.sid === "string"
+      ? { sub: payload.sub, email: payload.email, sid: payload.sid }
+      : { sub: payload.sub, email: payload.email };
   }
 }

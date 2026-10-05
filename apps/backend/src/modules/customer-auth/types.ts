@@ -1,16 +1,28 @@
 export interface AuthenticatedCustomer {
   sub: string;
   email: string;
+  /** The signed-in device this request came from (a `CustomerSession`
+   * id). Absent on access tokens issued before sessions existed. */
+  sid?: string;
 }
 
 export interface CustomerAccessTokenPayload {
   sub: string;
   email: string;
+  /** See `CustomerRefreshTokenPayload.sid`. Carried here too so that
+   * signing out -- an authenticated call -- knows which device to end. */
+  sid?: string;
 }
 
 export interface CustomerRefreshTokenPayload {
   sub: string;
   tokenVersion: number;
+  /** The `CustomerSession` this device holds. Signing out revokes this
+   * one session and no other device's; `tokenVersion` stays the switch
+   * for ending every session at once (password change, account
+   * deletion). Absent on tokens issued before sessions existed, which
+   * stay valid until they expire. */
+  sid?: string;
 }
 
 // Deliberately separate shapes (not reusing CustomerAccessTokenPayload)

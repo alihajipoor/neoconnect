@@ -370,12 +370,40 @@ model Customer {
   supportTickets     SupportTicket[]
   clientAttempts     ClientAttempt[]
   gamingToken        GamingResolverToken?
+  sessions           CustomerSession[]
 
   @@index([referredByCustomerId])
   // `GET /customers` orders by `createdAt desc` with no filter, so
   // without this the page's `take` bounds the response and not the sort.
   @@index([createdAt(sort: Desc)])
   @@map("customers")
+}
+
+/// One signed-in device: what signing out ends.
+///
+/// Before this, signing out bumped `Customer.tokenVersion`, which ends
+/// every refresh token the customer holds -- so signing out on a phone
+/// signed the desktop out too, and with clients that act on a rejected
+/// session, dropped its tunnel. Now each sign-in gets a row, both tokens
+/// carry its id, a refresh needs the row unrevoked, and signing out
+/// revokes only this one. `tokenVersion` is still the switch for ending
+/// every session at once, where that is the point: a password change,
+/// an account deletion.
+///
+/// Rows hold no secret -- the token is a signed JWT, never stored -- and
+/// are deleted with the customer.
+model CustomerSession {
+  id         String    @id @default(uuid())
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  /// Set on every refresh, so a row nobody has used for longer than a
+  /// refresh token lives can be recognised as dead and pruned.
+  lastUsedAt DateTime  @default(now())
+  revokedAt  DateTime?
+
+  @@index([customerId])
+  @@map("customer_sessions")
 }
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,8 @@ describe("CustomerAuthService", () => {
     // The trial grant now refuses anyone who already has a subscription,
     // which is what makes it safe to retry after a failure.
     subscription: { count: jest.Mock };
+    // One row per signed-in device; see CustomerSession.
+    customerSession: { create: jest.Mock; deleteMany: jest.Mock; updateMany: jest.Mock };
   };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let config: { get: jest.Mock };
@@ -55,6 +57,11 @@ describe("CustomerAuthService", () => {
     prisma = {
       customer: { findUnique: jest.fn(), update: jest.fn() },
       subscription: { count: jest.fn().mockResolvedValue(0) },
+      customerSession: {
+        create: jest.fn().mockResolvedValue({ id: "session-1" }),
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
     };
     jwt = { signAsync: jest.fn(), verifyAsync: jest.fn() };
     config = { get: jest.fn((key: string) => `config:${key}`) };
@@ -625,6 +632,72 @@ describe("CustomerAuthService", () => {
 
       const result = await service.refresh("token");
       expect(result).toEqual({ accessToken: "access-token-2", refreshToken: "refresh-token-2" });
+    });
+  });
+
+  describe("per-device sessions", () => {
+    it("puts a new session in both tokens on sign-in", async () => {
+      jwt.signAsync.mockResolvedValue("signed");
+      await service.issueTokenPair({ id: "customer-1", email: "a@b.c", tokenVersion: 0 });
+
+      expect(prisma.customerSession.create).toHaveBeenCalledWith({
+        data: { customerId: "customer-1" },
+        select: { id: true },
+      });
+      const [access, refresh] = jwt.signAsync.mock.calls.map((c) => c[0]);
+      expect(access).toMatchObject({ sub: "customer-1", sid: "session-1" });
+      expect(refresh).toMatchObject({ sub: "customer-1", tokenVersion: 0, sid: "session-1" });
+    });
+
+    it("keeps a device's session across a refresh instead of opening another", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", tokenVersion: 0, sid: "session-7" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ tokenVersion: 0 }));
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.refresh("token");
+
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "session-7", customerId: "customer-1", revokedAt: null } }),
+      );
+      expect(prisma.customerSession.create).not.toHaveBeenCalled();
+      expect(jwt.signAsync.mock.calls[1][0]).toMatchObject({ sid: "session-7" });
+    });
+
+    it("refuses to refresh a session that has been signed out", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", tokenVersion: 0, sid: "session-7" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ tokenVersion: 0 }));
+      prisma.customerSession.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.refresh("token")).rejects.toThrow(UnauthorizedException);
+    });
+
+    it("moves a token from before sessions onto a session of its own", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", tokenVersion: 0 });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ tokenVersion: 0 }));
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.refresh("token");
+      expect(prisma.customerSession.create).toHaveBeenCalled();
+    });
+
+    // The owner's requirement, pinned: signing out on one device must not
+    // sign out any other. The old logout bumped tokenVersion, which ends
+    // every device's refresh token.
+    it("signs out only this device, never the others", async () => {
+      await service.revokeSession("customer-1", "session-7");
+
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { id: "session-7", customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+      expect(prisma.customer.update).not.toHaveBeenCalled();
+    });
+
+    it("revokes nothing server-side for a token from before sessions", async () => {
+      await service.revokeSession("customer-1", undefined);
+
+      expect(prisma.customerSession.updateMany).not.toHaveBeenCalled();
+      expect(prisma.customer.update).not.toHaveBeenCalled();
     });
   });
 
