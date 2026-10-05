@@ -161,6 +161,31 @@ pub async fn vpn_disconnect<R: Runtime>(app: AppHandle<R>) -> Result<Empty, Stri
     }
 }
 
+/// Disconnects, and removes the credentials the platform keeps in its
+/// own VPN settings. Called when the customer's session ends.
+///
+/// Both platforms let a saved profile be switched on from the system's
+/// Settings with the app signed out -- Android's platform IKEv2 profile,
+/// iOS's tunnel profile and its IKEv2 one -- so a sign-out that only
+/// stopped the tunnel left the previous customer's tunnel one tap away.
+/// Separate from `vpn_disconnect` because the connect ladder calls that
+/// between rungs and must not erase the profile it is about to dial.
+#[tauri::command]
+pub async fn vpn_forget_profiles<R: Runtime>(app: AppHandle<R>) -> Result<Empty, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        handle(&app)?
+            .0
+            .run_mobile_plugin::<Empty>("forgetProfiles", ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        Err(unavailable())
+    }
+}
+
 /// Whether the device has stopped being routed through a VPN.
 ///
 /// Split out from `vpn_disconnect` so the teardown itself never blocks:

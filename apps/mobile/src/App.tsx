@@ -1,7 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ScreenTransition } from "@shared/components/ScreenTransition";
 import { getTokens } from "@shared/lib/session";
 import { flushAttempts } from "@shared/lib/attempts";
+import { endCustomerSession, setTunnelTeardown, type SessionEnd } from "@shared/lib/session-end";
+import { onSessionRevoked } from "@shared/lib/session-revoked";
+import { useI18n } from "@shared/lib/i18n";
+import { tearDownMobileForSignOut } from "./lib/vpn";
 import { Login } from "@shared/screens/Login";
 import { Register } from "@shared/screens/Register";
 import { VerifyEmail } from "@shared/screens/VerifyEmail";
@@ -21,6 +25,13 @@ import { ProminentDisclosure, hasAcceptedDisclosure } from "./components/Promine
 /** How often a queued diagnostic report retries. Matches the desktop
  * client so the two do not report at different rates for no reason. */
 const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
+
+// Every session end on this device -- the shared `logout()` and
+// `deleteAccount()` included -- takes the phone's tunnel down and
+// forgets the profiles the system keeps, rather than asking the desktop
+// service that does not exist here. At module scope so it is in place
+// before any screen can end a session.
+setTunnelTeardown(tearDownMobileForSignOut);
 
 /** The Android client.
  *
@@ -43,6 +54,7 @@ const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
  */
 type Screen =
   | "loading"
+  | "signingOut"
   | "disclosure"
   | "login"
   | "register"
@@ -60,6 +72,8 @@ export default function App() {
   // can sign in the moment the code is confirmed. Held in memory only.
   const [pendingAuth, setPendingAuth] = useState<{ email: string; password?: string } | null>(null);
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
+  const endingRef = useRef(false);
+  const { t } = useI18n();
 
   // The disclosure gates everything, including a session that is already
   // signed in. Play wants it shown before the data collection begins,
@@ -137,11 +151,61 @@ export default function App() {
     setScreen("verify");
   }
 
+  /** The one place a session ends on this device, whatever ended it.
+   *
+   * This is the reported bug. An Android tester signed out and the VPN
+   * stayed connected and kept carrying traffic: every route back to
+   * sign-in here was a bare `setScreen("login")`, the expired-session
+   * route did not even clear the cached credentials, and nothing on any
+   * of them touched the tunnel -- which lives in a VpnService or a
+   * NetworkExtension and outlives every screen.
+   *
+   * Same shape as the desktop App's: the tunnel comes down (and the
+   * stored profiles are forgotten) before the sign-in screen is drawn,
+   * and a teardown that could not be confirmed is said, not hidden. */
+  async function handleLoggedOut(reason: "signedOut" | "revoked" = "signedOut") {
+    if (endingRef.current) return;
+    endingRef.current = true;
+    setScreen("signingOut");
+    try {
+      let ended: SessionEnd;
+      try {
+        ended = await endCustomerSession();
+      } catch {
+        ended = { tunnel: "unconfirmed" };
+      }
+      setPendingAuth(null);
+      setLoginNotice(
+        ended.tunnel === "unconfirmed"
+          ? t("signout.tunnelUnconfirmed")
+          : reason === "revoked"
+            ? t("signout.sessionEnded")
+            : null,
+      );
+      setScreen("login");
+    } finally {
+      endingRef.current = false;
+    }
+  }
+
+  // See the desktop App: registered once, always calling the current
+  // render's handler.
+  const handleLoggedOutRef = useRef(handleLoggedOut);
+  handleLoggedOutRef.current = handleLoggedOut;
+  useEffect(() => onSessionRevoked(() => void handleLoggedOutRef.current("revoked")), []);
+
   function renderScreen() {
   if (screen === "loading") {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         Loading...
+      </div>
+    );
+  }
+  if (screen === "signingOut") {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        {t("nav.signingOut")}
       </div>
     );
   }
@@ -199,7 +263,7 @@ export default function App() {
         onBack={() => setScreen("dashboard")}
         onOpenReferrals={() => setScreen("referrals")}
         onOpenSupport={() => setScreen("support")}
-        onLoggedOut={() => setScreen("login")}
+        onLoggedOut={() => void handleLoggedOut()}
         // Android only. Custom mode is per-app routing, which on iOS
         // belongs to the system: `vpn_list_apps` has no iOS
         // implementation and returns unavailable(), so this card
@@ -242,7 +306,7 @@ export default function App() {
   }
     return (
       <Dashboard
-        onLoggedOut={() => setScreen("login")}
+        onLoggedOut={() => void handleLoggedOut()}
         onBrowsePlans={() => setScreen("plans")}
         onOpenSettings={() => setScreen("settings")}
       />

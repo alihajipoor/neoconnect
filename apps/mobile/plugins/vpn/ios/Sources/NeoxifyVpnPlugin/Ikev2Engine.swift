@@ -252,4 +252,28 @@ enum Ikev2Engine {
     static func disconnect() async {
         await loadedIfOurs()?.connection.stopVPNTunnel()
     }
+
+    /// Stops the tunnel, removes our personal-VPN profile, and deletes
+    /// the password it pointed at.
+    ///
+    /// For a sign-out. The profile and the keychain item together are a
+    /// working credential that iOS will dial from Settings with nobody
+    /// signed in to the app. `connect` writes both afresh every time, so
+    /// nothing a later sign-in needs is lost -- only the system's "allow
+    /// this VPN configuration" prompt comes back once.
+    ///
+    /// The keychain item goes even when the profile is not ours: it is
+    /// ours whatever the personal-VPN slot now holds.
+    static func forget() async {
+        if let manager = await loadedIfOurs() {
+            manager.connection.stopVPNTunnel()
+            try? await manager.removeFromPreferences()
+        }
+        let item: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(item as CFDictionary)
+    }
 }
