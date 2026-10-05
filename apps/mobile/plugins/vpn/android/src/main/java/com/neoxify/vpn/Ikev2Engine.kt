@@ -166,6 +166,26 @@ object Ikev2Engine {
             .onFailure { Log.w(TAG, "stopping the platform VPN failed", it) }
     }
 
+    /** Tears the tunnel down and removes the profile, credential and all.
+     *
+     * For a sign-out, where [stop]'s reason for keeping the profile no
+     * longer holds. The profile carries the account's IKEv2 username and
+     * password, and Android lists it under Settings > VPN, where anybody
+     * holding the phone can connect it -- or where it may already be set
+     * as always-on, so the platform dials it again by itself -- with no
+     * account signed in to the app at all. That is a tunnel through our
+     * node under a customer the app no longer shows.
+     *
+     * The cost is the consent dialog once more on the next IKEv2 connect,
+     * which is the right price for the next person to sign in.
+     */
+    fun forget(context: Context) {
+        stop(context)
+        if (Build.VERSION.SDK_INT < MIN_SDK) return
+        runCatching { manager(context).deleteProvisionedVpnProfile() }
+            .onFailure { Log.w(TAG, "removing the platform VPN profile failed", it) }
+    }
+
     /** Whether *our* platform tunnel is currently carrying the device. */
     fun isUp(context: Context): Boolean =
         Build.VERSION.SDK_INT >= MIN_SDK && startedByUs(context) && liveState(context) == LiveState.UP

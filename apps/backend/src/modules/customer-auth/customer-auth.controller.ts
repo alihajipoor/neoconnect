@@ -230,7 +230,10 @@ export class CustomerAuthController {
   @ApiBearerAuth()
   @UseGuards(CustomerJwtAuthGuard)
   async logout(@CurrentCustomer() customer: AuthenticatedCustomer) {
-    await this.customerAuthService.revokeAllSessions(customer.sub);
+    // This device only. It used to revoke every session the customer
+    // had, so signing out on one device signed out all of them -- and,
+    // with clients that end a rejected session, dropped their tunnels.
+    await this.customerAuthService.revokeSession(customer.sub, customer.sid);
   }
 
   /** Changes the password of a signed-in customer, and hands back fresh

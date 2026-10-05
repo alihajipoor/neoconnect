@@ -64,8 +64,8 @@ import { LocationPicker } from "@shared/components/LocationPicker";
 import { Sheet } from "@shared/components/Sheet";
 import { CommunityLinks } from "@shared/components/CommunityLinks";
 import { useI18n } from "@shared/lib/i18n";
+import { sessionGeneration } from "@shared/lib/session-end";
 import {
-  clearSnapshot,
   loadSnapshot,
   saveSnapshot,
 } from "@shared/lib/credential-cache";
@@ -85,6 +85,7 @@ import {
   connectWireGuard,
   connectXray,
   disconnect,
+  forgetProfiles,
   tunnelGone,
   hasVpnPermission,
   requestVpnPermission,
@@ -310,6 +311,7 @@ export function Dashboard({
    * way out was to wait for the timeout -- reported from a real phone.
    */
   const cancelRef = useRef(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [exitIp, setExitIp] = useState<string | null>(null);
@@ -618,6 +620,12 @@ export function Dashboard({
     setFailedOverTo(null);
     setUnsupportedChoice(null);
     cancelRef.current = false;
+    // The customer session this pass dials for. A sign-out can land
+    // mid-ladder; `cancelRef` stops the walk, but its own path leaves the
+    // teardown to the toggle that set it -- and a sign-out's teardown
+    // may already have finished by the time a slow connect returns. See
+    // the check after each connect below.
+    const sessionAtStart = sessionGeneration();
 
     // One small question before dialling: are these still the right
     // servers? It cannot block the connect -- `refreshConnectionConfig`
@@ -752,6 +760,7 @@ export function Dashboard({
       // The customer pressed stop. Whatever this attempt left behind is
       // torn down by the toggle that set the flag, so this only has to
       // stop walking the list.
+      if (sessionGeneration() !== sessionAtStart) return;
       if (cancelRef.current) return reportCancelled();
       const label = customerProtocolLabel(
         candidate.protocol,
@@ -819,6 +828,13 @@ export function Dashboard({
             allowedIPs: candidate.credentials.allowedIPs,
             allowedApps,
           });
+        }
+        // Signed out while this engine was coming up. Nothing else will
+        // take this tunnel down -- the sign-out's teardown may already
+        // have run -- so this pass does, silently, and stops.
+        if (sessionGeneration() !== sessionAtStart) {
+          await forgetProfiles().catch(() => disconnect()).catch(() => undefined);
+          return;
         }
         if (cancelRef.current) return reportCancelled();
         setProtocolUser(candidate);
@@ -922,9 +938,16 @@ export function Dashboard({
   }
 
   async function handleLogout() {
-    // Before the session goes: one customer's credentials left on the
-    // device for the next person to connect with is a leak, not a cache.
-    await clearSnapshot();
+    if (signingOut) return;
+    setSigningOut(true);
+    // A connect still walking its protocols stops rather than bringing
+    // the next one up after the teardown. The session generation covers
+    // the same race from outside this screen; see runLadder.
+    cancelRef.current = true;
+    // `logout()` takes the tunnel down -- and forgets the profiles the
+    // system keeps -- before it deletes the credentials. This used to
+    // clear the credentials and stop there, which is the reported bug:
+    // signed out, still connected, still carrying traffic.
     await logout();
     onLoggedOut();
   }
@@ -1022,10 +1045,11 @@ export function Dashboard({
           </Button>
           <Button
             variant="ghost"
-            onClick={handleLogout}
+            onClick={() => void handleLogout()}
+            disabled={signingOut}
             className="h-9 px-2 text-xs"
           >
-            {t("nav.signOut")}
+            {signingOut ? t("nav.signingOut") : t("nav.signOut")}
           </Button>
         </div>
       </header>

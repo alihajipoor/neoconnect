@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { tearDownForSignOut, type TeardownDeps } from "@shared/lib/tunnel-teardown";
 
 /** The Android side of the tunnel.
  *
@@ -113,3 +114,28 @@ export const tunnelGone = () =>
   invoke<{ gone: boolean }>("vpn_tunnel_gone").then((r) => r.gone);
 
 export const vpnStatus = () => invoke<VpnStatus>("vpn_status");
+
+/** Stops every engine and removes what the platform keeps in its own
+ * VPN settings -- see `vpn_forget_profiles`. Sign-out only. */
+export const forgetProfiles = () => invoke<void>("vpn_forget_profiles");
+
+/** The phone's half of ending a session.
+ *
+ * The shared teardown, pointed at this platform: "disconnect" forgets
+ * the stored profiles as well (falling back to a plain disconnect if the
+ * command is missing, so an older native side still stops the tunnel),
+ * and "still connected" is the same `tunnelGone` the dashboard trusts
+ * for its own disconnects -- whether the device is routed through a VPN
+ * at all, not whether our process thinks it started one.
+ *
+ * Registered with the shared session code at startup; see App.tsx.
+ */
+export const mobileTeardownDeps: TeardownDeps = {
+  disconnect: () => forgetProfiles().catch(() => disconnect()),
+  disarmGaming: () => Promise.resolve(),
+  connected: () => tunnelGone().then((gone) => !gone),
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+};
+
+export const tearDownMobileForSignOut = () => tearDownForSignOut(mobileTeardownDeps);

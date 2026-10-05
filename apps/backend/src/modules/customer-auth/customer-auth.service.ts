@@ -51,6 +51,14 @@ const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
  */
 const RESET_CODE_MAX_ATTEMPTS = 5;
 
+/** How long a session may go unrefreshed before its row is pruned.
+ *
+ * Longer than any refresh token lives (`CUSTOMER_JWT_REFRESH_TTL`,
+ * default 7d), so a row this idle cannot belong to a token that still
+ * works. Raise it if that TTL is ever set past it: pruning a live
+ * session would sign that device out. */
+const SESSION_IDLE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+
 @Injectable()
 export class CustomerAuthService {
   private readonly logger = new Logger(CustomerAuthService.name);
@@ -357,9 +365,22 @@ export class CustomerAuthService {
     return this.issueTokenPair(customer);
   }
 
-  async issueTokenPair(customer: { id: string; email: string; tokenVersion: number }): Promise<CustomerTokenPair> {
-    const accessPayload: CustomerAccessTokenPayload = { sub: customer.id, email: customer.email };
-    const refreshPayload: CustomerRefreshTokenPayload = { sub: customer.id, tokenVersion: customer.tokenVersion };
+  /** Tokens for one signed-in device.
+   *
+   * `sessionId` continues an existing session (a refresh); without it a
+   * new one is opened -- a sign-in. See `CustomerSession` for why a
+   * device has a session of its own. */
+  async issueTokenPair(
+    customer: { id: string; email: string; tokenVersion: number },
+    sessionId?: string,
+  ): Promise<CustomerTokenPair> {
+    const sid = sessionId ?? (await this.openSession(customer.id));
+    const accessPayload: CustomerAccessTokenPayload = { sub: customer.id, email: customer.email, sid };
+    const refreshPayload: CustomerRefreshTokenPayload = {
+      sub: customer.id,
+      tokenVersion: customer.tokenVersion,
+      sid,
+    };
 
     const accessToken = await this.jwt.signAsync(accessPayload, {
       secret: this.config.get<string>("customerJwt.accessSecret"),
@@ -388,7 +409,52 @@ export class CustomerAuthService {
       throw new UnauthorizedException("Refresh token has been revoked");
     }
 
+    // This device's own session, which signing out on this device -- and
+    // only this device -- revokes. A token from before sessions existed
+    // has none, and is moved onto a fresh one here, so that from its
+    // first refresh it can be signed out without touching anyone else.
+    if (typeof payload.sid === "string") {
+      const live = await this.prisma.customerSession.updateMany({
+        where: { id: payload.sid, customerId: customer.id, revokedAt: null },
+        data: { lastUsedAt: new Date() },
+      });
+      if (live.count === 0) {
+        throw new UnauthorizedException("Refresh token has been revoked");
+      }
+      return this.issueTokenPair(customer, payload.sid);
+    }
     return this.issueTokenPair(customer);
+  }
+
+  /** Opens a session for a sign-in, and drops this customer's sessions
+   * that can no longer be used -- signed out, or idle longer than a
+   * refresh token lives -- so the table is bounded per customer without
+   * a job of its own. */
+  private async openSession(customerId: string): Promise<string> {
+    const idleCutoff = new Date(Date.now() - SESSION_IDLE_LIFETIME_MS);
+    await this.prisma.customerSession.deleteMany({
+      where: { customerId, OR: [{ revokedAt: { not: null } }, { lastUsedAt: { lt: idleCutoff } }] },
+    });
+    const session = await this.prisma.customerSession.create({
+      data: { customerId },
+      select: { id: true },
+    });
+    return session.id;
+  }
+
+  /** Signs out one device: the session its tokens carry. Every other
+   * device keeps its session.
+   *
+   * A token from before sessions existed names none, and then nothing is
+   * revoked server-side -- the device discards its own tokens, and other
+   * devices are left alone, which is the point. Signing out used to call
+   * `revokeAllSessions` here, ending every device the customer had. */
+  async revokeSession(customerId: string, sessionId: string | undefined): Promise<void> {
+    if (!sessionId) return;
+    await this.prisma.customerSession.updateMany({
+      where: { id: sessionId, customerId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
   }
 
   /** Invalidates all outstanding refresh tokens for this customer. */

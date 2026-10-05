@@ -46,7 +46,8 @@ import {
 } from "../lib/split-tunnel";
 import { exitOfRoute } from "../lib/exit-options";
 import { gamingDisarm, loadGaming, saveGaming, type AppMode } from "../lib/gaming";
-import { clearSnapshot, loadSnapshot, saveSnapshot } from "../lib/credential-cache";
+import { loadSnapshot, saveSnapshot } from "../lib/credential-cache";
+import { sessionGeneration } from "../lib/session-end";
 import { refreshConnectionConfig } from "../lib/connection-config";
 import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
@@ -479,6 +480,7 @@ export function Dashboard({
    * between steps rather than interrupting one, so the engine is never
    * left half-started. */
   const cancelRef = useRef(false);
+  const [signingOut, setSigningOut] = useState(false);
   /** What the customer last asked for, and the stamp that lets an answer
    * still in flight discover it has been overtaken.
    *
@@ -1333,6 +1335,10 @@ export function Dashboard({
     // pass finally waking would clear the live pass's guard and write
     // its own long-obsolete verdict over the screen.
     const generation = ++ladderGenerationRef.current;
+    // Which customer session this pass dials for. See sessionGeneration:
+    // a sign-out can land while the pass is mid-ladder, from this screen
+    // or from one that cannot reach `cancelRef`.
+    const sessionAtStart = sessionGeneration();
     // The customer's side of the same fact. The ladder generation guards
     // the ladder against itself; this one tells every answer still in
     // flight anywhere in the file that a connect is now what the app is
@@ -1483,7 +1489,7 @@ export function Dashboard({
       const dials: Dial[] = [];
 
       for (const [index, candidate] of candidates.entries()) {
-        if (cancelRef.current) break;
+        if (cancelRef.current || sessionGeneration() !== sessionAtStart) break;
         const label = customerProtocolLabel(candidate.protocol, candidate.connection?.transport);
         const isLast = index === candidates.length - 1;
         if (candidate.routeId === shownRouteId) triedShownRoute = true;
@@ -1531,6 +1537,15 @@ export function Dashboard({
             payload: candidate,
             exits: concurrent.map((entry) => ({ exit: entry.exit, payload: entry.payload })),
           });
+          // The session this pass was started under ended while the
+          // engine was coming up. The sign-out's own teardown may have
+          // run before this connect finished, in which case this tunnel
+          // is one nothing else will ever take down -- so this pass does
+          // it, says nothing (the screen is gone), and stops.
+          if (sessionGeneration() !== sessionAtStart) {
+            await serviceDisconnect().catch(() => undefined);
+            return "failed";
+          }
           setProtocolUser(candidate);
           setConnectedAt(Date.now());
 
@@ -1865,10 +1880,19 @@ export function Dashboard({
   }
 
   async function handleLogout() {
-    // Before the session goes, not after: leaving one customer's
-    // credentials on a shared machine for the next person to connect
-    // with is not a cache, it is a leak.
-    await clearSnapshot();
+    if (signingOut) return;
+    setSigningOut(true);
+    // A connect still walking its protocols stops here rather than
+    // bringing the next one up after the teardown has run. The session
+    // generation catches the same case from outside this screen; this
+    // is the cheaper half, for the pass this screen can reach.
+    cancelRef.current = true;
+    // `logout()` takes the tunnel down before it deletes anything --
+    // see endCustomerSession. That used to be the other way round: the
+    // credentials were cleared here first and the tunnel never, so the
+    // sign-in screen appeared over a connection that was still carrying
+    // traffic. The credentials still go, after the tunnel, and whatever
+    // the server said.
     await logout();
     onLoggedOut();
   }
@@ -1959,8 +1983,13 @@ export function Dashboard({
           >
             <SettingsIcon className="size-4" />
           </Button>
-          <Button variant="ghost" onClick={handleLogout} className="h-8 px-2 text-xs">
-            {t("nav.signOut")}
+          <Button
+            variant="ghost"
+            onClick={() => void handleLogout()}
+            disabled={signingOut}
+            className="h-8 px-2 text-xs"
+          >
+            {signingOut ? t("nav.signingOut") : t("nav.signOut")}
           </Button>
         </div>
       </header>
