@@ -1807,6 +1807,47 @@ fn own_images() -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// No adapter on any machine is called this, so the wait below can
+    /// only end by cancellation or by running out of time.
+    const NO_SUCH_ADAPTER: &str = "Neoxify-test-adapter-that-does-not-exist";
+
+    /// The longest single wait in Custom mode's bring-up, up to ten
+    /// seconds, must give way to a Disconnect. This is the path the
+    /// rewrite notes list as untested: a split tunnel that ignored the
+    /// abandon flag for its whole bring-up is how Disconnect once did
+    /// nothing for thirty-eight seconds.
+    #[test]
+    fn a_cancelled_connect_stops_waiting_for_the_adapter() {
+        let token = crate::lifecycle::cancel::CancelToken::new();
+        let limits = crate::lifecycle::budget::Limits::new(token.clone(), std::time::Duration::from_secs(30));
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            token.cancel();
+        });
+        let began = std::time::Instant::now();
+        let outcome = wait_for_addressed_adapter(NO_SUCH_ADAPTER, &limits);
+        let took = began.elapsed();
+        canceller.join().unwrap();
+        assert!(outcome.is_err(), "a cancelled wait must not produce an adapter");
+        assert!(took < std::time::Duration::from_secs(3), "the wait outlived its cancellation: {took:?}");
+    }
+
+    /// And it fits inside what the connect has left, not only inside its
+    /// own ten-second ceiling -- the clamping the rewrite chose over
+    /// lowering constants.
+    #[test]
+    fn the_adapter_wait_ends_when_the_connect_runs_out_of_time() {
+        let limits = crate::lifecycle::budget::Limits::new(
+            crate::lifecycle::cancel::CancelToken::new(),
+            std::time::Duration::from_millis(400),
+        );
+        let began = std::time::Instant::now();
+        let outcome = wait_for_addressed_adapter(NO_SUCH_ADAPTER, &limits);
+        let took = began.elapsed();
+        assert!(outcome.is_err());
+        assert!(took < std::time::Duration::from_secs(3), "waited past the connect's budget: {took:?}");
+    }
+
     /// A selection with no destination scoping, which is what every
     /// test in this file is about.
     fn config_of(enabled: bool, apps: Vec<String>) -> SplitTunnelConfig {
