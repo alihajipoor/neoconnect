@@ -268,7 +268,7 @@ fn apply_via_registry(resolver: &str) -> Result<(), String> {
         .create_subkey_with_flags(&path, KEY_WRITE)
         .map_err(|e| format!("could not create the NRPT rule key: {e}"))?;
 
-    write_rule_values(&rule, resolver)?;
+    write_rule_values(&rule, ".", resolver, NRPT_COMMENT)?;
 
     drop(rule);
     poke_resolver();
@@ -289,13 +289,23 @@ fn apply_via_registry(resolver: &str) -> Result<(), String> {
 /// against what `Add-DnsClientNrptRule` actually wrote, so a well-meant
 /// tidy of these values fails loudly instead of shipping a rule that
 /// exists and pins nothing.
-fn write_rule_values(rule: &winreg::RegKey, resolver: &str) -> Result<(), String> {
+///
+/// `namespace` and `comment` are parameters so gaming mode's suffix
+/// rules are written by the same code -- the only differences between
+/// its rules and the tunnel's are which names they cover and which tag
+/// the sweep finds them by.
+fn write_rule_values(
+    rule: &winreg::RegKey,
+    namespace: &str,
+    resolver: &str,
+    comment: &str,
+) -> Result<(), String> {
     use winreg::RegValue;
 
     // REG_MULTI_SZ: the namespace, its own terminator, then the list's.
     // Both nulls are present in the bytes the cmdlet wrote.
     let mut namespaces: Vec<u8> = Vec::new();
-    for unit in ".".encode_utf16() {
+    for unit in namespace.encode_utf16() {
         namespaces.extend_from_slice(&unit.to_le_bytes());
     }
     namespaces.extend_from_slice(&[0, 0, 0, 0]);
@@ -306,7 +316,7 @@ fn write_rule_values(rule: &winreg::RegKey, resolver: &str) -> Result<(), String
     )
     .map_err(|e| format!("could not set the NRPT namespace: {e}"))?;
 
-    for (name, value) in [("GenericDNSServers", resolver), ("Comment", NRPT_COMMENT)] {
+    for (name, value) in [("GenericDNSServers", resolver), ("Comment", comment)] {
         rule.set_value(name, &value.to_string())
             .map_err(|e| format!("could not set the NRPT {name}: {e}"))?;
     }
@@ -1012,6 +1022,21 @@ pub fn apply_gaming(namespaces: &[String], resolver: &str) -> Result<Vec<String>
     // left where it is.
     clear_gaming();
 
+    // The registry first, exactly as the tunnel's rule does it -- see
+    // `apply`. The cmdlet below was the only path, and it is the call the
+    // rig measured at 10.0s, 16.3s, 43.9s and 55.1s, run here with the
+    // `Engines` lock held while the customer waits on a toggle. It stays
+    // as the fallback: rules installed slowly still work, and none do not.
+    match apply_gaming_via_registry(&scoped, resolver) {
+        Ok(()) => return Ok(scoped),
+        Err(why) => {
+            crate::cleanup_log::note("install the gaming DNS rules by registry", &why);
+            // Whatever part of the set was written goes before the
+            // cmdlet adds its own, so the two cannot stack.
+            clear_gaming();
+        }
+    }
+
     // One PowerShell spawn for the whole set. `Add-DnsClientNrptRule`
     // takes a single namespace, so this is a loop inside the script
     // rather than a loop of spawns -- a dozen suffixes would otherwise
@@ -1034,6 +1059,63 @@ pub fn apply_gaming(namespaces: &[String], resolver: &str) -> Result<Vec<String>
     powershell(&script, super::HELPER_BUDGET)
         .map_err(|e| format!("could not install the gaming DNS rules: {e}"))?;
     Ok(scoped)
+}
+
+/// Writes one rule per suffix straight into the policy table, then
+/// proves every one can be read back.
+///
+/// The read-back is [`gaming_rules_missing`] -- the same check the
+/// status surface runs as check 1 of design §8.3 -- so success here
+/// means precisely what the app will later be told. It also proves the
+/// far end of the session: `clear_gaming` sweeps by the same tag in the
+/// same locations, so a rule this can see is a rule the teardown removes.
+fn apply_gaming_via_registry(scoped: &[String], resolver: &str) -> Result<(), String> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_WRITE};
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    for namespace in scoped {
+        let path = format!(r"{}\{}", NRPT_REGISTRY_PATHS[0], gaming_rule_key(namespace));
+        let (rule, _) = hklm
+            .create_subkey_with_flags(&path, KEY_WRITE)
+            .map_err(|e| format!("could not create the NRPT rule key for {namespace}: {e}"))?;
+        write_rule_values(&rule, namespace, resolver, GAMING_NRPT_COMMENT)?;
+    }
+    poke_resolver();
+
+    match gaming_rules_missing(scoped) {
+        Ok(missing) if missing.is_empty() => Ok(()),
+        Ok(missing) => Err(format!(
+            "the rules for {} were written and then could not be found again",
+            missing.join(", ")
+        )),
+        Err(e) => Err(format!("the rules were written but could not be verified: {e}")),
+    }
+}
+
+/// The key a suffix's rule lives under: GUID-shaped like the cmdlet's,
+/// and derived from the suffix so a re-arm replaces a rule rather than
+/// stacking a second beside it -- the reason the tunnel's key is fixed.
+///
+/// Two independent 64-bit FNV-1a hashes, seeded apart and both prefixed
+/// so a gaming key can never equal the tunnel's fixed one. Nothing reads
+/// the key back by name: the sweep and the presence check both go by
+/// the `Comment` tag, so this only has to be stable and distinct.
+fn gaming_rule_key(namespace: &str) -> String {
+    fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+        bytes.iter().fold(seed, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3))
+    }
+    let input = format!("neoxify-gaming-nrpt:{}", namespace.to_ascii_lowercase());
+    let high = fnv1a(0xcbf2_9ce4_8422_2325, input.as_bytes());
+    let low = fnv1a(0x84222325_cbf29ce4, input.as_bytes());
+    format!(
+        "{{{:08X}-{:04X}-{:04X}-{:04X}-{:012X}}}",
+        high >> 32,
+        (high >> 16) & 0xFFFF,
+        high & 0xFFFF,
+        low >> 48,
+        low & 0xFFFF_FFFF_FFFF
+    )
 }
 
 /// Puts one configured suffix into the form NRPT wants, and refuses
@@ -1300,7 +1382,7 @@ mod tests {
             .create_subkey(format!(r"{ROOT}\{OUR_RULE_KEY}"))
             .expect("should create the test rule key");
 
-        write_rule_values(&rule, "10.77.0.1").expect("should write every value");
+        write_rule_values(&rule, ".", "10.77.0.1", NRPT_COMMENT).expect("should write every value");
 
         // REG_MULTI_SZ holding one namespace: "." in UTF-16, then the
         // string's terminator, then the list's. Four zero bytes, not two.
@@ -1332,6 +1414,50 @@ mod tests {
 
         drop(rule);
         let _ = hkcu.delete_subkey_all(ROOT);
+    }
+
+    /// A gaming suffix rule written by the registry path has the shape
+    /// the tunnel's has, carries gaming's tag rather than the tunnel's,
+    /// and reads back through the very function the status surface uses
+    /// as check 1 -- which is also what proves `clear_gaming` will find
+    /// it, since that sweep goes by the same tag.
+    #[test]
+    fn a_gaming_rule_written_by_registry_reads_back_and_stays_out_of_the_tunnels_sweep() {
+        const ROOT: &str = r"Software\Neoxify\nrpt-gaming-write";
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let _ = hkcu.delete_subkey_all(ROOT);
+        for namespace in [".battle.net", ".blizzard.com"] {
+            let (rule, _) = hkcu
+                .create_subkey(format!(r"{ROOT}\{}", gaming_rule_key(namespace)))
+                .expect("should create the test rule key");
+            write_rule_values(&rule, namespace, "127.0.0.53", GAMING_NRPT_COMMENT)
+                .expect("should write every value");
+            let config: u32 = rule.get_value("ConfigOptions").unwrap();
+            assert_eq!(config, 8, "the value that decides whether a rule does anything");
+        }
+
+        let mut present = tagged_rule_namespaces(&hkcu, &[ROOT], GAMING_NRPT_COMMENT).unwrap();
+        present.sort();
+        assert_eq!(present, vec![".battle.net".to_string(), ".blizzard.com".to_string()]);
+        assert_eq!(count_tagged_rules(&hkcu, &[ROOT], NRPT_COMMENT), Ok(0), "not the tunnel's");
+
+        let _ = hkcu.delete_subkey_all(ROOT);
+    }
+
+    /// Stable, so a re-arm replaces rather than stacks; distinct per
+    /// suffix; blind to case, as NRPT is; and never the tunnel's key.
+    #[test]
+    fn a_gaming_rule_key_is_stable_distinct_and_never_the_tunnels() {
+        let key = gaming_rule_key(".battle.net");
+        assert_eq!(key, gaming_rule_key(".battle.net"));
+        assert_eq!(key, gaming_rule_key(".Battle.NET"));
+        assert_ne!(key, gaming_rule_key(".blizzard.com"));
+        assert_ne!(key, OUR_RULE_KEY);
+        // GUID-shaped, as the cmdlet's keys are: {8-4-4-4-12}.
+        let inner = key.strip_prefix('{').and_then(|k| k.strip_suffix('}')).expect("braced");
+        let groups: Vec<usize> = inner.split('-').map(str::len).collect();
+        assert_eq!(groups, vec![8, 4, 4, 4, 12], "{key}");
+        assert!(inner.chars().all(|c| c == '-' || c.is_ascii_hexdigit()), "{key}");
     }
 
     /// The regression this whole change is about.
