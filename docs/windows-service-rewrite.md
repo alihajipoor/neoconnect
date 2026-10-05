@@ -70,6 +70,15 @@ Adapters vanish with their engine processes, and routes on a vanished
 adapter go with them, so "networking back to normal" is complete at the
 end of phase one.
 
+**Except OpenVPN's**, which is kept between sessions on purpose (making
+one is slow), so the server-pushed `0.0.0.0/1` and `128.0.0.0/1` routes
+openvpn.exe added outlive the kill. Phase one therefore deletes those
+two by destination with `route.exe` after killing OpenVPN. Before this
+was noticed they were left to the thorough pass, which runs on an empty
+slot after phase one and reached them only through the janitor's
+PowerShell purge, seconds after the customer had been told their
+networking was back.
+
 **Phase two — reconcile. Background, never blocks a reply.**
 
 Removing the tunnel service registration, purging routes on adapters
