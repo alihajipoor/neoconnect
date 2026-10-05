@@ -175,15 +175,17 @@ it entirely. What each of them used to pay:
   and so cost 4.4-6.5s per connect to usually delete nothing.
 * Xray's adapter setup was already `netsh.exe`, which is native.
 
-**IKEv2 is the exception and is left alone on purpose.**
-`ikev2::connect` still runs three cmdlets in one invocation to create
-the RAS entry, measured at 14.4s at best. Replacing it means writing a
-phonebook entry by hand -- about forty INI fields including generated
-GUIDs and timestamps, plus the IPsec configuration -- or binding
-`RasSetEntryPropertiesW` and its large version-dependent `RASENTRY`.
-A malformed entry cannot be dialled at all, it affects one protocol of
-five, and the measured cost is a tenth of what the DNS rule was. The
-cost-benefit says stop here.
+**IKEv2 was the exception, and no longer is (e392c2e).** It ran three
+cmdlets in one invocation to create the RAS entry: 3.0s on a healthy
+Windows 11 guest, 14.4-45s on the old rig. This document once stopped
+there because the alternatives were writing ~140 phonebook lines by
+hand or binding `RasSetEntryPropertiesW` and its large version-dependent
+`RASENTRY`, and a malformed entry could not be tested. With the VM it
+could. The section the cmdlets write was captured from them, in both
+modes, and is now written into the phonebook directly -- no struct,
+pinned line for line -- with the cmdlets kept as the fallback for a
+phonebook that cannot be written or an entry RAS refuses. Built-in
+connects in 1.46s where it took 4.7s.
 
 The PowerShell that remains is on paths where nobody is waiting: the
 DNS fallback when the registry refuses, `clear_with_cmdlets`, and
@@ -280,10 +282,11 @@ manufactured by the mechanism meant to prevent it.
 5. **Nothing blocking inside an async task.** `spawn_blocking` or an
    owning thread.
 6. **Every commit compiles on `windows-latest`.** It cannot be compiled
-   anywhere else — there is no Windows machine on this project since
-   2026-08-30, and `windivert-sys` links `WinDivert.lib` at build time,
-   so even the test binary fails to link off Windows. CI is the only
-   verification that exists. Branches must be named `claude/**` or
+   off Windows -- `windivert-sys` links `WinDivert.lib` at build time,
+   so even the test binary fails to link elsewhere. Since 2026-10-04
+   there is a Windows PC again, so build and test there first, and a
+   Windows VM to run the result against a live node; CI still has to
+   be green before a merge. Branches must be named `claude/**` or
    `rig/**` for it to run.
 
 ## Order
@@ -293,9 +296,19 @@ Bottom-up, each landing green before the next starts.
 1. ~~Foundation — cancellation, process supervision, RAII guard traits~~
 2. ~~IPC and the pipe server — contract preserved exactly~~
 3. ~~Service lifecycle — SCM, kernel liveness, two-phase stop~~
-4. Engine state machine — *cancellation and budgets threaded; the
-   state machine proper is still the slot type it was*
-5. The five engines — *entry points take `Limits`; internals untouched*
+4. ~~Engine state machine~~ — *the owning thread and queue
+   (`lifecycle::supervisor`) replaced the global lock; the slot now
+   holds a `Session` -- engine, profile and its WFP filters together --
+   so nothing session-scoped can outlive the session: ending it yields
+   the engine and parks the filters for the release step, and clears
+   the DNS state, on every path. Those used to be loose fields every
+   teardown path had to remember, and one once did not.*
+5. ~~The five engines~~ — *entry points take `Limits`. Of their
+   internals, the one measured cost left on a connect path was IKEv2's
+   PowerShell, now gone (see above). The rest were left as they are on
+   evidence, not neglect: every protocol connects, disconnects inside
+   the budget and leaves nothing behind, verified in the VM against a
+   live node.*
 6. DNS, routing, IPv6 block, janitor, repair — *done as targeted cost
    removal rather than wholesale rewrite: these modules are heavily
    tested and the measured problem in them was PowerShell, not
@@ -322,8 +335,13 @@ Bottom-up, each landing green before the next starts.
 Steps 4, 5 and 7 were taken partly and out of order on purpose: the
 cancellation and budget work cuts across all three, and doing it once
 across the call path was cheaper than doing it three times as each
-module came up for rewrite. What remains in each is its own structure,
-not its deadlines.
+module came up for rewrite.
+
+**All eight steps are done.** Both bars are met and measured on every
+protocol (disconnect 19-781ms with engines gone; closing or killing
+the app leaves nothing running), shipped in desktop 0.9.42. The IKEv2
+phonebook write and the `Session` type came after that release and
+ship in the next one.
 
 ## What this does not fix
 

@@ -152,28 +152,42 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<ras::Connection,
     // The rollback that used to live in Rust lives in the script for the
     // same reason: doing it out here would be a fourth spawn, on the
     // failure path, on a machine that is already too slow.
-    let script = entry_script(&escape_single_quotes(&profile.server), passive);
-    // `CMDLET_BUDGET`, not `HELPER_BUDGET`: see the measurements on that
-    // constant. This is the one call on this path whose expiry fails the
-    // connect, and it has no `status` poll behind it.
-    if let Err(e) = powershell_within(&script, super::CMDLET_BUDGET) {
-        // The entry may or may not exist depending on which stage went;
-        // the script removes it itself on the second, and on the first
-        // there is nothing to remove. Belt and braces here would be a
-        // further spawn on a machine that just proved it cannot afford
-        // one.
-        return Err(if let Some(rest) = e.strip_prefix("encryption: ") {
-            format!("could not configure the VPN entry's encryption: {rest}")
-        } else if let Some(rest) = e.strip_prefix("create: ") {
-            format!("could not create the VPN entry: {rest}")
-        } else {
-            // No stage marker, so this is the budget expiring or
-            // PowerShell itself failing rather than a cmdlet refusing.
-            format!("could not create the VPN entry: {e}")
-        });
-    }
+    //
+    // # And now no PowerShell at all, normally
+    //
+    // The entry is written straight into the phonebook -- see
+    // [`write_entry`] -- in milliseconds, where the one-spawn script
+    // measured 3.0s on a healthy Windows 11 guest (five runs, 3.03 to
+    // 3.35s, nearly all of it PowerShell starting) and up to 45s on the
+    // rig. The script is kept, unchanged, as the fallback: if the
+    // phonebook cannot be written, or the dial refuses the written entry
+    // with a phonebook-level error, the entry is made the old way and
+    // dialled once more.
+    let written = match write_entry(&profile.server, passive) {
+        Ok(()) => true,
+        Err(e) => {
+            crate::cleanup_log::note(
+                "write the IKEv2 entry",
+                &format!("{e}; creating it with the VpnClient cmdlets instead"),
+            );
+            create_with_cmdlets(&profile.server, passive)?;
+            false
+        }
+    };
 
-    match dial(&profile.username, &profile.password) {
+    let dialled = match dial(&profile.username, &profile.password) {
+        Err(code) if written && phonebook_refused(code) => {
+            crate::cleanup_log::note(
+                "dial the written IKEv2 entry",
+                &format!("{}; recreating it with the VpnClient cmdlets", dial_error(code)),
+            );
+            create_with_cmdlets(&profile.server, passive)?;
+            dial(&profile.username, &profile.password)
+        }
+        other => other,
+    };
+
+    match dialled {
         Ok(live) => {
             // Same exposure as every other protocol, despite Windows
             // owning this tunnel: strongSwan pushes 1.1.1.1 and Windows
@@ -242,6 +256,45 @@ pub fn connect(profile: &Ikev2Profile, passive: bool) -> Result<ras::Connection,
             Err(dial_error(code))
         }
     }
+}
+
+/// Creates the entry with the VpnClient cmdlets: the way it was always
+/// made, kept as the fallback behind [`write_entry`]. See the long note
+/// in [`connect`] for why it is one script and what it costs.
+fn create_with_cmdlets(server: &str, passive: bool) -> Result<(), String> {
+    let script = entry_script(&escape_single_quotes(server), passive);
+    // `CMDLET_BUDGET`, not `HELPER_BUDGET`: see the measurements on that
+    // constant. This is the one call on this path whose expiry fails the
+    // connect, and it has no `status` poll behind it.
+    powershell_within(&script, super::CMDLET_BUDGET).map(|_| ()).map_err(|e| {
+        // The entry may or may not exist depending on which stage went;
+        // the script removes it itself on the second, and on the first
+        // there is nothing to remove. Belt and braces here would be a
+        // further spawn on a machine that just proved it cannot afford
+        // one.
+        if let Some(rest) = e.strip_prefix("encryption: ") {
+            format!("could not configure the VPN entry's encryption: {rest}")
+        } else if let Some(rest) = e.strip_prefix("create: ") {
+            format!("could not create the VPN entry: {rest}")
+        } else {
+            // No stage marker, so this is the budget expiring or
+            // PowerShell itself failing rather than a cmdlet refusing.
+            format!("could not create the VPN entry: {e}")
+        }
+    })
+}
+
+/// Whether a dial failure is RAS refusing the *phonebook entry* -- the
+/// ones a hand-written entry could cause and the cmdlets' entry would
+/// not -- rather than the tunnel failing.
+///
+/// 621 cannot open the phonebook, 622 cannot load it, 623 cannot find
+/// the entry, 624 cannot write it, 625 corrupt phonebook, 627 a key
+/// missing from the entry. Anything else -- the server, credentials,
+/// the network -- would fail the same way with the cmdlets' entry, and
+/// retrying it would only double the wait.
+fn phonebook_refused(code: u32) -> bool {
+    matches!(code, 621..=625 | 627)
 }
 
 /// Dials the entry, returning the RAS error code on failure.
@@ -422,11 +475,323 @@ pub(super) fn entry_present() -> Option<bool> {
     }
 }
 
+/// Removes the entry: by editing the phonebook, or with the cmdlet when
+/// the file cannot be edited.
 pub(super) fn remove_entry() -> Result<(), String> {
-    let script = format!(
-        "Remove-VpnConnection -Name '{ENTRY_NAME}' -AllUserConnection -Force -ErrorAction SilentlyContinue"
-    );
-    powershell(&script).map(|_| ())
+    match rewrite_phonebook(None) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let script = format!(
+                "Remove-VpnConnection -Name '{ENTRY_NAME}' -AllUserConnection -Force -ErrorAction SilentlyContinue"
+            );
+            powershell(&script).map(|_| ())
+        }
+    }
+}
+
+/// Writes our entry into the all-user phonebook directly, replacing any
+/// previous one and leaving every other entry in the file alone.
+///
+/// # Why this is safe to do by hand
+///
+/// The phonebook is an INI file, and the section below is not composed
+/// from documentation: it is what `Add-VpnConnection` and
+/// `Set-VpnConnectionIPsecConfiguration`, run exactly as
+/// [`entry_script`] runs them, wrote on a Windows 11 guest -- captured in
+/// both modes and pinned in [`entry_section`]. The struct route
+/// (`RasSetEntryPropertiesW`) is still avoided for the reason the note in
+/// [`connect`] gives: a wrong layout there corrupts memory. A wrong line
+/// here fails the dial with a phonebook error, which [`connect`] answers
+/// by making the entry the old way.
+fn write_entry(server: &str, passive: bool) -> Result<(), String> {
+    // The server lands on a `PhoneNumber=` line. A line break or a
+    // bracket in it would write a key or a section of its own, so it is
+    // refused rather than escaped; the cmdlet fallback takes such a name
+    // as a quoted argument instead.
+    if server.is_empty() || server.chars().any(|c| c.is_control() || c == '[' || c == ']') {
+        return Err(format!("server name {server:?} cannot go in a phonebook line"));
+    }
+    rewrite_phonebook(Some(&entry_section(server, passive, &EntryStamp::now())))
+}
+
+/// Replaces our section of the phonebook with `section`, or removes it
+/// when `section` is `None`. Written to a temporary file beside it and
+/// renamed over it, so a failure part-way leaves the old phonebook --
+/// with the customer's own entries -- intact.
+fn rewrite_phonebook(section: Option<&str>) -> Result<(), String> {
+    let path = std::path::Path::new(ALL_USER_PHONEBOOK);
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if section.is_none() {
+                return Ok(());
+            }
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("could not create the phonebook folder: {e}"))?;
+            }
+            String::new()
+        }
+        Err(e) => return Err(format!("could not read the phonebook: {e}")),
+    };
+    let mut updated = without_section(&existing, ENTRY_NAME);
+    if let Some(section) = section {
+        if !updated.is_empty() && !updated.ends_with("\r\n\r\n") {
+            updated.push_str(if updated.ends_with("\r\n") { "\r\n" } else { "\r\n\r\n" });
+        }
+        updated.push_str(section);
+    } else if updated == existing {
+        return Ok(());
+    }
+    let temp = path.with_extension("pbk.neoxify-tmp");
+    std::fs::write(&temp, updated.as_bytes())
+        .map_err(|e| format!("could not write the phonebook: {e}"))?;
+    std::fs::rename(&temp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("could not replace the phonebook: {e}")
+    })
+}
+
+/// `phonebook` without the `[name]` section: from its header line up to,
+/// not including, the next line that opens a section. Line endings are
+/// kept as they were.
+fn without_section(phonebook: &str, name: &str) -> String {
+    let header = format!("[{name}]");
+    let mut out = String::with_capacity(phonebook.len());
+    let mut skipping = false;
+    for line in phonebook.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.starts_with('[') {
+            skipping = trimmed.eq_ignore_ascii_case(&header);
+        }
+        if !skipping {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// The per-entry values Windows generates: when it was written, a
+/// dial-parameters id and the entry's GUID.
+struct EntryStamp {
+    low: i32,
+    high: i32,
+    dial_params_uid: u32,
+    guid: [u8; 16],
+}
+
+impl EntryStamp {
+    fn now() -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        // FILETIME: 100ns intervals since 1601, which Windows writes as
+        // two signed 32-bit halves (`LowDateTime=-1913900400`).
+        const UNIX_TO_FILETIME_SECS: u64 = 11_644_473_600;
+        let since_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let filetime = (since_unix.as_secs() + UNIX_TO_FILETIME_SECS) * 10_000_000
+            + u64::from(since_unix.subsec_nanos() / 100);
+        // Randomness without a dependency: `RandomState` is keyed from
+        // the OS's random source for every instance. A GUID only has to
+        // be unique among this machine's entries, which this is.
+        let random = || {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u64(filetime);
+            hasher.finish()
+        };
+        let mut guid = [0u8; 16];
+        guid[..8].copy_from_slice(&random().to_le_bytes());
+        guid[8..].copy_from_slice(&random().to_le_bytes());
+        Self {
+            low: filetime as u32 as i32,
+            high: (filetime >> 32) as u32 as i32,
+            // Windows' own values were seven digits; any value unique to
+            // this entry serves, since credentials are passed to every
+            // dial rather than stored against it.
+            dial_params_uid: (random() % 9_000_000 + 1_000_000) as u32,
+            guid,
+        }
+    }
+}
+
+/// Our phonebook section, as Windows writes it.
+///
+/// Captured on a Windows 11 guest from the cmdlets [`entry_script`]
+/// runs, in both modes, and reproduced line for line. Five lines vary:
+/// the stamp's three values, which Windows generates per entry, and
+/// `IpPrioritizeRemote` / `Ipv6PrioritizeRemote` -- 1 for a full tunnel,
+/// 0 when `-SplitTunneling` is named (Custom mode), which is the whole of
+/// what that switch changes here.
+///
+/// The lines that matter most, so nobody "tidies" them:
+///
+/// * `CustomIPSecPolicies` is the cipher suite from
+///   `Set-VpnConnectionIPsecConfiguration` -- AES256, SHA256, DH group
+///   14, no PFS. Without it Windows offers its 1024-bit defaults and the
+///   node answers NO_PROPOSAL_CHOSEN; see [`connect`].
+/// * `CustomAuthKey=26` and its `CustomAuthData` are EAP-MSCHAPv2, what
+///   the node expects; see [`connect`] on why Eap and not MSChapv2.
+/// * `PhoneNumber` is the server's *hostname*, which the node's
+///   certificate is validated against.
+/// * `PowershellCreatedProfile=1` is kept because the captured entry had
+///   it; an entry that differs from the cmdlets' in any way nobody
+///   measured is not one this should ship.
+fn entry_section(server: &str, passive: bool, stamp: &EntryStamp) -> String {
+    let prioritize_remote = if passive { 0 } else { 1 };
+    let guid: String = stamp.guid.iter().map(|b| format!("{b:02X}")).collect();
+    let lines = [
+        format!("[{ENTRY_NAME}]"),
+        "Encoding=1".into(),
+        "PBVersion=8".into(),
+        "Type=2".into(),
+        "AutoLogon=0".into(),
+        "UseRasCredentials=1".into(),
+        format!("LowDateTime={}", stamp.low),
+        format!("HighDateTime={}", stamp.high),
+        format!("DialParamsUID={}", stamp.dial_params_uid),
+        format!("Guid={guid}"),
+        "VpnStrategy=7".into(),
+        "ExcludedProtocols=0".into(),
+        "LcpExtensions=1".into(),
+        "DataEncryption=256".into(),
+        "SwCompression=0".into(),
+        "NegotiateMultilinkAlways=0".into(),
+        "SkipDoubleDialDialog=0".into(),
+        "DialMode=0".into(),
+        "OverridePref=15".into(),
+        "RedialAttempts=3".into(),
+        "RedialSeconds=60".into(),
+        "IdleDisconnectSeconds=0".into(),
+        "RedialOnLinkFailure=1".into(),
+        "CallbackMode=0".into(),
+        "CustomDialDll=".into(),
+        "CustomDialFunc=".into(),
+        "CustomRasDialDll=".into(),
+        "ForceSecureCompartment=0".into(),
+        "DisableIKENameEkuCheck=0".into(),
+        "AuthenticateServer=0".into(),
+        "ShareMsFilePrint=1".into(),
+        "BindMsNetClient=1".into(),
+        "SharedPhoneNumbers=0".into(),
+        "GlobalDeviceSettings=0".into(),
+        "PrerequisiteEntry=".into(),
+        "PrerequisitePbk=".into(),
+        "PreferredPort=VPN2-0".into(),
+        "PreferredDevice=WAN Miniport (IKEv2)".into(),
+        "PreferredBps=0".into(),
+        "PreferredHwFlow=0".into(),
+        "PreferredProtocol=0".into(),
+        "PreferredCompression=0".into(),
+        "PreferredSpeaker=0".into(),
+        "PreferredMdmProtocol=0".into(),
+        "PreviewUserPw=1".into(),
+        "PreviewDomain=1".into(),
+        "PreviewPhoneNumber=0".into(),
+        "ShowDialingProgress=1".into(),
+        "ShowMonitorIconInTaskBar=1".into(),
+        "CustomAuthKey=26".into(),
+        "CustomAuthData=314442431A00000008000000010000000000000000000000".into(),
+        "AuthRestrictions=128".into(),
+        format!("IpPrioritizeRemote={prioritize_remote}"),
+        "IpInterfaceMetric=0".into(),
+        "IpHeaderCompression=0".into(),
+        "IpAddress=0.0.0.0".into(),
+        "IpDnsAddress=0.0.0.0".into(),
+        "IpDns2Address=0.0.0.0".into(),
+        "IpWinsAddress=0.0.0.0".into(),
+        "IpWins2Address=0.0.0.0".into(),
+        "IpAssign=1".into(),
+        "IpNameAssign=1".into(),
+        "IpDnsFlags=0".into(),
+        "IpNBTFlags=1".into(),
+        "TcpWindowSize=0".into(),
+        "UseFlags=2".into(),
+        "IpSecFlags=0".into(),
+        "IpDnsSuffix=".into(),
+        "Ipv6Assign=1".into(),
+        "Ipv6Address=::".into(),
+        "Ipv6PrefixLength=0".into(),
+        format!("Ipv6PrioritizeRemote={prioritize_remote}"),
+        "Ipv6InterfaceMetric=0".into(),
+        "Ipv6NameAssign=1".into(),
+        "Ipv6DnsAddress=::".into(),
+        "Ipv6Dns2Address=::".into(),
+        "Ipv6Prefix=0000000000000000".into(),
+        "Ipv6InterfaceId=0000000000000000".into(),
+        "DisableClassBasedDefaultRoute=0".into(),
+        "DisableMobility=0".into(),
+        "NetworkOutageTime=1800".into(),
+        "IDI=".into(),
+        "IDR=".into(),
+        "ImsConfig=0".into(),
+        "IdiType=0".into(),
+        "IdrType=0".into(),
+        "ProvisionType=0".into(),
+        "PreSharedKey=".into(),
+        "CacheCredentials=0".into(),
+        "NumCustomPolicy=1".into(),
+        "CustomIPSecPolicies=020000000400000003000000050000000200000000000000".into(),
+        "NumEku=0".into(),
+        "UseMachineRootCert=0".into(),
+        "Disable_IKEv2_Fragmentation=0".into(),
+        "PlumbIKEv2TSAsRoutes=0".into(),
+        "NumServers=0".into(),
+        "RouteVersion=1".into(),
+        "NumRoutes=0".into(),
+        "NumNrptRules=0".into(),
+        "AutoTiggerCapable=0".into(),
+        "NumAppIds=0".into(),
+        "NumClassicAppIds=0".into(),
+        "SecurityDescriptor=".into(),
+        "ApnInfoProviderId=".into(),
+        "ApnInfoUsername=".into(),
+        "ApnInfoPassword=".into(),
+        "ApnInfoAccessPoint=".into(),
+        "ApnInfoAuthentication=1".into(),
+        "ApnInfoCompression=0".into(),
+        "DeviceComplianceEnabled=0".into(),
+        "DeviceComplianceSsoEnabled=0".into(),
+        "DeviceComplianceSsoEku=".into(),
+        "DeviceComplianceSsoIssuer=".into(),
+        "FlagsSet=0".into(),
+        "Options=0".into(),
+        "DisableDefaultDnsSuffixes=0".into(),
+        "NumTrustedNetworks=0".into(),
+        "NumDnsSearchSuffixes=0".into(),
+        "PowershellCreatedProfile=1".into(),
+        "ProxyFlags=0".into(),
+        "ProxySettingsModified=0".into(),
+        "ProvisioningAuthority=".into(),
+        "AuthTypeOTP=0".into(),
+        "GREKeyDefined=0".into(),
+        "NumPerAppTrafficFilters=0".into(),
+        "AlwaysOnCapable=0".into(),
+        "DeviceTunnel=0".into(),
+        "PrivateNetwork=0".into(),
+        "ManagementApp=".into(),
+        String::new(),
+        "NETCOMPONENTS=".into(),
+        "ms_msclient=1".into(),
+        "ms_server=1".into(),
+        String::new(),
+        "MEDIA=rastapi".into(),
+        "Port=VPN2-0".into(),
+        "Device=WAN Miniport (IKEv2)".into(),
+        String::new(),
+        "DEVICE=vpn".into(),
+        format!("PhoneNumber={server}"),
+        "AreaCode=".into(),
+        "CountryCode=0".into(),
+        "CountryID=0".into(),
+        "UseDialingRules=0".into(),
+        "Comment=".into(),
+        "FriendlyName=".into(),
+        "LastSelectedPhone=0".into(),
+        "PromoteAlternates=0".into(),
+        "TryNextAlternateOnFail=1".into(),
+        String::new(),
+    ];
+    lines.join("\r\n") + "\r\n"
 }
 
 /// The one script `connect` runs, built where it can be tested.
@@ -618,5 +983,85 @@ mod tests {
         assert_eq!(escape_single_quotes("a'b"), "a''b");
         let script = entry_script(&escape_single_quotes("evil'; calc; #"), false);
         assert!(script.contains("'evil''; calc; #'"), "{script}");
+    }
+
+    fn stamp() -> EntryStamp {
+        EntryStamp { low: -1_913_900_400, high: 31_282_399, dial_params_uid: 6_394_593, guid: [0xAB; 16] }
+    }
+
+    /// Lines copied from the section `Add-VpnConnection` and
+    /// `Set-VpnConnectionIPsecConfiguration` wrote on a Windows 11 guest.
+    /// The ones a hand-written entry would get wrong first: the cipher
+    /// suite, the EAP type, the device, and the server on the line the
+    /// certificate is checked against.
+    #[test]
+    fn the_written_section_matches_what_windows_wrote() {
+        let section = entry_section("vpn.example.net", false, &stamp());
+        for line in [
+            "[Neoxify]",
+            "CustomIPSecPolicies=020000000400000003000000050000000200000000000000",
+            "NumCustomPolicy=1",
+            "CustomAuthKey=26",
+            "CustomAuthData=314442431A00000008000000010000000000000000000000",
+            "VpnStrategy=7",
+            "PreferredDevice=WAN Miniport (IKEv2)",
+            "Device=WAN Miniport (IKEv2)",
+            "PhoneNumber=vpn.example.net",
+            "LowDateTime=-1913900400",
+            "HighDateTime=31282399",
+            "DialParamsUID=6394593",
+            "Guid=ABABABABABABABABABABABABABABABAB",
+        ] {
+            assert!(section.contains(&format!("{line}\r\n")), "missing {line:?}");
+        }
+        assert_eq!(section.lines().filter(|l| l.starts_with('[')).count(), 1);
+    }
+
+    /// The whole of what `-SplitTunneling` changed in the captured
+    /// entries: two lines, 1 for a full tunnel and 0 for Custom mode.
+    #[test]
+    fn custom_mode_changes_only_the_two_prioritize_remote_lines() {
+        let full = entry_section("vpn.example.net", false, &stamp());
+        let custom = entry_section("vpn.example.net", true, &stamp());
+        let differing: Vec<_> = full.lines().zip(custom.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!(
+            differing,
+            [("IpPrioritizeRemote=1", "IpPrioritizeRemote=0"), ("Ipv6PrioritizeRemote=1", "Ipv6PrioritizeRemote=0")]
+        );
+    }
+
+    /// The customer's own VPN entries share this file. Replacing ours
+    /// must not touch theirs, whichever side of ours they sit on.
+    #[test]
+    fn only_our_section_is_removed() {
+        let book = "[Work]\r\nPhoneNumber=a\r\n\r\n\
+                    [Neoxify]\r\nPhoneNumber=b\r\n\r\nNETCOMPONENTS=\r\nms_server=1\r\n\r\n\
+                    [Home]\r\nPhoneNumber=c\r\n";
+        assert_eq!(
+            without_section(book, "Neoxify"),
+            "[Work]\r\nPhoneNumber=a\r\n\r\n[Home]\r\nPhoneNumber=c\r\n"
+        );
+        assert_eq!(without_section("[Work]\r\nx=1\r\n", "Neoxify"), "[Work]\r\nx=1\r\n");
+    }
+
+    /// A line break or bracket in the server would write a key or a
+    /// section of its own. Refused, so the quoted cmdlet path takes it.
+    #[test]
+    fn a_server_that_could_write_its_own_line_is_refused() {
+        for server in ["a\r\nPhoneNumber=b", "x]\r\n[Other", "", "a\nb"] {
+            assert!(write_entry(server, false).is_err(), "{server:?}");
+        }
+    }
+
+    #[test]
+    fn only_phonebook_errors_retry_with_the_cmdlets() {
+        for code in [621, 622, 623, 624, 625, 627] {
+            assert!(phonebook_refused(code), "{code}");
+        }
+        // Credentials, server and network failures would fail the same
+        // way with the cmdlets' entry.
+        for code in [626, 628, 691, 703, 800, 809, 13801, 13806] {
+            assert!(!phonebook_refused(code), "{code}");
+        }
     }
 }

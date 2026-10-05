@@ -102,9 +102,9 @@ enum Active {
 /// `&mut` and stops it. Ending a session and stopping interception are
 /// one operation because they cannot be allowed to be two.
 mod session {
-    use super::{Active, SplitTunnel};
+    use super::{Session, SplitTunnel};
 
-    pub(super) struct Slot(Option<Active>);
+    pub(super) struct Slot(Option<Session>);
 
     impl Slot {
         pub(super) fn empty() -> Self {
@@ -115,7 +115,7 @@ mod session {
             self.0.is_none()
         }
 
-        /// Installs the engine a fresh session was built on.
+        /// Installs the session a connect has just built.
         ///
         /// Every caller reaches this having just torn the previous
         /// session down -- `connect_inner` opens with `disconnect()` --
@@ -123,14 +123,18 @@ mod session {
         /// than a merely untidy state. Asserted rather than handled,
         /// because there is no sensible handling: the `Child` is already
         /// gone from our hands by the time we could look at it.
-        pub(super) fn fill(&mut self, active: Active) {
+        pub(super) fn fill(&mut self, session: Session) {
             debug_assert!(self.0.is_none(), "a session was installed over a live one");
-            self.0 = Some(active);
+            self.0 = Some(session);
         }
 
-        /// Looks at the engine without being able to remove it.
-        pub(super) fn peek_mut(&mut self) -> Option<&mut Active> {
+        /// Looks at the session without being able to remove it.
+        pub(super) fn peek_mut(&mut self) -> Option<&mut Session> {
             self.0.as_mut()
+        }
+
+        pub(super) fn peek(&self) -> Option<&Session> {
+            self.0.as_ref()
         }
 
         /// Ends the session: stops interception, then hands back
@@ -147,7 +151,7 @@ mod session {
         /// precisely the state the field bug left behind -- no engine
         /// tracked, a redirect loop still running -- and it is the state
         /// a Disconnect arriving after the fact has to be able to fix.
-        pub(super) fn end(&mut self, split_tunnel: &mut SplitTunnel) -> Option<Active> {
+        pub(super) fn end(&mut self, split_tunnel: &mut SplitTunnel) -> Option<Session> {
             split_tunnel.stop();
             // The concurrent exits go with the engine, in the same
             // operation and for the same reason interception does.
@@ -166,6 +170,68 @@ mod session {
 
 use session::Slot;
 
+/// One session: the engine, and everything that exists only because of
+/// it.
+///
+/// These used to be fields of `Engines` beside the slot -- the IPv6
+/// block, WireGuard's DNS-only confinement, the profile -- each kept in
+/// step with the engine by every path that ended a session remembering
+/// to clear it. The record of that working is the comments recording
+/// when it did not: a status poll that found a dead engine once stopped
+/// at the IPv6 block and left the machine's DNS rule pointing at
+/// nothing, and the field bug behind [`Slot`] was the same shape. Owned
+/// by the session, they cannot outlive it: ending the session yields
+/// all of it at once, and whatever the caller does not hand on is
+/// dropped -- and an `Ipv6Block` releases its filters when dropped.
+struct Session {
+    engine: Active,
+    /// The profile the tunnel was built from, so Custom mode can be
+    /// switched without the customer reconnecting by hand: whether a
+    /// tunnel is passive or full is decided when the engine starts, so
+    /// changing the mode means building it again, from this.
+    profile: ConnectProfile,
+    filters: SessionFilters,
+}
+
+impl Session {
+    fn new(engine: Active, profile: &ConnectProfile) -> Self {
+        Self { engine, profile: profile.clone(), filters: SessionFilters::default() }
+    }
+}
+
+/// The WFP filters a session installed, released when this is dropped.
+#[derive(Default)]
+struct SessionFilters {
+    /// The machine-wide IPv6 block that goes with a full tunnel, with
+    /// the tunnel's DNS confinement in the same WFP session when the
+    /// engine needs it.
+    ///
+    /// `Some` exactly while it is installed, which is what the status
+    /// poll reports to the app -- the customer is told IPv6 is blocked
+    /// because it *is* blocked, not because the protocol usually implies
+    /// it. See `ipv6_block` for the measurement, and for why WireGuard
+    /// is the one engine that never has one here.
+    ipv6: Option<Ipv6Block>,
+    /// DNS confined to the tunnel with no IPv6 block, for WireGuard --
+    /// whose own kill-switch blocks IPv6 but lets DNS out by the physical
+    /// NIC. Separate so that `ipv6_blocked`, and what the app tells the
+    /// customer about IPv6, still follows only `ipv6`.
+    dns_only: Option<Ipv6Block>,
+}
+
+impl SessionFilters {
+    /// Releases both, now. Dropping does the same; this exists so the
+    /// teardown can say *when*.
+    fn release(mut self) {
+        if let Some(mut block) = self.ipv6.take() {
+            block.remove();
+        }
+        if let Some(mut block) = self.dns_only.take() {
+            block.remove();
+        }
+    }
+}
+
 pub struct Engines {
     exe_dir: PathBuf,
     config_dir: PathBuf,
@@ -175,26 +241,15 @@ pub struct Engines {
     /// it -- an implementation bound to one adapter would stop working
     /// the moment failover moved the customer, and would do it silently.
     split_tunnel: SplitTunnel,
-    /// The machine-wide IPv6 block that goes with a full tunnel.
+    /// The filters of a session phase one has ended, held between its
+    /// first two steps and nowhere else.
     ///
-    /// `Some` exactly while it is installed, which is what the status
-    /// poll reports to the app -- the customer is told IPv6 is blocked
-    /// because it *is* blocked, not because the protocol usually implies
-    /// it. See `ipv6_block` for the measurement, and for why WireGuard
-    /// is the one engine that never has one here.
-    ipv6_block: Option<Ipv6Block>,
-    /// DNS confined to the tunnel with no IPv6 block, for WireGuard --
-    /// whose own kill-switch blocks IPv6 but lets DNS out by the physical
-    /// NIC. A field of its own so that `ipv6_blocked`, and what the app
-    /// tells the customer about IPv6, still follows only `ipv6_block`.
-    dns_only_block: Option<Ipv6Block>,
-    /// The profile the live tunnel was built from.
-    ///
-    /// Kept so Custom mode can be switched without the customer
-    /// reconnecting by hand: whether a tunnel is passive or full is
-    /// decided when the engine starts, so changing the mode means
-    /// building it again, and that needs the profile back.
-    last_profile: Option<ConnectProfile>,
+    /// `kill_engines` ends the session -- it has to, to take the engine
+    /// -- and `release_kernel_filters` is the step that releases them,
+    /// after the engine is gone. The teardown's order is its own tested
+    /// module, so the hand-over is a field rather than a reordering; it
+    /// is `None` at every other moment.
+    ending_filters: Option<SessionFilters>,
     /// What happened to the tunnel's own DNS rule on this session.
     ///
     /// Beside `ipv6_block` and for the same reason: the app puts this in
@@ -220,9 +275,7 @@ impl Engines {
             config_dir,
             active: Slot::empty(),
             split_tunnel: SplitTunnel::new(),
-            ipv6_block: None,
-            dns_only_block: None,
-            last_profile: None,
+            ending_filters: None,
             dns_state: dns::TunnelDns::NotRequested,
         }
     }
@@ -283,7 +336,7 @@ impl Engines {
         // something the tunnel does not care about.
         if was_passive == now_passive {
             if was_intercepting != now_intercepting || was_mode != now_mode {
-                let Some(profile) = self.last_profile.clone() else {
+                let Some(profile) = self.active.peek().map(|s| s.profile.clone()) else {
                     return Err(
                         "Custom mode changed, but this tunnel cannot be rebuilt without reconnecting."
                             .to_string(),
@@ -305,7 +358,7 @@ impl Engines {
             // per packet.
             return Ok(());
         }
-        let Some(profile) = self.last_profile.clone() else {
+        let Some(profile) = self.active.peek().map(|s| s.profile.clone()) else {
             // Nothing to rebuild from. Saying so is better than leaving
             // the customer with a tunnel that contradicts the toggle.
             return Err(
@@ -329,7 +382,7 @@ impl Engines {
     /// rule in this product is that the UI never reports a state nothing
     /// verified, and "IPv6 is blocked" is exactly such a state.
     pub fn ipv6_blocked(&self) -> bool {
-        self.ipv6_block.is_some()
+        self.active.peek().is_some_and(|s| s.filters.ipv6.is_some())
     }
 
     /// Whether this session asked for the tunnel's DNS rule and did not
@@ -455,15 +508,11 @@ impl Engines {
             current_token(),
             crate::lifecycle::budget::CONNECT_BUDGET.limit,
         );
-        let result = self
-            .connect_inner(profile, exits, &limits)
-            .map_err(|e| with_rival_hint(e, &rivals));
-        // Remembered only on success, so a failed attempt cannot leave a
-        // profile behind for Custom mode to rebuild from.
-        if result.is_ok() {
-            self.last_profile = Some(profile.clone());
-        }
-        result
+        // The profile Custom mode rebuilds from is the session's own,
+        // so a failed attempt -- which ends whatever session it began --
+        // cannot leave one behind.
+        self.connect_inner(profile, exits, &limits)
+            .map_err(|e| with_rival_hint(e, &rivals))
     }
 
     fn connect_inner(
@@ -510,7 +559,7 @@ impl Engines {
         match profile {
             ConnectProfile::Wireguard(p) => {
                 wireguard::connect(self, p, passive, limits)?;
-                self.active.fill(Active::WireguardTunnel);
+                self.active.fill(Session::new(Active::WireguardTunnel, profile));
             }
             // Nothing is spawned: Windows brings the interface up and
             // routes it. Custom mode works here too now -- the entry is
@@ -519,7 +568,7 @@ impl Engines {
             // interface like it pins to any other adapter.
             ConnectProfile::Ikev2(p) => {
                 let live = ikev2::connect(p, passive)?;
-                self.active.fill(Active::Ikev2(live));
+                self.active.fill(Session::new(Active::Ikev2(live), profile));
             }
             // Both Xray protocols take the same path: one engine, one
             // adapter, one set of routes -- only the outbound differs.
@@ -603,19 +652,12 @@ impl Engines {
                         return Err(e);
                     }
                 };
-                self.active.fill(Active::Child {
-                    protocol,
-                    child,
-                    routes,
-                });
+                self.active.fill(Session::new(Active::Child { protocol, child, routes }, profile));
             }
             ConnectProfile::Openvpn(p) => {
                 let child = openvpn::connect(self, p, passive, limits)?;
-                self.active.fill(Active::Child {
-                    protocol: "OPENVPN",
-                    child,
-                    routes: InstalledRoutes::none(),
-                });
+                let engine = Active::Child { protocol: "OPENVPN", child, routes: InstalledRoutes::none() };
+                self.active.fill(Session::new(engine, profile));
             }
         }
 
@@ -682,10 +724,22 @@ impl Engines {
     /// a block either, which is why the field stays `None` and the app's
     /// status follows the field.
     fn block_ipv6_if_needed(&mut self, profile: &ConnectProfile) {
-        self.ipv6_block = None;
-        self.dns_only_block = None;
+        let filters = self.filters_for(profile);
+        // Owned by the session from here. There is always one at this
+        // point -- this runs after the engine is in the slot -- and if
+        // somehow there were not, dropping the filters releases them,
+        // which is the right outcome for filters with no tunnel.
+        if let Some(session) = self.active.peek_mut() {
+            session.filters = filters;
+        }
+    }
+
+    /// Installs whatever this tunnel needs, and returns it to be owned by
+    /// the session.
+    fn filters_for(&self, profile: &ConnectProfile) -> SessionFilters {
+        let mut filters = SessionFilters::default();
         if self.split_tunnel.wants_interception() {
-            return;
+            return filters;
         }
         let dns = self.dns_confinement_for(profile);
         if !ipv6_block::needed_for(profile) {
@@ -693,11 +747,11 @@ impl Engines {
             // leaving by the physical NIC. See `Ipv6Block::install_dns_only`.
             if let Some(dns) = dns {
                 match Ipv6Block::install_dns_only(&self.config_dir, &dns) {
-                    Ok(block) => self.dns_only_block = Some(block),
+                    Ok(block) => filters.dns_only = Some(block),
                     Err(e) => eprintln!("DNS could not be confined to the tunnel: {e}"),
                 }
             }
-            return;
+            return filters;
         }
         let installed = match Ipv6Block::install(&self.config_dir, dns.as_ref()) {
             // The DNS filters share the IPv6 block's transaction, so a
@@ -713,9 +767,10 @@ impl Engines {
             other => other,
         };
         match installed {
-            Ok(block) => self.ipv6_block = Some(block),
+            Ok(block) => filters.ipv6 = Some(block),
             Err(e) => eprintln!("IPv6 could not be blocked for this tunnel: {e}"),
         }
+        filters
     }
 
     /// Whether this tunnel's DNS needs confining to it, and to what.
@@ -819,18 +874,31 @@ impl Engines {
     /// each of those call sites where one of them can be forgotten. It
     /// was, and the customer's whole machine lost DNS for it.
     fn end_session(&mut self) -> Option<Active> {
-        // Dropped with the tunnel: a Custom-mode toggle after a
-        // disconnect must not resurrect a connection the customer ended,
-        // and after an engine died there is nothing to rebuild towards.
-        self.last_profile = None;
-        self.active.end(&mut self.split_tunnel)
+        let session = self.active.end(&mut self.split_tunnel)?;
+        // The DNS state is a claim about this session's rule, so it ends
+        // with it -- on every path, including a status poll finding the
+        // engine dead, which used to leave the last session's complaint
+        // standing.
+        self.forget_dns_state();
+        // The profile is dropped with the session: a Custom-mode toggle
+        // after a disconnect must not resurrect a connection the
+        // customer ended, and after an engine died there is nothing to
+        // rebuild towards. The filters are parked for the caller's
+        // release step -- every caller has one, after the engine is
+        // gone -- and anything parked before is released now rather
+        // than replaced, so no filter can be orphaned by this.
+        if let Some(earlier) = self.ending_filters.replace(session.filters) {
+            earlier.release();
+        }
+        Some(session.engine)
     }
 
-    /// Takes the machine-wide IPv6 block down.
+    /// Releases the filters of the session just ended: the machine-wide
+    /// IPv6 block (with the DNS confinement in it) and WireGuard's
+    /// DNS-only confinement.
     ///
-    /// Dropping the handle ends the dynamic WFP session, which is what
-    /// removes the filters -- `Ipv6Block::remove` runs from `Drop`, so
-    /// taking the Option is the removal and doing it twice is a no-op.
+    /// Dropping a block's handle ends its dynamic WFP session, which is
+    /// what removes the filters, so releasing twice is a no-op.
     ///
     /// The same property is what makes a crash safe: the session belongs
     /// to this process, so the kernel tears it down when the process
@@ -838,13 +906,8 @@ impl Engines {
     /// no boot-time or persistent filter that could survive to strand a
     /// customer's networking.
     fn unblock_ipv6(&mut self) {
-        if let Some(mut block) = self.ipv6_block.take() {
-            block.remove();
-        }
-        // WireGuard's DNS-only confinement, released at the same moment
-        // for the same reasons.
-        if let Some(mut block) = self.dns_only_block.take() {
-            block.remove();
+        if let Some(filters) = self.ending_filters.take() {
+            filters.release();
         }
     }
 
@@ -1024,7 +1087,7 @@ impl Engines {
         // `None` into the slot, which is exactly what two of them used
         // to do, so they fall out to the one place that tears a session
         // down properly.
-        let verdict = match self.active.peek_mut() {
+        let verdict = match self.active.peek_mut().map(|s| &mut s.engine) {
             // Nothing tracked is NOT the same as nothing running, and
             // treating them as the same stranded customers.
             //
@@ -1916,11 +1979,22 @@ mod helper_tests {
     /// call itself is counted -- see `SplitTunnel::stop_calls`.
     ///
     /// Revert `Slot::end` to a bare `self.0.take()` and this fails.
+    /// A session to put in a slot. IKEv2's profile, because it is the
+    /// smallest to build; nothing here connects.
+    fn test_session() -> Session {
+        let profile = ConnectProfile::Ikev2(neoconnect_ipc::Ikev2Profile {
+            server: "node.example.com".into(),
+            username: String::new(),
+            password: String::new(),
+        });
+        Session::new(Active::WireguardTunnel, &profile)
+    }
+
     #[test]
     fn ending_a_session_stops_the_split_tunnel() {
         let mut slot = Slot::empty();
         let mut split = SplitTunnel::new();
-        slot.fill(Active::WireguardTunnel);
+        slot.fill(test_session());
 
         assert_eq!(split.stop_calls(), 0, "nothing should have been stopped yet");
         assert!(slot.end(&mut split).is_some(), "the engine should come back out");
@@ -1930,6 +2004,24 @@ mod helper_tests {
             "ending a session left the redirect loop running -- this is the field bug"
         );
         assert!(slot.is_empty());
+    }
+
+    /// What the session type is for: nothing that belongs to a session
+    /// survives its end. The profile Custom mode would rebuild from goes
+    /// with it, and so does the DNS complaint -- which a status poll that
+    /// found a dead engine used to leave standing, attached to nothing.
+    #[test]
+    fn ending_a_session_takes_its_profile_and_dns_state_with_it() {
+        let mut engines = Engines::new(PathBuf::new(), PathBuf::new());
+        engines.active.fill(test_session());
+        engines.set_dns_state_for_test(dns::TunnelDns::Unforced("test".into()));
+        assert!(engines.active.peek().is_some(), "the session's profile is there to rebuild from");
+
+        assert!(engines.end_session().is_some());
+        assert!(engines.active.peek().is_none(), "the profile outlived its session");
+        assert!(!engines.tunnel_dns_unprotected(), "the DNS complaint outlived its session");
+        engines.unblock_ipv6();
+        assert!(engines.ending_filters.is_none(), "filters were left parked after the release step");
     }
 
     /// The same, for the state the field bug actually left behind.
