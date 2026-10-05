@@ -1432,8 +1432,25 @@ mod tests {
                 .expect("should create the test rule key");
             write_rule_values(&rule, namespace, "127.0.0.53", GAMING_NRPT_COMMENT)
                 .expect("should write every value");
+            // Against what `Add-DnsClientNrptRule -Namespace
+            // '.neoxify-probe.invalid'` wrote on a real machine, read back
+            // value by value (2026-10-04): Name a REG_MULTI_SZ holding the
+            // suffix verbatim, leading dot included; ConfigOptions 8;
+            // Version 2; DisplayName and IPSECCARestriction present and
+            // empty. The same seven values the tunnel's "." rule has.
+            let name = rule.get_raw_value("Name").unwrap();
+            assert_eq!(name.vtype, winreg::enums::RegType::REG_MULTI_SZ);
+            let mut expected: Vec<u8> = namespace.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            expected.extend_from_slice(&[0, 0, 0, 0]);
+            assert_eq!(name.bytes, expected, "{namespace} must be stored verbatim");
             let config: u32 = rule.get_value("ConfigOptions").unwrap();
             assert_eq!(config, 8, "the value that decides whether a rule does anything");
+            let version: u32 = rule.get_value("Version").unwrap();
+            assert_eq!(version, 2);
+            for empty in ["DisplayName", "IPSECCARestriction"] {
+                let value: String = rule.get_value(empty).unwrap();
+                assert!(value.is_empty(), "{empty} should be present and empty");
+            }
         }
 
         let mut present = tagged_rule_namespaces(&hkcu, &[ROOT], GAMING_NRPT_COMMENT).unwrap();
