@@ -675,8 +675,22 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 Ok(Ok(state)) => state,
                 // Busy or gone. See `engines::os_visible_tunnel` for what
                 // the engine-less answer can and cannot say.
+                //
+                // On the blocking pool, because "busy" is exactly when
+                // this runs: during a connect. During an IKEv2 connect
+                // the phonebook entry already exists, so asking whether
+                // it is up launches PowerShell -- and inline, that held a
+                // runtime worker on every status poll of the connect, the
+                // one moment this fallback exists to stay responsive in.
                 _ => {
-                    let (connected, protocol, health) = crate::engines::os_visible_tunnel();
+                    // A failed join is a question nobody answered, and is
+                    // reported as one: never as "disconnected", which
+                    // would be a tunnel state nothing verified.
+                    let Ok((connected, protocol, health)) =
+                        tokio::task::spawn_blocking(crate::engines::os_visible_tunnel).await
+                    else {
+                        return Response::Error { message: "could not read the tunnel state".to_string() };
+                    };
                     Response::State {
                         connected,
                         protocol,
@@ -775,7 +789,13 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                     // visible the error is true and stays; if none is,
                     // "disconnected" is the honest reply and the queued
                     // pass is tidying.
-                    let (still_tunnelled, _, _) = crate::engines::os_visible_tunnel();
+                    // Blocking pool, as in the Status fallback. Unknown is
+                    // answered as still tunnelled: "it will be torn down
+                    // in a moment" is true either way, and "disconnected"
+                    // would be a state nothing checked.
+                    let still_tunnelled = tokio::task::spawn_blocking(crate::engines::os_visible_tunnel)
+                        .await
+                        .map_or(true, |(up, _, _)| up);
                     if still_tunnelled {
                         Response::Error {
                             message:
