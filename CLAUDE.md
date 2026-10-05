@@ -226,13 +226,15 @@ download URL precisely because they collided.
 Current: desktop `0.9.42`, mobile `0.2.21`, agent `v0.2.9` — each
 matching its latest released tag.
 
-**Pending deploy, and it gates the next client release.** `main` carries
-backend migrations `20261005_isp_recommendations` and
-`20261006_customer_sessions`, not yet applied in production. Deploy the
-backend with them **before** releasing desktop or mobile from `main`:
-those clients end a session the server rejects, and against the old
-backend a sign-out on one device still revokes every device's session,
-so it would drop their tunnels. Remove this paragraph once deployed.
+**The production backend tracks `main`** as of 2026-10-05 (`b8d1850`,
+with migrations `20261005_isp_recommendations` and
+`20261006_customer_sessions` applied). It is deployed over SSH to the
+panel host with the key at `C:\Users\aliha\.ssh\neoxify_panel`: dump the
+database to `/root/db-backups/pre-<what>-<time>.sql.gz` first, then
+`git pull --ff-only` in `/root/neoconnect` and
+`docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build`.
+Migrations apply at container start. Always deploy the backend before
+releasing clients that depend on it.
 
 ## iOS
 
