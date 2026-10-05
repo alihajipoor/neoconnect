@@ -91,7 +91,16 @@ export default () => ({
     // the behaviour that shipped before handles existed. An unkeyed
     // handle would be the same string for every customer, which is the
     // one property this must never have, so absent beats improvised.
-    exitHandleSecret: process.env.EXIT_HANDLE_SECRET ?? process.env.CREDENTIALS_ENCRYPTION_KEY,
+    //
+    // `||`, not `??`. docker-compose.prod.yml passes
+    // `EXIT_HANDLE_SECRET: ${EXIT_HANDLE_SECRET:-}`, which sets it to the
+    // EMPTY STRING when the .env does not mention it -- and `??` only
+    // falls back on undefined, so the empty string won and every handle
+    // was null in production from 2026-08-26 (when handles shipped) to
+    // 2026-10-05, with CREDENTIALS_ENCRYPTION_KEY sitting right there.
+    // Found when the per-ISP attestations, which share this secret,
+    // came out absent on the first deploy that carried them.
+    exitHandleSecret: process.env.EXIT_HANDLE_SECRET || process.env.CREDENTIALS_ENCRYPTION_KEY,
   },
   integrations: {
     // Shared secret machine callers present as X-Service-Token. Currently
