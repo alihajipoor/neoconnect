@@ -71,9 +71,13 @@ What carries over from the one-machine period, unchanged:
   `Neoxify-Test`, on the Windows PC, with its tooling outside the repo
   in `C:\Users\aliha\Claude\vm\tools` -- see the 2026-10-04 entry in
   `docs/journal/log.md`. It proves exit IPs, teardown and what the app
-  decided, and nothing at packet level: **no captures yet, and no IPv6
-  in the guest.** This matters more than anything else in this file;
-  see *How work is expected to be done here* below.
+  decided, and -- since 2026-10-05 -- what leaves the guest, captured at
+  the NIC miniport with `pktmon --comp nics`. **Not** with VirtualBox's
+  own `--nic-trace`, which silently misses the guest's outgoing global
+  IPv6. The guest has IPv6 addressing but this PC has no IPv6, so
+  nothing ever answers: a leak shows as packets *sent*, never as a
+  reply. This matters more than anything else in this file; see *How
+  work is expected to be done here* below.
 - **Fleet SSH keys** (`ovh_neo`, `azs_vps`, `neo_tr1`) went with the
   old box. Node access has to be re-established before any node-side
   work.
@@ -168,9 +172,9 @@ capture, or an exit IP that matches the node.
 
 **The rig that used to supply that proof is gone,** and the VM that
 replaced it covers only part of it. Do not quietly lower the bar to
-compensate. Until captures exist again, anything that needs real
-packets is **unverified, and must be labelled unverified** — not
-downgraded to "tests pass". A finding that needs a capture is blocked,
+compensate. Anything the VM's capture cannot reach -- a real IPv6
+path, a censored network, a physical device -- is **unverified, and
+must be labelled unverified** — not downgraded to "tests pass". A finding that needs a capture is blocked,
 not done. Rebuilding a capture rig is itself a work item; the traps that
 cost real hours on the old one are in `docs/journal/HANDOVER-2026-08-22.md`
 §7 and the final entries of `docs/journal/windows.md`.
