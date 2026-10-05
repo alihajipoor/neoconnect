@@ -517,6 +517,19 @@ mod tests {
     /// of it is a cleanup path -- the idle watchdog, the window
     /// closing, service stop -- and a cleanup that reports failure on a
     /// clean machine is one people learn to ignore.
+    /// The picker's listing, over a real pipe, now that it runs on the
+    /// blocking pool: it still answers, with the shape the app reads, and
+    /// the machine running the tests has applications to list.
+    #[tokio::test]
+    async fn listing_running_apps_answers_over_the_pipe() {
+        let name = r"\\.\pipe\neoconnect-test-running-apps";
+        start_server(name).await;
+        let reply = round_trip(name, r#"{"type":"listRunningApps"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "runningApps", "{parsed}");
+        assert!(parsed["apps"].is_array(), "{parsed}");
+    }
+
     #[tokio::test]
     async fn disarming_leaves_gaming_mode_reporting_off() {
         let name = r"\\.\pipe\neoconnect-test-gaming-lifecycle";
@@ -677,8 +690,19 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 }
             }
         }
-        Request::ListRunningApps => Response::RunningApps {
-            apps: crate::split_tunnel::running_apps(),
+        // On the blocking pool, not inline. This walks every process on
+        // the machine, opens each one, reads version resources and draws
+        // icons -- hundreds of milliseconds of synchronous Win32 -- and
+        // run inline it held one of the runtime's workers for all of it,
+        // every fifteen seconds while the picker is open. Rule 5 of the
+        // rewrite: nothing blocking inside an async task, because on a
+        // two-core machine a held worker is how the accept loop stopped
+        // being polled and a Disconnect could not even be read. Not the
+        // engine queue either: listing apps must not wait behind a
+        // connect.
+        Request::ListRunningApps => match tokio::task::spawn_blocking(crate::split_tunnel::running_apps).await {
+            Ok(apps) => Response::RunningApps { apps },
+            Err(_) => Response::Error { message: "could not list running applications".to_string() },
         },
         Request::Disconnect => {
             // Cancel first, and before queueing anything.
@@ -820,7 +844,14 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 .await
                 .unwrap_or_else(|_| gone())
         }
-        Request::GamingStatus => gaming_response(crate::gaming::status()),
+        // The blocking pool, for the reason `ListRunningApps` gives: the
+        // three checks resolve a name through Windows and open a TCP
+        // connection, each bounded at three seconds, and inline that was
+        // up to six seconds of a runtime worker held on a poll.
+        Request::GamingStatus => match tokio::task::spawn_blocking(crate::gaming::status).await {
+            Ok(report) => gaming_response(report),
+            Err(_) => Response::Error { message: "could not read gaming mode's state".to_string() },
+        },
         Request::ProbeSplitTunnel => {
             engines
                 .run(|engines: &mut Engines, token| {
