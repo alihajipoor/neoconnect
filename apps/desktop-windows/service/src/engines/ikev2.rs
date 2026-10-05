@@ -296,14 +296,41 @@ fn dial(username: &str, password: &str) -> Result<ras::Connection, u32> {
 ///
 /// Both, always. Disconnecting alone would leave "Neoxify" sitting in
 /// the customer's Windows VPN list, dialable by hand, outliving the app.
+///
+/// Skipped outright when the phonebook proves there is no entry. This is
+/// called from the untracked arm of `Engines::disconnect`, which every
+/// connect runs first to clear the decks -- whatever the protocol -- so
+/// it used to launch `rasdial.exe` and a PowerShell `Remove-VpnConnection`
+/// on every connect of every customer, almost none of whom have ever
+/// used IKEv2: 1.3 to 1.8 seconds on a fast development machine with no
+/// phonebook at all, for nothing. A RAS connection needs its entry, and
+/// no path here removes the entry before hanging up, so an entry proven
+/// absent means nothing to hang up either -- the same reasoning
+/// [`is_connected`] already relies on, through the same conclusive
+/// check.
 pub fn disconnect() -> Result<(), String> {
-    // rasdial is fine for hanging up: the 703 that rules it out for
-    // dialling is an EAP credential prompt, and there is nothing to
-    // prompt for when tearing one down.
-    let mut hangup = Command::new("rasdial");
-    hangup.args([ENTRY_NAME, "/disconnect"]);
-    let _ = super::capture_hidden(hangup, super::HELPER_BUDGET);
-    remove_entry()
+    disconnect_unless_absent(entry_definitely_absent(), || {
+        // rasdial is fine for hanging up: the 703 that rules it out for
+        // dialling is an EAP credential prompt, and there is nothing to
+        // prompt for when tearing one down.
+        let mut hangup = Command::new("rasdial");
+        hangup.args([ENTRY_NAME, "/disconnect"]);
+        let _ = super::capture_hidden(hangup, super::HELPER_BUDGET);
+        remove_entry()
+    })
+}
+
+/// The decision, apart from the processes it would launch, so it can be
+/// tested without launching them. Only proven absence skips the
+/// teardown; "could not tell" tears down, as it always did.
+fn disconnect_unless_absent(
+    definitely_absent: bool,
+    teardown: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if definitely_absent {
+        return Ok(());
+    }
+    teardown()
 }
 
 /// Whether the entry is currently connected.
@@ -519,6 +546,29 @@ fn escape_single_quotes(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only proven absence may skip the hang-up and the entry removal.
+    /// "Could not tell" has to tear down: answering absent wrongly is
+    /// the direction that once left a customer with a tunnel they could
+    /// not see -- see `entry_definitely_absent`.
+    #[test]
+    fn only_a_proven_absence_skips_the_teardown() {
+        let mut ran = false;
+        assert!(disconnect_unless_absent(true, || {
+            ran = true;
+            Ok(())
+        })
+        .is_ok());
+        assert!(!ran, "a provably absent entry launches nothing");
+
+        let mut ran = false;
+        let outcome = disconnect_unless_absent(false, || {
+            ran = true;
+            Err("teardown result".to_string())
+        });
+        assert!(ran, "anything short of proof still tears down");
+        assert_eq!(outcome, Err("teardown result".to_string()), "and its result is what is returned");
+    }
 
 
     /// The script is a PowerShell program written by string formatting
