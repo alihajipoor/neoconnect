@@ -2606,3 +2606,78 @@ production.
 - VirtualBox's trace stamps frames relative to when tracing began, and
   grew ~90 MB a minute from Windows Update; it is now off in the VM's
   saved config.
+
+## 2026-10-05 — signing out left the tunnel up, on every client
+
+Reported from Android: connected, signed out, and the VPN stayed up and
+kept carrying traffic. Read across all three clients, it was true of
+every way a session ends, not only that button.
+
+### What it was
+
+- **Windows/macOS** (shared UI in `apps/desktop-windows/src`): Sign out,
+  account deletion and a refused token refresh all ended in
+  `endCustomerSession`, which cleared tokens, the credential snapshot
+  and the gaming cache -- and never the tunnel. The service ends a
+  tunnel only when the app *process* goes, and signing out does not end
+  it, so the sign-in screen sat over a live tunnel with nothing on it
+  able to disconnect. The refused refresh was worse: only the
+  Dashboard's first load acted on `sessionExpired`; every other caller
+  dropped it, leaving the app signed out on disk and in on screen.
+- **Android/iOS** (`apps/mobile`): every route to sign-in was a bare
+  `setScreen("login")`; the expired-session one did not even clear the
+  cached credentials. And stopping would not have been enough: Android
+  keeps the platform IKEv2 profile (username and password) under
+  Settings > VPN, iOS keeps the tunnel profile with its engine config
+  in `providerConfiguration` plus the IKEv2 profile and keychain
+  password -- each can be switched on from system Settings with the app
+  signed out.
+- **macOS** is not a client yet: `vpn_connect` refuses and `vpn_status`
+  says nothing is connected. It runs the shared UI, so it gets the fix
+  with nothing to tear down.
+
+### What changed (`claude/signout-ends-tunnel`)
+
+- `endCustomerSession` takes the tunnel down **first**, credentials
+  after, and returns `down` only when the platform answered that
+  nothing is connected (`tunnel-teardown.ts`; bounded at 10s, re-sends
+  the disconnect while the tunnel stays up). The App shows "Signing
+  out..." until then, and says on the sign-in screen when it could not
+  confirm.
+- A session generation, bumped before the teardown starts, is checked by
+  both connect ladders after every engine they bring up, so a connect
+  still in flight cannot leave a tunnel up after the sign-out's teardown.
+- A refused refresh (401 only) is announced to the whole app and ends
+  the session wherever it happened. A refresh that merely failed --
+  unreachable, 5xx, 429, a CDN's 403 -- no longer clears the tokens; it
+  used to, and now that ending a session disconnects, it would have cut
+  somebody's VPN over one dropped request.
+- Mobile: new `vpn_forget_profiles`. Android deletes the provisioned
+  IKEv2 profile; iOS empties the tunnel profile's config (kept, so no
+  new consent prompt) and removes the IKEv2 profile and its keychain
+  item.
+
+### Proven, and not
+
+- Desktop JS tests (413) and typechecks pass on Windows; the plugin
+  crate passes `cargo check`; CI is green on the branch.
+- **Windows in the VM: not run.** The installer is built
+  (`C:\Users\aliha\Claude\vm\Neoxify-Setup-signout.exe`), but from 08:49
+  to past 09:10 another session was driving `Neoxify-Test` (installing
+  0.9.42, walking the picker and Settings), and this one did not take
+  the VM out from under it. Unverified until it runs.
+- **Android, iOS: unverified.** No SDK or device here; the Kotlin was
+  not compiled at all, the Swift only by ci-ios.
+
+### Server side, not changed
+
+`/customer-auth/logout` bumps `tokenVersion`, which revokes the refresh
+token of **every** device on the account; access tokens stay valid for
+their 15 minutes. Nothing touches the protocol credentials: they are
+per subscription and route, and stay valid on the nodes until the
+subscription ends, so a WireGuard key or Xray UUID copied before
+sign-out keeps working after it. Two consequences wanting a decision:
+with this branch, signing out on one device ends the others' sessions
+-- and now their tunnels -- at their next refresh; and real revocation
+on sign-out needs per-device credentials (or rotating the
+subscription's on "sign out everywhere"), pushed to the nodes.
