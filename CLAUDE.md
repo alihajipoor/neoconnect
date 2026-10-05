@@ -65,11 +65,15 @@ What carries over from the one-machine period, unchanged:
 - **The ownership table is retired.** No area belongs to another
   session. Nothing is "held" for anyone.
 - **One journal.** See `docs/journal/README.md` — there is one log.
-- **The test rig is still gone.** `Neoxify-Test2` (VirtualBox), the
-  packet captures, and the `C:/nxcme` worktree lived on the old Windows
-  box, and having a Windows PC again does not bring them back. This
-  matters more than anything else in this file; see *How work is
-  expected to be done here* below.
+- **The old test rig is gone; a smaller one exists.** `Neoxify-Test2`,
+  the packet captures, and the `C:/nxcme` worktree lived on the old
+  Windows box. Since 2026-10-04 there is a VirtualBox guest,
+  `Neoxify-Test`, on the Windows PC, with its tooling outside the repo
+  in `C:\Users\aliha\Claude\vm\tools` -- see the 2026-10-04 entry in
+  `docs/journal/log.md`. It proves exit IPs, teardown and what the app
+  decided, and nothing at packet level: **no captures yet, and no IPv6
+  in the guest.** This matters more than anything else in this file;
+  see *How work is expected to be done here* below.
 - **Fleet SSH keys** (`ovh_neo`, `azs_vps`, `neo_tr1`) went with the
   old box. Node access has to be re-established before any node-side
   work.
@@ -162,9 +166,10 @@ flowed. Counters, exit codes and "no error was thrown" have all produced
 false passes here. Ground truth means the server's own logs, a packet
 capture, or an exit IP that matches the node.
 
-**The rig that used to supply that proof is gone.** Do not quietly lower
-the bar to compensate. Until an equivalent exists, anything that needs
-real packets is **unverified, and must be labelled unverified** — not
+**The rig that used to supply that proof is gone,** and the VM that
+replaced it covers only part of it. Do not quietly lower the bar to
+compensate. Until captures exist again, anything that needs real
+packets is **unverified, and must be labelled unverified** — not
 downgraded to "tests pass". A finding that needs a capture is blocked,
 not done. Rebuilding a capture rig is itself a work item; the traps that
 cost real hours on the old one are in `docs/journal/HANDOVER-2026-08-22.md`
