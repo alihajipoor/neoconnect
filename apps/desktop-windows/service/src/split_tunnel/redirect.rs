@@ -1453,10 +1453,12 @@ struct Parsed {
 /// the machine. The alternative was an address disclosure the customer
 /// could not see, and a visible broken feature beats an invisible leak.
 ///
-/// **Known gap:** an ICMPv6 echo request behind an extension-header
-/// chain is not recognised here and passes through. Windows' own ICMP
-/// helper never emits one, so this has never been observed, but it is a
-/// hole rather than a proof.
+/// An ICMPv6 echo request behind an extension-header chain is recognised
+/// too: the IPv6 arms read the same chain walk as `parse_v6`. That used
+/// to be a stated gap -- only the fixed header was looked at, so a ping
+/// behind a hop-by-hop or destination-options header went out in the
+/// clear. Windows' own ICMP helper was never seen to emit one; it was a
+/// hole rather than a proof, and now it is neither.
 /// Whether this is ICMP at all, on either family.
 ///
 /// Separate from [`icmp_echo_request`] because the two answers are used
@@ -1466,7 +1468,7 @@ struct Parsed {
 fn is_icmp(packet: &[u8]) -> bool {
     match packet.first().map(|first| first >> 4) {
         Some(4) => packet.get(9) == Some(&IPPROTO_ICMP),
-        Some(6) => packet.get(6) == Some(&IPPROTO_ICMPV6),
+        Some(6) => v6_upper_layer(packet).is_some_and(|(next, _)| next == IPPROTO_ICMPV6),
         _ => false,
     }
 }
@@ -1485,12 +1487,9 @@ fn icmp_echo_request(packet: &[u8]) -> bool {
             }
             packet.get(header_len) == Some(&ICMP_ECHO_REQUEST)
         }
-        Some(6) => {
-            if *packet.get(6).unwrap_or(&0) != IPPROTO_ICMPV6 {
-                return false;
-            }
-            packet.get(IPV6_HEADER) == Some(&ICMPV6_ECHO_REQUEST)
-        }
+        Some(6) => v6_upper_layer(packet).is_some_and(|(next, offset)| {
+            next == IPPROTO_ICMPV6 && packet.get(offset) == Some(&ICMPV6_ECHO_REQUEST)
+        }),
         _ => false,
     }
 }
@@ -1586,29 +1585,56 @@ const MAX_EXTENSION_HEADERS: usize = 8;
 /// transport header at all. The caller must treat that as an unknown
 /// owner rather than as permission to pass the packet on.
 fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
-    if packet.len() < IPV6_HEADER || packet.first()? >> 4 != 6 {
-        return None;
-    }
+    let (next, offset) = v6_upper_layer(packet)?;
+    let transport = match next {
+        IPPROTO_TCP => Transport::Tcp,
+        IPPROTO_UDP => Transport::Udp,
+        _ => return None,
+    };
 
-    // Bytes 24..40 of the fixed header, which the length check above
-    // has already guaranteed are there.
+    // Bytes 24..40 of the fixed header, which `v6_upper_layer` has
+    // already required to be there.
     let mut destination = [0u8; 16];
     destination.copy_from_slice(&packet[24..40]);
     let destination = Ipv6Addr::from(destination);
 
+    // Flags sit at offset 13 of a TCP header, so 14 bytes covers
+    // both reads -- the same reasoning as the IPv4 parser.
+    let ports = packet.get(offset..offset + 14)?;
+    Some(ParsedV6 {
+        transport,
+        destination,
+        source_port: u16::from_be_bytes([ports[0], ports[1]]),
+        destination_port: u16::from_be_bytes([ports[2], ports[3]]),
+        tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
+        transport_offset: offset,
+    })
+}
+
+/// Walks an IPv6 packet's extension headers to the protocol after them,
+/// returning that protocol and where its header begins -- or `None` when
+/// the chain cannot be followed: an unknown extension header, a fragment
+/// after the first, or more headers than [`MAX_EXTENSION_HEADERS`].
+///
+/// Split out of `parse_v6` so the ICMPv6 checks read the same walk. They
+/// used to look only at the fixed header's Next Header and at byte 40,
+/// so an echo request behind any extension header was not recognised
+/// and went out in the clear -- the gap the old note on
+/// `icmp_echo_request` stated rather than closed.
+fn v6_upper_layer(packet: &[u8]) -> Option<(u8, usize)> {
+    if packet.len() < IPV6_HEADER || packet.first()? >> 4 != 6 {
+        return None;
+    }
     let mut next = packet[6];
     let mut offset = IPV6_HEADER;
 
     for _ in 0..MAX_EXTENSION_HEADERS {
-        let transport = match next {
-            IPPROTO_TCP => Transport::Tcp,
-            IPPROTO_UDP => Transport::Udp,
+        match next {
             // Header length is in 8-byte units, not counting the first.
             IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
                 let header = packet.get(offset..offset + 2)?;
                 next = header[0];
                 offset += (header[1] as usize + 1) * 8;
-                continue;
             }
             // Authentication headers count in 4-byte units and subtract
             // two rather than one, which is the sort of detail that
@@ -1617,33 +1643,20 @@ fn parse_v6(packet: &[u8]) -> Option<ParsedV6> {
                 let header = packet.get(offset..offset + 2)?;
                 next = header[0];
                 offset += (header[1] as usize + 2) * 4;
-                continue;
             }
             IPPROTO_FRAGMENT => {
                 let header = packet.get(offset..offset + 8)?;
-                // Only the first fragment carries the transport header;
-                // the rest have no ports to read and no owner to find.
+                // Only the first fragment carries the upper-layer
+                // header; the rest have nothing to read and no owner to
+                // find.
                 if u16::from_be_bytes([header[2], header[3]]) & 0xFFF8 != 0 {
                     return None;
                 }
                 next = header[0];
                 offset += 8;
-                continue;
             }
-            _ => return None,
-        };
-
-        // Flags sit at offset 13 of a TCP header, so 14 bytes covers
-        // both reads -- the same reasoning as the IPv4 parser.
-        let ports = packet.get(offset..offset + 14)?;
-        return Some(ParsedV6 {
-            transport,
-            destination,
-            source_port: u16::from_be_bytes([ports[0], ports[1]]),
-            destination_port: u16::from_be_bytes([ports[2], ports[3]]),
-            tcp_flags: if matches!(transport, Transport::Tcp) { ports[13] } else { 0 },
-            transport_offset: offset,
-        });
+            upper => return Some((upper, offset)),
+        }
     }
     None
 }
@@ -4881,6 +4894,46 @@ mod tests {
         packet[24..40].copy_from_slice(&dst.octets());
         packet[IPV6_HEADER] = icmp_type;
         packet
+    }
+
+    /// An ICMPv6 message behind a hop-by-hop and a destination-options
+    /// header, written out byte by byte rather than through the walker
+    /// under test.
+    fn icmpv6_behind_extensions(icmp_type: u8) -> Vec<u8> {
+        let mut packet = vec![0u8; IPV6_HEADER + 8 + 8 + 8];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&24u16.to_be_bytes());
+        packet[6] = IPPROTO_HOPOPTS;
+        packet[7] = 64;
+        let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+        packet[8..24].copy_from_slice(&src.octets());
+        packet[24..40].copy_from_slice(&dst.octets());
+        // Hop-by-hop: next header, length 0 (eight bytes in all).
+        packet[40] = IPPROTO_DSTOPTS;
+        packet[41] = 0;
+        // Destination options: next header ICMPv6, length 0.
+        packet[48] = IPPROTO_ICMPV6;
+        packet[49] = 0;
+        packet[56] = icmp_type;
+        packet
+    }
+
+    /// The gap the ping refusal used to state: an echo request behind an
+    /// extension-header chain went out unrecognised. It is refused now,
+    /// and -- the other half -- a non-echo ICMPv6 message behind the
+    /// same chain is still passed through untouched, as every ICMP
+    /// message other than a ping is.
+    #[test]
+    fn a_ping_behind_extension_headers_is_refused_and_other_icmpv6_still_passes() {
+        let selection = selection_of(&[r"C:\Games\game.exe"], SplitTunnelMode::OnlySelected);
+
+        let mut ping = icmpv6_behind_extensions(ICMPV6_ECHO_REQUEST);
+        assert_eq!(icmp_verdict(&mut ping, true, &selection), (Some(Leg::Swallowed), 1));
+
+        // 2 is Packet Too Big, which path-MTU discovery depends on.
+        let mut too_big = icmpv6_behind_extensions(2);
+        assert_eq!(icmp_verdict(&mut too_big, true, &selection), (None, 0));
     }
 
     /// Drives the real entry point rather than the classifier, so what
