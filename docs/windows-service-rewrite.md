@@ -186,9 +186,23 @@ five, and the measured cost is a tenth of what the DNS rule was. The
 cost-benefit says stop here.
 
 The PowerShell that remains is on paths where nobody is waiting: the
-DNS fallback when the registry refuses, `clear_with_cmdlets`, gaming
-mode, the janitor's residue sweep, the thorough teardown, and
-diagnostics.
+DNS fallback when the registry refuses, `clear_with_cmdlets`, and
+diagnostics -- plus gaming mode's and the tunnel's NRPT installs, only
+as fallbacks behind their registry writes.
+
+**This paragraph used to list the janitor's sweep and the thorough
+teardown as places nobody waits, and that was wrong.** Every connect
+begins with `disconnect()` to clear the decks, and with nothing live
+that runs the untracked arm: `ikev2::disconnect`, which launched
+`rasdial.exe` and a PowerShell `Remove-VpnConnection` for an entry
+almost no customer has, and the janitor's route purge, which launched
+PowerShell twice for every adapter of ours present -- and the OpenVPN
+adapter is never deleted. Measured on a fast development machine, the
+IKEv2 half alone was 1.3 to 1.8 seconds of every connect. Both are gone
+from that path now: the IKEv2 teardown is skipped when the phonebook
+proves there is no entry (8cc45e2), and route enumeration and removal
+are the IP Helper API (bd8d3b4). The whole untracked arm measured 61ms
+afterwards, on a machine with none of our adapters.
 
 ### What is still not bounded by the connect budget
 
