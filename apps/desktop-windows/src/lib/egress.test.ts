@@ -4,15 +4,29 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * from a test without a Tauri store. */
 const endpoints = vi.fn<() => Promise<string[]>>();
 /** Every `/health/ip` answer, keyed by the base URL that would serve it.
- * A base missing from the map is treated as unreachable. */
-const answers = new Map<string, { ip: string } | "unreachable">();
+ * A base missing from the map is treated as unreachable. `hang` never
+ * answers and ends only when the caller aborts -- what a request made in
+ * a new adapter's first seconds was measured doing. */
+type Answer = { ip: string } | "unreachable" | "hang";
+const answers = new Map<string, Answer>();
+/** Answers given one per request, in order, before `answers` applies --
+ * for an endpoint whose behaviour changes while a tunnel comes up. */
+const scripts = new Map<string, Answer[]>();
+/** Which bases were asked, in order. */
+const asked: string[] = [];
 
 vi.mock("./api-endpoints", () => ({ apiEndpoints: () => endpoints() }));
 
 vi.mock("@tauri-apps/plugin-http", () => ({
-  fetch: (url: string) => {
+  fetch: (url: string, init?: { signal?: AbortSignal }) => {
     const base = url.replace(/\/health\/ip$/, "");
-    const answer = answers.get(base);
+    asked.push(base);
+    const answer = scripts.get(base)?.shift() ?? answers.get(base);
+    if (answer === "hang") {
+      return new Promise((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("Request canceled")));
+      });
+    }
     if (answer === undefined || answer === "unreachable") {
       return Promise.reject(new Error(`no route to ${base}`));
     }
@@ -24,7 +38,7 @@ vi.mock("@tauri-apps/plugin-http", () => ({
 // business invoking here.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: () => Promise.reject(new Error("not used")) }));
 
-const { captureBaselineIp, verifyEgress } = await import("./egress");
+const { captureBaselineIp, verifyEgress, confirmEgressWithin } = await import("./egress");
 
 /** The real production list, in the real order (`config.ts`). The first
  * entry is the Cloudflare-fronted panel; the rest are node mirrors.
@@ -39,6 +53,8 @@ const FI_MIRROR = "https://fi1.neoxify.site:2053/api";
 afterEach(() => {
   endpoints.mockReset();
   answers.clear();
+  scripts.clear();
+  asked.length = 0;
 });
 
 /** The client's real address, as the CDN reports it. */
@@ -151,5 +167,118 @@ describe("comparing the address the world sees", () => {
   it("gives up and reports no baseline when the whole list is dead", async () => {
     endpoints.mockResolvedValue([CDN, FI_MIRROR]);
     await expect(captureBaselineIp()).resolves.toBeNull();
+  });
+});
+
+describe("the check made while a tunnel is coming up", () => {
+  /** A third endpoint, so the measured order -- first fails, second
+   * hangs, third answers -- can be laid out exactly. */
+  const FR_MIRROR = "https://fr1.neoxify.site:2053/api";
+
+  it("asks the baseline's endpoint alone, wherever it sits in the list", async () => {
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, "hang");
+    answers.set(FI_MIRROR, { ip: "203.0.113.10" });
+    const baseline = { ip: CLIENT, from: FI_MIRROR };
+
+    await expect(verifyEgress(baseline, { sameEndpointOnly: true })).resolves.toEqual({
+      state: "throughTunnel",
+      exitIp: "203.0.113.10",
+    });
+    expect(asked).toEqual([FI_MIRROR]);
+  });
+
+  it("keeps the list order otherwise, so a mirror cannot accuse itself", async () => {
+    // The reason the reordering is limited to `sameEndpointOnly`. This
+    // mirror reports its own node's address to everyone, so a baseline
+    // taken from it and a reading taken from it again are the same
+    // number whatever the route did -- read as a leak. In list order the
+    // CDN answers and the pair is, correctly, not compared at all.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR]);
+    answers.set(CDN, { ip: NODE });
+    answers.set(FI_MIRROR, { ip: NODE });
+    const baseline = { ip: NODE, from: FI_MIRROR };
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({
+      state: "indeterminate",
+      exitIp: NODE,
+    });
+    expect(asked).toEqual([CDN]);
+  });
+
+  it("asks nothing but the baseline's endpoint when told to", async () => {
+    // The measured failure, laid out as it happened on OpenVPN's first
+    // seconds: the baseline's endpoint refused at once, the next one
+    // hung for the full timeout, the third answered from the wrong
+    // endpoint. Without `sameEndpointOnly` all of that time is spent on
+    // an answer that cannot be used while another rung is waiting.
+    endpoints.mockResolvedValue([CDN, FI_MIRROR, FR_MIRROR]);
+    answers.set(CDN, "unreachable");
+    answers.set(FI_MIRROR, "hang");
+    answers.set(FR_MIRROR, { ip: NODE });
+    const baseline = { ip: CLIENT, from: CDN };
+
+    const started = Date.now();
+    await expect(
+      verifyEgress(baseline, { sameEndpointOnly: true, attemptMs: 5_000 }),
+    ).resolves.toEqual({ state: "unreachable" });
+    expect(asked).toEqual([CDN]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("abandons a request that hangs once its attempt time is up", async () => {
+    endpoints.mockResolvedValue([CDN, FI_MIRROR, FR_MIRROR]);
+    answers.set(CDN, "unreachable");
+    answers.set(FI_MIRROR, "hang");
+    answers.set(FR_MIRROR, { ip: NODE });
+    const baseline = { ip: CLIENT, from: CDN };
+
+    const started = Date.now();
+    const verdict = await verifyEgress(baseline, { attemptMs: 50 });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // The fallback still runs where it is allowed, and still refuses to
+    // turn a different endpoint's answer into a verdict.
+    expect(verdict).toEqual({ state: "indeterminate", exitIp: NODE });
+    expect(asked).toEqual([CDN, FI_MIRROR, FR_MIRROR]);
+  });
+
+  it("does not let a stalled request hide the one made after it", async () => {
+    // The first-connect OpenVPN case, measured: the request made the
+    // moment the tunnel came up stalls for longer than the whole check,
+    // while one made a second or two later is answered through the
+    // node. Asked in sequence, the stalled one was the entire check.
+    endpoints.mockResolvedValue([CDN]);
+    scripts.set(CDN, ["hang", "unreachable"]);
+    answers.set(CDN, { ip: NODE });
+    const baseline = { ip: CLIENT, from: CDN };
+
+    const started = Date.now();
+    await expect(
+      confirmEgressWithin(baseline, 5_000, { sameEndpointOnly: true, intervalMs: 20 }),
+    ).resolves.toEqual({ state: "throughTunnel", exitIp: NODE });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(asked.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("gives the latest answer when no proof arrives in time", async () => {
+    endpoints.mockResolvedValue([CDN]);
+    answers.set(CDN, { ip: CLIENT });
+    const baseline = { ip: CLIENT, from: CDN };
+
+    await expect(
+      confirmEgressWithin(baseline, 100, { sameEndpointOnly: true, intervalMs: 20 }),
+    ).resolves.toEqual({ state: "bypassingTunnel", exitIp: CLIENT });
+  });
+
+  it("reports unreachable, on time, when every request stalls", async () => {
+    endpoints.mockResolvedValue([CDN]);
+    answers.set(CDN, "hang");
+    const baseline = { ip: CLIENT, from: CDN };
+
+    const started = Date.now();
+    await expect(
+      confirmEgressWithin(baseline, 150, { sameEndpointOnly: true, intervalMs: 20 }),
+    ).resolves.toEqual({ state: "unreachable" });
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 });

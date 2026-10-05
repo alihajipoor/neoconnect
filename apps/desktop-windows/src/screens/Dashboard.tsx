@@ -13,6 +13,7 @@ import {
   captureIpv6Baseline,
   checkIpv6,
   verifyEgress,
+  confirmEgressWithin,
   type BaselineIp,
   type EgressVerdict,
 } from "../lib/egress";
@@ -257,31 +258,15 @@ async function confirmReachable(): Promise<ConnectionState> {
  * still short enough that a genuinely dead server is called out while
  * the customer is watching. */
 const VERIFY_TIMEOUT_MS = 30_000;
-const VERIFY_INTERVAL_MS = 1_500;
 
 /** Waits for traffic to actually start flowing, rather than asking once.
- *
- * Retries even on a definite-looking "bypassing" answer, because early in
- * a connection it is not definite at all: OpenVPN's routes arrive from
- * the server partway through negotiation, so traffic genuinely does go
- * around the tunnel for a moment before it goes through it.
- *
- * Returns as soon as it has proof, so a fast protocol stays fast.
- */
-async function confirmEgress(
+ * See `confirmEgressWithin` for how the attempts are made. */
+function confirmEgress(
   baseline: BaselineIp | null,
   budgetMs = VERIFY_TIMEOUT_MS,
+  sameEndpointOnly = false,
 ): Promise<EgressVerdict> {
-  const deadline = Date.now() + budgetMs;
-  let last: EgressVerdict = { state: "unreachable" };
-
-  while (Date.now() < deadline) {
-    const verdict = await verifyEgress(baseline);
-    if (verdict.state === "throughTunnel") return verdict;
-    last = verdict;
-    await new Promise((r) => setTimeout(r, VERIFY_INTERVAL_MS));
-  }
-  return last;
+  return confirmEgressWithin(baseline, budgetMs, { sameEndpointOnly });
 }
 
 /** How long to wait for ordinary networking to come back after tearing
@@ -1582,7 +1567,9 @@ export function Dashboard({
               }
             }
           } else {
-            const egress = await confirmEgress(baselineIpRef.current, verifyBudget);
+            // Only the last rung can use an answer from an endpoint other
+            // than the baseline's; see `VerifyOptions.sameEndpointOnly`.
+            const egress = await confirmEgress(baselineIpRef.current, verifyBudget, !isLast);
             setExitIp(egress.state === "unreachable" ? null : egress.exitIp);
 
             // The reachability check is worth its eight seconds only
