@@ -482,8 +482,14 @@ impl Ledger {
         state.ended.clone().filter(|e| e.generation == state.latest)
     }
 
-    /// Drops the record. A connect starting, or the customer pressing
-    /// Disconnect, makes it history.
+    /// Drops the record, for a connect that is starting: from then on
+    /// the old tunnel's death is not the answer to "is this customer
+    /// tunnelled".
+    ///
+    /// Deliberately not called on Disconnect. The record only ever
+    /// answers "no tunnel", which a Disconnect leaves exactly as true,
+    /// and keeping it lets a status that arrives while the thorough pass
+    /// holds the owning thread be answered without asking Windows.
     pub fn forget(&self) {
         self.state().ended = None;
     }
