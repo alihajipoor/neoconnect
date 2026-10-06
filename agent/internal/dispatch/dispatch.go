@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/controlplane/pb"
@@ -126,6 +127,25 @@ func provisionerKey(protocol, transport string) string {
 	return protocol + "|" + transport
 }
 
+// wireProtocol is the protocol a registry key reports under: the Protocol
+// enum the control plane knows, without the transport only the agent's
+// own lookup needs.
+//
+// Reports used to carry the key itself, so everything the WebSocket
+// inbound's provisioner counted went out as "XRAY_VLESS_TLS|WS" -- a
+// protocol no backend list contains. Its session counts walked past the
+// filter that drops Xray's 60-second tail (ConcurrencyService's
+// COUNTS_IGNORED), putting back the false "two devices" a clean switch
+// from PC to phone used to produce; and a usage delta under that label
+// would be dropped as an unknown protocol. Found by the 2026-10-06
+// review.
+func wireProtocol(key string) string {
+	if i := strings.IndexByte(key, '|'); i >= 0 {
+		return key[:i]
+	}
+	return key
+}
+
 func describeTarget(protocol, transport string) string {
 	if transport == "" || transport == "TCP" {
 		return fmt.Sprintf("protocol %q", protocol)
@@ -167,7 +187,7 @@ func (d *Dispatcher) CollectStats(ctx context.Context) ([]common.UsageDelta, []e
 			continue
 		}
 		for i := range protoDeltas {
-			protoDeltas[i].Protocol = protocol
+			protoDeltas[i].Protocol = wireProtocol(protocol)
 		}
 		deltas = append(deltas, protoDeltas...)
 	}
@@ -217,7 +237,7 @@ func (d *Dispatcher) CollectSessionCounts() ([]SessionCount, []error) {
 		for user, n := range perUser {
 			counts = append(counts, SessionCount{
 				ExternalUserID:  user,
-				Protocol:        protocol,
+				Protocol:        wireProtocol(protocol),
 				DistinctSources: uint32(n),
 			})
 		}
