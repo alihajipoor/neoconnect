@@ -5,7 +5,7 @@
 -- signing out on one device can revoke that device's credentials on the
 -- nodes without touching the customer's other devices.
 --
--- Additive and safe on a live database: one nullable column, two
+-- Additive and safe on a live database: two nullable columns, two
 -- indexes and a foreign key. Every existing row keeps sessionId NULL,
 -- which is what "the subscription's shared credential" means -- exactly
 -- what each row is today. Nothing is backfilled; a device is given
@@ -15,6 +15,16 @@
 -- a NULL sessionId, and NULLs are distinct in Postgres.
 
 ALTER TABLE "protocol_users" ADD COLUMN "sessionId" TEXT;
+
+-- When a node first confirmed it holds this credential: the agent's ack
+-- of a CREATE_USER/ENABLE_USER naming it, or of a re-assert of it. A
+-- device credential replaces the shared one in what a device is handed
+-- only once this is set, so a device never swaps a credential that works
+-- for one its node has not received -- a node whose control stream is
+-- down can sit on a QUEUED CREATE_USER for days while still serving the
+-- users it already has. NULL on every existing row; nothing reads it for
+-- shared rows.
+ALTER TABLE "protocol_users" ADD COLUMN "provisionedAt" TIMESTAMP(3);
 
 CREATE INDEX "protocol_users_sessionId_idx" ON "protocol_users"("sessionId");
 

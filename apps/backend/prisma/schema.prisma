@@ -774,6 +774,10 @@ model ProtocolUser {
   /// SetNull leaves it as an extra shared credential -- still metered,
   /// still expiring -- see the migration and the doc's Rollback section.
   sessionId        String?
+  /// When a node first acked a CREATE_USER/ENABLE_USER (or a re-assert)
+  /// for this credential. A device row replaces the shared row in what
+  /// a device is handed only once this is set -- see deviceView.
+  provisionedAt    DateTime?
 
   session        CustomerSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   subscription   Subscription   @relation(fields: [subscriptionId], references: [id])

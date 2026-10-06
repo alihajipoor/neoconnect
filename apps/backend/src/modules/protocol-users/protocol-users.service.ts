@@ -51,6 +51,8 @@ const PROTOCOL_USER_LIST_FIELDS = {
   // the first thing an operator needs when a customer says "my other
   // phone stopped working".
   sessionId: true,
+  // Whether a node has confirmed holding it -- the second thing.
+  provisionedAt: true,
 } satisfies Prisma.ProtocolUserSelect;
 
 /** A listed ProtocolUser as a caller sees it: the encrypted column is
@@ -291,16 +293,35 @@ export class ProtocolUsersService {
   }
 
   /** The device's own rows, with each gap filled by the shared row for the
-   * same subscription and route. */
+   * same subscription and route.
+   *
+   * A device row counts as the device's only once a node has confirmed
+   * it holds it (`provisionedAt`). Until then the device keeps the shared
+   * credential for that route, which already works. Creating the row and
+   * enqueueing its CREATE_USER is not the same as the node having it: a
+   * node whose control stream is down leaves the command QUEUED -- for
+   * days, on the nodes that have done this -- while still serving the
+   * users it already holds, and even a connected node runs commands one
+   * at a time behind the re-assert backlog. Handing the device its new
+   * credential at that point made it swap a working tunnel for one that
+   * could not connect, on every route of that node at once, and the
+   * client dials whatever it was handed straight away.
+   *
+   * Gated rather than offering both, the device's first: a client keys
+   * its credentials by route and would not necessarily try a second one
+   * for the same route, and a failed dial costs a timeout and a wrong
+   * entry in the per-ISP evidence. Gated, the response keeps its shape --
+   * one credential per route, and one that works.
+   *
+   * A device row with no shared row beside it is handed out unconfirmed:
+   * there is nothing that works to keep. */
   private async deviceView(customerId: string, sessionId: string) {
     const users = await this.prisma.protocolUser.findMany({
       where: { subscription: { customerId }, OR: [{ sessionId }, { sessionId: null }] },
       orderBy: { createdAt: "desc" },
       include: { node: true, protocolConfig: true },
     });
-    const own = new Set(
-      users.filter((u) => u.sessionId === sessionId).map((u) => `${u.subscriptionId}:${u.routeId}`),
-    );
+    const keyOf = (u: { subscriptionId: string; routeId: string }) => `${u.subscriptionId}:${u.routeId}`;
     // One shared row per (subscription, route): the oldest. There is
     // normally exactly one, but a rollback to a backend that knew nothing
     // of devices can leave more -- its session pruning sets a device row's
@@ -309,18 +330,21 @@ export class ProtocolUsersService {
     const sharedFor = new Map<string, (typeof users)[number]>();
     for (const u of users) {
       if (u.sessionId !== null) continue;
-      const key = `${u.subscriptionId}:${u.routeId}`;
-      const seen = sharedFor.get(key);
-      if (!seen || u.createdAt < seen.createdAt) sharedFor.set(key, u);
+      const seen = sharedFor.get(keyOf(u));
+      if (!seen || u.createdAt < seen.createdAt) sharedFor.set(keyOf(u), u);
     }
+    const own = new Set(
+      users
+        .filter((u) => u.sessionId === sessionId && (u.provisionedAt !== null || !sharedFor.has(keyOf(u))))
+        .map(keyOf),
+    );
     // Filtered again here although the query already excludes them:
     // another device's credential reaching this response would be the one
     // failure this whole design exists to prevent.
     return users
       .filter((u) => {
-        const key = `${u.subscriptionId}:${u.routeId}`;
-        if (u.sessionId === sessionId) return true;
-        return u.sessionId === null && !own.has(key) && sharedFor.get(key) === u;
+        if (u.sessionId === sessionId) return own.has(keyOf(u));
+        return u.sessionId === null && !own.has(keyOf(u)) && sharedFor.get(keyOf(u)) === u;
       })
       .map(({ node, protocolConfig, ...user }) => ({
         ...withDecryptedCredentials(user),

@@ -23,6 +23,9 @@ interface Row {
   protocol: string;
   status: string;
   createdAt: Date;
+  /** When a node acked it. Rows a test seeds are confirmed unless it
+   * says otherwise; rows `create` makes are not, until `confirmAll`. */
+  provisionedAt: Date | null;
 }
 
 const CUSTOMER = "customer-1";
@@ -46,6 +49,7 @@ function world(opts: {
     protocol: r.protocol ?? "XRAY_VLESS_REALITY",
     status: r.status ?? "ACTIVE",
     createdAt: new Date(2026, 9, 1, 0, 0, seq),
+    provisionedAt: r.provisionedAt === undefined ? new Date(2026, 9, 1) : r.provisionedAt,
   }));
   const subscriptions = (opts.subscriptions ?? [{ id: "sub-1" }]).map((s) => ({
     customerId: CUSTOMER,
@@ -147,10 +151,16 @@ function world(opts: {
         protocol: "XRAY_VLESS_REALITY",
         status: "ACTIVE",
         createdAt: new Date(2026, 9, 2, 0, 0, seq),
+        // Enqueued, not yet acked by the node.
+        provisionedAt: null,
       };
       rows.push(row);
       return row as never;
     });
+  /** Every node acks every pending CREATE_USER. */
+  const confirmAll = () => {
+    for (const row of rows) row.provisionedAt ??= new Date();
+  };
   const remove = jest.spyOn(service, "remove").mockImplementation(async (id) => {
     const i = rows.findIndex((r) => r.id === id);
     if (i >= 0) rows.splice(i, 1);
@@ -161,7 +171,7 @@ function world(opts: {
     return row as never;
   });
 
-  return { service, prisma, rows, sessions, subscriptions, create, remove, setEnabled };
+  return { service, prisma, rows, sessions, subscriptions, create, remove, setEnabled, confirmAll };
 }
 
 describe("ProtocolUsersService.listForDevice", () => {
@@ -190,14 +200,16 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("gives a device its own credential on every route, in place of the shared ones", async () => {
-    const { service, create } = world({
+  it("gives a device its own credential on every route, in place of the shared ones once the node has them", async () => {
+    const { service, create, confirmAll } = world({
       rows: [
         { id: "shared-a", routeId: "route-a" },
         { id: "shared-b", routeId: "route-b" },
       ],
     });
 
+    await service.listForDevice(CUSTOMER, ME);
+    confirmAll();
     const result = await service.listForDevice(CUSTOMER, ME);
 
     expect(create.mock.calls.map((c) => [c[0].routeId, c[1]])).toEqual([
@@ -207,6 +219,41 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(result).toHaveLength(2);
     expect(result.every((u) => u.sessionId === ME)).toBe(true);
     expect(result.map((u) => u.id)).not.toContain("shared-a");
+  });
+
+  /** Creating a row and enqueueing its CREATE_USER is not the node having
+   * it. A node whose control stream is down holds the command for days
+   * while still serving the users it has; handing the device its new
+   * credential then swapped a working tunnel for a dead one. */
+  it("keeps handing out the shared credential until a node has confirmed the device's own", async () => {
+    const { service, rows } = world({
+      rows: [
+        { id: "shared-a", routeId: "route-a" },
+        { id: "shared-b", routeId: "route-b" },
+      ],
+    });
+
+    const first = await service.listForDevice(CUSTOMER, ME);
+    expect(first.map((u) => u.id).sort()).toEqual(["shared-a", "shared-b"]);
+
+    // The node acks route-a's credential only.
+    rows.find((r) => r.sessionId === ME && r.routeId === "route-a")!.provisionedAt = new Date();
+    const second = await service.listForDevice(CUSTOMER, ME);
+
+    const byRoute = Object.fromEntries(second.map((u) => [u.routeId, u]));
+    expect(byRoute["route-a"].sessionId).toBe(ME);
+    expect(byRoute["route-b"].id).toBe("shared-b");
+    expect(second).toHaveLength(2);
+  });
+
+  // Nothing that works to keep, so nothing to wait for.
+  it("hands out an unconfirmed device credential where there is no shared one", async () => {
+    const { service } = world({ rows: [], routes: ["route-a"] });
+
+    const result = await service.listForDevice(CUSTOMER, ME);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].sessionId).toBe(ME);
   });
 
   it("never hands one device another device's credentials", async () => {
@@ -269,7 +316,7 @@ describe("ProtocolUsersService.listForDevice", () => {
   });
 
   it("falls back to the shared credential on a route where its own could not be made", async () => {
-    const { service, create } = world({
+    const { service, create, confirmAll } = world({
       rows: [
         { id: "shared-a", routeId: "route-a" },
         { id: "shared-b", routeId: "route-b" },
@@ -279,6 +326,12 @@ describe("ProtocolUsersService.listForDevice", () => {
       throw new Error("No free addresses left in WireGuard subnet");
     });
 
+    await service.listForDevice(CUSTOMER, ME);
+    // route-a is tried again on the next fetch; let that one fail too.
+    create.mockImplementationOnce(async () => {
+      throw new Error("No free addresses left in WireGuard subnet");
+    });
+    confirmAll();
     const result = await service.listForDevice(CUSTOMER, ME);
 
     const byRoute = Object.fromEntries(result.map((u) => [u.routeId, u]));
@@ -325,7 +378,7 @@ describe("ProtocolUsersService.listForDevice", () => {
     const w = world({});
     w.create.mockImplementation(async ({ subscriptionId, routeId }, sessionId) => {
       w.subscriptions[0].status = "SUSPENDED";
-      const row = { id: `new-${routeId}`, subscriptionId, routeId, sessionId: sessionId ?? null, nodeId: "n", protocol: "XRAY_VLESS_REALITY", status: "ACTIVE", createdAt: new Date() };
+      const row = { id: `new-${routeId}`, subscriptionId, routeId, sessionId: sessionId ?? null, nodeId: "n", protocol: "XRAY_VLESS_REALITY", status: "ACTIVE", createdAt: new Date(), provisionedAt: null };
       w.rows.push(row);
       return row as never;
     });

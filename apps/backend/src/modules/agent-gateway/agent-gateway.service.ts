@@ -81,6 +81,13 @@ const ROUTE_REASSERT_INTERVAL_MS = 60_000;
  * restart-then-reassert cycle restores the uplink. */
 export const UPLINK_ACK_PREFIX = "reassert-uplink:";
 
+/** Command-id prefix for re-asserting a credential no node has confirmed
+ * yet (ProtocolUser.provisionedAt is null). Its ack is what records the
+ * confirmation; a confirmed credential is re-asserted under the plain
+ * `reassert:` prefix, whose ack is ignored, so the confirmed majority
+ * costs no database write per user per minute. */
+export const CONFIRM_ACK_PREFIX = "reassert-confirm:";
+
 @Injectable()
 export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AgentGatewayService.name);
@@ -641,8 +648,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
             // Synthetic id: this command has no AgentCommand row, so its
             // ack is expected to match nothing (see handleCommandAck).
             // Prefixed so an unmatched ack is recognisable rather than
-            // looking like data loss.
-            this.writeCommand(nodeId, `reassert:${user.id}`, "CREATE_USER", payload);
+            // looking like data loss -- and, for a credential no node has
+            // confirmed yet, so its ack can record the confirmation.
+            const prefix = user.provisionedAt ? "reassert:" : CONFIRM_ACK_PREFIX;
+            this.writeCommand(nodeId, `${prefix}${user.id}`, "CREATE_USER", payload);
           }
           asserted += 1;
         }
@@ -680,9 +689,36 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // matched neither this branch nor an AgentCommand row and was
     // discarded in total silence. A relay whose outbound could not be
     // rebuilt looked exactly like one that had been rebuilt fine.
-    if (!ack.success && ack.commandId.startsWith("reassert")) {
-      this.logger.warn(`Re-assert of ${ack.commandId} failed on the node: ${ack.error}`);
+    if (ack.commandId.startsWith("reassert")) {
+      if (!ack.success) {
+        this.logger.warn(`Re-assert of ${ack.commandId} failed on the node: ${ack.error}`);
+      } else if (ack.commandId.startsWith(CONFIRM_ACK_PREFIX)) {
+        await this.markProvisioned({ id: ack.commandId.slice(CONFIRM_ACK_PREFIX.length) });
+      }
+      // Synthetic: there is no AgentCommand row to update, so nothing
+      // more to do. (This used to run the updateMany below anyway, one
+      // query per user per minute that could only ever match nothing.)
+      return;
     }
+
+    // A stored CREATE_USER or ENABLE_USER the node carried out means the
+    // credential it names now exists there. Read before the status
+    // update, which is the only other thing that touches the row.
+    if (ack.success) {
+      const command = await this.prisma.agentCommand.findUnique({
+        where: { id: ack.commandId },
+        select: { nodeId: true, type: true, payloadJson: true },
+      });
+      const externalUserId = (command?.payloadJson as { externalUserId?: unknown } | null)?.externalUserId;
+      if (
+        command &&
+        (command.type === "CREATE_USER" || command.type === "ENABLE_USER") &&
+        typeof externalUserId === "string"
+      ) {
+        await this.markProvisioned({ nodeId: command.nodeId, externalUserId });
+      }
+    }
+
     await this.prisma.agentCommand.updateMany({
       where: { id: ack.commandId },
       data: {
@@ -690,6 +726,19 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
         ackedAt: new Date(),
         error: ack.success ? null : ack.error,
       },
+    });
+  }
+
+  /** Records that a node has confirmed it holds a credential.
+   *
+   * What lets a device's own credential replace the shared one in what
+   * the device is handed (ProtocolUsersService.deviceView): until a node
+   * has acked it, the device keeps the shared credential that already
+   * works. Only the first confirmation is written. */
+  private async markProvisioned(where: { id: string } | { nodeId: string; externalUserId: string }) {
+    await this.prisma.protocolUser.updateMany({
+      where: { ...where, provisionedAt: null },
+      data: { provisionedAt: new Date() },
     });
   }
 
