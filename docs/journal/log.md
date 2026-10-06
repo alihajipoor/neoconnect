@@ -2722,3 +2722,40 @@ iptoasn.com.
 `20261005_isp_recommendations`) before clients. Clients only send the
 new fields once the server has issued an attestation, so the reverse
 order loses nothing -- but it also collects nothing.
+
+## 2026-10-05 (night) — deployed, verified in the VM, released 0.9.43 and mobile 0.2.22
+
+**Backend.** Production went from `ea3ba87` (2026-09-30) to `b8d1850`
+over SSH, after a database dump. Both migrations applied, the ASN table
+loaded (581,630 ranges), `/health/ip` returns an ASN and a signed
+network token, and `customer_sessions` rows appear for real sign-ins.
+The deploy found a six-week-old bug: compose passes an unset
+`EXIT_HANDLE_SECRET` as the empty string and `??` kept it, so every
+exit handle was null in production from 2026-08-26. Now `||`, with a
+test.
+
+**Desktop RC (main `2812c3a`) in the VM**, upgraded over 0.9.42 with
+the session kept (service hash checked against the local build):
+
+- Automatic is the first picker row; connecting with it settled on
+  fi-finland / Stealth, "You're protected", exit FI. No ISP tags yet,
+  which is expected: a tag needs five customers on one ASN in 48h.
+- DNS batch, all 8 protocols: exit FI, zero DNS left the NIC.
+- NIC capture, all 8 protocols: no global IPv6 sent, IPv4 only to the
+  node, except the known FIN/ACK and keepalive residue on connections
+  opened before the tunnel. Built-in's first capture was taken while
+  disconnected (the app had died with the guest-control session that
+  launched it) and is a control, not a result; the rerun connected is
+  clean -- 98 packets, all to the node.
+- Sign-out with Built-in up: tunnel down (exit US, no RAS connection),
+  the logout request blocked locally (16 attempts -- the POST walks
+  every endpoint and each failed instantly), and the server session
+  untouched (`revokedAt` null). The saved session was put back and the
+  app came up signed in, refresh working.
+
+**Released** `desktop-v0.9.43` and `android-v0.2.22`. **Unverified:**
+Android on a device -- nothing of mobile 0.2.22 has run on a phone
+here; iOS needs the Mac. Still open: a signed-out client's VPN
+credentials stay valid on the nodes until revoked server-side
+(per-device credentials would fix it); node SSH access; ir1 offline
+since 2026-09-12.
