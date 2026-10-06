@@ -86,6 +86,48 @@ describe("BillingService.confirmPayment expiry", () => {
     expect(newExpiryDays(prisma)).toBe(40);
   });
 
+  /** The stale-pending sweep cancelled the attempt, then the payment
+   * landed anyway -- a Checkout tab paid seven hours later, a slow crypto
+   * confirmation. The expiry is still the provisional one, a term out. */
+  it("gives exactly one term when a payment lands on an unpaid attempt the sweep cancelled", async () => {
+    const { service, prisma } = build({
+      id: "sub-1",
+      status: SubscriptionStatus.CANCELLED,
+      expireAt: new Date(Date.now() + 30 * DAY_MS),
+      plan: { durationDays: 30 },
+    });
+    (prisma as unknown as { paymentTransaction: { count: jest.Mock } }).paymentTransaction.count = jest
+      .fn()
+      .mockResolvedValue(0);
+
+    await service.confirmPayment("txn-1", {});
+
+    expect(newExpiryDays(prisma)).toBe(30);
+    // This payment is already CONFIRMED when the question is asked, so it
+    // must not count as the earlier one.
+    expect(
+      (prisma as unknown as { paymentTransaction: { count: jest.Mock } }).paymentTransaction.count,
+    ).toHaveBeenCalledWith({ where: { subscriptionId: "sub-1", status: "CONFIRMED", id: { not: "txn-1" } } });
+  });
+
+  /** Cancelled by an operator or an account deletion after being paid
+   * for: its remaining time was bought, and a renewal keeps it. */
+  it("extends a cancelled subscription that was paid for before", async () => {
+    const { service, prisma } = build({
+      id: "sub-1",
+      status: SubscriptionStatus.CANCELLED,
+      expireAt: new Date(Date.now() + 10 * DAY_MS),
+      plan: { durationDays: 30 },
+    });
+    (prisma as unknown as { paymentTransaction: { count: jest.Mock } }).paymentTransaction.count = jest
+      .fn()
+      .mockResolvedValue(1);
+
+    await service.confirmPayment("txn-1", {});
+
+    expect(newExpiryDays(prisma)).toBe(40);
+  });
+
   it("starts a fresh term when an expired subscription is paid again", async () => {
     // Extending from a date in the past would sell time that has already
     // elapsed.

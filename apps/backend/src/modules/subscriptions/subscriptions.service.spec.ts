@@ -138,12 +138,42 @@ describe("SubscriptionsService.createOrReusePending", () => {
 
     expect(count).toBe(3);
     const { where } = prisma.subscription.updateMany.mock.calls[0][0] as {
-      where: { status: SubscriptionStatus; createdAt: { lt: Date } };
+      where: { status: SubscriptionStatus; updatedAt: { lt: Date } };
     };
     expect(where.status).toBe(SubscriptionStatus.PENDING);
     // Crypto can sit unconfirmed a long time; cancelling one still in
     // flight is far worse than leaving a dead row an extra hour.
-    expect(where.createdAt.lt.getTime()).toBeLessThan(Date.now());
+    expect(where.updatedAt.lt.getTime()).toBeLessThan(Date.now());
+  });
+
+  /** Reuse refreshes the row for a new attempt but keeps its createdAt.
+   * Aged by createdAt, an attempt minutes old on a row first made five
+   * hours earlier was cancelled with its payment in flight. */
+  it("ages an attempt by its last reuse, not by when the row was first made", async () => {
+    const { service, prisma } = build(null);
+
+    await service.cancelStalePending(6 * 60 * 60 * 1000);
+
+    const { where } = prisma.subscription.updateMany.mock.calls[0][0] as { where: Record<string, unknown> };
+    expect(where).toHaveProperty("updatedAt");
+    expect(where).not.toHaveProperty("createdAt");
+  });
+
+  /** A payment can still confirm on a cancelled attempt. Left a term in
+   * the future, its provisional expiry was then extended by renewal as if
+   * owned: two terms for one payment. */
+  it("pulls a cancelled attempt's provisional expiry in to now", async () => {
+    const { service, prisma } = build(null);
+    const before = Date.now();
+
+    await service.cancelStalePending(6 * 60 * 60 * 1000);
+
+    const { data } = prisma.subscription.updateMany.mock.calls[0][0] as {
+      data: { status: SubscriptionStatus; expireAt: Date };
+    };
+    expect(data.status).toBe(SubscriptionStatus.CANCELLED);
+    expect(data.expireAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(data.expireAt.getTime()).toBeLessThanOrEqual(Date.now());
   });
 });
 

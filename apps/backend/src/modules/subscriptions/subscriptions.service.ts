@@ -339,12 +339,27 @@ export class SubscriptionsService {
    * the admin's Subscriptions view and in any revenue query that isn't
    * careful about status. Cancelled rather than deleted so the attempt
    * stays auditable alongside its PaymentTransaction.
+   *
+   * Aged by `updatedAt`, not `createdAt`. createOrReusePending reuses the
+   * row for every new attempt at the same plan, so a customer who came
+   * back five hours after abandoning one was paying on a row whose
+   * createdAt was already about to cross the cutoff, and the next sweep
+   * cancelled an attempt minutes old with its payment in flight.
+   *
+   * The provisional expiry goes with the cancellation. A pending row is
+   * written a full term ahead, and a payment can still confirm on it after
+   * this -- a Stripe Checkout page stays payable for 24 hours, crypto
+   * confirms when it confirms -- at which point renewSubscription saw a
+   * CANCELLED row with a future expiry, took that as time owned, and
+   * extended it: two terms for one payment. With the expiry in the past
+   * a late payment buys exactly one term from the day it lands.
    */
   async cancelStalePending(olderThanMs: number) {
-    const cutoff = new Date(Date.now() - olderThanMs);
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - olderThanMs);
     const { count } = await this.prisma.subscription.updateMany({
-      where: { status: SubscriptionStatus.PENDING, createdAt: { lt: cutoff } },
-      data: { status: SubscriptionStatus.CANCELLED },
+      where: { status: SubscriptionStatus.PENDING, updatedAt: { lt: cutoff } },
+      data: { status: SubscriptionStatus.CANCELLED, expireAt: now },
     });
     return count;
   }

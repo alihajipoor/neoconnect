@@ -292,7 +292,7 @@ export class BillingService {
     }
 
     if (transaction.subscriptionId) {
-      await this.renewSubscription(transaction.subscriptionId);
+      await this.renewSubscription(transaction.subscriptionId, transactionId);
     }
 
     // Issued here, in the same flow that activates the subscription,
@@ -348,7 +348,7 @@ export class BillingService {
    *   a prior quota/expiry suspension): re-enables it -- the exact
    *   reverse of `UsageService.disableProtocolUsers`, reusing
    *   `ProtocolUsersService.setEnabled(true)`. */
-  private async renewSubscription(subscriptionId: string) {
+  private async renewSubscription(subscriptionId: string, transactionId: string) {
     const subscription = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
       include: { plan: true },
@@ -366,7 +366,22 @@ export class BillingService {
     // Status is the discriminator rather than the date, because the date
     // cannot distinguish "provisional, never paid for" from "genuinely
     // owned".
-    const firstActivation = subscription.status === SubscriptionStatus.PENDING;
+    //
+    // CANCELLED needs one more question. The stale-pending sweep cancels
+    // unpaid attempts, and a payment can still confirm on one afterwards
+    // (a Checkout page is payable for 24 hours; crypto confirms when it
+    // confirms). Its expiry is the same provisional date, so it is a first
+    // activation too -- unless the subscription was ever paid for, which
+    // is what distinguishes it from one an operator or an account deletion
+    // cancelled. The sweep now also pulls the expiry in, so this matters
+    // for the rows it cancelled before it did. This payment is already
+    // CONFIRMED by now, hence excluded.
+    const firstActivation =
+      subscription.status === SubscriptionStatus.PENDING ||
+      (subscription.status === SubscriptionStatus.CANCELLED &&
+        (await this.prisma.paymentTransaction.count({
+          where: { subscriptionId, status: "CONFIRMED", id: { not: transactionId } },
+        })) === 0);
     const base =
       !firstActivation && subscription.expireAt > new Date() ? subscription.expireAt : new Date();
     const newExpireAt = new Date(base.getTime() + subscription.plan.durationDays * 24 * 60 * 60 * 1000);
