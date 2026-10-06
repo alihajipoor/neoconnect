@@ -677,13 +677,37 @@ export function Dashboard({
   async function connectNow(takeover?: string[]) {
     if (!protocolUser) return;
 
-    // A tunnel the device limit is still taking down comes down first.
-    // Dialling over it would hand the next engine a descriptor the last
-    // one has not let go of -- so if it did not come down, nothing is
-    // dialled, and the card stays up beside the error line that says the
-    // disconnect did not finish.
-    const pendingTeardown = slotTeardownRef.current;
-    if (pendingTeardown && (await pendingTeardown) === "stuck") return;
+    // A tunnel the device limit is still taking down comes down first,
+    // and so does one an earlier teardown left up -- the card can still
+    // be showing over it, and its "Use on this device instead" is the
+    // only way here with a tunnel up (the orb disconnects then). Dialling
+    // over it would hand the next engine a descriptor the last one has
+    // not let go of, so if it does not come down, nothing is dialled, and
+    // the card stays up beside the error line that says the disconnect
+    // did not finish.
+    const ownTeardown =
+      !slotTeardownRef.current && (connectionState === "connected" || connectionState === "degraded");
+    if (ownTeardown) setConnectionState("disconnecting");
+    const pendingTeardown = ownTeardown
+      ? tearDownForSlot({ disconnect, waitForTeardown })
+      : slotTeardownRef.current;
+    if (pendingTeardown) {
+      if ((await pendingTeardown) === "stuck") {
+        setConnectionError({
+          kind: "unknown",
+          messageKey: "err.teardownStuck",
+          detail: "still routed through a VPN; not dialling over it",
+        });
+        setConnectionState("degraded");
+        return;
+      }
+      // Down, on the platform's word -- and said, so a connect that
+      // stops at the consent dialog below does not leave the orb on
+      // "disconnecting".
+      setConnectionState("disconnected");
+      setConnectedAt(null);
+      setExitIp(null);
+    }
 
     setConnectionError(null);
     setPermissionDenied(false);
