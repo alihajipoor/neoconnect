@@ -110,9 +110,23 @@ export class AuthService {
   /** Generates a new candidate TOTP secret and stores it (mfaEnabled stays
    * false until confirmed via enableMfa) -- calling this again before
    * confirming just overwrites the previous candidate, which is fine, it
-   * was never active. */
+   * was never active.
+   *
+   * Refused while MFA is on. It used to write `mfaEnabled: false` with a
+   * new secret whatever the state, so an access token alone -- the exact
+   * threat disableMfa asks for the password against -- could switch the
+   * second factor off, or bind it to the caller's own authenticator and
+   * lock the real admin out at their next sign-in. A stale panel tab
+   * offering "Enable" did the first half by accident. Changing
+   * authenticators now goes through disableMfa, and so needs the
+   * password. */
   async setupMfa(adminId: string): Promise<{ secret: string; otpauthUrl: string; qrCodeDataUrl: string }> {
     const admin = await this.prisma.adminUser.findUniqueOrThrow({ where: { id: adminId } });
+    if (admin.mfaEnabled) {
+      throw new BadRequestException(
+        "Two-factor authentication is already on. Turn it off with your password before setting it up again.",
+      );
+    }
     const secret = authenticator.generateSecret();
     await this.prisma.adminUser.update({ where: { id: adminId }, data: { mfaSecret: secret, mfaEnabled: false } });
 

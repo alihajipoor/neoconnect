@@ -181,6 +181,16 @@ describe("AuthService", () => {
       });
     });
 
+    // An access token alone used to be enough to switch MFA off this way
+    // (setup wrote mfaEnabled: false), or to bind it to the caller's own
+    // authenticator -- what disableMfa asks for the password to prevent.
+    it("setupMfa refuses while MFA is on, and changes nothing", async () => {
+      prisma.adminUser.findUniqueOrThrow.mockResolvedValue(buildAdmin({ mfaEnabled: true, mfaSecret: "SECRET" }));
+
+      await expect(service.setupMfa("admin-1")).rejects.toThrow(BadRequestException);
+      expect(prisma.adminUser.update).not.toHaveBeenCalled();
+    });
+
     it("enableMfa rejects if setupMfa was never called", async () => {
       prisma.adminUser.findUniqueOrThrow.mockResolvedValue(buildAdmin({ mfaSecret: null }));
       await expect(service.enableMfa("admin-1", "123456")).rejects.toThrow(BadRequestException);
