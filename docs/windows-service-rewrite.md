@@ -345,11 +345,61 @@ ship in the next one.
 
 ## What this does not fix
 
-The control plane. Windows clients fail to reach the API far more often
-than Android ones — 160 `CONTROL_PLANE_UNREACHABLE` against 107
-successes in 30 days, where Android is 43 against 323 — and each one
-burns a 6s timeout before the tunnel is even attempted. That is a large
-part of "slow to connect" and it is a **separate defect** in the
-endpoint list or the client's HTTP path. `client_attempts.apiEndpoint`
-is NULL on every one of those rows, so the telemetry cannot yet say
-which endpoint failed. Fix the telemetry first.
+The control plane — but not the way this section used to put it. It
+said Windows clients fail to reach the API far more often than Android
+ones ("160 `CONTROL_PLANE_UNREACHABLE` against 107 successes in 30
+days, where Android is 43 against 323") and that each one burns 6s
+before the tunnel is attempted. **That was wrong: those rows were not
+from Windows.** Measured from `client_attempts` on 2026-10-06 (a "30
+day" query, which the 14-day retention cuts to about 14):
+
+- Desktop builds 0.9.29–0.9.42 sent about 160 attempts and **zero**
+  `CONTROL_PLANE_UNREACHABLE`.
+- All 182 rows labelled `platform = "windows"` with that outcome carry
+  a **mobile** version — 0.2.18, 0.2.20, 0.2.21 (mobile is 0.2.x,
+  desktop 0.9.x). 0.2.20 alone has 149 unreachable of 251, mostly from
+  customers other than the owner. Android-labelled rows: 30 of 522.
+  Nothing is labelled `ios` or `macos`.
+- They were the iOS builds. `attempts.ts` is compiled into the mobile
+  app through the `@shared` alias, and until 81508ee (mobile 0.2.22)
+  its `detectPlatform` said "android" if the user agent did and
+  "windows" for anything else. 0.2.20 was iOS-only; 0.2.18 was the iOS
+  bring-up; 0.2.21 shipped for both, and its Android build labelled
+  itself correctly.
+- `apiEndpoint` is NULL on every row of every platform, and `asn` on
+  every row older than 0.2.22 / 0.9.43.
+
+Two things make even the corrected numbers weaker than they look:
+
+- **Desktop's zero only covers 0.9.29–0.9.38.** From 0.9.39 the client
+  filled `apiEndpoint` with every hostname it would try — 233
+  characters with the current bundle — against a server limit of 200.
+  The server answered 400, the client counted that as delivered, and
+  every unreachable report from 0.9.39–0.9.43 (and mobile 0.2.22) was
+  lost. For those versions the rate is unobservable, not zero.
+- **Most mobile "connect" rows were not connects.** The refresh that
+  files them also runs on every foreground and every `online` event
+  once the snapshot is ten minutes old, and reported itself as
+  "connecting on cached credentials" regardless. Offline devices queue
+  up to 25 and flush them later, and a flush over twenty a minute was
+  throttled and silently dropped. So 149 of 251 is not "59% of connects
+  fail".
+
+What `claude/control-plane-telemetry` changes, so the next two weeks
+of rows can answer this: the server accepts `apiEndpoint` up to 2000
+characters and stores the iOS builds' "windows" as `ios-inferred`;
+clients take the platform from the binary (`build_platform`), report
+each address actually tried with how it ended (`req:`/`refresh:`/
+`retry:` legs, `timeout`, `budget`, `scope`, `net`, `h<status>`),
+add a socket-level `probe:` (dns, blockpage, tcp, tls, cert) after a
+failed sign-in or resume refresh, say which trigger and app state a
+refresh failed under, keep throttled reports, and never ship without
+the endpoint seed.
+
+**Still unexplained:** why the iOS cohort fails so much more than
+Android. Both share every line of the control-plane path. Candidates
+read from the code — the 6s budget against a token-refresh chain of
+three sequential fresh connections, iOS suspending the app seconds
+after backgrounding, the 0.2.20 extension aborting under load — are
+unverified, and nothing here can settle it without a real iPhone on a
+censored network. The VM cannot.

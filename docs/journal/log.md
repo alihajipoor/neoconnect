@@ -2759,3 +2759,48 @@ here; iOS needs the Mac. Still open: a signed-out client's VPN
 credentials stay valid on the nodes until revoked server-side
 (per-device credentials would fix it); node SSH access; ir1 offline
 since 2026-09-12.
+
+## 2026-10-06 — the "Windows can't reach the API" rows were iOS
+
+Branch `claude/control-plane-telemetry`, pushed, **not merged, nothing
+deployed or tagged.**
+
+**The finding.** Measured from `client_attempts`: desktop 0.9.29–0.9.42
+recorded zero `CONTROL_PLANE_UNREACHABLE`; all 182 "windows" ones carry
+mobile versions (0.2.18/0.2.20/0.2.21) -- the iOS builds, labelled
+"windows" by the shared `detectPlatform` until 81508ee. So **the
+commit messages of 7a5fd50 and a241741 are wrong** where they say
+Windows reaches the API far less reliably than Android ("160 against
+107", "162 ... against 43", "the mobile build has no seed"). Commits
+cannot be edited; this is the correction. The 6s-budget-inside-8s
+arithmetic in a241741 was real but bit the mobile app, which has
+carried the seed since 4174b7c. The source comments repeating the claim
+are fixed on the branch, and `docs/windows-service-rewrite.md` "What
+this does not fix" is rewritten with the numbers.
+
+Also found by reading, and fixed on the branch: every unreachable
+report from desktop 0.9.39–0.9.43 and mobile 0.2.22 was **lost** (its
+`apiEndpoint` hostname list overran the DTO's 200-character limit; 400;
+counted as delivered), so desktop's zero means nothing past 0.9.38;
+resume/online refreshes were reported as connects; a 429 dropped queued
+reports; and the release prebuild could overwrite a fetched seed with
+the placeholder on a transient failure.
+
+**Deploy order:** backend first. Until it is, new clients still work --
+a 400 on a long `apiEndpoint` is resent once cut to 200 -- but the
+already-shipped 0.9.39+/0.2.22 reports go on being lost. No migration.
+
+**Reading old rows** (they age out by about 2026-10-20; nothing was
+rewritten): treat `platform = 'windows' AND "appVersion" LIKE '0.2.%'`
+as the mobile app on iOS (or a desktop dev run), the same inference
+the server now stores as `ios-inferred` / `mobile-inferred`. Split
+mobile unreachable rows by reason prefix: from the new builds,
+`pre-connect` / `resume` / `online` say what triggered them.
+
+**Unverified:** why iOS fails so much more than Android -- both share
+every line of the control-plane path; the candidates (token-refresh
+chain inside the 6s budget, iOS suspending the app, the 0.2.20
+extension aborting) are readings, not measurements. The probe's
+classes were checked against live TLS from this PC only (ok, cert,
+dns), never from a censored network; the Android/iOS builds of the
+new Rust were not compiled here. All of it waits on a real iPhone.
