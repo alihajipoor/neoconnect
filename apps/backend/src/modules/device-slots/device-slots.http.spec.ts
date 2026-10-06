@@ -115,13 +115,15 @@ describe("device slots over HTTP", () => {
     // "Use on this device instead".
     const takeover = await post("/customer/vpn/claim", "session-phone", { subscriptionId: SUB, takeover: [granted.handle] });
     expect(takeover.status).toBe(200);
+    const phoneHandle = ((await takeover.json()) as { handle: string }).handle;
 
     // The PC's next renewal says so -- 200, never 401.
     const renew = await post("/customer/vpn/renew", "session-pc", { subscriptionId: SUB });
     expect(renew.status).toBe(200);
     expect(await renew.json()).toMatchObject({ status: "displaced", by: { label: "گوشی علی", platform: "android" } });
 
-    const release = await post("/customer/vpn/release", "session-phone", { subscriptionId: SUB });
+    // Naming the grant it gives back.
+    const release = await post("/customer/vpn/release", "session-phone", { subscriptionId: SUB, handle: phoneHandle });
     expect(release.status).toBe(204);
     const again = await post("/customer/vpn/claim", "session-pc", { subscriptionId: SUB });
     expect(again.status).toBe(200);

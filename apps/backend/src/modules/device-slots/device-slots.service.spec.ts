@@ -133,12 +133,57 @@ describe("DeviceSlotsService", () => {
     });
   });
 
-  it("is idempotent for the device already holding the slot", async () => {
+  it("keeps the slot of a device that claims again, under a new handle", async () => {
     const { service } = build();
     const first = await service.claim(as(PC), { subscriptionId: SUB }, windows);
     const second = await service.claim(as(PC), { subscriptionId: SUB }, windows);
 
-    expect(second.handle).toBe(first.handle);
+    expect(second).toMatchObject({ granted: true, enforced: true });
+    expect(second.handle).not.toBe(first.handle);
+    await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held", handle: second.handle });
+    expect((await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, android))).holders).toHaveLength(1);
+  });
+
+  // A card the phone showed just before the PC claimed again still works.
+  it("still takes a device over by the handle it had before it claimed again", async () => {
+    const { service } = build();
+    await service.claim(as(PC), { subscriptionId: SUB }, windows);
+    const shown = (await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, android))).holders[0].handle;
+    await service.claim(as(PC), { subscriptionId: SUB }, windows);
+
+    await expect(service.claim(as(PHONE), { subscriptionId: SUB, takeover: [shown] }, android)).resolves.toMatchObject({
+      granted: true,
+    });
+  });
+
+  /** Disconnect, then Connect at once (to change server): the release is
+   * fire-and-forget and can arrive after the new claim. Without a handle
+   * it freed the slot the PC was now using -- the phone was let in with
+   * no card, and the PC, connected first, was told it had been
+   * displaced. */
+  it("ignores a release that arrives after the same device has claimed again", async () => {
+    const { service } = build();
+    const before = await service.claim(as(PC), { subscriptionId: SUB }, windows);
+    const after = await service.claim(as(PC), { subscriptionId: SUB }, windows);
+
+    await service.release(as(PC), { subscriptionId: SUB, handle: before.handle! });
+    await service.release(as(PC), { handle: before.handle! });
+
+    await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, android));
+    await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held", handle: after.handle });
+  });
+
+  it("releases the slot a release names by its current handle, and any slot when it names none", async () => {
+    const named = build();
+    const grant = await named.service.claim(as(PC), { subscriptionId: SUB }, windows);
+    await named.service.release(as(PC), { subscriptionId: SUB, handle: grant.handle! });
+    await expect(named.service.claim(as(PHONE), { subscriptionId: SUB }, android)).resolves.toMatchObject({ granted: true });
+
+    const unnamed = build();
+    await unnamed.service.claim(as(PC), { subscriptionId: SUB }, windows);
+    await unnamed.service.claim(as(PC), { subscriptionId: SUB }, windows);
+    await unnamed.service.release(as(PC), { subscriptionId: SUB });
+    await expect(unnamed.service.claim(as(PHONE), { subscriptionId: SUB }, android)).resolves.toMatchObject({ granted: true });
   });
 
   /** "Use on this device instead": the phone takes the slot, and the PC

@@ -138,8 +138,10 @@ Request:
   the plan is unlimited (`limit: null`), the token names no device, or
   slots are switched off (`DEVICE_SLOTS=off`). Dial; renewing is
   harmless but pointless.
-- Claiming again while holding the slot is idempotent: same `handle`,
-  `200`.
+- Claiming again while holding the slot keeps the slot and answers
+  `200` with a **new** `handle`. Keep the handle of the latest grant
+  (claim, or a `renew` that re-granted): `release` names it. Another
+  device's takeover may still name the previous one.
 
 **409 -- `DEVICE_LIMIT`.** The plan's devices are all in use. Do not dial.
 
@@ -225,8 +227,16 @@ still means the device was signed out, as everywhere.)
 
 When the customer presses Disconnect. Fire and forget.
 
-Request: `{"subscriptionId": "6f1c..."}`, or `{}` to release this
-device's slot on every subscription.
+Request: `{"subscriptionId": "6f1c...", "handle": "Zm9vYmFyYmF6"}`, or
+`{"handle": "..."}` / `{}` for this device's slot on every subscription.
+
+`handle` is the one from the grant being given back -- the latest claim,
+or the `renew` that re-granted. Send it. A release is fire and forget,
+and the request can still arrive seconds after the customer pressed
+Connect again; that new claim gave the slot a new handle, so the late
+release, naming the old one, frees nothing. Without `handle` the slot is
+freed whatever grant it is under (older behaviour, kept for apps that do
+not send it).
 
 Response: **204**, no body. (404 for a subscription that is not the
 customer's.)
@@ -301,8 +311,10 @@ refusal of the device -- see obligation 2.
    not run the failover ladder** (it would only take the slot back or
    fail). On `inactive`: disconnect and show the plan-ended state.
 8. **On Disconnect, release** -- fire and forget, at most 1.5 s, never
-   delaying teardown. Sign-out releases the slot on the server by itself;
-   no separate call is needed.
+   delaying teardown -- naming the `handle` of the latest grant, so a
+   release that lands after the next Connect's claim frees nothing.
+   Sign-out releases the slot on the server by itself; no separate call
+   is needed.
 9. **When the tunnel degrades and this device was unclaimed or
    displaced**, do not run the ladder blindly: tear down, call `renew`
    with a 4 s budget, and if it answers `displaced`, show that. If it

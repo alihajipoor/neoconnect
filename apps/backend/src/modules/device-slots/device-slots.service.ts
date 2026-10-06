@@ -55,9 +55,15 @@ const takeoversKey = (subscriptionId: string) => `slots-takeovers:${subscription
 
 interface Holder {
   sessionId: string;
-  /** Opaque, per grant. What another device names to take this one over;
-   * a session id is never handed to another device. */
+  /** Opaque, new with every grant -- a claim while holding the slot
+   * included. What another device names to take this one over (a session
+   * id is never handed to another device), and what this device's release
+   * names, so a release that arrives after a newer claim drops nothing. */
   handle: string;
+  /** The handle before the last re-claim, still good for a takeover: a
+   * refusal card shown just before this device claimed again must not
+   * need a second tap. Absent on records from before it existed. */
+  previousHandle?: string | null;
   since: number;
   lastRenew: number;
   label: string | null;
@@ -229,10 +235,22 @@ export class DeviceSlotsService {
       const holders = await this.holders(subscription.id);
       const mine = holders.find((h) => h.sessionId === session.id);
       if (mine) {
+        // The same slot, under a new handle: Disconnect then Connect
+        // sends a release and then a claim, and the release can arrive
+        // second. Naming the old handle, it then finds nothing to drop.
         credited = named ?? mine.protocolUserId;
-        await this.writeHolder(subscription.id, { ...mine, lastRenew: now, label, platform, protocolUserId: credited });
+        const handle = newHandle();
+        await this.writeHolder(subscription.id, {
+          ...mine,
+          handle,
+          previousHandle: mine.handle,
+          lastRenew: now,
+          label,
+          platform,
+          protocolUserId: credited,
+        });
         await this.store.hdel(displacedKey(subscription.id), session.id);
-        return this.granted(subscription.id, limit, mine.handle);
+        return this.granted(subscription.id, limit, handle);
       }
 
       const seen = await this.lastSeen(subscription.id, holders, now);
@@ -245,7 +263,7 @@ export class DeviceSlotsService {
       const wanted = new Set(request.takeover ?? []);
       const needed = live.length - limit + 1;
       const takenOver = live
-        .filter((h) => wanted.has(h.handle))
+        .filter((h) => wanted.has(h.handle) || (!!h.previousHandle && wanted.has(h.previousHandle)))
         .sort((a, b) => (seen.get(a.sessionId) ?? a.lastRenew) - (seen.get(b.sessionId) ?? b.lastRenew))
         .slice(0, Math.max(0, needed));
       const remaining = live.filter((h) => !takenOver.includes(h));
@@ -263,7 +281,7 @@ export class DeviceSlotsService {
       // to happen.
       if (takenOver.length > 0) await this.countTakeover(subscription.id, now);
 
-      const handle = randomBytes(9).toString("base64url");
+      const handle = newHandle();
       const holder: Holder = {
         sessionId: session.id,
         handle,
@@ -344,7 +362,7 @@ export class DeviceSlotsService {
       const seen = await this.lastSeen(subscription.id, holders, now);
       const live = holders.filter((h) => now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS);
       if (live.length < limit) {
-        const handle = randomBytes(9).toString("base64url");
+        const handle = newHandle();
         await this.store.hdel(
           slotsKey(subscription.id),
           ...holders.filter((h) => !live.includes(h)).map((h) => h.sessionId),
@@ -376,20 +394,29 @@ export class DeviceSlotsService {
   }
 
   /** Gives this device's slot back: on one subscription, or on all of the
-   * customer's. What the app sends when the customer presses Disconnect. */
-  async release(caller: SlotCaller, request: { subscriptionId?: string }): Promise<void> {
+   * customer's. What the app sends when the customer presses Disconnect.
+   *
+   * With `handle`, only the grant it names: the app sends the release
+   * fire-and-forget and moves on, while the request can still be walking
+   * the API's endpoints seconds later -- after a Connect pressed in the
+   * meantime has claimed the slot again (under a new handle). Dropping
+   * whatever this device held then would free the slot it is using, let
+   * the next device in without a card, and tell this one at its next
+   * renewal that it had been displaced. Without `handle`, as before. */
+  async release(caller: SlotCaller, request: { subscriptionId?: string; handle?: string }): Promise<void> {
     if (!caller.sessionId) return;
     const sessionId = caller.sessionId;
+    const mine = (id: string) => id === sessionId;
     if (request.subscriptionId) {
       const owned = await this.prisma.subscription.findFirst({
         where: { id: request.subscriptionId, customerId: caller.customerId },
         select: { id: true },
       });
       if (!owned) throw new NotFoundException("Subscription not found");
-      await this.dropSessions(owned.id, (id) => id === sessionId);
+      await this.dropSessions(owned.id, mine, request.handle);
       return;
     }
-    await this.releaseSession(caller.customerId, sessionId);
+    await this.forEachSubscription(caller.customerId, (id) => this.dropSessions(id, mine, request.handle));
   }
 
   /** A device's slots, on every subscription of its customer -- for
@@ -571,9 +598,12 @@ export class DeviceSlotsService {
     }
   }
 
-  private async dropSessions(subscriptionId: string, match: (sessionId: string) => boolean) {
+  /** `handle`: drop nothing if a matching holder holds its slot under a
+   * different, newer grant (see release). */
+  private async dropSessions(subscriptionId: string, match: (sessionId: string) => boolean, handle?: string) {
     await this.lock.run(subscriptionId, async () => {
       const holders = await this.holders(subscriptionId);
+      if (handle !== undefined && holders.some((h) => match(h.sessionId) && h.handle !== handle)) return;
       await this.store.hdel(slotsKey(subscriptionId), ...holders.map((h) => h.sessionId).filter(match));
       const displaced = Object.keys(await this.store.hgetall(displacedKey(subscriptionId)));
       await this.store.hdel(displacedKey(subscriptionId), ...displaced.filter(match));
@@ -612,6 +642,10 @@ export class DeviceSlotsService {
       staleAfterSec: STALE_AFTER_SEC,
     };
   }
+}
+
+function newHandle(): string {
+  return randomBytes(9).toString("base64url");
 }
 
 function positive(limit: number | null): number | null {
