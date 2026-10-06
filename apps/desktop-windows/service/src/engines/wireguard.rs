@@ -740,6 +740,34 @@ mod tests {
         let mut liveness = ServiceLiveness::with_query(|| ScmView::Pending);
         assert!(matches!(liveness.look(), Look::Again), "a starting service is not an ending");
     }
+
+    /// Only "no such service" is an absent service. Every other reason
+    /// the manager would not open it is a question that went unanswered,
+    /// and used to be read as a definite ending -- the engine watch
+    /// reporting a live tunnel gone, and `tunnel_is_running` answering
+    /// `false` over it.
+    #[test]
+    fn only_a_service_that_does_not_exist_is_not_registered() {
+        let open_failed = |code: i32| view_of_open_error(&windows_service::Error::Winapi(std::io::Error::from_raw_os_error(code)));
+        assert_eq!(open_failed(1060), ScmView::NotRegistered, "ERROR_SERVICE_DOES_NOT_EXIST");
+        for code in [
+            5,    // ERROR_ACCESS_DENIED
+            6,    // ERROR_INVALID_HANDLE
+            8,    // ERROR_NOT_ENOUGH_MEMORY
+            123,  // ERROR_INVALID_NAME
+            1053, // ERROR_SERVICE_REQUEST_TIMEOUT
+            1072, // ERROR_SERVICE_MARKED_FOR_DELETE
+            1115, // ERROR_SHUTDOWN_IN_PROGRESS
+        ] {
+            let view = open_failed(code);
+            assert_eq!(view, ScmView::Unreadable, "error {code}");
+            assert!(counts_as_running(&view), "error {code} read as a tunnel that is down");
+        }
+        assert_eq!(
+            view_of_open_error(&windows_service::Error::ArgumentHasNulByte("service name")),
+            ScmView::Unreadable
+        );
+    }
 }
 
 /// What the peer's handshake says about the tunnel.
@@ -824,8 +852,9 @@ fn scm_view() -> ScmView {
         // absent, for the reason `counts_as_running` gives.
         return ScmView::Unreadable;
     };
-    let Ok(service) = manager.open_service(TUNNEL_SERVICE_NAME, ServiceAccess::QUERY_STATUS) else {
-        return ScmView::NotRegistered;
+    let service = match manager.open_service(TUNNEL_SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(service) => service,
+        Err(e) => return view_of_open_error(&e),
     };
     match service.query_status() {
         Ok(status) => match status.current_state {
@@ -839,6 +868,25 @@ fn scm_view() -> ScmView {
             _ => ScmView::Pending,
         },
         Err(_) => ScmView::Unreadable,
+    }
+}
+
+/// What a failure to open the tunnel service says about it.
+///
+/// Only `ERROR_SERVICE_DOES_NOT_EXIST` means there is no such service.
+/// Everything else -- a manager too busy to answer, access refused, a
+/// handle that could not be allocated -- is the question going
+/// unanswered, and reading that as "not registered" turned a failed
+/// query into a definite ending: the engine watch reported the tunnel
+/// gone and the status poll answered `connected: false` over a tunnel
+/// that was up. "Could not ask" is not "down".
+fn view_of_open_error(error: &windows_service::Error) -> ScmView {
+    const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
+    match error {
+        windows_service::Error::Winapi(e) if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) => {
+            ScmView::NotRegistered
+        }
+        _ => ScmView::Unreadable,
     }
 }
 
