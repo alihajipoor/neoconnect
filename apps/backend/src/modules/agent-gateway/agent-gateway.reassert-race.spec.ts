@@ -185,7 +185,7 @@ describe("AgentGatewayService re-assert against a concurrent switch-off", () => 
     jest.spyOn(Logger.prototype, "log").mockImplementation(() => undefined);
     const { service, wire, reassert } = build(["a", "b"]);
     const ack = (commandId: string) =>
-      (service as unknown as { handleCommandAck(a: object): Promise<void> }).handleCommandAck({
+      (service as unknown as { handleCommandAck(n: string, a: object): Promise<void> }).handleCommandAck("node-1", {
         commandId,
         success: true,
         error: "",
