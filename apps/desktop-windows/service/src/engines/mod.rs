@@ -438,10 +438,19 @@ pub struct Engines {
     handshake_reading: Option<(Instant, wireguard::HandshakeHealth)>,
     /// How the WireGuard tunnel service's state is read. See [`ScmQuery`].
     wireguard_scm: ScmQuery,
+    /// The most recent generation a thorough pass -- `disconnect()` --
+    /// has run after, with nothing begun since. Phase two after a drop
+    /// is skipped for a generation already swept: a Disconnect or the app
+    /// going away that reached the owning thread first has done it.
+    swept_after: u64,
     /// How many sessions have been ended, by any route. For the tests
     /// that prove a dead engine racing a Disconnect is torn down once.
     #[cfg(test)]
     sessions_ended: u32,
+    /// How many thorough passes have run. For the test that proves
+    /// phase two does not repeat one.
+    #[cfg(test)]
+    thorough_passes: u32,
 }
 
 impl Engines {
@@ -458,8 +467,11 @@ impl Engines {
             engine_gone: None,
             handshake_reading: None,
             wireguard_scm: Arc::new(wireguard::scm_view),
+            swept_after: 0,
             #[cfg(test)]
             sessions_ended: 0,
+            #[cfg(test)]
+            thorough_passes: 0,
         }
     }
 
@@ -668,6 +680,11 @@ impl Engines {
     #[cfg(test)]
     pub(crate) fn sessions_ended(&self) -> u32 {
         self.sessions_ended
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thorough_passes(&self) -> u32 {
+        self.thorough_passes
     }
 
     /// Puts a session into a given DNS state without connecting.
@@ -1309,8 +1326,17 @@ impl Engines {
     /// Only while nothing has begun since. A connect that started in
     /// between has already run this pass for itself, and running the
     /// janitor now would take that connect's own engine for an orphan.
+    ///
+    /// And only once. A Disconnect, or the app going away, that reached
+    /// this thread between phase one and here queued its own thorough
+    /// pass ahead of this one; it swept the same machine for the same
+    /// ended session, and a second sweep -- which can reach the cmdlets
+    /// -- would find nothing to do and take seconds doing it.
     pub fn finish_dead_session(&mut self, generation: u64) {
         if !self.active.is_empty() || !self.ledger.is_latest(generation) {
+            return;
+        }
+        if self.swept_after == generation {
             return;
         }
         if let Err(message) = self.disconnect() {
@@ -1577,6 +1603,14 @@ impl Engines {
         // and can do the least about it.
         self.unblock_ipv6();
         self.wipe_generated_configs();
+        // The slot is empty now, so the latest session to have begun has
+        // ended and this pass has swept up after it. Phase two after a
+        // drop reads this so as not to sweep the same machine twice.
+        self.swept_after = self.ledger.latest();
+        #[cfg(test)]
+        {
+            self.thorough_passes += 1;
+        }
         result
     }
 
@@ -3279,5 +3313,34 @@ mod helper_tests {
                 })
                 .await;
         }
+    }
+
+    /// Phase two is the thorough pass, and runs once per drop. A
+    /// Disconnect -- or the app going away -- that reached the owning
+    /// thread between phase one and phase two queued its own pass ahead
+    /// of it; sweeping the machine again finds nothing and costs seconds.
+    #[test]
+    fn phase_two_does_not_repeat_a_thorough_pass_that_already_ran() {
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_session("XRAY_VLESS_TLS", engine_stand_in());
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || engines.ledger().confirmed_drop().is_some()));
+        assert!(engines.end_dead_session(g));
+        assert_eq!(engines.thorough_passes(), 0, "phase one ran the thorough pass");
+        let _ = engines.disconnect();
+        assert_eq!(engines.thorough_passes(), 1);
+        engines.finish_dead_session(g);
+        assert_eq!(engines.thorough_passes(), 1, "phase two swept the same machine again");
+
+        // Without one in between, phase two is the pass -- once.
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_session("XRAY_VLESS_TLS", engine_stand_in());
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || engines.ledger().confirmed_drop().is_some()));
+        assert!(engines.end_dead_session(g));
+        engines.finish_dead_session(g);
+        assert_eq!(engines.thorough_passes(), 1, "phase two did not run");
+        engines.finish_dead_session(g);
+        assert_eq!(engines.thorough_passes(), 1, "phase two ran twice");
     }
 }

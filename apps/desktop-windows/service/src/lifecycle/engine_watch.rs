@@ -569,6 +569,12 @@ impl Ledger {
         generation != 0 && self.state().latest == generation
     }
 
+    /// The most recent session to have begun, live or not; 0 before the
+    /// first.
+    pub fn latest(&self) -> u64 {
+        self.state().latest
+    }
+
     /// The last session ended on its own and nothing has begun since --
     /// confirmed or not. What the owning thread acts on and what the log
     /// line quotes.
