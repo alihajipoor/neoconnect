@@ -150,7 +150,7 @@ fn survey(engines: &mut Engines) -> Survey {
         routes: our_route_counts(),
         firewall_rule: split_tunnel_rule_present(),
         wfp_filters: with_wfp_engine(|engine| our_filter_ids(engine).map(|ids| ids.len())).flatten(),
-        wireguard_tunnel_service: wireguard::tunnel_is_running(),
+        wireguard_tunnel_service: wireguard::tunnel_service_registered(),
         ras_entry: ikev2::entry_present(),
         tunnel_up,
     }
@@ -513,7 +513,7 @@ fn step_wireguard(engines: &Engines, found: &Survey, report: &mut RepairReport) 
         // Asked again all the same: `step_tunnel` above may have created
         // nothing, but a tunnel torn down between the survey and here
         // would leave one.
-        if !wireguard::tunnel_is_running() {
+        if !wireguard::tunnel_service_registered() {
             push(report, WIREGUARD_SERVICE, RepairOutcome::AlreadyClean);
             return;
         }
@@ -521,7 +521,7 @@ fn step_wireguard(engines: &Engines, found: &Survey, report: &mut RepairReport) 
 
     wireguard::remove_tunnel_if_present(engines);
     let mut trouble: Option<String> = None;
-    if wireguard::tunnel_is_running() {
+    if wireguard::tunnel_service_registered() {
         // wireguard.exe either is not there or did not manage it. Its
         // `/uninstalltunnelservice` is also the call that can hang for
         // 25 minutes on a service stuck in START_PENDING, which is why
@@ -531,7 +531,7 @@ fn step_wireguard(engines: &Engines, found: &Survey, report: &mut RepairReport) 
         }
     }
 
-    if wireguard::tunnel_is_running() {
+    if wireguard::tunnel_service_registered() {
         push(
             report,
             WIREGUARD_SERVICE,
@@ -622,7 +622,7 @@ pub(crate) fn diagnostics(engines: &mut Engines) -> Diagnostics {
         nrpt_rules: dns::rule_count(),
         split_tunnel_firewall_rule: split_tunnel_rule_present().unwrap_or(false),
         orphaned_engines: janitor::list_orphaned_engines(&exe_dir),
-        wireguard_tunnel_service: wireguard::tunnel_is_running(),
+        wireguard_tunnel_service: wireguard::tunnel_service_registered(),
         ras_entry: ikev2::entry_present().unwrap_or(false),
         wfp_filters: with_wfp_engine(|engine| our_filter_ids(engine).map(|ids| ids.len() as u32))
             .flatten()

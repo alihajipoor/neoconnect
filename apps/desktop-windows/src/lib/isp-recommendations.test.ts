@@ -39,6 +39,16 @@ describe("detectPlatform", () => {
   it("files an iPad as iOS, not macOS", () => {
     expect(detectPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 5)).toBe("ios");
   });
+
+  /** The original defect was a guess that defaulted to a real platform:
+   * anything not Android was "windows", so the iOS builds' failures were
+   * read as Windows ones for a month. What it cannot place, it must say
+   * it cannot place. */
+  it("says unknown, never windows, for what it does not recognise", () => {
+    expect(detectPlatform("Mozilla/5.0 (X11; Linux x86_64)", 0)).toBe("unknown");
+    expect(detectPlatform("", 0)).toBe("unknown");
+    expect(detectPlatform("Node.js/24", 0)).toBe("unknown");
+  });
 });
 
 describe("network identity", () => {

@@ -66,6 +66,13 @@ pub fn stop_watching() {
     SHUTTING_DOWN.store(true, Ordering::Release);
 }
 
+/// Whether [`stop_watching`] has been called. The engine watches in
+/// `engine_watch` honour the same signal, so one call ends every watch
+/// thread the service has.
+pub(crate) fn shutting_down() -> bool {
+    SHUTTING_DOWN.load(Ordering::Acquire)
+}
+
 /// An owned process handle that closes itself.
 ///
 /// Wrapped rather than used raw because every path out of

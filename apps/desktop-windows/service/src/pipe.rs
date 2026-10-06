@@ -17,11 +17,13 @@
 
 use std::sync::Arc;
 
+use crate::lifecycle::cancel::CancelToken;
 use crate::lifecycle::client_watch::ClientWatch;
+use crate::lifecycle::engine_watch::Ledger;
 use crate::lifecycle::supervisor::Supervisor;
 use std::time::{Duration, Instant};
 
-use neoconnect_ipc::{Request, Response, PIPE_NAME};
+use neoconnect_ipc::{Request, Response, TunnelHealth, PIPE_NAME};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::Mutex;
@@ -76,6 +78,7 @@ const IDLE_POLL: Duration = Duration::from_secs(10);
 /// below this point, including the ACL, is the shipping code path.
 pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Result<()> {
     let mut server = create_pipe_server(name, true)?;
+    let ledger = tear_down_dead_engines(&engines).await?;
     // Last time the app asked this service anything. The tunnel is torn
     // down when the app has been silent long enough to be considered
     // gone -- which is the fix for the worst failure this service had:
@@ -205,9 +208,10 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
 
         let engines = engines.clone();
         let last_seen = Arc::clone(&last_seen);
+        let ledger = Arc::clone(&ledger);
         tokio::spawn(async move {
             *last_seen.lock().await = Instant::now();
-            if let Err(err) = handle_connection(connected, engines).await {
+            if let Err(err) = handle_connection(connected, engines, ledger).await {
                 eprintln!("connection error: {err}");
             }
             // Marked again on the way out, so a long-running request
@@ -217,7 +221,88 @@ pub async fn serve_on(name: &str, engines: Supervisor<Engines>) -> std::io::Resu
     }
 }
 
-async fn handle_connection(stream: NamedPipeServer, engines: Supervisor<Engines>) -> std::io::Result<()> {
+/// Connects the engine watch to the owning thread, and hands back the
+/// ledger the status fallback reads.
+///
+/// A watch reports from its own thread, where nothing may touch the
+/// engine state. So the report is a generation sent down a channel, and
+/// this task turns each one into two jobs on the owning thread: phase
+/// one, which releases what the dead session held -- routes, filters,
+/// the DNS rule, Custom mode -- and phase two, the thorough pass, queued
+/// behind it because nobody is waiting on it.
+///
+/// Neither job cancels whatever is running. A probe or a diagnostics
+/// snapshot finishing first costs a moment; a connect cannot be running
+/// for the dead session, because a connect begins by ending it. And
+/// neither is cancellable: each publishes a token of its own that
+/// nothing holds, because a teardown that honours cancellation undoes
+/// its own purpose (docs/windows-service-rewrite.md).
+async fn tear_down_dead_engines(engines: &Supervisor<Engines>) -> std::io::Result<Arc<Ledger>> {
+    let (gone_tx, mut gone_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    let ledger = engines
+        .run(move |engines: &mut Engines, _| {
+            engines.when_an_engine_ends(Arc::new(move |generation| {
+                let _ = gone_tx.send(generation);
+            }));
+            engines.ledger()
+        })
+        .await
+        .map_err(|_| std::io::Error::other("the engine supervisor is not running"))?;
+
+    let engines = engines.clone();
+    tokio::spawn(async move {
+        while let Some(generation) = gone_rx.recv().await {
+            let behind = engines.clone();
+            let _ = engines.run_detached(move |engines: &mut Engines, _| {
+                crate::engines::adopt_token(&CancelToken::new());
+                if engines.end_dead_session(generation) {
+                    let _ = behind.run_detached(move |engines: &mut Engines, _| {
+                        crate::engines::adopt_token(&CancelToken::new());
+                        engines.finish_dead_session(generation);
+                    });
+                }
+            });
+        }
+    });
+    Ok(ledger)
+}
+
+/// The status answer for a session whose engine is known to have ended
+/// and has not been replaced -- given without the owning thread and
+/// without asking Windows.
+///
+/// For the moment that matters most: the owning thread is busy *tearing
+/// that session down*, so a `Status` falls back, and the fallback used
+/// to ask `os_visible_tunnel` -- which for IKEv2, with the phonebook
+/// entry still present, launches PowerShell. The engine watch already
+/// has the kernel's word that the engine is gone.
+///
+/// Only a confirmed drop answers (`Ledger::confirmed_drop`): a process
+/// exit, or an ending the owning thread has checked. A WireGuard tunnel
+/// service seen `Stopped` once, or an IKEv2 connection seen out of
+/// `Connected` once, can be back a moment later -- the manager
+/// restarting the service, MOBIKE moving the connection -- and answering
+/// "down" from that while the owning thread is busy elsewhere would be a
+/// tunnel state nothing verified. Those fall through to the fallback's
+/// own question until phase one has asked the engine.
+fn state_after_a_drop(ledger: &Ledger) -> Option<Response> {
+    ledger.confirmed_drop().map(|_| Response::State {
+        connected: false,
+        protocol: None,
+        health: TunnelHealth::Down,
+        split_tunnel_active: crate::split_tunnel::running_without_the_lock(),
+        split_tunnel_problem: None,
+        ipv6_blocked: false,
+        tunnel_dns_unprotected: false,
+        split_tunnel_restart_needed: Vec::new(),
+    })
+}
+
+async fn handle_connection(
+    stream: NamedPipeServer,
+    engines: Supervisor<Engines>,
+    ledger: Arc<Ledger>,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
@@ -229,7 +314,7 @@ async fn handle_connection(stream: NamedPipeServer, engines: Supervisor<Engines>
         }
 
         let response = match serde_json::from_str::<Request>(line.trim()) {
-            Ok(request) => dispatch(request, &engines).await,
+            Ok(request) => dispatch(request, &engines, &ledger).await,
             // Deliberately does not echo the input back -- an error
             // message is the one thing that crosses back to a caller,
             // and reflecting unparsed bytes into it is a needless way to
@@ -478,6 +563,14 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
         assert_eq!(parsed["status"], "state");
+        // No session and no drop on record, so this came from the
+        // fallback's looks at Windows. Whatever they found, they did not
+        // prove that nothing is running: `Down` is what the app reads as
+        // a tunnel that ended, and it must not be given here.
+        assert_ne!(parsed["health"]["state"], "down", "the fallback's guess was given as a verified answer: {parsed}");
+        if parsed["connected"] == false {
+            assert_eq!(parsed["health"]["state"], "unknown", "{parsed}");
+        }
     }
 
     #[tokio::test]
@@ -596,6 +689,267 @@ mod tests {
         assert!(parsed["message"].as_str().unwrap().contains("namespaces"), "{parsed}");
     }
 
+    /// A process standing in for an engine, and a way to kill it from
+    /// outside the service -- which is what a crash or `Stop-Process
+    /// -Force` is.
+    fn engine_stand_in() -> std::process::Child {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(r"C:\Windows\System32\ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .creation_flags(0x0800_0000)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawning ping")
+    }
+
+    fn kill_from_outside(pid: u32) {
+        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+        // SAFETY: plain calls; the handle is closed straight after.
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            assert!(!h.is_null(), "could not open the stand-in");
+            TerminateProcess(h, 1);
+            windows_sys::Win32::Foundation::CloseHandle(h);
+        }
+    }
+
+    /// The 2026-10-06 measurement, as far as a test can take it: the
+    /// engine dies and **nobody asks**. The service has to notice, and
+    /// put the session down, on its own -- the old service did neither
+    /// until the app's next fifteen-second poll. Then the next status
+    /// says so.
+    #[tokio::test]
+    async fn an_engine_that_dies_is_torn_down_without_anyone_asking() {
+        let name = r"\\.\pipe\neoconnect-test-engine-dies";
+        let engines = start_server(name).await;
+
+        let pid = engines
+            .run(|engines: &mut Engines, _| {
+                let child = engine_stand_in();
+                let pid = child.id();
+                engines.begin_test_session("XRAY_VLESS_REALITY", child);
+                pid
+            })
+            .await
+            .unwrap();
+        let reply = round_trip(name, r#"{"type":"status"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["connected"], true, "{parsed}");
+        assert_eq!(parsed["protocol"], "XRAY_VLESS_REALITY");
+
+        let killed_at = std::time::Instant::now();
+        kill_from_outside(pid);
+
+        // No status request from here until the session is gone: only
+        // the engine watch can be what ends it. Before the watch, nothing
+        // would have, however long this waited.
+        //
+        // The bound is loose for the reason REPLY_MUST_BEAT gives: this
+        // runs beside four hundred other tests, and the teardown reads
+        // the registry. On this PC it takes tens of milliseconds; what
+        // matters is that it happens with nobody asking, and well inside
+        // the fifteen seconds the old poll took.
+        let mut gone = false;
+        while killed_at.elapsed() < std::time::Duration::from_secs(10) {
+            let has = engines.run(|engines: &mut Engines, _| engines.has_session()).await.unwrap();
+            if !has {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let took = killed_at.elapsed();
+        eprintln!("dead session torn down {took:?} after the engine was killed, with nobody asking");
+        assert!(gone, "the dead session was still in the slot 10s later, with nobody asking");
+        assert!(took < std::time::Duration::from_secs(5), "torn down {took:?} after the engine died");
+
+        let reply = round_trip(name, r#"{"type":"status"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "state");
+        assert_eq!(parsed["connected"], false, "{parsed}");
+        assert_eq!(parsed["health"]["state"], "down");
+        assert!(parsed["protocol"].is_null());
+    }
+
+    /// The owning thread busy, the engine dead: the status that falls
+    /// back must still arrive promptly and must say down. The thread
+    /// being busy is the ordinary case here, because the busy job is
+    /// usually the teardown of that same dead session.
+    #[tokio::test]
+    async fn a_status_while_the_service_is_busy_after_a_drop_says_down() {
+        let name = r"\\.\pipe\neoconnect-test-busy-after-drop";
+        let engines = start_server(name).await;
+
+        let (pid, ledger) = engines
+            .run(|engines: &mut Engines, _| {
+                let child = engine_stand_in();
+                let pid = child.id();
+                engines.begin_test_session("OPENVPN", child);
+                (pid, engines.ledger())
+            })
+            .await
+            .unwrap();
+
+        // Occupy the owning thread, then kill the engine. Its teardown
+        // queues behind the parked job, so the status below can only be
+        // answered by the fallback.
+        let busy = engines.run(|_engines: &mut Engines, token: &crate::lifecycle::cancel::CancelToken| {
+            let _ = token.sleep(std::time::Duration::from_secs(30));
+        });
+        kill_from_outside(pid);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ledger.confirmed_drop().is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(ledger.confirmed_drop().is_some(), "the watch did not record the drop, confirmed -- a process exit cannot be undone");
+
+        let asked = std::time::Instant::now();
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            round_trip(name, r#"{"type":"status"}"#),
+        )
+        .await
+        .expect("status must not queue behind whatever is running");
+        let took = asked.elapsed();
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["connected"], false, "{parsed}");
+        assert_eq!(parsed["health"]["state"], "down");
+        assert!(took < std::time::Duration::from_secs(5), "the fallback took {took:?}");
+
+        engines.cancel_running();
+        let _ = busy.await;
+        // And the queued teardown then runs.
+        let mut gone = false;
+        for _ in 0..100 {
+            if !engines.run(|engines: &mut Engines, _| engines.has_session()).await.unwrap() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(gone, "the teardown queued behind the busy job never ran");
+    }
+
+    /// The fallback answers from the ledger only when the kernel has
+    /// said the engine ended and nothing has started since -- never on a
+    /// live session, never on a fresh service.
+    #[test]
+    fn the_fallback_says_down_only_after_a_recorded_drop() {
+        let ledger = Ledger::new();
+        assert!(state_after_a_drop(&ledger).is_none(), "nothing happened yet");
+
+        let live = ledger.begin("WIREGUARD");
+        assert!(state_after_a_drop(&ledger).is_none(), "a live session is not a drop");
+
+        assert!(ledger.record(live, Some(1066), std::time::Instant::now(), true));
+        match state_after_a_drop(&ledger) {
+            Some(Response::State { connected, protocol, health, .. }) => {
+                assert!(!connected);
+                assert!(protocol.is_none());
+                assert_eq!(health, TunnelHealth::Down);
+            }
+            other => panic!("expected a down state, got {other:?}"),
+        }
+
+        ledger.close(live);
+        ledger.begin("IKEV2");
+        assert!(state_after_a_drop(&ledger).is_none(), "a newer session makes the drop history");
+    }
+
+    /// A WireGuard tunnel service seen `Stopped` once, or an IKEv2
+    /// connection seen out of `Connected` once, can be back a moment
+    /// later. Until the owning thread has asked the engine, the fallback
+    /// does not answer "down" from that -- and once it has asked and
+    /// found the engine running, the record is gone.
+    #[test]
+    fn the_fallback_does_not_answer_from_an_ending_that_may_be_undone() {
+        let ledger = Ledger::new();
+        let live = ledger.begin("WIREGUARD");
+        assert!(ledger.record(live, Some(1066), std::time::Instant::now(), false));
+        assert!(state_after_a_drop(&ledger).is_none(), "a Stopped seen once answered for the tunnel");
+
+        assert!(ledger.retract(live), "phase one found it running");
+        assert!(state_after_a_drop(&ledger).is_none());
+
+        assert!(ledger.record(live, Some(1066), std::time::Instant::now(), false));
+        ledger.confirm(live);
+        assert!(state_after_a_drop(&ledger).is_some(), "checked and ended is a drop");
+    }
+
+    /// The defect both reviews found, end to end over a real pipe. The
+    /// watch reports the engine gone; phase one asks it and finds it
+    /// running -- a restarted WireGuard tunnel service, an IKEv2
+    /// connection moved by MOBIKE. The record must be taken back, so
+    /// status keeps saying up, and the session must be watched again, so
+    /// that when the engine really does die it is still noticed with
+    /// nobody asking.
+    #[tokio::test]
+    async fn an_ending_the_engine_contradicts_leaves_the_tunnel_up_and_watched() {
+        use crate::lifecycle::engine_watch::{Liveness, Look};
+        struct SaysGoneOnce;
+        impl Liveness for SaysGoneOnce {
+            fn look(&mut self) -> Look {
+                Look::Gone(Some(1066))
+            }
+            fn may_return(&self) -> bool {
+                true
+            }
+        }
+
+        let name = r"\\.\pipe\neoconnect-test-contradicted-drop";
+        let engines = start_server(name).await;
+        let (pid, ledger) = engines
+            .run(|engines: &mut Engines, _| {
+                let child = engine_stand_in();
+                let pid = child.id();
+                engines.begin_test_session_watched_by("XRAY_VLESS_REALITY", child, Box::new(SaysGoneOnce));
+                (pid, engines.ledger())
+            })
+            .await
+            .unwrap();
+
+        // Phase one runs on its own, with nobody asking. Settled once the
+        // session is watched again.
+        let mut settled = false;
+        for _ in 0..200 {
+            let (rearms, watched) = engines
+                .run(|engines: &mut Engines, _| (engines.session_rearms(), engines.session_is_watched()))
+                .await
+                .unwrap();
+            if rearms >= 1 && watched && ledger.ended_without_successor().is_none() {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(settled, "the contradicted report was not taken back, or the session was left unwatched");
+        assert!(ledger.confirmed_drop().is_none());
+
+        let reply = round_trip(name, r#"{"type":"status"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["connected"], true, "a live tunnel was reported down: {parsed}");
+        assert_eq!(parsed["protocol"], "XRAY_VLESS_REALITY");
+
+        // Now the real death, which only the re-armed watch can see.
+        let killed_at = std::time::Instant::now();
+        kill_from_outside(pid);
+        let mut gone = false;
+        while killed_at.elapsed() < std::time::Duration::from_secs(10) {
+            if !engines.run(|engines: &mut Engines, _| engines.has_session()).await.unwrap() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(gone, "after the re-arm, a real death went unnoticed");
+        assert!(killed_at.elapsed() < std::time::Duration::from_secs(5));
+        let reply = round_trip(name, r#"{"type":"status"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["connected"], false, "{parsed}");
+    }
+
     #[tokio::test]
     async fn reports_a_missing_engine_binary_clearly() {
         let name = r"\\.\pipe\neoconnect-test-missing-engine";
@@ -653,7 +1007,7 @@ fn gone() -> Response {
     Response::Error { message: "the service is shutting down".to_string() }
 }
 
-async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
+async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledger) -> Response {
     match request {
         Request::Status => {
             // Raced against a deadline rather than waiting its turn.
@@ -693,9 +1047,22 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                 // runtime worker on every status poll of the connect, the
                 // one moment this fallback exists to stay responsive in.
                 _ => {
+                    // The engine watch saw the tunnel's engine end and
+                    // nothing has begun since: that is the kernel's
+                    // answer, and it needs no process to give it.
+                    if let Some(state) = state_after_a_drop(ledger) {
+                        return state;
+                    }
                     // A failed join is a question nobody answered, and is
                     // reported as one: never as "disconnected", which
                     // would be a tunnel state nothing verified.
+                    //
+                    // And a tunnel it cannot see comes back with health
+                    // `Unknown`, not `Down`: the fallback's looks are an
+                    // adapter's presence and, for IKEv2, PowerShell, and
+                    // both say "nothing" while a Custom-mode rebuild has
+                    // the adapter down or PowerShell fails. The app tells
+                    // a customer their connection was lost only on `Down`.
                     let Ok((connected, protocol, health)) =
                         tokio::task::spawn_blocking(crate::engines::os_visible_tunnel).await
                     else {
@@ -803,9 +1170,19 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>) -> Response {
                     // answered as still tunnelled: "it will be torn down
                     // in a moment" is true either way, and "disconnected"
                     // would be a state nothing checked.
-                    let still_tunnelled = tokio::task::spawn_blocking(crate::engines::os_visible_tunnel)
-                        .await
-                        .map_or(true, |(up, _, _)| up);
+                    //
+                    // The ledger first, for the reason the Status
+                    // fallback gives: a thread busy tearing down a dead
+                    // session is the common case here, and the kernel has
+                    // already said that tunnel is gone. Confirmed only,
+                    // for the reason `state_after_a_drop` gives.
+                    let still_tunnelled = if ledger.confirmed_drop().is_some() {
+                        false
+                    } else {
+                        tokio::task::spawn_blocking(crate::engines::os_visible_tunnel)
+                            .await
+                            .map_or(true, |(up, _, _)| up)
+                    };
                     if still_tunnelled {
                         Response::Error {
                             message:

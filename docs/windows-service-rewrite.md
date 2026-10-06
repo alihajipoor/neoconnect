@@ -345,11 +345,137 @@ ship in the next one.
 
 ## What this does not fix
 
-The control plane. Windows clients fail to reach the API far more often
-than Android ones — 160 `CONTROL_PLANE_UNREACHABLE` against 107
-successes in 30 days, where Android is 43 against 323 — and each one
-burns a 6s timeout before the tunnel is even attempted. That is a large
-part of "slow to connect" and it is a **separate defect** in the
-endpoint list or the client's HTTP path. `client_attempts.apiEndpoint`
-is NULL on every one of those rows, so the telemetry cannot yet say
-which endpoint failed. Fix the telemetry first.
+The control plane — but not the way this section used to put it. It
+said Windows clients fail to reach the API far more often than Android
+ones ("160 `CONTROL_PLANE_UNREACHABLE` against 107 successes in 30
+days, where Android is 43 against 323") and that each one burns 6s
+before the tunnel is attempted. **That was wrong: those rows were not
+from Windows.** Measured from `client_attempts` on 2026-10-06 (a "30
+day" query, which the 14-day retention cuts to about 14):
+
+- Desktop builds 0.9.29–0.9.42 sent about 160 attempts and **zero**
+  `CONTROL_PLANE_UNREACHABLE`.
+- All 182 rows labelled `platform = "windows"` with that outcome carry
+  a **mobile** version — 0.2.18, 0.2.20, 0.2.21 (mobile is 0.2.x,
+  desktop 0.9.x). 0.2.20 alone has 149 unreachable of 251, mostly from
+  customers other than the owner. Android-labelled rows: 30 of 522.
+  Nothing is labelled `ios` or `macos`.
+- They were the iOS builds. `attempts.ts` is compiled into the mobile
+  app through the `@shared` alias, and until 81508ee (mobile 0.2.22)
+  its `detectPlatform` said "android" if the user agent did and
+  "windows" for anything else. 0.2.20 was iOS-only; 0.2.18 was the iOS
+  bring-up; 0.2.21 shipped for both, and its Android build labelled
+  itself correctly.
+- `apiEndpoint` is NULL on every row of every platform, and `asn` on
+  every row older than 0.2.22 / 0.9.43.
+
+**Most mobile "connect" rows were not connects,** which makes even the
+corrected numbers weaker than they look. The refresh that files them
+also runs on every foreground and every `online` event once the
+snapshot is ten minutes old, and reported itself as "connecting on
+cached credentials" regardless. Offline devices queue up to 25 and
+flush them later, and by the code a flush over twenty a minute would
+be throttled and the throttled reports dropped. So 149 of 251 is not
+"59% of connects fail".
+
+**Desktop's zero is not undermined by a 400.** An earlier version of
+this section said it was: from 0.9.39 the client fills `apiEndpoint`
+with every hostname it would try — 233 characters with the current
+bundle, worked out from the code — against a server limit of 200, so it
+concluded the server answered every such report 400, the client
+counted that as delivered, and the rate for 0.9.39 on was unobservable.
+Production's nginx log refutes it: in the 14 days to 2026-10-06 it
+answered 1079 `POST /api/client-attempts` with 204 and not one with a
+400, and no stored row has `apiEndpoint` set. So no report carrying the
+hostname list arrived at all, and nothing was lost to the limit; the
+zero for desktop 0.9.39–0.9.42 above is as good as the zero for the
+builds before it. What no count of delivered reports can see, for any
+version, is a report still queued on a device that has not reached the
+server since.
+
+What `claude/control-plane-telemetry` changes, so the next two weeks
+of rows can answer this: the server accepts `apiEndpoint` up to 2000
+characters and stores the iOS builds' "windows" as `ios-inferred`;
+clients take the platform from the binary (`build_platform`), report
+each address actually tried with how it ended (`req:`/`refresh:`/
+`retry:` legs, `timeout`, `budget`, `scope`, `net`, `h<status>`),
+add a socket-level `probe:` (dns, blockpage, tcp, tls, cert) after a
+failed sign-in or resume refresh, say which trigger and app state a
+refresh failed under and whether the app was backgrounded during it,
+keep throttled reports, and never ship without the endpoint seed.
+
+The probe never holds its report back: the report is sent or queued
+the moment the request fails, as before the probe existed, and the
+answer -- up to twenty seconds later -- is added to the queued entry,
+or sent as a follow-up row (outcome `OTHER`, the original's time) if
+the report has already gone. On iOS a suspended app can be killed
+inside those twenty seconds. Nor does it run across a connect, which
+moves the path it measures: it is not begun while the screen shows
+connecting, verifying or disconnecting, or within a minute of a
+connect starting (`probe: skipped=connect`), and one running when a
+connect starts is abandoned and told to stop -- it begins no new
+lookup, TCP handshake or ClientHello after that
+(`probe: abandoned=connect@<ms>`). Unit-tested only.
+
+**Still unexplained:** why the iOS cohort fails so much more than
+Android. They share the control-plane *code*, but not necessarily what
+was built into it, and that gives the leading candidate — unproven,
+and checkable without an iPhone:
+
+- **The iOS builds may have shipped without the endpoint seed.** Since
+  4174b7c the Android and Windows release workflows refuse to build
+  without it (`NEOXIFY_REQUIRE_SEED=1`). iOS 0.2.18–0.2.21 were built
+  on the Mac, where nothing required it until `build-ios.sh` did on this
+  branch: `tauri ios build` runs `pnpm build`, whose prebuild fetches
+  the seed and, on any failure, quietly copies the placeholder in.
+  `apply-capability-scope` then leaves the HTTP permission as committed
+  — `*.neoxify.site` and nothing else, the domain that is DNS-poisoned
+  and SNI-blocked in Iran (journal, 2026-09-01). Such a build tries only
+  the compiled-in addresses, all on that domain, and the device refuses
+  any other address a later bundle names. That would fit an iOS-only
+  failure rate without anything being wrong in the shared code. If the
+  Mac's fetch succeeded at each build — likely enough on an unfiltered
+  network — the candidate is ruled out; that is what the check decides.
+
+How to check, on the Mac, best evidence first:
+
+1. **The build output**, if any survives (terminal scrollback, a saved
+   log): each build prints `seed-bundle: v<n>, <m> endpoints` or
+   `seed-bundle: placeholder (<why>)`, then `capability-scope: ...
+   +<k> glob(s) for <h> host(s)` or `capability-scope: left as
+   committed (...)`.
+2. **The shipped artefacts**: any surviving `.ipa` or `.xcarchive` of
+   0.2.18, 0.2.20 or 0.2.21 — `src-tauri/gen/apple/build/` holds only
+   the latest (build-ios.sh clears the archive each time), 0.2.18 was
+   built in the old checkout under `~/Desktop`, and a copy downloaded
+   from the App Store is encrypted and useless for this. Unzip it and
+   search the main executable in `Payload/Neoxify.app` for the allow
+   globs, which Tauri compiles into the binary:
+   `grep -a -o 'https\?://[A-Za-z0-9*.:-]*/\*' <executable> | sort -u`.
+   Only `*.neoxify.site` (and `http://localhost:4000/*`) means no seed
+   reached that build's scope: the candidate holds for it. Any other
+   host means a seed was applied — to this build, or, since the script
+   only ever adds, to an earlier one in the same checkout, which leaves
+   the seed itself open; it is inside the embedded frontend, which
+   Tauri stores compressed, so a plain search will not find it. (Tried
+   on 2026-10-06 against a Windows debug build of the desktop app,
+   whose committed scope came back exactly, as plain strings; not yet
+   tried on an iOS build. If no glob turns up there at all, not even
+   `*.neoxify.site`, this check cannot answer.)
+3. **The checkout's current state**, which shows only the most recent
+   build: `apps/desktop-windows/src/lib/seed-bundle.json` (a
+   `"key":"placeholder"` envelope, or a real one) and `git diff
+   apps/mobile/src-tauri/capabilities/default.json` (globs added by the
+   prebuild show as a diff; the script only ever adds, and the checkout
+   was re-cloned on 2026-09-23, so a diff means some build since then
+   had a seed, not which).
+
+From the next iOS release on the question cannot arise, since
+`build-ios.sh` now requires the seed; for the IPAs already shipped
+only the checks above can answer it.
+
+The other candidates, read from the code — the 6s budget against a
+token-refresh chain of three sequential fresh connections, iOS
+suspending the app seconds after backgrounding, the 0.2.20 extension
+aborting under load — are unverified too, and settling them needs a
+real iPhone on a censored network. The VM cannot.

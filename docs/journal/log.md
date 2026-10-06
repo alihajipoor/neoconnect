@@ -1705,7 +1705,7 @@ reported it as working; it does not hold. The node mirrors are the real
 Iranian path, and the bundle's ordering has to keep them prominent.
 
 **germany-1's mirror is dead from Iran at the IP layer.** Handshake to
-`38.60.249.229:2053` never completes from ir1 regardless of SNI --
+`<germany-1>:2053` never completes from ir1 regardless of SNI --
 including `www.google.com` -- while the same test against finland
 succeeds immediately. TCP opens on 22/80/443 too. Not a name block. Kept
 in the bundle since it is fine everywhere else, but it is dead weight for
@@ -1823,7 +1823,7 @@ from ir1, and ir1's network filters differently from the consumer ISPs
 customers actually use. Measured again from six Iranian ISP vantage
 points via check-host:
 
-**germany is not blocked from Iran.** `http://38.60.249.229/` returns 200
+**germany is not blocked from Iran.** `http://<germany-1>/` returns 200
 from ir1..ir8 in ~0.15s, and the mirror
 `https://{node-mirror}/api/health` returns 200 from four
 Iranian nodes. What is true is narrower and much less interesting: ir1
@@ -2929,3 +2929,599 @@ lines before enforcing; the rig tests in the design (false-positive soak
 per protocol, PC-then-phone, takeover with captures, censored path,
 non-claiming clients, long Xray download, IKEv2, restart during a hold,
 Android screen-off) gate it.
+
+## 2026-10-06 — device slots, Windows client (branch `claude/device-slots-desktop`)
+
+Built on `claude/per-device-credentials` (`f960994`). Not merged, not
+released. Needs that backend deployed first: against today's production
+backend every claim is a 404, which the client reads as "no answer, dial
+anyway, stop asking" -- so the branch is harmless before the deploy, and
+does nothing either.
+
+**Where things are.** All of the platform-neutral logic is in
+`apps/desktop-windows/src/lib`, for the mobile client to reuse through
+`@shared`: `device-identity.ts` (the two headers; nothing from the web
+portal), `device-slots.ts` (claim/renew/release, every answer turned into
+an outcome; only 409 `DEVICE_LIMIT` / `SUBSCRIPTION_INACTIVE` and 429
+`TAKEOVER_LIMIT` stop a dial), `device-slot-session.ts` (the state
+machine, a module-level `deviceSlot`, and `slotStop` -- what to show and
+report), `device-slot-notice.ts` (the card's words, en/fa),
+`components/DeviceSlotCard.tsx`. `Dashboard.tsx` only wires them.
+
+**Decisions taken here, not in the contract:**
+- The claim runs alongside the config refresh rather than after it, so a
+  blackholed API costs max(6 s, 3 s), not 9 s. It names the on-screen
+  credential; once the ladder lands, an idempotent re-claim moves the
+  slot to the one it landed on.
+- A held slot is not re-claimed by an automatic reconnect while its
+  renewal is current (the request would go into the tunnel just judged
+  dead), but is re-claimed by any connect once overdue.
+- The slot is also released after a failed or cancelled connect and when
+  the tunnel is observed gone on its own -- not only on Disconnect --
+  so the other device is never told "in use on Windows PC" about a PC
+  that is not connected.
+- A claim refused *after* dialling (the pre-dial one went unanswered)
+  disconnects and shows the refusal card, like a takeover.
+- `deviceLimit: null` skips the claim; an absent `deviceLimit` (older
+  backend) does not.
+
+**PROVEN (unit tests and typecheck only):** desktop JS 37 files / 526
+tests (32 / 435 at `f960994`), typecheck clean; mobile
+JS 4 / 34 and `tsc` clean against the changed shared files; web portal
+and macOS shells `tsc` clean; the frontend bundles. The card was
+rendered in a throwaway browser harness in both languages (no overflow,
+100-140 px) -- outside the app.
+**UNVERIFIED:** everything else. No claim, renewal or release has
+reached a real backend; the dashboard wiring has not run (it needs the
+Tauri runtime and two signed-in devices on a Starter account); the card
+has not been seen inside the 400x640 dashboard; nothing on a censored
+network. The PC-then-phone, takeover and displaced scenarios are rig
+work, as is checking that a displaced device really does not run its
+ladder.
+
+## 2026-10-06 — device slots, mobile client (branch `claude/device-slots-mobile`)
+
+Built on `claude/device-slots-desktop` (`f32c47e`), using its shared
+`@shared/lib` slot files unchanged. Not merged, not released; like the
+desktop branch it needs the slots backend deployed first, and before
+that every claim is a 404 the app dials past.
+
+**Where things are.** `apps/mobile/src/lib/device-slot-steps.ts` holds
+what a phone adds: the claim asked alongside the config refresh,
+renewal in the foreground only (`document.visibilityState`), a check as
+the app returns to the front, and a teardown that says "down" only when
+`tunnelGone` confirms it. `apps/mobile/src/screens/Dashboard.tsx` wires
+it into `runLadder`, the toggle and the health poll. Android and iOS run
+the same JS.
+
+**Decisions taken here:**
+- No background work for slots. A backgrounded phone keeps its slot
+  through its tunnel's traffic; the first foreground poll after it
+  returns renews, or learns it was displaced.
+- The phone has no automatic ladder, so "do not run the failover ladder
+  when displaced" holds by construction; `checkStanding` (obligation 9)
+  is not wired, because nothing on mobile reconnects by itself.
+- The orb goes busy on the press, before the claim and refresh, so a
+  second press stops the pass rather than starting a second claim that
+  would make the first one's refusal be ignored. A pass that dials
+  nothing reads the tunnel state back from `vpn_status`.
+- "Use on this device instead" waits for a teardown the slot started;
+  if that teardown did not finish, nothing is dialled over it.
+- The label is the generic one from `device-identity.ts` ("Android
+  phone", "iPhone", "iPad"); the phone model is not added.
+
+**PROVEN (unit tests and typecheck only):** mobile JS 5 files / 59 tests
+(34 before), `tsc` clean, the bundle builds; desktop JS 37 / 526 and
+typecheck unchanged. The card was rendered in a throwaway browser
+harness at 360x740 in both languages, outside the app.
+**UNVERIFIED:** everything else. The dashboard wiring has not run on a
+phone or emulator; whether Android's WebView really reports `hidden`
+when backgrounded (and so whether renewal truly stops) is not checked;
+nothing has reached a real backend; nothing on a censored network. An
+IKEv2 profile set as always-on could be redialled by Android after a
+displaced phone disconnects, without a claim -- unexamined. PC-then-
+phone, takeover, a displaced phone, and a phone in the background with
+the screen off are rig work.
+
+## 2026-10-06 — device slots, client review fixes (branch `claude/device-slots-mobile`)
+
+Five review findings against the shared slot session, all confirmed in
+the code before fixing. Both clients take them, since the session is
+shared.
+
+- **Takeover through the tunnel** (the serious one). Where the API
+  answers only through the tunnel, the claim before dialling never
+  arrives; the takeover the customer asked for was dropped with it, and
+  the claim sent through the tunnel was refused in favour of the very
+  device being replaced. "Use on this device instead" could never work
+  there, and each press ran a full ladder. The takeover is now kept
+  until a claim naming it is answered: the late claim, the poll's retry
+  and the check before an automatic reconnect all carry it, and a late
+  429 `TAKEOVER_LIMIT` stops the session rather than being ignored.
+- **Release racing a renewal.** A renewal still out when Disconnect is
+  pressed could be processed after the release and re-grant the slot
+  (renew gives a lapsed slot back when there is room), so the other
+  device was told "in use on Windows PC" about a PC that was off. The
+  session now releases again once that request settles, if its answer
+  was a counted grant or it got none -- never once a new connect has
+  started, because the server knows the device, not the connect. A
+  claim also waits for a release still on the wire (at most 1.5 s, only
+  straight after a Disconnect). This also covers stop pressed during the
+  claim before dialling.
+- **`enforced: false` on a plan with a limit** is a new standing,
+  `uncounted`, claimed again every renewal until a grant is counted and
+  checked before an automatic reconnect. Only a null limit is treated
+  as unlimited now.
+- **Fresh means confirmed.** An unanswered renewal used to count as
+  fresh. The session now keeps when the server last *confirmed* the
+  slot; a held slot unconfirmed for `staleAfterSec` (read from the grant
+  now, 90 s by default) is checked before an automatic reconnect.
+- **The card outlives the dashboard.** A late refusal landing while the
+  dashboard was in Settings tore the tunnel down and lost the card. It
+  now lives in a store beside the slot (`slotNoticeStore`), read with
+  `useSyncExternalStore`, and is cleared on sign-out.
+
+**PROVEN (unit tests and typecheck only):** desktop JS 37 files / 550
+tests (526 before), desktop `tsc` clean; mobile JS 5 / 60 (59 before),
+mobile `tsc` clean, its bundle builds. 16 of the 22 new session tests
+fail against the previous session code; the other six guard the new
+behaviour's limits. **UNVERIFIED:** everything else, as before. The
+dashboards' use of the store has not been rendered. Nothing has reached
+a real backend, a filtered network or a phone; the takeover through the
+tunnel is exactly the case that needs the rig and a censored path.
+
+## 2026-10-06 — an engine that dies: the app kept saying "protected"
+
+Branch `claude/engine-death-honesty`, not merged, not released.
+
+### The measurement
+
+In `Neoxify-Test`, desktop 0.9.43, fi-finland, Stealth (Xray), capture
+at the NIC miniport (`pktmon --comp nics`) and the app's text sampled
+through WebView2 DevTools on the same clock:
+
+- **Full tunnel:** `xray.exe` killed (`Stop-Process -Force`). Traffic
+  went out direct within 0.2s -- 875 packets to the probe address in
+  30s -- and the dashboard said "You're protected" for **17.0s**, then
+  "You're not protected" with no reconnect.
+- **Custom mode** (curl.exe selected): the selected app's traffic
+  failed for 4.7s, then went direct (840 packets) once the split-tunnel
+  watchdog saw `neoconnect0` gone; "You're protected" until **8.1s**.
+- `cleanup.log` said nothing about the engine -- only the split
+  tunnel's adapter-gone stop and a DNS-rule clear.
+
+Why: the service held no wait on any engine. A dead engine was found
+only by `status()` calling `try_wait`, and `status()` ran when the app's
+fifteen-second health poll asked. Until then the session stayed in the
+slot -- routes, WFP filters (which permit port 53 only through the dead
+adapter), NRPT rule, Custom mode pinned to a vanished adapter -- and
+the screen repeated the last poll's verdict.
+
+Fail open stays. The defect was the claim, not the fail-open: nothing
+on this branch blocks traffic or reconnects.
+
+### What changed
+
+**Service.** `lifecycle::engine_watch`: a plain thread per session,
+waiting on what the kernel signals when the engine ends, and a ledger
+of generations. `begin_session` is now the only way into the slot and
+always starts a watch; `Slot::end` closes the generation before the
+engine is handed back, so no teardown of ours (Disconnect, a connect
+clearing the decks, a Custom-mode rebuild) can read as a drop. On a
+drop the pipe queues phase one (`end_dead_session`: re-check the engine
+really ended, then Custom mode, routes, WFP filters, NRPT by registry --
+no PowerShell) and behind it phase two (`finish_dead_session`: the
+ordinary thorough `disconnect()`, only if no session has begun since).
+Each drop writes one `cleanup.log` line: "the tunnel engine ended on
+its own | <protocol>, exit code N, noticed by the engine watch; routes,
+filters and DNS rule released Nms after it was seen". A `Status` that
+falls back while the owning thread is busy answers from the ledger
+first, so it says down without PowerShell.
+
+Per engine:
+
+| Engine | Watched by | Also changed |
+|---|---|---|
+| Xray: four engine profiles -- `XRAY_VLESS_REALITY` (Stealth), `XRAY_VLESS_TLS` (Stealth HTTPS, and Stealth Web when its transport is WS), `XRAY_TROJAN` (Stealth Lite), `SHADOWSOCKS` | a duplicate of `xray.exe`'s own process handle | -- |
+| OpenVPN | a duplicate of `openvpn.exe`'s process handle | phase one purges its pushed half-defaults by destination, as the hard stop does |
+| WireGuard | the tunnel service's process (pid from the service manager once Running), the manager re-asked every second | `tunnel_is_running` now means "registered and not Stopped"; it used to mean "can be opened", so a dead tunnel stayed `connected: true` forever (read from code, never measured). Only "no such service" (1060) is not registered; any other failure to open it is unreadable, which counts as running. Handshake reading reused for 5s |
+| IKEv2 | `RasConnectionNotificationW(RASCN_Disconnection)` on the held handle, plus `RasGetConnectStatusW` once a second | -- |
+
+`XRAY_VMESS` ("Stealth (legacy)") has a label in the app but no desktop
+`ConnectProfile`, so the desktop cannot connect with it and nothing here
+covers it. Stated rather than left out of the table.
+
+**App.** A one-second liveness poll while a tunnel is shown: one
+status call, no egress, no probe; skipped during a ladder pass, a press,
+a Custom-mode change or the Custom-mode probe. `droppedFromPoll` decides:
+an answer must have arrived (a failed call is a miss, never a drop), it
+must be the service's verified "no tunnel" (`health: down`), nothing of
+ours may have disturbed it, no connect/disconnect of ours in flight, and
+the screen claiming a tunnel (the middle two since the review). The
+headline is then "VPN connection lost / The tunnel closed, so your
+traffic is now going out without Neoxify and is not protected. Connect
+again to protect it." (and Persian), destructive colour. The
+fifteen-second poll keeps its interval and its evidence; since the
+review its "no tunnel" goes through the same rule and wording, and one
+it cannot trust counts as a miss.
+
+**One behaviour goes away, on purpose.** A WireGuard tunnel whose
+service process died used to be rebuilt by the app: status kept saying
+`connected: true`, the egress check then read degraded twice, and the
+ladder reconnected -- the only protocol that recovered by itself, and
+only because the service misreported it. Now it is reported as lost,
+like the others, and nothing reconnects. Whether a dropped tunnel
+should reconnect automatically is a product decision this branch does
+not take; it only stops the false "connected".
+
+**IPC: no new field or variant.** The optional `tunnel_ended` field the
+plan mentioned was not added: the freeze rule says every variant and
+field keeps its shape and meaning, and whether an additive field is
+allowed is the rule owner's call. What the review fixes did instead (see
+below) stays inside the meanings the IPC already gives: `health: down`
+is "nothing is running" and `unknown` is "no trustworthy evidence", so a
+status the service could not verify -- its fallback while the owning
+thread is busy -- now says `connected: false` with `unknown`, and only
+`down` is a drop to the app.
+
+**Mixed versions** (corrected after review; the first version of this
+entry said both directions were "unchanged", which was not true):
+
+- *This app on a 0.9.43 service.* Xray, OpenVPN and IKEv2 deaths are
+  caught at the next one-second poll, because the old service checks
+  the engine on every status call (`try_wait`, RAS). WireGuard is not:
+  the old service's `tunnel_is_running` means "can be opened", so a dead
+  tunnel stays `connected: true` there forever, and the app says
+  connected. And the old service reads the WireGuard handshake on every
+  status (it has no `HANDSHAKE_REUSE_FOR`), so on WireGuard it spawns
+  `wg.exe` once a second. The app cannot avoid that: `Status` carries
+  no option, and the only request that names the service's version is
+  `Diagnostics`, which runs netsh and PowerShell on the owning thread --
+  far heavier than what it would save. It lasts while the app and
+  service are out of step; the installer replaces both in one step, so
+  in practice only after an install whose service step failed. A 0.9.43
+  service also says `down` for its fallback's guesses, so there the app
+  falls back on its own guard (it knows when it started a Custom-mode
+  change or probe), and a guess during any other long operation would
+  still read as a drop.
+- *A 0.9.43 app on this service.* The service tears the dead session
+  down within about a second and traffic goes direct (fail open), but
+  the old app polls only every fifteen seconds and says "You're
+  protected" until then -- the measured 17s becomes up to 15s, not 1s.
+
+### Proven, by tests on this PC
+
+`cargo test --workspace`: service 454 passed, 6 ignored (was 432); ipc
+58; tauri lib 18 passed, 1 ignored. `pnpm test`: 451 (was 435).
+`cargo check --workspace --all-targets` clean, no new warnings.
+
+- 32 real processes killed at the same instant are each noticed by
+  their own watch, for their own generation: slowest 6ms alone, 10-15ms
+  under the full suite.
+- 32 sessions ended on purpose report nothing and leave no watch thread
+  -- including the half whose watch outlives the kill, where only the
+  closed generation stands in the way.
+- Each of the five process-engine labels (the four Xray profiles and
+  OpenVPN), killed behind the service's back, is reported in under 2s
+  and torn down exactly once; a stale report leaves a newer session
+  alone; a status poll that finds the death first takes the same steps.
+- 32 engines dying while a Disconnect races them, in both orders: each
+  session ended exactly once, nothing left in the slot.
+- Over a real pipe: a dead engine leaves the slot 65-115ms after the
+  kill with nobody asking; a status while the owning thread is busy
+  says down.
+- WireGuard's watch against a real process with the service manager
+  scripted; IKEv2's against a handle RAS never issued (no crash, no
+  drop recorded).
+- App: the drop rule's table, the headline table ("protected" for one
+  state only), and source assertions that the liveness poll goes
+  through the rule and the stamp and makes no egress or probe call.
+
+### Unverified -- needs the VM, not done here
+
+Nothing on this branch has carried a packet. The coordinating session
+is to repeat the 2026-10-06 method (pktmon at the NIC, DevTools text on
+the same clock) for: `xray.exe` killed on each of the four Xray engine
+profiles, and on Stealth Web (VLESS_TLS over WS), full tunnel and
+Custom mode; `openvpn.exe` killed; the
+`WireGuardTunnel$neoconnect` process killed; IKEv2 dropped
+(`rasdial Neoxify /disconnect`). Expected: a `cleanup.log` line within
+about a second, the headline changed within about two, packets still
+direct (fail open), DNS resolving afterwards, no reconnect.
+
+Specifically unproven until then:
+
+- That `RasConnectionNotificationW` fires for a real IKEv2 drop. If it
+  does not, the once-a-second status call still catches it.
+- That the WireGuard tunnel service runs as its own process whose pid
+  the manager reports, and whether the manager restarts it after a crash
+  (recovery actions were not checked). If it restarts it before phase
+  one asks, the review fixes below take the report back and keep
+  watching; if after, phase two removes it as a leftover. Shown against
+  a scripted manager; not seen on a real one.
+- That MOBIKE moving an IKEv2 connection takes it out of `Connected` at
+  all, and if so whether `RasGetConnectStatusW` can say so in the moment
+  phase one asks. Handled the same way; covered only by a stand-in
+  source, since no test here has a real RAS connection.
+- That a WireGuard tunnel service never reads `Stopped` between
+  `/installtunnelservice` returning and starting. If it did, the watch
+  would end a tunnel that was about to come up. Believed not, from
+  wireguard-windows' install path; not observed.
+- The INFERRED rows of the map that preceded this work: plain DNS and
+  IPv6 blocked in the gap before the old poll, WireGuard staying
+  "connected" after its process died, IKEv2's fallback launching
+  PowerShell. The fix assumes them; no capture has shown them.
+
+### Review fixes (two reviews of `bc3b2ca`)
+
+1. **A drop the engine contradicts stayed on record** (both reviews).
+   The watch recorded before phase one asked; when phase one found the
+   engine running it returned, leaving the record -- so the Status and
+   Disconnect fallbacks answered "no tunnel" for a live one -- and the
+   session unwatched for good, since a watch that reports has finished.
+   Triggers: a WireGuard tunnel service restarted by the manager, a
+   failed service-manager query, an IKEv2 connection out of `Connected`
+   while MOBIKE moves it. Now a source that can come back (the tunnel
+   service, RAS) records unconfirmed, and only a confirmed drop answers
+   a fallback; phase one finding the engine alive retracts the record
+   and starts the watch again (at most one look a second for a source
+   that keeps contradicting itself; three re-arms per session logged).
+2. **Any `OpenService` failure read as "not registered".** Only 1060
+   (`ERROR_SERVICE_DOES_NOT_EXIST`) does now; the rest are unreadable.
+3. **The app took any `connected: false` as a verified drop.** The
+   service's busy fallback now answers "nothing seen" with `health:
+   unknown` (and the untracked arm of `status()` does too when PowerShell
+   could not answer for IKEv2); the app says "connection lost" only on
+   `down`. Within the frozen IPC: no field or variant added, both values
+   keep the meanings the IPC gives them, and shipped apps read every
+   `connected: false` alike. The app also marks its own disturbances --
+   a Custom-mode change, which rebuilds the tunnel, and the Custom-mode
+   probe, which holds the owning thread -- and sets aside any answer one
+   began during, which closes the probe race (the probe starts after
+   the health check's own status, so it could begin while a liveness
+   look was already waiting). The fifteen-second check counts an
+   untrusted "no tunnel" as a miss rather than publishing it.
+4. **A stale health check could overwrite "connection lost".** The drop
+   now advances the publish stamp, and the check stops once overtaken.
+5. **Phase two could repeat a thorough pass** a Disconnect or the app
+   going away had already run for that session. It skips it now.
+6. **A drop taken over by a Disconnect, a connect or the app going away
+   before phase one was never logged.** `end_session` logs it now, once.
+7. **`wg.exe` once a second on a 0.9.43 service.** Not avoidable from
+   the app; stated under *Mixed versions* above.
+8. **A stale comment** in `status()`, and the Xray rows above (four
+   engine profiles; `XRAY_VMESS` has no desktop profile).
+9. **The compatibility claim** -- corrected under *Mixed versions*.
+
+Tests after the fixes: `cargo test --workspace` service 471 passed, 6
+ignored (was 454); ipc 58; tauri lib 18 passed, 1 ignored. `pnpm test`
+465 (was 451). `pnpm typecheck` clean. `cargo check --workspace
+--all-targets`: no new warnings.
+
+What those prove, and what they do not: the re-arm, the retraction and
+the unconfirmed record are exercised on real processes and over a real
+pipe, with the service manager scripted for WireGuard; IKEv2's trigger
+only through a stand-in source. The app-side rules are unit tests and
+source assertions. No capture, no real rebuild, no real MOBIKE: all of
+it is unverified in the sense this file uses, and belongs in the VM run
+above.
+
+### Traps
+
+- The service tests write to `C:\ProgramData\Neoxify\cleanup.log` when
+  that directory is writable -- on this PC it is, because the service is
+  not installed and earlier tests created it. Every line there is test
+  output. Do not read it as a field log on this machine.
+
+## 2026-10-06 — the "Windows can't reach the API" rows were iOS
+
+Branch `claude/control-plane-telemetry`, pushed, **not merged, nothing
+deployed or tagged.**
+
+**The finding.** Measured from `client_attempts`: desktop 0.9.29–0.9.42
+recorded zero `CONTROL_PLANE_UNREACHABLE`; all 182 "windows" ones carry
+mobile versions (0.2.18/0.2.20/0.2.21) -- the iOS builds, labelled
+"windows" by the shared `detectPlatform` until 81508ee. So **the
+commit messages of 7a5fd50 and a241741 are wrong** where they say
+Windows reaches the API far less reliably than Android ("160 against
+107", "162 ... against 43", "the mobile build has no seed"). Commits
+cannot be edited; this is the correction. The 6s-budget-inside-8s
+arithmetic in a241741 was real but bit the mobile app. The source
+comments repeating the claim are fixed on the branch, and
+`docs/windows-service-rewrite.md` "What this does not fix" is rewritten
+with the numbers.
+
+(This paragraph first said the mobile app "has carried the seed since
+4174b7c", and c1a9689's message answers "the mobile build has no seed"
+with release-android.yml alone. True of Android only: 4174b7c made the
+seed required in the Android and Windows release workflows. iOS
+0.2.18–0.2.21 were built on the Mac, where nothing required it until
+this branch -- see below.)
+
+Also found by reading, and fixed on the branch: resume/online
+refreshes were reported as connects; a 429 dropped queued reports; and
+the release prebuild could overwrite a fetched seed with the
+placeholder on a transient failure.
+
+**Correction: nothing was lost to the 400.** This entry first said, as
+the commit messages of a67ea1b, c1a9689 and f6d4b52 still do, that
+every unreachable report from desktop 0.9.39–0.9.43 and mobile 0.2.22
+was lost -- its `apiEndpoint` hostname list (233 characters, worked out
+from the code) over the DTO's 200-character limit, answered 400,
+counted as delivered -- so desktop's zero meant nothing past 0.9.38.
+That was reasoned from the code and never checked against the server.
+Production's nginx log for the 14 days to 2026-10-06 has 1079
+`POST /api/client-attempts` answered 204 and **not one 400**, and no
+stored row has `apiEndpoint` set: no report carrying the hostname list
+arrived at all. Desktop's zero stands for 0.9.39–0.9.42 as it does
+before. The raised limit and the client's resend-cut-to-200 are still
+right -- the new trace is longer than 200 and production still enforces
+200 -- but they prevent a future loss, not a past one. The comments and
+docs that repeated the claim are corrected on the branch.
+
+**Deploy order:** backend first. Until it is, new clients still work --
+a 400 on a long `apiEndpoint` is resent once cut to 200. No migration.
+
+**Reading old rows** (they age out by about 2026-10-20; nothing was
+rewritten): treat `platform = 'windows' AND "appVersion" LIKE '0.2.%'`
+as the mobile app on iOS (or a desktop dev run), the same inference
+the server now stores as `ios-inferred` / `mobile-inferred`. Split
+mobile unreachable rows by reason prefix: from the new builds,
+`pre-connect` / `resume` / `online` say what triggered them, and "app
+was in the background during it" marks the ones iOS suspension could
+explain.
+
+**Unverified:** why iOS fails so much more than Android. The two share
+the control-plane code but maybe not what was built into it, and that
+is the **leading candidate**: an iOS build whose seed fetch failed on
+the Mac shipped the placeholder, and with it the committed HTTP scope
+of `*.neoxify.site` alone -- the domain blocked in Iran -- so it could
+try only the compiled-in addresses on that domain. Not proven: no build
+log is in the repo, and on an unfiltered network the fetch probably
+worked. To check, on the Mac: the build output's `seed-bundle:` and
+`capability-scope:` lines if any survive; `grep -a` on the executable
+of a surviving 0.2.18/0.2.20/0.2.21 `.ipa` or `.xcarchive` for the
+`https://` allow globs (only `*.neoxify.site` = no seed applied; the
+globs do appear as plain strings in a desktop debug build); the
+checkout's `seed-bundle.json` and `git diff` of
+`apps/mobile/src-tauri/capabilities/default.json`, which reflect only
+the latest build. Details in `docs/windows-service-rewrite.md`. The
+other candidates (token-refresh chain inside the 6s budget, iOS
+suspending the app, the 0.2.20 extension aborting) are readings, not
+measurements. The probe's
+classes were checked against live TLS from this PC only (ok, cert,
+dns), never from a censored network; the Android/iOS builds of the
+new Rust were not compiled here. All of it waits on a real iPhone.
+
+**After review.** The probe had made a failed sign-in or resume
+refresh wait up to 20s before its report was even queued -- long
+enough, on iOS, for a suspended app to be killed with it. The report
+is made at once again, and the probe's answer follows: added to the
+queued entry, or sent as a follow-up row (`OTHER`, the original's
+time) if the report has already gone. And a resume probe could run
+across a connect, resume being exactly when people press Connect: it
+is now not begun while the screen shows connecting, verifying or
+disconnecting or within a minute of a connect starting, and one
+running when a connect starts is abandoned and cancelled on the Rust
+side (no new lookup, TCP handshake or ClientHello after that) --
+`probe: skipped=connect` / `probe: abandoned=connect@<ms>` say so in
+the report. A long trace is now cut from the middle and keeps the
+probe. All unit tests (vitest, `cargo test` on this PC). The mobile
+Dashboard's two refresh calls have no test of their own: the mobile
+app has no DOM test environment, and the shared refresh they call is
+tested in the desktop suite.
+
+## 2026-10-06 (morning) — per-device backend deployed; the release candidate in the VM
+
+**Deployed.** `main` at `e50a095` (merge of `claude/per-device-credentials`,
+backend only; the agent diff is comments). DB dumped first
+(`pre-per-device-20261006-125635.sql.gz`). Migrations
+`20261007_per_device_credentials`, `20261008_concurrency_holds`,
+`20261008_session_labels` applied at start; defaults left as they are:
+`CONCURRENCY_CUT=shadow`, `DEVICE_SLOTS=enforce`, device cap 10. Before
+that the three migrations were applied to a copy of production (every
+table's schema, every table's data except `usage_records` and
+`agent_commands`) in a throwaway container on the panel host: under 4s,
+2,013 credential rows intact, FK `ON DELETE SET NULL`. Copy deleted.
+
+**Per-device credentials, end to end (proven).** The VM's 0.9.43 client
+fetched after the deploy: its session got 70 credentials of its own
+(REALITY, VLESS-TLS TCP+WS, Trojan, WireGuard, OpenVPN, Shadowsocks on
+the five live nodes), every one `provisionedAt` from a node's ack.
+IKEv2 stays on the shared credential by design. A Stealth session moved
+15 MB that `usage_records` puts on the device credential, not the
+shared one.
+
+**Release candidate `claude/rc-0.9.44`** (main + device slots + engine
+death + control-plane telemetry), built locally and installed over
+0.9.43 in the VM; the running service's hash matches the build.
+
+- **Engine death, re-measured** with the same method as the baseline
+  (pktmon at the NIC + dashboard text over DevTools, one clock). Traffic
+  still fails open, by design; the claim is what changed. "You're
+  protected" after the engine died:
+
+  | protocol (engine) | 0.9.43 | RC |
+  |---|---|---|
+  | Stealth / Xray, full tunnel | 17.0s | 1.05s |
+  | Stealth / Xray, Custom mode | 8.1s | 2.0s |
+  | Fast / WireGuard | never (until Windows restarted the tunnel ~2 min later) | 1.9s |
+  | Compatible / OpenVPN | 3.7s | 0.67s |
+  | Built-in / IKEv2 (RAS hang-up) | 9.5s | 0.80s |
+
+  Each then shows "VPN connection lost". In Custom mode the selected app
+  now goes direct at 0.3s instead of black-holing for 4.7s first,
+  because phase one releases Custom mode at once.
+- **Custom mode at the NIC** on the RC: selected app (curl) 0 packets
+  direct while connected, unselected control 13. Exit FI vs US.
+- **Device slot, one device, live backend (proven):** a connect claims
+  (`slots:<subscription>` holds the VM's session, platform windows),
+  renews, and a Disconnect releases it (key gone within seconds).
+- **A one-device plan, live:** the owner's Pro subscription was moved to
+  Starter for the test with an UPDATE of `planId` only (both plans: same
+  routes, no data cap) and moved back afterwards (confirmed Pro). The VM
+  connected and stayed "You're protected", never refused. The shadow
+  backstop saw "2 devices active against a limit of 1" -- the VM on its
+  device credential holding the slot, and another of the owner's devices
+  idling on the shared WireGuard credential (keepalives only, ~10 KB in
+  6 min) -- and logged "would hold the shared credentials", i.e. the
+  device without a slot, never the slot holder. Nothing was sent.
+
+**Not done here, and why.** The two-device refusal ("in use on ...",
+"Use on this device instead") needs a second signed-in device of one
+account; Claude does not create accounts or sign in with passwords, so
+it waits for the owner. IKEv2 sign-out revocation is still per-account
+until the agent change. Nothing of this has run on a censored network
+or a phone.
+
+## 2026-10-06 — device slots, clients aligned with the revised contract (branch `claude/device-slots-mobile`)
+
+The backend's second review changed `docs/device-slots.md`; this branch
+now carries that revision (`claude/per-device-credentials` merged in,
+no conflicts) and both clients follow it. All of it is in the shared
+code in `apps/desktop-windows/src/lib`, so Windows and the phones take
+it together.
+
+- **Release names its grant.** Every claim answers with a new `handle`,
+  even one made while holding the slot, and the server frees a slot on
+  release only under the handle it is held by now. The session keeps
+  the latest counted grant's handle (claim, or a renewal that gave a
+  lapsed slot back), per subscription, until sign-out, and every
+  release sends it. A release that would name no grant is never sent:
+  without a handle the server frees whatever the device holds, a newer
+  connect's slot included. The cost: a claim sent and never answered,
+  that did arrive, is left to go stale (90 s after its traffic stops).
+- **A device with no label is named from its platform**, in the app's
+  language: "a Windows PC", "a Mac", "a Linux PC", "an Android phone",
+  "an iPhone" (Persian: "یک رایانهٔ ویندوزی", "یک مک", "یک رایانهٔ
+  لینوکسی", "یک گوشی اندروید", "یک آیفون"); "another device" only with
+  neither. A label is shown as sent; one that is only a kind, from an
+  older server, is read the backend's way.
+- **Headers: the platform always, a model or nothing.** No more "Windows
+  PC" / "Android phone" / "iPhone" labels. A PC, a Mac and an iPhone
+  send the platform alone; an iPad sends "iPad"; an Android phone sends
+  the model from its WebView user agent ("Pixel 7"), and nothing if the
+  agent is reduced to `K` or cannot be read with confidence.
+- **Obligation 11.** Both dashboards already tore down without the
+  ladder on a claim refused after connecting. Now that refusal (and a
+  late `TAKEOVER_LIMIT`) reports no second CONNECT attempt -- the dial
+  worked and was reported as a success when it happened, and that
+  report and the remembered route stand, being true of the network --
+  and the refusal card waits until the tunnel is confirmed down instead
+  of showing over a tunnel still coming down.
+- **Three answers stop a dial**, written as that list. A renewal 409
+  carrying `SUBSCRIPTION_INACTIVE` used to tear the tunnel down; every
+  renewal answer but a 200 (and a sign-out) now keeps it. After a 404 or
+  a codeless 409 before dialling, the claim through the tunnel is now
+  made once, as obligation 2 asks.
+
+**PROVEN (unit tests, typecheck, bundle):** desktop JS 37 files / 576
+tests (550 before), `tsc` clean; mobile JS 5 / 65 (60 before), `tsc`
+clean; both bundles build; web portal and macOS `tsc` clean. 42 tests
+(36 desktop, 6 mobile) fail against the code before these commits.
+**UNVERIFIED:** everything that is not a unit test. The Android model
+parse is tested against sample user agents, not a phone's WebView;
+whether this WebView still carries the model is unchecked. The card's
+new wording has not been rendered. Nothing has reached the real
+backend, a filtered network or a phone; obligation 11 is exactly the
+censored-path case that needs the rig.

@@ -1,8 +1,11 @@
-import { attemptedEndpoints } from "./api-endpoints";
-import { reportAttempt } from "./attempts";
+import { reportAttempt, type AttemptReport } from "./attempts";
+import { connectStarting, probeAddendum } from "./control-plane-probe";
+import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
+import type { ResumeTrigger } from "./resume";
 import type { ProtocolUser } from "./types";
+import { watchBackground } from "./visibility";
 
 /** Fetching the credentials again immediately before dialling.
  *
@@ -82,18 +85,23 @@ export interface ConfigRefresh {
  * without it.
  *
  * This is not the same budget as a normal request and must not be. A
- * plain `apiRequest` walks every known endpoint at up to 8s each, which
- * is right when someone is waiting for a screen and wrong when they have
- * pressed Connect: on a filtered network that would add tens of seconds
- * of nothing-happening before the first packet of the actual tunnel, and
- * the reward for waiting it out is a config that is almost always
- * identical to the one already in hand.
+ * plain `apiRequest` gives each endpoint up to 8s, and after a 401 runs
+ * a token refresh and a retry on top -- right when someone is waiting
+ * for a screen, wrong when they have pressed Connect: on a filtered
+ * network that would add tens of seconds of nothing-happening before the
+ * first packet of the actual tunnel, and the reward for waiting it out
+ * is a config that is almost always identical to the one already in
+ * hand.
  *
- * Six seconds buys the first endpoint's answer -- which is the one that
- * worked last time, since `rememberEndpoint` puts it first -- and gives
- * up on the rest. A connect that would otherwise have started instantly
- * is delayed by at most this, once, and only when what is held is
- * already past its horizon.
+ * Six seconds covers one round of the GET, which is raced across every
+ * endpoint since 0.9.39 / 0.2.22. It is tighter when the access token
+ * has expired, because then the GET's 401 is followed by a token-refresh
+ * POST, walked one endpoint at a time, and the GET again -- three fresh
+ * connections in sequence. Which leg the budget ran out in is in the
+ * report's endpoint trace; the budget itself is left alone until that
+ * says it should change. A connect that would otherwise have started
+ * instantly is delayed by at most this, once, and only when what is held
+ * is already past its horizon.
  */
 export const REFRESH_BUDGET_MS = 6_000;
 
@@ -202,6 +210,17 @@ function withBudget<T>(work: Promise<T>, budgetMs: number): Promise<T | typeof T
   });
 }
 
+/** Why a refresh is running.
+ *
+ * Only `connect` is about to dial anything. `resume` (the app came back
+ * to the foreground) and `online` (the device got a network back) run
+ * the same refresh from `useRefreshOnResume`, with nothing connecting
+ * afterwards -- and their failures used to be reported in the connect's
+ * words, "connecting on cached credentials", which no connect followed.
+ * On the phones, which fire `resume` on every foreground after ten
+ * minutes, those were most of the "connect" rows. */
+export type RefreshTrigger = "connect" | ResumeTrigger;
+
 export interface RefreshOptions {
   /** What the caller is holding and would otherwise dial. */
   held: ProtocolUser[];
@@ -213,8 +232,31 @@ export interface RefreshOptions {
   /** Skips the freshness check and always asks. Used by the manual
    * retry, where the customer has explicitly said "try again". */
   force?: boolean;
+  /** Why it is running; decides how a failure is described. Defaults to
+   * `connect`, the one call site that predates the others. */
+  trigger?: RefreshTrigger;
+  /** The connection state the screen held when the refresh began --
+   * "connected", "disconnected" and so on -- for the failure report
+   * only. With a tunnel up the refresh went through it, and a failure
+   * there is a different problem from one on the bare network. It is
+   * what the app believed, not a verified fact, and is labelled so. */
+  appState?: string;
   now?: number;
 }
+
+/** The opening words of a failure report, per trigger. Distinct
+ * prefixes, so rows can be split by what caused them; the connect's is
+ * the wording every earlier build used. */
+const TRIGGER_LABEL: Record<RefreshTrigger, string> = {
+  connect: "pre-connect",
+  resume: "resume",
+  online: "online",
+};
+
+/** Screen states in which a connect or a disconnect is moving the path
+ * the control plane is reached over. A probe begun in one would measure
+ * the move. Matched as strings: `appState` is whatever the screen held. */
+const PATH_CHANGING: ReadonlySet<string> = new Set(["connecting", "verifying", "disconnecting"]);
 
 /** Fetches the credentials again, unless what is held is still fresh.
  *
@@ -223,7 +265,13 @@ export interface RefreshOptions {
  * connecting.
  */
 export async function refreshConnectionConfig(options: RefreshOptions): Promise<ConfigRefresh> {
-  const { held, budgetMs = REFRESH_BUDGET_MS, force = false, now = Date.now() } = options;
+  const { held, budgetMs = REFRESH_BUDGET_MS, force = false, trigger = "connect", appState, now = Date.now() } = options;
+
+  // First, ahead of the freshness check: the connect starts whether or
+  // not this asks anything, and a probe after an earlier failure -- a
+  // resume refresh's, typically, since resume is when people press
+  // Connect -- must not run across it.
+  if (trigger === "connect") connectStarting();
 
   const savedAt =
     options.heldSavedAt !== undefined ? options.heldSavedAt : ((await loadSnapshot())?.savedAt ?? null);
@@ -236,8 +284,21 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     return { protocolUsers: held, source: "fresh", ageMs, drift: [], sessionExpired: false };
   }
 
-  const outcome = await withBudget(getProtocolUsers(), budgetMs);
+  const trace = newTrace();
+  // Whether the app was backgrounded while this ran -- on iOS that
+  // suspends it, and a "timeout" then says nothing about the network.
+  const backgrounded = watchBackground();
+  const askedAt = Date.now();
+  const outcome = await withBudget(getProtocolUsers(trace), budgetMs);
+  const elapsedMs = Date.now() - askedAt;
+  // Read now, at the moment the wait ended, because the request carries
+  // on after a budget expires: whatever is still in flight here is what
+  // the budget ran out on, and renders as such.
+  const tried = renderTrace(trace);
   const answered = outcome === TIMED_OUT ? null : outcome;
+  // Only a failure report reads it again, later; anything else is done
+  // with it here.
+  if (answered && (answered.ok || answered.sessionExpired)) backgrounded();
 
   if (answered?.ok) {
     const fresh = answered.data;
@@ -253,7 +314,7 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
       void reportAttempt({
         kind: "CONNECT",
         outcome: "SUCCESS",
-        reason: `pre-connect refresh found changed server parameters: ${drift.join("; ")}`,
+        reason: `${TRIGGER_LABEL[trigger]} refresh found changed server parameters: ${drift.join("; ")}`,
       });
     }
     return { protocolUsers: fresh, source: "network", ageMs: null, drift, sessionExpired: false };
@@ -280,22 +341,52 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     : answered.ok
       ? "unexpected"
       : answered.error;
-  void reportAttempt({
+  const age = ageMs === null ? "of unknown age" : `${Math.round(ageMs / 60_000)} min old`;
+  const horizon = `(horizon ${Math.round(SNAPSHOT_TTL_MS / 60_000)} min)`;
+  // Only a connect is connecting. The other triggers dial nothing, and
+  // their reports must not say otherwise.
+  const consequence =
+    trigger === "connect"
+      ? `connecting on cached credentials ${age} ${horizon}`
+      : `nothing is being dialled; holding cached credentials ${age} ${horizon}`;
+  const report: AttemptReport = {
     kind: "CONNECT",
     outcome: "CONTROL_PLANE_UNREACHABLE",
-    // Which addresses were in play when nothing answered. Without this
-    // the row says "the control plane was unreachable" and nothing
-    // about *what* was unreachable, which is the difference between a
-    // blocked domain and a client carrying the wrong mirror list.
-    apiEndpoint: await attemptedEndpoints(),
+    // Which addresses were actually tried, in which leg, and how each
+    // ended. Without this the row says "the control plane was
+    // unreachable" and nothing about *what* was unreachable -- a
+    // blocked domain, a client carrying the wrong mirror list, and a
+    // budget that ran out inside the token refresh all look the same.
+    // An empty trace means nothing was dialled at all, and says so
+    // rather than naming addresses that were never tried.
+    apiEndpoint: tried === "" ? "none dialled" : tried,
     reason:
-      `pre-connect config refresh failed (${detail}); connecting on cached credentials ` +
-      (ageMs === null ? "of unknown age" : `${Math.round(ageMs / 60_000)} min old`) +
-      ` (horizon ${Math.round(SNAPSHOT_TTL_MS / 60_000)} min)`,
-  });
+      `${TRIGGER_LABEL[trigger]} config refresh failed (${detail}) after ${elapsedMs}ms; ${consequence}` +
+      (appState ? `; app showed ${appState}` : "") +
+      // The refresh's own window. The probe after it says the same for
+      // itself, in its addendum.
+      (backgrounded() ? "; app was in the background during it" : ""),
+  };
+  // Made now, not after the probe: on iOS a backgrounded app is
+  // suspended within seconds and can be killed, taking a report it was
+  // still holding with it. The stage each address failed at, from a
+  // socket-level probe, follows as an addendum -- but not before a
+  // connect, which starts the moment this returns and would change the
+  // path under the probe -- nor while the screen said one, or a
+  // disconnect, was under way. See control-plane-probe.ts.
+  if (trigger === "connect") void reportAttempt(report);
+  else
+    void reportAttempt(
+      report,
+      probeAddendum(trace.entries, { pathChanging: appState !== undefined && PATH_CHANGING.has(appState) }),
+    );
   // Also on the console, where a beta tester reading their own log can
   // see it without a round trip through the panel.
-  console.warn(`[connect] config refresh failed (${detail}); dialling cached credentials`);
+  console.warn(
+    trigger === "connect"
+      ? `[connect] config refresh failed (${detail}); dialling cached credentials`
+      : `[${trigger}] config refresh failed (${detail}); keeping cached credentials`,
+  );
 
   return { protocolUsers: held, source: "stale", ageMs, drift: [], sessionExpired: false };
 }

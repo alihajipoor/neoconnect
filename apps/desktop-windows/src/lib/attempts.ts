@@ -1,6 +1,8 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
 import { publicRequest } from "./api";
+import { API_ENDPOINT_MAX, clipTrace, LEGACY_API_ENDPOINT_MAX } from "./endpoint-trace";
 import { getTokens } from "./session";
 import { currentAttestation } from "./network-identity";
 
@@ -76,19 +78,25 @@ export interface AttemptReport {
   protocol?: string;
   reason?: string;
   attempts?: AttemptRung[];
-  /** Which control-plane address or addresses were in play.
+  /** What was tried, on a CONTROL_PLANE_UNREACHABLE report: the
+   * rendered endpoint trace (see endpoint-trace.ts), or "none dialled",
+   * sometimes followed by a `probe:` section (control-plane-probe.ts).
    *
-   * The backend has accepted this since the table was created and the
-   * client has never once sent it, so every CONTROL_PLANE_UNREACHABLE
-   * row ever recorded has a null here -- 160 of them from Windows in
-   * thirty days, against 107 successful connects, where Android manages
-   * 43 against 323. Something about the Windows path reaches the API far
-   * less reliably, and the one column that would say whether it is the
-   * main domain being blocked or the mirror list being wrong has been
-   * empty the entire time.
+   * The history of this field is a warning. The backend accepted it from
+   * the start and no client sent it until 0.9.39 / 0.2.22, so every
+   * unreachable row had a null here. When it was finally sent it was the
+   * hostname of every address the client *would* try -- 233 characters
+   * with the current bundle by the code, against a server limit of 200,
+   * which would have been a 400 that `send` counted as delivered. That
+   * was once written up as every such report lost; production's log
+   * says no 400 was answered (14 days to 2026-10-06: 1079 POSTs answered
+   * 204, none 400), and no row has the field set -- no report carrying
+   * the list arrived at all. A comment here also read the rows as Windows
+   * reaching the API less often than Android; they were the mobile app's
+   * iOS builds mislabelled as Windows (see `detectPlatform`).
    *
-   * Hostnames rather than full URLs: the path adds nothing and the
-   * column is read by a person scanning for a pattern. */
+   * So it is now what actually happened, address by address, and its
+   * length is fitted here and again in `send` rather than trusted. */
   apiEndpoint?: string;
   /** For a SESSION report: seconds the tunnel has carried traffic. */
   sessionSeconds?: number;
@@ -102,31 +110,54 @@ interface QueuedReport extends AttemptReport {
   network?: string;
 }
 
-/** Which build this is.
+/** Which platform the user agent suggests -- the fallback only.
  *
- * Detected rather than hardcoded because this file is shared: the
- * Android client aliases this whole directory, so a literal "windows"
- * here would label every tablet report as a desktop one -- and telling
- * the two apart is most of the value of having the field.
+ * This was the only source until the binary was asked instead (see
+ * `reportedPlatform`), and what it got wrong is why. It used to stop at
+ * android-or-windows, and this file is compiled into the mobile app as
+ * well, so every iOS report from mobile 0.2.18 to 0.2.21 was filed as a
+ * Windows one: all 182 "windows" CONTROL_PLANE_UNREACHABLE rows in the
+ * table on 2026-10-06 carry a 0.2.x version, while the real Windows
+ * client had recorded none. It read as "Windows cannot reach the API"
+ * and was written up that way.
  *
- * The user agent rather than a platform plugin, which is not a
- * dependency of either app. Both run in a system webview, and the one
- * on Android says so. A wrong guess costs a mislabelled row, so it is
- * not worth a new dependency in two apps to improve on.
+ * The iOS test is the same one `apps/mobile/src/lib/platform.ts` uses:
+ * iPadOS reports itself as a Mac and only a touchscreen gives it away.
+ * And anything it does not recognise is "unknown", never a particular
+ * platform -- the defect was a guess defaulting to a real answer.
  */
 export function detectPlatform(
   userAgent: string = typeof navigator === "undefined" ? "" : navigator.userAgent,
   maxTouchPoints: number = typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints ?? 0,
 ): string {
   if (/android/i.test(userAgent)) return "android";
-  // This used to stop at android-or-windows, so every iPhone and Mac
-  // report was filed as a Windows one -- which would have folded three
-  // platforms' failures into one row of the per-ISP data. The iOS test
-  // is the same one `apps/mobile/src/lib/platform.ts` uses: iPadOS
-  // reports itself as a Mac and only a touchscreen gives it away.
   if (/iphone|ipad|ipod/i.test(userAgent)) return "ios";
   if (/macintosh/i.test(userAgent)) return maxTouchPoints > 1 ? "ios" : "macos";
-  return "windows";
+  if (/windows/i.test(userAgent)) return "windows";
+  return "unknown";
+}
+
+/** The platform names a binary can report. Anything else coming back
+ * from the command is treated as no answer. */
+const KNOWN_PLATFORMS = new Set(["windows", "android", "ios", "macos", "linux"]);
+
+/** Which build this is: the OS the binary was compiled for.
+ *
+ * Asked of Rust (`build_platform`, registered by the Windows and mobile
+ * apps) because the compile target cannot be mislabelled the way a user
+ * agent can -- an iPad is "ios" whatever its webview calls itself, and an
+ * Android tablet in desktop mode is still "android". The user agent is
+ * only the fallback, for a shell that does not register the command.
+ *
+ * Cached for the process, like the version: it cannot change while the
+ * app runs, and one IPC call is enough. */
+let platformPromise: Promise<string> | null = null;
+export function reportedPlatform(): Promise<string> {
+  platformPromise ??= invoke<unknown>("build_platform").then(
+    (os) => (typeof os === "string" && KNOWN_PLATFORMS.has(os) ? os : detectPlatform()),
+    () => detectPlatform(),
+  );
+  return platformPromise;
 }
 
 /** How many unsent reports are kept.
@@ -147,6 +178,9 @@ const MAX_QUEUED = 25;
 const MAX_AGE_MS = 14 * 86_400_000;
 
 const KEY = "queue";
+
+/** The status the server's throttle answers with. See `send`. */
+const THROTTLED = 429;
 
 let storePromise: Promise<Store> | null = null;
 function getStore(): Promise<Store> {
@@ -186,13 +220,29 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
   }
 }
 
-/** Sends one report. Resolves false only when the control plane could
- * not be reached, which is the one case worth queueing for.
+/** Sends one report. Resolves false when it should be kept and sent
+ * later: the control plane could not be reached, or it said "not now".
  *
- * A rejection *from* the server -- a 400, a throttle, anything with a
+ * Any other rejection *from* the server -- a 400, a 5xx, anything with a
  * status -- counts as delivered. It means we reached it and it did not
  * want this, and retrying forever would turn one malformed report into
  * a permanent background load.
+ *
+ * The throttle is the exception, because it is about timing and not the
+ * report. The endpoint allows twenty a minute per address, and one
+ * reconnect sends a report and then flushes a queue of up to
+ * `MAX_QUEUED` -- so the reports queued while the control plane was
+ * unreachable, which are the ones this whole file exists for, were the
+ * ones answered 429 and dropped. Customers behind one carrier NAT share
+ * that address, which makes it likelier still. Kept instead; the flush
+ * stops at the first one, and the next contact carries on.
+ *
+ * And one allowance for a server older than this client. Until the
+ * limit was raised, the backend refused an `apiEndpoint` over 200
+ * characters with a 400, and an endpoint trace is often longer. Against
+ * such a server -- production, until it is redeployed -- the report is
+ * sent once more with the trace cut to fit, rather than lost whole over
+ * its longest field. A current server never sees the second request.
  */
 async function send(report: QueuedReport): Promise<boolean> {
   // Attached by hand rather than by using the authenticated helper. That
@@ -201,13 +251,20 @@ async function send(report: QueuedReport): Promise<boolean> {
   // out. An expired token here simply leaves the report anonymous --
   // the server verifies it if it can and ignores it if it cannot.
   const tokens = await getTokens();
-  const result = await publicRequest<void>("/client-attempts", {
-    method: "POST",
-    body: JSON.stringify(report),
-    headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : undefined,
-  });
+  const post = (body: QueuedReport) =>
+    publicRequest<void>("/client-attempts", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : undefined,
+    });
+
+  let result = await post(report);
+  if (!result.ok && result.status === 400 && (report.apiEndpoint?.length ?? 0) > LEGACY_API_ENDPOINT_MAX) {
+    result = await post({ ...report, apiEndpoint: clipTrace(report.apiEndpoint!, LEGACY_API_ENDPOINT_MAX) });
+  }
 
   if (result.ok) return true;
+  if (result.status === THROTTLED) return false;
   // publicRequest flattens both cases into a string, and only one of
   // them should keep the report alive. This is the message it uses when
   // no endpoint answered at all.
@@ -238,18 +295,123 @@ export function withNetwork(report: AttemptReport, attestation = currentAttestat
   };
 }
 
+/** More to say about a report than was known when it was made: what the
+ * socket-level probe found (control-plane-probe.ts), which takes up to
+ * twenty seconds. Each field is added to the report's own after "; ". */
+export interface AttemptAddendum {
+  apiEndpoint?: string;
+  reason?: string;
+}
+
+const REASON_MAX = 500;
+
+/** `report` with `addendum` added to it, each field still fitted. */
+function amended(report: QueuedReport, addendum: AttemptAddendum): QueuedReport {
+  const join = (own?: string, more?: string) => (own && more ? `${own}; ${more}` : (own ?? more));
+  const apiEndpoint = join(report.apiEndpoint, addendum.apiEndpoint);
+  return {
+    ...report,
+    reason: join(report.reason, addendum.reason)?.slice(0, REASON_MAX),
+    apiEndpoint: apiEndpoint === undefined ? undefined : clipTrace(apiEndpoint, API_ENDPOINT_MAX),
+  };
+}
+
+/** Queues a report to go out on the next contact. */
+async function enqueue(report: QueuedReport): Promise<void> {
+  const queue = await readQueue();
+  queue.push(report);
+  await writeQueue(queue.slice(-MAX_QUEUED));
+}
+
+/** Whether a queued report is `original`, as it was made. Matched on
+ * what it was stamped with rather than an id of its own, which the
+ * server would refuse as an unknown field. */
+function isSameReport(candidate: QueuedReport, original: QueuedReport): boolean {
+  return (
+    candidate.occurredAt === original.occurredAt &&
+    candidate.kind === original.kind &&
+    candidate.outcome === original.outcome &&
+    candidate.reason === original.reason
+  );
+}
+
+/** An addendum whose report has already gone, sent as a row of its own.
+ *
+ * OTHER rather than the original's outcome, so a follow-up is never
+ * counted as a second failure -- the unreachable count is the number this
+ * telemetry exists to get right. The reason names the report it belongs
+ * to, and it carries that report's time, so the two sort together. */
+async function sendFollowUp(original: QueuedReport, addendum: AttemptAddendum): Promise<void> {
+  const followUp: QueuedReport = amended(
+    {
+      kind: original.kind,
+      outcome: "OTHER",
+      platform: original.platform,
+      appVersion: original.appVersion,
+      occurredAt: original.occurredAt,
+      ...(original.network ? { network: original.network } : {}),
+      reason: `probe follow-up to the ${original.kind} ${original.outcome} report of ${original.occurredAt}, which was no longer held when the probe answered; not an attempt`,
+    },
+    addendum,
+  );
+  if (!(await send(followUp))) await enqueue(followUp);
+}
+
+/** Adds a late addendum to its report: in the queue if the report is
+ * still waiting there, which is the usual case -- the control plane was
+ * unreachable a moment ago -- or as a follow-up if it has gone since. */
+async function addLate(original: QueuedReport, addendum: AttemptAddendum): Promise<void> {
+  const queue = await readQueue();
+  const at = queue.findIndex((r) => isSameReport(r, original));
+  if (at === -1) {
+    await sendFollowUp(original, addendum);
+    return;
+  }
+  queue[at] = amended(queue[at], addendum);
+  await writeQueue(queue);
+}
+
 /** Records how an attempt went, and tries to send it.
  *
  * Fire and forget: call it with `void`. It resolves when it is done and
  * never rejects, but nothing should wait for it.
+ *
+ * `addendum` is more of the same report that is still being worked out
+ * -- the probe after an unreachable control plane. The report does not
+ * wait for it. It is sent, or queued, as it would be without one; an
+ * addendum ready by the time it has to be queued goes in with it, and
+ * one that arrives later is added to the queued report, or sent after it
+ * as a follow-up if the report is no longer held -- delivered, by this
+ * call or a flush, or pushed out of the queue. On iOS a backgrounded app
+ * is suspended within seconds and may be killed after that, and a report
+ * held back for a twenty-second probe could die with it.
  */
-export async function reportAttempt(report: AttemptReport): Promise<void> {
+export async function reportAttempt(
+  report: AttemptReport,
+  addendum?: Promise<AttemptAddendum | undefined>,
+): Promise<void> {
   try {
     const shaped = withNetwork(report);
     if (shaped === null) return;
+
+    // Watched from the start, so an answer that lands while the report
+    // is being sent can still go in with it.
+    const early: { arrived: boolean; value?: AttemptAddendum } = { arrived: addendum === undefined };
+    const later = addendum?.then(
+      (value) => {
+        early.value = value;
+        early.arrived = true;
+        return value;
+      },
+      () => {
+        early.arrived = true;
+        return undefined;
+      },
+    );
+
     const queued: QueuedReport = {
       ...shaped,
-      platform: detectPlatform(),
+      platform: await reportedPlatform(),
       appVersion: await appVersion(),
       // Stamped now, even for the report that goes out immediately. The
       // server keeps its own arrival time regardless; this is what makes
@@ -258,19 +420,28 @@ export async function reportAttempt(report: AttemptReport): Promise<void> {
       // A reason of unbounded length would be rejected by the server's
       // validation, losing the whole report over its least important
       // field.
-      reason: report.reason?.slice(0, 500),
+      reason: report.reason?.slice(0, REASON_MAX),
+      // The same, for the one field long enough to hit its limit: the
+      // hostname list 0.9.39 to 0.9.43 send would overrun the old 200.
+      apiEndpoint: shaped.apiEndpoint === undefined ? undefined : clipTrace(shaped.apiEndpoint, API_ENDPOINT_MAX),
     };
 
     if (await send(queued)) {
       // Reaching the server is also the signal that anything held back
       // can go now.
       await flushAttempts();
+      const extra = await later;
+      if (extra) await sendFollowUp(queued, extra);
       return;
     }
 
-    const queue = await readQueue();
-    queue.push(queued);
-    await writeQueue(queue.slice(-MAX_QUEUED));
+    // Kept now, not once the addendum is in.
+    const inTime = early.arrived;
+    await enqueue(inTime && early.value ? amended(queued, early.value) : queued);
+    if (!inTime) {
+      const extra = await later;
+      if (extra) await addLate(queued, extra);
+    }
   } catch {
     // Reporting must never surface as a failure of the thing being
     // reported on.
@@ -281,9 +452,11 @@ export async function reportAttempt(report: AttemptReport): Promise<void> {
  * to think the control plane is reachable -- at launch, after a
  * successful sign-in.
  *
- * Stops at the first unreachable send rather than walking the rest.
- * With the control plane down, every remaining one would pay the full
- * endpoint-ladder timeout to learn the same thing.
+ * Stops at the first send that has to be kept rather than walking the
+ * rest. With the control plane down, every remaining one would pay the
+ * full endpoint-ladder timeout to learn the same thing; with the
+ * throttle saying "not now", every remaining one would be told the same.
+ * The periodic flush in App.tsx picks up where this left off.
  */
 export async function flushAttempts(): Promise<void> {
   try {

@@ -64,7 +64,7 @@ function build(opts: { limit?: number | null; status?: string; sessions?: Record
   const service = new DeviceSlotsService(prisma as never, store, presence);
   const warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
   jest.spyOn(Logger.prototype, "log").mockImplementation(() => undefined);
-  return { service, prisma, presence, sessions, subscription, warn };
+  return { service, prisma, presence, sessions, store, subscription, warn };
 }
 
 const as = (sessionId?: string) => ({ customerId: CUSTOMER, sessionId });
@@ -205,6 +205,99 @@ describe("DeviceSlotsService", () => {
       limit: 1,
       by: { handle: granted.handle, label: "Pixel 7", platform: "android" },
       at: expect.any(String),
+    });
+  });
+
+  /** A takeover is said only while it is true. The record lasts an hour,
+   * and used to be answered for all of it: a renewal disconnected the PC
+   * under a card naming the phone after the phone had gone, with the
+   * slot free. */
+  describe("a device taken over, once the device that took its place has left", () => {
+    async function takenOver(limit = 1) {
+      const built = build({ limit });
+      await built.service.claim(as(PC), { subscriptionId: SUB }, windows);
+      const { holders } = await refusal(built.service.claim(as(PHONE), { subscriptionId: SUB }, android));
+      await built.service.claim(as(PHONE), { subscriptionId: SUB, takeover: [holders[0].handle] }, android);
+      return built;
+    }
+
+    type Built = ReturnType<typeof build>;
+    const leaving: [string, (built: Built) => Promise<unknown>][] = [
+      ["disconnected", ({ service }) => service.release(as(PHONE), { subscriptionId: SUB })],
+      [
+        "been signed out",
+        async ({ sessions }) => {
+          sessions[PHONE].revokedAt = new Date();
+        },
+      ],
+      // Neither renewed nor carried traffic for longer than staleAfterSec.
+      ["gone quiet", () => jest.advanceTimersByTimeAsync(91_000)],
+    ];
+
+    it.each(leaving)("gets its slot back on renewal when that device has %s", async (_how, leave) => {
+      const built = await takenOver();
+      await leave(built);
+
+      const renewed = await built.service.renew(as(PC), { subscriptionId: SUB });
+      expect(renewed).toMatchObject({ status: "held", enforced: true, handle: expect.any(String) });
+      // The record is over, for the backstop as well.
+      expect((await built.service.state(SUB)).displaced.has(`s:${PC}`)).toBe(false);
+      await expect(built.service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held" });
+    });
+
+    it("names the device that holds the slot now, not the one that left", async () => {
+      const built = await takenOver();
+      await built.service.release(as(PHONE), { subscriptionId: SUB });
+      const tablet = await built.service.claim(as(TABLET), { subscriptionId: SUB }, { label: "iPad Air", platform: "ios" });
+
+      await expect(built.service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({
+        status: "displaced",
+        by: { handle: tablet.handle, label: "iPad Air", platform: "ios" },
+      });
+      // Still taken over, as far as the backstop is concerned.
+      expect((await built.service.state(SUB)).displaced.has(`s:${PC}`)).toBe(true);
+    });
+
+    /** On a plan of two the device that took over can still be there
+     * while a slot frees up beside it: there is room, so nothing is
+     * taken from anyone by giving it back. */
+    it("gets its slot back when there is room, even with the device that took its place still there", async () => {
+      const built = build({ limit: 2 });
+      await built.service.claim(as(PC), { subscriptionId: SUB }, windows);
+      await built.service.claim(as(PHONE), { subscriptionId: SUB }, android);
+      const { holders } = await refusal(built.service.claim(as(TABLET), { subscriptionId: SUB }));
+      const pc = holders.find((h) => h.platform === "windows")!;
+      await built.service.claim(as(TABLET), { subscriptionId: SUB, takeover: [pc.handle] });
+      await expect(built.service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "displaced" });
+
+      await built.service.release(as(PHONE), { subscriptionId: SUB });
+
+      await expect(built.service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held" });
+    });
+
+    /** Written before records named the session that took over: matched
+     * by the handle they do name. */
+    it("still reads a record from before it named the session", async () => {
+      const { service, store } = build();
+      const phone = await service.claim(as(PHONE), { subscriptionId: SUB }, android);
+      await store.hset(
+        `slots-displaced:${SUB}`,
+        {
+          [PC]: JSON.stringify({
+            by: { handle: phone.handle, label: "Pixel 7", platform: "android" },
+            at: Date.now(),
+            noGrace: false,
+          }),
+        },
+        60 * 60_000,
+      );
+
+      await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({
+        status: "displaced",
+        by: { handle: phone.handle, label: "Pixel 7" },
+      });
+      await service.release(as(PHONE), { subscriptionId: SUB });
+      await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held" });
     });
   });
 

@@ -1038,6 +1038,18 @@ model ClientAttempt {
 
   /// "windows" | "macos" | "android" | "ios", and the app version, so a fault can be tied
   /// to a release rather than guessed at.
+  ///
+  /// Not equally trustworthy across versions. Mobile builds up to 0.2.21
+  /// guessed it from the user agent and said "windows" for anything that
+  /// was not Android -- in practice the iOS builds -- so those rows are
+  /// not Windows. The server now stores such a report as "ios-inferred"
+  /// (0.2.18-0.2.21, the versions that had iOS builds) or
+  /// "mobile-inferred" (earlier); see `recordedPlatform`. Rows written
+  /// before that deploy still say "windows", and a 0.2.x appVersion is
+  /// what gives them away: desktop was already 0.8.9 when reporting
+  /// began. Mobile 0.2.22 / desktop 0.9.43 fixed the guess; later builds
+  /// ask the binary, and their fallback says "unknown" where it used to
+  /// say "windows".
   platform   String
   appVersion String
 
@@ -1048,8 +1060,32 @@ model ClientAttempt {
   /// write; this is a diagnosis aid, not an archive.
   attemptsJson Json?
 
-  /// Which control-plane address answered, if any. This alone would have
-  /// shown the CDN domain being refused before a packet ever left.
+  /// Which control-plane addresses were tried, on a
+  /// CONTROL_PLANE_UNREACHABLE report only -- never "which one answered",
+  /// which no client has ever sent. Null on every other outcome.
+  ///
+  /// By client version:
+  ///   - null: desktop up to 0.9.38 and mobile up to 0.2.21 never sent it.
+  ///   - comma-separated hostnames: desktop 0.9.39-0.9.43 and mobile
+  ///     0.2.22. The list the client *would* try, recomputed after the
+  ///     failure -- not what was dialled. A list over the old 200-character
+  ///     limit would have been refused with a 400, but none was: in the 14
+  ///     days to 2026-10-06 production answered 1079 POST
+  ///     /api/client-attempts with 204 and none with a 400, and no stored
+  ///     row has this field set. No report carrying the list arrived in
+  ///     that window at all.
+  ///   - a trace, from the builds after: `leg: host[:port]=outcome@ms`
+  ///     for each address actually tried, legs ("req", "refresh",
+  ///     "retry") separated by "; ", or "none dialled". After a failed
+  ///     sign-in or a failed refresh on resume -- never before a connect
+  ///     -- a last `probe:` section gives the stage each failed address
+  ///     failed at (dns, blockpage, tcp, tls, cert, *-timeout, ok). If it
+  ///     had to be shortened -- to 200 characters when it reached a server
+  ///     from before the limit was raised -- "[N cut]" stands where N
+  ///     entries were taken from the middle of the attempts, and from the
+  ///     probe's middle only once the attempts are down to two. The
+  ///     vocabulary is in endpoint-trace.ts and control-plane-probe.ts in
+  ///     the desktop client.
   apiEndpoint String?
 
   /// The app's own error text, truncated. Free-form on purpose: the

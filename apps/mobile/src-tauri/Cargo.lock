@@ -2227,8 +2227,9 @@ dependencies = [
 
 [[package]]
 name = "mobile"
-version = "0.2.22"
+version = "0.2.23"
 dependencies = [
+ "rustls",
  "serde",
  "serde_json",
  "tauri",
@@ -2238,6 +2239,7 @@ dependencies = [
  "tauri-plugin-neoxify-vpn",
  "tauri-plugin-opener",
  "tauri-plugin-store",
+ "webpki-roots",
 ]
 
 [[package]]

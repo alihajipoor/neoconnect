@@ -193,6 +193,7 @@ describe("gaming profile revalidation", () => {
     await expect(getGamingProfile()).resolves.toEqual({
       ok: false,
       error: "Could not reach Neoxify. Check your internet connection.",
+      noResponse: true,
     });
   });
 
@@ -208,6 +209,7 @@ describe("gaming profile revalidation", () => {
     await expect(getGamingProfile()).resolves.toEqual({
       ok: false,
       error: "Could not reach Neoxify. Check your internet connection.",
+      noResponse: true,
     });
   });
 
@@ -216,6 +218,9 @@ describe("gaming profile revalidation", () => {
     await expect(getGamingProfile()).resolves.toEqual({
       ok: false,
       error: "gaming catalogue is unavailable",
+      // Every answered failure keeps its status (device slots needed it
+      // to tell a 409 from everything else).
+      status: 500,
     });
   });
 
@@ -227,7 +232,7 @@ describe("gaming profile revalidation", () => {
     replies.push({ kind: "respond", status: 500 });
     const result = await getGamingProfile();
     expect(result.ok).toBe(false);
-    expect(result).toEqual({ ok: false, error: "Request failed (500)" });
+    expect(result).toEqual({ ok: false, error: "Request failed (500)", status: 500 });
   });
 
   it("refuses a 304 that answers a request which asked nothing conditional", async () => {
@@ -237,7 +242,7 @@ describe("gaming profile revalidation", () => {
     replies.push({ kind: "respond", status: 304, etag: TAG });
     const result = await getGamingProfile();
     expect(result.ok).toBe(false);
-    expect(result).toEqual({ ok: false, error: "Request failed (304)" });
+    expect(result).toEqual({ ok: false, error: "Request failed (304)", status: 304 });
   });
 
   it("does not carry a validator across a cleared cache", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResult } from "./api";
+import { beginAttempt, settleAttempt, type EndpointTrace } from "./endpoint-trace";
 import type { ProtocolUser } from "./types";
 
 /** The disk cache, stood in for. `credential-cache.ts` itself is the real
@@ -30,15 +31,35 @@ vi.mock("@tauri-apps/plugin-store", () => ({
   },
 }));
 
-/** The one API call the refresh makes. */
-const fetchUsers = vi.fn<() => Promise<ApiResult<ProtocolUser[]>>>();
-vi.mock("./customer", () => ({ getProtocolUsers: () => fetchUsers() }));
+/** The one API call the refresh makes. Handed the trace the refresh
+ * passes down, so a test can record on it what the real request would. */
+const fetchUsers = vi.fn<(trace?: EndpointTrace) => Promise<ApiResult<ProtocolUser[]>>>();
+vi.mock("./customer", () => ({ getProtocolUsers: (trace?: EndpointTrace) => fetchUsers(trace) }));
 
 /** Telemetry, spied on rather than sent. Whether a stale connect is
  * *visible* is half of what this change is for, so it is asserted rather
  * than assumed. */
 const reportAttempt = vi.fn();
-vi.mock("./attempts", () => ({ reportAttempt: (r: unknown) => reportAttempt(r) }));
+vi.mock("./attempts", () => ({ reportAttempt: (r: unknown, addendum?: unknown) => reportAttempt(r, addendum) }));
+
+/** The socket-level probe, stood in for: its own tests are elsewhere,
+ * and how its answer joins the report is attempts.test.ts's. What
+ * matters here is when the refresh asks for it. */
+type Addendum = { apiEndpoint?: string; reason?: string } | undefined;
+type ProbeOptions = { pathChanging?: boolean };
+const probeAddendum = vi.fn<(entries: unknown[], options?: ProbeOptions) => Promise<Addendum>>();
+const connectStarting = vi.fn();
+vi.mock("./control-plane-probe", () => ({
+  probeAddendum: (e: unknown[], o?: ProbeOptions) => probeAddendum(e, o),
+  connectStarting: () => connectStarting(),
+}));
+
+/** Reports are fire-and-forget, so a test waits for one rather than
+ * reading it the moment the refresh returns. */
+async function firstReport<T>(): Promise<T> {
+  await vi.waitFor(() => expect(reportAttempt).toHaveBeenCalled());
+  return reportAttempt.mock.calls[0][0] as T;
+}
 
 const { refreshConnectionConfig, describeConfigDrift } = await import("./connection-config");
 const { SNAPSHOT_TTL_MS, isSnapshotStale, saveSnapshot, loadSnapshot } = await import("./credential-cache");
@@ -74,6 +95,9 @@ beforeEach(() => {
   for (const data of files.values()) data.clear();
   fetchUsers.mockReset();
   reportAttempt.mockReset();
+  probeAddendum.mockReset();
+  probeAddendum.mockResolvedValue(undefined);
+  connectStarting.mockReset();
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
@@ -186,6 +210,232 @@ describe("refreshConnectionConfig", () => {
     expect(result.protocolUsers).toEqual(held);
     expect(Date.now() - started).toBeLessThan(1_000);
     expect((reportAttempt.mock.calls[0][0] as { reason: string }).reason).toContain("no answer within 30ms");
+  });
+
+  /** The field that was null on every row, and then a list of what the
+   * client *would* have tried. Now: what it did try, in which leg, and
+   * how each ended. RFC 2606 names stand in for the real list. */
+  it("reports each address tried, by leg, when the refresh fails", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation(async (trace) => {
+      // The usual shape after fifteen idle minutes: the GET answers 401,
+      // and the token refresh it triggers gets nowhere.
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "h401", 900);
+      settleAttempt(beginAttempt(trace, "https://edge.example.org:2053/api", 0), "cancel", 901);
+      trace!.phase = "refresh";
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 1_000), "net", 1_200);
+      return { ok: false, error: "Could not renew your session just now. Try again in a moment." };
+    });
+
+    await refreshConnectionConfig({ held });
+
+    const report = reportAttempt.mock.calls[0][0] as { outcome: string; apiEndpoint: string };
+    expect(report.outcome).toBe("CONTROL_PLANE_UNREACHABLE");
+    expect(report.apiEndpoint).toBe(
+      "req: api.example.net=h401@900 edge.example.org:2053=cancel@901; refresh: api.example.net=net@200",
+    );
+  });
+
+  /** The question the old field could never answer: the refresh gave up
+   * while an address was still being waited on. */
+  it("names the address the budget ran out on", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation((trace) => {
+      beginAttempt(trace, "https://api.example.net/api");
+      return new Promise(() => undefined);
+    });
+
+    await refreshConnectionConfig({ held, budgetMs: 30 });
+
+    const report = reportAttempt.mock.calls[0][0] as { apiEndpoint: string };
+    expect(report.apiEndpoint).toMatch(/^req: api\.example\.net=budget@\d+$/);
+  });
+
+  /** A foreground or a returning network runs the same refresh with
+   * nothing connecting afterwards. Its report said "connecting on cached
+   * credentials" all the same, so on the phones -- where it fires on
+   * every foreground past the horizon -- most "connect" rows were not
+   * connects at all. */
+  it.each([
+    ["resume", "resume config refresh failed"],
+    ["online", "online config refresh failed"],
+  ] as const)("does not describe a %s refresh as a connect", async (trigger, prefix) => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: false, error: "Could not reach Neoxify. Check your internet connection." });
+
+    await refreshConnectionConfig({ held, force: true, trigger });
+
+    const { reason } = await firstReport<{ reason: string }>();
+    expect(reason.startsWith(prefix)).toBe(true);
+    expect(reason).not.toContain("connecting");
+    expect(reason).toContain("nothing is being dialled");
+  });
+
+  /** The connect keeps the wording every earlier build used, so old and
+   * new rows still split on the same prefix. */
+  it("keeps the connect's own wording for a connect", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: false, error: "Could not reach Neoxify. Check your internet connection." });
+
+    await refreshConnectionConfig({ held });
+
+    const reason = (reportAttempt.mock.calls[0][0] as { reason: string }).reason;
+    expect(reason.startsWith("pre-connect config refresh failed (Could not reach Neoxify.")).toBe(true);
+    expect(reason).toContain("connecting on cached credentials");
+  });
+
+  /** With a tunnel up the refresh went through it, which is a different
+   * failure from one on the bare network. Labelled as what the screen
+   * showed, because that is all it is. And how long it waited, which is
+   * the other half of "no answer". */
+  it("says what the app showed and how long it waited", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockReturnValue(new Promise(() => undefined));
+
+    await refreshConnectionConfig({ held, budgetMs: 30, trigger: "resume", appState: "connected" });
+
+    const { reason } = await firstReport<{ reason: string }>();
+    expect(reason).toMatch(/^resume config refresh failed \(no answer within 30ms\) after \d+ms; /);
+    expect(reason.endsWith("; app showed connected")).toBe(true);
+  });
+
+  /** iOS suspends a backgrounded app, so a refresh caught by that
+   * "times out" without the network having had a say. The report says
+   * when that happened, so those rows can be told apart. */
+  it("says when the app went to the background during the refresh", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
+    Object.assign(globalThis, { document: doc });
+    try {
+      fetchUsers.mockImplementation(async () => {
+        doc.visibilityState = "hidden";
+        doc.dispatchEvent(new Event("visibilitychange"));
+        return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+      });
+
+      await refreshConnectionConfig({ held, force: true, trigger: "resume" });
+
+      const { reason } = await firstReport<{ reason: string }>();
+      expect(reason.endsWith("; app was in the background during it")).toBe(true);
+    } finally {
+      Object.assign(globalThis, { document: undefined });
+    }
+  });
+
+  it("does not say so when it stayed in front", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: false, error: "Could not reach Neoxify. Check your internet connection." });
+
+    await refreshConnectionConfig({ held });
+
+    expect((await firstReport<{ reason: string }>()).reason).not.toContain("background");
+  });
+
+  /** After a refresh nothing follows, the probe's answer -- which stage
+   * each failed address failed at -- follows the report. It does not
+   * hold it back: on iOS a backgrounded app can be suspended and killed
+   * inside the twenty seconds a probe may take. */
+  it("reports a failed resume refresh at once and hands the probe on", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation(async (trace) => {
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "timeout", 8_000);
+      return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+    });
+    // A probe that never answers.
+    probeAddendum.mockReturnValue(new Promise<Addendum>(() => undefined));
+
+    await refreshConnectionConfig({ held, force: true, trigger: "resume" });
+
+    // Made by the time the refresh has returned, probe or no probe.
+    expect(reportAttempt).toHaveBeenCalledTimes(1);
+    const [report, addendum] = reportAttempt.mock.calls[0] as [{ apiEndpoint: string }, unknown];
+    expect(report.apiEndpoint).toBe("req: api.example.net=timeout@8000");
+    expect(addendum).toBeInstanceOf(Promise);
+    expect(probeAddendum).toHaveBeenCalledTimes(1);
+  });
+
+  /** A connect starts the moment the refresh gives up, and changes the
+   * path under anything still measuring it. No probe there. */
+  it("does not probe before a connect", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation(async (trace) => {
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "timeout", 8_000);
+      return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+    });
+
+    await refreshConnectionConfig({ held });
+
+    expect(probeAddendum).not.toHaveBeenCalled();
+    expect((await firstReport<{ apiEndpoint: string }>()).apiEndpoint).toBe("req: api.example.net=timeout@8000");
+    expect(reportAttempt.mock.calls[0][1]).toBeUndefined();
+  });
+
+  /** The pre-connect refresh is the first step of every connect pass in
+   * both apps. It tells the probe a connect is starting -- so a resume
+   * probe still running stops -- whether or not it asks anything. */
+  it("tells the probe a connect is starting, even when it asks nothing", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now());
+
+    const result = await refreshConnectionConfig({ held });
+
+    expect(result.source).toBe("fresh");
+    expect(fetchUsers).not.toHaveBeenCalled();
+    expect(connectStarting).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call a resume refresh a connect starting", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: true, data: held });
+
+    await refreshConnectionConfig({ held, force: true, trigger: "resume" });
+
+    expect(connectStarting).not.toHaveBeenCalled();
+  });
+
+  /** Resume is when people press Connect. A refresh that began while the
+   * screen showed a connect or disconnect under way has the probe skip,
+   * since the path it would measure is moving. */
+  it.each([
+    ["connecting", true],
+    ["verifying", true],
+    ["disconnecting", true],
+    ["connected", false],
+    ["disconnected", false],
+    [undefined, false],
+  ])("with the screen showing %s, has the probe skip: %s", async (appState, pathChanging) => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation(async (trace) => {
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "timeout", 8_000);
+      return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+    });
+
+    await refreshConnectionConfig({ held, force: true, trigger: "resume", appState });
+
+    expect(probeAddendum).toHaveBeenCalledTimes(1);
+    expect(probeAddendum.mock.calls[0][1]).toEqual({ pathChanging });
+  });
+
+  /** Never a list of addresses that were not dialled. */
+  it("says so when nothing was dialled", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: false, error: "Could not reach Neoxify. Check your internet connection." });
+
+    await refreshConnectionConfig({ held });
+
+    expect((reportAttempt.mock.calls[0][0] as { apiEndpoint: string }).apiEndpoint).toBe("none dialled");
   });
 
   it("reports an expired session without deciding what to do about it", async () => {

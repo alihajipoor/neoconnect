@@ -40,6 +40,8 @@ rm -rf src-tauri/gen/apple/build/mobile_iOS.xcarchive
 # DerivedData rather than the directory to clear. One debug build left
 # behind by a manual xcodebuild invocation was enough to break every
 # release build after it.
+#
+# `stale` is also read below: "debug" here means this is a release build.
 if printf '%s\n' "${args[@]:-}" | grep -q -- "--debug"; then
   stale=release
 else
@@ -72,6 +74,22 @@ node scripts/add-tunnel-extension.mjs
 cp src-tauri/icons/ios/*.png src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
 
 export VITE_DISTRIBUTION=store
+
+# A release build must carry the endpoint seed, as the Android and
+# Windows release workflows already insist. `tauri ios build` runs
+# `pnpm build`, whose prebuild fetches the seed; without this set, a
+# failed fetch there quietly bakes in the placeholder, and the IPA tries
+# only the compiled-in addresses -- on a domain that is DNS-poisoned and
+# SNI-blocked in Iran, with the HTTP permission refusing every other
+# host. Nothing about such a build looks wrong until it is in a
+# customer's hands.
+#
+# Release only: a --debug simulator build (CI's, or one made offline)
+# has no customer. Set NEOXIFY_REQUIRE_SEED=0 to override deliberately.
+if [ "$stale" = "debug" ]; then
+  export NEOXIFY_REQUIRE_SEED="${NEOXIFY_REQUIRE_SEED:-1}"
+fi
+
 # bash 3.2 (what macOS ships) treats an empty array as unset under
 # `set -u`, so the plain "${args[@]}" aborts a build invoked with no
 # arguments at all -- which is every release build.

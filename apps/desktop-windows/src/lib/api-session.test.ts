@@ -56,6 +56,7 @@ vi.mock("./session", () => ({
 }));
 
 const { apiRequest } = await import("./api");
+const { newTrace, renderTrace } = await import("./endpoint-trace");
 const { onSessionRevoked } = await import("./session-revoked");
 
 let announced = 0;
@@ -131,5 +132,42 @@ describe("a refresh that works", () => {
     expect(result).toEqual({ ok: true, data: { id: "c1" } });
     expect(stored).toEqual({ accessToken: "new-access", refreshToken: "r2" });
     expect(announced).toBe(0);
+  });
+});
+
+/** The pre-connect refresh's report names which leg of this chain a
+ * failure happened in. After fifteen idle minutes the access token has
+ * expired, so a refresh is then all three legs, each a separate
+ * connection -- and "the GET answered, the token refresh did not" is a
+ * different problem from "nothing answered at all". */
+describe("the endpoint trace of an authenticated request", () => {
+  it("records the request, the token refresh and the retry as separate legs", async () => {
+    replies["/customer/me"] = [{ status: 401 }, { status: 200, body: { id: "c1" } }];
+    replies["/customer-auth/refresh"] = [{ status: 200, body: { accessToken: "new-access", refreshToken: "r2" } }];
+    const trace = newTrace();
+
+    await apiRequest("/customer/me", undefined, trace);
+
+    expect(renderTrace(trace)).toMatch(
+      /^req: a\.example=h401@\d+; refresh: a\.example=h200@\d+; retry: a\.example=h200@\d+$/,
+    );
+  });
+
+  it("shows the leg that could not be completed", async () => {
+    replies["/customer/me"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = ["unreachable"];
+    const trace = newTrace();
+
+    await apiRequest("/customer/me", undefined, trace);
+
+    expect(renderTrace(trace)).toMatch(/^req: a\.example=h401@\d+; refresh: a\.example=net@\d+$/);
+  });
+
+  /** Tracing is an observer: with one, nothing extra is sent. */
+  it("sends exactly the requests it would without a trace", async () => {
+    replies["/customer/me"] = [{ status: 401 }, { status: 200, body: { id: "c1" } }];
+    replies["/customer-auth/refresh"] = [{ status: 200, body: { accessToken: "new-access", refreshToken: "r2" } }];
+    await apiRequest("/customer/me", undefined, newTrace());
+    expect(requested).toEqual(["/customer/me", "/customer-auth/refresh", "/customer/me"]);
   });
 });

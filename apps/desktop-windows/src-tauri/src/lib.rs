@@ -1,3 +1,4 @@
+mod control_plane_probe;
 mod vpn;
 
 use tauri::{Emitter, Manager};
@@ -28,6 +29,19 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2
 #[tauri::command]
 fn get_launch_deep_link(state: tauri::State<LaunchDeepLink>) -> Option<String> {
     state.0.clone()
+}
+
+/// The OS this binary was compiled for, as the platform on attempt
+/// reports.
+///
+/// The webview's user agent was the source, shared with the mobile app,
+/// and its fallback was "windows": the iOS builds reported as Windows for
+/// a month and turned an iOS problem into an apparent Windows one. The
+/// compile target cannot be wrong that way. The mobile app registers the
+/// same command; see `reportedPlatform` in attempts.ts.
+#[tauri::command]
+fn build_platform() -> &'static str {
+    std::env::consts::OS
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -144,7 +158,13 @@ pub fn run() {
             vpn::measure_latency,
             vpn::probe_tcp,
             vpn::network_fingerprint,
-            get_launch_deep_link
+            get_launch_deep_link,
+            build_platform,
+            // After a control-plane request fails: which stage each
+            // address failed at. See control_plane_probe.rs.
+            control_plane_probe::probe_control_plane,
+            // And its stop, for when a connect starts while it runs.
+            control_plane_probe::cancel_control_plane_probe
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.

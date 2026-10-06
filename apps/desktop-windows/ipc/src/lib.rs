@@ -1323,7 +1323,20 @@ pub enum TunnelHealth {
     /// unreachable host, or a blocked port.
     NeverHandshaked,
     /// Nothing is running, so there is nothing to assess.
+    ///
+    /// Said only when the service knows it: from the engine it holds, the
+    /// record of that engine ending, or Windows answering every question
+    /// it was asked.
     Down,
+    /// No trustworthy evidence either way.
+    ///
+    /// Beside `connected: false` this is the status answered while the
+    /// service was too busy to consult its engine (or an untracked IKEv2
+    /// question PowerShell could not answer): nothing of ours was seen,
+    /// and nothing proved there was nothing. An app must not tell anyone
+    /// their tunnel ended on the strength of it. Apps that predate the
+    /// distinction read every `connected: false` alike, as they always
+    /// did.
     #[default]
     Unknown,
 }

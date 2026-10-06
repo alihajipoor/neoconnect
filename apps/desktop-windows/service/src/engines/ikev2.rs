@@ -392,6 +392,18 @@ fn disconnect_unless_absent(
 /// OS -- or by the customer through the network flyout -- is not
 /// reported as up.
 pub fn is_connected() -> bool {
+    connection_state() == Some(true)
+}
+
+/// The same question, keeping "could not ask" apart from "no".
+///
+/// `None` when PowerShell failed or ran out of time. [`is_connected`]
+/// reads that as not connected, which is the right default for the
+/// callers deciding whether there is anything to tear down -- and the
+/// wrong one for telling a customer their tunnel is gone. The untracked
+/// arm of `Engines::status` uses this so that it only says `Down` when
+/// Windows actually answered.
+pub fn connection_state() -> Option<bool> {
     // The cheap half, and on most machines the whole answer.
     //
     // This is reached from `status()`'s untracked arm, which is the
@@ -402,12 +414,12 @@ pub fn is_connected() -> bool {
     // `Status` is the one request the service goes out of its way to
     // keep answerable.
     if entry_definitely_absent() {
-        return false;
+        return Some(false);
     }
     let script = format!(
         "(Get-VpnConnection -Name '{ENTRY_NAME}' -AllUserConnection -ErrorAction SilentlyContinue).ConnectionStatus"
     );
-    matches!(powershell(&script), Ok(out) if out.trim().eq_ignore_ascii_case("Connected"))
+    powershell(&script).ok().map(|out| out.trim().eq_ignore_ascii_case("Connected"))
 }
 
 /// Where Windows keeps all-user RAS entries.

@@ -9,6 +9,7 @@ import {
   movesTunnel,
   phaseFor,
   pressFor,
+  supersedeAnswers,
   type Intent,
 } from "./connect-intent";
 
@@ -155,6 +156,29 @@ describe("an answer that was already in flight cannot decide what the next press
     const live = declareIntent(stalled, "disconnect");
     // The stalled pass finally wakes up and tries to finish.
     expect(concludeIntent(live, stalled.generation)).toEqual(live);
+  });
+
+  it("lets a drop outrank a health check that asked before the engine died", () => {
+    // Review of the engine-death branch: the fifteen-second check took
+    // its status while the tunnel was up, the liveness poll then found
+    // it gone and said so, and the check's egress verdict landed on top
+    // -- "unverified" over "VPN connection lost", about a tunnel that no
+    // longer existed. The drop advances the stamp the check is holding.
+    let now = IDLE_INTENT;
+    const check = now.generation;
+    const look = now.generation;
+
+    expect(isCurrent(now, look)).toBe(true);
+    now = supersedeAnswers(now);
+
+    expect(isCurrent(now, check)).toBe(false);
+    // Nothing was asked for: the app is still idle, so the next
+    // observation is shown as it is.
+    expect(now.intent).toBe("idle");
+    expect(phaseFor(now.intent, "disconnected")).toBe("disconnected");
+    // And a later press still supersedes it in turn.
+    const press = declareIntent(now, "connect");
+    expect(isCurrent(press, now.generation)).toBe(false);
   });
 });
 

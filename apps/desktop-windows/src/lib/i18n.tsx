@@ -535,6 +535,17 @@ const en = {
   "dash.protectedHint": "Your traffic is encrypted and routed through Neoxify.",
   "dash.notProtected": "You're not protected",
   "dash.notProtectedHint": "Connect to encrypt your traffic and hide your IP.",
+  // A tunnel the screen was vouching for closed without anyone asking.
+  // "You're not protected / Connect to encrypt..." above is written for
+  // somebody who has not connected yet; this is somebody whose traffic
+  // was protected a second ago and is not now. Measured on 2026-10-06:
+  // the engine died, traffic went out direct in 0.2s, and the screen said
+  // "You're protected" for another 17 seconds. It now says this instead,
+  // within about a second. No promise of a reconnect: nothing reconnects
+  // on its own.
+  "dash.dropped": "VPN connection lost",
+  "dash.droppedHint":
+    "The tunnel closed, so your traffic is now going out without Neoxify and is not protected. Connect again to protect it.",
   "dash.degraded": "Not carrying traffic",
   "dash.degradedHint": "The tunnel is up but the server isn't responding. Your traffic is NOT protected. Try reconnecting or pick another server.",
   // The third answer, and the one the screen had no words for.
@@ -601,6 +612,53 @@ const en = {
   "err.connectBusy": "A connection attempt is already running. Give it a moment, then try again.",
   "err.unknown": "Couldn't connect.",
   "err.showDetail": "Technical details",
+
+  // Device slots: the plan's device limit is how many devices may use
+  // the VPN at the same time (docs/device-slots.md). Worded from the
+  // limit and the devices, never from the server's English `message`.
+  // Plain and factual: a refusal is the plan working as sold, not an
+  // error, and the customer has a one-press way through it.
+  "slots.limitOne": "Your plan allows 1 device at a time.",
+  "slots.limitMany": "Your plan allows {limit} devices at a time.",
+  "slots.inUseOn": "Neoxify is in use on {device} since {time}.",
+  "slots.inUseOnNoTime": "Neoxify is in use on {device}.",
+  "slots.inUseOnMany": "Neoxify is in use on {devices}.",
+  "slots.deviceSince": "{device} (since {time})",
+  "slots.anotherDevice": "another device",
+  "slots.useHere": "Use on this device instead",
+  "slots.cancel": "Cancel",
+  "slots.dismiss": "Dismiss",
+  // "Disconnected:" only once the service has confirmed the tunnel is
+  // down; until then the second form, which claims nothing about it.
+  "slots.displaced": "Disconnected: Neoxify is now in use on {device}.",
+  "slots.nowInUseOn": "Neoxify is now in use on {device}.",
+  "slots.takeoverLimit": "You've switched devices too many times in the last hour. Try again in {minutes} min.",
+  // The device limit ended this device's session, and the teardown that
+  // followed has not been confirmed: the tunnel was still up, or the
+  // service could not say. Worded for both -- it claims only that the
+  // closing is unconfirmed -- and true while the app keeps trying, which
+  // it does on every poll until the tunnel is confirmed down.
+  "slots.teardownStuck":
+    "Your plan can't be used on this device right now. Still disconnecting — the tunnel hasn't been confirmed closed yet.",
+  // A degraded tunnel on a device whose slot was never confirmed, when
+  // the check got no verdict. Both name the limit as a possibility,
+  // never as the cause. The first only when nothing came back at all (no
+  // answer in time, or no answer anywhere); the second when Neoxify did
+  // answer -- an error, a throttle, something this app cannot read --
+  // and so was reached, and only did not confirm anything.
+  "slots.unchecked":
+    "We couldn't reach Neoxify to check. If Neoxify is in use on another of your devices, your plan's limit of {limit} at a time may be the reason.",
+  "slots.unconfirmed":
+    "Neoxify couldn't confirm this device's place on your plan right now. If Neoxify is in use on another of your devices, your plan's limit of {limit} at a time may be the reason.",
+  // A device the server names by its kind alone (its `platform`, with no
+  // model or name of its own), as {device} in the sentences above. The
+  // kind is named here, in the reader's language, never by the device
+  // that is being named -- it may be in another one.
+  "slots.platformWindows": "a Windows PC",
+  "slots.platformMac": "a Mac",
+  "slots.platformLinux": "a Linux PC",
+  "slots.platformAndroid": "an Android phone",
+  "slots.platformIos": "an iPhone",
 
   // "Repair my network".
   //
@@ -1177,6 +1235,9 @@ const fa: Record<TranslationKey, string> = {
   "dash.protectedHint": "ترافیک شما رمزگذاری شده و از طریق نئوکسیفای عبور می‌کند.",
   "dash.notProtected": "شما محافظت نمی‌شوید",
   "dash.notProtectedHint": "برای رمزگذاری ترافیک و پنهان‌کردن آی‌پی خود متصل شوید.",
+  "dash.dropped": "اتصال VPN قطع شد",
+  "dash.droppedHint":
+    "تونل بسته شد، بنابراین ترافیک شما اکنون بدون نئوکسیفای ارسال می‌شود و محافظت نمی‌شود. برای محافظت، دوباره وصل شوید.",
   "dash.degraded": "ترافیک عبور نمی‌کند",
   "dash.degradedHint": "تونل برقرار است اما سرور پاسخ نمی‌دهد. ترافیک شما محافظت نمی‌شود. دوباره وصل شوید یا سرور دیگری انتخاب کنید.",
   "dash.unverified": "متصل، اما تأیید نشده",
@@ -1208,6 +1269,31 @@ const fa: Record<TranslationKey, string> = {
   "err.connectBusy": "یک تلاش برای اتصال در حال انجام است. کمی صبر کنید و دوباره امتحان کنید.",
   "err.unknown": "اتصال برقرار نشد.",
   "err.showDetail": "جزئیات فنی",
+
+  "slots.limitOne": "پلن شما در هر زمان فقط روی یک دستگاه کار می‌کند.",
+  "slots.limitMany": "پلن شما در هر زمان روی {limit} دستگاه کار می‌کند.",
+  "slots.inUseOn": "نئوکسیفای از {time} روی {device} در حال استفاده است.",
+  "slots.inUseOnNoTime": "نئوکسیفای روی {device} در حال استفاده است.",
+  "slots.inUseOnMany": "نئوکسیفای روی این دستگاه‌ها در حال استفاده است: {devices}.",
+  "slots.deviceSince": "{device} (از {time})",
+  "slots.anotherDevice": "دستگاهی دیگر",
+  "slots.useHere": "استفاده روی همین دستگاه",
+  "slots.cancel": "انصراف",
+  "slots.dismiss": "بستن",
+  "slots.displaced": "اتصال قطع شد: نئوکسیفای اکنون روی {device} در حال استفاده است.",
+  "slots.nowInUseOn": "نئوکسیفای اکنون روی {device} در حال استفاده است.",
+  "slots.takeoverLimit": "در یک ساعت گذشته دفعات زیادی دستگاه را عوض کرده‌اید. {minutes} دقیقهٔ دیگر دوباره امتحان کنید.",
+  "slots.teardownStuck":
+    "در حال حاضر پلن شما روی این دستگاه قابل استفاده نیست. همچنان در حال قطع اتصال هستیم — بسته‌شدن تونل هنوز تأیید نشده است.",
+  "slots.unchecked":
+    "نتوانستیم برای بررسی به نئوکسیفای دسترسی پیدا کنیم. اگر نئوکسیفای روی دستگاه دیگری از شما در حال استفاده است، ممکن است دلیلش سقف {limit} دستگاه هم‌زمان در پلن شما باشد.",
+  "slots.unconfirmed":
+    "نئوکسیفای فعلاً نتوانست جای این دستگاه را در پلن شما تأیید کند. اگر نئوکسیفای روی دستگاه دیگری از شما در حال استفاده است، ممکن است دلیلش سقف {limit} دستگاه هم‌زمان در پلن شما باشد.",
+  "slots.platformWindows": "یک رایانهٔ ویندوزی",
+  "slots.platformMac": "یک مک",
+  "slots.platformLinux": "یک رایانهٔ لینوکسی",
+  "slots.platformAndroid": "یک گوشی اندروید",
+  "slots.platformIos": "یک آیفون",
 
   "settings.repair": "ترمیم شبکه",
   "repair.title": "ترمیم شبکهٔ من",

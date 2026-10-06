@@ -37,6 +37,11 @@ export interface Subscription {
   autoRenew: boolean;
   createdAt: string;
   updatedAt: string;
+  /** How many devices may use the VPN at the same time on this plan, or
+   * null for unlimited (docs/device-slots.md). Absent from a backend
+   * older than device slots -- which is not the same as null, and is
+   * never read as unlimited. */
+  deviceLimit?: number | null;
 }
 
 export type Protocol =

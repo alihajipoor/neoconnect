@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Sparkles, Tag } from "lucide-react";
 import { displayedRoute, showsAutomatic } from "../lib/displayed-route";
@@ -20,10 +20,15 @@ import {
 import {
   combineEvidence,
   customModePollState,
+  droppedFromPoll,
   fullTunnelPollState,
   handshakeEvidence,
+  headlineFor,
   isTunnelUp,
+  LIVENESS_POLL_MS,
+  noTunnelVerified,
   stateFromStatus,
+  type HeadlineTone,
   type VpnStatus,
 } from "../lib/connection-evidence";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
@@ -53,8 +58,17 @@ import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
+import {
+  deviceSlot,
+  slotNoticeStore,
+  slotStop,
+  slotTeardown,
+  slotTeardownShown,
+  type SlotStopReason,
+} from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { isServiceTimeout, withTimeout } from "../lib/service-call";
+import { PROBE_CAP_MS, statusDisturbances } from "../lib/status-disturbance";
 import {
   concludeIntent,
   declareIntent,
@@ -62,6 +76,7 @@ import {
   isCurrent,
   phaseFor,
   pressFor,
+  supersedeAnswers,
   type IntentState,
   type PressAction,
 } from "../lib/connect-intent";
@@ -73,6 +88,7 @@ import { Flag } from "../components/Flag";
 import { LocationPicker } from "../components/LocationPicker";
 import { CommunityLinks } from "../components/CommunityLinks";
 import { RepairNetwork } from "../components/RepairNetwork";
+import { DeviceSlotCard } from "../components/DeviceSlotCard";
 import { useI18n } from "../lib/i18n";
 
 /** How a ladder pass ended.
@@ -83,8 +99,17 @@ import { useI18n } from "../lib/i18n";
  * started has nothing to say about any server and must not pretend
  * otherwise. It also used to be silent, which is what a dead-looking
  * button is made of.
+ *
+ * "refused" is the plan's device limit: nothing was dialled, because
+ * Neoxify is in use on another of the customer's devices. Neither a
+ * failure nor a decline -- the card says where, and how to move it here.
  */
-type LadderOutcome = "connected" | "failed" | "declined";
+type LadderOutcome = "connected" | "failed" | "declined" | "refused";
+
+/** Kinds of connect error a network repair cannot help with. Offering it
+ * under "your plan's device limit is in use" would send somebody to fix
+ * a machine that is not broken. */
+const NOT_THE_NETWORK = new Set(["concurrentLimit", "quotaExhausted", "subscriptionInactive"]);
 
 /** Every call the screen makes to the service goes through one of these
  * two, never through a bare invoke.
@@ -98,6 +123,17 @@ function serviceStatus(): Promise<VpnStatus> {
 function serviceDisconnect(): Promise<void> {
   return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect");
 }
+
+/** The headline's colour for each tone `headlineFor` can ask for. Full
+ * class names, so the stylesheet build can see them. */
+const HEADLINE_TONE: Record<HeadlineTone, string> = {
+  success: "text-success",
+  highlight: "text-highlight",
+  warning: "text-warning",
+  muted: "text-muted-foreground",
+  plain: "text-foreground",
+  destructive: "text-destructive",
+};
 
 /** How often to re-check a live tunnel.
  *
@@ -492,7 +528,38 @@ export function Dashboard({
   const intentRef = useRef<IntentState>(IDLE_INTENT);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
+  /** Whether the tunnel the screen was vouching for closed without anyone
+   * asking. Only ever true alongside "disconnected", and it changes the
+   * words from "connect to be protected" to "your connection was lost".
+   * See `droppedFromPoll`. */
+  const [tunnelDropped, setTunnelDropped] = useState(false);
+  /** Single-flight for the one-second liveness poll. */
+  const livenessInFlightRef = useRef(false);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
+  /** What the plan's device limit has to say, when it is why this device
+   * is not connected: refused before dialling, taken over by another
+   * device, or a check that could not be made. See `deviceSlot`.
+   *
+   * Kept beside the slot, not in this screen: a claim through the tunnel
+   * can be refused while the screen is away in Settings, and the tunnel
+   * comes down regardless. The card written then is here on return. */
+  const slotNotice = useSyncExternalStore(slotNoticeStore.subscribe, slotNoticeStore.current);
+  const setSlotNotice = slotNoticeStore.set;
+  /** Whether a teardown the device limit asked for is still owed, and
+   * whether an attempt at it has already come back without the tunnel
+   * down. Beside the slot for the same reason the card is; see
+   * `slotTeardown`. */
+  const slotTeardownState = useSyncExternalStore(slotTeardown.subscribe, slotTeardown.state);
+  /** That teardown, while the screen shows it under way. Worded as what
+   * it is -- still disconnecting -- rather than as "You're not
+   * protected", which the service has not said. */
+  const slotTeardownShowing = slotTeardownState !== "none" && connectionState === "disconnecting";
+  /** Set when the device limit ended or refused this device's session.
+   * The automatic ladder must not run then -- it would only take the
+   * slot back from the device the customer is now using, or fail on
+   * every protocol and say so about servers that are fine. Cleared by the
+   * customer's own next connect. */
+  const slotLostRef = useRef(false);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
 
   // Only set when *this* app instance brought the tunnel up. The helper
@@ -617,9 +684,41 @@ export function Dashboard({
    */
   function publishObserved(generation: number, observed: ConnectionState): ConnectionState | null {
     if (!isCurrent(intentRef.current, generation)) return null;
-    const phase = phaseFor(intentRef.current.intent, observed);
+    // The service saying the tunnel is down is what a teardown the device
+    // limit still owes waits for, whoever asked: a remount after
+    // Settings, a recheck pressed while the state was unknown, the
+    // health poll. The retry only runs on the transient recheck, which
+    // has nothing to do once the screen says "disconnected" -- so
+    // without this the stuck line, saying the tunnel has not been
+    // confirmed closed, outlived the service confirming exactly that.
+    if (observed === "disconnected") slotTeardown.confirmDown();
+    // A tunnel still up after the device limit ended the session is one
+    // still being taken down, never one that is fine -- whichever path
+    // observed it: the teardown's own check, a recheck, a remount.
+    const phase = phaseFor(intentRef.current.intent, slotTeardownShown(slotTeardown.owed(), observed));
     setConnectionState(phase);
     return phase;
+  }
+
+  /** Puts "VPN connection lost" on screen -- the one place it is said --
+   * once `droppedFromPoll` has agreed that it is true.
+   *
+   * Then it makes every answer still in flight old news. The health
+   * check takes its status first and its egress or probe reading seconds
+   * later, so one that asked before the engine died would otherwise land
+   * its verdict -- "unverified", "degraded", even "connected" -- on top
+   * of this, about a tunnel that is gone. See `supersedeAnswers`.
+   *
+   * Returns whether it was shown; it is not when a press has overtaken
+   * the answer it rests on. */
+  function publishDrop(generation: number): boolean {
+    if (publishObserved(generation, "disconnected") === null) return false;
+    intentRef.current = supersedeAnswers(intentRef.current);
+    setTunnelDropped(true);
+    setConnectedAt(null);
+    strikesRef.current = 0;
+    sessionTrackerRef.current.broken();
+    return true;
   }
 
   /** What the service says, without putting it on screen.
@@ -795,8 +894,13 @@ export function Dashboard({
   //
   // `force` because the hook has already done the staleness check; it
   // does not call this at all inside the horizon.
-  useRefreshOnResume(async () => {
-    const refreshed = await refreshConnectionConfig({ held: protocolUsers, force: true });
+  useRefreshOnResume(async (trigger) => {
+    const refreshed = await refreshConnectionConfig({
+      held: protocolUsers,
+      force: true,
+      trigger,
+      appState: connectionState,
+    });
     if (refreshed.source !== "network") return;
     setProtocolUsers(refreshed.protocolUsers);
     setProtocolUser(
@@ -917,6 +1021,15 @@ export function Dashboard({
     // of the account data -- and takes its own baseline besides, so null
     // here leaves both alone.
     const adopted = ladderInFlight() ? null : await syncFromService();
+    // A tunnel this window did not bring up still uses one of the plan's
+    // devices. Nothing is known about its slot, so the first health poll
+    // claims it -- or, if the dashboard has merely been away in
+    // Settings, carries on with what was already known. Not one the
+    // device limit is still taking down: that one is not being used, it
+    // is being given up, and the recheck below goes on doing that.
+    if (adopted !== null && isTunnelUp(adopted) && !slotTeardown.owed()) {
+      deviceSlot.adopt({ subscriptionId: sub?.id, deviceLimit: sub?.deviceLimit });
+    }
 
     // Only meaningful while nothing is up: taken through a live tunnel
     // this would record the exit address as the "before" value and every
@@ -1012,8 +1125,63 @@ export function Dashboard({
       // over a connect that had already begun, and the next press then
       // meant Disconnect.
       const generation = intentRef.current.generation;
+      // And marked, so an answer one of our own Custom-mode changes or
+      // probes may have caught can be told apart afterwards. See
+      // `status-disturbance`.
+      const mark = statusDisturbances.mark();
 
-      let fromStatus: ConnectionState;
+      // Failing to ask is not the same as learning the tunnel is down,
+      // so the last known state stands and no strike is counted.
+      //
+      // It does not stand indefinitely, though. The last answer was an
+      // observation when it arrived; a minute of silence later it is
+      // only a memory, and leaving "You're protected" on screen on the
+      // strength of a memory is the same claim-without-evidence this
+      // screen exists to refuse. Several misses in a row means the
+      // honest answer has become "we don't know".
+      const miss = () => {
+        statusMissesRef.current += 1;
+        if (statusMissesRef.current >= STATUS_MISSES_BEFORE_UNKNOWN) {
+          if (publishObserved(generation, "unknown")) strikesRef.current = 0;
+        }
+      };
+
+      let status: VpnStatus;
+      try {
+        status = await serviceStatus();
+      } catch {
+        miss();
+        return;
+      }
+
+      // A "no tunnel" the service could not verify -- its fallback's
+      // guess while the owning thread was busy -- or one our own
+      // Custom-mode change or probe may have caused, is not an
+      // observation either. It is counted as a miss, not shown: shown,
+      // it put "You're not protected" over a tunnel a Custom-mode rebuild
+      // was a second from bringing back -- and once the screen shows no
+      // tunnel, neither poll runs, so it stood until the app next
+      // reloaded its state.
+      const disturbed = statusDisturbances.since(mark);
+      if (!status.connected && (disturbed || !noTunnelVerified(status))) {
+        miss();
+        return;
+      }
+      statusMissesRef.current = 0;
+
+      // The plan's device limit, renewed on this poll every
+      // `renewEverySec` (four polls at the contract's sixty seconds);
+      // `onPoll` answers at once when nothing is due. Before the tunnel
+      // checks, because if another device has the slot there is nothing
+      // left to check: this device stops, says why, and does not run
+      // the ladder. Not gated on `generation` -- a takeover is news
+      // whatever the customer pressed meanwhile.
+      const slotEvent = await deviceSlot.onPoll();
+      if (slotEvent.kind !== "keep") {
+        await endForSlot(slotEvent);
+        return;
+      }
+
       // Read from the status this check just took, not from the
       // `splitTunnelActive` this effect closed over. On the first check
       // after a connect that captured value is still the `false` from
@@ -1024,37 +1192,29 @@ export function Dashboard({
       // was carrying the selected apps. Measured on a Windows 11 guest:
       // curl.exe selected and exiting through the node, the screen
       // yellow for one poll.
-      let customMode: boolean;
-      try {
-        const status = await serviceStatus();
-        customMode = Boolean(status.splitTunnelActive);
-        setSplitTunnelActive(customMode);
-        setSplitTunnelProblem(status.splitTunnelProblem ?? null);
-    setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
-    setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
-        setIpv6Blocked(Boolean(status.ipv6Blocked));
-        fromStatus = stateFromStatus(status);
-        statusMissesRef.current = 0;
-      } catch {
-        // Failing to ask is not the same as learning the tunnel is
-        // down, so the last known state stands and no strike is counted.
-        //
-        // It does not stand indefinitely, though. The last answer was an
-        // observation when it arrived; a minute of silence later it is
-        // only a memory, and leaving "You're protected" on screen on the
-        // strength of a memory is the same claim-without-evidence this
-        // screen exists to refuse. Several misses in a row means the
-        // honest answer has become "we don't know".
-        statusMissesRef.current += 1;
-        if (statusMissesRef.current >= STATUS_MISSES_BEFORE_UNKNOWN) {
-          if (publishObserved(generation, "unknown")) strikesRef.current = 0;
-        }
-        return;
-      }
+      const customMode = Boolean(status.splitTunnelActive);
+      setSplitTunnelActive(customMode);
+      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+      setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
+      setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
+      setIpv6Blocked(Boolean(status.ipv6Blocked));
+      const fromStatus = stateFromStatus(status);
 
       if (fromStatus === "disconnected") {
         sessionTrackerRef.current.broken();
+        // Usually the one-second liveness poll below gets here first.
+        // This is the same conclusion from the slower instrument, so it
+        // goes through the same rule and is worded the same way.
+        if (droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) {
+          publishDrop(generation);
+          return;
+        }
         if (publishObserved(generation, "disconnected") === null) return;
+        // The tunnel went on its own, and nothing renews a slot without
+        // one. Given back, rather than left to turn the customer's other
+        // device away as "in use" for the ninety seconds it takes to go
+        // stale.
+        void deviceSlot.release();
         setConnectedAt(null);
         strikesRef.current = 0;
         return;
@@ -1089,15 +1249,28 @@ export function Dashboard({
         // on an Xray protocol sat on a green orb indefinitely while
         // nothing flowed -- the one instrument that could have caught it
         // was skipped in exactly the case it was needed.
+        //
+        // Marked while it runs: it holds the service's owning thread, and
+        // a liveness status asked meanwhile is answered by the fallback.
+        const probed = statusDisturbances.begin(PROBE_CAP_MS);
         const carried = await invoke("vpn_probe_split_tunnel")
           .then(() => true)
-          .catch(() => false);
+          .catch(() => false)
+          .finally(probed);
         verdict = customModePollState(fromStatus, carried);
       } else {
         const egress = await verifyEgress(baselineIpRef.current);
+        if (!isCurrent(intentRef.current, generation)) return;
         if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
         verdict = fullTunnelPollState(fromStatus, egress);
       }
+
+      // Overtaken while it measured -- by a press, or by the liveness
+      // poll finding the tunnel gone (`publishDrop`). Either way what
+      // follows is about a tunnel the screen no longer describes, and a
+      // reading taken through a tunnel that has since ended must not
+      // count towards the per-ISP tags.
+      if (!isCurrent(intentRef.current, generation)) return;
 
       // "It kept working", for the per-ISP tags: a proven check advances
       // the session clock, a failed one restarts it. `unverified` does
@@ -1127,6 +1300,8 @@ export function Dashboard({
       // failed, this only reports -- it does not act.
       if (strikesRef.current < MID_SESSION_STRIKES) return;
       if (Date.now() < cooldownUntilRef.current) return;
+      // Never after the device limit ended this session. See slotLostRef.
+      if (slotLostRef.current) return;
 
       // A tunnel that is up and carrying nothing is the case a customer
       // cannot fix themselves and should not have to: the old behaviour
@@ -1135,7 +1310,7 @@ export function Dashboard({
       // moment to ask anything of them.
       strikesRef.current = 0;
       cooldownUntilRef.current = Date.now() + MID_SESSION_COOLDOWN_MS;
-      await runLadder();
+      await runLadder({ automatic: true });
     };
 
     // Once straight away, then on the interval.
@@ -1167,6 +1342,63 @@ export function Dashboard({
     // exactly the check that matters -- the first one after a connect.
   }, [connectionState]);
 
+  // Is the tunnel still there -- asked every second, and nothing else.
+  //
+  // The poll above proves traffic flows, and it is right that it runs
+  // only every fifteen seconds: it fetches through the tunnel, on links
+  // that are often slow and censored. But its verdict then stood on
+  // screen until the next one, and that is how, measured on 2026-10-06,
+  // "You're protected" outlived a killed engine by 17.0 seconds while
+  // every packet went out direct. Custom mode: 8.1s.
+  //
+  // So the cheap half of the question is asked on its own, often. One
+  // status call: the service answers from the engine's own process
+  // handle, the tunnel service's state or RAS, and since the service
+  // now tears a dead session down the moment the kernel reports it, the
+  // answer is already "nothing is running" by the time this asks. It
+  // never promotes anything -- a live answer changes nothing here -- and
+  // nothing but the service's verified "no tunnel" is a drop: not a
+  // failed call, and not the fallback's guess (`droppedFromPoll`).
+  //
+  // Stays out of the way of the things that own the tunnel or the
+  // service's attention: a ladder pass, a press in flight, a Custom-mode
+  // change and the Custom-mode probe. Not only by not starting while one
+  // runs: the probe is started by the health poll after its own status
+  // returns, so one can begin while this look is already waiting on the
+  // service -- and the answer is then discarded, by the mark taken here.
+  useEffect(() => {
+    if (!isTunnelUp(connectionState)) return;
+
+    const look = async () => {
+      if (livenessInFlightRef.current || ladderInFlight()) return;
+      if (intentRef.current.intent !== "idle") return;
+      if (statusDisturbances.busy()) return;
+      livenessInFlightRef.current = true;
+      // Stamped before asking, like every other writer here: a press
+      // landing while this waits makes the answer old news.
+      const generation = intentRef.current.generation;
+      const mark = statusDisturbances.mark();
+      try {
+        const status = await serviceStatus().catch(() => null);
+        const disturbed = statusDisturbances.since(mark);
+        if (!droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) return;
+        publishDrop(generation);
+      } finally {
+        livenessInFlightRef.current = false;
+      }
+    };
+
+    const id = setInterval(() => void look(), LIVENESS_POLL_MS);
+    return () => clearInterval(id);
+  }, [connectionState]);
+
+  // "Connection lost" describes the moment a tunnel went, and only for as
+  // long as nothing has happened since. Any other state -- a connect
+  // starting, a tunnel adopted, a teardown -- retires it.
+  useEffect(() => {
+    if (connectionState !== "disconnected") setTunnelDropped(false);
+  }, [connectionState]);
+
   // Nothing that is only passing through gets to stay.
   //
   // "Connecting...", "Disconnecting..." and "Can't tell right now" all
@@ -1190,6 +1422,16 @@ export function Dashboard({
       // it here would put "You're not protected" on screen in the middle
       // of a connect that is still working.
       if (ladderInFlight()) return;
+      // A teardown the device limit still owes is this recheck's to try
+      // again, rather than only to look at: the tunnel it found up last
+      // time is one this device was told to give up. One attempt at a
+      // time (`retry` joins one still running), each bounded by the
+      // teardown's own deadline, every recheck until the service says
+      // the tunnel is down -- and the card waiting on that shows then.
+      if (slotTeardown.owed()) {
+        void slotTeardown.retry(tearDownForSlotOnce);
+        return;
+      }
       // Past its deadline, it owns nothing -- and the intent it declared
       // has to go with it. Leaving that standing would be a new way to
       // wedge the screen rather than a fix for the old one: `phaseFor`
@@ -1222,6 +1464,9 @@ export function Dashboard({
   async function handleConnectToggle(action: PressAction) {
     if (!protocolUser) return;
     setConnectionError(null);
+    // Whatever the press does next, the screen is no longer describing
+    // the moment the last tunnel went.
+    setTunnelDropped(false);
 
     switch (action) {
       // Pressing during a pass means stop. The ladder checks `cancelRef`
@@ -1240,6 +1485,10 @@ export function Dashboard({
       case "cancelConnect": {
         const generation = beginIntent("disconnect");
         cancelRef.current = true;
+        // The pass may already hold a slot. Given back fire and forget,
+        // never in front of the teardown (docs/device-slots.md, 8).
+        void deviceSlot.release();
+        setSlotNotice(null);
         setConnectionState("disconnecting");
         await serviceDisconnect().catch(() => undefined);
         await confirmTornDown();
@@ -1255,7 +1504,22 @@ export function Dashboard({
       // and the answer that follows is the way out of a
       // "Disconnecting..." that has stopped describing anything.
       case "disconnect": {
+        // The device limit's teardown is still owed: this press is that
+        // teardown, asked for again now rather than at the next recheck.
+        // Not the ordinary Disconnect below, which would clear the card
+        // that teardown is for -- it shows once the tunnel is down.
+        if (slotTeardown.owed()) {
+          await slotTeardown.retry(tearDownForSlotOnce);
+          return;
+        }
         const generation = beginIntent("disconnect");
+        // This device stops using one of the plan's devices. Released
+        // fire and forget, within a second and a half, and never in
+        // front of the teardown: while the tunnel is still up the request
+        // goes through it, which on a filtered network is the likeliest
+        // way to reach the API at all.
+        void deviceSlot.release();
+        setSlotNotice(null);
         setConnectionState("disconnecting");
         try {
           await serviceDisconnect();
@@ -1300,23 +1564,111 @@ export function Dashboard({
       }
 
       case "connect": {
-        const outcome = await runLadder();
-        // A press that produced no attempt at all has to say so. It used
-        // to return quietly: the guard from a pass that had stalled was
-        // still set, `runLadder` declined, and the button looked dead
-        // for as long as the guard lasted. Silence there is part of what
-        // taught people to press three or four times.
-        if (outcome === "declined") {
-          setConnectionError({
-            kind: "serviceUnavailable",
-            messageKey: "err.connectBusy",
-            detail: "a connection attempt was already running",
-          });
-          await syncFromService();
-        }
+        await connectNow();
         return;
       }
     }
+  }
+
+  /** A connect the customer asked for: the button, or "Use on this
+   * device instead" with the devices to take the slot over from. */
+  async function connectNow(takeover?: string[]) {
+    // "Use on this device instead" can be pressed while the device limit's
+    // teardown is still owed -- a takeover's card shows over a tunnel
+    // still up. That tunnel comes down first, on the service's word, and
+    // if it will not, nothing is dialled: the stuck line stays, and the
+    // pass below would otherwise start from "nothing is up" when
+    // something is.
+    if (slotTeardown.owed()) {
+      if ((await slotTeardown.retry(tearDownForSlotOnce)) === "stuck") return;
+    }
+    // Their own connect from here; nothing is owed any more.
+    slotTeardown.clear();
+    setConnectionError(null);
+    setSlotNotice(null);
+    // Their own press: whatever the device limit stopped is theirs to
+    // start again.
+    slotLostRef.current = false;
+    const outcome = await runLadder({ takeover });
+    // A press that produced no attempt at all has to say so. It used
+    // to return quietly: the guard from a pass that had stalled was
+    // still set, `runLadder` declined, and the button looked dead
+    // for as long as the guard lasted. Silence there is part of what
+    // taught people to press three or four times.
+    if (outcome === "declined") {
+      setConnectionError({
+        kind: "serviceUnavailable",
+        messageKey: "err.connectBusy",
+        detail: "a connection attempt was already running",
+      });
+      await syncFromService();
+    }
+  }
+
+  /** Says why the device limit stopped this device -- see `slotStop`
+   * for what is shown and reported, which both clients share. A
+   * refusal is reported as a limit, never as a failed dial: no rungs, so
+   * no route is marked as failing for anybody, and nothing is
+   * remembered as this network's best or worst route. */
+  function showSlotStop(reason: SlotStopReason, when: "beforeDial" | "whileConnected") {
+    const stop = slotStop(reason, when);
+    if (stop.notice) setSlotNotice(stop.notice);
+    if (stop.report) void reportAttempt(stop.report);
+    if (stop.inactive) {
+      // The plan-ended card already says what to do about SUSPENDED and
+      // EXPIRED; anything else gets the error line.
+      const status = stop.subscriptionStatus;
+      if (status) setSubscription((current) => (current ? { ...current, status } : current));
+      if (status !== "SUSPENDED" && status !== "EXPIRED") {
+        setConnectionError({
+          kind: "subscriptionInactive",
+          messageKey: "err.subscriptionInactive",
+          detail: `subscription ${status ?? "not active"}`,
+        });
+      }
+    }
+  }
+
+  /** The device limit ended this device's session while it was
+   * connected: another device took the slot over, a claim made through
+   * the tunnel was refused, or the subscription stopped.
+   *
+   * Disconnects and says why, and does NOT run the failover ladder
+   * (docs/device-slots.md, obligations 7 and 11): it would only take the
+   * slot back from the device the customer is now using, or fail on every
+   * protocol and blame servers that are fine. Records nothing either --
+   * no attempt, no route marked failing, no best route moved: the dial
+   * worked and was reported as it happened; the plan refused the device.
+   * "Disconnected:" waits for the service to confirm it, and a refusal's
+   * card waits for that altogether -- see DeviceSlotCard.
+   *
+   * A teardown that does not finish is not left there. The tunnel stays
+   * shown as still disconnecting, never as working, with the stuck line
+   * saying so; the recheck tries again until the service says it is
+   * down; and the card shows then. See `slotTeardown`. */
+  async function endForSlot(event: SlotStopReason) {
+    // The session has ended and the app is already on its way to the
+    // sign-in screen, tunnel included; there is nothing to add.
+    if (event.kind === "signedOut") return;
+    slotLostRef.current = true;
+    // A pass in flight stops between its steps rather than dialling the
+    // next protocol on a slot that is somebody else's.
+    cancelRef.current = true;
+    showSlotStop(event, "whileConnected");
+    setFailedOverTo(null);
+    await slotTeardown.begin(tearDownForSlotOnce);
+  }
+
+  /** One attempt at the device limit's teardown. True only when the
+   * service has said the tunnel is down; a tunnel still up after the
+   * settle time, or a service that will not answer, is not down. */
+  async function tearDownForSlotOnce(): Promise<boolean> {
+    const generation = beginIntent("disconnect");
+    setConnectionState("disconnecting");
+    await serviceDisconnect().catch(() => undefined);
+    const state = await confirmTornDown();
+    endIntent(generation);
+    return state === "disconnected";
   }
 
   /** Works down the protocols this subscription holds until one is
@@ -1328,7 +1680,14 @@ export function Dashboard({
    * does, using the same order, the same evidence and the same memory.
    * Duplicating it would mean two ladders drifting apart.
    */
-  async function runLadder(): Promise<LadderOutcome> {
+  async function runLadder(
+    options: {
+      /** Handles from a device-limit card: take the slot over from them. */
+      takeover?: string[];
+      /** Started by the health poll rather than by the customer. */
+      automatic?: boolean;
+    } = {},
+  ): Promise<LadderOutcome> {
     if (!protocolUser || ladderInFlight()) return "declined";
     // Its own number, so a pass that stalled past its deadline can be
     // told apart from the one that replaced it. Without that, a stalled
@@ -1371,9 +1730,102 @@ export function Dashboard({
       // throws, gives up after its own short budget, and falls back to
       // the credentials already in hand; see the note there about why a
       // failed refresh must never cost somebody in Iran their VPN.
-      const refreshed = await refreshConnectionConfig({ held: protocolUsers });
+      //
+      // The plan's device limit is asked at the same time, not after:
+      // both are before anything is dialled or torn down, and on a
+      // network where the API is blackholed running them one after the
+      // other would add the claim's three seconds to the refresh's six
+      // for no answer from either. The credential named is the one on
+      // screen; once the ladder lands, the slot is moved to the one it
+      // landed on (`afterConnected`).
+      //
+      // Not for an automatic pass whose slot was never confirmed. A
+      // degraded tunnel there may be the device limit rather than the
+      // network, and asking through it is asking into the thing that
+      // stopped working -- that case tears down first and asks below.
+      const checkFirst = options.automatic === true && deviceSlot.needsStandingCheck();
+      const subscriptionId = subscription?.id ?? protocolUser.subscriptionId;
+      const slotDecision = checkFirst
+        ? null
+        : deviceSlot.beforeDial({
+            subscriptionId,
+            protocolUserId: protocolUser.id,
+            takeover: options.takeover,
+            deviceLimit: subscription?.deviceLimit,
+          });
+      // `appState` is the state this pass started from: "disconnected"
+      // from the button, or whatever the health poll saw when it began
+      // a failover -- in which case the refresh went through that tunnel.
+      const refreshed = await refreshConnectionConfig({
+        held: protocolUsers,
+        trigger: "connect",
+        appState: connectionState,
+      });
       if (refreshed.source === "network") setProtocolUsers(refreshed.protocolUsers);
       const dialable = refreshed.protocolUsers.length > 0 ? refreshed.protocolUsers : [protocolUser];
+
+      // Refused, or the check says this device's slot is somebody
+      // else's: nothing is dialled. Never a failed dial in the attempt
+      // history, never a "best route" learned, never the ladder.
+      let stoppedBySlot: SlotStopReason | null = null;
+      if (slotDecision) {
+        const decision = await slotDecision;
+        if (decision.kind !== "dial") stoppedBySlot = decision;
+      } else {
+        // Obligation 9: down first, so the question does not go into a
+        // tunnel that may be held, then four seconds to ask.
+        await serviceDisconnect().catch(() => undefined);
+        const standing = await deviceSlot.checkStanding();
+        if (standing.kind === "unanswered") {
+          // Said, and then the ladder runs as usual: a limit that could
+          // not be checked is a possibility, not a verdict. Worded by
+          // whether anything came back: "couldn't reach Neoxify" only
+          // when nothing did, never over an answer that was an error.
+          const limit = deviceSlot.limit() ?? subscription?.deviceLimit ?? null;
+          if (typeof limit === "number") setSlotNotice({ kind: "unchecked", limit, noAnswer: standing.noAnswer });
+        } else if (standing.kind !== "clear") {
+          stoppedBySlot = standing;
+        }
+      }
+      if (stoppedBySlot !== null) {
+        // Said only to a customer still waiting on this pass: one who
+        // pressed stop, or signed out, has already moved on.
+        const stillWanted = !cancelRef.current && sessionGeneration() === sessionAtStart;
+        if (stillWanted) {
+          showSlotStop(stoppedBySlot, "beforeDial");
+          if (options.automatic || stoppedBySlot.kind === "displaced") slotLostRef.current = true;
+        }
+        // A pass started by the poll still had a tunnel up, and a slot
+        // that is not this device's leaves it nothing to stay up for.
+        // From the button nothing is up, so there is nothing to take
+        // down -- and nothing was dialled either way.
+        //
+        // That teardown is the device limit's, the same one a stop while
+        // connected owes (`endForSlot`), and it goes through the same
+        // place: owed until the service says the tunnel is down, a tunnel
+        // still up meanwhile shown as still disconnecting -- never as the
+        // raw "connected" the health poll would then pick up and turn
+        // green over a refusal -- and tried again on the recheck. Taken
+        // down here once and left, a tunnel that outlived the wait sat
+        // there with the card hidden (it waits for "down") and nothing
+        // trying again: `slotLostRef` keeps the ladder away, by design.
+        //
+        // Not for a pass the customer cancelled or a sign-out overtook --
+        // each runs its own teardown -- nor for one a newer pass has
+        // replaced, whose intent the attempt would stamp out.
+        if (options.automatic && stillWanted && ladderGenerationRef.current === generation) {
+          endIntent(intent);
+          await slotTeardown.begin(tearDownForSlotOnce);
+          return "refused";
+        }
+        if (options.automatic) await serviceDisconnect().catch(() => undefined);
+        if (ladderGenerationRef.current !== generation) return "refused";
+        endIntent(intent);
+        // The service's answer, not an assumption -- the same as a
+        // failed pass ends with.
+        await confirmTornDown(intent);
+        return "refused";
+      }
 
       // Whatever is up comes down first, and this is not a formality.
       // Run from the health poll, the tunnel that just stopped working
@@ -1781,6 +2233,18 @@ export function Dashboard({
                 [...dials, verdict === "connected" ? { routeId: candidate.routeId, carried: true } : null],
               ),
             });
+            // Whatever the device limit had to say before this pass is
+            // answered by it.
+            setSlotNotice(null);
+            // The slot, now that a tunnel is up: claimed through it if the
+            // claim before dialling went unanswered, or moved to the
+            // credential the ladder landed on. Not awaited -- the pass is
+            // over and its guard must not wait on the API. A refusal that
+            // arrives this way is the limit enforced late, and ends the
+            // session like a takeover does.
+            void deviceSlot.afterConnected({ protocolUserId: candidate.id }).then((event) => {
+              if (event.kind !== "keep" && sessionGeneration() === sessionAtStart) void endForSlot(event);
+            });
             return "connected";
           }
 
@@ -1818,6 +2282,11 @@ export function Dashboard({
       // A pass the customer stopped is not a failure and must not be
       // reported as one.
       setConnectionError(cancelRef.current ? null : lastError);
+      // Nothing came up, so this device is not using one of the plan's
+      // devices. Kept, the slot would turn the customer's phone away for
+      // the next ninety seconds with "Neoxify is in use on Windows PC" --
+      // a claim about a device that is not connected.
+      void deviceSlot.release();
       if (!cancelRef.current) {
         // The whole ladder failed. This is the report that has been
         // costing a screenshot and a conversation every time: which
@@ -1954,6 +2423,8 @@ export function Dashboard({
   // is no longer a pair to disagree.
   const press = pressFor(connectionState);
   const connectLabel = t(press.labelKey);
+  // The same discipline for the headline: one table, one render.
+  const headline = headlineFor(connectionState, { dropped: tunnelDropped, customMode: splitTunnelActive });
 
   if (loading) {
     return (
@@ -2136,60 +2607,27 @@ export function Dashboard({
                           exists to answer, and it was set at the same
                           size and weight as a form label. It is the
                           headline; it now looks like one. */}
-                      <p
-                        className={
-                          connectionState === "connected"
-                            ? "text-base font-semibold tracking-tight text-success"
-                            : connectionState === "unverified"
-                              ? "text-base font-semibold tracking-tight text-highlight"
-                              : connectionState === "degraded"
-                              ? "text-base font-semibold tracking-tight text-warning"
-                              : connectionState === "unknown"
-                                ? "text-base font-semibold tracking-tight text-muted-foreground"
-                                : "text-base font-semibold tracking-tight text-foreground"
-                        }
-                      >
-                        {/* "Not protected" is a claim, and it only gets
-                            made where the service has actually said so.
-                            The unknown branch sits above the fallback for
-                            that reason: it is the case that used to fall
-                            through to it and tell a customer with a live
-                            tunnel that they had none. */}
-                        {connectionState === "connected"
-                          ? t("dash.protected")
-                          : connectionState === "unverified"
-                            ? t("dash.unverified")
-                            : connectionState === "degraded"
-                            ? t("dash.degraded")
-                            : connectionState === "connecting" || connectionState === "verifying"
-                              ? t("dash.verifying")
-                              : connectionState === "unknown"
-                                ? t("dash.unknown")
-                                : t("dash.notProtected")}
+                      {/* "Not protected" is a claim, and it only gets
+                          made where the service has actually said so --
+                          see `headlineFor`, which holds the whole table,
+                          including the dropped tunnel, so it can be
+                          tested without a window. The device limit's
+                          teardown sits above it: while the service still
+                          reports the tunnel up after a refusal, the honest
+                          headline is that it is still being disconnected. */}
+                      <p className={`text-base font-semibold tracking-tight ${HEADLINE_TONE[slotTeardownShowing ? "plain" : headline.tone]}`}>
+                        {slotTeardownShowing ? t("dash.disconnecting") : t(headline.title)}
                       </p>
                       {/* text-pretty rather than a raw wrap: these hints
                           run two lines in English and three in Persian,
                           and a one-word last line under the hero control
                           is the thing that made the block look thrown
                           together. */}
+                      {/* Nothing to add while the device limit's teardown
+                          runs: the line below says what is happening once
+                          an attempt has not finished. */}
                       <p className="mt-1 text-xs text-pretty text-muted-foreground">
-                        {connectionState === "connected"
-                          ? t("dash.protectedHint")
-                          : connectionState === "unverified"
-                            ? // Custom mode is a narrower claim than a
-                              // full tunnel, so it gets the narrower
-                              // sentence: what could not be confirmed
-                              // there is that the *chosen apps* are
-                              // being carried, which is a different fact
-                              // from whether this machine is tunnelled.
-                              t(splitTunnelActive ? "dash.unverifiedCustomHint" : "dash.unverifiedHint")
-                            : connectionState === "degraded"
-                            ? t("dash.degradedHint")
-                            : connectionState === "connecting" || connectionState === "verifying"
-                              ? t("dash.verifyingHint")
-                              : connectionState === "unknown"
-                                ? t("dash.unknownHint")
-                                : t("dash.notProtectedHint")}
+                        {slotTeardownShowing ? null : t(headline.hint)}
                       </p>
                       {/* The proof, shown rather than just acted on: this
                           is the address the outside world actually saw,
@@ -2328,9 +2766,31 @@ export function Dashboard({
                       ) : null}
                     </div>
 
+                    {/* The plan's device limit, when it is why this
+                        device is not connected: where Neoxify is in use,
+                        and the one press that moves it here. */}
+                    {slotNotice ? (
+                      <DeviceSlotCard
+                        notice={slotNotice}
+                        // "Disconnected:" is a claim about the tunnel, so
+                        // it waits for the service to have said so.
+                        tunnelDown={connectionState === "disconnected"}
+                        onUseHere={(takeover) => void connectNow(takeover)}
+                        onDismiss={() => setSlotNotice(null)}
+                      />
+                    ) : null}
+
                     {/* Reserved space either way, so the layout doesn't
                         jump when an error appears or clears. */}
                     <div className="min-h-4 px-2 text-center">
+                      {/* The device limit ended this session and the
+                          tunnel is not confirmed down yet. Said rather than
+                          left to the orb, and kept while the recheck
+                          keeps trying; a refusal's card waits for the
+                          tunnel to be down. */}
+                      {slotTeardownState === "stuck" ? (
+                        <p className="text-xs text-destructive">{t("slots.teardownStuck")}</p>
+                      ) : null}
                       {connectionError ? (
                         <>
                           <p className="text-xs text-destructive">{t(connectionError.messageKey)}</p>
@@ -2369,8 +2829,11 @@ export function Dashboard({
                               few seconds later is what observes that.
                               Writing "disconnected" from here would be
                               this screen asserting a tunnel state it had
-                              not checked. */}
-                          <RepairNetwork variant="inline" />
+                              not checked.
+
+                              Not for a plan's limit or state, which no
+                              repair of this machine can change. */}
+                          {NOT_THE_NETWORK.has(connectionError.kind) ? null : <RepairNetwork variant="inline" />}
                         </>
                       ) : null}
                     </div>

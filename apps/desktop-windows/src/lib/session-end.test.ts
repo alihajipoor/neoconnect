@@ -309,3 +309,42 @@ describe("ending a session ends the tunnel", () => {
     expect(seenDuringTeardown).toBe(before + 1);
   });
 });
+
+describe("ending a session forgets this device's slot", () => {
+  /** Sign-out releases the slot on the server by itself
+   * (docs/device-slots.md, obligation 8), so nothing is sent -- but a
+   * renewal still owed to the old session must not run, or claim, under
+   * the next one. */
+  it("forgets the slot without a request of its own", async () => {
+    const { deviceSlot } = await import("./device-slot-session");
+    deviceSlot.adopt({ subscriptionId: "6f1c2b9e-0000-4000-8000-000000000001" });
+    expect(deviceSlot.standing()).toBe("unclaimed");
+
+    await endCustomerSession();
+
+    expect(deviceSlot.standing()).toBe("none");
+    expect(calls.filter((c) => c.url.includes("/customer/vpn/"))).toEqual([]);
+  });
+
+  /** The card names the old account's devices. */
+  it("clears the device limit's card", async () => {
+    const { slotNoticeStore } = await import("./device-slot-session");
+    slotNoticeStore.set({ kind: "displaced", by: { handle: "h", label: "Windows PC", platform: "windows" }, at: null });
+
+    await endCustomerSession();
+
+    expect(slotNoticeStore.current()).toBeNull();
+  });
+
+  /** The sign-out's own teardown takes the tunnel down; retries of the
+   * old session's must not run on into the next account's. */
+  it("forgets a teardown the device limit still owed", async () => {
+    const { slotTeardown } = await import("./device-slot-session");
+    await slotTeardown.begin(() => Promise.resolve(false));
+    expect(slotTeardown.owed()).toBe(true);
+
+    await endCustomerSession();
+
+    expect(slotTeardown.owed()).toBe(false);
+  });
+});
