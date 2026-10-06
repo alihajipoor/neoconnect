@@ -5,6 +5,7 @@ import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolU
 import { getProtocolUsers } from "./customer";
 import type { ResumeTrigger } from "./resume";
 import type { ProtocolUser } from "./types";
+import { watchBackground } from "./visibility";
 
 /** Fetching the credentials again immediately before dialling.
  *
@@ -273,6 +274,9 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   }
 
   const trace = newTrace();
+  // Whether the app was backgrounded while this ran -- on iOS that
+  // suspends it, and a "timeout" then says nothing about the network.
+  const backgrounded = watchBackground();
   const askedAt = Date.now();
   const outcome = await withBudget(getProtocolUsers(trace), budgetMs);
   const elapsedMs = Date.now() - askedAt;
@@ -281,6 +285,9 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   // the budget ran out on, and renders as such.
   const tried = renderTrace(trace);
   const answered = outcome === TIMED_OUT ? null : outcome;
+  // Only a failure report reads it again, later; anything else is done
+  // with it here.
+  if (answered && (answered.ok || answered.sessionExpired)) backgrounded();
 
   if (answered?.ok) {
     const fresh = answered.data;
@@ -345,7 +352,9 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
       apiEndpoint: [tried === "" ? "none dialled" : tried, probe].filter(Boolean).join("; "),
       reason:
         `${FAILURE_PREFIX[trigger]} (${detail}) after ${elapsedMs}ms; ${consequence}` +
-        (appState ? `; app showed ${appState}` : ""),
+        (appState ? `; app showed ${appState}` : "") +
+        // Read when the report is made, so it covers the probe too.
+        (backgrounded() ? "; app was in the background during it" : ""),
     });
   // The stage each address failed at, from a socket-level probe -- but
   // not before a connect, which starts the moment this returns and would

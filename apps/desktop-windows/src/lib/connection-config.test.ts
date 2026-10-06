@@ -296,6 +296,40 @@ describe("refreshConnectionConfig", () => {
     expect(reason.endsWith("; app showed connected")).toBe(true);
   });
 
+  /** iOS suspends a backgrounded app, so a refresh caught by that
+   * "times out" without the network having had a say. The report says
+   * when that happened, so those rows can be told apart. */
+  it("says when the app went to the background during the refresh", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    const doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
+    Object.assign(globalThis, { document: doc });
+    try {
+      fetchUsers.mockImplementation(async () => {
+        doc.visibilityState = "hidden";
+        doc.dispatchEvent(new Event("visibilitychange"));
+        return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+      });
+
+      await refreshConnectionConfig({ held, force: true, trigger: "resume" });
+
+      const { reason } = await firstReport<{ reason: string }>();
+      expect(reason.endsWith("; app was in the background during it")).toBe(true);
+    } finally {
+      Object.assign(globalThis, { document: undefined });
+    }
+  });
+
+  it("does not say so when it stayed in front", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: false, error: "Could not reach Neoxify. Check your internet connection." });
+
+    await refreshConnectionConfig({ held });
+
+    expect((await firstReport<{ reason: string }>()).reason).not.toContain("background");
+  });
+
   /** After a refresh nothing follows, the probe's answer -- which stage
    * each failed address failed at -- goes on the end of the trace. */
   it("adds the probe's answer to a failed resume refresh", async () => {
