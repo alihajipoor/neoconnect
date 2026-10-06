@@ -26,6 +26,7 @@ package shaper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -76,17 +77,49 @@ func execRunner(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 
+// Query runs a command and returns its output. Swapped out in tests for
+// the same reason as Runner.
+type Query func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+func execQuery(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+func noQuery(context.Context, string, ...string) ([]byte, error) {
+	return nil, errors.New("shaper: this shaper cannot query tc")
+}
+
 type Shaper struct {
 	iface string
 	// ifb is the intermediate device inbound traffic is redirected to so
 	// it can be shaped as egress. Interface names are capped at 15
 	// characters by the kernel, hence the short prefix.
-	ifb string
-	run Runner
+	ifb   string
+	run   Runner
+	query Query
 }
 
 func New(iface string) *Shaper {
-	return &Shaper{iface: iface, ifb: ifbNameFor(iface), run: execRunner}
+	return &Shaper{iface: iface, ifb: ifbNameFor(iface), run: execRunner, query: execQuery}
+}
+
+// RootPresent reports whether the qdisc EnsureRoot installs on the tunnel
+// interface is still there. After `wg-quick` restarts the interface it is
+// not, and every per-user rule went with it -- which is what the caller
+// needs to know to stop trusting its record of who is shaped.
+func (s *Shaper) RootPresent(ctx context.Context) (bool, error) {
+	out, err := s.query(ctx, "tc", "qdisc", "show", "dev", s.iface)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		// qdisc htb 1: root refcnt 2 r2q 10 default 0xffff ...
+		f := strings.Fields(line)
+		if len(f) >= 4 && f[0] == "qdisc" && f[1] == "htb" && f[2] == "1:" && f[3] == "root" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func ifbNameFor(iface string) string {
@@ -244,5 +277,11 @@ func maxUint32(a, b uint32) uint32 {
 // runner instead of tc. Exists so callers in other packages can exercise
 // their own shaping logic without a kernel or root.
 func NewWithRunner(iface string, run Runner) *Shaper {
-	return &Shaper{iface: iface, ifb: ifbNameFor(iface), run: run}
+	return &Shaper{iface: iface, ifb: ifbNameFor(iface), run: run, query: noQuery}
+}
+
+// NewWithRunners is NewWithRunner with a stand-in for reading tc's state
+// as well, for callers whose logic depends on what is already installed.
+func NewWithRunners(iface string, run Runner, query Query) *Shaper {
+	return &Shaper{iface: iface, ifb: ifbNameFor(iface), run: run, query: query}
 }

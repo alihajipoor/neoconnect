@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/neoxify/neoxify-hub/agent/internal/shaper"
 )
@@ -129,6 +130,92 @@ func TestReconnectOnADifferentAddressMovesTheLimit(t *testing.T) {
 	}
 	if got := rec.count("class del"); got == 0 {
 		t.Error("expected the rule on the old address to be removed")
+	}
+}
+
+// wgHarness shapes WireGuard against a recorder, with a stand-in for the
+// interface's root qdisc: present once EnsureRoot has installed it, gone
+// when the test says wg-quick recreated the interface.
+func wgHarness() (*Dispatcher, *tcRecorder, *bool) {
+	rec := &tcRecorder{}
+	root := false
+	run := func(ctx context.Context, name string, args ...string) error {
+		if len(args) >= 5 && args[0] == "qdisc" && args[1] == "replace" && args[3] == "wg0" && args[4] == "root" {
+			root = true
+		}
+		return rec.run(ctx, name, args...)
+	}
+	query := func(context.Context, string, ...string) ([]byte, error) {
+		if root {
+			return []byte("qdisc htb 1: root refcnt 2 r2q 10 default 0xffff direct_packets_stat 0 direct_qlen 1000\n"), nil
+		}
+		return []byte("qdisc noqueue 0: root refcnt 2\n"), nil
+	}
+	d := New()
+	d.RegisterShaper("WIREGUARD", shaper.NewWithRunners("wg0", run, query))
+	return d, rec, &root
+}
+
+func wgCap(mbps uint32) commandPayload {
+	return commandPayload{
+		Protocol: "WIREGUARD", ExternalUserID: "peer-1", DownloadMbps: mbps,
+		Credentials: map[string]string{"address": "10.66.0.5/32"},
+	}
+}
+
+func TestAReassertedCapIsNotReappliedEveryMinute(t *testing.T) {
+	// Re-asserts now carry caps, every 60 s for every capped user.
+	// Re-applying each time would take the user's rules down and put them
+	// back once a minute: a moment uncapped, queued packets dropped.
+	d, rec, _ := wgHarness()
+	for i := 0; i < 5; i++ {
+		d.applyRateLimit(context.Background(), wgCap(50))
+	}
+	if got := rec.count("class replace dev wg0"); got != 1 {
+		t.Fatalf("expected the cap applied once, got %d applications", got)
+	}
+
+	// A plan edit is still applied.
+	d.applyRateLimit(context.Background(), wgCap(20))
+	if got := rec.count("rate 20mbit"); got != 1 {
+		t.Fatalf("a changed cap was not applied: %d", got)
+	}
+}
+
+func TestCapsComeBackWhenTheInterfaceIsRecreated(t *testing.T) {
+	// `wg-quick` recreating wg0 takes every tc rule on it along. The
+	// re-assert that follows has to put them back, not trust the record.
+	d, rec, root := wgHarness()
+	d.applyRateLimit(context.Background(), wgCap(50))
+
+	*root = false
+	d.rootSeenAt["WIREGUARD"] = time.Now().Add(-time.Minute)
+	d.applyRateLimit(context.Background(), wgCap(50))
+
+	if got := rec.count("class replace dev wg0"); got != 2 {
+		t.Fatalf("expected the cap re-applied on the recreated interface, got %d applications", got)
+	}
+}
+
+func TestAChangedCapReachesAConnectedOpenVPNClient(t *testing.T) {
+	// A plan edit used to reach a connected OpenVPN client only once they
+	// reconnected: the reconcile saw them shaped at the same address and
+	// moved on.
+	d, rec := newHarness(map[string]string{"cn-1": "10.8.0.6"})
+	d.applyRateLimit(context.Background(), commandPayload{Protocol: "OPENVPN", ExternalUserID: "cn-1", DownloadMbps: 50})
+	d.ReconcileShaping(context.Background())
+
+	// The same cap again, as every re-assert now sends it: nothing to do.
+	d.applyRateLimit(context.Background(), commandPayload{Protocol: "OPENVPN", ExternalUserID: "cn-1", DownloadMbps: 50})
+	d.ReconcileShaping(context.Background())
+	if got := rec.count("class replace"); got != 1 {
+		t.Fatalf("an unchanged cap was re-applied: %d applications", got)
+	}
+
+	d.applyRateLimit(context.Background(), commandPayload{Protocol: "OPENVPN", ExternalUserID: "cn-1", DownloadMbps: 20})
+	d.ReconcileShaping(context.Background())
+	if got := rec.count("rate 20mbit"); got != 1 {
+		t.Fatalf("the changed cap never reached the connected client: %d", got)
 	}
 }
 
