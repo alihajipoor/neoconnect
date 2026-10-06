@@ -337,6 +337,20 @@ enum Noticed {
     ByStatus,
 }
 
+/// "XRAY_TROJAN, exit code 1": the protocol, and the number the source
+/// gave for the ending when it gave one -- named for who gave it.
+fn describe_ending(protocol: &str, ended: Option<&engine_watch::Ended>) -> String {
+    let code_is = match protocol {
+        "IKEV2" => "RAS error",
+        "WIREGUARD" => "service exit code",
+        _ => "exit code",
+    };
+    match ended.and_then(|e| e.detail) {
+        Some(code) => format!("{protocol}, {code_is} {code}"),
+        None => protocol.to_string(),
+    }
+}
+
 /// How long a WireGuard handshake reading is reused.
 ///
 /// The app now asks for status every second while a tunnel is up, to
@@ -443,6 +457,10 @@ pub struct Engines {
     /// is skipped for a generation already swept: a Disconnect or the app
     /// going away that reached the owning thread first has done it.
     swept_after: u64,
+    /// The generation whose drop has already been written to
+    /// `cleanup.log`, so the line is written once whichever teardown
+    /// ends the session.
+    drop_logged: u64,
     /// How many sessions have been ended, by any route. For the tests
     /// that prove a dead engine racing a Disconnect is torn down once.
     #[cfg(test)]
@@ -468,6 +486,7 @@ impl Engines {
             handshake_reading: None,
             wireguard_scm: Arc::new(wireguard::scm_view),
             swept_after: 0,
+            drop_logged: 0,
             #[cfg(test)]
             sessions_ended: 0,
             #[cfg(test)]
@@ -807,12 +826,6 @@ impl Engines {
     ) -> Result<(), String> {
         profile.validate().map_err(|e| e.to_string())?;
 
-        // A drop recorded from an earlier session stops being the answer
-        // the moment a new connect begins. Left standing, a status
-        // answered from the ledger while this connect holds the owning
-        // thread would report the old tunnel's death over the new one.
-        self.ledger.forget();
-
         // Asked before the teardown, not only after it.
         //
         // The `disconnect` below is the clear-the-decks pass every
@@ -827,7 +840,24 @@ impl Engines {
             return Err(ABANDONED.to_string());
         }
 
-        self.disconnect()?;
+        let cleared = self.disconnect();
+        // A drop recorded from an earlier session stops being the answer
+        // once this connect is past clearing the decks. Left standing, a
+        // status answered from the ledger while the connect holds the
+        // owning thread would report the old tunnel's death over the new
+        // one.
+        //
+        // After the `disconnect` above rather than before it: that is
+        // the teardown which ends a dead session whose own teardown had
+        // not run yet, and it is the record that lets it say so in
+        // `cleanup.log` (see `end_session`). Until the new engine starts
+        // there is no tunnel, so the record answers truthfully meanwhile.
+        //
+        // And whether or not that pass succeeded. One that failed may
+        // have left something of the old tunnel up, and a record saying
+        // "no tunnel" is then exactly the answer that must not stand.
+        self.ledger.forget();
+        cleared?;
         // Belt and braces with `disconnect`'s own reset: a connect that
         // fails part way must not leave the previous session's DNS
         // complaint attached to nothing.
@@ -1373,6 +1403,8 @@ impl Engines {
         // certain either way: both callers have asked the engine itself.
         self.ledger.record(generation, None, Instant::now(), true);
         let ended = self.ledger.ended_without_successor().filter(|e| e.generation == generation);
+        // This function writes the log line; `end_session` must not.
+        self.drop_logged = generation;
 
         let engine = self.end_session();
         let protocol = engine.as_ref().map_or("unknown", Active::protocol);
@@ -1402,18 +1434,9 @@ impl Engines {
         let dns = dns::clear_registry_only();
         self.forget_dns_state();
 
-        // What the number is depends on who gave it.
-        let code_is = match protocol {
-            "IKEV2" => "RAS error",
-            "WIREGUARD" => "service exit code",
-            _ => "exit code",
-        };
         let mut detail = format!(
-            "{protocol}{}, noticed by {}",
-            match ended.as_ref().and_then(|e| e.detail) {
-                Some(code) => format!(", {code_is} {code}"),
-                None => String::new(),
-            },
+            "{}, noticed by {}",
+            describe_ending(protocol, ended.as_ref()),
             match noticed {
                 Noticed::ByWatch => "the engine watch",
                 Noticed::ByStatus => "a status poll",
@@ -1447,6 +1470,27 @@ impl Engines {
         // watch here means its thread is not left waiting on a process
         // nobody cares about any more.
         drop(session.watch.take());
+        // A drop on record that its own teardown never got to: a
+        // Disconnect, a connect clearing the decks, or the app going
+        // away reached this thread between the watch's report and phase
+        // one, and phase one then found the slot empty and did nothing.
+        // The session still ended on its own, and support reads this log
+        // to find out why a tunnel went -- so it is written here, the one
+        // place every route out of the slot passes. `tear_down_dead_session`
+        // writes its own fuller line and marks the generation first.
+        if self.drop_logged != session.generation {
+            if let Some(ended) = self.ledger.ended_without_successor().filter(|e| e.generation == session.generation) {
+                self.drop_logged = session.generation;
+                crate::cleanup_log::note(
+                    "the tunnel engine ended on its own",
+                    &format!(
+                        "{}, noticed by the engine watch{}; the session was then ended by another teardown -- a Disconnect, a connect or the app going away -- before the watch's own ran",
+                        describe_ending(session.engine.protocol(), Some(&ended)),
+                        if ended.confirmed { "" } else { " (not confirmed: the engine was not asked again)" },
+                    ),
+                );
+            }
+        }
         self.handshake_reading = None;
         #[cfg(test)]
         {
@@ -3342,5 +3386,78 @@ mod helper_tests {
         assert_eq!(engines.thorough_passes(), 1, "phase two did not run");
         engines.finish_dead_session(g);
         assert_eq!(engines.thorough_passes(), 1, "phase two ran twice");
+    }
+
+    /// A drop whose own teardown never ran, because a Disconnect reached
+    /// the owning thread first, is still in `cleanup.log` -- once.
+    #[test]
+    fn a_drop_a_disconnect_takes_over_is_still_logged_once() {
+        const LABEL: &str = "TEST_DROP_TAKEN_BY_A_DISCONNECT";
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_session(LABEL, engine_stand_in());
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || engines.ledger().confirmed_drop().is_some()));
+
+        let _ = crate::lifecycle::teardown::hard_stop(&mut engines);
+        assert!(!engines.has_session());
+        assert!(!engines.end_dead_session(g), "phase one found the slot empty");
+        let _ = engines.disconnect();
+
+        let lines = crate::cleanup_log::noted_containing(LABEL);
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].contains("| the tunnel engine ended on its own |"), "{}", lines[0]);
+        assert!(lines[0].contains(&format!("{LABEL}, exit code 1")), "{}", lines[0]);
+        assert!(lines[0].contains("ended by another teardown"), "{}", lines[0]);
+    }
+
+    /// The same for a connect, which used to forget the drop before its
+    /// clear-the-decks teardown could see it.
+    #[test]
+    fn a_drop_a_connect_takes_over_is_still_logged() {
+        const LABEL: &str = "TEST_DROP_TAKEN_BY_A_CONNECT";
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_session(LABEL, engine_stand_in());
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || engines.ledger().confirmed_drop().is_some()));
+
+        let profile = ConnectProfile::Wireguard(neoconnect_ipc::WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        // `connect_inner` with a token of its own: `connect` reads the
+        // process-wide published one, which other tests running beside
+        // this one adopt and cancel.
+        let limits = crate::lifecycle::budget::Limits::new(
+            crate::lifecycle::cancel::CancelToken::new(),
+            crate::lifecycle::budget::CONNECT_BUDGET.limit,
+        );
+        assert!(engines.connect_inner(&profile, &[], &limits).is_err(), "there is no wireguard.exe to connect with here");
+        assert!(!engines.end_dead_session(g));
+        assert!(engines.ledger().ended_without_successor().is_none(), "the connect left the old drop answering");
+
+        let lines = crate::cleanup_log::noted_containing(LABEL);
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].contains("ended by another teardown"), "{}", lines[0]);
+    }
+
+    /// And a drop torn down by its own phase one is logged once, with the
+    /// fuller line, not a second time by the teardown inside it.
+    #[test]
+    fn a_drop_torn_down_by_its_own_phase_one_is_logged_once() {
+        const LABEL: &str = "TEST_DROP_OWN_TEARDOWN";
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_session(LABEL, engine_stand_in());
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || engines.ledger().confirmed_drop().is_some()));
+        assert!(engines.end_dead_session(g));
+        engines.finish_dead_session(g);
+
+        let lines = crate::cleanup_log::noted_containing(LABEL);
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].contains(&format!("{LABEL}, exit code 1, noticed by the engine watch; routes, filters")), "{}", lines[0]);
     }
 }

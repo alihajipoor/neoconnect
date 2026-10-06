@@ -68,7 +68,29 @@ pub fn note(operation: &str, detail: &str) {
 pub fn record(operation: &str, detail: &str) {
     let mut line = String::new();
     let _ = writeln!(line, "{} | {operation} | {detail}", now());
+    #[cfg(test)]
+    NOTED.lock().unwrap_or_else(|e| e.into_inner()).push(line.trim_end().to_string());
     append(&line);
+}
+
+/// Every entry this test process has recorded.
+///
+/// For the tests that prove an entry is written, and written once. The
+/// file itself cannot answer that: it is the machine's, every earlier run
+/// has appended to it, and tests running beside each other share it.
+#[cfg(test)]
+static NOTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The entries this test process has recorded that contain `needle`.
+#[cfg(test)]
+pub fn noted_containing(needle: &str) -> Vec<String> {
+    NOTED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|line| line.contains(needle))
+        .cloned()
+        .collect()
 }
 
 /// The last `lines` entries, oldest first, for the diagnostics snapshot.
