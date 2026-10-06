@@ -2327,18 +2327,47 @@ install_xray() {
   fi
 
   local template="$SCRIPT_DIR/assets/xray-config.json.template"
-  # Worded for the role, not for two of the protocols it affects. The old
-  # wording named WireGuard/OpenVPN only, which reads as "no" to anyone
-  # building an Xray-entry relay -- and that is the common case, since
-  # REALITY is the transport an Iran relay is actually reached on. ir1
-  # was installed that way on 2026-08-13 and could not carry a route.
-  # The base template now carries RoutingService so that answer is no
-  # longer fatal, but the question should still be answerable correctly.
-  echo "A RELAY node is one customers connect to so it can forward them on to an exit node elsewhere (typically an Iran-reachable box fronting servers abroad). This is about the node's role -- answer yes for any relay, whichever protocol customers arrive on."
-  read -r -p "Is this a RELAY node? [y/N]: " is_relay
-  if [[ "${is_relay,,}" == "y" ]]; then
+  # The role decides the template, and when the caller knows the role it
+  # is not asked again. Both entry points know it: action_install_agent
+  # from its role question, action_engines_agent from the panel. Asking
+  # anyway let the two answers disagree, and the question defaulted to No
+  # -- so pressing Enter on a relay wrote the base template, whose default
+  # outbound is freedom, and relayed customers matching no route rule
+  # left from the relay itself. Only a caller that knows nothing is asked,
+  # and then the default follows what this box already runs.
+  local is_relay="${node_is_relay:-}"
+  if [[ -z "$is_relay" ]]; then
+    local relay_default="n" relay_prompt="[y/N]"
+    if [[ -f "$config_path" ]] && jq -e '.inbounds[]? | select(.tag == "relay-tun-in")' "$config_path" >/dev/null 2>&1; then
+      relay_default="y"
+      relay_prompt="[Y/n]"
+    fi
+    # Worded for the role, not for two of the protocols it affects. The
+    # old wording named WireGuard/OpenVPN only, which reads as "no" to
+    # anyone building an Xray-entry relay -- and that is the common case,
+    # since REALITY is the transport an Iran relay is actually reached on.
+    # ir1 was installed that way on 2026-08-13 and could not carry a route.
+    echo "A RELAY node is one customers connect to so it can forward them on to an exit node elsewhere (typically an Iran-reachable box fronting servers abroad). This is about the node's role -- answer yes for any relay, whichever protocol customers arrive on."
+    read -r -p "Is this a RELAY node? $relay_prompt: " is_relay
+    is_relay="${is_relay:-$relay_default}"
+    is_relay="${is_relay,,}"
+  fi
+  if [[ "$is_relay" == "y" ]]; then
     template="$SCRIPT_DIR/assets/xray-relay-config.json.template"
-    echo "Using the relay config variant (adds a dormant tun bridge -- see docs/architecture.md, \"Multi-Hop Relay Chaining\"). Routes are wired up from the panel/API, not here."
+    echo "Using the relay config variant (a dormant tun bridge, and a blackhole as the default outbound -- see docs/architecture.md, \"Multi-Hop Relay Chaining\"). Routes are wired up from the panel/API, not here."
+  fi
+
+  # Kept before it is overwritten. This function is run against nodes
+  # that are serving customers, and the template is not everything a
+  # live config holds: ir1 carries hand-added per-exit inbounds (and,
+  # before the template caught up, its own blackhole), and a plain
+  # re-render deleted them with no copy left. What the template does not
+  # own is carried over from this copy below.
+  local config_backup=""
+  if [[ -f "$config_path" ]]; then
+    config_backup="$config_path.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$config_path" "$config_backup"
+    echo "  Previous config kept at $config_backup"
   fi
 
   sed \
@@ -2435,7 +2464,99 @@ PY
 }
 EOF
 
-  systemctl restart xray
+  # Carry over what the previous config had and the template does not
+  # own: inbounds under any other tag, outbounds under any other tag
+  # (appended, so the template's first outbound stays the default), and
+  # path fallbacks on the template's TLS listeners that lead to one of
+  # those carried-over inbounds. Routing rules are only reported -- one
+  # pointing at something that no longer exists would stop Xray starting.
+  if [[ -n "$config_backup" ]]; then
+    XRAY_BACKUP="$config_backup" XRAY_CONFIG="$config_path" python3 - <<'PY' || echo "WARNING: could not carry the previous config's extra inbounds over -- compare $config_backup with $config_path by hand." >&2
+import json
+import os
+
+TEMPLATE_TAGS = {"vless-in", "trojan-in", "vless-tls-in", "vless-ws-in", "shadowsocks-in", "api-in", "relay-tun-in"}
+with open(os.environ["XRAY_BACKUP"]) as handle:
+    old = json.load(handle)
+path = os.environ["XRAY_CONFIG"]
+with open(path) as handle:
+    new = json.load(handle)
+
+new_inbounds = new.setdefault("inbounds", [])
+present = {i.get("tag") for i in new_inbounds}
+# Not one that would collide on a port with what was just configured:
+# `xray run -test` does not bind, so the collision would first show as an
+# Xray that cannot start.
+taken = {str(i.get("port")) for i in new_inbounds}
+kept, clashing = [], []
+for i in old.get("inbounds", []):
+    if i.get("tag") in TEMPLATE_TAGS or i.get("tag") in present:
+        continue
+    (clashing if str(i.get("port")) in taken else kept).append(i)
+new_inbounds.extend(kept)
+for i in clashing:
+    print("  NOT carried over, its port %s is now taken -- inbound %s (it is in the backup)" % (i.get("port"), i.get("tag")))
+
+new_outbounds = new.setdefault("outbounds", [])
+present_out = {o.get("tag") for o in new_outbounds}
+kept_out = [o for o in old.get("outbounds", []) if o.get("tag") not in present_out]
+new_outbounds.extend(kept_out)
+
+kept_ports = {str(i.get("port")) for i in kept}
+old_by_tag = {i.get("tag"): i for i in old.get("inbounds", [])}
+kept_fallbacks = []
+for inbound in new_inbounds:
+    tag = inbound.get("tag")
+    if tag not in TEMPLATE_TAGS or tag not in old_by_tag:
+        continue
+    fallbacks = inbound.get("settings", {}).get("fallbacks")
+    if fallbacks is None:
+        continue
+    paths = {f.get("path") for f in fallbacks}
+    for f in old_by_tag[tag].get("settings", {}).get("fallbacks") or []:
+        dest = str(f.get("dest", "")).rsplit(":", 1)[-1]
+        if f.get("path") and f.get("path") not in paths and dest in kept_ports:
+            fallbacks.append(f)
+            kept_fallbacks.append("%s %s" % (tag, f.get("path")))
+
+with open(path, "w") as handle:
+    json.dump(new, handle, indent=2)
+
+if kept:
+    print("  Kept from the previous config: inbound(s) %s" % ", ".join(str(i.get("tag")) for i in kept))
+if kept_out:
+    print("  Kept from the previous config: outbound(s) %s" % ", ".join(str(o.get("tag")) for o in kept_out))
+if kept_fallbacks:
+    print("  Kept from the previous config: fallback(s) %s" % ", ".join(kept_fallbacks))
+new_rules = new.get("routing", {}).get("rules", [])
+for rule in old.get("routing", {}).get("rules", []):
+    if rule not in new_rules:
+        print("  NOT carried over, re-add it by hand if it is still wanted -- routing rule: %s" % json.dumps(rule))
+PY
+  fi
+
+  # Tested before the restart, and the previous config put back if it
+  # fails. A config Xray refuses is every protocol on the node down at
+  # once, and a re-run of this function is exactly when one gets written.
+  if ! /usr/local/bin/xray run -test -config "$config_path" >/dev/null 2>&1; then
+    echo "ERROR: Xray refuses the new config:" >&2
+    /usr/local/bin/xray run -test -config "$config_path" 2>&1 | tail -5 >&2 || true
+    if [[ -n "$config_backup" ]]; then
+      cp -a "$config_backup" "$config_path"
+      echo "  The previous config is back in place and Xray was not restarted." >&2
+    fi
+    return 1
+  fi
+
+  # The verified restart where it exists (installed with the TLS
+  # certificate tooling): it compares the inbounds running before and
+  # after and says which did not come back, which a plain restart never
+  # does.
+  if [[ -x /usr/local/bin/neoxify-xray-restart ]]; then
+    /usr/local/bin/neoxify-xray-restart || echo "WARNING: see above -- an inbound that was running before the restart is not running now." >&2
+  else
+    systemctl restart xray
+  fi
 
   local config_id params
   if [[ "$reality_is_new" == "y" ]]; then
