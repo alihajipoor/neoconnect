@@ -233,6 +233,36 @@ fetch_agent_binary() {
 
 action_install_agent() {
   require_root
+
+  # Not over an enrolled node. This is menu option 1 on every agent box,
+  # and the agent menu only exists on one that is already enrolled -- so
+  # "Install Neoxify Agent", picked to repair a node, used to register a
+  # NEW node in the panel, overwrite agent.json with its identity, and
+  # abandon the old row with every config, credential and route on it:
+  # never re-asserted again, its usage unmetered under an id the panel
+  # does not know, and Xray restarted with no users in it. install.sh
+  # already refused to reach this function that way through the role
+  # question; the menu entry was the way round it. Option 6 keeps
+  # agent.json by default, so this is also how a kept identity comes back.
+  if [[ -f /etc/neoxify/agent.json ]]; then
+    local existing_id keep_identity
+    existing_id="$(jq -r '.nodeId // empty' /etc/neoxify/agent.json 2>/dev/null || true)"
+    echo "This box is already enrolled as node ${existing_id:-<unknown>}."
+    echo "Installing again would register a NEW node in the panel and abandon this one:"
+    echo "its configs, its customers' credentials and its routes."
+    echo "Use 2 to update the agent, 4 to re-enroll, 5 to add or reconfigure an engine."
+    read -r -p "Reinstall only the agent binary and service, keeping this identity? [y/N]: " keep_identity
+    if [[ "${keep_identity,,}" == "y" ]]; then
+      detect_os
+      install_base_deps
+      fetch_agent_binary
+      install_agentd_unit
+      start_agentd
+      echo "Agent reinstalled; still node ${existing_id:-<unknown>}."
+    fi
+    return 0
+  fi
+
   detect_os
   install_base_deps
   fetch_agent_binary
