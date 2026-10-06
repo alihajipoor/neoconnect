@@ -2994,3 +2994,50 @@ IKEv2 profile set as always-on could be redialled by Android after a
 displaced phone disconnects, without a claim -- unexamined. PC-then-
 phone, takeover, a displaced phone, and a phone in the background with
 the screen off are rig work.
+
+## 2026-10-06 — device slots, client review fixes (branch `claude/device-slots-mobile`)
+
+Five review findings against the shared slot session, all confirmed in
+the code before fixing. Both clients take them, since the session is
+shared.
+
+- **Takeover through the tunnel** (the serious one). Where the API
+  answers only through the tunnel, the claim before dialling never
+  arrives; the takeover the customer asked for was dropped with it, and
+  the claim sent through the tunnel was refused in favour of the very
+  device being replaced. "Use on this device instead" could never work
+  there, and each press ran a full ladder. The takeover is now kept
+  until a claim naming it is answered: the late claim, the poll's retry
+  and the check before an automatic reconnect all carry it, and a late
+  429 `TAKEOVER_LIMIT` stops the session rather than being ignored.
+- **Release racing a renewal.** A renewal still out when Disconnect is
+  pressed could be processed after the release and re-grant the slot
+  (renew gives a lapsed slot back when there is room), so the other
+  device was told "in use on Windows PC" about a PC that was off. The
+  session now releases again once that request settles, if its answer
+  was a counted grant or it got none -- never once a new connect has
+  started, because the server knows the device, not the connect. A
+  claim also waits for a release still on the wire (at most 1.5 s, only
+  straight after a Disconnect). This also covers stop pressed during the
+  claim before dialling.
+- **`enforced: false` on a plan with a limit** is a new standing,
+  `uncounted`, claimed again every renewal until a grant is counted and
+  checked before an automatic reconnect. Only a null limit is treated
+  as unlimited now.
+- **Fresh means confirmed.** An unanswered renewal used to count as
+  fresh. The session now keeps when the server last *confirmed* the
+  slot; a held slot unconfirmed for `staleAfterSec` (read from the grant
+  now, 90 s by default) is checked before an automatic reconnect.
+- **The card outlives the dashboard.** A late refusal landing while the
+  dashboard was in Settings tore the tunnel down and lost the card. It
+  now lives in a store beside the slot (`slotNoticeStore`), read with
+  `useSyncExternalStore`, and is cleared on sign-out.
+
+**PROVEN (unit tests and typecheck only):** desktop JS 37 files / 550
+tests (526 before), desktop `tsc` clean; mobile JS 5 / 60 (59 before),
+mobile `tsc` clean, its bundle builds. 16 of the 22 new session tests
+fail against the previous session code; the other six guard the new
+behaviour's limits. **UNVERIFIED:** everything else, as before. The
+dashboards' use of the store has not been rendered. Nothing has reached
+a real backend, a filtered network or a phone; the takeover through the
+tunnel is exactly the case that needs the rig and a censored path.
