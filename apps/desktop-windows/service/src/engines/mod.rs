@@ -1745,11 +1745,13 @@ impl Engines {
                 } else if ikev2::is_connected() {
                     Verdict::Reported(true, Some("IKEV2".to_string()), TunnelHealth::Unknown)
                 } else {
-                    // Nothing tracked and nothing running. Still routed
-                    // through `Dead` rather than answered here, because
-                    // an untracked slot is exactly the shape the field
-                    // bug left behind, and a redirect loop may well be
-                    // running underneath it. Stopping one that is not
+                    // Nothing tracked and nothing running. Not answered
+                    // here: `NothingTracked` below still takes the idle
+                    // steps -- Custom mode stopped, the IPv6 block
+                    // released, the NRPT rule cleared, the janitor run --
+                    // because an untracked slot is exactly the shape the
+                    // field bug left behind, and a redirect loop may well
+                    // be running underneath it. Stopping one that is not
                     // there costs nothing.
                     Verdict::NothingTracked
                 }
