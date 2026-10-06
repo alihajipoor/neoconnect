@@ -470,11 +470,25 @@ describe("the liveness wiring the pure functions cannot check", () => {
     expect(check).toContain("if (!status.connected && (disturbed || !noTunnelVerified(status))) {");
   });
 
-  it("says 'connection lost' in one place, through the stamp", () => {
+  it("makes a drop outrank every answer still in flight", () => {
     expect(dropStart).toBeGreaterThan(0);
     expect(publishDrop).toContain('publishObserved(generation, "disconnected")');
+    expect(publishDrop).toContain("intentRef.current = supersedeAnswers(intentRef.current);");
     expect(publishDrop).toContain("setTunnelDropped(true)");
+    // Only there: one place says "VPN connection lost".
     expect(dashboard.split("setTunnelDropped(true)").length).toBe(2);
+  });
+
+  it("drops a health check's reading once it has been overtaken", () => {
+    // The check reads status, then spends seconds on egress or the
+    // probe. If the tunnel was found gone meanwhile, nothing it measured
+    // may reach the screen or the per-ISP tags.
+    const measured = check.indexOf("verdict = fullTunnelPollState(fromStatus, egress);");
+    const guard = check.indexOf("if (!isCurrent(intentRef.current, generation)) return;", measured);
+    const tags = check.indexOf("sessionTrackerRef.current.healthy(");
+    expect(measured).toBeGreaterThan(0);
+    expect(guard).toBeGreaterThan(measured);
+    expect(guard).toBeLessThan(tags);
   });
 
   it("takes the headline from the table rather than re-deriving it", () => {

@@ -68,6 +68,7 @@ import {
   isCurrent,
   phaseFor,
   pressFor,
+  supersedeAnswers,
   type IntentState,
   type PressAction,
 } from "../lib/connect-intent";
@@ -649,10 +650,17 @@ export function Dashboard({
   /** Puts "VPN connection lost" on screen -- the one place it is said --
    * once `droppedFromPoll` has agreed that it is true.
    *
+   * Then it makes every answer still in flight old news. The health
+   * check takes its status first and its egress or probe reading seconds
+   * later, so one that asked before the engine died would otherwise land
+   * its verdict -- "unverified", "degraded", even "connected" -- on top
+   * of this, about a tunnel that is gone. See `supersedeAnswers`.
+   *
    * Returns whether it was shown; it is not when a press has overtaken
    * the answer it rests on. */
   function publishDrop(generation: number): boolean {
     if (publishObserved(generation, "disconnected") === null) return false;
+    intentRef.current = supersedeAnswers(intentRef.current);
     setTunnelDropped(true);
     setConnectedAt(null);
     strikesRef.current = 0;
@@ -1167,9 +1175,17 @@ export function Dashboard({
         verdict = customModePollState(fromStatus, carried);
       } else {
         const egress = await verifyEgress(baselineIpRef.current);
+        if (!isCurrent(intentRef.current, generation)) return;
         if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
         verdict = fullTunnelPollState(fromStatus, egress);
       }
+
+      // Overtaken while it measured -- by a press, or by the liveness
+      // poll finding the tunnel gone (`publishDrop`). Either way what
+      // follows is about a tunnel the screen no longer describes, and a
+      // reading taken through a tunnel that has since ended must not
+      // count towards the per-ISP tags.
+      if (!isCurrent(intentRef.current, generation)) return;
 
       // "It kept working", for the per-ISP tags: a proven check advances
       // the session clock, a failed one restarts it. `unverified` does
