@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   createDeviceSlotSession,
@@ -1145,5 +1146,29 @@ describe("what a dashboard does when the slot stops it", () => {
       subscriptionStatus: null,
       inactive: false,
     });
+  });
+});
+
+/** Source assertions, for the reason `connect-intent.test.ts` gives: the
+ * dashboard needs a Tauri runtime, a helper service and a real network,
+ * so nothing here can watch what it publishes. What can be pinned is
+ * that its slot stops go through `slotTeardown`. */
+describe("the wiring the pure functions cannot check", () => {
+  const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+
+  /** An automatic pass stopped by the device limit tore the tunnel down
+   * once, outside `slotTeardown`: a tunnel that outlived the wait was
+   * published raw, the health poll could turn it green over the refusal,
+   * the card stayed hidden and nothing tried again. */
+  it("hands an automatic pass's slot stop to the owed teardown", () => {
+    const start = dashboard.indexOf("if (stoppedBySlot !== null) {");
+    expect(start).toBeGreaterThan(0);
+    const end = dashboard.indexOf("// Whatever is up comes down first", start);
+    expect(end).toBeGreaterThan(start);
+    const stop = dashboard.slice(start, end);
+
+    expect(stop).toMatch(
+      /if \(options\.automatic[^{]*\{[^}]*await slotTeardown\.begin\(tearDownForSlotOnce\);[^}]*return "refused";/,
+    );
   });
 });

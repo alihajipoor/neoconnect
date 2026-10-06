@@ -1631,6 +1631,25 @@ export function Dashboard({
         // that is not this device's leaves it nothing to stay up for.
         // From the button nothing is up, so there is nothing to take
         // down -- and nothing was dialled either way.
+        //
+        // That teardown is the device limit's, the same one a stop while
+        // connected owes (`endForSlot`), and it goes through the same
+        // place: owed until the service says the tunnel is down, a tunnel
+        // still up meanwhile shown as still disconnecting -- never as the
+        // raw "connected" the health poll would then pick up and turn
+        // green over a refusal -- and tried again on the recheck. Taken
+        // down here once and left, a tunnel that outlived the wait sat
+        // there with the card hidden (it waits for "down") and nothing
+        // trying again: `slotLostRef` keeps the ladder away, by design.
+        //
+        // Not for a pass the customer cancelled or a sign-out overtook --
+        // each runs its own teardown -- nor for one a newer pass has
+        // replaced, whose intent the attempt would stamp out.
+        if (options.automatic && stillWanted && ladderGenerationRef.current === generation) {
+          endIntent(intent);
+          await slotTeardown.begin(tearDownForSlotOnce);
+          return "refused";
+        }
         if (options.automatic) await serviceDisconnect().catch(() => undefined);
         if (ladderGenerationRef.current !== generation) return "refused";
         endIntent(intent);
