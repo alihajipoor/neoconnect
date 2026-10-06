@@ -209,3 +209,27 @@ func TestEmptyOverrideDoesNotBlankTheServerName(t *testing.T) {
 		t.Fatal("server name was blanked")
 	}
 }
+
+// A stream that fails straight away -- a rejected Hello, a panel that is
+// down -- backs off to maxBackoff. The old loop waited one second every
+// time, forever.
+func TestImmediateFailuresBackOff(t *testing.T) {
+	want := []time.Duration{1, 2, 4, 8, 16, 30, 30}
+	backoff := initialBackoff
+	for i, w := range want {
+		var wait time.Duration
+		wait, backoff = nextBackoff(backoff, 200*time.Millisecond)
+		if wait != w*time.Second {
+			t.Fatalf("failure %d: waited %s, want %s", i+1, wait, w*time.Second)
+		}
+	}
+}
+
+// A stream that stayed up was working; when it drops, the agent comes
+// back quickly rather than paying for failures from long ago.
+func TestAStreamThatLivedResetsTheBackoff(t *testing.T) {
+	wait, next := nextBackoff(maxBackoff, 10*time.Minute)
+	if wait != initialBackoff || next != 2*initialBackoff {
+		t.Fatalf("after a long-lived stream: waited %s then %s, want %s then %s", wait, next, initialBackoff, 2*initialBackoff)
+	}
+}

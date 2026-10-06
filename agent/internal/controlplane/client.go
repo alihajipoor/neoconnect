@@ -90,23 +90,45 @@ func Run(ctx context.Context, cfg *config.Config, dispatcher *dispatch.Dispatche
 			return ctx.Err()
 		}
 
-		if err := runStream(ctx, client, cfg.NodeID, signingKey, dispatcher, prober); err != nil && ctx.Err() == nil {
-			log.Printf("agent sync stream error: %v (retrying in %s)", err, backoff)
+		started := time.Now()
+		err := runStream(ctx, client, cfg.NodeID, signingKey, dispatcher, prober)
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		var wait time.Duration
+		wait, backoff = nextBackoff(backoff, time.Since(started))
+		log.Printf("agent sync stream error: %v (retrying in %s)", err, wait)
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(backoff):
-		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-		if err == nil {
-			backoff = initialBackoff // clean disconnect (server closed stream): reset backoff
+		case <-time.After(wait):
 		}
 	}
+}
+
+// nextBackoff returns how long to wait before redialling after a stream
+// that stayed up for `lived`, and the backoff to carry into the next
+// failure.
+//
+// The loop used to reset to the floor when `err == nil`, but that tested
+// the function's own err, always nil by then, not runStream's -- so every
+// wait was one second, maxBackoff was dead code, and a node whose Hello
+// was rejected, or whose panel was down, redialled and logged once a
+// second forever. Testing runStream's error would not have worked either:
+// it never returns nil, even for a stream the server closed cleanly
+// ("receive: EOF"). So the reset is decided by how long the stream
+// stayed up: one that lasted at least maxBackoff was working, and its end
+// is a fresh failure that deserves a quick retry.
+func nextBackoff(cur, lived time.Duration) (wait, next time.Duration) {
+	if lived >= maxBackoff {
+		cur = initialBackoff
+	}
+	next = cur * 2
+	if next > maxBackoff {
+		next = maxBackoff
+	}
+	return cur, next
 }
 
 // dialTarget derives the gRPC target and transport security from the
