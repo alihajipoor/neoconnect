@@ -177,11 +177,14 @@ func (d *Dispatcher) CollectStats(ctx context.Context) ([]common.UsageDelta, []e
 // SessionReporter is implemented by provisioners that can say how many
 // distinct places each user is connected from.
 //
-// Optional on purpose: only Xray both needs this and can answer it. The
-// other engines are already self-limiting -- OpenVPN replaces a session
-// when the same certificate reconnects, and a WireGuard peer holds one
-// endpoint at a time -- so a shared credential doesn't buy real
-// concurrency there and there's nothing to report.
+// Optional on purpose: an engine that cannot measure reports nothing,
+// which the backend reads as unknown rather than zero. WireGuard and
+// OpenVPN were once self-limiting -- devices sharing one key or
+// certificate fight over it -- but since the backend gives each
+// signed-in device credentials of its own (docs/per-device-credentials.md)
+// two devices no longer share one, and the plan's device limit is judged
+// per device in the backend (ConcurrencyService, which also discounts
+// WireGuard's three-minute handshake tail) and by device slots.
 type SessionReporter interface {
 	SessionCounts() (map[string]int, error)
 }
