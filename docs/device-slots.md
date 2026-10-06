@@ -40,7 +40,8 @@ Owner decisions, 2026-10-06:
 A slot whose device has neither renewed nor carried traffic for
 `staleAfterSec` (90 s) is free: the next claim gets it without asking.
 A phone in the background that cannot renew keeps its slot through its
-tunnel's own traffic (WireGuard and OpenVPN keepalives are enough).
+tunnel's own traffic (WireGuard and OpenVPN keepalives are enough), for
+as long as the traffic lasts -- days, if the app is never opened.
 
 **The control plane is never a precondition for connecting.** An app
 that cannot reach the API -- in Iran, often -- dials anyway and claims

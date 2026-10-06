@@ -39,6 +39,13 @@ const TAKEOVER_WINDOW_MS = 60 * 60_000;
 const TAKEOVERS_LOGGED_PAST = 10;
 const TAKEOVERS_REFUSED_PAST = 30;
 
+/** How long a subscription's slots outlive the last write to them --
+ * a claim, a renewal, or (keepAlive) a report of its devices carrying
+ * traffic. Housekeeping: whether a holder is still using its slot is
+ * decided by STALE_MS, never by this. But it must not run out under a
+ * holder that is in use without renewing -- a phone's always-on tunnel
+ * nobody opens the app on -- or the next device would be let in with no
+ * refusal and the phone told later it had been displaced. */
 const SLOT_TTL_MS = 24 * 60 * 60_000;
 const DISPLACED_TTL_MS = 60 * 60_000;
 
@@ -370,6 +377,21 @@ export class DeviceSlotsService {
    * account. */
   async releaseCustomer(customerId: string): Promise<void> {
     await this.forEachSubscription(customerId, (id) => this.releaseSubscription(id));
+  }
+
+  /** Called for every report of a subscription's devices carrying
+   * traffic: keeps its slots from expiring while they are in use. A
+   * holder that renews keeps them alive by itself; one that only carries
+   * traffic -- the mobile apps do not renew in the background -- would
+   * otherwise lose its slot SLOT_TTL_MS after its last renewal, however
+   * busy its tunnel. Never throws. */
+  async keepAlive(subscriptionId: string): Promise<void> {
+    if (deviceSlotsMode() === "off") return;
+    try {
+      await this.store.expire(slotsKey(subscriptionId), SLOT_TTL_MS);
+    } catch (err) {
+      this.logger.warn(`Could not keep the slots of subscription ${subscriptionId}: ${(err as Error).message}`);
+    }
   }
 
   /** For the backstop. Empty when slots are off. */

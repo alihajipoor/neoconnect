@@ -87,7 +87,7 @@ function build(opts: {
     displaced: opts.slots?.displaced ?? new Map(),
     credit: opts.slots?.credit ?? new Map(),
   };
-  const slots = { state: jest.fn(async () => slotState) };
+  const slots = { state: jest.fn(async () => slotState), keepAlive: jest.fn(async () => undefined) };
   const service = new ConcurrencyService(
     prisma as never,
     agentGateway as never,

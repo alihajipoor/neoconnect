@@ -168,6 +168,8 @@ export class ConcurrencyService {
 
     for (const [subscriptionId, seen] of bySubscription) {
       await this.presence.record(subscriptionId, seen, now);
+      // A device in use keeps its slot whether or not it renews.
+      await this.slots.keepAlive(subscriptionId);
       await this.evaluate(subscriptionId, now);
     }
   }
