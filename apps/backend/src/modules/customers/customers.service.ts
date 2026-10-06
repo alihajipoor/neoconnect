@@ -161,6 +161,11 @@ export class CustomersService {
         }`,
       );
     }
+    // And their device slots, as the customer's own password change and
+    // reset do: a device just signed out must not go on showing as "in
+    // use" to the next device that connects. Every device here -- the
+    // admin's request is none of them. Never throws.
+    await this.deviceSlots.releaseOtherSessions(id);
     return updated;
   }
 

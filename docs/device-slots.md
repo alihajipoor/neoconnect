@@ -40,7 +40,8 @@ Owner decisions, 2026-10-06:
 A slot whose device has neither renewed nor carried traffic for
 `staleAfterSec` (90 s) is free: the next claim gets it without asking.
 A phone in the background that cannot renew keeps its slot through its
-tunnel's own traffic (WireGuard and OpenVPN keepalives are enough).
+tunnel's own traffic (WireGuard and OpenVPN keepalives are enough), for
+as long as the traffic lasts -- days, if the app is never opened.
 
 **The control plane is never a precondition for connecting.** An app
 that cannot reach the API -- in Iran, often -- dials anyway and claims
@@ -71,24 +72,32 @@ use on Windows PC since 14:02".
 
 | Header | Value |
 |---|---|
-| `X-Neoxify-Device-Platform` | `windows`, `macos`, `linux`, `android` or `ios` (case-insensitive). Anything else is ignored. |
-| `X-Neoxify-Device-Label` | A **generic** name: `Windows PC`, `Mac`, `Android phone (Pixel 7)`, `iPhone`. ASCII, or UTF-8 **percent-encoded** (`encodeURIComponent`) for anything else -- HTTP header values are Latin-1. |
+| `X-Neoxify-Device-Platform` | `windows`, `macos`, `linux`, `android` or `ios` (case-insensitive). Anything else is ignored. Always send it. |
+| `X-Neoxify-Device-Label` | Only what the platform does not say: a **model** (`Pixel 7`, `Galaxy S24`, `iPad`) or the user's own name for the device. Omit it when there is neither. ASCII, or UTF-8 **percent-encoded** (`encodeURIComponent`) for anything else -- HTTP header values are Latin-1. |
 
 Rules for the label:
 
+- **Never the device's kind.** `Windows PC` or `Android phone` is English,
+  and the device that shows it may be in Persian: the kind is named by
+  the reader, from `platform`, in its own language. The backend drops a
+  generic kind (`Windows PC`, `Mac`, `Linux PC`, `Android phone`,
+  `iPhone`, ...) to `null`, and keeps only the model out of `Android
+  phone (Pixel 7)` -- the form the apps were first built to send.
 - **Never a hostname, computer name or account name.** It is shown on
   other devices and a machine name is personal -- often the owner's own
   name. The backend also drops anything that looks like one
-  (`ali-laptop.local`, `DESKTOP-7H3K2L9`) in favour of the platform's
-  generic label, but that is a backstop, not permission.
-- A phone model is fine (`Android phone (Galaxy S24)`); the user's own
-  wording is fine if the app ever lets them set it.
+  (`ali-laptop.local`, `DESKTOP-7H3K2L9`), but that is a backstop, not
+  permission.
 - Control characters are stripped, whitespace collapsed, and the label is
   cut to 48 characters.
-- Platform without label: the backend names the device `Windows PC`,
-  `Mac`, `Linux PC`, `Android phone` or `iPhone`.
-- Sending neither leaves the name as it was. A device never named shows
-  as `label: null`; the app should then say "another device".
+- Sending neither header leaves the name as it was.
+
+**Naming a device on screen** (`holders[]`, `by`): in the app's own
+language, `label` when it is not `null` -- a model or the user's words,
+shown as sent -- and otherwise the platform's name (`windows` → "Windows
+PC" in English, `android` → "Android phone", `ios` → "iPhone", `macos`
+→ "Mac", `linux` → "Linux PC", each in the app's language); with
+neither, "another device".
 
 The browser sign-in flow (Google/Facebook through the system browser)
 cannot send headers when the session is created; the device is named by
@@ -137,8 +146,10 @@ Request:
   the plan is unlimited (`limit: null`), the token names no device, or
   slots are switched off (`DEVICE_SLOTS=off`). Dial; renewing is
   harmless but pointless.
-- Claiming again while holding the slot is idempotent: same `handle`,
-  `200`.
+- Claiming again while holding the slot keeps the slot and answers
+  `200` with a **new** `handle`. Keep the handle of the latest grant
+  (claim, or a `renew` that re-granted): `release` names it. Another
+  device's takeover may still name the previous one.
 
 **409 -- `DEVICE_LIMIT`.** The plan's devices are all in use. Do not dial.
 
@@ -151,7 +162,7 @@ Request:
   "holders": [
     {
       "handle": "Zm9vYmFyYmF6",
-      "label": "Windows PC",
+      "label": null,
       "platform": "windows",
       "since": "2026-10-06T10:32:04.120Z",
       "lastSeen": "2026-10-06T10:55:41.004Z"
@@ -162,8 +173,8 @@ Request:
 
 - `holders` are the devices using the slots: `since` is when each got its
   slot, `lastSeen` when it last renewed or carried traffic. Format times
-  in the device's locale and time zone. `label` may be `null` ("another
-  device").
+  in the device's locale and time zone. `label` is often `null`: name
+  the device from `platform` (see *Naming a device on screen*).
 - `message` is an English fallback. Word the card from `limit` and
   `holders` in the app's language.
 - **Never a 401.** The apps end the session on 401; a refusal is not a
@@ -177,7 +188,10 @@ Request:
 **429 -- `TAKEOVER_LIMIT`.** `{"statusCode": 429, "code":
 "TAKEOVER_LIMIT", "message": "...", "retryAfterSec": 1260}` -- more than
 30 takeovers on this subscription in the last hour. Only a claim *with*
-`takeover` can get this. Say so; do not retry automatically.
+`takeover` can get this code. Say so; do not retry automatically.
+
+**429 without a `code`** -- the request limit (see *Request limit*), not
+a refusal. Before dialling it means dial anyway, like a timeout.
 
 **401** -- this device has been signed out (its session is revoked or
 gone). Handle like any other 401: the session has ended.
@@ -191,7 +205,10 @@ Every `renewEverySec` while connected.
 
 Request: `{"subscriptionId": "6f1c..."}`
 
-**Always 200** (apart from 400/401/404 as above), with a `status`:
+**200** with a `status` (below). Never 409 for the limit. A renewal
+answered with anything else -- no answer, a 5xx, a 429, a 404 -- changes
+nothing: keep the tunnel and try again at the next interval. (A 401
+still means the device was signed out, as everywhere.)
 
 ```json
 { "status": "held", "enforced": true, "subscriptionId": "6f1c...", "limit": 1,
@@ -200,7 +217,7 @@ Request: `{"subscriptionId": "6f1c..."}`
 
 ```json
 { "status": "displaced", "subscriptionId": "6f1c...", "limit": 1,
-  "by": { "handle": "YmF6cXV4", "label": "Android phone (Pixel 7)", "platform": "android" },
+  "by": { "handle": "YmF6cXV4", "label": "Pixel 7", "platform": "android" },
   "at": "2026-10-06T11:02:13.551Z" }
 ```
 
@@ -218,8 +235,16 @@ Request: `{"subscriptionId": "6f1c..."}`
 
 When the customer presses Disconnect. Fire and forget.
 
-Request: `{"subscriptionId": "6f1c..."}`, or `{}` to release this
-device's slot on every subscription.
+Request: `{"subscriptionId": "6f1c...", "handle": "Zm9vYmFyYmF6"}`, or
+`{"handle": "..."}` / `{}` for this device's slot on every subscription.
+
+`handle` is the one from the grant being given back -- the latest claim,
+or the `renew` that re-granted. Send it. A release is fire and forget,
+and the request can still arrive seconds after the customer pressed
+Connect again; that new claim gave the slot a new handle, so the late
+release, naming the old one, frees nothing. Without `handle` the slot is
+freed whatever grant it is under (older behaviour, kept for apps that do
+not send it).
 
 Response: **204**, no body. (404 for a subscription that is not the
 customer's.)
@@ -234,6 +259,15 @@ the app wants to save a round trip (claiming is still correct).
 ```json
 [{ "id": "6f1c...", "status": "ACTIVE", "planId": "...", "expireAt": "...", "deviceLimit": 1 }]
 ```
+
+### Request limit
+
+The three endpoints allow 60 requests a minute **per device** (per
+access token), not per address: customers reaching the API through a
+node's mirror or through the tunnel share that node's address, and so
+do customers behind one carrier-grade NAT. Past it the answer is a 429
+with no `code` (`ThrottlerException: Too Many Requests`). It is never a
+refusal of the device -- see obligation 2.
 
 ## Timings
 
@@ -253,12 +287,17 @@ the app wants to save a round trip (claiming is still correct).
 1. **Claim before dialling**, after refreshing the connection config and
    before tearing down anything. Send the device headers and the
    `protocolUserId` of the credential about to be dialled.
-2. **Never let the claim block a connect.** No answer within 3 s, a
-   network error or a 5xx: dial anyway, and claim again once the tunnel
-   is up (through it). Only a definite refusal (409/429) stops the dial.
+2. **Never let the claim block a connect.** Exactly three answers stop
+   the dial: **409 with `code` `DEVICE_LIMIT`**, **409 with `code`
+   `SUBSCRIPTION_INACTIVE`**, and **429 with `code` `TAKEOVER_LIMIT`**
+   (only after a takeover). A 401 ends the session, as everywhere.
+   Anything else -- no answer within 3 s, a network error, a 5xx, a 429
+   or 409 without one of those codes, a 404 -- means dial anyway, and
+   claim again once the tunnel is up (through it). That later claim can
+   be refused too, over a working tunnel: see item 11.
 3. **On 409 `DEVICE_LIMIT`**, do not dial. Show, in the app's language:
    "Your plan allows *{limit}* device(s) at a time. Neoxify is in use on
-   *{label}* since *{since}*." with **Use on this device instead** and
+   *{device}* since *{since}*." with **Use on this device instead** and
    **Cancel**. *Use here* claims again with `takeover` = the handles shown
    (the server frees one slot, from the device least recently seen), then
    dials. On a plan of more than one the app may let the customer pick
@@ -273,22 +312,45 @@ the app wants to save a round trip (claiming is still correct).
    failover ladder.
 6. **Renew every `renewEverySec` while connected**, in the foreground.
    Mobile apps need not renew in the background; traffic keeps the slot.
-   A renewal that cannot reach the API changes nothing -- keep the tunnel.
+   A renewal that is not answered 200 -- unreachable, 5xx, 429, anything
+   but a 401 -- changes nothing: keep the tunnel.
 7. **On `displaced`**: disconnect, show "Disconnected: Neoxify is now in
-   use on *{by.label}*." with **Use on this device instead**, and **do
+   use on *{device}*." with **Use on this device instead**, and **do
    not run the failover ladder** (it would only take the slot back or
    fail). On `inactive`: disconnect and show the plan-ended state.
 8. **On Disconnect, release** -- fire and forget, at most 1.5 s, never
-   delaying teardown. Sign-out releases the slot on the server by itself;
-   no separate call is needed.
+   delaying teardown -- naming the `handle` of the latest grant, so a
+   release that lands after the next Connect's claim frees nothing.
+   Sign-out releases the slot on the server by itself; no separate call
+   is needed.
 9. **When the tunnel degrades and this device was unclaimed or
    displaced**, do not run the ladder blindly: tear down, call `renew`
    with a 4 s budget, and if it answers `displaced`, show that. If it
    cannot be reached, say so honestly ("We couldn't reach Neoxify to
-   check. If Neoxify is on on another of your devices, your plan's limit
-   of 1 may be the reason.") and then run the ladder as usual. Never claim
-   a server "couldn't be reached" if it was never dialled.
-10. **The label is generic** -- never a hostname (see *Headers*).
+   check. If Neoxify is in use on another of your devices, your plan's
+   limit of *{limit}* may be the reason.") and then run the ladder as
+   usual. Never claim a server "couldn't be reached" if it was never
+   dialled.
+10. **The label is a model or the user's own words** -- never the device's kind and never a hostname; *{device}* is named as *Naming a device on screen* says (see *Headers*).
+11. **A claim refused after connecting.** When the claim before dialling
+    went unanswered (item 2), the device is already connected when its
+    claim through the tunnel is answered -- and in Iran that will be the
+    common path. The answer is final, as it would have been before
+    dialling:
+    - **409 `DEVICE_LIMIT`**: handled like `displaced` (item 7). Tear
+      the tunnel down, **do not run the failover ladder**, record **no
+      attempt and no best route** (item 5 -- the dial worked; the plan
+      refused the device), and show the refusal card of item 3 with
+      **Use on this device instead** and **Cancel**. *Use here* claims
+      with `takeover`, then dials again. Never leave the tunnel up over
+      a refusal, and never show the card over a tunnel still carrying
+      traffic.
+    - **409 `SUBSCRIPTION_INACTIVE`**: tear down the same way, no ladder,
+      and show the plan-ended state.
+    - Anything else (no answer, 5xx, a codeless 429): keep the tunnel
+      and renew at the next interval. A `renew` from a device holding no
+      slot grants one if there is room, and answers `displaced` (item 7)
+      if there is not.
 
 Where this lands in the apps (from the design review; line numbers drift):
 desktop `runLadder` in `apps/desktop-windows/src/screens/Dashboard.tsx`
@@ -307,9 +369,12 @@ poll).
   with a fallback to the backend's memory if Redis cannot answer -- one
   backend instance, as elsewhere.
 - A slot is freed by: release; sign-out of that device; a password
-  change or reset (every other device); the device cap evicting that
-  device; suspension or expiry of the subscription; deleting the
-  account; or 90 s of silence.
+  change or reset (every other device); an admin setting the password
+  (every device); the device cap evicting that device; the hourly sweep
+  of signed-out and long-idle sessions; suspension or expiry of the
+  subscription; deleting the account; or 90 s of silence. Whatever path
+  signed a device out, a holder whose session is revoked or gone is
+  never counted -- a refusal never names a device that cannot connect.
 - `DEVICE_SLOTS=enforce` (default) or `off` (every claim granted,
   nothing recorded). Empty means the default. Only apps that claim are
   affected, so the switch is safe to leave on before any app ships it.
@@ -319,8 +384,12 @@ poll).
 Slots only bind apps that claim. The backstop is for the rest -- an old
 release, credentials copied into a third-party client -- and runs on
 what nodes already report every ~30 s: usage bytes per credential, and
-session counts (the maximum per credential across Xray's inbounds, not
-the sum; WireGuard's three-minute handshake tail is ignored).
+session counts from OpenVPN and IKEv2 only. Xray's and WireGuard's
+session counts are ignored: both carry a tail (60 s after the last
+accepted connection, three minutes after the last handshake) that made
+a clean switch from the PC to the phone look like two devices for long
+enough to hold the phone. For those engines a device is active while
+its usage shows bytes.
 
 - **Per device.** Every credential of one signed-in device is that
   device, on any route or node. All shared credentials of a subscription
@@ -332,13 +401,24 @@ the sum; WireGuard's three-minute handshake tail is ignored).
   was taken over (after its 90 s grace, or at once if it had itself
   just taken over), then the shared pseudo-device, then the newest
   device. **Never a device holding a slot**, and never all of them.
+  It also acts on a device whose slot was taken over and that is still
+  going after its grace while the holders who took its place renew,
+  even with no traffic of theirs showing (still dialling, idle) -- and
+  then only on that device. A quiet holder counts against nothing else.
+- **A grant lifts a hold.** A device let in -- by a claim, a takeover, or
+  a renewal that gives a lapsed slot back -- has any hold on its
+  credentials, and on the shared credential it named, lifted before its
+  grant is answered, and those credentials are put back on their nodes
+  at once (the app dials straight after). A hold found on a slot
+  holder at any later reading is lifted the same way.
 - **`CONCURRENCY_CUT=shadow` (default):** it logs `[shadow] Subscription
   ...: N devices active against a limit of L; would hold device <session>`
   -- at most once per ten minutes per subscription -- and sends nothing.
 - **`CONCURRENCY_CUT=enforce`:** it holds the device -- a `DISABLE_USER`
   on each of its credentials, on that credential's own inbound, and a
   90 s lease (`protocol_users.heldUntil`) that the 60 s re-assert skips.
-  The lease is renewed while the devices not held fill the limit, and
+  The lease is renewed while the devices not held fill the limit
+  (counting, for a device taken over, the holders that renew), and
   lapses on its own once they do not; the next re-assert then puts the
   credentials back, as they are at that moment. A held device on a
   censored network is back within about two and a half minutes of the

@@ -10,7 +10,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../prisma/prisma.service";
 import { KeyedLock } from "../protocol-users/keyed-lock";
-import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
+import { hasDeviceInfo, specificLabel, type DeviceInfo } from "../../common/device-info";
 import { DeviceStateStore } from "./device-state.store";
 import { DevicePresence, deviceKeyOf, resolveDevices, type DeviceKey } from "./device-presence";
 import { deviceSlotsMode } from "./modes";
@@ -39,6 +39,13 @@ const TAKEOVER_WINDOW_MS = 60 * 60_000;
 const TAKEOVERS_LOGGED_PAST = 10;
 const TAKEOVERS_REFUSED_PAST = 30;
 
+/** How long a subscription's slots outlive the last write to them --
+ * a claim, a renewal, or (keepAlive) a report of its devices carrying
+ * traffic. Housekeeping: whether a holder is still using its slot is
+ * decided by STALE_MS, never by this. But it must not run out under a
+ * holder that is in use without renewing -- a phone's always-on tunnel
+ * nobody opens the app on -- or the next device would be let in with no
+ * refusal and the phone told later it had been displaced. */
 const SLOT_TTL_MS = 24 * 60 * 60_000;
 const DISPLACED_TTL_MS = 60 * 60_000;
 
@@ -48,9 +55,15 @@ const takeoversKey = (subscriptionId: string) => `slots-takeovers:${subscription
 
 interface Holder {
   sessionId: string;
-  /** Opaque, per grant. What another device names to take this one over;
-   * a session id is never handed to another device. */
+  /** Opaque, new with every grant -- a claim while holding the slot
+   * included. What another device names to take this one over (a session
+   * id is never handed to another device), and what this device's release
+   * names, so a release that arrives after a newer claim drops nothing. */
   handle: string;
+  /** The handle before the last re-claim, still good for a takeover: a
+   * refusal card shown just before this device claimed again must not
+   * need a second tap. Absent on records from before it existed. */
+  previousHandle?: string | null;
   since: number;
   lastRenew: number;
   label: string | null;
@@ -114,8 +127,20 @@ export type RenewResult =
  * first, after a grace), and which shared credentials a holder named. */
 export interface SlotState {
   holders: Set<DeviceKey>;
+  /** Holders that renewed within STALE_AFTER_SEC: using their slot
+   * whether or not their traffic shows yet. */
+  live: Set<DeviceKey>;
   displaced: Map<DeviceKey, { at: number; noGrace: boolean }>;
   credit: Map<string, DeviceKey>;
+}
+
+/** A device was just let in: by a claim (with or without a takeover) or
+ * by a renewal that gave a lapsed slot back. */
+export interface SlotGrant {
+  subscriptionId: string;
+  sessionId: string;
+  /** The shared credential it said it is connecting with, if any. */
+  protocolUserId: string | null;
 }
 
 /** Device slots: the plan's device limit as the apps ask for it before
@@ -142,12 +167,36 @@ export interface SlotState {
 export class DeviceSlotsService {
   private readonly logger = new Logger(DeviceSlotsService.name);
   private readonly lock = new KeyedLock();
+  private readonly grantListeners: ((grant: SlotGrant) => Promise<void>)[] = [];
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly store: DeviceStateStore,
     private readonly presence: DevicePresence,
   ) {}
+
+  /** Tells `listener` about every device let in, before its grant is
+   * answered -- how the backstop lifts a hold on a device the moment it
+   * holds a slot, so the dial that follows the grant works. A listener
+   * here rather than a dependency: this module imports nothing, so the
+   * modules that act on slots can all import it without a cycle. */
+  onGrant(listener: (grant: SlotGrant) => Promise<void>): void {
+    this.grantListeners.push(listener);
+  }
+
+  /** Never fails the grant: a listener's failure is logged, and the
+   * backstop's own evaluation lifts the hold at its next reading. */
+  private async announce(grant: SlotGrant) {
+    for (const listener of this.grantListeners) {
+      try {
+        await listener(grant);
+      } catch (err) {
+        this.logger.warn(
+          `After granting session ${grant.sessionId} a slot on ${grant.subscriptionId}: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
 
   /** Asks for a slot on one subscription, optionally taking over the
    * holders named by handle. Throws 401 (device signed out), 404 (not the
@@ -174,24 +223,40 @@ export class DeviceSlotsService {
       return this.unenforced(subscription.id, limit);
     }
 
-    const label = (device?.label ?? null) || session.label;
+    const label = specificLabel(device?.label) ?? specificLabel(session.label);
     const platform = (device?.platform ?? null) || session.platform;
     const named = request.protocolUserId
       ? await this.sharedCredentialOf(subscription.id, request.protocolUserId)
       : null;
 
-    return this.lock.run(subscription.id, async () => {
+    let credited: string | null = named;
+    const result = await this.lock.run(subscription.id, async () => {
       const now = Date.now();
       const holders = await this.holders(subscription.id);
       const mine = holders.find((h) => h.sessionId === session.id);
       if (mine) {
-        await this.writeHolder(subscription.id, { ...mine, lastRenew: now, label, platform, protocolUserId: named ?? mine.protocolUserId });
+        // The same slot, under a new handle: Disconnect then Connect
+        // sends a release and then a claim, and the release can arrive
+        // second. Naming the old handle, it then finds nothing to drop.
+        credited = named ?? mine.protocolUserId;
+        const handle = newHandle();
+        await this.writeHolder(subscription.id, {
+          ...mine,
+          handle,
+          previousHandle: mine.handle,
+          lastRenew: now,
+          label,
+          platform,
+          protocolUserId: credited,
+        });
         await this.store.hdel(displacedKey(subscription.id), session.id);
-        return this.granted(subscription.id, limit, mine.handle);
+        return this.granted(subscription.id, limit, handle);
       }
 
-      const seen = await this.lastSeen(subscription.id, holders, now);
-      const live = holders.filter((h) => now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS);
+      const [seen, gone] = await Promise.all([this.lastSeen(subscription.id, holders, now), this.signedOut(holders)]);
+      const live = holders.filter(
+        (h) => !gone.has(h.sessionId) && now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS,
+      );
       const stale = holders.filter((h) => !live.includes(h));
 
       // Only as many as it takes to make room, from those named: the
@@ -200,7 +265,7 @@ export class DeviceSlotsService {
       const wanted = new Set(request.takeover ?? []);
       const needed = live.length - limit + 1;
       const takenOver = live
-        .filter((h) => wanted.has(h.handle))
+        .filter((h) => wanted.has(h.handle) || (!!h.previousHandle && wanted.has(h.previousHandle)))
         .sort((a, b) => (seen.get(a.sessionId) ?? a.lastRenew) - (seen.get(b.sessionId) ?? b.lastRenew))
         .slice(0, Math.max(0, needed));
       const remaining = live.filter((h) => !takenOver.includes(h));
@@ -218,7 +283,7 @@ export class DeviceSlotsService {
       // to happen.
       if (takenOver.length > 0) await this.countTakeover(subscription.id, now);
 
-      const handle = randomBytes(9).toString("base64url");
+      const handle = newHandle();
       const holder: Holder = {
         sessionId: session.id,
         handle,
@@ -255,6 +320,8 @@ export class DeviceSlotsService {
       }
       return this.granted(subscription.id, limit, handle);
     });
+    await this.announce({ subscriptionId: subscription.id, sessionId: session.id, protocolUserId: credited });
+    return result;
   }
 
   /** Keeps a slot. Answers `held`, or `displaced` (with by whom) for a
@@ -271,7 +338,8 @@ export class DeviceSlotsService {
       return { status: "held", ...withoutGranted(this.unenforced(subscription.id, limit)) };
     }
 
-    return this.lock.run(subscription.id, async () => {
+    let regranted = false;
+    const result = await this.lock.run(subscription.id, async (): Promise<RenewResult> => {
       const now = Date.now();
       const holders = await this.holders(subscription.id);
       const mine = holders.find((h) => h.sessionId === session.id);
@@ -286,17 +354,19 @@ export class DeviceSlotsService {
           status: "displaced" as const,
           subscriptionId: subscription.id,
           limit,
-          by: displaced.by,
+          by: { ...displaced.by, label: specificLabel(displaced.by.label) },
           at: new Date(displaced.at).toISOString(),
         };
       }
 
       // Lapsed while quiet (or forgotten, if Redis was lost): back in if
       // there is room, as a claim without takeover would be.
-      const seen = await this.lastSeen(subscription.id, holders, now);
-      const live = holders.filter((h) => now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS);
+      const [seen, gone] = await Promise.all([this.lastSeen(subscription.id, holders, now), this.signedOut(holders)]);
+      const live = holders.filter(
+        (h) => !gone.has(h.sessionId) && now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS,
+      );
       if (live.length < limit) {
-        const handle = randomBytes(9).toString("base64url");
+        const handle = newHandle();
         await this.store.hdel(
           slotsKey(subscription.id),
           ...holders.filter((h) => !live.includes(h)).map((h) => h.sessionId),
@@ -306,11 +376,12 @@ export class DeviceSlotsService {
           handle,
           since: now,
           lastRenew: now,
-          label: session.label,
+          label: specificLabel(session.label),
           platform: session.platform,
           protocolUserId: null,
           tookOverAt: null,
         });
+        regranted = true;
         return { status: "held" as const, ...withoutGranted(this.granted(subscription.id, limit, handle)) };
       }
       const current = [...live].sort((a, b) => b.since - a.since)[0];
@@ -318,27 +389,38 @@ export class DeviceSlotsService {
         status: "displaced" as const,
         subscriptionId: subscription.id,
         limit,
-        by: { handle: current.handle, label: current.label, platform: current.platform },
+        by: { handle: current.handle, label: specificLabel(current.label), platform: current.platform },
         at: new Date(current.since).toISOString(),
       };
     });
+    if (regranted) await this.announce({ subscriptionId: subscription.id, sessionId: session.id, protocolUserId: null });
+    return result;
   }
 
   /** Gives this device's slot back: on one subscription, or on all of the
-   * customer's. What the app sends when the customer presses Disconnect. */
-  async release(caller: SlotCaller, request: { subscriptionId?: string }): Promise<void> {
+   * customer's. What the app sends when the customer presses Disconnect.
+   *
+   * With `handle`, only the grant it names: the app sends the release
+   * fire-and-forget and moves on, while the request can still be walking
+   * the API's endpoints seconds later -- after a Connect pressed in the
+   * meantime has claimed the slot again (under a new handle). Dropping
+   * whatever this device held then would free the slot it is using, let
+   * the next device in without a card, and tell this one at its next
+   * renewal that it had been displaced. Without `handle`, as before. */
+  async release(caller: SlotCaller, request: { subscriptionId?: string; handle?: string }): Promise<void> {
     if (!caller.sessionId) return;
     const sessionId = caller.sessionId;
+    const mine = (id: string) => id === sessionId;
     if (request.subscriptionId) {
       const owned = await this.prisma.subscription.findFirst({
         where: { id: request.subscriptionId, customerId: caller.customerId },
         select: { id: true },
       });
       if (!owned) throw new NotFoundException("Subscription not found");
-      await this.dropSessions(owned.id, (id) => id === sessionId);
+      await this.dropSessions(owned.id, mine, request.handle);
       return;
     }
-    await this.releaseSession(caller.customerId, sessionId);
+    await this.forEachSubscription(caller.customerId, (id) => this.dropSessions(id, mine, request.handle));
   }
 
   /** A device's slots, on every subscription of its customer -- for
@@ -372,16 +454,37 @@ export class DeviceSlotsService {
     await this.forEachSubscription(customerId, (id) => this.releaseSubscription(id));
   }
 
+  /** Called for every report of a subscription's devices carrying
+   * traffic: keeps its slots from expiring while they are in use. A
+   * holder that renews keeps them alive by itself; one that only carries
+   * traffic -- the mobile apps do not renew in the background -- would
+   * otherwise lose its slot SLOT_TTL_MS after its last renewal, however
+   * busy its tunnel. Never throws. */
+  async keepAlive(subscriptionId: string): Promise<void> {
+    if (deviceSlotsMode() === "off") return;
+    try {
+      await this.store.expire(slotsKey(subscriptionId), SLOT_TTL_MS);
+    } catch (err) {
+      this.logger.warn(`Could not keep the slots of subscription ${subscriptionId}: ${(err as Error).message}`);
+    }
+  }
+
   /** For the backstop. Empty when slots are off. */
   async state(subscriptionId: string): Promise<SlotState> {
-    const empty: SlotState = { holders: new Set(), displaced: new Map(), credit: new Map() };
+    const empty: SlotState = { holders: new Set(), live: new Set(), displaced: new Map(), credit: new Map() };
     if (deviceSlotsMode() === "off") return empty;
-    const [holders, displacedRaw] = await Promise.all([
+    const now = Date.now();
+    const [all, displacedRaw] = await Promise.all([
       this.holders(subscriptionId),
       this.store.hgetall(displacedKey(subscriptionId)),
     ]);
+    // A signed-out device protects nothing, and lends its credit to no
+    // shared credential.
+    const gone = await this.signedOut(all);
+    const holders = all.filter((h) => !gone.has(h.sessionId));
     for (const h of holders) {
       empty.holders.add(deviceKeyOf(h.sessionId));
+      if (now - h.lastRenew <= STALE_MS) empty.live.add(deviceKeyOf(h.sessionId));
       if (h.protocolUserId) empty.credit.set(h.protocolUserId, deviceKeyOf(h.sessionId));
     }
     for (const [sessionId, raw] of Object.entries(displacedRaw)) {
@@ -417,11 +520,12 @@ export class DeviceSlotsService {
   }
 
   private async nameSession(sessionId: string, device: DeviceInfo) {
+    const label = specificLabel(device.label);
     await this.prisma.customerSession
       .updateMany({
         where: { id: sessionId },
         data: {
-          ...(device.label !== null ? { label: device.label } : {}),
+          ...(label !== null ? { label } : {}),
           ...(device.platform !== null ? { platform: device.platform } : {}),
         },
       })
@@ -443,6 +547,22 @@ export class DeviceSlotsService {
     return Object.values(raw)
       .map((value) => parse<Holder>(value))
       .filter((h): h is Holder => h !== null && typeof h.sessionId === "string");
+  }
+
+  /** Which of these holders' devices are signed out: session revoked, or
+   * gone. Sign-out frees a device's slots itself, but not every path that
+   * ends sessions did (an admin setting a password, the hourly sweep),
+   * and a release that fails leaves the slot behind; a signed-out device
+   * must never be the one a refusal names. */
+  private async signedOut(holders: Holder[]): Promise<Set<string>> {
+    if (holders.length === 0) return new Set();
+    const ids = holders.map((h) => h.sessionId);
+    const rows = await this.prisma.customerSession.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, revokedAt: true },
+    });
+    const live = new Set(rows.filter((r) => r.revokedAt === null).map((r) => r.id));
+    return new Set(ids.filter((id) => !live.has(id)));
   }
 
   private async writeHolder(subscriptionId: string, holder: Holder) {
@@ -503,9 +623,12 @@ export class DeviceSlotsService {
     }
   }
 
-  private async dropSessions(subscriptionId: string, match: (sessionId: string) => boolean) {
+  /** `handle`: drop nothing if a matching holder holds its slot under a
+   * different, newer grant (see release). */
+  private async dropSessions(subscriptionId: string, match: (sessionId: string) => boolean, handle?: string) {
     await this.lock.run(subscriptionId, async () => {
       const holders = await this.holders(subscriptionId);
+      if (handle !== undefined && holders.some((h) => match(h.sessionId) && h.handle !== handle)) return;
       await this.store.hdel(slotsKey(subscriptionId), ...holders.map((h) => h.sessionId).filter(match));
       const displaced = Object.keys(await this.store.hgetall(displacedKey(subscriptionId)));
       await this.store.hdel(displacedKey(subscriptionId), ...displaced.filter(match));
@@ -546,6 +669,10 @@ export class DeviceSlotsService {
   }
 }
 
+function newHandle(): string {
+  return randomBytes(9).toString("base64url");
+}
+
 function positive(limit: number | null): number | null {
   return limit !== null && limit > 0 ? limit : null;
 }
@@ -553,7 +680,7 @@ function positive(limit: number | null): number | null {
 function view(h: Holder, lastSeen: number): HolderView {
   return {
     handle: h.handle,
-    label: h.label,
+    label: specificLabel(h.label),
     platform: h.platform,
     since: new Date(h.since).toISOString(),
     lastSeen: new Date(lastSeen).toISOString(),

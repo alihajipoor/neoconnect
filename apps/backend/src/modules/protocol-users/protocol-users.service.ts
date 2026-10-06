@@ -62,6 +62,27 @@ const warnedLimitValues = new Set<string>();
 const NEW_DEVICE_SETS_PER_WINDOW = 10;
 const DEVICE_SET_WINDOW_MS = 60 * 60 * 1000;
 
+/** Protocols on which devices keep the subscription's shared credential
+ * rather than getting one of their own.
+ *
+ * IKEv2, until the agent stops reloading every secret for every user:
+ * each IKEv2 CREATE_USER rewrites the node's whole secrets file and runs
+ * `swanctl --load-creds --clear`, so a re-assert of N users costs N
+ * reloads of N secrets -- and every command for every protocol on that
+ * node runs in one loop behind it. Device credentials multiply the IKEv2
+ * rows by up to (1 + devices). Once a node's re-assert takes longer than
+ * its 60 s cycle the loop never catches up, and sign-out DELETE_USERs,
+ * quota DISABLE_USERs and the CREATE_USERs that confirm new device
+ * credentials queue behind it without bound -- delaying the very
+ * revocation per-device credentials exist for. Where that point is has
+ * not been measured.
+ *
+ * The cost of keeping it shared: signing one device out does not revoke
+ * its IKEv2 access -- as on every route before per-device credentials.
+ * IKEv2 itself is untouched; it is the per-device split that waits for
+ * the agent change (docs/per-device-credentials.md, "Known, deferred"). */
+const SHARED_CREDENTIAL_ONLY: ReadonlySet<Protocol> = new Set<Protocol>(["IKEV2"]);
+
 /** Every column of ProtocolUser, named.
  *
  * Unusually for a list projection this narrows nothing today -- the
@@ -278,7 +299,10 @@ export class ProtocolUsersService {
     const heldKeys = new Set(held.map((u) => `${u.subscriptionId}:${u.routeId}`));
 
     for (const subscription of subscriptions) {
-      const { routes } = await this.routesFor(subscription.plan);
+      const { routes } = await this.routesFor({
+        ...subscription.plan,
+        protocolsAllowed: subscription.plan.protocolsAllowed.filter((p) => !SHARED_CREDENTIAL_ONLY.has(p)),
+      });
       const created: string[] = [];
       for (const route of routes) {
         if (heldKeys.has(`${subscription.id}:${route.id}`)) continue;
@@ -630,6 +654,9 @@ export class ProtocolUsersService {
             if (recent) continue;
           }
           const result = await this.revokeSessionCredentials(session.customerId, session.id);
+          // A device that is gone holds no slot either: it must not show
+          // as "in use" to the customer's next device. Never throws.
+          await this.deviceSlots.releaseSession(session.customerId, session.id);
           revoked += result.revoked;
           failed += result.failed;
           sessions += 1;

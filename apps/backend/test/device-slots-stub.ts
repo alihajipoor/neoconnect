@@ -11,6 +11,8 @@ export function deviceSlotsStub() {
     releaseOtherSessions: jest.fn().mockResolvedValue(undefined),
     releaseSubscription: jest.fn().mockResolvedValue(undefined),
     releaseCustomer: jest.fn().mockResolvedValue(undefined),
-    state: jest.fn().mockResolvedValue({ holders: new Set(), displaced: new Map(), credit: new Map() }),
+    keepAlive: jest.fn().mockResolvedValue(undefined),
+    onGrant: jest.fn(),
+    state: jest.fn().mockResolvedValue({ holders: new Set(), live: new Set(), displaced: new Map(), credit: new Map() }),
   };
 }
