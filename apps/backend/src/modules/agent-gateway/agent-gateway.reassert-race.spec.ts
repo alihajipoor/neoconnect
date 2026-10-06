@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/require-await -- the stand-ins below
    match the async signatures of the Prisma client they replace. */
+import { Logger } from "@nestjs/common";
 import { AgentGatewayService } from "./agent-gateway.service";
 import { encryptCredentials } from "../protocol-users/credentials-crypto";
 
@@ -67,6 +68,7 @@ function build(users: string[]) {
     },
   };
   const registry = {
+    delete: () => undefined,
     get: () => ({
       write: (msg: { command: { type: string; payloadJson: Buffer } }) => {
         const payload = JSON.parse(msg.command.payloadJson.toString("utf8")) as { externalUserId: string };
@@ -171,6 +173,47 @@ describe("AgentGatewayService re-assert against a concurrent switch-off", () => 
     await reassert(false);
 
     expect(forUser(wire, "a")).toEqual(["DISABLE_USER", "ENABLE_USER", "CREATE_USER"]);
+  });
+
+  /** The agent runs every command of every protocol in one loop, and an
+   * IKEv2 re-assert reloads every secret per user. A node whose re-assert
+   * takes longer than the 60 s cycle never catches up if each cycle adds
+   * a full copy -- and sign-outs and quota cuts queue behind all of it.
+   * One copy per credential at a time, and say so. */
+  it("does not queue a second periodic re-assert behind one the node has not carried out, and says the node is behind", async () => {
+    const warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, "log").mockImplementation(() => undefined);
+    const { service, wire, reassert } = build(["a", "b"]);
+    const ack = (commandId: string) =>
+      (service as unknown as { handleCommandAck(a: object): Promise<void> }).handleCommandAck({
+        commandId,
+        success: true,
+        error: "",
+      });
+
+    await reassert(false);
+    await ack("reassert:pu-000");
+    await reassert(false);
+
+    expect(forUser(wire, "a")).toEqual(["CREATE_USER", "CREATE_USER"]);
+    expect(forUser(wire, "b")).toEqual(["CREATE_USER"]);
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("has not carried out 1 re-assert"))).toHaveLength(1);
+
+    // An ack lost without the stream closing does not stop it for good.
+    jest.setSystemTime(Date.now() + 11 * 60_000);
+    await reassert(false);
+    expect(forUser(wire, "b")).toEqual(["CREATE_USER", "CREATE_USER"]);
+    jest.restoreAllMocks();
+  });
+
+  it("forgets what was in flight on a stream that closed", async () => {
+    const { service, wire, reassert } = build(["a"]);
+
+    await reassert(false);
+    (service as unknown as { handleStreamClosed(n: string, c: unknown): void }).handleStreamClosed("node-1", {});
+    await reassert(false);
+
+    expect(forUser(wire, "a")).toEqual(["CREATE_USER", "CREATE_USER"]);
   });
 
   // A hold lifted because its device was let in: the hold's own

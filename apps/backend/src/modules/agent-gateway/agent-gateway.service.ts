@@ -103,6 +103,12 @@ const ON_COMMANDS: ReadonlySet<AgentCommandType> = new Set<AgentCommandType>(["C
  * a hold that lapsed is never mistaken for one just placed. */
 const OFF_RACE_MARGIN_MS = 30_000;
 
+/** How long a periodic re-assert may go unacknowledged before the next
+ * cycle writes it again regardless -- for an ack lost without the stream
+ * closing. Until then the earlier one is still in the node's queue, and
+ * a second copy would only lengthen it. */
+const REASSERT_ACK_PATIENCE_MS = 10 * 60_000;
+
 /** How long the last command per credential is remembered. Housekeeping:
  * only commands from the last OFF_RACE_MARGIN_MS, or sent while a batch
  * was being written, are ever consulted. */
@@ -131,6 +137,14 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * the rest of the backend makes, and it only has to outlive one batch. */
   private readonly lastUserCommand = new Map<string, LastUserCommand>();
   private userCommandSeq = 0;
+
+  /** Re-asserts written straight onto a stream and not acknowledged yet,
+   * by command id. The agent runs every command of every protocol in one
+   * loop, so a re-assert still unacknowledged when the next cycle comes
+   * round means the node is more than a cycle behind -- and an IKEv2
+   * re-assert, which reloads every secret per user, is how it gets there.
+   * See reassertProvisionedUsers. */
+  private readonly unackedReasserts = new Map<string, { nodeId: string; at: number }>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -359,6 +373,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    */
   private handleStreamClosed(nodeId: string, call: AgentDuplexCall) {
     this.registry.delete(nodeId, call);
+    // What was in flight on that stream is gone with it; the reconnect's
+    // own re-assert sends everything again.
+    for (const [id, sent] of this.unackedReasserts) if (sent.nodeId === nodeId) this.unackedReasserts.delete(id);
   }
 
   private buildCredentials(): { credentials: grpc.ServerCredentials; isSecure: boolean } {
@@ -649,6 +666,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * just come back. */
   private async reassertProvisionedUsers(nodeId: string, opts: { persist: boolean } = { persist: true }) {
     let asserted = 0;
+    let behind = 0;
     // When the batch being handled was read: a credential switched off
     // after that (or just before -- OFF_RACE_MARGIN_MS) is not put back.
     let readAt = Date.now();
@@ -682,17 +700,42 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       },
       handle: async (users) => {
         for (const user of users) {
-          const sent = await this.guardedReassert(user, readAt, (payload) =>
-            opts.persist ? this.enqueueCommand(nodeId, "CREATE_USER", payload) : this.writeReassert(user, payload),
-          );
+          const sent = await this.guardedReassert(user, readAt, (payload) => {
+            if (opts.persist) return this.enqueueCommand(nodeId, "CREATE_USER", payload);
+            // Last cycle's copy is still in the node's queue: it will be
+            // carried out, and another would only lengthen the queue that
+            // sign-outs and quota cuts wait in.
+            if (this.stillQueued(user.id)) {
+              behind += 1;
+              return false;
+            }
+            this.writeReassert(user, payload);
+            return true;
+          });
           if (sent) asserted += 1;
         }
       },
     });
 
+    if (behind > 0) {
+      this.logger.warn(
+        `Node ${nodeId} has not carried out ${behind} re-assert(s) from the last cycle: its command queue is more than ` +
+          `${REASSERT_INTERVAL_MS / 1000} s behind, and sign-outs, quota cuts and new device credentials wait in it. ` +
+          `Not sending those again until it catches up.`,
+      );
+    }
     if (asserted === 0) return;
     const how = opts.persist ? "after reconnect" : "on periodic re-assert";
     this.logger.log(`Re-asserted ${asserted} provisioned user(s) on node ${nodeId} ${how}`);
+  }
+
+  /** Whether a periodic re-assert of this credential was written within
+   * REASSERT_ACK_PATIENCE_MS and has not been acknowledged. */
+  private stillQueued(protocolUserId: string): boolean {
+    const cutoff = Date.now() - REASSERT_ACK_PATIENCE_MS;
+    return [`reassert:${protocolUserId}`, `${CONFIRM_ACK_PREFIX}${protocolUserId}`].some(
+      (id) => (this.unackedReasserts.get(id)?.at ?? -Infinity) > cutoff,
+    );
   }
 
   /** Puts these credentials back on their nodes now, rather than at the
@@ -745,7 +788,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     if (before?.off && before.at >= readAt - OFF_RACE_MARGIN_MS) return false;
 
     const sentAfter = this.userCommandSeq;
-    await send(reassertPayload(user));
+    if ((await send(reassertPayload(user))) === false) return false;
 
     const after = this.lastUserCommand.get(key);
     if (after?.off && after.seq > sentAfter) {
@@ -787,8 +830,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * credential no node has confirmed yet, so its ack can record the
    * confirmation. */
   private writeReassert(user: { id: string; nodeId: string; provisionedAt: Date | null }, payload: object) {
-    const prefix = user.provisionedAt ? "reassert:" : CONFIRM_ACK_PREFIX;
-    this.writeCommand(user.nodeId, `${prefix}${user.id}`, "CREATE_USER", payload);
+    const commandId = `${user.provisionedAt ? "reassert:" : CONFIRM_ACK_PREFIX}${user.id}`;
+    if (this.writeCommand(user.nodeId, commandId, "CREATE_USER", payload)) {
+      this.unackedReasserts.set(commandId, { nodeId: user.nodeId, at: Date.now() });
+    }
   }
 
   /** Records a command's outcome.
@@ -818,6 +863,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     // discarded in total silence. A relay whose outbound could not be
     // rebuilt looked exactly like one that had been rebuilt fine.
     if (ack.commandId.startsWith("reassert")) {
+      this.unackedReasserts.delete(ack.commandId);
       if (!ack.success) {
         this.logger.warn(`Re-assert of ${ack.commandId} failed on the node: ${ack.error}`);
       } else if (ack.commandId.startsWith(CONFIRM_ACK_PREFIX)) {

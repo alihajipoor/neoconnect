@@ -167,12 +167,24 @@ Credentials on a node become subscriptions x devices x routes.
   installer and node change, not part of this work.
 - **OpenVPN.** Revocation is a ccd `disable` file per CN, never cleaned
   up -- one small file per revoked device credential.
-- **IKEv2.** Every add, remove *and re-assert* rewrites the whole secrets
-  file and reloads every secret (`swanctl --load-creds --clear`), one
-  command at a time on the node's command loop. So the 60 s re-assert on
-  an IKEv2 node costs about rows-squared, and device credentials multiply
-  it by up to (1 + devices) squared. Fixing that is an agent change (see
-  *Known, deferred*).
+- **IKEv2: no device credentials -- the shared one stays.** Every add,
+  remove *and re-assert* rewrites the whole secrets file and reloads
+  every secret (`swanctl --load-creds --clear`), and the agent runs
+  every command of every protocol in one loop. So the 60 s re-assert on
+  an IKEv2 node costs about rows-squared; device credentials would have
+  multiplied the rows by up to (1 + devices), and once a node's
+  re-assert takes longer than its cycle the loop never catches up --
+  sign-out DELETE_USERs, quota DISABLE_USERs and the CREATE_USERs that
+  confirm new device credentials, for every protocol, queue behind it
+  without bound. Where that point is has not been measured. So devices
+  are handed the subscription's shared IKEv2 credential, as before this
+  work, until the agent skips the reload for an unchanged user (*Known,
+  deferred*). **The cost: signing one device out does not revoke its
+  IKEv2 access.** IKEv2 itself is still offered everywhere it was.
+  Separately, the gateway no longer queues a periodic re-assert behind
+  an unacknowledged one for the same credential, and logs `Node ... has
+  not carried out N re-assert(s) from the last cycle` when a node falls
+  more than a cycle behind -- the alert for this, on any protocol.
 - **Re-assert.** Every live row is re-sent to its node every 60 s. "Live"
   excludes rows of a signed-out session (on their way off the node) and
   rows the backstop holds.
@@ -358,9 +370,12 @@ Low-severity review findings not fixed here, and why:
   on reconnect, or `ccd-exclusive` on the nodes (a node change needing
   the owner's approval). Per-device credentials make revocation routine,
   so this matters more than it did; it is not new.
-- **IKEv2 re-assert cost is quadratic.** An agent change (skip the reload
-  for an unchanged user within 30 s of the last one) and an agent
-  release. Documented under *Limits*.
+- **IKEv2 re-assert cost is quadratic, so IKEv2 stays on shared
+  credentials.** An agent change (skip the reload for an unchanged user
+  within 30 s of the last one) and an agent release; then IKEv2 can join
+  per-device credentials (`SHARED_CREDENTIAL_ONLY` in
+  `protocol-users.service.ts`). Until then a sign-out does not revoke
+  IKEv2. Documented under *Limits*.
 - **Xray counted once per inbound in the agent.** The backend takes the
   max, which is enough; counting once per Xray process is an agent
   release.
