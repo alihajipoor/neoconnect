@@ -59,13 +59,32 @@ export const HOLD_LEASE_MS = 90_000;
  * log every ninety seconds forever. */
 const SHADOW_LOG_INTERVAL_MS = 10 * 60_000;
 
-/** Engines whose session count carries a tail and is ignored here.
+/** Engines whose session count carries a tail, and is ignored here: for
+ * these a device is active only while its usage report shows bytes.
  *
- * WireGuard counts a peer for three minutes after its last handshake, so
- * a legitimate switch from PC to phone on one node read as two devices
- * for long enough to be held. Its keepalive every 25 s puts bytes in
- * every usage report instead, and that is used. */
-const COUNTS_IGNORED = new Set(["WIREGUARD"]);
+ * WireGuard counts a peer for three minutes after its last handshake.
+ * Xray's counter (one per inbound, all reading the access log) counts a
+ * source for 60 s after its last "accepted" line. Either tail made a
+ * clean switch look like two devices for long enough to be held -- and
+ * the device held was the newest, the one the customer had just switched
+ * to: a PC that opened a connection at t=20 s and disconnected at 25 s
+ * was still "active" at 30, 60 and 90 alongside the phone, three strikes.
+ * A WireGuard keepalive every 25 s puts bytes in every report anyway; an
+ * Xray device shows while it carries traffic, which errs towards
+ * counting fewer devices, never more.
+ *
+ * OpenVPN's and IKEv2's counts are the connections open right now, with
+ * no tail, and still count. Every protocol Xray serves on a node is
+ * listed (Shadowsocks among them); see XRAY_SERVED_ON_NODE in the agent
+ * gateway. */
+const COUNTS_IGNORED = new Set([
+  "WIREGUARD",
+  "XRAY_VLESS_REALITY",
+  "XRAY_VLESS_TLS",
+  "XRAY_VMESS",
+  "XRAY_TROJAN",
+  "SHADOWSOCKS",
+]);
 
 /** The plan's device limit, judged per device on what the nodes report.
  *
@@ -135,11 +154,10 @@ export class ConcurrencyService {
   }
 
   private async process(nodeId: string, sessions: SessionCountInput[], deltas: UsageDeltaInput[], now: number) {
-    // Session counts collapsed to the max per credential. Every Xray
-    // inbound on a node has its own counter reading the same access log,
-    // so one device on REALITY was reported five times; summing made it
-    // five devices. All five read the same file a moment apart, so the
-    // max is the reading.
+    // Session counts collapsed to the max per credential, from engines
+    // whose count has no tail (COUNTS_IGNORED). Summing them is what once
+    // made one phone on REALITY five devices: every Xray inbound has its
+    // own counter reading the same access log.
     const counted = new Map<string, number>();
     for (const count of sessions) {
       if (COUNTS_IGNORED.has(count.protocol)) continue;

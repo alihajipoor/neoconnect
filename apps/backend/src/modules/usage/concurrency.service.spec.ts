@@ -189,17 +189,53 @@ describe("ConcurrencyService (device-limit backstop)", () => {
   });
 
   // The PC disconnects and the phone connects. For one report both look
-  // active; that must not be enough.
-  it("does not act on a clean switch from the PC to the phone", async () => {
+  // active; that must not be enough -- and nor may the PC's Xray session
+  // count, which goes on counting it for 60 s after its last connection.
+  // That tail is what this test used to leave out: with it, the PC read
+  // as active at 30, 60 and 90 s, three strikes, and the phone -- the
+  // newer device, the one the customer had just switched to -- was held.
+  it("does not act on a clean switch from the PC to the phone, Xray's session-count tail included", async () => {
     process.env.CONCURRENCY_CUT = "enforce";
     const { service, agentGateway, warn } = build({ limit: 1, rows: twoDevices() });
 
-    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 900 }] });
-    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 40 }], "node-2": [{ ext: "ext-phone", bytes: 900 }] });
-    for (let i = 0; i < 6; i++) await tick(service, { "node-1": [], "node-2": [{ ext: "ext-phone", bytes: 900 }] });
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 900, sources: 1 }] });
+    // t=30: the PC opened a connection at 20 s and left at 25 s; the
+    // phone is on.
+    await tick(service, {
+      "node-1": [{ ext: "ext-pc", bytes: 40, sources: 1 }],
+      "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }],
+    });
+    // t=60 and t=90: no bytes from the PC, but Xray still counts its
+    // source from 20 s.
+    for (let i = 0; i < 2; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", sources: 1 }],
+        "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }],
+      });
+    }
+    for (let i = 0; i < 6; i++) await tick(service, { "node-1": [], "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }] });
 
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  /** OpenVPN's count is the connections open right now: no tail, so it
+   * still counts. A connected OpenVPN client moves bytes anyway; this
+   * pins down that the count alone is enough. */
+  it("still counts a device from an engine whose session count has no tail", async () => {
+    const { service, warn } = build({
+      limit: 1,
+      rows: [row("pc", { sessionId: PC }), row("phone", { sessionId: PHONE, nodeId: "node-2", protocol: "OPENVPN" })],
+    });
+
+    for (let i = 0; i < 4; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", bytes: 500 }],
+        "node-2": [{ ext: "ext-phone", sources: 1, protocol: "OPENVPN" }],
+      });
+    }
+
+    expect(shadowLines(warn)).toHaveLength(1);
   });
 
   /** WireGuard counts a peer for three minutes after its last handshake,

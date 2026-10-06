@@ -307,7 +307,10 @@ All on this branch, each with tests:
   change, suspension) with no row behind them. Replaced: see
   `docs/device-slots.md`, *The backstop*.
 - Every Xray user's session count was reported once per inbound and
-  summed. The backend now takes the max per credential.
+  summed. The backend now ignores Xray's session counts altogether
+  (their 60 s tail held the phone after a clean switch) and goes by
+  bytes; it takes the max per credential for the engines it still
+  counts.
 - Plaintext credentials were kept in `agent_commands` forever. They are
   removed from a command's payload once it is acked or failed.
 

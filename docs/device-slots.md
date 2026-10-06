@@ -361,8 +361,12 @@ poll).
 Slots only bind apps that claim. The backstop is for the rest -- an old
 release, credentials copied into a third-party client -- and runs on
 what nodes already report every ~30 s: usage bytes per credential, and
-session counts (the maximum per credential across Xray's inbounds, not
-the sum; WireGuard's three-minute handshake tail is ignored).
+session counts from OpenVPN and IKEv2 only. Xray's and WireGuard's
+session counts are ignored: both carry a tail (60 s after the last
+accepted connection, three minutes after the last handshake) that made
+a clean switch from the PC to the phone look like two devices for long
+enough to hold the phone. For those engines a device is active while
+its usage shows bytes.
 
 - **Per device.** Every credential of one signed-in device is that
   device, on any route or node. All shared credentials of a subscription
