@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   ChevronRight,
   Clock,
@@ -80,11 +80,11 @@ import {
 } from "@shared/lib/attempts";
 import {
   deviceSlot,
+  slotNoticeStore,
   slotStop,
   type SlotStop,
   type SlotStopReason,
 } from "@shared/lib/device-slot-session";
-import type { SlotNotice } from "@shared/lib/device-slot-notice";
 import { DeviceSlotCard } from "@shared/components/DeviceSlotCard";
 import {
   claimWhileRefreshing,
@@ -355,8 +355,13 @@ export function Dashboard({
   const [permissionDenied, setPermissionDenied] = useState(false);
   /** What the plan's device limit has to say, when it is why this phone
    * is not connected: refused before dialling, or taken over by another
-   * device. See `deviceSlot`, shared with the Windows client. */
-  const [slotNotice, setSlotNotice] = useState<SlotNotice | null>(null);
+   * device. See `deviceSlot`, shared with the Windows client.
+   *
+   * Kept beside the slot, not in this screen: a claim through the tunnel
+   * can be refused while the screen is away in Settings, and the tunnel
+   * comes down regardless. The card written then is here on return. */
+  const slotNotice = useSyncExternalStore(slotNoticeStore.subscribe, slotNoticeStore.current);
+  const setSlotNotice = slotNoticeStore.set;
   /** The teardown the device limit started, while it runs. A connect
    * pressed meanwhile -- "Use on this device instead" on the card that
    * teardown put up -- waits for it rather than dialling over a tunnel

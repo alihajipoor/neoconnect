@@ -325,4 +325,14 @@ describe("ending a session forgets this device's slot", () => {
     expect(deviceSlot.standing()).toBe("none");
     expect(calls.filter((c) => c.url.includes("/customer/vpn/"))).toEqual([]);
   });
+
+  /** The card names the old account's devices. */
+  it("clears the device limit's card", async () => {
+    const { slotNoticeStore } = await import("./device-slot-session");
+    slotNoticeStore.set({ kind: "displaced", by: { handle: "h", label: "Windows PC", platform: "windows" }, at: null });
+
+    await endCustomerSession();
+
+    expect(slotNoticeStore.current()).toBeNull();
+  });
 });

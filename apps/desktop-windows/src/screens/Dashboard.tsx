@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, Clock, Gamepad2, Globe, MapPin, Settings as SettingsIcon, Shield, Sparkles, Tag } from "lucide-react";
 import { displayedRoute, showsAutomatic } from "../lib/displayed-route";
@@ -53,8 +53,7 @@ import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
-import { deviceSlot, slotStop, type SlotStopReason } from "../lib/device-slot-session";
-import type { SlotNotice } from "../lib/device-slot-notice";
+import { deviceSlot, slotNoticeStore, slotStop, type SlotStopReason } from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { isServiceTimeout, withTimeout } from "../lib/service-call";
 import {
@@ -507,8 +506,13 @@ export function Dashboard({
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   /** What the plan's device limit has to say, when it is why this device
    * is not connected: refused before dialling, taken over by another
-   * device, or a check that could not be made. See `deviceSlot`. */
-  const [slotNotice, setSlotNotice] = useState<SlotNotice | null>(null);
+   * device, or a check that could not be made. See `deviceSlot`.
+   *
+   * Kept beside the slot, not in this screen: a claim through the tunnel
+   * can be refused while the screen is away in Settings, and the tunnel
+   * comes down regardless. The card written then is here on return. */
+  const slotNotice = useSyncExternalStore(slotNoticeStore.subscribe, slotNoticeStore.current);
+  const setSlotNotice = slotNoticeStore.set;
   /** Set when the device limit ended or refused this device's session.
    * The automatic ladder must not run then -- it would only take the
    * slot back from the device the customer is now using, or fail on

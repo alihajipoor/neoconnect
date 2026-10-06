@@ -1,6 +1,6 @@
 import { clearGamingProfileCache } from "./customer";
 import { clearSnapshot } from "./credential-cache";
-import { deviceSlot } from "./device-slot-session";
+import { deviceSlot, slotNoticeStore } from "./device-slot-session";
 import { clearTokens } from "./session";
 import { tearDownForSignOut, type TeardownVerdict } from "./tunnel-teardown";
 
@@ -96,6 +96,9 @@ export async function endCustomerSession(): Promise<SessionEnd> {
   // the server by itself (docs/device-slots.md, obligation 8), and a
   // renewal still owed to the old session must not land on the next.
   deviceSlot.reset();
+  // Its card too: it names the old account's devices, and the next
+  // account to sign in on this machine must not open onto it.
+  slotNoticeStore.set(null);
   let tunnel: TeardownVerdict;
   try {
     tunnel = await tunnelTeardown();

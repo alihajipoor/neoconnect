@@ -580,6 +580,45 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
  * `endCustomerSession`); the server releases it there by itself. */
 export const deviceSlot: DeviceSlotSession = createDeviceSlotSession();
 
+/** The device limit's card, kept beside the slot rather than in a screen.
+ *
+ * For the same reason the slot is: the dashboard unmounts whenever
+ * Settings is open, and the answers that put a card up do not wait for
+ * it. A claim sent through the tunnel can be refused seconds after the
+ * connect, and the tunnel comes down whether a screen is there or not.
+ * Held in the screen's own state, that card was written to a screen that
+ * no longer existed, and the customer came back to a Connect button and
+ * no reason. A dashboard that mounts finds it here. Cleared on sign-out
+ * with the slot. */
+export interface SlotNoticeStore {
+  current(): SlotNotice | null;
+  set(notice: SlotNotice | null): void;
+  /** For `useSyncExternalStore`. Returns the unsubscribe. */
+  subscribe(listener: () => void): () => void;
+}
+
+export function createSlotNoticeStore(): SlotNoticeStore {
+  let notice: SlotNotice | null = null;
+  const listeners = new Set<() => void>();
+  // Closures rather than methods on `this`, so a screen can hand `set`
+  // around the way it would a state setter.
+  const current = () => notice;
+  const set = (next: SlotNotice | null) => {
+    if (next === notice) return;
+    notice = next;
+    for (const listener of [...listeners]) listener();
+  };
+  const subscribe = (listener: () => void) => {
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  };
+  return { current, set, subscribe };
+}
+
+export const slotNoticeStore: SlotNoticeStore = createSlotNoticeStore();
+
 /** Anything the slot can say that stops this device: a connect refused
  * before dialling, or a session ended while connected. */
 export type SlotStopReason =

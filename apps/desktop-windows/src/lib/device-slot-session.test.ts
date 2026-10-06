@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDeviceSlotSession, slotStop } from "./device-slot-session";
+import { createDeviceSlotSession, createSlotNoticeStore, slotStop } from "./device-slot-session";
 import type { ClaimOutcome, RenewOutcome } from "./device-slots";
 
 /** The slot's life from Connect to Disconnect, with the three calls stood
@@ -693,6 +693,37 @@ describe("a held slot whose renewals go unanswered", () => {
     await h.session.onPoll();
     h.advance(30_000);
     expect(h.session.needsStandingCheck()).toBe(false);
+  });
+});
+
+/** The card lives beside the slot, so a refusal that lands while the
+ * dashboard is away -- in Settings -- is still there when it comes back. */
+describe("the device limit's card", () => {
+  it("outlives the screen that put it up", () => {
+    const store = createSlotNoticeStore();
+    const first = vi.fn();
+    const unsubscribe = store.subscribe(first);
+    unsubscribe();
+
+    // Set while no screen is listening, as an answer arriving after the
+    // dashboard unmounted would.
+    store.set({ kind: "refused", refusal: REFUSAL });
+    expect(first).not.toHaveBeenCalled();
+
+    // The next dashboard reads it on mount.
+    expect(store.current()).toEqual({ kind: "refused", refusal: REFUSAL });
+  });
+
+  it("tells the screen that is listening, and only when it changes", () => {
+    const store = createSlotNoticeStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    const notice = { kind: "unchecked" as const, limit: 1 };
+    store.set(notice);
+    store.set(notice);
+    store.set(null);
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(store.current()).toBeNull();
   });
 });
 
