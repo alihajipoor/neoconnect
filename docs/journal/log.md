@@ -2938,7 +2938,7 @@ report), `device-slot-notice.ts` (the card's words, en/fa),
   backend) does not.
 
 **PROVEN (unit tests and typecheck only):** desktop JS 37 files / 526
-tests (442 before this branch's first commit), typecheck clean; mobile
+tests (32 / 435 at `f960994`), typecheck clean; mobile
 JS 4 / 34 and `tsc` clean against the changed shared files; web portal
 and macOS shells `tsc` clean; the frontend bundles. The card was
 rendered in a throwaway browser harness in both languages (no overflow,
