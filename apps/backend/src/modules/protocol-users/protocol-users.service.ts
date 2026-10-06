@@ -16,15 +16,43 @@ import { sharedWireGuardReserve, wireGuardPoolSize } from "./wireguard-subnet";
 /** How many signed-in devices of one customer may hold credentials of
  * their own at once. See `enforceDeviceLimit`.
  *
- * Five by default: a phone, a laptop, a tablet and a spare, with room
- * for a reinstall before the oldest is evicted. The ceiling it protects
- * is the node's, not the customer's -- a WireGuard config serves a /24,
- * 253 peers, and every device credential is one of them. Read at call
- * time so a test or an operator can change it without a rebuild. */
+ * A hidden safety cap, not a customer-facing rule, and not the plan's
+ * device limit (maxConcurrentConnections, enforced by device slots --
+ * docs/device-slots.md). Ten by default (owner decision, 2026-10-06; it
+ * was five): comfortably above the phones, laptops, tablets and
+ * reinstalls of one household, so that in practice nobody in use is
+ * evicted. The ceiling it protects is the node's, not the customer's --
+ * a WireGuard config serves a /24, 253 peers, and every device
+ * credential is one of them (a quarter of which is kept back for shared
+ * credentials, see sharedWireGuardReserve).
+ *
+ * Read at call time so a test or an operator can change it without a
+ * rebuild; in production that means `docker compose up -d` recreating
+ * the container after infra/.env changes. Empty means the default (the
+ * compose file passes `${VAR:-}`); anything else that is not a whole
+ * number from 1 to DEVICE_CREDENTIAL_LIMIT_CEILING is ignored, with a
+ * warning, in favour of the default. */
 export function deviceCredentialLimit(): number {
-  const raw = Number(process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT);
-  return Number.isInteger(raw) && raw >= 1 ? raw : 5;
+  const raw = (process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT ?? "").trim();
+  if (raw === "") return DEFAULT_DEVICE_CREDENTIAL_LIMIT;
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (Number.isInteger(parsed) && parsed >= 1 && parsed <= DEVICE_CREDENTIAL_LIMIT_CEILING) return parsed;
+  if (!warnedLimitValues.has(raw)) {
+    warnedLimitValues.add(raw);
+    new Logger("ProtocolUsersService").warn(
+      `CUSTOMER_DEVICE_CREDENTIAL_LIMIT=${JSON.stringify(raw)} is not a whole number from 1 to ` +
+        `${DEVICE_CREDENTIAL_LIMIT_CEILING}; using ${DEFAULT_DEVICE_CREDENTIAL_LIMIT}`,
+    );
+  }
+  return DEFAULT_DEVICE_CREDENTIAL_LIMIT;
 }
+
+const DEFAULT_DEVICE_CREDENTIAL_LIMIT = 10;
+/** No customer needs more, and a typo like "1e6" or "100000" must not
+ * quietly switch off the cap that protects the WireGuard pools. */
+const DEVICE_CREDENTIAL_LIMIT_CEILING = 50;
+/** Each rejected value is reported once, not on every fetch. */
+const warnedLimitValues = new Set<string>();
 
 /** How many devices of one customer may receive their first credential
  * set within DEVICE_SET_WINDOW_MS. See allowNewDeviceSet. Ten an hour is
