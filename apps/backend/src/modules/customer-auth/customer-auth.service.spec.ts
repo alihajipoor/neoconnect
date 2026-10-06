@@ -39,6 +39,9 @@ describe("CustomerAuthService", () => {
     subscription: { count: jest.Mock };
     // One row per signed-in device; see CustomerSession.
     customerSession: { create: jest.Mock; deleteMany: jest.Mock; updateMany: jest.Mock };
+    // Password changes write the password and the session revocation
+    // together.
+    $transaction: jest.Mock;
   };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let config: { get: jest.Mock };
@@ -67,6 +70,9 @@ describe("CustomerAuthService", () => {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      // The array form: each operation is one of the mocks above, already
+      // called, so resolving them together is what the real one returns.
+      $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
     };
     jwt = { signAsync: jest.fn(), verifyAsync: jest.fn() };
     config = { get: jest.fn((key: string) => `config:${key}`) };
@@ -780,6 +786,43 @@ describe("CustomerAuthService", () => {
       // which would orphan the credentials its tunnel is running on.
       expect(prisma.customerSession.create).not.toHaveBeenCalled();
       expect(jwt.signAsync.mock.calls[0][0]).toMatchObject({ sid: "session-7" });
+    });
+
+    /** The revocation used to be the first statement of the best-effort
+     * endSessions: a database error there was logged and swallowed, the
+     * reset went through, and the devices it was meant to lock out kept
+     * their sessions -- and their credentials, for as long as they used
+     * them. */
+    it("a reset revokes every session in the same transaction as the password", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", purpose: "password-reset" });
+      protocolUsersService.endSessions.mockRejectedValue(new Error("database went away"));
+
+      await expect(service.resetPassword("token", "a-brand-new-password")).resolves.toBeUndefined();
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it("a change revokes every other session in the same transaction as the password", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      prisma.customerSession.updateMany.mockResolvedValue({ count: 1 });
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.changePassword(
+        "customer-1",
+        { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+        "session-7",
+      );
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null, id: { not: "session-7" } },
+        data: { revokedAt: expect.any(Date) },
+      });
     });
 
     it("a change from a signed-out or pre-session token opens a new session and ends all others", async () => {

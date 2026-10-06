@@ -450,12 +450,28 @@ export class ProtocolUsersService {
   }
 
   /** Ends sessions in bulk and takes their device credentials back -- for
-   * a password reset or change, where every other device is meant to stop
-   * working. `except` keeps the caller's own session (a password change
-   * from a signed-in device should not drop that device's tunnel).
+   * a password reset or change, where every other device is meant to lose
+   * the device credentials it was issued. `except` keeps the caller's own
+   * session (a password change from a signed-in device should not drop
+   * that device's tunnel).
+   *
+   * The subscription's shared credentials (sessionId NULL) are NOT
+   * touched: in phase 1 they stay valid on the nodes, so anyone holding a
+   * copy of them keeps a working tunnel through a password reset. See
+   * docs/per-device-credentials.md, "Transition".
    *
    * Revoked first, credentials second, so a failure in between leaves the
-   * sessions unusable and the sweep to finish the job. */
+   * sessions unusable and the sweep to finish the job. (The password paths
+   * also write the revocation in the same transaction as the password, so
+   * it cannot be lost even if this never runs.)
+   *
+   * Which sessions hold credentials is read under the customer lock, after
+   * the revocation. A device in the middle of its first fetch holds that
+   * lock having passed its liveness check before the revocation; reading
+   * outside the lock saw it with no rows yet, skipped it, and its fresh set
+   * stayed live until the hourly sweep. The lock is FIFO, so the read runs
+   * after that fetch has committed, and any fetch queued after the read is
+   * refused as signed out. */
   async endSessions(customerId: string, except?: string) {
     const where: Prisma.CustomerSessionWhereInput = {
       customerId,
@@ -464,15 +480,19 @@ export class ProtocolUsersService {
     };
     await this.prisma.customerSession.updateMany({ where, data: { revokedAt: new Date() } });
 
-    const holders = await this.prisma.customerSession.findMany({
-      where: { customerId, protocolUsers: { some: {} }, ...(except ? { id: { not: except } } : {}) },
-      select: { id: true },
+    // removeSessionCredentials directly, not revokeSessionCredentials:
+    // this already holds the lock, and KeyedLock is not re-entrant.
+    return this.customerLock.run(customerId, async () => {
+      const holders = await this.prisma.customerSession.findMany({
+        where: { customerId, protocolUsers: { some: {} }, ...(except ? { id: { not: except } } : {}) },
+        select: { id: true },
+      });
+      let revoked = 0;
+      for (const holder of holders) {
+        revoked += (await this.removeSessionCredentials(holder.id, customerId)).revoked;
+      }
+      return { sessions: holders.length, revoked };
     });
-    let revoked = 0;
-    for (const holder of holders) {
-      revoked += (await this.revokeSessionCredentials(customerId, holder.id)).revoked;
-    }
-    return { sessions: holders.length, revoked };
   }
 
   /** Runs under the customer lock (or from a path that already holds it). */

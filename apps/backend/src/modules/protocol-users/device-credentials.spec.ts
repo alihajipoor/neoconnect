@@ -90,13 +90,22 @@ function world(opts: {
         const s = sessions.find((x) => x.id === where.id && x.customerId === where.customerId);
         return s ? { revokedAt: s.revokedAt } : null;
       }),
-      findMany: jest.fn(async ({ where }: { where: { customerId: string; id: { not: string } } }) =>
+      findMany: jest.fn(async ({ where }: { where: { customerId: string; id?: { not: string } } }) =>
         sessions
-          .filter((s) => s.customerId === where.customerId && s.id !== where.id.not)
+          .filter((s) => s.customerId === where.customerId && s.id !== where.id?.not)
           .filter((s) => rows.some((r) => r.sessionId === s.id))
           .sort((a, b) => a.lastUsedAt.getTime() - b.lastUsedAt.getTime())
           .map((s) => ({ id: s.id })),
       ),
+      updateMany: jest.fn(async ({ where }: { where: { customerId: string; revokedAt: null; id?: { not: string } } }) => {
+        let count = 0;
+        for (const s of sessions) {
+          if (s.customerId !== where.customerId || s.revokedAt || s.id === where.id?.not) continue;
+          s.revokedAt = new Date();
+          count += 1;
+        }
+        return { count };
+      }),
     },
     subscription: {
       findMany: jest.fn(async ({ where }: { where: { customerId: string; status: string } }) =>
@@ -509,6 +518,45 @@ describe("ProtocolUsersService.revokeSessionCredentials", () => {
     const result = await service.revokeSessionCredentials(CUSTOMER, ME);
 
     expect(result).toEqual({ revoked: 1, failed: 1 });
+    expect(rows.map((r) => r.id)).toEqual(["me-a"]);
+  });
+});
+
+describe("ProtocolUsersService.endSessions", () => {
+  /** The password reset meant to lock out an intruder whose device is in
+   * the middle of its first fetch: it passed the liveness check before
+   * the reset, and has not written a row yet. Holders read outside the
+   * lock missed it, and its fresh set stayed live for up to an hour. */
+  it("takes back the set a device was minting when its session was ended", async () => {
+    const w = world({ sessions: [{ id: ME }] });
+    w.create.mockImplementation(async ({ subscriptionId, routeId }, sessionId) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const row = { id: `new-${routeId}`, subscriptionId, routeId, sessionId: sessionId ?? null, nodeId: "n", protocol: "XRAY_VLESS_REALITY", status: "ACTIVE", createdAt: new Date(), provisionedAt: null };
+      w.rows.push(row);
+      return row as never;
+    });
+
+    const fetch = w.service.listForDevice(CUSTOMER, ME);
+    // Let the fetch pass its liveness check and start creating.
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    const ended = w.service.endSessions(CUSTOMER);
+    await Promise.all([fetch, ended]);
+
+    expect(w.rows.filter((r) => r.sessionId === ME)).toHaveLength(0);
+    await expect(ended).resolves.toEqual({ sessions: 1, revoked: 2 });
+  });
+
+  it("keeps the caller's own session and its credentials", async () => {
+    const { service, rows } = world({
+      sessions: [{ id: ME }, { id: OTHER }],
+      rows: [
+        { id: "me-a", sessionId: ME },
+        { id: "other-a", sessionId: OTHER },
+      ],
+    });
+
+    await service.endSessions(CUSTOMER, ME);
+
     expect(rows.map((r) => r.id)).toEqual(["me-a"]);
   });
 });

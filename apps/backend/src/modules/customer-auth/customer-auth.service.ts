@@ -476,9 +476,10 @@ export class CustomerAuthService {
     }
   }
 
-  /** Ends sessions and takes their device credentials back, never
-   * throwing: the password change that called this has already been
-   * written, and the sweep finishes anything left. */
+  /** Takes back the device credentials of sessions a password change has
+   * already revoked (in the same transaction as the password), never
+   * throwing: whatever this does not finish, the hourly sweep does,
+   * because the sessions are already marked revoked. */
   private async endSessions(customerId: string, except?: string): Promise<void> {
     try {
       await this.protocolUsersService.endSessions(customerId, except);
@@ -623,18 +624,34 @@ export class CustomerAuthService {
    */
   private async applyNewPassword(customerId: string, newPassword: string): Promise<void> {
     const passwordHash = await argon2.hash(newPassword);
-    await this.prisma.customer.update({
-      where: { id: customerId },
-      data: {
-        passwordHash,
-        tokenVersion: { increment: 1 },
-        passwordResetCode: null,
-        passwordResetCodeExpiresAt: null,
-      },
-    });
-    // tokenVersion stops the refresh tokens; this stops the VPN
-    // credentials those devices were issued, which would otherwise keep
-    // working for whoever the reset was meant to lock out.
+    // The sessions are revoked in the same transaction as the password,
+    // so the two succeed or fail together. They used to be revoked by the
+    // best-effort endSessions below, whose first statement is that
+    // revocation: a database error there was logged and swallowed, the
+    // reset went through, and the devices it was meant to lock out kept
+    // their sessions -- and, since the sweep only reclaims revoked or
+    // idle sessions, their credentials, for as long as they kept using
+    // them.
+    await this.prisma.$transaction([
+      this.prisma.customer.update({
+        where: { id: customerId },
+        data: {
+          passwordHash,
+          tokenVersion: { increment: 1 },
+          passwordResetCode: null,
+          passwordResetCodeExpiresAt: null,
+        },
+      }),
+      this.prisma.customerSession.updateMany({
+        where: { customerId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+    // tokenVersion stops the refresh tokens; this takes back the device
+    // credentials those sessions were issued. The subscription's shared
+    // credentials are NOT touched in phase 1: they stay valid on the
+    // nodes, and anyone holding a copy keeps a working tunnel through the
+    // reset. See docs/per-device-credentials.md, "Transition".
     await this.endSessions(customerId);
   }
 
@@ -672,10 +689,6 @@ export class CustomerAuthService {
     }
 
     const passwordHash = await argon2.hash(dto.newPassword);
-    const updated = await this.prisma.customer.update({
-      where: { id: customerId },
-      data: { passwordHash, tokenVersion: { increment: 1 } },
-    });
 
     // The caller keeps its session, and with it the VPN credentials its
     // tunnel is running on; every other device is ended, credentials
@@ -692,6 +705,24 @@ export class CustomerAuthService {
       ).count > 0
         ? sessionId
         : undefined;
+
+    // The other sessions are revoked in the same transaction as the
+    // password -- see applyNewPassword for why a swallowed failure there
+    // was not good enough.
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.customer.update({
+        where: { id: customerId },
+        data: { passwordHash, tokenVersion: { increment: 1 } },
+      }),
+      this.prisma.customerSession.updateMany({
+        where: { customerId, revokedAt: null, ...(keep ? { id: { not: keep } } : {}) },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    // Takes back the device credentials of the sessions just ended. As
+    // with a reset, the subscription's shared credentials stay valid in
+    // phase 1.
     await this.endSessions(customerId, keep);
     return this.issueTokenPair(updated, keep);
   }

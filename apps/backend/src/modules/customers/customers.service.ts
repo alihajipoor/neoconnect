@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { randomBytes, randomUUID } from "node:crypto";
 import { CustomerStatus, PaymentStatus, Prisma, SubscriptionStatus } from "@prisma/client";
@@ -36,6 +36,8 @@ const DELETION_SELECT = {
 
 @Injectable()
 export class CustomersService {
+  private readonly logger = new Logger(CustomersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
@@ -127,12 +129,35 @@ export class CustomersService {
       data.tokenVersion = { increment: 1 };
     }
 
-    const updated = await this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
-    if (password) {
-      // The refresh tokens stop with tokenVersion; the VPN credentials
-      // those devices were issued stop here. Without this, whoever the
-      // reset was meant to lock out keeps a working tunnel.
+    if (!password) {
+      return this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
+    }
+
+    // The sessions are revoked in the same transaction as the password,
+    // so they succeed or fail together; see applyNewPassword in
+    // CustomerAuthService for why.
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT }),
+      this.prisma.customerSession.updateMany({
+        where: { customerId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+    // The refresh tokens stop with tokenVersion; the device credentials
+    // those sessions were issued are taken back here. Best effort: the
+    // password is already written, and the hourly sweep finishes what
+    // this does not, since the sessions are already revoked. The
+    // subscription's shared credentials are NOT touched in phase 1 --
+    // anyone holding a copy keeps a working tunnel (see
+    // docs/per-device-credentials.md, "Transition").
+    try {
       await this.protocolUsers.endSessions(id);
+    } catch (err) {
+      this.logger.error(
+        `Password set for customer ${id}, but their device credentials could not be taken back yet: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
     return updated;
   }

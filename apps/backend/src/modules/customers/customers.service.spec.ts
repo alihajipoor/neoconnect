@@ -162,6 +162,23 @@ describe("CustomersService", () => {
 
       expect(protocolUsers.endSessions).toHaveBeenCalledWith("customer-1");
     });
+
+    // Written with the password, so a failure taking the credentials back
+    // cannot leave the sessions live as well.
+    it("revokes the sessions in the same transaction as the password, and survives the credential step failing", async () => {
+      const saved = buildCustomer();
+      prisma.customer.findUnique.mockResolvedValue(saved);
+      prisma.$transaction.mockResolvedValue([saved, { count: 2 }]);
+      protocolUsers.endSessions.mockRejectedValue(new Error("database went away"));
+
+      await expect(service.update("customer-1", { password: "a-new-password" } as any)).resolves.toBe(saved);
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
   });
 
   describe("remove", () => {
