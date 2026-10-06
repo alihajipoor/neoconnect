@@ -641,26 +641,11 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
         }),
       handle: async (users) => {
         for (const user of users) {
-          const payload = {
-            protocol: user.protocol,
-            transport: user.protocolConfig.transport,
-            // Omitted entirely when null, so the payload stays
-            // byte-identical to what every non-relay node already
-            // receives.
-            ...(user.protocolConfig.inboundTag ? { inboundTag: user.protocolConfig.inboundTag } : {}),
-            externalUserId: user.externalUserId,
-            credentials: decryptCredentials(user.credentialsJson),
-          };
+          const payload = reassertPayload(user);
           if (opts.persist) {
             await this.enqueueCommand(nodeId, "CREATE_USER", payload);
           } else {
-            // Synthetic id: this command has no AgentCommand row, so its
-            // ack is expected to match nothing (see handleCommandAck).
-            // Prefixed so an unmatched ack is recognisable rather than
-            // looking like data loss -- and, for a credential no node has
-            // confirmed yet, so its ack can record the confirmation.
-            const prefix = user.provisionedAt ? "reassert:" : CONFIRM_ACK_PREFIX;
-            this.writeCommand(nodeId, `${prefix}${user.id}`, "CREATE_USER", payload);
+            this.writeReassert(user, payload);
           }
           asserted += 1;
         }
@@ -670,6 +655,36 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     if (asserted === 0) return;
     const how = opts.persist ? "after reconnect" : "on periodic re-assert";
     this.logger.log(`Re-asserted ${asserted} provisioned user(s) on node ${nodeId} ${how}`);
+  }
+
+  /** Puts these credentials back on their nodes now, rather than at the
+   * next periodic re-assert up to a minute away -- for a device-limit hold
+   * lifted because its device was let in (ConcurrencyService): that
+   * device dials straight after its claim is granted. Live rows only, as
+   * the periodic re-assert; a node not connected gets them on reconnect.
+   * Never throws. */
+  async reassertCredentials(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    try {
+      const users = await this.prisma.protocolUser.findMany({
+        where: { id: { in: ids }, ...liveCredentialWhere() },
+        include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+      });
+      for (const user of users) this.writeReassert(user, reassertPayload(user));
+    } catch (err) {
+      this.logger.warn(`Could not re-assert ${ids.length} credential(s) now: ${(err as Error).message}`);
+    }
+  }
+
+  /** One re-assert, written straight onto the node's stream. Synthetic id:
+   * the command has no AgentCommand row, so its ack is expected to match
+   * nothing (see handleCommandAck). Prefixed so an unmatched ack is
+   * recognisable rather than looking like data loss -- and, for a
+   * credential no node has confirmed yet, so its ack can record the
+   * confirmation. */
+  private writeReassert(user: { id: string; nodeId: string; provisionedAt: Date | null }, payload: object) {
+    const prefix = user.provisionedAt ? "reassert:" : CONFIRM_ACK_PREFIX;
+    this.writeCommand(user.nodeId, `${prefix}${user.id}`, "CREATE_USER", payload);
   }
 
   /** Records a command's outcome.
@@ -809,6 +824,26 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     }
     return command;
   }
+}
+
+/** The CREATE_USER a re-assert sends for one credential: its protocol,
+ * transport and inbound, so it is rebuilt where it was created, and its
+ * credentials decrypted, since the agent cannot use the stored form. */
+function reassertPayload(user: {
+  protocol: string;
+  externalUserId: string;
+  credentialsJson: string;
+  protocolConfig: { transport: string | null; inboundTag: string | null };
+}) {
+  return {
+    protocol: user.protocol,
+    transport: user.protocolConfig.transport,
+    // Omitted entirely when null, so the payload stays byte-identical to
+    // what every non-relay node already receives.
+    ...(user.protocolConfig.inboundTag ? { inboundTag: user.protocolConfig.inboundTag } : {}),
+    externalUserId: user.externalUserId,
+    credentials: decryptCredentials(user.credentialsJson),
+  };
 }
 
 /** A stored payload with its `credentials` removed, or null when it had

@@ -165,6 +165,113 @@ describe("device slots and the backstop together", () => {
     await expect(slots.renew(as(PHONE), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held" });
   });
 
+  /** Holds the phone the backstop's way: the PC holds the slot, the
+   * phone dialled without claiming (the API did not answer within 3 s),
+   * and both carried traffic for three readings. */
+  async function phoneHeldWhilePcHoldsTheSlot() {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const w = world(1, [row(PC, { sessionId: PC }), row(PHONE, { sessionId: PHONE, nodeId: "node-2" })]);
+    await w.slots.claim(as(PC), { subscriptionId: SUB });
+    for (let i = 0; i < 4; i++) {
+      await report(w.backstop, "node-1", [{ ext: `ext-${PC}`, bytes: 500 }]);
+      await report(w.backstop, "node-2", [{ ext: `ext-${PHONE}`, bytes: 500 }]);
+      await jest.advanceTimersByTimeAsync(30_000);
+      await w.slots.renew(as(PC), { subscriptionId: SUB });
+    }
+    const phoneRow = w.rows.find((r) => r.id === PHONE)!;
+    expect(phoneRow.heldUntil!.getTime()).toBeGreaterThan(Date.now());
+    return { ...w, phoneRow, pcRow: w.rows.find((r) => r.id === PC)! };
+  }
+
+  /** The customer then taps "Use on this device instead" on the phone
+   * whose API has come back. */
+  async function phoneTakesOver(w: Awaited<ReturnType<typeof phoneHeldWhilePcHoldsTheSlot>>) {
+    const { holders } = await refusal(w.slots.claim(as(PHONE), { subscriptionId: SUB }));
+    return w.slots.claim(as(PHONE), { subscriptionId: SUB, takeover: [holders[0].handle] });
+  }
+
+  /** The hold outlived the grant: the device the customer had just
+   * chosen stayed off its nodes, and the lease was renewed for as long as
+   * the PC it displaced -- on a censored path, never hearing it was
+   * displaced -- kept going. The PC was never held at all. */
+  it("lifts the hold on a device the moment it is let in, and holds the device it displaced instead", async () => {
+    const w = await phoneHeldWhilePcHoldsTheSlot();
+
+    const granted = await phoneTakesOver(w);
+    expect(granted.granted).toBe(true);
+
+    // Lifted before the grant was answered, and put back on its node at
+    // once: the app dials as soon as the grant arrives.
+    expect(w.phoneRow.heldUntil).toBeNull();
+    expect(w.gateway.reassertCredentials).toHaveBeenCalledWith([PHONE]);
+
+    // Ten minutes: the phone in use and renewing, the PC still going.
+    for (let i = 0; i < 20; i++) {
+      await report(w.backstop, "node-1", [{ ext: `ext-${PC}`, bytes: 500 }]);
+      await report(w.backstop, "node-2", [{ ext: `ext-${PHONE}`, bytes: 500 }]);
+      await jest.advanceTimersByTimeAsync(30_000);
+      if (i % 2 === 1) await w.slots.renew(as(PHONE), { subscriptionId: SUB });
+    }
+
+    expect(w.phoneRow.heldUntil === null || w.phoneRow.heldUntil.getTime() <= Date.now()).toBe(true);
+    expect(w.pcRow.heldUntil!.getTime()).toBeGreaterThan(Date.now());
+    const disabled = w.gateway.enqueueCommand.mock.calls
+      .filter((c) => c[1] === "DISABLE_USER")
+      .map((c) => (c[2] as { externalUserId: string }).externalUserId);
+    expect(disabled).toEqual([`ext-${PHONE}`, `ext-${PC}`]);
+    expect([...(await w.slots.state(SUB)).holders]).toEqual([`s:${PHONE}`]);
+  });
+
+  /** The phone holds the slot and renews, but its traffic does not show
+   * (it is still dialling, or idle). The PC it displaced keeps going. By
+   * traffic alone that is one device on a plan of one -- and it was, for
+   * as long as the PC ran. */
+  it("holds a displaced device that keeps going after its grace while the holder is quiet", async () => {
+    const w = await phoneHeldWhilePcHoldsTheSlot();
+    await phoneTakesOver(w);
+
+    for (let i = 0; i < 12; i++) {
+      await report(w.backstop, "node-1", [{ ext: `ext-${PC}`, bytes: 500 }]);
+      await jest.advanceTimersByTimeAsync(30_000);
+      if (i % 2 === 1) await w.slots.renew(as(PHONE), { subscriptionId: SUB });
+    }
+
+    expect(w.pcRow.heldUntil!.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  /** The other side of that rule: a quiet holder counts only against a
+   * device it displaced. The PC holds the slot and goes quiet (crashed,
+   * or the lid closed) while an old app on the phone -- one that never
+   * claims -- connects. Nobody was displaced; nobody is held. */
+  it("does not count a quiet holder against a device that was never displaced", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const w = world(1, [row(PC, { sessionId: PC }), row(PHONE, { sessionId: PHONE, nodeId: "node-2" })]);
+    await w.slots.claim(as(PC), { subscriptionId: SUB });
+
+    for (let i = 0; i < 8; i++) {
+      await report(w.backstop, "node-2", [{ ext: `ext-${PHONE}`, bytes: 500 }]);
+      await jest.advanceTimersByTimeAsync(30_000);
+      if (i % 2 === 1) await w.slots.renew(as(PC), { subscriptionId: SUB });
+    }
+
+    expect(w.gateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
+  /** A hold can land between the backstop reading who holds a slot and
+   * the claim that makes the device one. The next reading lifts it. */
+  it("lifts, at its next reading, a hold that raced a device's claim", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const w = world(1, [row(PC, { sessionId: PC }), row(PHONE, { sessionId: PHONE, nodeId: "node-2" })]);
+    await w.slots.claim(as(PHONE), { subscriptionId: SUB });
+    const phoneRow = w.rows.find((r) => r.id === PHONE)!;
+    phoneRow.heldUntil = new Date(Date.now() + 90_000);
+
+    await report(w.backstop, "node-1", [{ ext: `ext-${PC}`, bytes: 500 }]);
+
+    expect(phoneRow.heldUntil).toBeNull();
+    expect(w.gateway.reassertCredentials).toHaveBeenCalledWith([PHONE]);
+  });
+
   // And the housekeeping still happens: a subscription nobody uses lets
   // its slots go.
   it("still lets the slots of a subscription with no traffic and no renewals expire", async () => {

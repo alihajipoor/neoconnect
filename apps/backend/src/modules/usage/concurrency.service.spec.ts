@@ -80,14 +80,23 @@ function build(opts: {
       })),
     },
   };
-  const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue({}) };
+  const agentGateway = {
+    enqueueCommand: jest.fn().mockResolvedValue({}),
+    reassertCredentials: jest.fn().mockResolvedValue(undefined),
+  };
   // Who holds a device slot, as DeviceSlotsService.state reports it.
   const slotState: SlotState = {
     holders: opts.slots?.holders ?? new Set(),
+    // Holders renewing, unless a test says otherwise.
+    live: opts.slots?.live ?? new Set(opts.slots?.holders ?? []),
     displaced: opts.slots?.displaced ?? new Map(),
     credit: opts.slots?.credit ?? new Map(),
   };
-  const slots = { state: jest.fn(async () => slotState), keepAlive: jest.fn(async () => undefined) };
+  const slots = {
+    state: jest.fn(async () => slotState),
+    keepAlive: jest.fn(async () => undefined),
+    onGrant: jest.fn(),
+  };
   const service = new ConcurrencyService(
     prisma as never,
     agentGateway as never,

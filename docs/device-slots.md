@@ -378,13 +378,24 @@ its usage shows bytes.
   was taken over (after its 90 s grace, or at once if it had itself
   just taken over), then the shared pseudo-device, then the newest
   device. **Never a device holding a slot**, and never all of them.
+  It also acts on a device whose slot was taken over and that is still
+  going after its grace while the holders who took its place renew,
+  even with no traffic of theirs showing (still dialling, idle) -- and
+  then only on that device. A quiet holder counts against nothing else.
+- **A grant lifts a hold.** A device let in -- by a claim, a takeover, or
+  a renewal that gives a lapsed slot back -- has any hold on its
+  credentials, and on the shared credential it named, lifted before its
+  grant is answered, and those credentials are put back on their nodes
+  at once (the app dials straight after). A hold found on a slot
+  holder at any later reading is lifted the same way.
 - **`CONCURRENCY_CUT=shadow` (default):** it logs `[shadow] Subscription
   ...: N devices active against a limit of L; would hold device <session>`
   -- at most once per ten minutes per subscription -- and sends nothing.
 - **`CONCURRENCY_CUT=enforce`:** it holds the device -- a `DISABLE_USER`
   on each of its credentials, on that credential's own inbound, and a
   90 s lease (`protocol_users.heldUntil`) that the 60 s re-assert skips.
-  The lease is renewed while the devices not held fill the limit, and
+  The lease is renewed while the devices not held fill the limit
+  (counting, for a device taken over, the holders that renew), and
   lapses on its own once they do not; the next re-assert then puts the
   credentials back, as they are at that moment. A held device on a
   censored network is back within about two and a half minutes of the
