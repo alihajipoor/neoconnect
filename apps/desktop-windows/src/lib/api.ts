@@ -108,13 +108,22 @@ async function fetchAnyEndpoint(path: string, init: RequestInit, trace?: Endpoin
   // Windows reaching the API less often than Android -- "162
   // CONTROL_PLANE_UNREACHABLE reports from Windows in thirty days" --
   // and explained the difference by the mobile build having no seed
-  // bundle. Both halves were wrong. The mobile release builds have
-  // carried the eight-address seed since 4174b7c (release-android.yml
-  // requires it), so the lists are the same length on both. And the
-  // "Windows" rows were the mobile app's iOS builds, which the shared
-  // attempts.ts labelled "windows" until 0.2.22: every one carries a
-  // 0.2.x version, and the real Windows client had recorded none. The
-  // arithmetic bit the mobile app, on both platforms, before 0.2.22.
+  // bundle. The "Windows" rows were the mobile app's iOS builds, which
+  // the shared attempts.ts labelled "windows" until 0.2.22: every one
+  // carries a 0.2.x version, and the real Windows client had recorded
+  // none. The arithmetic bit the mobile app before 0.2.22.
+  //
+  // The seed half is open, and for iOS only. Since 4174b7c the Android
+  // and Windows release workflows refuse to build without the seed
+  // (NEOXIFY_REQUIRE_SEED). The iOS builds, 0.2.18 to 0.2.21, were made
+  // on the Mac, where nothing required it until build-ios.sh did on
+  // this branch: a failed fetch there would have baked in the
+  // placeholder, and with it a capability scope naming only the one
+  // compiled-in domain -- the one blocked in Iran -- so every other
+  // address would be refused on the device. Whether any shipped IPA was
+  // built that way is not known; it is the leading candidate for the
+  // iOS builds' unreachable rate, and docs/windows-service-rewrite.md
+  // ("What this does not fix") says how to check it.
   //
   // Racing removes the arithmetic entirely. The slowest address costs
   // nothing because nobody waits for it, and the result arrives in one

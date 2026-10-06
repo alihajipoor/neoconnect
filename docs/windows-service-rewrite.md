@@ -405,9 +405,64 @@ refresh failed under and whether the app was backgrounded during it,
 keep throttled reports, and never ship without the endpoint seed.
 
 **Still unexplained:** why the iOS cohort fails so much more than
-Android. Both share every line of the control-plane path. Candidates
-read from the code — the 6s budget against a token-refresh chain of
-three sequential fresh connections, iOS suspending the app seconds
-after backgrounding, the 0.2.20 extension aborting under load — are
-unverified, and nothing here can settle it without a real iPhone on a
-censored network. The VM cannot.
+Android. They share the control-plane *code*, but not necessarily what
+was built into it, and that gives the leading candidate — unproven,
+and checkable without an iPhone:
+
+- **The iOS builds may have shipped without the endpoint seed.** Since
+  4174b7c the Android and Windows release workflows refuse to build
+  without it (`NEOXIFY_REQUIRE_SEED=1`). iOS 0.2.18–0.2.21 were built
+  on the Mac, where nothing required it until `build-ios.sh` did on this
+  branch: `tauri ios build` runs `pnpm build`, whose prebuild fetches
+  the seed and, on any failure, quietly copies the placeholder in.
+  `apply-capability-scope` then leaves the HTTP permission as committed
+  — `*.neoxify.site` and nothing else, the domain that is DNS-poisoned
+  and SNI-blocked in Iran (journal, 2026-09-01). Such a build tries only
+  the compiled-in addresses, all on that domain, and the device refuses
+  any other address a later bundle names. That would fit an iOS-only
+  failure rate without anything being wrong in the shared code. If the
+  Mac's fetch succeeded at each build — likely enough on an unfiltered
+  network — the candidate is ruled out; that is what the check decides.
+
+How to check, on the Mac, best evidence first:
+
+1. **The build output**, if any survives (terminal scrollback, a saved
+   log): each build prints `seed-bundle: v<n>, <m> endpoints` or
+   `seed-bundle: placeholder (<why>)`, then `capability-scope: ...
+   +<k> glob(s) for <h> host(s)` or `capability-scope: left as
+   committed (...)`.
+2. **The shipped artefacts**: any surviving `.ipa` or `.xcarchive` of
+   0.2.18, 0.2.20 or 0.2.21 — `src-tauri/gen/apple/build/` holds only
+   the latest (build-ios.sh clears the archive each time), 0.2.18 was
+   built in the old checkout under `~/Desktop`, and a copy downloaded
+   from the App Store is encrypted and useless for this. Unzip it and
+   search the main executable in `Payload/Neoxify.app` for the allow
+   globs, which Tauri compiles into the binary:
+   `grep -a -o 'https\?://[A-Za-z0-9*.:-]*/\*' <executable> | sort -u`.
+   Only `*.neoxify.site` (and `http://localhost:4000/*`) means no seed
+   reached that build's scope: the candidate holds for it. Any other
+   host means a seed was applied — to this build, or, since the script
+   only ever adds, to an earlier one in the same checkout, which leaves
+   the seed itself open; it is inside the embedded frontend, which
+   Tauri stores compressed, so a plain search will not find it. (Tried
+   on 2026-10-06 against a Windows debug build of the desktop app,
+   whose committed scope came back exactly, as plain strings; not yet
+   tried on an iOS build. If no glob turns up there at all, not even
+   `*.neoxify.site`, this check cannot answer.)
+3. **The checkout's current state**, which shows only the most recent
+   build: `apps/desktop-windows/src/lib/seed-bundle.json` (a
+   `"key":"placeholder"` envelope, or a real one) and `git diff
+   apps/mobile/src-tauri/capabilities/default.json` (globs added by the
+   prebuild show as a diff; the script only ever adds, and the checkout
+   was re-cloned on 2026-09-23, so a diff means some build since then
+   had a seed, not which).
+
+From the next iOS release on the question cannot arise, since
+`build-ios.sh` now requires the seed; for the IPAs already shipped
+only the checks above can answer it.
+
+The other candidates, read from the code — the 6s budget against a
+token-refresh chain of three sequential fresh connections, iOS
+suspending the app seconds after backgrounding, the 0.2.20 extension
+aborting under load — are unverified too, and settling them needs a
+real iPhone on a censored network. The VM cannot.

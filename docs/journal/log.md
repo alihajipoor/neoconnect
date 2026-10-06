@@ -2773,10 +2773,17 @@ commit messages of 7a5fd50 and a241741 are wrong** where they say
 Windows reaches the API far less reliably than Android ("160 against
 107", "162 ... against 43", "the mobile build has no seed"). Commits
 cannot be edited; this is the correction. The 6s-budget-inside-8s
-arithmetic in a241741 was real but bit the mobile app, which has
-carried the seed since 4174b7c. The source comments repeating the claim
-are fixed on the branch, and `docs/windows-service-rewrite.md` "What
-this does not fix" is rewritten with the numbers.
+arithmetic in a241741 was real but bit the mobile app. The source
+comments repeating the claim are fixed on the branch, and
+`docs/windows-service-rewrite.md` "What this does not fix" is rewritten
+with the numbers.
+
+(This paragraph first said the mobile app "has carried the seed since
+4174b7c", and c1a9689's message answers "the mobile build has no seed"
+with release-android.yml alone. True of Android only: 4174b7c made the
+seed required in the Android and Windows release workflows. iOS
+0.2.18–0.2.21 were built on the Mac, where nothing required it until
+this branch -- see below.)
 
 Also found by reading, and fixed on the branch: resume/online
 refreshes were reported as connects; a 429 dropped queued reports; and
@@ -2811,10 +2818,24 @@ mobile unreachable rows by reason prefix: from the new builds,
 was in the background during it" marks the ones iOS suspension could
 explain.
 
-**Unverified:** why iOS fails so much more than Android -- both share
-every line of the control-plane path; the candidates (token-refresh
-chain inside the 6s budget, iOS suspending the app, the 0.2.20
-extension aborting) are readings, not measurements. The probe's
+**Unverified:** why iOS fails so much more than Android. The two share
+the control-plane code but maybe not what was built into it, and that
+is the **leading candidate**: an iOS build whose seed fetch failed on
+the Mac shipped the placeholder, and with it the committed HTTP scope
+of `*.neoxify.site` alone -- the domain blocked in Iran -- so it could
+try only the compiled-in addresses on that domain. Not proven: no build
+log is in the repo, and on an unfiltered network the fetch probably
+worked. To check, on the Mac: the build output's `seed-bundle:` and
+`capability-scope:` lines if any survive; `grep -a` on the executable
+of a surviving 0.2.18/0.2.20/0.2.21 `.ipa` or `.xcarchive` for the
+`https://` allow globs (only `*.neoxify.site` = no seed applied; the
+globs do appear as plain strings in a desktop debug build); the
+checkout's `seed-bundle.json` and `git diff` of
+`apps/mobile/src-tauri/capabilities/default.json`, which reflect only
+the latest build. Details in `docs/windows-service-rewrite.md`. The
+other candidates (token-refresh chain inside the 6s budget, iOS
+suspending the app, the 0.2.20 extension aborting) are readings, not
+measurements. The probe's
 classes were checked against live TLS from this PC only (ok, cert,
 dns), never from a censored network; the Android/iOS builds of the
 new Rust were not compiled here. All of it waits on a real iPhone.
