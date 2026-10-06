@@ -15,6 +15,25 @@ import {
   ValidateNested,
 } from "class-validator";
 
+/** The longest `apiEndpoint` accepted.
+ *
+ * It was 200, and that silently threw away every report it was meant to
+ * explain. Clients from desktop 0.9.39 and mobile 0.2.22 on fill it with
+ * the hostname of every control-plane address they would try -- eleven
+ * of them with the current endpoint bundle, 233 characters before any
+ * node mirrors are added -- and only on a CONTROL_PLANE_UNREACHABLE
+ * report. Over the limit the global ValidationPipe answers 400, the
+ * client counts a 400 as delivered (attempts.ts `send`), and the report
+ * is neither stored nor queued. So every unreachable report those builds
+ * sent was lost, and "no unreachable reports from 0.9.39 on" in the data
+ * means nothing at all.
+ *
+ * 2000 holds the per-address trace newer clients send -- address,
+ * outcome and milliseconds for each one tried, in each phase -- with
+ * room for the mirror list to grow. Still bounded, because this endpoint
+ * is unauthenticated; the column is TEXT, so no migration. */
+export const API_ENDPOINT_MAX_LENGTH = 2000;
+
 /** One rung of the failover ladder, as the app recorded it.
  *
  * The client already builds exactly this to show under "show details";
@@ -80,9 +99,12 @@ export class ReportAttemptDto {
   @MaxLength(64)
   protocol?: string;
 
+  /** Which control-plane addresses were tried and how each one failed,
+   * on a CONTROL_PLANE_UNREACHABLE report. See `API_ENDPOINT_MAX_LENGTH`
+   * for why the bound is what it is. */
   @IsOptional()
   @IsString()
-  @MaxLength(200)
+  @MaxLength(API_ENDPOINT_MAX_LENGTH)
   apiEndpoint?: string;
 
   /** The app's own error text. Free-form on purpose -- the enum is for

@@ -304,7 +304,10 @@ function AttemptRow({ attempt }: { attempt: ClientAttempt }) {
                 )}
                 {attempt.apiEndpoint && (
                   <div>
-                    <Label>API address that answered</Label>
+                    {/* Only ever sent on an unreachable report, so it is
+                        never "the one that answered" -- it is what was
+                        tried. */}
+                    <Label>API addresses tried</Label>
                     <p className="font-mono text-xs break-all">{attempt.apiEndpoint}</p>
                   </div>
                 )}
