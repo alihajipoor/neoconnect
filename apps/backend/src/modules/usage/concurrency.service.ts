@@ -191,7 +191,11 @@ export class ConcurrencyService {
     // own counter reading the same access log.
     const counted = new Map<string, number>();
     for (const count of sessions) {
-      if (COUNTS_IGNORED.has(count.protocol)) continue;
+      // The protocol part only: the agent labels a non-TCP inbound's
+      // count "<protocol>|<transport>" (dispatch.go), and the WebSocket
+      // VLESS+TLS inbound's "XRAY_VLESS_TLS|WS" used to miss this set and
+      // count its 60 s tail as a device.
+      if (COUNTS_IGNORED.has(count.protocol.split("|")[0])) continue;
       counted.set(count.externalUserId, Math.max(counted.get(count.externalUserId) ?? 0, count.distinctSources));
     }
     const active = new Set([...counted].filter(([, n]) => n > 0).map(([id]) => id));

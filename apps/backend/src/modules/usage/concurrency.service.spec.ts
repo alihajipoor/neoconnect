@@ -268,6 +268,24 @@ describe("ConcurrencyService (device-limit backstop)", () => {
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
+  /** The agent labels a WebSocket inbound's count "<protocol>|<transport>"
+   * (dispatch.go), so the tail-carrying "XRAY_VLESS_TLS|WS" was not in the
+   * ignore set and its 60 s tail counted a WS customer who had left as
+   * still active -- the same false second device the set exists for. */
+  it("ignores an Xray WebSocket inbound's session count too, labelled with its transport", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({ limit: 1, rows: twoDevices() });
+
+    for (let i = 0; i < 6; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", sources: 1, protocol: "XRAY_VLESS_TLS|WS" }],
+        "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }],
+      });
+    }
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
   it("ignores credentials already switched off, ids it does not know, and empty deltas", async () => {
     process.env.CONCURRENCY_CUT = "enforce";
     const { service, agentGateway } = build({
