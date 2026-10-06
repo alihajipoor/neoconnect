@@ -6,6 +6,7 @@ import { endCustomerSession, type SessionEnd } from "./session-end";
 import { clearGamingProfileCache } from "./customer";
 import { solveChallengeFor } from "./pow";
 import { currentLanguage } from "./i18n";
+import { deviceHeaders } from "./device-identity";
 import { startSocialSignIn } from "./social-auth";
 import type { SocialOutcome, SocialProvider } from "./social-auth";
 import type { ApiResult } from "./api";
@@ -96,6 +97,9 @@ export async function login(email: string, password: string) {
   const result = await publicRequest<LoginResult>("/customer-auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
+    // Names this device to the customer's others ("Neoxify is in use on
+    // Windows PC"). See device-identity.ts.
+    headers: deviceHeaders(),
   });
   if (result.ok && !("requiresVerification" in result.data)) {
     // Before the tokens, not after. From here on any fetch is this
@@ -151,6 +155,7 @@ export async function socialSignIn(
       ? await publicRequest<TokenPair>("/customer-auth/social", {
           method: "POST",
           body: JSON.stringify({ provider, token: outcome.token, locale }),
+          headers: deviceHeaders(),
         })
       : // Google and Facebook finished on the server; this only collects
         // the session it is already holding.

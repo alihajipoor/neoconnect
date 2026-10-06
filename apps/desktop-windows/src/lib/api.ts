@@ -1,5 +1,6 @@
 import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, rememberEndpoint } from "./api-endpoints";
+import { deviceHeaders } from "./device-identity";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
 import { clearTokens, getTokens, setTokens } from "./session";
 import { announceSessionRevoked } from "./session-revoked";
@@ -307,6 +308,11 @@ async function refreshTokens(): Promise<Refresh> {
   const result = await publicRequest<TokenPair>("/customer-auth/refresh", {
     method: "POST",
     body: JSON.stringify({ refreshToken: current.refreshToken }),
+    // What this device is called on the customer's other devices
+    // ("Neoxify is in use on Windows PC"). Sent on every refresh because
+    // a session started in the system browser could not send it, and its
+    // first refresh is what names that device. See device-identity.ts.
+    headers: deviceHeaders(),
   });
   if (!result.ok) {
     return result.status === REFRESH_REFUSED ? { kind: "refused" } : { kind: "unavailable" };
