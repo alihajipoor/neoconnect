@@ -27,6 +27,30 @@ export function allocateWireGuardAddress(cidr: string, used: string[]): string {
   throw new BadRequestException(`No free addresses left in WireGuard subnet ${cidr}`);
 }
 
+/** How many peers a WireGuard subnet can hold: every address except the
+ * network, the server's own `.1` and the broadcast -- exactly the
+ * addresses allocateWireGuardAddress can hand out. 253 for the /24 the
+ * installer configures. Null for a CIDR it could not parse. */
+export function wireGuardPoolSize(cidr: string): number | null {
+  const prefix = Number(cidr.split("/")[1]);
+  if (!Number.isInteger(prefix) || prefix < 1 || prefix > 30) return null;
+  return 2 ** (32 - prefix) - 3;
+}
+
+/** Addresses only a subscription's shared credential may take.
+ *
+ * A device credential that cannot get an address falls back to its
+ * subscription's shared one -- nothing is lost. A shared credential has
+ * nothing to fall back to: it is what a paying customer, a renewal or a
+ * new trial is provisioned with. Device credentials share the pool with
+ * them (one customer can hold up to the device cap of them per config,
+ * kept for up to 30 days idle), so without a reserve a pool filled by
+ * devices would refuse the next paying customer. A quarter of the pool,
+ * never less than 16: 63 of the 253 in a /24. */
+export function sharedWireGuardReserve(poolSize: number): number {
+  return Math.max(16, Math.floor(poolSize / 4));
+}
+
 function ipToInt(ip: string): number {
   const parts = ip.split(".").map(Number);
   if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {

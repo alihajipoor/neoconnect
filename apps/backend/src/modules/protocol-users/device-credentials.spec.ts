@@ -640,6 +640,31 @@ describe("ProtocolUsersService.create for a device", () => {
     expect(prisma.protocolUser.create.mock.calls[0][0].data).not.toHaveProperty("sessionId");
   });
 
+  /** A device that cannot get an address falls back to the shared
+   * credential; a paying customer's shared credential has nothing to fall
+   * back to. So the last quarter of a pool is the shared rows' alone. */
+  it("refuses a device the addresses kept for subscription credentials, and gives them to a shared one", async () => {
+    const { service, stored } = build();
+    // A /24 holds 253 peers and keeps 63 back: fill 190.
+    for (let i = 0; i < 190; i++) {
+      stored.push({ credentialsJson: encryptCredentials({ address: `10.66.0.${i + 2}/32` }) });
+    }
+
+    await expect(service.create({ subscriptionId: "sub-1", routeId: "route-wg" }, ME)).rejects.toThrow(
+      /kept for subscription credentials/,
+    );
+    await expect(service.create({ subscriptionId: "sub-1", routeId: "route-wg" })).resolves.toBeDefined();
+  });
+
+  it("lets a device take an address while the pool has room above the reserve", async () => {
+    const { service, stored } = build();
+    for (let i = 0; i < 189; i++) {
+      stored.push({ credentialsJson: encryptCredentials({ address: `10.66.0.${i + 2}/32` }) });
+    }
+
+    await expect(service.create({ subscriptionId: "sub-1", routeId: "route-wg" }, ME)).resolves.toBeDefined();
+  });
+
   // Two peers on one address break the older one. Lazy provisioning makes
   // concurrent creation on one WireGuard config an everyday event.
   it("never gives two concurrently created WireGuard peers the same address", async () => {

@@ -11,6 +11,7 @@ import { rateLimitFor } from "./rate-limit";
 import { generateCredentials } from "./generate-credentials";
 import { KeyedLock } from "./keyed-lock";
 import { commandTarget, deleteUserPayload } from "./command-target";
+import { sharedWireGuardReserve, wireGuardPoolSize } from "./wireguard-subnet";
 
 /** How many signed-in devices of one customer may hold credentials of
  * their own at once. See `enforceDeviceLimit`.
@@ -564,6 +565,21 @@ export class ProtocolUsersService {
       const usedAddresses =
         protocolConfig.protocol === "WIREGUARD" ? await this.usedWireGuardAddresses(protocolConfig.id) : [];
 
+      // A device credential may not take the last addresses of a pool:
+      // those are kept for shared credentials, which have nothing to fall
+      // back to (see sharedWireGuardReserve). Refusing here sends the
+      // device back to its subscription's shared credential, the same as
+      // any other failure to create one.
+      if (sessionId && protocolConfig.protocol === "WIREGUARD") {
+        const cidr = (protocolConfig.publicParamsJson as { subnetCidr?: unknown } | null)?.subnetCidr;
+        const pool = typeof cidr === "string" ? wireGuardPoolSize(cidr) : null;
+        if (pool !== null && pool - usedAddresses.length <= sharedWireGuardReserve(pool)) {
+          throw new BadRequestException(
+            `WireGuard pool ${String(cidr)} is down to the addresses kept for subscription credentials`,
+          );
+        }
+      }
+
       const generated = generateCredentials(protocolConfig.protocol, protocolConfig, usedAddresses);
 
       const row = await this.prisma.protocolUser.create({
@@ -728,21 +744,36 @@ export class ProtocolUsersService {
       existing.filter((u) => !u.sessionId && allowedRouteIds.has(u.routeId)).map((u) => u.routeId),
     );
     const created = [];
+    const failed: { routeId: string; reason: string }[] = [];
     for (const route of routes) {
       if (already.has(route.id)) continue;
       // Sequential, not Promise.all: WireGuard address allocation reads
       // the addresses already in use, so two routes on the same node
       // provisioned in parallel can pick the same one.
-      created.push(await this.create({ subscriptionId, routeId: route.id }));
+      //
+      // One route failing must not cost the customer the others. This
+      // runs on a confirmed payment, a renewal, a trial grant and a
+      // voucher, and a throw here -- a WireGuard pool with no free
+      // address left is the one in sight -- used to abort every route
+      // that sorted after the failing one, and with them the caller's
+      // own remaining work (the invoice after a renewal). Logged at
+      // error, because a paying customer short of a route is not routine.
+      try {
+        created.push(await this.create({ subscriptionId, routeId: route.id }));
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        failed.push({ routeId: route.id, reason });
+        this.logger.error(`provisionAll(${subscriptionId}): route ${route.id} could not be provisioned: ${reason}`);
+      }
     }
 
-    // Both halves, named. This used to return the created users alone,
+    // Every half, named. This used to return the created users alone,
     // which was the whole story when it could only add -- and once it
     // could also revoke, every caller was structurally unable to see
     // that half. The backfill in particular summarised a sweep as
     // "added N" while the same sweep deleted credentials from live
     // nodes. Returning one array again would rebuild that blind spot.
-    return { created, revoked };
+    return { created, revoked, failed };
   }
 
   /** The routes a plan can be provisioned on now (`routes`, enabled and

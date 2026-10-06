@@ -385,7 +385,21 @@ export class BillingService {
     // the client can fail over between protocols without needing to
     // reach us. defaultRouteId still decides which the client tries
     // first; it no longer decides which exist.
-    const provisioned = await this.protocolUsersService.provisionAll(subscriptionId);
+    //
+    // Caught: the payment is confirmed and the subscription already
+    // extended above, so a provisioning failure (a plan whose routes are
+    // all down throws by design) must not also cost the customer the
+    // invoice that confirmPayment issues after this returns. Logged at
+    // error -- a paid subscription with nothing to connect with is
+    // someone's job to fix today.
+    let provisioned: { created: unknown[] } = { created: [] };
+    try {
+      provisioned = await this.protocolUsersService.provisionAll(subscriptionId);
+    } catch (err) {
+      this.logger.error(
+        `Subscription ${subscriptionId} renewed but could not be provisioned: ${(err as Error).message}`,
+      );
+    }
     if (existingUsers.length === 0 && provisioned.created.length === 0) {
       this.logger.warn(
         `Subscription ${subscriptionId} (plan ${subscription.planId}) had a payment confirmed but no enabled route matches its allowed protocols -- no protocol user was provisioned`,

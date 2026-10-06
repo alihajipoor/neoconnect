@@ -100,3 +100,47 @@ describe("BillingService.confirmPayment expiry", () => {
     expect(newExpiryDays(prisma)).toBe(30);
   });
 });
+
+/** The money has moved by the time provisioning runs. A provisioning
+ * failure must not also skip the invoice -- the customer is owed one
+ * whether or not a node was reachable. */
+describe("BillingService.confirmPayment when provisioning fails", () => {
+  it("still extends the subscription and issues the invoice", async () => {
+    const prisma = {
+      paymentTransaction: {
+        findUnique: jest.fn().mockResolvedValue({ id: "txn-1", status: "PENDING", subscriptionId: "sub-1", provider: "STRIPE" }),
+        update: jest.fn(),
+      },
+      subscription: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: "sub-1",
+          status: SubscriptionStatus.ACTIVE,
+          expireAt: new Date(Date.now() + DAY_MS),
+          plan: { durationDays: 30 },
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      protocolUser: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const invoices = { issueForPayment: jest.fn().mockResolvedValue({}) };
+    const service = new BillingService(
+      prisma as never,
+      {
+        setEnabled: jest.fn(),
+        provisionAll: jest.fn().mockRejectedValue(new Error("The Pro plan's selected routes are all unavailable")),
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: jest.fn() } as never,
+      { availableProviders: jest.fn().mockResolvedValue([]) } as never,
+      invoices as never,
+      {} as never,
+    );
+
+    await expect(service.confirmPayment("txn-1", {})).resolves.toBeUndefined();
+
+    expect(prisma.subscription.update).toHaveBeenCalled();
+    expect(invoices.issueForPayment).toHaveBeenCalledWith("txn-1");
+  });
+});
