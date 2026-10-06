@@ -3,6 +3,7 @@ import * as argon2 from "argon2";
 import { CustomersService } from "./customers.service";
 import { encryptCredentials } from "../protocol-users/credentials-crypto";
 import { KeyedLock } from "../protocol-users/keyed-lock";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 /** A credential row as account deletion reads it. */
 function credentialRow(id: string) {
@@ -54,6 +55,7 @@ describe("CustomersService", () => {
   let agentGateway: { enqueueCommand: jest.Mock };
   let protocolUsers: { endSessions: jest.Mock; withCustomerLock: jest.Mock };
   let lock: KeyedLock;
+  let deviceSlots: ReturnType<typeof deviceSlotsStub>;
 
   beforeEach(() => {
     prisma = {
@@ -81,11 +83,12 @@ describe("CustomersService", () => {
     agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
     // The real lock, so a test can hold it the way a device fetch does.
     lock = new KeyedLock();
+    deviceSlots = deviceSlotsStub();
     protocolUsers = {
       endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
       withCustomerLock: jest.fn((id: string, work: () => Promise<unknown>) => lock.run(id, work)),
     };
-    service = new CustomersService(prisma as any, agentGateway as any, protocolUsers as any);
+    service = new CustomersService(prisma as any, agentGateway as any, protocolUsers as any, deviceSlots as any);
   });
 
   describe("get", () => {
@@ -392,6 +395,14 @@ describe("CustomersService", () => {
         "ext-device",
       ]);
       await expect(deletion).resolves.toEqual({ deleted: true, credentialsRevoked: 2 });
+    });
+
+    it("frees every device slot of the deleted account", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(deviceSlots.releaseCustomer).toHaveBeenCalledWith("customer-1");
     });
 
     // An access token lives fifteen minutes past tokenVersion; with the

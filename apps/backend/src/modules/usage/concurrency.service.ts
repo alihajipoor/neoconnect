@@ -11,6 +11,7 @@ import {
   sessionIdOf,
 } from "../device-slots/device-presence";
 import { concurrencyCutMode } from "../device-slots/modes";
+import { DISPLACED_GRACE_MS, DeviceSlotsService } from "../device-slots/device-slots.service";
 import type { UsageDeltaInput } from "./usage.service";
 
 export interface SessionCountInput {
@@ -116,6 +117,7 @@ export class ConcurrencyService {
     @Inject(forwardRef(() => AgentGatewayService))
     private readonly agentGateway: AgentGatewayService,
     private readonly presence: DevicePresence,
+    private readonly slots: DeviceSlotsService,
   ) {}
 
   /** One node's stats report: records which credentials carried traffic,
@@ -182,14 +184,15 @@ export class ConcurrencyService {
       return;
     }
 
-    const [entries, credentials] = await Promise.all([
+    const [entries, credentials, slots] = await Promise.all([
       this.presence.entries(subscriptionId, PRESENCE_FRESH_MS, now),
       this.prisma.protocolUser.findMany({
         where: { subscriptionId },
         select: { id: true, routeId: true, sessionId: true, provisionedAt: true, heldUntil: true },
       }),
+      this.slots.state(subscriptionId),
     ]);
-    const devices = resolveDevices(entries, credentials);
+    const devices = resolveDevices(entries, credentials, slots.credit);
 
     // Holds are only honoured and extended while enforcing: switching back
     // to shadow lets any that exist lapse within HOLD_LEASE_MS.
@@ -235,11 +238,33 @@ export class ConcurrencyService {
       );
       return;
     }
+    // A device holding a slot is never held: it asked first and was let
+    // in. So node-side miscounting can never cut a single-device customer,
+    // or a pair that takes turns through the app.
+    const candidates = free.filter((key) => !slots.holders.has(key));
+    if (candidates.length === 0) {
+      this.forget(subscriptionId);
+      return;
+    }
+    // A device just taken over is told on its next renewal and disconnects
+    // by itself; it gets that long before it can be held -- unless it had
+    // itself just taken over, which is what overlapping grace periods on
+    // purpose looks like. Waiting keeps the strikes, so it acts as soon as
+    // the grace is over.
+    const inGrace = candidates.some((key) => {
+      const d = slots.displaced.get(key);
+      return d !== undefined && !d.noGrace && now - d.at < DISPLACED_GRACE_MS;
+    });
+    if (inGrace) return;
     this.strikes.delete(subscriptionId);
     this.lastStrikeAt.delete(subscriptionId);
 
     const victims = this.pickDevicesToHold(
-      free.map((key) => ({ key, firstSeen: devices.get(key)!.firstSeen })),
+      candidates.map((key) => ({
+        key,
+        firstSeen: devices.get(key)!.firstSeen,
+        displacedAt: slots.displaced.get(key)?.at ?? null,
+      })),
       free.length - limit,
     );
 
@@ -262,17 +287,23 @@ export class ConcurrencyService {
     );
   }
 
-  /** Which devices to hold, `excess` of them.
+  /** Which devices to hold, at most `excess` of them, never one holding
+   * a slot (the caller has removed those).
    *
-   * The shared pseudo-device first -- it cannot be told about anything,
+   * A device whose slot was taken over first -- it was told, and is still
+   * going -- then the shared pseudo-device, which cannot be told anything
    * and is the copy most likely not to be the customer's own current
-   * device -- then the newest device: the one whose activity began most
+   * device, then the newest device: the one whose activity began most
    * recently. Never all of them: the point, unlike the cut this replaces,
    * is that the device already in use keeps working. */
-  private pickDevicesToHold(candidates: { key: DeviceKey; firstSeen: number }[], excess: number): DeviceKey[] {
+  private pickDevicesToHold(
+    candidates: { key: DeviceKey; firstSeen: number; displacedAt: number | null }[],
+    excess: number,
+  ): DeviceKey[] {
+    const tier = (c: (typeof candidates)[number]) => (c.displacedAt !== null ? 0 : c.key === SHARED_DEVICE ? 1 : 2);
     const ranked = [...candidates].sort((a, b) => {
-      if (a.key === SHARED_DEVICE) return -1;
-      if (b.key === SHARED_DEVICE) return 1;
+      if (tier(a) !== tier(b)) return tier(a) - tier(b);
+      if (a.displacedAt !== null && b.displacedAt !== null) return a.displacedAt - b.displacedAt;
       return b.firstSeen - a.firstSeen;
     });
     return ranked.slice(0, excess).map((c) => c.key);

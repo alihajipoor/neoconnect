@@ -3,6 +3,7 @@
    they replace, most of which have nothing to wait for in memory. */
 import { UnauthorizedException } from "@nestjs/common";
 import { ProtocolUsersService } from "./protocol-users.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 import { encryptCredentials } from "./credentials-crypto";
 import { KeyedLock } from "./keyed-lock";
 
@@ -154,7 +155,8 @@ function world(opts: {
     usageRecord: { findFirst: jest.fn(async () => null) },
   };
 
-  const service = new ProtocolUsersService(prisma as never, {} as never);
+  const slots = deviceSlotsStub();
+  const service = new ProtocolUsersService(prisma as never, {} as never, slots as never);
   // create/remove/setEnabled have their own tests; here what matters is
   // which rows they are asked to make, remove or switch off.
   const create = jest
@@ -189,7 +191,7 @@ function world(opts: {
     return row as never;
   });
 
-  return { service, prisma, rows, sessions, subscriptions, create, remove, setEnabled, confirmAll };
+  return { service, prisma, rows, sessions, subscriptions, create, remove, setEnabled, confirmAll, slots };
 }
 
 describe("ProtocolUsersService.listForDevice", () => {
@@ -517,6 +519,19 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(remove.mock.calls.map((c) => c[0])).toEqual(["out-a"]);
   });
 
+  // It has nothing of its own left to connect with.
+  it("gives an evicted device's plan slot back too", async () => {
+    process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT = "1";
+    const { service, slots } = world({
+      sessions: [{ id: ME }, { id: OTHER, lastUsedAt: new Date(Date.now() - 86_400_000) }],
+      rows: [{ id: "other-a", sessionId: OTHER }],
+    });
+
+    await service.listForDevice(CUSTOMER, ME);
+
+    expect(slots.releaseSession).toHaveBeenCalledWith(CUSTOMER, OTHER);
+  });
+
   it("does not evict anyone for a device that already holds its set", async () => {
     process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT = "1";
     const { service, remove } = world({
@@ -688,7 +703,7 @@ describe("ProtocolUsersService.provisionAll with device credentials", () => {
       route: { findMany: jest.fn().mockResolvedValue(allowed.map((id) => ({ id }))) },
       protocolUser: { findMany: jest.fn().mockResolvedValue(existing) },
     };
-    const service = new ProtocolUsersService(prisma as never, {} as never);
+    const service = new ProtocolUsersService(prisma as never, {} as never, deviceSlotsStub() as never);
     const create = jest.spyOn(service, "create").mockImplementation(async ({ routeId }) => ({ routeId }) as never);
     const remove = jest.spyOn(service, "remove").mockResolvedValue(undefined);
     return { service, create, remove };
@@ -761,7 +776,7 @@ describe("ProtocolUsersService.create for a device", () => {
       },
     };
     const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
-    const service = new ProtocolUsersService(prisma as never, agentGateway as never);
+    const service = new ProtocolUsersService(prisma as never, agentGateway as never, deviceSlotsStub() as never);
     return { service, prisma, agentGateway, stored };
   }
 

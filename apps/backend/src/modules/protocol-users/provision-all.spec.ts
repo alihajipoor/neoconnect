@@ -1,4 +1,5 @@
 import { ProtocolUsersService } from "./protocol-users.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 /** Provisioning every route a plan allows, so the client can fail over
  * between protocols without reaching the control plane -- which, on a
@@ -19,7 +20,7 @@ describe("ProtocolUsersService.provisionAll", () => {
         findMany: jest.fn().mockResolvedValue(existingRouteIds.map((routeId) => ({ routeId }))),
       },
     };
-    const service = new ProtocolUsersService(prisma as never, {} as never);
+    const service = new ProtocolUsersService(prisma as never, {} as never, deviceSlotsStub() as never);
     // create() is exercised by its own tests; here what matters is which
     // routes it is asked for, and how many times.
     const create = jest

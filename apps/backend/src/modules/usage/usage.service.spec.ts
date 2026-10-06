@@ -1,4 +1,5 @@
 import { UsageService } from "./usage.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 /** How an agent-reported delta finds the row it belongs to.
  *
@@ -30,7 +31,7 @@ describe("UsageService.recordDeltas protocol-user lookup", () => {
         }),
       ),
     };
-    const service = new UsageService(prisma as never, {} as never, {} as never);
+    const service = new UsageService(prisma as never, {} as never, {} as never, deviceSlotsStub() as never);
     return { service, prisma };
   }
 
@@ -95,9 +96,14 @@ describe("UsageService suspension targets the credential's inbound", () => {
       },
     };
     const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue({}) };
-    const service = new UsageService(prisma as never, agentGateway as never, {} as never);
+    const slots = deviceSlotsStub();
+    const service = new UsageService(prisma as never, agentGateway as never, {} as never, slots as never);
 
     await service.suspendForQuota("sub-1");
+
+    // Nobody is using a suspended subscription: its device slots are free
+    // for whichever device connects after a renewal.
+    expect(slots.releaseSubscription).toHaveBeenCalledWith("sub-1");
 
     expect(prisma.protocolUser.findMany.mock.calls[0][0]).toEqual(
       expect.objectContaining({ include: { protocolConfig: { select: { transport: true, inboundTag: true } } } }),

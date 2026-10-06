@@ -14,6 +14,8 @@ import { RegisterCustomerDto } from "./dto/register-customer.dto";
 import { verificationEmail, passwordResetEmail, toLocale, type Locale } from "../email/templates";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 import { SESSION_IDLE_LIFETIME_MS } from "./session-lifetime";
+import { hasDeviceInfo, type DeviceInfo } from "../../common/device-info";
+import { DeviceSlotsService } from "../device-slots/device-slots.service";
 import {
   CustomerAccessTokenPayload,
   CustomerRefreshTokenPayload,
@@ -52,6 +54,15 @@ const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
  */
 const RESET_CODE_MAX_ATTEMPTS = 5;
 
+/** The session columns a device's own description sets -- only those it
+ * actually sent, so a request without the headers never erases a name. */
+function deviceColumns(device: DeviceInfo | undefined): { label?: string; platform?: string } {
+  if (!device || !hasDeviceInfo(device)) return {};
+  return {
+    ...(device.label !== null ? { label: device.label } : {}),
+    ...(device.platform !== null ? { platform: device.platform } : {}),
+  };
+}
 
 @Injectable()
 export class CustomerAuthService {
@@ -80,6 +91,7 @@ export class CustomerAuthService {
     private readonly freeTrialSettingsService: FreeTrialSettingsService,
     private readonly referralsService: ReferralsService,
     private readonly emailService: EmailService,
+    private readonly deviceSlots: DeviceSlotsService,
   ) {}
 
   /** Creates the Customer via the same service/logic the admin-facing
@@ -351,24 +363,30 @@ export class CustomerAuthService {
    * side's `{mfaRequired: true, mfaToken}` pattern in AuthService.login().
    * A stale already-issued token from before this change still works
    * until it naturally expires; this only gates new logins. */
-  async login(email: string, password: string): Promise<CustomerTokenPair | CustomerRequiresVerification> {
+  async login(
+    email: string,
+    password: string,
+    device?: DeviceInfo,
+  ): Promise<CustomerTokenPair | CustomerRequiresVerification> {
     const customer = await this.validateCredentials(email, password);
     if (!customer.emailVerifiedAt) {
       return { requiresVerification: true, email: customer.email };
     }
-    return this.issueTokenPair(customer);
+    return this.issueTokenPair(customer, undefined, device);
   }
 
   /** Tokens for one signed-in device.
    *
    * `sessionId` continues an existing session (a refresh); without it a
-   * new one is opened -- a sign-in. See `CustomerSession` for why a
+   * new one is opened -- a sign-in -- named by `device` when the app said
+   * what it is (see device-info.ts). See `CustomerSession` for why a
    * device has a session of its own. */
   async issueTokenPair(
     customer: { id: string; email: string; tokenVersion: number },
     sessionId?: string,
+    device?: DeviceInfo,
   ): Promise<CustomerTokenPair> {
-    const sid = sessionId ?? (await this.openSession(customer.id));
+    const sid = sessionId ?? (await this.openSession(customer.id, device));
     const accessPayload: CustomerAccessTokenPayload = { sub: customer.id, email: customer.email, sid };
     const refreshPayload: CustomerRefreshTokenPayload = {
       sub: customer.id,
@@ -388,7 +406,7 @@ export class CustomerAuthService {
     return { accessToken, refreshToken };
   }
 
-  async refresh(refreshToken: string): Promise<CustomerTokenPair> {
+  async refresh(refreshToken: string, device?: DeviceInfo): Promise<CustomerTokenPair> {
     let payload: CustomerRefreshTokenPayload;
     try {
       payload = await this.jwt.verifyAsync<CustomerRefreshTokenPayload>(refreshToken, {
@@ -410,14 +428,18 @@ export class CustomerAuthService {
     if (typeof payload.sid === "string") {
       const live = await this.prisma.customerSession.updateMany({
         where: { id: payload.sid, customerId: customer.id, revokedAt: null },
-        data: { lastUsedAt: new Date() },
+        // The device's name rides along when the app sends it, so a
+        // session opened where no headers could be sent (the browser
+        // sign-in flow) is named by its first refresh. Never blanked by a
+        // request that sent none.
+        data: { lastUsedAt: new Date(), ...deviceColumns(device) },
       });
       if (live.count === 0) {
         throw new UnauthorizedException("Refresh token has been revoked");
       }
       return this.issueTokenPair(customer, payload.sid);
     }
-    return this.issueTokenPair(customer);
+    return this.issueTokenPair(customer, undefined, device);
   }
 
   /** Opens a session for a sign-in, and drops this customer's sessions
@@ -431,7 +453,7 @@ export class CustomerAuthService {
    * row here instead would turn its credentials into shared ones (the
    * foreign key is SET NULL, for the sake of rollback) that sign-out
    * could then never reach. */
-  private async openSession(customerId: string): Promise<string> {
+  private async openSession(customerId: string, device?: DeviceInfo): Promise<string> {
     const idleCutoff = new Date(Date.now() - SESSION_IDLE_LIFETIME_MS);
     await this.prisma.customerSession.deleteMany({
       where: {
@@ -441,7 +463,7 @@ export class CustomerAuthService {
       },
     });
     const session = await this.prisma.customerSession.create({
-      data: { customerId },
+      data: { customerId, ...deviceColumns(device) },
       select: { id: true },
     });
     return session.id;
@@ -474,6 +496,9 @@ export class CustomerAuthService {
       const reason = err instanceof Error ? err.message : String(err);
       this.logger.error(`Sign-out of session ${sessionId} could not revoke its credentials yet: ${reason}`);
     }
+    // A signed-out device is not using the VPN: its slot goes to whoever
+    // claims next, without asking. Never throws.
+    await this.deviceSlots.releaseSession(customerId, sessionId);
   }
 
   /** Takes back the device credentials of sessions a password change has
@@ -487,6 +512,8 @@ export class CustomerAuthService {
       const reason = err instanceof Error ? err.message : String(err);
       this.logger.error(`Could not end sessions for customer ${customerId}: ${reason}`);
     }
+    // And their device slots. Never throws.
+    await this.deviceSlots.releaseOtherSessions(customerId, except);
   }
 
   /** Invalidates all outstanding refresh tokens for this customer. */

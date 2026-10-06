@@ -12,6 +12,7 @@ import { generateCredentials } from "./generate-credentials";
 import { KeyedLock } from "./keyed-lock";
 import { commandTarget, deleteUserPayload } from "./command-target";
 import { sharedWireGuardReserve, wireGuardPoolSize } from "./wireguard-subnet";
+import { DeviceSlotsService } from "../device-slots/device-slots.service";
 
 /** How many signed-in devices of one customer may hold credentials of
  * their own at once. See `enforceDeviceLimit`.
@@ -119,6 +120,7 @@ export class ProtocolUsersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
+    private readonly deviceSlots: DeviceSlotsService,
   ) {}
 
   /** The operator's view of provisioned users -- bounded.
@@ -413,6 +415,9 @@ export class ProtocolUsersService {
         `Customer ${customerId} is at the device limit; taking credentials back from session ${holder.id}`,
       );
       await this.removeSessionCredentials(holder.id);
+      // Its plan slot too, if it held one: it no longer has anything of
+      // its own to connect with. Never throws.
+      await this.deviceSlots.releaseSession(customerId, holder.id);
     }
   }
 

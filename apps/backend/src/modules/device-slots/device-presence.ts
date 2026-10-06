@@ -153,9 +153,16 @@ export class DevicePresence {
  * device, counting two devices as one. That is the direction to err in:
  * too few devices means nobody is held who should not be. */
 export function resolveDevices(
-  entries: PresenceEntry[],
+  rawEntries: PresenceEntry[],
   credentials: CredentialInfo[],
+  /** Shared credentials a device holding a slot said it connects with:
+   * their traffic is that device's, whatever the heuristic below says. */
+  credit: Map<string, DeviceKey> = new Map(),
 ): Map<DeviceKey, ActiveDevice> {
+  const entries = rawEntries.map((e) => {
+    const credited = credit.get(e.protocolUserId);
+    return credited && e.deviceKey === SHARED_DEVICE ? { ...e, deviceKey: credited } : e;
+  });
   const devices = new Map<DeviceKey, ActiveDevice>();
   const add = (key: DeviceKey, e: { firstSeen: number; lastSeen: number }) => {
     const seen = devices.get(key);

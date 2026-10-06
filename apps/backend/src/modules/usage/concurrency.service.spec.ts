@@ -4,6 +4,7 @@ import { Logger } from "@nestjs/common";
 import { ConcurrencyService, HOLD_LEASE_MS } from "./concurrency.service";
 import { DevicePresence, resolveDevices, type PresenceEntry } from "../device-slots/device-presence";
 import { DeviceStateStore } from "../device-slots/device-state.store";
+import type { SlotState } from "../device-slots/device-slots.service";
 
 /** The plan's device limit, judged per device on what nodes report.
  *
@@ -46,7 +47,12 @@ function row(id: string, over: Partial<Row> = {}): Row {
   };
 }
 
-function build(opts: { limit: number | null; rows: Row[]; subscriptionStatus?: string }) {
+function build(opts: {
+  limit: number | null;
+  rows: Row[];
+  subscriptionStatus?: string;
+  slots?: Partial<SlotState>;
+}) {
   const rows = opts.rows;
   const where = (r: Row, w: Record<string, unknown>): boolean =>
     Object.entries(w).every(([key, value]) => {
@@ -75,10 +81,18 @@ function build(opts: { limit: number | null; rows: Row[]; subscriptionStatus?: s
     },
   };
   const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue({}) };
+  // Who holds a device slot, as DeviceSlotsService.state reports it.
+  const slotState: SlotState = {
+    holders: opts.slots?.holders ?? new Set(),
+    displaced: opts.slots?.displaced ?? new Map(),
+    credit: opts.slots?.credit ?? new Map(),
+  };
+  const slots = { state: jest.fn(async () => slotState) };
   const service = new ConcurrencyService(
     prisma as never,
     agentGateway as never,
     new DevicePresence(DeviceStateStore.inMemory()),
+    slots as never,
   );
   const warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
   return { service, prisma, agentGateway, rows, warn };
@@ -323,6 +337,99 @@ describe("ConcurrencyService (device-limit backstop)", () => {
     expect(rows[1].heldUntil!.getTime()).toBeLessThan(Date.now());
     expect(commands(agentGateway, "ENABLE_USER")).toHaveLength(0);
     expect(commands(agentGateway, "DISABLE_USER")).toHaveLength(1);
+  });
+
+  /** A device holding a slot asked first and was let in. Node-side
+   * miscounting must never cut it -- or a single-device customer, or a
+   * pair taking turns through the app. */
+  it("never holds a device that holds a slot, even when it is the newer one", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({
+      limit: 1,
+      rows: twoDevices(),
+      slots: { holders: new Set([`s:${PHONE}` as const]) },
+    });
+
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }] });
+    for (let i = 0; i < 3; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+
+    expect(commands(agentGateway, "DISABLE_USER").map((c) => (c[2] as { externalUserId: string }).externalUserId)).toEqual([
+      "ext-pc",
+    ]);
+  });
+
+  it("holds nobody when every device over the limit holds a slot", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({
+      limit: 1,
+      rows: twoDevices(),
+      slots: { holders: new Set([`s:${PC}` as const, `s:${PHONE}` as const]) },
+    });
+
+    for (let i = 0; i < 6; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
+  /** The phone took the slot over. The PC learns it on its next renewal
+   * and disconnects by itself; it gets that long before it is held. */
+  it("gives a device whose slot was taken over a grace period, then holds it first", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const displacedAt = Date.now();
+    const { service, agentGateway } = build({
+      limit: 1,
+      rows: twoDevices(),
+      slots: {
+        holders: new Set([`s:${PHONE}` as const]),
+        displaced: new Map([[`s:${PC}` as const, { at: displacedAt, noGrace: false }]]),
+      },
+    });
+
+    // Three readings in, still inside the 90 s grace: nothing yet.
+    for (let i = 0; i < 3; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+
+    // Still going after the grace: held.
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+    expect(commands(agentGateway, "DISABLE_USER").map((c) => (c[2] as { externalUserId: string }).externalUserId)).toEqual([
+      "ext-pc",
+    ]);
+  });
+
+  // Two devices taking the slot back and forth to ride the grace periods.
+  it("gives no grace to a device that had itself just taken the slot over", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({
+      limit: 1,
+      rows: twoDevices(),
+      slots: {
+        holders: new Set([`s:${PHONE}` as const]),
+        displaced: new Map([[`s:${PC}` as const, { at: Date.now(), noGrace: true }]]),
+      },
+    });
+
+    for (let i = 0; i < 3; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+
+    expect(commands(agentGateway, "DISABLE_USER")).toHaveLength(1);
+  });
+
+  /** A device connecting with a shared credential (its own not yet
+   * confirmed by the node) names it in its claim; that credential's
+   * traffic is then that device's, not folded into the other device. */
+  it("counts a shared credential a slot holder named as that holder's device", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const rows = [row("pc", { sessionId: PC }), row("shared", { nodeId: "node-2" })];
+    const { service, agentGateway } = build({
+      limit: 1,
+      rows,
+      slots: { holders: new Set([`s:${PHONE}` as const]), credit: new Map([["shared", `s:${PHONE}` as const]]) },
+    });
+
+    for (let i = 0; i < 4; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-shared", bytes: 1 }] });
+
+    expect(commands(agentGateway, "DISABLE_USER").map((c) => (c[2] as { externalUserId: string }).externalUserId)).toEqual([
+      "ext-pc",
+    ]);
   });
 
   it("counts a subscription across nodes, not one node at a time", async () => {

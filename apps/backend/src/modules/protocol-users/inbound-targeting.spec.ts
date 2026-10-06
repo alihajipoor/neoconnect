@@ -1,4 +1,5 @@
 import { ProtocolUsersService } from "./protocol-users.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 import { encryptCredentials } from "./credentials-crypto";
 import { deleteUserPayload } from "./command-target";
 
@@ -62,7 +63,7 @@ describe("commands name the inbound", () => {
       },
     };
     const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
-    return { service: new ProtocolUsersService(prisma as never, agentGateway as never), agentGateway };
+    return { service: new ProtocolUsersService(prisma as never, agentGateway as never, deviceSlotsStub() as never), agentGateway };
   }
 
   function payloadOf(agentGateway: { enqueueCommand: jest.Mock }, type: string) {

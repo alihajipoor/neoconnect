@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import * as argon2 from "argon2";
 import { CustomerAuthService } from "./customer-auth.service";
+import { deviceSlotsStub } from "../../../test/device-slots-stub";
 
 // Password hashing is real argon2, not mocked -- same reasoning as
 // auth.service.spec.ts: this is the logic that decides whether a login
@@ -56,6 +57,7 @@ describe("CustomerAuthService", () => {
   let freeTrialSettingsService: { get: jest.Mock };
   let referralsService: { resolveReferralCode: jest.Mock; notifyReferrerOfActivation: jest.Mock };
   let emailService: { sendMail: jest.Mock };
+  let deviceSlots: ReturnType<typeof deviceSlotsStub>;
 
   beforeAll(async () => {
     PASSWORD_HASH = await argon2.hash(PASSWORD);
@@ -92,6 +94,7 @@ describe("CustomerAuthService", () => {
       notifyReferrerOfActivation: jest.fn().mockResolvedValue(undefined),
     };
     emailService = { sendMail: jest.fn().mockResolvedValue(true) };
+    deviceSlots = deviceSlotsStub();
 
     service = new CustomerAuthService(
       prisma as any,
@@ -103,6 +106,7 @@ describe("CustomerAuthService", () => {
       freeTrialSettingsService as any,
       referralsService as any,
       emailService as any,
+      deviceSlots as any,
     );
   });
 
@@ -744,6 +748,60 @@ describe("CustomerAuthService", () => {
 
       await expect(service.revokeSession("customer-1", "session-7")).resolves.toBeUndefined();
       expect(prisma.customerSession.updateMany).toHaveBeenCalled();
+    });
+
+    // What "Neoxify is in use on Windows PC" on the customer's other
+    // devices is read from.
+    it("names a new session after the device that signed in", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date() }));
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.login("customer@example.com", PASSWORD, { label: "Windows PC", platform: "windows" });
+
+      expect(prisma.customerSession.create).toHaveBeenCalledWith({
+        data: { customerId: "customer-1", label: "Windows PC", platform: "windows" },
+        select: { id: true },
+      });
+    });
+
+    // The browser sign-in flow opens its session where no headers can be
+    // sent; its first refresh names it. A refresh that sends nothing must
+    // not erase a name.
+    it("names a session on refresh when the app says what it is, and leaves the name alone when it does not", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", tokenVersion: 0, sid: "session-7" });
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ tokenVersion: 0 }));
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.refresh("token", { label: "Android phone", platform: "android" });
+      await service.refresh("token", { label: null, platform: null });
+
+      expect(prisma.customerSession.updateMany.mock.calls[0][0].data).toEqual({
+        lastUsedAt: expect.any(Date),
+        label: "Android phone",
+        platform: "android",
+      });
+      expect(prisma.customerSession.updateMany.mock.calls[1][0].data).toEqual({ lastUsedAt: expect.any(Date) });
+    });
+
+    // A signed-out device is not using the VPN; its plan slot is free.
+    it("gives a signed-out device's slot back", async () => {
+      await service.revokeSession("customer-1", "session-7");
+
+      expect(deviceSlots.releaseSession).toHaveBeenCalledWith("customer-1", "session-7");
+    });
+
+    it("gives the ended devices' slots back on a password change, keeping the caller's", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.changePassword(
+        "customer-1",
+        { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+        "session-7",
+      );
+
+      expect(deviceSlots.releaseOtherSessions).toHaveBeenCalledWith("customer-1", "session-7");
     });
 
     // A session still holding credentials has to give them back on the

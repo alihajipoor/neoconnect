@@ -6,6 +6,7 @@ import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { EmailService } from "../email/email.service";
 import { lowDataWarningEmail, expiringSoonEmail, toLocale } from "../email/templates";
 import { commandTarget } from "../protocol-users/command-target";
+import { DeviceSlotsService } from "../device-slots/device-slots.service";
 
 export interface UsageDeltaInput {
   externalUserId: string;
@@ -35,6 +36,7 @@ export class UsageService {
     @Inject(forwardRef(() => AgentGatewayService))
     private readonly agentGateway: AgentGatewayService,
     private readonly emailService: EmailService,
+    private readonly deviceSlots: DeviceSlotsService,
   ) {}
 
   async recordDeltas(nodeId: string, deltas: UsageDeltaInput[]) {
@@ -125,6 +127,8 @@ export class UsageService {
 
     await this.prisma.subscription.update({ where: { id: subscriptionId }, data: { status: "SUSPENDED" } });
     await this.disableProtocolUsers(subscriptionId);
+    // Nobody is using it now; a renewal starts with every slot free.
+    await this.deviceSlots.releaseSubscription(subscriptionId);
     this.logger.log(`Subscription ${subscriptionId} suspended: data cap exceeded`);
   }
 
@@ -134,6 +138,7 @@ export class UsageService {
 
     await this.prisma.subscription.update({ where: { id: subscriptionId }, data: { status: "EXPIRED" } });
     await this.disableProtocolUsers(subscriptionId);
+    await this.deviceSlots.releaseSubscription(subscriptionId);
     this.logger.log(`Subscription ${subscriptionId} expired`);
   }
 

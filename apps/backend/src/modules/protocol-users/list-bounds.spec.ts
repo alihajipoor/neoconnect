@@ -56,7 +56,7 @@ describe("GET /protocol-users bounds", () => {
       },
       $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
     };
-    service = new ProtocolUsersService(prisma as any, {} as any);
+    service = new ProtocolUsersService(prisma as any, {} as any, {} as any);
   });
 
   function argsOf() {

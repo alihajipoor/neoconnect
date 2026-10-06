@@ -36,7 +36,7 @@ describe("admin list windows", () => {
 
     beforeEach(() => {
       customer = tableOf(ROWS);
-      service = new CustomersService({ customer, $transaction: $transaction() } as any, {} as any, {} as any);
+      service = new CustomersService({ customer, $transaction: $transaction() } as any, {} as any, {} as any, {} as any);
     });
 
     it("returns a page rather than every customer", async () => {
@@ -101,11 +101,15 @@ describe("admin list windows", () => {
      * customer app calls. */
     it("leaves listByCustomer alone", async () => {
       subscription.findMany.mockClear();
-      await service.listByCustomer("customer-1");
+      // The customer's own rows, each with its plan's device limit.
+      subscription.findMany.mockResolvedValueOnce([{ id: "sub-1", plan: { maxConcurrentConnections: 1 } }]);
+      const rows = await service.listByCustomer("customer-1");
 
       const args = subscription.findMany.mock.calls[0][0];
       expect(args.where).toEqual({ customerId: "customer-1" });
       expect(args.take).toBeUndefined();
+      // The plan's limit travels as deviceLimit; the plan itself does not.
+      expect(rows).toEqual([{ id: "sub-1", deviceLimit: 1 }]);
     });
   });
 

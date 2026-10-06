@@ -7,6 +7,7 @@ import type { ListWindow, Page } from "../../common/pagination";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { deleteUserPayload } from "../protocol-users/command-target";
+import { DeviceSlotsService } from "../device-slots/device-slots.service";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
 import { UpdateCustomerDto } from "./dto/update-customer.dto";
 
@@ -42,6 +43,7 @@ export class CustomersService {
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
     private readonly protocolUsers: ProtocolUsersService,
+    private readonly deviceSlots: DeviceSlotsService,
   ) {}
 
   /** Every customer, a page at a time.
@@ -201,6 +203,10 @@ export class CustomersService {
       );
     }
 
+    // Their device slots, while the subscriptions they are keyed on still
+    // exist to be found. Never throws.
+    await this.deviceSlots.releaseCustomer(id);
+
     // Under the customer lock, so no device of this customer is minting
     // credentials of its own between the read below and the transaction
     // -- a row created in that window would be deleted without any
@@ -349,6 +355,10 @@ export class CustomersService {
       ]);
       return protocolUsers.length;
     });
+
+    // Every device slot of the account: nobody is using it any more.
+    // Never throws.
+    await this.deviceSlots.releaseCustomer(id);
 
     return { deleted: true, credentialsRevoked: revoked };
   }

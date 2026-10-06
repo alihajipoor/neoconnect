@@ -401,6 +401,14 @@ model CustomerSession {
   /// refresh token lives can be recognised as dead and pruned.
   lastUsedAt DateTime  @default(now())
   revokedAt  DateTime?
+  /// What the device calls itself, for "Neoxify is in use on <label>"
+  /// (docs/device-slots.md): "Windows PC", "Android phone (Pixel 7)".
+  /// From the X-Neoxify-Device-Label header at sign-in or claim; never a
+  /// hostname. Null for sessions from before labels, and from apps that
+  /// send none.
+  label      String?
+  /// windows | macos | linux | android | ios, from X-Neoxify-Device-Platform.
+  platform   String?
   /// This device's own VPN credentials -- see ProtocolUser.sessionId.
   protocolUsers ProtocolUser[]
 
