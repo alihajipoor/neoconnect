@@ -84,6 +84,59 @@ describe("the platform a report carries", () => {
   });
 });
 
+/** The queue exists for the reports that could not be sent when they
+ * happened. One reconnect sends a report and flushes up to 25 more,
+ * against a throttle of twenty a minute -- and a 429 used to count as
+ * delivered, so the queued ones were the ones thrown away. */
+describe("the throttle", () => {
+  const THROTTLED: ApiResult<void> = { ok: false, error: "ThrottlerException: Too Many Requests", status: 429 };
+  const UNREACHABLE: ApiResult<void> = { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+  const queued = () => (files.get("attempt-reports.json")?.get("queue") as unknown[] | undefined) ?? [];
+
+  beforeEach(() => invoke.mockResolvedValue("windows"));
+
+  it("keeps a throttled report and sends it on the next contact", async () => {
+    publicRequest.mockResolvedValueOnce(THROTTLED).mockResolvedValue({ ok: true, data: undefined });
+
+    await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "REJECTED", reason: "first" });
+    expect(queued()).toHaveLength(1);
+
+    await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "SUCCESS", reason: "second" });
+    expect(sentBodies().map((b) => b.reason)).toEqual(["first", "second", "first"]);
+    expect(queued()).toHaveLength(0);
+  });
+
+  /** Stops at the throttle and keeps the rest, rather than walking on
+   * into twenty more refusals. */
+  it("stops a flush at the throttle and keeps what was not sent", async () => {
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    for (let i = 0; i < 25; i += 1) {
+      await attempts.reportAttempt({ kind: "CONNECT", outcome: "CONTROL_PLANE_UNREACHABLE", reason: `r${i}` });
+    }
+    expect(queued()).toHaveLength(25);
+
+    // The report that reaches the server, then nineteen of the queue,
+    // then the throttle.
+    publicRequest.mockReset();
+    let calls = 0;
+    publicRequest.mockImplementation(async () => (++calls <= 20 ? { ok: true, data: undefined } : THROTTLED));
+    await attempts.reportAttempt({ kind: "CONNECT", outcome: "SUCCESS" });
+
+    expect(calls).toBe(21);
+    expect(queued()).toHaveLength(6);
+    // The oldest went first; what is left is the newest, in order.
+    expect((queued() as { reason: string }[]).map((r) => r.reason)).toEqual(["r19", "r20", "r21", "r22", "r23", "r24"]);
+  });
+
+  /** Everything else with a status is still a verdict on the report,
+   * not on the timing, and is not retried. */
+  it("still drops a report the server refused for any other reason", async () => {
+    publicRequest.mockResolvedValue({ ok: false, error: "Internal server error", status: 500 });
+    await attempts.reportAttempt({ kind: "SIGN_IN", outcome: "SUCCESS" });
+    expect(queued()).toHaveLength(0);
+  });
+});
+
 /** The field that lost every report it was on: a server limit of 200,
  * a list of 233, a 400 the client counted as delivered. */
 describe("the length of apiEndpoint", () => {

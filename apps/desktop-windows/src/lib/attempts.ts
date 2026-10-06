@@ -176,6 +176,9 @@ const MAX_AGE_MS = 14 * 86_400_000;
 
 const KEY = "queue";
 
+/** The status the server's throttle answers with. See `send`. */
+const THROTTLED = 429;
+
 let storePromise: Promise<Store> | null = null;
 function getStore(): Promise<Store> {
   // A rejected promise must not be cached, or one transient failure
@@ -214,13 +217,22 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
   }
 }
 
-/** Sends one report. Resolves false only when the control plane could
- * not be reached, which is the one case worth queueing for.
+/** Sends one report. Resolves false when it should be kept and sent
+ * later: the control plane could not be reached, or it said "not now".
  *
- * A rejection *from* the server -- a 400, a throttle, anything with a
+ * Any other rejection *from* the server -- a 400, a 5xx, anything with a
  * status -- counts as delivered. It means we reached it and it did not
  * want this, and retrying forever would turn one malformed report into
  * a permanent background load.
+ *
+ * The throttle is the exception, because it is about timing and not the
+ * report. The endpoint allows twenty a minute per address, and one
+ * reconnect sends a report and then flushes a queue of up to
+ * `MAX_QUEUED` -- so the reports queued while the control plane was
+ * unreachable, which are the ones this whole file exists for, were the
+ * ones answered 429 and dropped. Customers behind one carrier NAT share
+ * that address, which makes it likelier still. Kept instead; the flush
+ * stops at the first one, and the next contact carries on.
  *
  * With one exception, for a server older than this client. Until the
  * limit was raised, the backend refused an `apiEndpoint` over 200
@@ -249,6 +261,7 @@ async function send(report: QueuedReport): Promise<boolean> {
   }
 
   if (result.ok) return true;
+  if (result.status === THROTTLED) return false;
   // publicRequest flattens both cases into a string, and only one of
   // them should keep the report alive. This is the message it uses when
   // no endpoint answered at all.
@@ -325,9 +338,11 @@ export async function reportAttempt(report: AttemptReport): Promise<void> {
  * to think the control plane is reachable -- at launch, after a
  * successful sign-in.
  *
- * Stops at the first unreachable send rather than walking the rest.
- * With the control plane down, every remaining one would pay the full
- * endpoint-ladder timeout to learn the same thing.
+ * Stops at the first send that has to be kept rather than walking the
+ * rest. With the control plane down, every remaining one would pay the
+ * full endpoint-ladder timeout to learn the same thing; with the
+ * throttle saying "not now", every remaining one would be told the same.
+ * The periodic flush in App.tsx picks up where this left off.
  */
 export async function flushAttempts(): Promise<void> {
   try {
