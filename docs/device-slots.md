@@ -1,8 +1,10 @@
 # Device slots: the plan's device limit
 
-Status: backend implemented on `claude/per-device-credentials`. **No app
-implements the client side yet**, and nothing here has run against a real
-node, phone or censored network -- see *What is unverified* at the end.
+Status: backend implemented on `claude/per-device-credentials`; the
+Windows and mobile clients implement this revision on
+`claude/device-slots-mobile`. **Unit tests only**: no client has reached
+the real backend, and nothing here has run against a real node, phone or
+censored network -- see *What is unverified* at the end.
 
 This document is the contract. The desktop and mobile apps are built
 against it, not against the backend code; change the two together.
@@ -434,8 +436,8 @@ slot logic over an in-memory store; an HTTP-level test of this contract
 on a real Nest server with the production validation pipe; the built
 backend boots and maps the three routes. **Unverified:**
 
-- No app claims, renews or releases yet. Nothing on this page has been
-  seen from a client.
+- The apps claim, renew and release in unit tests only. Nothing on this
+  page has been seen from a client against the real backend.
 - No Redis has held a slot. The migrations have been applied only to
   CI's empty Postgres (they apply, and match the schema), never to a
   database with real data.

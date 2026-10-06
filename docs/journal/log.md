@@ -3069,3 +3069,55 @@ behaviour's limits. **UNVERIFIED:** everything else, as before. The
 dashboards' use of the store has not been rendered. Nothing has reached
 a real backend, a filtered network or a phone; the takeover through the
 tunnel is exactly the case that needs the rig and a censored path.
+
+## 2026-10-06 — device slots, clients aligned with the revised contract (branch `claude/device-slots-mobile`)
+
+The backend's second review changed `docs/device-slots.md`; this branch
+now carries that revision (`claude/per-device-credentials` merged in,
+no conflicts) and both clients follow it. All of it is in the shared
+code in `apps/desktop-windows/src/lib`, so Windows and the phones take
+it together.
+
+- **Release names its grant.** Every claim answers with a new `handle`,
+  even one made while holding the slot, and the server frees a slot on
+  release only under the handle it is held by now. The session keeps
+  the latest counted grant's handle (claim, or a renewal that gave a
+  lapsed slot back), per subscription, until sign-out, and every
+  release sends it. A release that would name no grant is never sent:
+  without a handle the server frees whatever the device holds, a newer
+  connect's slot included. The cost: a claim sent and never answered,
+  that did arrive, is left to go stale (90 s after its traffic stops).
+- **A device with no label is named from its platform**, in the app's
+  language: "a Windows PC", "a Mac", "a Linux PC", "an Android phone",
+  "an iPhone" (Persian: "یک رایانهٔ ویندوزی", "یک مک", "یک رایانهٔ
+  لینوکسی", "یک گوشی اندروید", "یک آیفون"); "another device" only with
+  neither. A label is shown as sent; one that is only a kind, from an
+  older server, is read the backend's way.
+- **Headers: the platform always, a model or nothing.** No more "Windows
+  PC" / "Android phone" / "iPhone" labels. A PC, a Mac and an iPhone
+  send the platform alone; an iPad sends "iPad"; an Android phone sends
+  the model from its WebView user agent ("Pixel 7"), and nothing if the
+  agent is reduced to `K` or cannot be read with confidence.
+- **Obligation 11.** Both dashboards already tore down without the
+  ladder on a claim refused after connecting. Now that refusal (and a
+  late `TAKEOVER_LIMIT`) reports no second CONNECT attempt -- the dial
+  worked and was reported as a success when it happened, and that
+  report and the remembered route stand, being true of the network --
+  and the refusal card waits until the tunnel is confirmed down instead
+  of showing over a tunnel still coming down.
+- **Three answers stop a dial**, written as that list. A renewal 409
+  carrying `SUBSCRIPTION_INACTIVE` used to tear the tunnel down; every
+  renewal answer but a 200 (and a sign-out) now keeps it. After a 404 or
+  a codeless 409 before dialling, the claim through the tunnel is now
+  made once, as obligation 2 asks.
+
+**PROVEN (unit tests, typecheck, bundle):** desktop JS 37 files / 576
+tests (550 before), `tsc` clean; mobile JS 5 / 65 (60 before), `tsc`
+clean; both bundles build; web portal and macOS `tsc` clean. 42 tests
+(36 desktop, 6 mobile) fail against the code before these commits.
+**UNVERIFIED:** everything that is not a unit test. The Android model
+parse is tested against sample user agents, not a phone's WebView;
+whether this WebView still carries the model is unchecked. The card's
+new wording has not been rendered. Nothing has reached the real
+backend, a filtered network or a phone; obligation 11 is exactly the
+censored-path case that needs the rig.
