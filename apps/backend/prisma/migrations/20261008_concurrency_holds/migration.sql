@@ -1,0 +1,15 @@
+-- The plan's device limit, node-side backstop (docs/device-slots.md,
+-- "The backstop"): a durable hold on one device's credentials.
+--
+-- Until this lapses the credential is kept off its node: the 60 s
+-- re-assert skips it, and evaluation extends it for as long as the other
+-- devices leave no room. Once nobody extends it, it lapses by itself and
+-- the next re-assert puts the credential back -- there is no timer to
+-- lose in a restart and no captured list to replay.
+--
+-- Additive and safe on a live database: one nullable column, NULL on
+-- every row (nothing is held). Only written when CONCURRENCY_CUT=enforce;
+-- the default (shadow) never writes it. The previous backend ignores it,
+-- which during a rollback would only mean a held device is re-asserted
+-- back early.
+ALTER TABLE "protocol_users" ADD COLUMN "heldUntil" TIMESTAMP(3);

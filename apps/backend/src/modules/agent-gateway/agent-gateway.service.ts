@@ -381,10 +381,16 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
               return;
             }
             await this.usageService.recordDeltas(nodeId, msg.statsBatch?.deltas ?? []);
-            // Concurrency rides along with usage: same poll, and only
-            // meaningful next to it. Absent for engines that can't
-            // measure it, which is treated as unknown rather than zero.
-            await this.concurrencyService.handleSessionCounts(nodeId, msg.statsBatch?.sessions ?? []);
+            // The device limit rides along with usage: same poll. Which
+            // devices are active comes from the usage deltas as much as
+            // from the session counts (see ConcurrencyService), and an
+            // engine that reports no counts is unknown rather than zero.
+            // handleReport never throws, so a counting problem cannot
+            // close this node's control stream.
+            await this.concurrencyService.handleReport(nodeId, {
+              sessions: msg.statsBatch?.sessions ?? [],
+              deltas: msg.statsBatch?.deltas ?? [],
+            });
           }
           // stateSnapshot: no handling yet -- full reconciliation is later work.
         } catch (err) {

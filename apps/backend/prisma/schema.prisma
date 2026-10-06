@@ -778,6 +778,11 @@ model ProtocolUser {
   /// for this credential. A device row replaces the shared row in what
   /// a device is handed only once this is set -- see deviceView.
   provisionedAt    DateTime?
+  /// Held off its node by the device-limit backstop until this time (see
+  /// ConcurrencyService; only ever written with CONCURRENCY_CUT=enforce).
+  /// The re-assert skips a credential while this is in the future, and
+  /// it lapses on its own when nothing extends it.
+  heldUntil        DateTime?
 
   session        CustomerSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   subscription   Subscription   @relation(fields: [subscriptionId], references: [id])

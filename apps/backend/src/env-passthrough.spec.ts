@@ -9,7 +9,7 @@ import { deviceCredentialLimit } from "./modules/protocol-users/protocol-users.s
  * and never see take effect). Every tuning knob read by code is listed
  * here, and each must be passed through as `${NAME:-}` -- optional, empty
  * meaning "the default in the code". */
-const OPTIONAL_KNOBS = ["CUSTOMER_DEVICE_CREDENTIAL_LIMIT"];
+const OPTIONAL_KNOBS = ["CUSTOMER_DEVICE_CREDENTIAL_LIMIT", "CONCURRENCY_CUT"];
 
 const COMPOSE = readFileSync(join(__dirname, "..", "..", "..", "infra", "docker-compose.prod.yml"), "utf8");
 

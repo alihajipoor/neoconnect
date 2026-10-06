@@ -199,7 +199,7 @@ describe("PlansService", () => {
 
       expect(prisma.protocolUser.findMany.mock.calls[0][0].where).toEqual({
         subscription: { planId: "plan-1", status: "ACTIVE" },
-        ...liveCredentialWhere(),
+        ...liveCredentialWhere(expect.any(Date) as unknown as Date),
         protocol: { in: ["WIREGUARD", "OPENVPN"] },
       });
     });

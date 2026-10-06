@@ -12,11 +12,19 @@ import type { Prisma } from "@prisma/client";
  *   ended in bulk and the sweep has not reached them yet, the row is
  *   still ACTIVE -- and a re-assert of it put the signed-out device's
  *   credential straight back, for up to an hour.
+ * * A credential the device-limit backstop is holding (heldUntil in the
+ *   future) is meant to stay off its node. Re-asserting it undid every
+ *   cut within a minute; the backstop's hold is only durable because
+ *   this skips it. When the hold lapses, the next re-assert restores the
+ *   credential as it is then -- never a list captured at the cut.
  *
- * Shared credentials (no session) are always included. */
-export function liveCredentialWhere(): Prisma.ProtocolUserWhereInput {
+ * Shared credentials (no session) are always included unless held. */
+export function liveCredentialWhere(now = new Date()): Prisma.ProtocolUserWhereInput {
   return {
     status: "ACTIVE",
-    AND: [{ OR: [{ sessionId: null }, { session: { is: { revokedAt: null } } }] }],
+    AND: [
+      { OR: [{ sessionId: null }, { session: { is: { revokedAt: null } } }] },
+      { OR: [{ heldUntil: null }, { heldUntil: { lte: now } }] },
+    ],
   };
 }

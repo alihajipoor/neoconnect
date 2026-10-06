@@ -1,365 +1,451 @@
-import { ConcurrencyService } from "./concurrency.service";
-import { PrismaService } from "../../prisma/prisma.service";
-import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
-import { ConcurrencyStore, sumFresh } from "./concurrency-store";
-import { encryptCredentials } from "../protocol-users/credentials-crypto";
+/* eslint-disable @typescript-eslint/require-await -- the stand-ins below
+   match the async signatures of the Prisma client they replace. */
+import { Logger } from "@nestjs/common";
+import { ConcurrencyService, HOLD_LEASE_MS } from "./concurrency.service";
+import { DevicePresence, resolveDevices, type PresenceEntry } from "../device-slots/device-presence";
+import { DeviceStateStore } from "../device-slots/device-state.store";
 
-/** Enforcement disconnects paying customers, so the conditions under
- * which it fires are worth pinning down precisely. The expensive mistake
- * here is a false positive: someone moving from wifi to mobile data
- * briefly looks identical to two people sharing an account. */
-describe("ConcurrencyService", () => {
-  /** A subscription holding one credential per protocol on one node --
-   * which is what every subscription looks like now that provisioning
-   * covers every route the plan allows. */
-  function credentials(protocols: string[]) {
-    return protocols.map((protocol, i) => ({
-      id: `pu-${i}`,
-      nodeId: "node-1",
-      protocol,
-      externalUserId: `ext-${i}`,
-      status: "ACTIVE",
-      subscriptionId: "sub-1",
-      credentialsJson: encryptCredentials({ uuid: `ext-${i}` }),
-    }));
-  }
+/** The plan's device limit, judged per device on what nodes report.
+ *
+ * The expensive mistake here is a false positive -- holding a customer
+ * who is only switching from the PC to the phone, or one device that
+ * happens to use several routes at once -- so most of what is pinned
+ * down is when it must NOT act. Nothing here has run against a node. */
 
-  function build(
-    opts: { limit: number | null; status?: string; protocols?: string[] } = { limit: 2 },
-  ) {
-    const users = credentials(opts.protocols ?? ["XRAY_VLESS_REALITY"]).map((u) => ({
-      ...u,
-      status: opts.status ?? "ACTIVE",
-      protocolConfig: { transport: "TCP", inboundTag: null as string | null },
-    }));
-    const subscription = { status: "ACTIVE" };
+interface Row {
+  id: string;
+  nodeId: string;
+  externalUserId: string;
+  protocol: string;
+  status: string;
+  subscriptionId: string;
+  sessionId: string | null;
+  routeId: string;
+  provisionedAt: Date | null;
+  heldUntil: Date | null;
+  protocolConfig: { transport: string; inboundTag: string | null };
+}
 
-    const prisma = {
-      protocolUser: {
-        findFirst: jest.fn(({ where }: { where: { externalUserId: string } }) =>
-          Promise.resolve(users.find((u) => u.externalUserId === where.externalUserId) ?? null),
-        ),
-        // The current rows, every time: the restore must re-read them, so a
-        // row deleted or switched off since the cut must not come back.
-        findMany: jest.fn(({ where }: { where: { id?: { in: string[] }; subscription?: { status: string } } }) =>
-          Promise.resolve(
-            users
-              .filter((u) => u.status === "ACTIVE")
-              .filter((u) => !where.id || where.id.in.includes(u.id))
-              .filter(() => !where.subscription || where.subscription.status === subscription.status),
-          ),
-        ),
-      },
-      subscription: {
-        findUnique: jest
-          .fn()
-          .mockResolvedValue({ id: "sub-1", plan: { maxConcurrentConnections: opts.limit } }),
-      },
-    };
-    const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue({}) };
+const PC = "session-pc";
+const PHONE = "session-phone";
 
-    // Mirrors the real store's semantics -- latest count per node, summed
-    // while fresh -- without a Redis. The freshness rule itself is tested
-    // directly against sumFresh at the bottom of this file.
-    const perNode = new Map<string, Map<string, { count: number; at: number }>>();
-    const store = {
-      // eslint-disable-next-line @typescript-eslint/require-await -- matches the real store's async signature
-      recordAndTotal: jest.fn(async (subscriptionId: string, nodeId: string, count: number) => {
-        const nodes = perNode.get(subscriptionId) ?? new Map();
-        nodes.set(nodeId, { count, at: Date.now() });
-        perNode.set(subscriptionId, nodes);
-        let total = 0;
-        for (const [node, entry] of nodes) {
-          if (Date.now() - entry.at > 90_000) nodes.delete(node);
-          else total += entry.count;
-        }
-        return total;
+function row(id: string, over: Partial<Row> = {}): Row {
+  return {
+    id,
+    nodeId: "node-1",
+    externalUserId: `ext-${id}`,
+    protocol: "XRAY_VLESS_REALITY",
+    status: "ACTIVE",
+    subscriptionId: "sub-1",
+    sessionId: null,
+    routeId: `route-${id}`,
+    provisionedAt: new Date(0),
+    heldUntil: null,
+    protocolConfig: { transport: "TCP", inboundTag: null },
+    ...over,
+  };
+}
+
+function build(opts: { limit: number | null; rows: Row[]; subscriptionStatus?: string }) {
+  const rows = opts.rows;
+  const where = (r: Row, w: Record<string, unknown>): boolean =>
+    Object.entries(w).every(([key, value]) => {
+      if (key === "externalUserId") return (value as { in: string[] }).in.includes(r.externalUserId);
+      if (key === "id") return (value as { in: string[] }).in.includes(r.id);
+      if (key === "heldUntil") return r.heldUntil !== null && r.heldUntil > (value as { gt: Date }).gt;
+      return (r as unknown as Record<string, unknown>)[key] === value;
+    });
+
+  const prisma = {
+    protocolUser: {
+      findMany: jest.fn(async ({ where: w }: { where: Record<string, unknown> }) =>
+        rows.filter((r) => where(r, w)).map((r) => ({ ...r })),
+      ),
+      updateMany: jest.fn(async ({ where: w, data }: { where: Record<string, unknown>; data: { heldUntil: Date } }) => {
+        const hit = rows.filter((r) => where(r, w));
+        for (const r of hit) r.heldUntil = data.heldUntil;
+        return { count: hit.length };
       }),
-      // eslint-disable-next-line @typescript-eslint/require-await -- as above
-      clear: jest.fn(async (subscriptionId: string) => {
-        perNode.delete(subscriptionId);
-      }),
-    };
+    },
+    subscription: {
+      findUnique: jest.fn(async () => ({
+        status: opts.subscriptionStatus ?? "ACTIVE",
+        plan: { maxConcurrentConnections: opts.limit },
+      })),
+    },
+  };
+  const agentGateway = { enqueueCommand: jest.fn().mockResolvedValue({}) };
+  const service = new ConcurrencyService(
+    prisma as never,
+    agentGateway as never,
+    new DevicePresence(DeviceStateStore.inMemory()),
+  );
+  const warn = jest.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+  return { service, prisma, agentGateway, rows, warn };
+}
 
-    const service = new ConcurrencyService(
-      prisma as unknown as PrismaService,
-      agentGateway as unknown as AgentGatewayService,
-      store as unknown as ConcurrencyStore,
-    );
-    return { service, prisma, agentGateway, store, users, subscription };
-  }
+/** What a node reports in one cycle: bytes for some credentials, session
+ * counts for others. */
+type Seen = { ext: string; bytes?: number; sources?: number; protocol?: string };
 
-  /** One polling cycle.
-   *
-   * The clock has to move between cycles, and not only for realism: a
-   * strike is deliberately capped at one per ~20 seconds, because several
-   * nodes now report the same subscription and three of them answering at
-   * once would otherwise burn the whole debounce on a single reading.
-   * Reports really are about 30 seconds apart. */
-  async function poll(
-    service: ConcurrencyService,
-    nodeId: string,
-    counts: { externalUserId: string; protocol: string; distinctSources: number }[],
-  ) {
-    await service.handleSessionCounts(nodeId, counts);
-    await jest.advanceTimersByTimeAsync(30_000);
-  }
+async function cycle(service: ConcurrencyService, nodeId: string, seen: Seen[]) {
+  await service.handleReport(nodeId, {
+    deltas: seen
+      .filter((s) => s.bytes !== undefined)
+      .map((s) => ({ externalUserId: s.ext, protocol: s.protocol ?? "XRAY_VLESS_REALITY", bytesUp: String(s.bytes), bytesDown: "0" })),
+    sessions: seen
+      .filter((s) => s.sources !== undefined)
+      .map((s) => ({ externalUserId: s.ext, protocol: s.protocol ?? "XRAY_VLESS_REALITY", distinctSources: s.sources! })),
+  });
+}
 
-  /** One credential reporting `n` sources. */
-  const over = (n: number) => [
-    { externalUserId: "ext-0", protocol: "XRAY_VLESS_REALITY", distinctSources: n },
-  ];
+/** One report from each node, then the ~30 s until the next. */
+async function tick(service: ConcurrencyService, perNode: Record<string, Seen[]>) {
+  for (const [node, seen] of Object.entries(perNode)) await cycle(service, node, seen);
+  await jest.advanceTimersByTimeAsync(30_000);
+}
 
-  const disables = (mock: jest.Mock) => mock.mock.calls.filter((c) => c[1] === "DISABLE_USER");
+const commands = (gw: { enqueueCommand: jest.Mock }, type: string) =>
+  gw.enqueueCommand.mock.calls.filter((c) => c[1] === type);
+const shadowLines = (warn: jest.SpyInstance) =>
+  warn.mock.calls.map((c) => String(c[0])).filter((line) => line.includes("[shadow]"));
 
+describe("ConcurrencyService (device-limit backstop)", () => {
+  const savedMode = process.env.CONCURRENCY_CUT;
   beforeEach(() => jest.useFakeTimers());
-  afterEach(() => jest.useRealTimers());
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+    if (savedMode === undefined) delete process.env.CONCURRENCY_CUT;
+    else process.env.CONCURRENCY_CUT = savedMode;
+  });
 
-  it("does nothing while a user is within their limit", async () => {
-    const { service, agentGateway } = build({ limit: 2 });
-    for (let i = 0; i < 5; i++) await poll(service, "node-1", over(2));
+  /** A PC and a phone, each with its own credential. */
+  const twoDevices = () => [row("pc", { sessionId: PC }), row("phone", { sessionId: PHONE, nodeId: "node-2" })];
+
+  it("does nothing while the devices in use are within the limit", async () => {
+    const { service, agentGateway, warn } = build({ limit: 2, rows: twoDevices() });
+
+    for (let i = 0; i < 6; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 500 }], "node-2": [{ ext: "ext-phone", bytes: 500 }] });
+
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    expect(shadowLines(warn)).toHaveLength(0);
   });
 
-  it("tolerates a single over-limit reading", async () => {
-    // A laptop waking on a new network shows two addresses for one poll.
-    // Acting on that would disconnect people constantly.
-    const { service, agentGateway } = build({ limit: 1 });
-    await poll(service, "node-1", over(2));
+  /** Every Xray inbound on a node has its own counter on the same access
+   * log, so one phone on REALITY was reported five times -- and summed to
+   * five, over Starter's, Pro's and Trial's limits alike. */
+  it("counts one device once however many Xray inbounds report it", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway, warn } = build({ limit: 1, rows: [row("phone", { sessionId: PHONE })] });
+    const fiveCounters = ["XRAY_VLESS_REALITY", "XRAY_TROJAN", "XRAY_VLESS_TLS", "XRAY_VLESS_TLS", "SHADOWSOCKS"].map(
+      (protocol) => ({ ext: "ext-phone", sources: 1, protocol }),
+    );
+
+    for (let i = 0; i < 6; i++) await tick(service, { "node-1": fiveCounters });
+
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 
-  it("disconnects only after the excess persists", async () => {
-    const { service, agentGateway } = build({ limit: 1 });
-
-    await poll(service, "node-1", over(3));
-    await poll(service, "node-1", over(3));
-    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
-
-    await poll(service, "node-1", over(3));
-    expect(agentGateway.enqueueCommand).toHaveBeenCalledWith("node-1", "DISABLE_USER", {
-      protocol: "XRAY_VLESS_REALITY",
-      transport: "TCP",
-      externalUserId: "ext-0",
-    });
-  });
-
-  // Untargeted, the cut landed on the node's default inbound and missed
-  // every WebSocket and relay customer.
-  it("aims the cut and the restore at the credential's own inbound", async () => {
-    const { service, agentGateway, users } = build({ limit: 1 });
-    users[0].protocolConfig = { transport: "WS", inboundTag: "vless-ws-in-fr" };
-
-    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
-    await jest.advanceTimersByTimeAsync(61_000);
-
-    const payloads = agentGateway.enqueueCommand.mock.calls.map((c) => [c[1], c[2]]);
-    expect(payloads).toContainEqual([
-      "DISABLE_USER",
-      { protocol: "XRAY_VLESS_REALITY", transport: "WS", inboundTag: "vless-ws-in-fr", externalUserId: "ext-0" },
-    ]);
-    expect(payloads).toContainEqual([
-      "ENABLE_USER",
-      expect.objectContaining({ transport: "WS", inboundTag: "vless-ws-in-fr", externalUserId: "ext-0" }),
-    ]);
-  });
-
-  /** The cut used to replay the list it captured. A phone signed out
-   * during the cooldown -- the natural thing to do after being cut off --
-   * had its rows deleted and DELETE_USER sent, and then the replayed
-   * ENABLE_USER put its credential back on every node with no row behind
-   * it: unmetered, outside the limit, and on OpenVPN valid forever. */
-  it("does not bring back a credential revoked during the cooldown", async () => {
-    const { service, agentGateway, users } = build({
+  /** Concurrent exits: one PC on several routes, on several nodes, at
+   * once. Summing per credential made it several devices on its own. */
+  it("counts every credential of one device as that one device, across routes and nodes", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({
       limit: 1,
-      protocols: ["XRAY_VLESS_REALITY", "OPENVPN"],
+      rows: [
+        row("pc-fi", { sessionId: PC }),
+        row("pc-fr", { sessionId: PC, nodeId: "node-2" }),
+        row("pc-wg", { sessionId: PC, nodeId: "node-2", protocol: "WIREGUARD" }),
+      ],
     });
 
-    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
-    expect(disables(agentGateway.enqueueCommand)).toHaveLength(2);
-
-    // Signed out on the phone: its row is gone.
-    users.splice(1, 1);
-    await jest.advanceTimersByTimeAsync(61_000);
-
-    const restored = agentGateway.enqueueCommand.mock.calls
-      .filter((c) => c[1] === "ENABLE_USER")
-      .map((c) => (c[2] as { externalUserId: string }).externalUserId);
-    expect(restored).toEqual(["ext-0"]);
-  });
-
-  it("does not undo a suspension that landed during the cooldown", async () => {
-    const { service, agentGateway, subscription } = build({ limit: 1 });
-
-    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
-    subscription.status = "SUSPENDED";
-    await jest.advanceTimersByTimeAsync(61_000);
-
-    expect(agentGateway.enqueueCommand.mock.calls.filter((c) => c[1] === "ENABLE_USER")).toHaveLength(0);
-  });
-
-  it("forgets earlier strikes once a user is back within the limit", async () => {
-    // Otherwise two isolated blips hours apart would eventually add up to
-    // a disconnect for someone who never shared anything.
-    const { service, agentGateway } = build({ limit: 1 });
-
-    await poll(service, "node-1", over(2));
-    await poll(service, "node-1", over(2));
-    await poll(service, "node-1", over(1));
-    await poll(service, "node-1", over(2));
+    for (let i = 0; i < 6; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc-fi", bytes: 10 }],
+        "node-2": [
+          { ext: "ext-pc-fr", bytes: 10 },
+          { ext: "ext-pc-wg", bytes: 10, protocol: "WIREGUARD" },
+        ],
+      });
+    }
 
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
-  it("restores the user after the cooldown rather than leaving them cut off", async () => {
-    const { service, agentGateway } = build({ limit: 1 });
+  // The PC disconnects and the phone connects. For one report both look
+  // active; that must not be enough.
+  it("does not act on a clean switch from the PC to the phone", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway, warn } = build({ limit: 1, rows: twoDevices() });
 
-    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
-    expect(disables(agentGateway.enqueueCommand)).toHaveLength(1);
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 900 }] });
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 40 }], "node-2": [{ ext: "ext-phone", bytes: 900 }] });
+    for (let i = 0; i < 6; i++) await tick(service, { "node-1": [], "node-2": [{ ext: "ext-phone", bytes: 900 }] });
 
-    await jest.advanceTimersByTimeAsync(61_000);
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
 
-    const restore = agentGateway.enqueueCommand.mock.calls.find((c) => c[1] === "ENABLE_USER");
-    expect(restore).toBeDefined();
-    // Re-enabling needs the real credentials, not an empty object.
-    expect((restore?.[2] as { credentials: Record<string, string> }).credentials).toEqual({
-      uuid: "ext-0",
+  /** WireGuard counts a peer for three minutes after its last handshake,
+   * so its session count read a switch as two devices for three minutes.
+   * Its keepalive bytes are used instead. */
+  it("ignores WireGuard's session count and goes by its bytes", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({
+      limit: 1,
+      rows: [row("pc", { sessionId: PC, protocol: "WIREGUARD" }), row("phone", { sessionId: PHONE, nodeId: "node-2" })],
     });
+
+    // The PC left; its peer is still "counted" by the handshake tail.
+    for (let i = 0; i < 6; i++) {
+      await tick(service, {
+        "node-1": [{ ext: "ext-pc", sources: 1, protocol: "WIREGUARD" }],
+        "node-2": [{ ext: "ext-phone", bytes: 500 }],
+      });
+    }
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+  });
+
+  it("ignores credentials already switched off, ids it does not know, and empty deltas", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({
+      limit: 1,
+      rows: [row("pc", { sessionId: PC }), row("phone", { sessionId: PHONE, status: "DISABLED" })],
+    });
+
+    for (let i = 0; i < 6; i++) {
+      await tick(service, {
+        "node-1": [
+          { ext: "ext-pc", bytes: 10 },
+          { ext: "ext-phone", bytes: 10 },
+          { ext: "route:uplink", bytes: 10 },
+          { ext: "ext-nobody", bytes: 0 },
+        ],
+      });
+    }
+
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
   it("treats an unset limit as unlimited, not as zero", async () => {
-    // Plans created before this feature have no value set. Reading that
-    // as "zero allowed" would disconnect every customer on them.
-    const { service, agentGateway } = build({ limit: null });
-    for (let i = 0; i < 5; i++) await poll(service, "node-1", over(99));
+    process.env.CONCURRENCY_CUT = "enforce";
+    const { service, agentGateway } = build({ limit: null, rows: twoDevices() });
+
+    for (let i = 0; i < 6; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
-  it("leaves already-disabled users alone", async () => {
-    const { service, agentGateway } = build({ limit: 1, status: "DISABLED" });
-    for (let i = 0; i < 5; i++) await poll(service, "node-1", over(9));
+  // The coordinator's decision: watch first. A misjudgement here
+  // disconnects a paying customer, and this has never run against a node.
+  it("in shadow mode -- the default -- logs which device it would hold and sends nothing", async () => {
+    delete process.env.CONCURRENCY_CUT;
+    const { service, agentGateway, prisma, warn } = build({ limit: 1, rows: twoDevices() });
+
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }] });
+    for (let i = 0; i < 4; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+
     expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    expect(prisma.protocolUser.updateMany).not.toHaveBeenCalled();
+    const lines = shadowLines(warn);
+    expect(lines).toHaveLength(1);
+    // The phone came second, so it is the one that would be held.
+    expect(lines[0]).toContain(`would hold device ${PHONE}`);
   });
 
-  it("ignores counts for a user this node doesn't know", async () => {
-    const { service, prisma, agentGateway } = build({ limit: 1 });
-    prisma.protocolUser.findFirst.mockResolvedValue(null);
+  it("in shadow mode logs a subscription persistently over its limit only now and then", async () => {
+    const { service, warn } = build({ limit: 1, rows: twoDevices() });
 
-    for (let i = 0; i < 5; i++) await poll(service, "node-1", over(9));
-    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    for (let i = 0; i < 20; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+
+    expect(shadowLines(warn)).toHaveLength(1);
   });
 
-  /** The hole that provisioning-every-route opened.
-   *
-   * Each credential on its own is inside the limit, so judging them
-   * separately -- as this did before -- saw nothing wrong and let one
-   * customer run the limit once per protocol.
-   */
-  it("adds up sources across a subscription's credentials rather than judging each alone", async () => {
-    const { service, agentGateway } = build({
-      limit: 2,
-      protocols: ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS", "XRAY_TROJAN"],
-    });
+  /** The owner's rule: the device already in use keeps working. The cut
+   * this replaces disconnected every credential of the subscription. */
+  it("when enforcing, holds only the newest device, on its own inbound, and leaves the first one alone", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const rows = twoDevices();
+    rows[1].protocolConfig = { transport: "WS", inboundTag: "vless-ws-in-fr" };
+    const { service, agentGateway } = build({ limit: 1, rows });
 
-    const spreadOut = [
-      { externalUserId: "ext-0", protocol: "XRAY_VLESS_REALITY", distinctSources: 2 },
-      { externalUserId: "ext-1", protocol: "XRAY_VLESS_TLS", distinctSources: 2 },
-      { externalUserId: "ext-2", protocol: "XRAY_TROJAN", distinctSources: 2 },
-    ];
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }] });
+    for (let i = 0; i < 3; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
 
-    for (let i = 0; i < 3; i++) await poll(service, "node-1", spreadOut);
-
-    // 6 sources against a limit of 2.
-    expect(disables(agentGateway.enqueueCommand).length).toBeGreaterThan(0);
+    expect(commands(agentGateway, "DISABLE_USER").map((c) => [c[0], c[2]])).toEqual([
+      ["node-2", { protocol: "XRAY_VLESS_REALITY", transport: "WS", inboundTag: "vless-ws-in-fr", externalUserId: "ext-phone" }],
+    ]);
+    expect(rows[1].heldUntil).toBeInstanceOf(Date);
+    expect(rows[0].heldUntil).toBeNull();
   });
 
-  /** Dropping only the credential that reported over the limit would
-   * move the sharer onto the next protocol they already hold, which is
-   * the same hole one step along. */
-  it("drops every credential the subscription holds, not just the reporting one", async () => {
-    const { service, agentGateway } = build({
-      limit: 1,
-      protocols: ["XRAY_VLESS_REALITY", "XRAY_VLESS_TLS", "XRAY_TROJAN"],
-    });
+  /** Shared credentials cannot be told why, and are the likeliest copy. */
+  it("when enforcing, holds the shared credentials before a signed-in device", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    // The phone holds its own confirmed credential on the shared row's
+    // route, so the shared traffic cannot be the phone's (resolveDevices).
+    const rows = [row("shared"), row("phone", { sessionId: PHONE, nodeId: "node-2", routeId: "route-shared" })];
+    const { service, agentGateway } = build({ limit: 1, rows });
 
-    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(5));
+    // The phone is the newer one here; the shared copy is still first.
+    await tick(service, { "node-1": [{ ext: "ext-shared", bytes: 1 }] });
+    for (let i = 0; i < 3; i++) await tick(service, { "node-1": [{ ext: "ext-shared", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
 
-    const dropped = disables(agentGateway.enqueueCommand).map((c) => (c[2] as { externalUserId: string }).externalUserId);
-    expect(dropped.sort()).toEqual(["ext-0", "ext-1", "ext-2"]);
+    expect(commands(agentGateway, "DISABLE_USER").map((c) => (c[2] as { externalUserId: string }).externalUserId)).toEqual([
+      "ext-shared",
+    ]);
   });
 
-  /** The hole that having a credential on every route opened next.
-   *
-   * Each node sees a count inside the limit, so per-node judging -- which
-   * is what this did before -- saw nothing wrong. A sharer only had to
-   * tell each friend to pick a different location, and a limit of two
-   * across five nodes quietly permitted ten.
-   */
+  /** The hold is a lease, not a timer: kept while the other device leaves
+   * no room, lapsing by itself once it does -- and then the re-assert,
+   * which reads the rows as they are at that moment, brings the device
+   * back. Nothing here ever replays a captured list. */
+  it("keeps a hold while the device in use fills the limit, and lets it lapse when that device goes quiet", async () => {
+    process.env.CONCURRENCY_CUT = "enforce";
+    const rows = twoDevices();
+    const { service, agentGateway } = build({ limit: 1, rows });
+
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }] });
+    for (let i = 0; i < 3; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
+    expect(rows[1].heldUntil).not.toBeNull();
+
+    // Five minutes of the PC in use: the hold is renewed throughout.
+    for (let i = 0; i < 10; i++) {
+      await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }] });
+      expect(rows[1].heldUntil!.getTime()).toBeGreaterThan(Date.now());
+    }
+
+    // The PC goes quiet; nothing renews the hold and it lapses.
+    await jest.advanceTimersByTimeAsync(HOLD_LEASE_MS + 1_000);
+    expect(rows[1].heldUntil!.getTime()).toBeLessThan(Date.now());
+    expect(commands(agentGateway, "ENABLE_USER")).toHaveLength(0);
+    expect(commands(agentGateway, "DISABLE_USER")).toHaveLength(1);
+  });
+
   it("counts a subscription across nodes, not one node at a time", async () => {
-    const { service, agentGateway } = build({ limit: 2 });
+    const { service, warn } = build({ limit: 1, rows: twoDevices() });
 
-    // Two devices in Finland and two in France. Neither node is over.
-    for (let i = 0; i < 3; i++) {
-      await poll(service, "node-1", over(2));
-      await poll(service, "node-2", over(2));
-    }
+    for (let i = 0; i < 4; i++) await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 1 }], "node-2": [{ ext: "ext-phone", bytes: 1 }] });
 
-    expect(disables(agentGateway.enqueueCommand).length).toBeGreaterThan(0);
+    expect(shadowLines(warn)).toHaveLength(1);
   });
 
-  /** The debounce is meant to require the excess to *persist*. Several
-   * nodes answering within the same cycle is one reading, not three, and
-   * counting it as three would disconnect people mid location-switch --
-   * hitting hardest the customers who use the most locations. */
+  // Several nodes answering in the same cycle are one reading, not three.
   it("counts one polling cycle once however many nodes report it", async () => {
-    const { service, agentGateway } = build({ limit: 1 });
+    const { service, warn } = build({
+      limit: 1,
+      rows: [
+        row("pc", { sessionId: PC }),
+        row("phone", { sessionId: PHONE }),
+      ],
+    });
 
-    // Five nodes, one cycle, comfortably over the limit.
-    for (const node of ["n1", "n2", "n3", "n4", "n5"]) {
-      await service.handleSessionCounts(node, over(2));
+    for (const node of ["node-1", "node-1", "node-1", "node-1"]) {
+      await cycle(service, node, [{ ext: "ext-pc", bytes: 1 }, { ext: "ext-phone", bytes: 1 }]);
     }
 
-    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    expect(shadowLines(warn)).toHaveLength(0);
   });
 
-  /** Otherwise the counts from before the drop survive it, and the
-   * customer's legitimate devices trip the limit again the moment they
-   * reconnect -- a disconnect loop rather than a warning. */
-  it("forgets the stored counts after disconnecting someone", async () => {
-    const { service, store } = build({ limit: 1 });
+  // It runs inside the agent's stream handler, where a throw closes the
+  // node's control stream.
+  it("never throws, whatever fails underneath", async () => {
+    const { service, prisma } = build({ limit: 1, rows: twoDevices() });
+    prisma.protocolUser.findMany.mockRejectedValue(new Error("database went away"));
 
-    for (let i = 0; i < 3; i++) await poll(service, "node-1", over(4));
-
-    expect(store.clear).toHaveBeenCalledWith("sub-1");
+    await expect(
+      service.handleReport("node-1", { deltas: [{ externalUserId: "ext-pc", protocol: "X", bytesUp: "1", bytesDown: "0" }] }),
+    ).resolves.toBeUndefined();
   });
 });
 
-/** The freshness rule, which is where the real judgement in the store
- * lives. Tested directly so it needs no Redis. */
-describe("sumFresh", () => {
-  const now = 1_000_000;
-
-  it("adds up every node that reported recently", () => {
-    expect(
-      sumFresh({ "node-1": `2:${now - 1_000}`, "node-2": `3:${now - 2_000}` }, now),
-    ).toEqual({ total: 5, stale: [] });
+describe("resolveDevices", () => {
+  const entry = (protocolUserId: string, deviceKey: PresenceEntry["deviceKey"], firstSeen = 0): PresenceEntry => ({
+    protocolUserId,
+    deviceKey,
+    nodeId: "node-1",
+    firstSeen,
+    lastSeen: firstSeen + 1,
   });
 
-  /** A node that has gone quiet has no live sessions. Absence is the only
-   * "they disconnected" signal there is -- nodes report the users they
-   * see, never the ones they don't -- so a stale entry must drop out
-   * rather than pin someone at a count they no longer have. */
-  it("drops a node that has stopped reporting", () => {
-    const result = sumFresh({ "node-1": `2:${now - 1_000}`, "node-2": `9:${now - 200_000}` }, now);
-    expect(result.total).toBe(2);
-    expect(result.stale).toEqual(["node-2"]);
+  it("counts a device's credentials as one device", () => {
+    const devices = resolveDevices(
+      [entry("a", `s:${PC}`), entry("b", `s:${PC}`, 5)],
+      [
+        { id: "a", routeId: "r1", sessionId: PC, provisionedAt: new Date() },
+        { id: "b", routeId: "r2", sessionId: PC, provisionedAt: new Date() },
+      ],
+    );
+    expect([...devices.keys()]).toEqual([`s:${PC}`]);
+    expect(devices.get(`s:${PC}`)).toEqual({ firstSeen: 0, lastSeen: 6 });
   });
 
-  /** Counted-forever is the failure mode worth avoiding: a single bad
-   * write would otherwise hold a customer over their limit permanently. */
-  it("treats a malformed entry as stale rather than as a number", () => {
-    const result = sumFresh({ "node-1": "not-a-count", "node-2": `1:${now}` }, now);
-    expect(result.total).toBe(1);
-    expect(result.stale).toEqual(["node-1"]);
+  /** A device is handed the shared credential on a route where its own is
+   * not confirmed yet, so in the transition one PC can be on its own
+   * credential for one route and the shared one for another at once. */
+  it("folds shared traffic into a device that would have been handed it", () => {
+    const devices = resolveDevices(
+      [entry("own-r1", `s:${PC}`), entry("shared-r2", "shared")],
+      [
+        { id: "own-r1", routeId: "r1", sessionId: PC, provisionedAt: new Date() },
+        { id: "own-r2", routeId: "r2", sessionId: PC, provisionedAt: null },
+        { id: "shared-r2", routeId: "r2", sessionId: null, provisionedAt: null },
+      ],
+    );
+    expect([...devices.keys()]).toEqual([`s:${PC}`]);
+  });
+
+  it("keeps shared traffic as a device of its own when every active device has its own credential there", () => {
+    const devices = resolveDevices(
+      [entry("own-r1", `s:${PC}`), entry("shared-r1", "shared")],
+      [
+        { id: "own-r1", routeId: "r1", sessionId: PC, provisionedAt: new Date() },
+        { id: "shared-r1", routeId: "r1", sessionId: null, provisionedAt: null },
+      ],
+    );
+    expect([...devices.keys()].sort()).toEqual([`s:${PC}`, "shared"].sort());
+  });
+});
+
+describe("DevicePresence", () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it("keeps when a run of activity began across reports, and restarts it after a long gap", async () => {
+    const presence = new DevicePresence(DeviceStateStore.inMemory());
+    const start = Date.now();
+    const seen = [{ protocolUserId: "a", deviceKey: `s:${PC}` as const, nodeId: "node-1" }];
+
+    await presence.record("sub-1", seen, start);
+    await presence.record("sub-1", seen, start + 30_000);
+    expect((await presence.entries("sub-1", 45_000, start + 30_000))[0].firstSeen).toBe(start);
+
+    await presence.record("sub-1", seen, start + 30_000 + 6 * 60_000);
+    expect((await presence.entries("sub-1", 45_000, start + 30_000 + 6 * 60_000))[0].firstSeen).toBe(
+      start + 30_000 + 6 * 60_000,
+    );
+  });
+
+  it("returns only what was seen within the window asked for", async () => {
+    const presence = new DevicePresence(DeviceStateStore.inMemory());
+    const now = Date.now();
+    await presence.record("sub-1", [{ protocolUserId: "old", deviceKey: "shared", nodeId: "n" }], now - 60_000);
+    await presence.record("sub-1", [{ protocolUserId: "new", deviceKey: "shared", nodeId: "n" }], now);
+
+    expect((await presence.entries("sub-1", 45_000, now)).map((e) => e.protocolUserId)).toEqual(["new"]);
+  });
+
+  // Counted forever is the failure to avoid: one bad write would hold a
+  // customer over their limit permanently.
+  it("forgets a malformed entry instead of counting it", async () => {
+    const store = DeviceStateStore.inMemory();
+    await store.hset("presence:sub-1", { broken: "not-an-entry" }, 60_000);
+    const presence = new DevicePresence(store);
+
+    expect(await presence.entries("sub-1", 45_000)).toEqual([]);
+    expect(await store.hgetall("presence:sub-1")).toEqual({});
   });
 });
