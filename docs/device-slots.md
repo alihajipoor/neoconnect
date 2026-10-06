@@ -177,7 +177,10 @@ Request:
 **429 -- `TAKEOVER_LIMIT`.** `{"statusCode": 429, "code":
 "TAKEOVER_LIMIT", "message": "...", "retryAfterSec": 1260}` -- more than
 30 takeovers on this subscription in the last hour. Only a claim *with*
-`takeover` can get this. Say so; do not retry automatically.
+`takeover` can get this code. Say so; do not retry automatically.
+
+**429 without a `code`** -- the request limit (see *Request limit*), not
+a refusal. Before dialling it means dial anyway, like a timeout.
 
 **401** -- this device has been signed out (its session is revoked or
 gone). Handle like any other 401: the session has ended.
@@ -191,7 +194,10 @@ Every `renewEverySec` while connected.
 
 Request: `{"subscriptionId": "6f1c..."}`
 
-**Always 200** (apart from 400/401/404 as above), with a `status`:
+**200** with a `status` (below). Never 409 for the limit. A renewal
+answered with anything else -- no answer, a 5xx, a 429, a 404 -- changes
+nothing: keep the tunnel and try again at the next interval. (A 401
+still means the device was signed out, as everywhere.)
 
 ```json
 { "status": "held", "enforced": true, "subscriptionId": "6f1c...", "limit": 1,
@@ -235,6 +241,15 @@ the app wants to save a round trip (claiming is still correct).
 [{ "id": "6f1c...", "status": "ACTIVE", "planId": "...", "expireAt": "...", "deviceLimit": 1 }]
 ```
 
+### Request limit
+
+The three endpoints allow 60 requests a minute **per device** (per
+access token), not per address: customers reaching the API through a
+node's mirror or through the tunnel share that node's address, and so
+do customers behind one carrier-grade NAT. Past it the answer is a 429
+with no `code` (`ThrottlerException: Too Many Requests`). It is never a
+refusal of the device -- see obligation 2.
+
 ## Timings
 
 | What | Value | Where it comes from |
@@ -253,9 +268,13 @@ the app wants to save a round trip (claiming is still correct).
 1. **Claim before dialling**, after refreshing the connection config and
    before tearing down anything. Send the device headers and the
    `protocolUserId` of the credential about to be dialled.
-2. **Never let the claim block a connect.** No answer within 3 s, a
-   network error or a 5xx: dial anyway, and claim again once the tunnel
-   is up (through it). Only a definite refusal (409/429) stops the dial.
+2. **Never let the claim block a connect.** Exactly three answers stop
+   the dial: **409 with `code` `DEVICE_LIMIT`**, **409 with `code`
+   `SUBSCRIPTION_INACTIVE`**, and **429 with `code` `TAKEOVER_LIMIT`**
+   (only after a takeover). A 401 ends the session, as everywhere.
+   Anything else -- no answer within 3 s, a network error, a 5xx, a 429
+   or 409 without one of those codes, a 404 -- means dial anyway, and
+   claim again once the tunnel is up (through it).
 3. **On 409 `DEVICE_LIMIT`**, do not dial. Show, in the app's language:
    "Your plan allows *{limit}* device(s) at a time. Neoxify is in use on
    *{label}* since *{since}*." with **Use on this device instead** and
@@ -273,7 +292,8 @@ the app wants to save a round trip (claiming is still correct).
    failover ladder.
 6. **Renew every `renewEverySec` while connected**, in the foreground.
    Mobile apps need not renew in the background; traffic keeps the slot.
-   A renewal that cannot reach the API changes nothing -- keep the tunnel.
+   A renewal that is not answered 200 -- unreachable, 5xx, 429, anything
+   but a 401 -- changes nothing: keep the tunnel.
 7. **On `displaced`**: disconnect, show "Disconnected: Neoxify is now in
    use on *{by.label}*." with **Use on this device instead**, and **do
    not run the failover ladder** (it would only take the slot back or
