@@ -3,7 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { existsSync, readFileSync } from "node:fs";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
-import { AgentCommandType, Prisma } from "@prisma/client";
+import { AgentCommandType, Prisma, Protocol } from "@prisma/client";
 import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
@@ -11,6 +11,7 @@ import { UsageService } from "../usage/usage.service";
 import { ConcurrencyService } from "../usage/concurrency.service";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
 import { liveCredentialWhere } from "../protocol-users/live-credentials";
+import { rateLimitFor } from "../protocol-users/rate-limit";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
 import { verifyEd25519 } from "./ed25519";
@@ -693,7 +694,10 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       // restart on ir1, all five France routes returned "invalid request
       // user id" while Finland kept working, because the re-assert had
       // put every France customer on the default inbounds.
-          include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+      //
+      // node and subscription: for the plan's speed caps, which go along
+      // to agents that can take them (see reassertPayload).
+          include: REASSERT_INCLUDE,
           orderBy: { id: "asc" },
           take,
         });
@@ -750,7 +754,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       const readAt = Date.now();
       const users = await this.prisma.protocolUser.findMany({
         where: { id: { in: ids }, ...liveCredentialWhere() },
-        include: { protocolConfig: { select: { transport: true, inboundTag: true } } },
+        include: REASSERT_INCLUDE,
       });
       for (const user of users) {
         // Put back on purpose: the hold's own DISABLE_USER, seconds ago,
@@ -779,7 +783,7 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
    * Per-device sign-out makes such deletes routine. Returns whether the
    * CREATE_USER was sent. */
   private async guardedReassert(
-    user: { nodeId: string; protocol: string; externalUserId: string; credentialsJson: string; protocolConfig: { transport: string | null; inboundTag: string | null } },
+    user: ReassertUser,
     readAt: number,
     send: (payload: object) => unknown,
   ): Promise<boolean> {
@@ -983,15 +987,57 @@ function userCommandKey(nodeId: string, protocol: string, externalUserId: string
   return `${nodeId}\u0000${protocol}\u0000${externalUserId}`;
 }
 
-/** The CREATE_USER a re-assert sends for one credential: its protocol,
- * transport and inbound, so it is rebuilt where it was created, and its
- * credentials decrypted, since the agent cannot use the stored form. */
-function reassertPayload(user: {
+/** What a re-assert reads with each credential. */
+const REASSERT_INCLUDE = {
+  protocolConfig: { select: { transport: true, inboundTag: true } },
+  node: { select: { agentVersion: true } },
+  subscription: { select: { plan: { select: { maxDownloadMbps: true, maxUploadMbps: true } } } },
+} satisfies Prisma.ProtocolUserInclude;
+
+type ReassertUser = {
+  nodeId: string;
   protocol: string;
   externalUserId: string;
   credentialsJson: string;
   protocolConfig: { transport: string | null; inboundTag: string | null };
-}) {
+  node?: { agentVersion: string | null } | null;
+  subscription?: { plan: { maxDownloadMbps: number | null; maxUploadMbps: number | null } | null } | null;
+};
+
+/** The first agent release that can be sent a plan's speed caps on every
+ * re-assert: its applyRateLimit records a cap and applies only what
+ * changed. Earlier agents rebuild a user's whole tc setup on every
+ * CREATE_USER that carries caps -- a moment uncapped and a dozen tc
+ * processes per capped WireGuard user, every 60 s -- so they are sent
+ * none, as before.
+ *
+ * Caps used to arrive only at first provisioning and on a plan edit, and
+ * the agent kept them in memory: after any agent restart (every rollout)
+ * no OpenVPN customer who reconnected was shaped again, and after a
+ * `wg-quick` restart or a reboot no WireGuard customer, until an admin
+ * happened to edit the plan. Found by the 2026-10-06 review.
+ *
+ * If the agent release carrying that change is cut under another number,
+ * this has to move with it. */
+export const REASSERT_CAPS_FROM_AGENT = "0.2.10";
+
+/** Whether an agent reporting this version takes caps on every re-assert.
+ * Anything that is not a plain release number -- "dev", a missing
+ * version -- is treated as too old. */
+export function agentTakesReassertedCaps(agentVersion: string | null | undefined): boolean {
+  const parse = (v: string) => /^v?(\d+)\.(\d+)\.(\d+)$/.exec(v)?.slice(1).map(Number);
+  const have = agentVersion ? parse(agentVersion) : undefined;
+  const need = parse(REASSERT_CAPS_FROM_AGENT)!;
+  if (!have) return false;
+  for (let i = 0; i < 3; i++) if (have[i] !== need[i]) return have[i] > need[i];
+  return true;
+}
+
+/** The CREATE_USER a re-assert sends for one credential: its protocol,
+ * transport and inbound, so it is rebuilt where it was created, and its
+ * credentials decrypted, since the agent cannot use the stored form --
+ * and the plan's speed caps, for an agent that can take them. */
+function reassertPayload(user: ReassertUser) {
   return {
     protocol: user.protocol,
     transport: user.protocolConfig.transport,
@@ -1000,6 +1046,11 @@ function reassertPayload(user: {
     ...(user.protocolConfig.inboundTag ? { inboundTag: user.protocolConfig.inboundTag } : {}),
     externalUserId: user.externalUserId,
     credentials: decryptCredentials(user.credentialsJson),
+    // Nothing at all for an uncapped plan or an unshapeable protocol, the
+    // same as at first provisioning (rateLimitFor).
+    ...(agentTakesReassertedCaps(user.node?.agentVersion)
+      ? rateLimitFor(user.subscription?.plan, user.protocol as Protocol)
+      : {}),
   };
 }
 

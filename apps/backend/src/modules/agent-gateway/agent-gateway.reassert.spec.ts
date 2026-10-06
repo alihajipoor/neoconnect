@@ -1,5 +1,5 @@
 import { cursoredFindMany } from "../../../test/cursored";
-import { AgentGatewayService } from "./agent-gateway.service";
+import { AgentGatewayService, agentTakesReassertedCaps } from "./agent-gateway.service";
 import { encryptCredentials } from "../protocol-users/credentials-crypto";
 import { liveCredentialWhere } from "../protocol-users/live-credentials";
 
@@ -20,6 +20,8 @@ describe("AgentGatewayService reconnect reconciliation", () => {
       externalUserId: string;
       credentials: Record<string, string>;
       transport?: string;
+      agentVersion?: string;
+      plan?: { maxDownloadMbps: number | null; maxUploadMbps: number | null };
     }[],
   ) {
     const prisma = {
@@ -37,6 +39,8 @@ describe("AgentGatewayService reconnect reconciliation", () => {
             status: "ACTIVE",
             credentialsJson: encryptCredentials(u.credentials),
             protocolConfig: { transport: u.transport ?? "TCP" },
+            ...(u.agentVersion !== undefined ? { node: { agentVersion: u.agentVersion } } : {}),
+            ...(u.plan ? { subscription: { plan: u.plan } } : {}),
           })),
         ),
       },
@@ -132,6 +136,48 @@ describe("AgentGatewayService reconnect reconciliation", () => {
     // credentials are live (liveCredentialWhere), tested on its own.
     expect(args.where).toEqual({ nodeId: "node-1", ...liveCredentialWhereAt(expect.any(Date)) });
     expect(args.where).not.toHaveProperty("id");
+  });
+
+  /** Caps used to arrive only at first provisioning and on a plan edit,
+   * and the agent kept them in memory: after an agent restart or a
+   * wg-quick restart, nobody provisioned earlier was shaped again. The
+   * re-assert now carries them -- but only to an agent whose
+   * applyRateLimit is idempotent; an older one would tear down and
+   * rebuild every capped user's tc rules once a minute. */
+  it("sends the plan's speed caps to an agent that can take them, and only to one", async () => {
+    const plan = { maxDownloadMbps: 50, maxUploadMbps: 10 };
+    const wg = { privateKey: "a", address: "10.66.0.2/32" };
+    const { service, enqueue } = build([
+      { protocol: "WIREGUARD", externalUserId: "new-agent", credentials: wg, agentVersion: "v0.2.10", plan },
+      { protocol: "WIREGUARD", externalUserId: "old-agent", credentials: wg, agentVersion: "v0.2.9", plan },
+      { protocol: "WIREGUARD", externalUserId: "dev-agent", credentials: wg, agentVersion: "dev", plan },
+      // Unshapeable, so nothing however new the agent.
+      { protocol: "XRAY_VLESS_REALITY", externalUserId: "xray", credentials: { uuid: "x" }, agentVersion: "v0.3.0", plan },
+      { protocol: "OPENVPN", externalUserId: "uncapped", credentials: {}, agentVersion: "v0.3.0", plan: { maxDownloadMbps: null, maxUploadMbps: null } },
+    ]);
+
+    await reassert(service, "node-1");
+
+    const sent = new Map(enqueue.mock.calls.map((c) => [(c[2] as { externalUserId: string }).externalUserId, c[2]]));
+    expect(sent.get("new-agent")).toMatchObject({ downloadMbps: 50, uploadMbps: 10 });
+    for (const id of ["old-agent", "dev-agent", "xray", "uncapped"]) {
+      expect(sent.get(id)).not.toHaveProperty("downloadMbps");
+      expect(sent.get(id)).not.toHaveProperty("uploadMbps");
+    }
+  });
+
+  it("compares agent versions numerically, and treats anything unparseable as too old", () => {
+    expect(agentTakesReassertedCaps("v0.2.10")).toBe(true);
+    expect(agentTakesReassertedCaps("0.2.10")).toBe(true);
+    expect(agentTakesReassertedCaps("v0.2.11")).toBe(true);
+    expect(agentTakesReassertedCaps("v0.3.0")).toBe(true);
+    expect(agentTakesReassertedCaps("v1.0.0")).toBe(true);
+    expect(agentTakesReassertedCaps("v0.2.9")).toBe(false);
+    expect(agentTakesReassertedCaps("v0.1.99")).toBe(false);
+    expect(agentTakesReassertedCaps("dev")).toBe(false);
+    expect(agentTakesReassertedCaps("v0.2.10-rc1")).toBe(false);
+    expect(agentTakesReassertedCaps(null)).toBe(false);
+    expect(agentTakesReassertedCaps(undefined)).toBe(false);
   });
 
   it("sends nothing for a node with no provisioned users", async () => {
