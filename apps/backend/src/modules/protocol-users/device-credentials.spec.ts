@@ -431,6 +431,29 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(rows.filter((r) => r.sessionId === ME)).toHaveLength(2);
   });
 
+  /** The cap bounds how many sets exist, not how fast they churn. A
+   * sign-in loop made a full set (and evicted one) per new session. */
+  it("hands an eleventh new device within the hour the shared credentials, creating and evicting nothing", async () => {
+    process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT = "50";
+    const ids = Array.from({ length: 11 }, (_, i) => `s${i}`);
+    const { service, create, remove } = world({
+      sessions: ids.map((id) => ({ id })),
+      rows: [
+        { id: "shared-a", routeId: "route-a" },
+        { id: "shared-b", routeId: "route-b" },
+      ],
+    });
+
+    for (const id of ids.slice(0, 10)) await service.listForDevice(CUSTOMER, id);
+    expect(create).toHaveBeenCalledTimes(20);
+
+    const eleventh = await service.listForDevice(CUSTOMER, "s10");
+
+    expect(create).toHaveBeenCalledTimes(20);
+    expect(remove).not.toHaveBeenCalled();
+    expect(eleventh.map((u) => u.id).sort()).toEqual(["shared-a", "shared-b"]);
+  });
+
   it("does not evict anyone for a device that already holds its set", async () => {
     process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT = "1";
     const { service, remove } = world({

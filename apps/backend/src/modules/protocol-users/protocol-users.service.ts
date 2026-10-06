@@ -26,6 +26,13 @@ export function deviceCredentialLimit(): number {
   return Number.isInteger(raw) && raw >= 1 ? raw : 5;
 }
 
+/** How many devices of one customer may receive their first credential
+ * set within DEVICE_SET_WINDOW_MS. See allowNewDeviceSet. Ten an hour is
+ * far above anyone signing in on their own devices -- reinstalls
+ * included -- and far below a loop. */
+const NEW_DEVICE_SETS_PER_WINDOW = 10;
+const DEVICE_SET_WINDOW_MS = 60 * 60 * 1000;
+
 /** Every column of ProtocolUser, named.
  *
  * Unusually for a list projection this narrows nothing today -- the
@@ -77,6 +84,9 @@ export class ProtocolUsersService {
    * older. provisionAll avoided that by being sequential; lazy device
    * provisioning makes concurrent creation an ordinary event. */
   private readonly wireGuardLock = new KeyedLock();
+  /** When each customer recently started a device's first set -- see
+   * allowNewDeviceSet. */
+  private readonly newDeviceSets = new Map<string, number[]>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -230,7 +240,9 @@ export class ProtocolUsersService {
       select: { subscriptionId: true, routeId: true },
     });
     if (held.length === 0) {
-      // A device's first set. Make room before creating it.
+      // A device's first set. Rate-limited first, so a refused set
+      // evicts nobody; then make room before creating it.
+      if (!this.allowNewDeviceSet(customerId)) return;
       await this.enforceDeviceLimit(customerId, sessionId);
     }
     const heldKeys = new Set(held.map((u) => `${u.subscriptionId}:${u.routeId}`));
@@ -271,6 +283,45 @@ export class ProtocolUsersService {
         }
       }
     }
+  }
+
+  /** Whether this customer may start another device's first credential
+   * set now, counting it if so.
+   *
+   * The device cap bounds how many sets exist at once, not how fast they
+   * are made and thrown away. Past the cap every new session's first
+   * fetch evicts the oldest device (DELETE_USER on every route) and
+   * creates a full set (CREATE_USER on every route) -- each an OpenVPN
+   * RSA keygen on this process's event loop, a ccd file that is never
+   * cleaned up, an IKEv2 secrets reload, an agent_commands row. A
+   * sign-in loop (login, social, or until about 2026-10-12 a replayed
+   * sid-less refresh token, which opens a new session on every call) had
+   * no ceiling on that rate.
+   *
+   * Refusing costs the device nothing it had before: with no set of its
+   * own it is handed the subscription's shared credentials, exactly what
+   * every device got before per-device credentials existed. In-process,
+   * like the customer lock, on the same one-instance assumption. */
+  private allowNewDeviceSet(customerId: string, now = Date.now()): boolean {
+    const recent = (this.newDeviceSets.get(customerId) ?? []).filter((at) => now - at < DEVICE_SET_WINDOW_MS);
+    if (recent.length >= NEW_DEVICE_SETS_PER_WINDOW) {
+      this.newDeviceSets.set(customerId, recent);
+      this.logger.warn(
+        `Customer ${customerId} has started ${recent.length} device credential sets within the hour; ` +
+          `this device gets the shared credentials instead`,
+      );
+      return false;
+    }
+    recent.push(now);
+    this.newDeviceSets.set(customerId, recent);
+    // Housekeeping, so the map holds customers active this hour rather
+    // than every customer since the process started.
+    if (this.newDeviceSets.size > 1000) {
+      for (const [key, times] of this.newDeviceSets) {
+        if (times.every((at) => now - at >= DEVICE_SET_WINDOW_MS)) this.newDeviceSets.delete(key);
+      }
+    }
+    return true;
   }
 
   /** Keeps the number of devices holding credentials of their own at or
