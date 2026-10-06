@@ -576,6 +576,57 @@ describe("the teardown after the slot ends the session", () => {
       }),
     ).toBe("stuck");
   });
+
+  /** Neither plugin call has a deadline of its own. One that never
+   * settled left the owed teardown "tearingDown" for good: the retry runs
+   * only on "stuck", so nothing tried again and no stuck line appeared. */
+  it("comes back stuck when the platform never answers, and is tried again", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = createSlotTeardown();
+      const waits: (() => Promise<boolean>)[] = [() => new Promise<boolean>(() => undefined), () => Promise.resolve(true)];
+      const attempt = slotTeardownAttempt({
+        disconnect: () => Promise.resolve(),
+        waitForTeardown: () => (waits.shift() ?? (() => Promise.resolve(false)))(),
+      });
+
+      void store.begin(attempt);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(store.state()).toBe("stuck");
+      expect(store.running()).toBeNull();
+
+      expect(await store.retry(attempt)).toBe("down");
+      expect(store.owed()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** A disconnect call that never answers may still have stopped the
+   * engine: the platform is asked once it has had its time. */
+  it("asks the platform anyway when the disconnect call never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const waitForTeardown = vi.fn(() => Promise.resolve(true));
+      let verdict: string | null = null;
+      void tearDownForSlot({ disconnect: () => new Promise(() => undefined), waitForTeardown }).then((v) => {
+        verdict = v;
+      });
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(waitForTeardown).toHaveBeenCalledTimes(1);
+      expect(verdict).toBe("down");
+
+      const store = createSlotTeardown();
+      void store.begin(
+        slotTeardownAttempt({ disconnect: () => new Promise(() => undefined), waitForTeardown: () => Promise.resolve(false) }),
+      );
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(store.state()).toBe("stuck");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("Disconnect", () => {
