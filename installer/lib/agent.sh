@@ -2817,6 +2817,43 @@ masquerade_client_subnet() {
     iptables -t nat -A POSTROUTING -s "$subnet" -o "$iface" -j MASQUERADE
 }
 
+# Destinations no VPN client is forwarded to through this node: private,
+# carrier-grade NAT and link-local space.
+#
+# Nothing filtered FORWARD, so a customer could reach every other
+# customer's device on this node -- WireGuard, OpenVPN and IKEv2 alike,
+# 10.66/10.77/10.68 are all routed locally -- and the provider's metadata
+# service at 169.254.169.254 and its private network, MASQUERADEd to the
+# node's own address: the provider answered the node. Found by the
+# 2026-10-06 review; the Xray half of it is the private-address rule in
+# the templates.
+#
+# Matched on the client subnet as source, so replies to clients, phantun's
+# DNAT (public source) and relayed traffic into relay-tun (public
+# destination) are untouched, and a client's traffic to this node's own
+# tunnel address is INPUT, not FORWARD. Inserted at the top of FORWARD,
+# above install_ikev2's ACCEPTs. Applied on relays too: unlike the NAT
+# rule, this one fails closed.
+TUNNEL_ISOLATION_RANGES=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16)
+
+isolate_client_subnet() {
+  local subnet="$1" range
+  for range in "${TUNNEL_ISOLATION_RANGES[@]}"; do
+    iptables -C FORWARD -s "$subnet" -d "$range" -j DROP 2>/dev/null || \
+      iptables -I FORWARD -s "$subnet" -d "$range" -j DROP
+  done
+}
+
+# The same rules as wg-quick hooks, for wg0.conf: WireGuard-only nodes
+# keep no saved iptables, so wg0 has to put them back on every start.
+wg_isolation_hooks() {
+  local subnet="$1" range
+  for range in "${TUNNEL_ISOLATION_RANGES[@]}"; do
+    echo "PostUp = iptables -C FORWARD -s ${subnet} -d ${range} -j DROP 2>/dev/null || iptables -I FORWARD -s ${subnet} -d ${range} -j DROP"
+    echo "PostDown = iptables -D FORWARD -s ${subnet} -d ${range} -j DROP 2>/dev/null || true"
+  done
+}
+
 # The panel's Protocol Config of this kind on this node, as one line of
 # JSON, or nothing if there is none. Fails if the panel cannot be asked,
 # which callers must not read as "none": what a re-run does next depends
@@ -2929,6 +2966,16 @@ install_wireguard() {
 PostDown = iptables -t nat -D POSTROUTING -s ${subnet} -o ${default_iface} -j MASQUERADE 2>/dev/null || true"
   fi
 
+  # Isolation goes in on every node, relays included -- see
+  # isolate_client_subnet. A private DNS server other than this node's own
+  # tunnel address would be cut off by it.
+  local wg_isolation
+  wg_isolation="$(wg_isolation_hooks "$subnet")"
+  if [[ "$dns" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.) && "$dns" != "$server_ip" ]]; then
+    echo "  WARNING: clients are given DNS $dns, a private address this node does not forward" >&2
+    echo "  tunnel clients to. Use a public resolver, or this node's own $server_ip." >&2
+  fi
+
   local wg_conf_new
   wg_conf_new="$(mktemp)"
   cat > "$wg_conf_new" <<EOF
@@ -2937,6 +2984,7 @@ Address = ${server_ip}/24
 ListenPort = ${listen_port}
 PrivateKey = ${private_key}
 ${wg_nat_hooks}
+${wg_isolation}
 EOF
 
   # Restarted only when something changed. A restart drops every peer the
@@ -3587,6 +3635,8 @@ CONF
     masquerade_client_subnet "$listen_pool" "$uplink"
     iptables -C FORWARD -s "$listen_pool" -j ACCEPT 2>/dev/null || iptables -I FORWARD -s "$listen_pool" -j ACCEPT
     iptables -C FORWARD -d "$listen_pool" -j ACCEPT 2>/dev/null || iptables -I FORWARD -d "$listen_pool" -j ACCEPT
+    # After the ACCEPTs, so these land above them.
+    isolate_client_subnet "$listen_pool"
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent >/dev/null 2>&1 || true
     netfilter-persistent save >/dev/null 2>&1 || true
   fi
@@ -3837,8 +3887,9 @@ EOF
   fi
   enable_ip_forwarding
   masquerade_client_subnet "$ovpn_subnet" "$default_iface"
+  isolate_client_subnet "$ovpn_subnet"
   # OpenVPN's systemd unit has no PostUp/PostDown-style hook the way
-  # wg-quick does, so the rule above needs to be persisted separately to
+  # wg-quick does, so the rules above need to be persisted separately to
   # survive a reboot -- iptables-persistent's own systemd unit restores
   # /etc/iptables/rules.v4 on every boot.
   apt-get install -y -qq iptables-persistent
