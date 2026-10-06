@@ -10,6 +10,7 @@ import { NodesService } from "../nodes/nodes.service";
 import { UsageService } from "../usage/usage.service";
 import { ConcurrencyService } from "../usage/concurrency.service";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
+import { liveCredentialWhere } from "../protocol-users/live-credentials";
 import { AgentConnectionRegistry } from "./agent-connection-registry";
 import { resolveProtoPath } from "./proto-path";
 import { verifyEd25519 } from "./ed25519";
@@ -610,7 +611,9 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       label: `reassertProvisionedUsers(${nodeId})`,
       read: (afterId, take) =>
         this.prisma.protocolUser.findMany({
-          where: { nodeId, status: "ACTIVE", ...after(afterId) },
+          // Not every ACTIVE row: not a signed-out device's on its way off
+          // the node -- see liveCredentialWhere.
+          where: { nodeId, ...liveCredentialWhere(), ...after(afterId) },
       // For the transport and the inbound tag. Without either, every
       // re-assert after an engine restart rebuilds customers on the
       // wrong inbound -- silently, and for everyone at once, since

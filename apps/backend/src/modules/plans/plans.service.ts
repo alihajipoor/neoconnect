@@ -6,6 +6,7 @@ import { isShapeable, rateLimitFor } from "../protocol-users/rate-limit";
 import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { commandTarget } from "../protocol-users/command-target";
 import { decryptCredentials } from "../protocol-users/credentials-crypto";
+import { liveCredentialWhere } from "../protocol-users/live-credentials";
 
 /** The protocols a plan's speed cap can reach -- see rate-limit.ts. */
 const SHAPEABLE_PROTOCOLS = Object.values(Protocol).filter(isShapeable);
@@ -258,7 +259,7 @@ export class PlansService {
     const users = await this.prisma.protocolUser.findMany({
       where: {
         subscription: { planId: plan.id, status: "ACTIVE" },
-        status: "ACTIVE",
+        ...liveCredentialWhere(),
         protocol: { in: SHAPEABLE_PROTOCOLS },
       },
       select: {

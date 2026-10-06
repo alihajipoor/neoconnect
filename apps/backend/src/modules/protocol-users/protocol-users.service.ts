@@ -326,14 +326,31 @@ export class ProtocolUsersService {
 
   /** Keeps the number of devices holding credentials of their own at or
    * below `deviceCredentialLimit()`, by taking them back from the device
-   * least recently refreshed.
+   * that has been out of use longest.
+   *
+   * "Out of use" the way the sweep judges it: a signed-out session first,
+   * then by the later of its last refresh and the last traffic on any of
+   * its credentials. Ranking by refresh alone picked exactly the device
+   * the sweep was written to protect -- an always-on phone tunnel nobody
+   * opens the app on, which never refreshes and carries traffic every
+   * day -- and it has no reason to fetch again until someone opens the
+   * app, so it stayed cut off until then.
    *
    * Evicting rather than refusing, because the device being refused is
    * the one the customer is holding right now, while the one evicted is
    * most often a reinstall's abandoned session. An evicted device that is
-   * in fact still in use gets a fresh set on its next fetch; only past
-   * the limit in *active* devices does this churn, and then the cost is
-   * a reconnect, not an outage.
+   * in fact still in use is handed its subscription's shared credentials
+   * and a fresh set of its own on its next fetch -- but until it fetches,
+   * what it holds no longer works. Past the limit in *active* devices
+   * that is an outage for one of them, which is why the limit (a hidden
+   * safety cap, not the plan's device limit) is set well above what
+   * anyone uses.
+   *
+   * The eviction happens before the new set is created, so a set that
+   * then fails to be created (a full WireGuard pool) has still cost the
+   * evicted device its own. That device falls back to the shared
+   * credentials on its next fetch, as everyone did before per-device
+   * credentials.
    *
    * The limit exists for the nodes. Each device credential is a peer, an
    * EAP identity or a client in an engine, and a sign-in loop could
@@ -342,11 +359,28 @@ export class ProtocolUsersService {
   private async enforceDeviceLimit(customerId: string, sessionId: string) {
     const holders = await this.prisma.customerSession.findMany({
       where: { customerId, id: { not: sessionId }, protocolUsers: { some: {} } },
-      select: { id: true },
-      orderBy: { lastUsedAt: "asc" },
+      select: {
+        id: true,
+        lastUsedAt: true,
+        revokedAt: true,
+        protocolUsers: {
+          select: { usageRecords: { select: { reportedAt: true }, orderBy: { reportedAt: "desc" }, take: 1 } },
+        },
+      },
     });
     const excess = holders.length - (deviceCredentialLimit() - 1);
-    for (const holder of holders.slice(0, Math.max(0, excess))) {
+    if (excess <= 0) return;
+
+    const lastInUse = (holder: (typeof holders)[number]) =>
+      holder.revokedAt
+        ? 0
+        : Math.max(
+            holder.lastUsedAt.getTime(),
+            ...holder.protocolUsers.flatMap((u) => u.usageRecords.map((r) => r.reportedAt.getTime())),
+          );
+    const ranked = [...holders].sort((a, b) => lastInUse(a) - lastInUse(b));
+
+    for (const holder of ranked.slice(0, excess)) {
       this.logger.log(
         `Customer ${customerId} is at the device limit; taking credentials back from session ${holder.id}`,
       );

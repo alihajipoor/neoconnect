@@ -38,6 +38,8 @@ function world(opts: {
   subscriptions?: { id: string; customerId?: string; status?: string }[];
   sessions?: { id: string; customerId?: string; revokedAt?: Date | null; lastUsedAt?: Date }[];
   routes?: string[];
+  /** When each session's credentials last carried traffic. */
+  lastTraffic?: Record<string, Date>;
 }) {
   let seq = 0;
   const rows: Row[] = (opts.rows ?? []).map((r) => ({
@@ -94,8 +96,15 @@ function world(opts: {
         sessions
           .filter((s) => s.customerId === where.customerId && s.id !== where.id?.not)
           .filter((s) => rows.some((r) => r.sessionId === s.id))
-          .sort((a, b) => a.lastUsedAt.getTime() - b.lastUsedAt.getTime())
-          .map((s) => ({ id: s.id })),
+          .map((s) => ({
+            id: s.id,
+            lastUsedAt: s.lastUsedAt,
+            revokedAt: s.revokedAt,
+            // The latest usage record per credential, as the query asks.
+            protocolUsers: rows
+              .filter((r) => r.sessionId === s.id)
+              .map(() => ({ usageRecords: opts.lastTraffic?.[s.id] ? [{ reportedAt: opts.lastTraffic[s.id] }] : [] })),
+          })),
       ),
       updateMany: jest.fn(async ({ where }: { where: { customerId: string; revokedAt: null; id?: { not: string } } }) => {
         let count = 0;
@@ -461,6 +470,51 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(create).toHaveBeenCalledTimes(20);
     expect(remove).not.toHaveBeenCalled();
     expect(eleventh.map((u) => u.id).sort()).toEqual(["shared-a", "shared-b"]);
+  });
+
+  /** The sweep counts traffic as use, and so must eviction: an always-on
+   * phone tunnel never refreshes but carries traffic every day, and it
+   * would not fetch again until someone opened the app. */
+  it("keeps a device whose credentials carry traffic, though it has not refreshed for a while", async () => {
+    process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT = "2";
+    const now = Date.now();
+    const { service, rows, remove } = world({
+      sessions: [
+        { id: ME },
+        { id: "always-on-phone", lastUsedAt: new Date(now - 20 * 86_400_000) },
+        { id: "laptop", lastUsedAt: new Date(now - 2 * 86_400_000) },
+      ],
+      rows: [
+        { id: "phone-a", sessionId: "always-on-phone" },
+        { id: "laptop-a", sessionId: "laptop" },
+      ],
+      lastTraffic: { "always-on-phone": new Date(now - 60_000) },
+    });
+
+    await service.listForDevice(CUSTOMER, ME);
+
+    expect(remove.mock.calls.map((c) => c[0])).toEqual(["laptop-a"]);
+    expect(rows.some((r) => r.sessionId === "always-on-phone")).toBe(true);
+  });
+
+  it("evicts a signed-out session before any live one", async () => {
+    process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT = "2";
+    const now = Date.now();
+    const { service, remove } = world({
+      sessions: [
+        { id: ME },
+        { id: "signed-out", lastUsedAt: new Date(now - 1_000), revokedAt: new Date(now - 500) },
+        { id: "old-but-live", lastUsedAt: new Date(now - 9 * 86_400_000) },
+      ],
+      rows: [
+        { id: "out-a", sessionId: "signed-out" },
+        { id: "old-a", sessionId: "old-but-live" },
+      ],
+    });
+
+    await service.listForDevice(CUSTOMER, ME);
+
+    expect(remove.mock.calls.map((c) => c[0])).toEqual(["out-a"]);
   });
 
   it("does not evict anyone for a device that already holds its set", async () => {

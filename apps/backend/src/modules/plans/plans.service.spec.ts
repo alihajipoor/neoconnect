@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { PlansService } from "./plans.service";
 import { encryptCredentials } from "../protocol-users/credentials-crypto";
+import { liveCredentialWhere } from "../protocol-users/live-credentials";
 
 function buildPlan(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -198,7 +199,7 @@ describe("PlansService", () => {
 
       expect(prisma.protocolUser.findMany.mock.calls[0][0].where).toEqual({
         subscription: { planId: "plan-1", status: "ACTIVE" },
-        status: "ACTIVE",
+        ...liveCredentialWhere(),
         protocol: { in: ["WIREGUARD", "OPENVPN"] },
       });
     });
