@@ -52,11 +52,23 @@ func New(mgmtAddr, ccdDir string) *Provisioner {
 // do is clear any stale ccd "disable" file for this CN, so this also
 // doubles as the re-enable path (ENABLE_USER dispatches here too -- see
 // agent/internal/dispatch).
+//
+// Cleared by leaving an empty ccd file rather than none: an allow-list
+// entry, inert today. Revocation lives only in the "disable" files, so a
+// node rebuilt with the same CA and an empty ccd directory accepts every
+// certificate ever revoked on it, including those whose rows are gone.
+// With an empty file for every live CN -- which the control plane's
+// 60-second re-assert writes within a minute of this agent starting --
+// `ccd-exclusive` can be switched on in server.conf, and then a CN with
+// no file is refused: a rebuilt node accepts nobody until the re-assert
+// names who is live. Switching it on is a node change for the owner,
+// after this agent is on every OpenVPN node; until then nothing about
+// who connects changes.
 func (p *Provisioner) CreateUser(ctx context.Context, user common.ProtocolUser) error {
 	if user.ExternalUserID == "" {
 		return fmt.Errorf("openvpn CreateUser: missing commonName")
 	}
-	return p.removeDisableFile(user.ExternalUserID)
+	return p.writeAllowFile(user.ExternalUserID)
 }
 
 func (p *Provisioner) UpdateUser(ctx context.Context, user common.ProtocolUser) error {
@@ -157,18 +169,24 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 }
 
 func (p *Provisioner) writeDisableFile(cn string) error {
+	return p.writeCcd(cn, []byte("disable\n"))
+}
+
+// writeAllowFile leaves an empty ccd file for this CN -- see CreateUser.
+func (p *Provisioner) writeAllowFile(cn string) error {
+	return p.writeCcd(cn, nil)
+}
+
+func (p *Provisioner) writeCcd(cn string, content []byte) error {
+	// The CN becomes a file name. Generated ones never contain a path
+	// separator; one that did would write outside the ccd directory.
+	if cn == "." || cn == ".." || strings.ContainsAny(cn, `/\`) {
+		return fmt.Errorf("openvpn: %q is not usable as a ccd file name", cn)
+	}
 	if err := os.MkdirAll(p.ccdDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir ccd dir: %w", err)
 	}
-	return os.WriteFile(filepath.Join(p.ccdDir, cn), []byte("disable\n"), 0o644)
-}
-
-func (p *Provisioner) removeDisableFile(cn string) error {
-	err := os.Remove(filepath.Join(p.ccdDir, cn))
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove ccd disable file: %w", err)
-	}
-	return nil
+	return os.WriteFile(filepath.Join(p.ccdDir, cn), content, 0o644)
 }
 
 // mgmtCommand sends a single command to OpenVPN's local Management

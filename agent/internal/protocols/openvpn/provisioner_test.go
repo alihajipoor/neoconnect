@@ -5,8 +5,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/neoxify/neoxify-hub/agent/internal/protocols/common"
 )
 
 // fakeMgmt is as much of OpenVPN's management interface as `status 2`
@@ -132,5 +136,52 @@ func TestATruncatedStatusIsNotReadAsComplete(t *testing.T) {
 	mgmt.set(status(both, true))
 	if got := byUser(t, p); len(got) != 0 {
 		t.Fatalf("nobody used anything, but got %v", got)
+	}
+}
+
+// A live CN gets an empty ccd file, a revoked one "disable". The empty
+// file is what ccd-exclusive will need: without one, a CN is refused.
+func TestLiveCNsGetAnAllowFileAndRevokedOnesADisableOne(t *testing.T) {
+	addr, mgmt := startFakeMgmt(t)
+	mgmt.set("SUCCESS: common name 'cn-1' found, 1 client(s) killed\r\n")
+	dir := t.TempDir()
+	p := New(addr, dir)
+	ctx := context.Background()
+	file := filepath.Join(dir, "cn-1")
+
+	expect := func(when, want string) {
+		t.Helper()
+		got, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("%s: no ccd file: %v", when, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s: ccd file holds %q, want %q", when, got, want)
+		}
+	}
+
+	if err := p.CreateUser(ctx, common.ProtocolUser{ExternalUserID: "cn-1"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	expect("after CreateUser", "")
+
+	if err := p.RemoveUser(ctx, "cn-1"); err != nil {
+		t.Fatalf("RemoveUser: %v", err)
+	}
+	expect("after RemoveUser", "disable\n")
+
+	// ENABLE_USER dispatches to CreateUser: re-enabled means allowed again.
+	if err := p.CreateUser(ctx, common.ProtocolUser{ExternalUserID: "cn-1"}); err != nil {
+		t.Fatalf("CreateUser again: %v", err)
+	}
+	expect("after re-enabling", "")
+}
+
+func TestACNIsNeverAPathOutOfTheCcdDirectory(t *testing.T) {
+	p := New("127.0.0.1:1", t.TempDir())
+	for _, cn := range []string{"../escape", "a/b", `a\b`, ".."} {
+		if err := p.CreateUser(context.Background(), common.ProtocolUser{ExternalUserID: cn}); err == nil {
+			t.Errorf("CN %q was accepted as a ccd file name", cn)
+		}
 	}
 }
