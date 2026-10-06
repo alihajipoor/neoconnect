@@ -32,4 +32,12 @@ export class ReleaseSlotDto {
   @IsOptional()
   @IsUUID()
   subscriptionId?: string;
+
+  /** The `handle` of the grant being given back -- the latest claim's (or
+   * the renewal's that re-granted). A slot held under a newer grant is
+   * then left alone. Omitted: whatever this device holds. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  handle?: string;
 }

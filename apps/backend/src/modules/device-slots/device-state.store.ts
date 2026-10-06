@@ -80,6 +80,21 @@ export class DeviceStateStore implements OnModuleDestroy {
     this.memory.set(key, entry);
   }
 
+  /** Pushes an existing key's expiry out to `ttlMs` from now. A key that
+   * does not exist stays that way. */
+  async expire(key: string, ttlMs: number): Promise<void> {
+    if (this.redis) {
+      try {
+        await this.redis.pexpire(key, ttlMs);
+        return;
+      } catch (err) {
+        this.degraded(err as Error);
+      }
+    }
+    const entry = this.live(key);
+    if (entry) entry.expiresAt = Date.now() + ttlMs;
+  }
+
   async hdel(key: string, ...fields: string[]): Promise<void> {
     if (fields.length === 0) return;
     if (this.redis) {

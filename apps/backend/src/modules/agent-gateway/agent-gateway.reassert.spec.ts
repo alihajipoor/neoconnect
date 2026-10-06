@@ -189,6 +189,37 @@ describe("AgentGatewayService reconnect reconciliation", () => {
     });
   });
 
+  /** A hold lifted because its device was let in: the device dials as
+   * soon as its grant arrives, so its credentials go back now rather than
+   * at the next periodic re-assert -- and only rows that are still live. */
+  it("re-asserts named credentials at once, live ones only, without storing a command", async () => {
+    const { service, prisma, enqueue } = build([
+      { protocol: "XRAY_VLESS_REALITY", externalUserId: "uuid-1", credentials: { uuid: "uuid-1" } },
+    ]);
+    const write = jest
+      .spyOn(service as unknown as { writeCommand: () => boolean }, "writeCommand")
+      .mockReturnValue(true);
+
+    await service.reassertCredentials(["pu-000"]);
+
+    const where = prisma.protocolUser.findMany.mock.calls[0][0].where as Record<string, unknown>;
+    expect(where).toMatchObject({ id: { in: ["pu-000"] }, ...liveCredentialWhereAt(expect.any(Date)) });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(write).toHaveBeenCalledWith("node-1", expect.stringMatching(/^reassert/), "CREATE_USER", {
+      protocol: "XRAY_VLESS_REALITY",
+      transport: "TCP",
+      externalUserId: "uuid-1",
+      credentials: { uuid: "uuid-1" },
+    });
+  });
+
+  it("never throws from an immediate re-assert", async () => {
+    const { service, prisma } = build([]);
+    prisma.protocolUser.findMany = jest.fn().mockRejectedValue(new Error("database went away")) as never;
+
+    await expect(service.reassertCredentials(["pu-000"])).resolves.toBeUndefined();
+  });
+
   /** The device-limit backstop's hold is only durable because this skips
    * it: re-asserting every ACTIVE row undid each cut within a minute. A
    * lapsed hold is included again, which is how the device comes back --

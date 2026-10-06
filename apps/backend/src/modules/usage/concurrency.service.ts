@@ -11,7 +11,7 @@ import {
   sessionIdOf,
 } from "../device-slots/device-presence";
 import { concurrencyCutMode } from "../device-slots/modes";
-import { DISPLACED_GRACE_MS, DeviceSlotsService } from "../device-slots/device-slots.service";
+import { DISPLACED_GRACE_MS, DeviceSlotsService, type SlotGrant } from "../device-slots/device-slots.service";
 import type { UsageDeltaInput } from "./usage.service";
 
 export interface SessionCountInput {
@@ -59,13 +59,32 @@ export const HOLD_LEASE_MS = 90_000;
  * log every ninety seconds forever. */
 const SHADOW_LOG_INTERVAL_MS = 10 * 60_000;
 
-/** Engines whose session count carries a tail and is ignored here.
+/** Engines whose session count carries a tail, and is ignored here: for
+ * these a device is active only while its usage report shows bytes.
  *
- * WireGuard counts a peer for three minutes after its last handshake, so
- * a legitimate switch from PC to phone on one node read as two devices
- * for long enough to be held. Its keepalive every 25 s puts bytes in
- * every usage report instead, and that is used. */
-const COUNTS_IGNORED = new Set(["WIREGUARD"]);
+ * WireGuard counts a peer for three minutes after its last handshake.
+ * Xray's counter (one per inbound, all reading the access log) counts a
+ * source for 60 s after its last "accepted" line. Either tail made a
+ * clean switch look like two devices for long enough to be held -- and
+ * the device held was the newest, the one the customer had just switched
+ * to: a PC that opened a connection at t=20 s and disconnected at 25 s
+ * was still "active" at 30, 60 and 90 alongside the phone, three strikes.
+ * A WireGuard keepalive every 25 s puts bytes in every report anyway; an
+ * Xray device shows while it carries traffic, which errs towards
+ * counting fewer devices, never more.
+ *
+ * OpenVPN's and IKEv2's counts are the connections open right now, with
+ * no tail, and still count. Every protocol Xray serves on a node is
+ * listed (Shadowsocks among them); see XRAY_SERVED_ON_NODE in the agent
+ * gateway. */
+const COUNTS_IGNORED = new Set([
+  "WIREGUARD",
+  "XRAY_VLESS_REALITY",
+  "XRAY_VLESS_TLS",
+  "XRAY_VMESS",
+  "XRAY_TROJAN",
+  "SHADOWSOCKS",
+]);
 
 /** The plan's device limit, judged per device on what the nodes report.
  *
@@ -118,7 +137,38 @@ export class ConcurrencyService {
     private readonly agentGateway: AgentGatewayService,
     private readonly presence: DevicePresence,
     private readonly slots: DeviceSlotsService,
-  ) {}
+  ) {
+    // A device let in through its app is never held, including by a hold
+    // that came before it claimed: the device the backstop cut for being
+    // over the limit is often the very one the customer then chooses with
+    // "Use on this device instead".
+    this.slots.onGrant((grant) => this.liftOnGrant(grant));
+  }
+
+  /** Lifts any hold on the credentials of a device that was just granted
+   * a slot -- its own, and the shared credential it named -- and puts
+   * them back on their nodes at once, since the app dials as soon as the
+   * grant arrives. Without this the hold outlived the grant: the device
+   * the customer had just chosen stayed off its nodes, its client ran the
+   * ladder across every route on a dead tunnel, and the lease was renewed
+   * for as long as the device it displaced kept going. */
+  private async liftOnGrant(grant: SlotGrant) {
+    const rows = await this.prisma.protocolUser.findMany({
+      where: { subscriptionId: grant.subscriptionId, heldUntil: { gt: new Date() } },
+      select: { id: true, sessionId: true },
+    });
+    const ids = rows.filter((r) => r.sessionId === grant.sessionId || r.id === grant.protocolUserId).map((r) => r.id);
+    await this.lift(grant.subscriptionId, ids);
+  }
+
+  private async lift(subscriptionId: string, ids: string[]) {
+    if (ids.length === 0) return;
+    await this.prisma.protocolUser.updateMany({ where: { id: { in: ids } }, data: { heldUntil: null } });
+    await this.agentGateway.reassertCredentials(ids);
+    this.logger.warn(
+      `Subscription ${subscriptionId}: lifted the hold on ${ids.length} credential(s) of a device holding a slot`,
+    );
+  }
 
   /** One node's stats report: records which credentials carried traffic,
    * then judges each subscription that appeared in it.
@@ -135,11 +185,10 @@ export class ConcurrencyService {
   }
 
   private async process(nodeId: string, sessions: SessionCountInput[], deltas: UsageDeltaInput[], now: number) {
-    // Session counts collapsed to the max per credential. Every Xray
-    // inbound on a node has its own counter reading the same access log,
-    // so one device on REALITY was reported five times; summing made it
-    // five devices. All five read the same file a moment apart, so the
-    // max is the reading.
+    // Session counts collapsed to the max per credential, from engines
+    // whose count has no tail (COUNTS_IGNORED). Summing them is what once
+    // made one phone on REALITY five devices: every Xray inbound has its
+    // own counter reading the same access log.
     const counted = new Map<string, number>();
     for (const count of sessions) {
       if (COUNTS_IGNORED.has(count.protocol)) continue;
@@ -168,6 +217,8 @@ export class ConcurrencyService {
 
     for (const [subscriptionId, seen] of bySubscription) {
       await this.presence.record(subscriptionId, seen, now);
+      // A device in use keeps its slot whether or not it renews.
+      await this.slots.keepAlive(subscriptionId);
       await this.evaluate(subscriptionId, now);
     }
   }
@@ -194,36 +245,71 @@ export class ConcurrencyService {
     ]);
     const devices = resolveDevices(entries, credentials, slots.credit);
 
+    // A device holding a slot is never held -- not by a hold from before
+    // it was let in (lifted at its grant as well, see liftOnGrant), nor by
+    // one that raced its claim -- and nor is the shared credential it
+    // named.
+    const ownedBySlotHolder = (c: { id: string; sessionId: string | null }) =>
+      slots.holders.has(deviceKeyOf(c.sessionId)) || slots.credit.has(c.id);
+    const heldRows = credentials.filter((c) => c.heldUntil !== null && c.heldUntil.getTime() > now);
+    await this.lift(
+      subscriptionId,
+      heldRows.filter(ownedBySlotHolder).map((c) => c.id),
+    );
+    const stillHeld = heldRows.filter((c) => !ownedBySlotHolder(c));
+
     // Holds are only honoured and extended while enforcing: switching back
     // to shadow lets any that exist lapse within HOLD_LEASE_MS.
     const enforcing = concurrencyCutMode() === "enforce";
-    const held = new Set(
-      enforcing
-        ? credentials.filter((c) => c.heldUntil && c.heldUntil.getTime() > now).map((c) => deviceKeyOf(c.sessionId))
-        : [],
-    );
+    const held = new Set(enforcing ? stillHeld.map((c) => deviceKeyOf(c.sessionId)) : []);
     const free = [...devices.keys()].filter((key) => !held.has(key));
 
-    // Keep every hold while the devices not held leave no room for them.
-    // A held device shows no traffic of its own once it is cut, so
-    // "within the limit" alone would lift it, it would come back, and the
-    // two would take turns. Extended only while needed: once a device not
-    // held goes quiet the holds lapse, and the re-assert brings the held
-    // device back by itself.
-    if (held.size > 0 && free.length >= limit) {
+    // Holders using their slot with no traffic showing -- dialling, idle,
+    // between renewals. They count against a device whose slot was taken
+    // over and that is still going after its grace, and against nothing
+    // else: that device was told, by the customer's own choice, to make
+    // room for them, and with traffic alone it never looked over the
+    // limit while they were quiet -- or while they were held, which is
+    // how a taken-over PC on a censored path kept the phone that took
+    // its place cut indefinitely.
+    const quietHolders = [...slots.live].filter((key) => !free.includes(key)).length;
+    const pastGrace = (key: DeviceKey) => {
+      const d = slots.displaced.get(key);
+      return d !== undefined && (d.noGrace || now - d.at >= DISPLACED_GRACE_MS);
+    };
+    const overstaying = free.filter((key) => !slots.holders.has(key) && pastGrace(key));
+
+    // Keep a hold while the devices not held leave no room for it. A held
+    // device shows no traffic of its own once it is cut, so "within the
+    // limit" alone would lift it, it would come back, and the two would
+    // take turns. Extended only while needed: once a device not held goes
+    // quiet the holds lapse, and the re-assert brings the held device back
+    // by itself.
+    const extend = stillHeld.filter(
+      (c) => free.length + (slots.displaced.has(deviceKeyOf(c.sessionId)) ? quietHolders : 0) >= limit,
+    );
+    if (enforcing && extend.length > 0) {
       await this.prisma.protocolUser.updateMany({
-        where: { subscriptionId, heldUntil: { gt: new Date(now) } },
+        where: { id: { in: extend.map((c) => c.id) } },
         data: { heldUntil: new Date(now + HOLD_LEASE_MS) },
       });
     }
 
-    if (free.length <= limit) {
+    // Over the limit: more devices carrying traffic than the plan allows,
+    // or a device taken over still going while the holders who took its
+    // place are using their slots.
+    const overByTraffic = free.length > limit;
+    const overstayingExcess = overByTraffic ? 0 : Math.min(overstaying.length, free.length + quietHolders - limit);
+    if (!overByTraffic && overstayingExcess <= 0) {
       // Back within the limit: forget the history rather than letting
       // strikes accumulate across unrelated incidents hours apart.
       this.strikes.delete(subscriptionId);
       this.lastStrikeAt.delete(subscriptionId);
       return;
     }
+    const tally = overByTraffic
+      ? `${free.length} devices active`
+      : `${free.length} devices active and ${quietHolders} more holding a slot`;
 
     // One strike per cycle however many nodes report it.
     const lastStrike = this.lastStrikeAt.get(subscriptionId);
@@ -233,15 +319,16 @@ export class ConcurrencyService {
     this.strikes.set(subscriptionId, strikes);
     if (strikes < STRIKES_BEFORE_ACTION) {
       this.logger.debug(
-        `Subscription ${subscriptionId}: ${free.length} devices active against a limit of ${limit} ` +
-          `(${strikes}/${STRIKES_BEFORE_ACTION})`,
+        `Subscription ${subscriptionId}: ${tally} against a limit of ${limit} (${strikes}/${STRIKES_BEFORE_ACTION})`,
       );
       return;
     }
     // A device holding a slot is never held: it asked first and was let
     // in. So node-side miscounting can never cut a single-device customer,
-    // or a pair that takes turns through the app.
-    const candidates = free.filter((key) => !slots.holders.has(key));
+    // or a pair that takes turns through the app. Over the limit only
+    // because of quiet holders, only the devices taken over are
+    // candidates.
+    const candidates = overByTraffic ? free.filter((key) => !slots.holders.has(key)) : overstaying;
     if (candidates.length === 0) {
       this.forget(subscriptionId);
       return;
@@ -265,7 +352,7 @@ export class ConcurrencyService {
         firstSeen: devices.get(key)!.firstSeen,
         displacedAt: slots.displaced.get(key)?.at ?? null,
       })),
-      free.length - limit,
+      overByTraffic ? free.length - limit : overstayingExcess,
     );
 
     if (!enforcing) {
@@ -273,17 +360,16 @@ export class ConcurrencyService {
       if (lastLog === undefined || now - lastLog >= SHADOW_LOG_INTERVAL_MS) {
         this.lastShadowLogAt.set(subscriptionId, now);
         this.logger.warn(
-          `[shadow] Subscription ${subscriptionId}: ${free.length} devices active against a limit of ${limit}; ` +
+          `[shadow] Subscription ${subscriptionId}: ${tally} against a limit of ${limit}; ` +
             `would hold ${victims.map(describe).join(", ")} (CONCURRENCY_CUT=shadow, nothing sent)`,
         );
       }
       return;
     }
 
-    for (const key of victims) await this.hold(subscriptionId, key, now);
+    for (const key of victims) await this.hold(subscriptionId, key, now, new Set(slots.credit.keys()));
     this.logger.warn(
-      `Subscription ${subscriptionId}: ${free.length} devices active against a limit of ${limit}; ` +
-        `holding ${victims.map(describe).join(", ")}`,
+      `Subscription ${subscriptionId}: ${tally} against a limit of ${limit}; holding ${victims.map(describe).join(", ")}`,
     );
   }
 
@@ -311,18 +397,28 @@ export class ConcurrencyService {
 
   /** Holds one device: every ACTIVE credential it has on the
    * subscription, targeted at its own inbound, kept off the re-assert by
-   * the lease. Only in enforce mode. */
-  private async hold(subscriptionId: string, key: DeviceKey, now: number) {
-    const users = await this.prisma.protocolUser.findMany({
-      where: { subscriptionId, status: "ACTIVE", sessionId: sessionIdOf(key) },
-      select: {
-        id: true,
-        nodeId: true,
-        protocol: true,
-        externalUserId: true,
-        protocolConfig: { select: { transport: true, inboundTag: true } },
-      },
-    });
+   * the lease. Only in enforce mode.
+   *
+   * `credited` are the shared credentials slot holders named in their
+   * claims. Their traffic is the holder's (resolveDevices), so they are
+   * not part of the shared pseudo-device, and holding it must not touch
+   * them: a PC whose own credential on route A was not confirmed yet
+   * dials the shared one there and names it, while an old app on the
+   * phone uses the shared credential of route B -- holding "the shared
+   * credentials" then cut the PC, the slot holder, as well. */
+  private async hold(subscriptionId: string, key: DeviceKey, now: number, credited: Set<string>) {
+    const users = (
+      await this.prisma.protocolUser.findMany({
+        where: { subscriptionId, status: "ACTIVE", sessionId: sessionIdOf(key) },
+        select: {
+          id: true,
+          nodeId: true,
+          protocol: true,
+          externalUserId: true,
+          protocolConfig: { select: { transport: true, inboundTag: true } },
+        },
+      })
+    ).filter((u) => !credited.has(u.id));
     if (users.length === 0) return;
 
     // The lease first: if the commands below fail, the re-assert must

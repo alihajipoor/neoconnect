@@ -41,6 +41,9 @@ function build(opts: { limit?: number | null; status?: string; sessions?: Record
         Object.assign(sessions[where.id], data);
         return { count: 1 };
       }),
+      findMany: jest.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
+        where.id.in.filter((id) => sessions[id]).map((id) => ({ id, revokedAt: sessions[id].revokedAt })),
+      ),
     },
     subscription: {
       findFirst: jest.fn(async ({ where }: { where: { id: string; customerId: string } }) =>
@@ -65,8 +68,8 @@ function build(opts: { limit?: number | null; status?: string; sessions?: Record
 }
 
 const as = (sessionId?: string) => ({ customerId: CUSTOMER, sessionId });
-const windows = { label: "Windows PC", platform: "windows" as const };
-const android = { label: "Android phone (Pixel 7)", platform: "android" as const };
+const windows = { label: null, platform: "windows" as const };
+const android = { label: "Pixel 7", platform: "android" as const };
 
 /** The 409 a refused claim throws, as the app receives it. */
 async function refusal(promise: Promise<unknown>) {
@@ -128,17 +131,62 @@ describe("DeviceSlotsService", () => {
       message: "Your plan allows 1 device at a time.",
       limit: 1,
       holders: [
-        { handle: expect.any(String), label: "Windows PC", platform: "windows", since: expect.any(String), lastSeen: expect.any(String) },
+        { handle: expect.any(String), label: null, platform: "windows", since: expect.any(String), lastSeen: expect.any(String) },
       ],
     });
   });
 
-  it("is idempotent for the device already holding the slot", async () => {
+  it("keeps the slot of a device that claims again, under a new handle", async () => {
     const { service } = build();
     const first = await service.claim(as(PC), { subscriptionId: SUB }, windows);
     const second = await service.claim(as(PC), { subscriptionId: SUB }, windows);
 
-    expect(second.handle).toBe(first.handle);
+    expect(second).toMatchObject({ granted: true, enforced: true });
+    expect(second.handle).not.toBe(first.handle);
+    await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held", handle: second.handle });
+    expect((await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, android))).holders).toHaveLength(1);
+  });
+
+  // A card the phone showed just before the PC claimed again still works.
+  it("still takes a device over by the handle it had before it claimed again", async () => {
+    const { service } = build();
+    await service.claim(as(PC), { subscriptionId: SUB }, windows);
+    const shown = (await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, android))).holders[0].handle;
+    await service.claim(as(PC), { subscriptionId: SUB }, windows);
+
+    await expect(service.claim(as(PHONE), { subscriptionId: SUB, takeover: [shown] }, android)).resolves.toMatchObject({
+      granted: true,
+    });
+  });
+
+  /** Disconnect, then Connect at once (to change server): the release is
+   * fire-and-forget and can arrive after the new claim. Without a handle
+   * it freed the slot the PC was now using -- the phone was let in with
+   * no card, and the PC, connected first, was told it had been
+   * displaced. */
+  it("ignores a release that arrives after the same device has claimed again", async () => {
+    const { service } = build();
+    const before = await service.claim(as(PC), { subscriptionId: SUB }, windows);
+    const after = await service.claim(as(PC), { subscriptionId: SUB }, windows);
+
+    await service.release(as(PC), { subscriptionId: SUB, handle: before.handle! });
+    await service.release(as(PC), { handle: before.handle! });
+
+    await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, android));
+    await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held", handle: after.handle });
+  });
+
+  it("releases the slot a release names by its current handle, and any slot when it names none", async () => {
+    const named = build();
+    const grant = await named.service.claim(as(PC), { subscriptionId: SUB }, windows);
+    await named.service.release(as(PC), { subscriptionId: SUB, handle: grant.handle! });
+    await expect(named.service.claim(as(PHONE), { subscriptionId: SUB }, android)).resolves.toMatchObject({ granted: true });
+
+    const unnamed = build();
+    await unnamed.service.claim(as(PC), { subscriptionId: SUB }, windows);
+    await unnamed.service.claim(as(PC), { subscriptionId: SUB }, windows);
+    await unnamed.service.release(as(PC), { subscriptionId: SUB });
+    await expect(unnamed.service.claim(as(PHONE), { subscriptionId: SUB }, android)).resolves.toMatchObject({ granted: true });
   });
 
   /** "Use on this device instead": the phone takes the slot, and the PC
@@ -155,7 +203,7 @@ describe("DeviceSlotsService", () => {
       status: "displaced",
       subscriptionId: SUB,
       limit: 1,
-      by: { handle: granted.handle, label: "Android phone (Pixel 7)", platform: "android" },
+      by: { handle: granted.handle, label: "Pixel 7", platform: "android" },
       at: expect.any(String),
     });
   });
@@ -199,7 +247,7 @@ describe("DeviceSlotsService", () => {
     // The PC comes back to a slot that is taken: it is told by whom.
     await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({
       status: "displaced",
-      by: { label: "Android phone (Pixel 7)" },
+      by: { label: "Pixel 7" },
     });
   });
 
@@ -214,7 +262,7 @@ describe("DeviceSlotsService", () => {
     await jest.advanceTimersByTimeAsync(20_000);
 
     const body = await refusal(service.claim(as(PC), { subscriptionId: SUB }, windows));
-    expect(body.holders[0].label).toBe("Android phone (Pixel 7)");
+    expect(body.holders[0].label).toBe("Pixel 7");
   });
 
   // During the transition a device may connect with a shared credential;
@@ -252,6 +300,20 @@ describe("DeviceSlotsService", () => {
     await release(service);
 
     await expect(service.claim(as(PHONE), { subscriptionId: SUB }, android)).resolves.toMatchObject({ granted: true });
+  });
+
+  /** A path that signs devices out without releasing their slots -- an
+   * admin setting the password, the hourly sweep, a release that failed
+   * -- must not leave the customer refused in favour of a device that
+   * can no longer connect at all. */
+  it("does not count a holder whose device has been signed out, and does not shield it from the backstop", async () => {
+    const { service, sessions } = build();
+    await service.claim(as(PC), { subscriptionId: SUB, protocolUserId: "shared-1" }, windows);
+    sessions[PC].revokedAt = new Date();
+
+    expect(await service.state(SUB)).toMatchObject({ holders: new Set(), live: new Set(), credit: new Map() });
+    await expect(service.claim(as(PHONE), { subscriptionId: SUB }, android)).resolves.toMatchObject({ granted: true });
+    expect([...(await service.state(SUB)).holders]).toEqual([`s:${PHONE}`]);
   });
 
   it("lets as many devices in as the plan allows, and refuses the next", async () => {
@@ -363,13 +425,33 @@ describe("DeviceSlotsService", () => {
   });
 
   it("names the device from its headers, and keeps the name from sign-in when a claim sends none", async () => {
-    const { service, sessions } = build({ sessions: { [PC]: { label: "Windows PC", platform: "windows" }, [PHONE]: {} } });
+    const { service, sessions } = build({ sessions: { [PC]: { label: "Ali's laptop", platform: "windows" }, [PHONE]: {} } });
 
     await service.claim(as(PC), { subscriptionId: SUB });
     const body = await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, android));
 
-    expect(body.holders[0]).toMatchObject({ label: "Windows PC", platform: "windows" });
-    expect(sessions[PHONE]).toMatchObject({ label: "Android phone (Pixel 7)", platform: "android" });
+    expect(body.holders[0]).toMatchObject({ label: "Ali's laptop", platform: "windows" });
+    expect(sessions[PHONE]).toMatchObject({ label: "Pixel 7", platform: "android" });
+  });
+
+  /** "Windows PC" is English; the phone reading it may be in Persian. The
+   * kind of device is named from `platform` by the device that shows it.
+   * A generic name stored before this rule -- or sent by an app built to
+   * the old contract -- is not passed on. */
+  it("never hands another device a generic English kind as a label", async () => {
+    const { service } = build({
+      sessions: { [PC]: { label: "Windows PC", platform: "windows" }, [PHONE]: { label: "Android phone", platform: "android" } },
+    });
+
+    await service.claim(as(PC), { subscriptionId: SUB }, { label: "Windows PC", platform: "windows" });
+    const refused = await refusal(service.claim(as(PHONE), { subscriptionId: SUB }, { label: "Android phone (Pixel 7)", platform: "android" }));
+    expect(refused.holders[0]).toMatchObject({ label: null, platform: "windows" });
+
+    await service.claim(as(PHONE), { subscriptionId: SUB, takeover: [refused.holders[0].handle] });
+    await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({
+      status: "displaced",
+      by: { label: "Pixel 7", platform: "android" },
+    });
   });
 
   /** Two people sharing one slot by tapping back and forth is within the

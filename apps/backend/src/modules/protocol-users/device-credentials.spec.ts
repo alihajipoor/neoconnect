@@ -38,7 +38,8 @@ function world(opts: {
   rows?: Partial<Row>[];
   subscriptions?: { id: string; customerId?: string; status?: string }[];
   sessions?: { id: string; customerId?: string; revokedAt?: Date | null; lastUsedAt?: Date }[];
-  routes?: string[];
+  /** Route ids, on REALITY unless given a protocol. */
+  routes?: (string | { id: string; protocol: string })[];
   /** When each session's credentials last carried traffic. */
   lastTraffic?: Record<string, Date>;
 }) {
@@ -65,7 +66,11 @@ function world(opts: {
     lastUsedAt: new Date(),
     ...s,
   }));
-  const routes = (opts.routes ?? ["route-a", "route-b"]).map((id) => ({ id }));
+  const routes = (opts.routes ?? ["route-a", "route-b"]).map((r) =>
+    typeof r === "string" ? { id: r, protocol: "XRAY_VLESS_REALITY" } : r,
+  );
+  const allowedRoutes = routes.map((r) => ({ id: r.id }));
+  const protocolsAllowed = [...new Set(routes.map((r) => r.protocol))];
 
   const customerOf = (subscriptionId: string) => subscriptions.find((s) => s.id === subscriptionId)?.customerId;
 
@@ -121,7 +126,7 @@ function world(opts: {
       findMany: jest.fn(async ({ where }: { where: { customerId: string; status: string } }) =>
         subscriptions
           .filter((s) => s.customerId === where.customerId && s.status === where.status)
-          .map((s) => ({ id: s.id, plan: { name: "Pro", protocolsAllowed: [], allowedRoutes: routes } })),
+          .map((s) => ({ id: s.id, plan: { name: "Pro", protocolsAllowed, allowedRoutes } })),
       ),
       findUnique: jest.fn(async ({ where }: { where: { id: string } }) => {
         const s = subscriptions.find((x) => x.id === where.id);
@@ -129,8 +134,13 @@ function world(opts: {
       }),
     },
     route: {
-      // provisionable now, then allowed by policy -- the same list here.
-      findMany: jest.fn(async () => routes),
+      // provisionable now, then allowed by policy -- the same list here,
+      // narrowed to the protocols asked for.
+      findMany: jest.fn(async ({ where }: { where?: { entryProtocolConfig?: { protocol?: { in?: string[] } } } }) =>
+        routes
+          .filter((r) => where?.entryProtocolConfig?.protocol?.in?.includes(r.protocol) ?? true)
+          .map((r) => ({ id: r.id })),
+      ),
     },
     protocolUser: {
       findMany: jest.fn(async ({ where, include }: { where?: Record<string, unknown>; include?: unknown }) =>
@@ -239,6 +249,29 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(result).toHaveLength(2);
     expect(result.every((u) => u.sessionId === ME)).toBe(true);
     expect(result.map((u) => u.id)).not.toContain("shared-a");
+  });
+
+  /** Every IKEv2 CREATE_USER makes the node reload every secret, and every
+   * command for every protocol waits behind it; device rows multiplied
+   * that. Until the agent changes, IKEv2 stays on the shared credential
+   * -- the protocol is still offered, just not split per device. */
+  it("gives a device no IKEv2 credential of its own, and hands it the shared one there", async () => {
+    const { service, create, confirmAll } = world({
+      rows: [
+        { id: "shared-a", routeId: "route-a" },
+        { id: "shared-ike", routeId: "route-ike", protocol: "IKEV2" },
+      ],
+      routes: ["route-a", { id: "route-ike", protocol: "IKEV2" }],
+    });
+
+    await service.listForDevice(CUSTOMER, ME);
+    confirmAll();
+    const result = await service.listForDevice(CUSTOMER, ME);
+
+    expect(create.mock.calls.map((c) => c[0].routeId)).toEqual(["route-a"]);
+    const byRoute = Object.fromEntries(result.map((u) => [u.routeId, u]));
+    expect(byRoute["route-a"].sessionId).toBe(ME);
+    expect(byRoute["route-ike"].id).toBe("shared-ike");
   });
 
   /** Creating a row and enqueueing its CREATE_USER is not the node having
@@ -659,6 +692,15 @@ describe("ProtocolUsersService.sweepDeadSessionCredentials", () => {
     expect(prisma.customerSession.deleteMany).toHaveBeenCalledWith({
       where: { id: "gone", protocolUsers: { none: {} } },
     });
+  });
+
+  // A device that is gone must not go on showing as "in use".
+  it("frees the device slots of a session it reclaims, and of no other", async () => {
+    const { service, slots } = sweepWorld([{ id: "gone", revokedAt: new Date() }, { id: "used", revokedAt: null }], ["used"]);
+
+    await service.sweepDeadSessionCredentials();
+
+    expect(slots.releaseSession.mock.calls).toEqual([[CUSTOMER, "gone"]]);
   });
 
   // A refresh token dies after a week, but a device goes on connecting
