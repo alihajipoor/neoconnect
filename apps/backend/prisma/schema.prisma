@@ -401,6 +401,8 @@ model CustomerSession {
   /// refresh token lives can be recognised as dead and pruned.
   lastUsedAt DateTime  @default(now())
   revokedAt  DateTime?
+  /// This device's own VPN credentials -- see ProtocolUser.sessionId.
+  protocolUsers ProtocolUser[]
 
   @@index([customerId])
   @@map("customer_sessions")
@@ -755,7 +757,22 @@ model ProtocolUser {
   status           ProtocolUserStatus @default(ACTIVE)
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
+  /// The signed-in device this credential was issued to, or null for the
+  /// subscription's shared credential (every row from before 2026-10-07).
+  ///
+  /// A device credential is what lets signing out on one device cut that
+  /// device off without touching the customer's others: sign-out removes
+  /// the rows naming its session, from the node first. Everything keyed
+  /// by subscriptionId -- usage, caps, expiry, re-assert -- covers both
+  /// kinds unchanged. See docs/per-device-credentials.md.
+  ///
+  /// Restrict, not Cascade or SetNull: a cascade would drop the row
+  /// without telling the node, and SetNull would quietly turn one
+  /// device's credential into a shared one. A session has to give its
+  /// credentials back before it can be deleted.
+  sessionId        String?
 
+  session        CustomerSession? @relation(fields: [sessionId], references: [id], onDelete: Restrict)
   subscription   Subscription   @relation(fields: [subscriptionId], references: [id])
   route          Route          @relation(fields: [routeId], references: [id])
   node           Node           @relation(fields: [nodeId], references: [id])
@@ -763,6 +780,10 @@ model ProtocolUser {
   usageRecords   UsageRecord[]
 
   @@unique([nodeId, protocol, externalUserId])
+  // One device credential per device per route. NULLs are distinct, so
+  // the shared rows (sessionId null) are not constrained by it.
+  @@unique([subscriptionId, routeId, sessionId])
+  @@index([sessionId])
   @@index([subscriptionId])
   @@index([routeId])
   // `GET /protocol-users` orders by `createdAt desc`. Its `nodeId` filter

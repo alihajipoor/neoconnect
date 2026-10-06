@@ -36,7 +36,7 @@ describe("admin list windows", () => {
 
     beforeEach(() => {
       customer = tableOf(ROWS);
-      service = new CustomersService({ customer, $transaction: $transaction() } as any, {} as any);
+      service = new CustomersService({ customer, $transaction: $transaction() } as any, {} as any, {} as any);
     });
 
     it("returns a page rather than every customer", async () => {

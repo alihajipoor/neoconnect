@@ -44,7 +44,12 @@ describe("CustomerAuthService", () => {
   let config: { get: jest.Mock };
   let customersService: { create: jest.Mock };
   let subscriptionsService: { create: jest.Mock };
-  let protocolUsersService: { create: jest.Mock; provisionAll: jest.Mock };
+  let protocolUsersService: {
+    create: jest.Mock;
+    provisionAll: jest.Mock;
+    revokeSessionCredentials: jest.Mock;
+    endSessions: jest.Mock;
+  };
   let freeTrialSettingsService: { get: jest.Mock };
   let referralsService: { resolveReferralCode: jest.Mock; notifyReferrerOfActivation: jest.Mock };
   let emailService: { sendMail: jest.Mock };
@@ -67,7 +72,12 @@ describe("CustomerAuthService", () => {
     config = { get: jest.fn((key: string) => `config:${key}`) };
     customersService = { create: jest.fn() };
     subscriptionsService = { create: jest.fn() };
-    protocolUsersService = { create: jest.fn(), provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [] }) };
+    protocolUsersService = {
+      create: jest.fn(),
+      provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [] }),
+      revokeSessionCredentials: jest.fn().mockResolvedValue({ revoked: 0, failed: 0 }),
+      endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
+    };
     freeTrialSettingsService = { get: jest.fn() };
     // Resolves to "no referrer" by default, which is what the existing
     // cases here describe. A test that cares supplies its own.
@@ -698,6 +708,94 @@ describe("CustomerAuthService", () => {
 
       expect(prisma.customerSession.updateMany).not.toHaveBeenCalled();
       expect(prisma.customer.update).not.toHaveBeenCalled();
+      expect(protocolUsersService.revokeSessionCredentials).not.toHaveBeenCalled();
+    });
+
+    // The point of per-device credentials: signing out takes this
+    // device's VPN credentials off the nodes, and only this device's.
+    it("takes this device's VPN credentials back on sign-out, after revoking the session", async () => {
+      const order: string[] = [];
+      prisma.customerSession.updateMany.mockImplementation(() => {
+        order.push("session");
+        return Promise.resolve({ count: 1 });
+      });
+      protocolUsersService.revokeSessionCredentials.mockImplementation(() => {
+        order.push("credentials");
+        return Promise.resolve({ revoked: 3, failed: 0 });
+      });
+
+      await service.revokeSession("customer-1", "session-7");
+
+      expect(protocolUsersService.revokeSessionCredentials).toHaveBeenCalledWith("customer-1", "session-7");
+      expect(protocolUsersService.endSessions).not.toHaveBeenCalled();
+      // Session first: if the node commands fail, the session already
+      // cannot mint a new set.
+      expect(order).toEqual(["session", "credentials"]);
+    });
+
+    it("still signs out when the credentials cannot be revoked yet", async () => {
+      protocolUsersService.revokeSessionCredentials.mockRejectedValue(new Error("database went away"));
+
+      await expect(service.revokeSession("customer-1", "session-7")).resolves.toBeUndefined();
+      expect(prisma.customerSession.updateMany).toHaveBeenCalled();
+    });
+
+    // A session still holding credentials has to give them back on the
+    // nodes first, which the sweep does. Deleting it here would be refused
+    // by the foreign key -- and fail the sign-in.
+    it("never prunes a session that still holds device credentials on sign-in", async () => {
+      jwt.signAsync.mockResolvedValue("signed");
+      await service.issueTokenPair({ id: "customer-1", email: "a@b.c", tokenVersion: 0 });
+
+      expect(prisma.customerSession.deleteMany.mock.calls[0][0].where).toMatchObject({
+        customerId: "customer-1",
+        protocolUsers: { none: {} },
+      });
+    });
+  });
+
+  describe("password changes end other devices' credentials", () => {
+    it("a reset ends every session, credentials included", async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: "customer-1", purpose: "password-reset" });
+
+      await service.resetPassword("token", "a-brand-new-password");
+
+      expect(protocolUsersService.endSessions).toHaveBeenCalledWith("customer-1", undefined);
+    });
+
+    it("a change keeps the caller's session and its tunnel, and ends the others", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      prisma.customerSession.updateMany.mockResolvedValue({ count: 1 });
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.changePassword(
+        "customer-1",
+        { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+        "session-7",
+      );
+
+      expect(protocolUsersService.endSessions).toHaveBeenCalledWith("customer-1", "session-7");
+      // The caller's own session carries on rather than a new one opening,
+      // which would orphan the credentials its tunnel is running on.
+      expect(prisma.customerSession.create).not.toHaveBeenCalled();
+      expect(jwt.signAsync.mock.calls[0][0]).toMatchObject({ sid: "session-7" });
+    });
+
+    it("a change from a signed-out or pre-session token opens a new session and ends all others", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer({ tokenVersion: 1 }));
+      prisma.customerSession.updateMany.mockResolvedValue({ count: 0 });
+      jwt.signAsync.mockResolvedValue("signed");
+
+      await service.changePassword(
+        "customer-1",
+        { currentPassword: PASSWORD, newPassword: "a-brand-new-password" },
+        "session-7",
+      );
+
+      expect(protocolUsersService.endSessions).toHaveBeenCalledWith("customer-1", undefined);
+      expect(prisma.customerSession.create).toHaveBeenCalled();
     });
   });
 

@@ -7,6 +7,7 @@ import { SubscriptionsService } from "../subscriptions/subscriptions.service";
 import { ReferralsService } from "../referrals/referrals.service";
 import { ClientAttemptsService } from "../client-attempts/client-attempts.service";
 import { ReachabilityService } from "../reachability/reachability.service";
+import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { SWEEPS_QUEUE, STALE_PENDING_AFTER_MS } from "./jobs.constants";
 
 @Processor(SWEEPS_QUEUE)
@@ -20,6 +21,7 @@ export class SweepsProcessor extends WorkerHost {
     private readonly referralsService: ReferralsService,
     private readonly clientAttemptsService: ClientAttemptsService,
     private readonly reachabilityService: ReachabilityService,
+    private readonly protocolUsersService: ProtocolUsersService,
   ) {
     super();
   }
@@ -92,6 +94,13 @@ export class SweepsProcessor extends WorkerHost {
         } else if (results.length) {
           this.logger.log(`reachability: all ${results.length} node(s) reachable`);
         }
+        break;
+      }
+      case "device-credentials": {
+        // Takes signed-out and long-idle devices' VPN credentials off the
+        // nodes (docs/per-device-credentials.md). Logs its own summary
+        // when it did anything.
+        await this.protocolUsersService.sweepDeadSessionCredentials();
         break;
       }
       default:

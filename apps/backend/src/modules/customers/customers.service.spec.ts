@@ -28,6 +28,7 @@ describe("CustomersService", () => {
     $transaction: jest.Mock;
   };
   let agentGateway: { enqueueCommand: jest.Mock };
+  let protocolUsers: { endSessions: jest.Mock };
 
   beforeEach(() => {
     prisma = {
@@ -52,7 +53,8 @@ describe("CustomersService", () => {
       $transaction: jest.fn().mockResolvedValue([]),
     };
     agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
-    service = new CustomersService(prisma as any, agentGateway as any);
+    protocolUsers = { endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }) };
+    service = new CustomersService(prisma as any, agentGateway as any, protocolUsers as any);
   });
 
   describe("get", () => {
@@ -114,6 +116,20 @@ describe("CustomersService", () => {
         expect.objectContaining({ where: { id: "customer-1" }, data: { status: "SUSPENDED" } }),
       );
       expect(result.status).toBe("SUSPENDED");
+      // Not a password change, so no device is signed out.
+      expect(protocolUsers.endSessions).not.toHaveBeenCalled();
+    });
+
+    // An admin setting a password is usually answering "someone else is in
+    // my account": the refresh tokens stop with tokenVersion, and the VPN
+    // credentials issued to those devices have to stop too.
+    it("ends every device session, credentials included, when it sets a password", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customer.update.mockResolvedValue(buildCustomer());
+
+      await service.update("customer-1", { password: "a-new-password" } as any);
+
+      expect(protocolUsers.endSessions).toHaveBeenCalledWith("customer-1");
     });
   });
 

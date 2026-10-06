@@ -10,6 +10,7 @@ import { ClientAttemptsModule } from "../client-attempts/client-attempts.module"
 import { ReachabilityModule } from "../reachability/reachability.module";
 import { ANNOUNCEMENTS_QUEUE, SWEEPS_QUEUE } from "./jobs.constants";
 import { ReferralsModule } from "../referrals/referrals.module";
+import { ProtocolUsersModule } from "../protocol-users/protocol-users.module";
 import { SweepsProcessor } from "./sweeps.processor";
 import { SweepsSchedulerService } from "./sweeps-scheduler.service";
 import { AnnouncementsProcessor } from "./announcements.processor";
@@ -47,6 +48,9 @@ const announcementsQueue = BullModule.registerQueue({ name: ANNOUNCEMENTS_QUEUE 
     // For the half-hourly Iran reachability probe. No cycle: the
     // reachability module pulls in Prisma, email and alerting only.
     ReachabilityModule,
+    // For the device-credential sweep. No cycle: protocol-users pulls in
+    // Prisma and the agent gateway only.
+    ProtocolUsersModule,
   ],
   providers: [SweepsProcessor, SweepsSchedulerService, AnnouncementsProcessor],
   exports: [announcementsQueue],

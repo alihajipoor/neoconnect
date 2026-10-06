@@ -5,6 +5,7 @@ import { CustomerStatus, PaymentStatus, Prisma, SubscriptionStatus } from "@pris
 import { PrismaService } from "../../prisma/prisma.service";
 import type { ListWindow, Page } from "../../common/pagination";
 import { AgentGatewayService } from "../agent-gateway/agent-gateway.service";
+import { ProtocolUsersService } from "../protocol-users/protocol-users.service";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
 import { UpdateCustomerDto } from "./dto/update-customer.dto";
 
@@ -25,6 +26,7 @@ export class CustomersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentGateway: AgentGatewayService,
+    private readonly protocolUsers: ProtocolUsersService,
   ) {}
 
   /** Every customer, a page at a time.
@@ -112,7 +114,14 @@ export class CustomersService {
       data.tokenVersion = { increment: 1 };
     }
 
-    return this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
+    const updated = await this.prisma.customer.update({ where: { id }, data, select: SAFE_SELECT });
+    if (password) {
+      // The refresh tokens stop with tokenVersion; the VPN credentials
+      // those devices were issued stop here. Without this, whoever the
+      // reset was meant to lock out keeps a working tunnel.
+      await this.protocolUsers.endSessions(id);
+    }
+    return updated;
   }
 
   /** Deletes a customer along with everything that exists solely to serve

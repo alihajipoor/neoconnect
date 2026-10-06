@@ -248,7 +248,7 @@ export class CustomerAuthController {
   @ApiBearerAuth()
   @UseGuards(CustomerJwtAuthGuard)
   changePassword(@CurrentCustomer() customer: AuthenticatedCustomer, @Body() dto: ChangePasswordDto) {
-    return this.customerAuthService.changePassword(customer.sub, dto);
+    return this.customerAuthService.changePassword(customer.sub, dto, customer.sid);
   }
 
   // No guard -- the token itself is the credential (mirrors admin MFA's

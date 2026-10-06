@@ -13,6 +13,7 @@ import { ReferralsService } from "../referrals/referrals.service";
 import { RegisterCustomerDto } from "./dto/register-customer.dto";
 import { verificationEmail, passwordResetEmail, toLocale, type Locale } from "../email/templates";
 import { ChangePasswordDto } from "./dto/change-password.dto";
+import { SESSION_IDLE_LIFETIME_MS } from "./session-lifetime";
 import {
   CustomerAccessTokenPayload,
   CustomerRefreshTokenPayload,
@@ -51,13 +52,6 @@ const PASSWORD_RESET_CODE_TTL_MS = 30 * 60 * 1000;
  */
 const RESET_CODE_MAX_ATTEMPTS = 5;
 
-/** How long a session may go unrefreshed before its row is pruned.
- *
- * Longer than any refresh token lives (`CUSTOMER_JWT_REFRESH_TTL`,
- * default 7d), so a row this idle cannot belong to a token that still
- * works. Raise it if that TTL is ever set past it: pruning a live
- * session would sign that device out. */
-const SESSION_IDLE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class CustomerAuthService {
@@ -429,11 +423,21 @@ export class CustomerAuthService {
   /** Opens a session for a sign-in, and drops this customer's sessions
    * that can no longer be used -- signed out, or idle longer than a
    * refresh token lives -- so the table is bounded per customer without
-   * a job of its own. */
+   * a job of its own.
+   *
+   * Except those still holding device credentials. Those have to be
+   * taken off the nodes first, which is the device-credential sweep's
+   * job (ProtocolUsersService.sweepDeadSessionCredentials) -- and the
+   * foreign key refuses the delete anyway, which here would fail the
+   * sign-in. */
   private async openSession(customerId: string): Promise<string> {
     const idleCutoff = new Date(Date.now() - SESSION_IDLE_LIFETIME_MS);
     await this.prisma.customerSession.deleteMany({
-      where: { customerId, OR: [{ revokedAt: { not: null } }, { lastUsedAt: { lt: idleCutoff } }] },
+      where: {
+        customerId,
+        OR: [{ revokedAt: { not: null } }, { lastUsedAt: { lt: idleCutoff } }],
+        protocolUsers: { none: {} },
+      },
     });
     const session = await this.prisma.customerSession.create({
       data: { customerId },
@@ -448,13 +452,39 @@ export class CustomerAuthService {
    * A token from before sessions existed names none, and then nothing is
    * revoked server-side -- the device discards its own tokens, and other
    * devices are left alone, which is the point. Signing out used to call
-   * `revokeAllSessions` here, ending every device the customer had. */
+   * `revokeAllSessions` here, ending every device the customer had.
+   *
+   * Then this device's own VPN credentials are taken off every node
+   * (docs/per-device-credentials.md), and only this device's: the other
+   * devices' credentials and the subscription's shared ones stay. The
+   * session is revoked first, so even if the node commands fail the
+   * session cannot mint a new set, and the hourly sweep retries them.
+   * Failures are logged, never thrown -- a sign-out must not fail
+   * because a node is down. */
   async revokeSession(customerId: string, sessionId: string | undefined): Promise<void> {
     if (!sessionId) return;
     await this.prisma.customerSession.updateMany({
       where: { id: sessionId, customerId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+    try {
+      await this.protocolUsersService.revokeSessionCredentials(customerId, sessionId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Sign-out of session ${sessionId} could not revoke its credentials yet: ${reason}`);
+    }
+  }
+
+  /** Ends sessions and takes their device credentials back, never
+   * throwing: the password change that called this has already been
+   * written, and the sweep finishes anything left. */
+  private async endSessions(customerId: string, except?: string): Promise<void> {
+    try {
+      await this.protocolUsersService.endSessions(customerId, except);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Could not end sessions for customer ${customerId}: ${reason}`);
+    }
   }
 
   /** Invalidates all outstanding refresh tokens for this customer. */
@@ -601,6 +631,10 @@ export class CustomerAuthService {
         passwordResetCodeExpiresAt: null,
       },
     });
+    // tokenVersion stops the refresh tokens; this stops the VPN
+    // credentials those devices were issued, which would otherwise keep
+    // working for whoever the reset was meant to lock out.
+    await this.endSessions(customerId);
   }
 
   /** Changes the password of an already-signed-in customer.
@@ -616,7 +650,7 @@ export class CustomerAuthService {
    * including the caller's own, so without new ones the app would
    * silently log itself out on the very next request.
    */
-  async changePassword(customerId: string, dto: ChangePasswordDto) {
+  async changePassword(customerId: string, dto: ChangePasswordDto, sessionId?: string) {
     const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) {
       throw new BadRequestException("Account not found");
@@ -642,6 +676,22 @@ export class CustomerAuthService {
       data: { passwordHash, tokenVersion: { increment: 1 } },
     });
 
-    return this.issueTokenPair(updated);
+    // The caller keeps its session, and with it the VPN credentials its
+    // tunnel is running on; every other device is ended, credentials
+    // and all. Opening a new session here instead -- what this did before
+    // devices had credentials of their own -- would orphan the caller's
+    // set and drop its tunnel on the next fetch.
+    const keep =
+      sessionId &&
+      (
+        await this.prisma.customerSession.updateMany({
+          where: { id: sessionId, customerId, revokedAt: null },
+          data: { lastUsedAt: new Date() },
+        })
+      ).count > 0
+        ? sessionId
+        : undefined;
+    await this.endSessions(customerId, keep);
+    return this.issueTokenPair(updated, keep);
   }
 }
