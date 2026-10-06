@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import type { IdentityProvider } from "@prisma/client";
+import type { Customer, IdentityProvider } from "@prisma/client";
 
 import { PrismaService } from "../../../prisma/prisma.service";
 import { verifyApple, verifyFacebook, verifyGoogle, type VerifiedIdentity } from "./verify";
@@ -80,8 +80,16 @@ export class SocialAuthService {
    * feature. Linking on an unverified address means anyone who can make
    * a provider account claiming an address can walk into the account
    * that owns it, which is account takeover dressed as convenience.
+   *
+   * `created` says whether (3) happened, because a new account is owed
+   * what a password sign-up gets on verifying -- the trial -- and only
+   * the caller can give it (see CustomerAuthService.onSocialSignup).
    */
-  async resolveCustomer(provider: IdentityProvider, identity: VerifiedIdentity, locale: string) {
+  async resolveCustomer(
+    provider: IdentityProvider,
+    identity: VerifiedIdentity,
+    locale: string,
+  ): Promise<{ customer: Customer; created: boolean }> {
     const existing = await this.prisma.customerIdentity.findUnique({
       where: { provider_subject: { provider, subject: identity.subject } },
       include: { customer: true },
@@ -95,7 +103,23 @@ export class SocialAuthService {
       if (existing.customer.status !== "ACTIVE") {
         throw new UnauthorizedException("This account is disabled");
       }
-      return existing.customer;
+      if (!existing.customer.emailVerifiedAt) {
+        // An account this route once made from an address the provider had
+        // not verified. No session until something has: the provider now,
+        // for the same address -- or the customer, by email.
+        if (
+          identity.emailVerified &&
+          identity.email?.toLowerCase() === existing.customer.email.toLowerCase()
+        ) {
+          const customer = await this.prisma.customer.update({
+            where: { id: existing.customer.id },
+            data: { emailVerifiedAt: new Date() },
+          });
+          return { customer, created: false };
+        }
+        throw new BadRequestException(unverifiedMessage(provider));
+      }
+      return { customer: existing.customer, created: false };
     }
 
     if (identity.email && identity.emailVerified) {
@@ -118,7 +142,7 @@ export class SocialAuthService {
         await this.prisma.customerIdentity.create({
           data: { customerId: byEmail.id, provider, subject: identity.subject, email: identity.email },
         });
-        return byEmail;
+        return { customer: byEmail, created: false };
       }
     }
 
@@ -139,17 +163,34 @@ export class SocialAuthService {
       );
     }
 
+    // Only from an address the provider has verified. This used to create
+    // the account anyway, unverified, and the controller then issued a
+    // full session -- the one route that broke the rule that no account
+    // gets a session before its address is proven. It also sat on an
+    // address nobody had proven, which blocked its real owner: their
+    // password sign-up hit the duplicate, and their own verified provider
+    // sign-in was refused as an unconfirmed account.
+    if (!identity.emailVerified) {
+      throw new BadRequestException(unverifiedMessage(provider));
+    }
+
     // The address is already proven by the provider, so there is nothing
     // to verify -- mailing a confirmation to an address Google has just
     // vouched for only loses people.
-    return this.prisma.customer.create({
+    const customer = await this.prisma.customer.create({
       data: {
         email: identity.email.toLowerCase(),
         passwordHash: null,
         locale,
-        emailVerifiedAt: identity.emailVerified ? new Date() : null,
+        emailVerifiedAt: new Date(),
         identities: { create: { provider, subject: identity.subject, email: identity.email } },
       },
     });
+    return { customer, created: true };
   }
+}
+
+function unverifiedMessage(provider: IdentityProvider): string {
+  const name = provider === "GOOGLE" ? "Google" : provider === "APPLE" ? "Apple" : "Facebook";
+  return `Your ${name} account has not verified its email address. Please verify it with ${name}, or sign up with your email instead.`;
 }

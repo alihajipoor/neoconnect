@@ -93,7 +93,8 @@ export class CustomerAuthController {
   async social(@Body() dto: SocialLoginDto, @Headers() headers: HeaderBag) {
     const provider = dto.provider.toUpperCase() as "GOOGLE" | "APPLE" | "FACEBOOK";
     const identity = await this.socialAuth.verify(provider, dto.token);
-    const customer = await this.socialAuth.resolveCustomer(provider, identity, dto.locale ?? "en");
+    const { customer, created } = await this.socialAuth.resolveCustomer(provider, identity, dto.locale ?? "en");
+    if (created) await this.customerAuthService.onSocialSignup(customer.id);
     return this.customerAuthService.issueTokenPair(customer, undefined, deviceInfoFrom(headers));
   }
 
@@ -172,7 +173,8 @@ export class CustomerAuthController {
       const providerToken = await this.oauthFlow.exchangeCode(provider, code);
       const upper = provider.toUpperCase() as "GOOGLE" | "FACEBOOK";
       const identity = await this.socialAuth.verify(upper, providerToken);
-      const customer = await this.socialAuth.resolveCustomer(upper, identity, pending.locale);
+      const { customer, created } = await this.socialAuth.resolveCustomer(upper, identity, pending.locale);
+      if (created) await this.customerAuthService.onSocialSignup(customer.id);
       const tokens = await this.customerAuthService.issueTokenPair(customer);
       res.redirect(this.oauthFlow.appCallback({ handoff: this.oauthFlow.storeHandoff(tokens) }));
     } catch (err) {

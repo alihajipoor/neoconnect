@@ -46,15 +46,16 @@ describe("resolving a customer from a social identity", () => {
       customerIdentity: {
         findUnique: jest.fn().mockResolvedValue({
           id: "identity-1",
-          customer: { id: "existing", status: "ACTIVE" },
+          customer: { id: "existing", status: "ACTIVE", email: "ali@example.com", emailVerifiedAt: new Date() },
           email: "old@example.com",
         }),
         update: jest.fn(),
         create: jest.fn(),
       },
     });
-    const customer = await serviceWith(prisma).resolveCustomer("GOOGLE", verified, "en");
+    const { customer, created } = await serviceWith(prisma).resolveCustomer("GOOGLE", verified, "en");
     expect(customer.id).toBe("existing");
+    expect(created).toBe(false);
     // The account is found by subject, so a changed address does not
     // fork it into a second one.
     expect(prisma.customer.findUnique).not.toHaveBeenCalled();
@@ -69,8 +70,9 @@ describe("resolving a customer from a social identity", () => {
         create: jest.fn(),
       },
     });
-    const customer = await serviceWith(prisma).resolveCustomer("GOOGLE", verified, "en");
+    const { customer, created } = await serviceWith(prisma).resolveCustomer("GOOGLE", verified, "en");
     expect(customer.id).toBe("existing");
+    expect(created).toBe(false);
     expect(prisma.customerIdentity.create).toHaveBeenCalled();
     // Looked up lowercased: providers are inconsistent about case and
     // the column is not case-insensitive.
@@ -86,11 +88,47 @@ describe("resolving a customer from a social identity", () => {
         create: jest.fn(() => Promise.resolve({ id: "new" })),
       },
     });
-    await serviceWith(prisma).resolveCustomer("FACEBOOK", { ...verified, emailVerified: false }, "en");
+    await expect(
+      serviceWith(prisma).resolveCustomer("FACEBOOK", { ...verified, emailVerified: false }, "en"),
+    ).rejects.toBeInstanceOf(BadRequestException);
     // Never even looked for an account to attach to: an unverified
     // address is not evidence of anything.
     expect(prisma.customer.findUnique).not.toHaveBeenCalled();
     expect(prisma.customerIdentity.create).not.toHaveBeenCalled();
+  });
+
+  /** It used to create the account unverified, and the controller then
+   * issued a full session: the one route that broke the rule that no
+   * account is signed in before its address is proven. */
+  it("creates no account from an address the provider has not verified", async () => {
+    const prisma = prismaDouble();
+    await expect(
+      serviceWith(prisma).resolveCustomer("GOOGLE", { ...verified, emailVerified: false }, "en"),
+    ).rejects.toThrow(/has not verified its email address/);
+    expect(prisma.customer.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a session to an account this route once made unverified, until the provider vouches", async () => {
+    const identityRow = {
+      id: "identity-1",
+      customer: { id: "old", status: "ACTIVE", email: "ali@example.com", emailVerifiedAt: null },
+    };
+    const prisma = prismaDouble({
+      customerIdentity: { findUnique: jest.fn().mockResolvedValue(identityRow), update: jest.fn(), create: jest.fn() },
+    });
+    await expect(
+      serviceWith(prisma).resolveCustomer("GOOGLE", { ...verified, emailVerified: false }, "en"),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    // Verified by the provider now, for the same address: proven.
+    const update = jest.fn().mockResolvedValue({ ...identityRow.customer, emailVerifiedAt: new Date() });
+    const later = prismaDouble({
+      customerIdentity: { findUnique: jest.fn().mockResolvedValue(identityRow), update: jest.fn(), create: jest.fn() },
+      customer: { findUnique: jest.fn(), create: jest.fn(), update },
+    });
+    const { customer } = await serviceWith(later).resolveCustomer("GOOGLE", verified, "en");
+    expect(update).toHaveBeenCalledWith({ where: { id: "old" }, data: { emailVerifiedAt: expect.any(Date) } });
+    expect(customer.emailVerifiedAt).toBeInstanceOf(Date);
   });
 
   it("refuses to link into an account that never confirmed its own address", async () => {
@@ -129,12 +167,15 @@ describe("resolving a customer from a social identity", () => {
 
   it("creates a new account, lowercased and already verified", async () => {
     const prisma = prismaDouble();
-    const customer = (await serviceWith(prisma).resolveCustomer("APPLE", verified, "fa")) as unknown as {
+    const { customer: made, created } = await serviceWith(prisma).resolveCustomer("APPLE", verified, "fa");
+    const customer = made as unknown as {
       email: string;
       passwordHash: null;
       locale: string;
       emailVerifiedAt: Date | null;
     };
+    // Reported, so the caller can grant what a verified sign-up is owed.
+    expect(created).toBe(true);
     expect(customer.email).toBe("ali@example.com");
     expect(customer.passwordHash).toBeNull();
     expect(customer.locale).toBe("fa");

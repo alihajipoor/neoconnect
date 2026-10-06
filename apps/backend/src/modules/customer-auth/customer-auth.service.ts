@@ -308,7 +308,19 @@ export class CustomerAuthService {
     return this.afterFirstVerification(customerId);
   }
 
-  /** What follows an account being verified for the first time, by either
+  /** A new account made by a Google, Apple or Facebook sign-in.
+   *
+   * It is created already verified -- the provider proved the address --
+   * so it never passes through verification, which is where a password
+   * sign-up is granted its trial. With trial mode on, every Google or
+   * Apple sign-up landed on "choose a plan" while a password sign-up got
+   * the trial, and no log line said why. Never throws: the sign-in goes
+   * ahead whatever happens to the trial. */
+  async onSocialSignup(customerId: string): Promise<void> {
+    await this.afterFirstVerification(customerId);
+  }
+
+  /** What follows an account being verified for the first time, by any
    * route: the trial, and the referrer told. */
   private async afterFirstVerification(customerId: string) {
     // Caught, not propagated. The account is already marked verified by

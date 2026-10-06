@@ -825,6 +825,27 @@ describe("CustomerAuthService", () => {
     });
   });
 
+  describe("onSocialSignup", () => {
+    it("grants a new social account the trial and tells its referrer, as verification does", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer({ emailVerifiedAt: new Date(), passwordHash: null }));
+      freeTrialSettingsService.get.mockResolvedValue({ enabled: true, trialPlanId: "plan-1", trialRouteId: "route-1" });
+      subscriptionsService.create.mockResolvedValue({ id: "sub-1" });
+
+      await service.onSocialSignup("customer-1");
+
+      expect(subscriptionsService.create).toHaveBeenCalledWith({ customerId: "customer-1", planId: "plan-1" });
+      expect(protocolUsersService.provisionAll).toHaveBeenCalledWith("sub-1");
+      expect(referralsService.notifyReferrerOfActivation).toHaveBeenCalledWith("customer-1");
+    });
+
+    it("never throws, so a failed grant cannot fail the sign-in", async () => {
+      freeTrialSettingsService.get.mockRejectedValue(new Error("settings unreachable"));
+      jest.spyOn(service["logger"], "error").mockImplementation(() => undefined);
+
+      await expect(service.onSocialSignup("customer-1")).resolves.toBeUndefined();
+    });
+  });
+
   describe("trial grant", () => {
     it("makes one trial when two grants for one customer race", async () => {
       // Count-then-create is two statements: both racers used to see zero.
