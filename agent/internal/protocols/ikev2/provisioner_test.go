@@ -113,6 +113,61 @@ func TestAnAgentRestartDoesNotBillSATotalsAgain(t *testing.T) {
 	}
 }
 
+func TestDisablingAUserEndsOnlyTheirSession(t *testing.T) {
+	// The finding: `--terminate --eap-id` is not a swanctl option, so it
+	// failed before reaching charon, the failure was swallowed, and a
+	// disabled customer stayed connected. With the fake checking options
+	// the way swanctl does, the old code terminates nothing here.
+	p, f := withFake(t, filled(t))
+
+	if err := p.SetEnabled(context.Background(), "nx-user1", false); err != nil {
+		t.Fatalf("SetEnabled(false): %v", err)
+	}
+	if len(f.terminated) != 1 || f.terminated[0] != "1" {
+		t.Fatalf("expected exactly IKE SA 1 terminated, got %v", f.terminated)
+	}
+
+	// DELETE_USER takes the same path.
+	if err := p.RemoveUser(context.Background(), "nx-user2"); err != nil {
+		t.Fatalf("RemoveUser: %v", err)
+	}
+	if len(f.terminated) != 2 || f.terminated[1] != "2" {
+		t.Fatalf("expected IKE SA 2 terminated next, got %v", f.terminated)
+	}
+}
+
+func TestRemovingAUserWithNoSessionIsNotAnError(t *testing.T) {
+	p, f := withFake(t, filled(t))
+	if err := p.RemoveUser(context.Background(), "nx-nobody"); err != nil {
+		t.Fatalf("RemoveUser: %v", err)
+	}
+	if len(f.terminated) != 0 {
+		t.Fatalf("other customers' sessions were ended: %v", f.terminated)
+	}
+}
+
+func TestAFailedTerminateIsReported(t *testing.T) {
+	// Swallowing this is what let the old bug pass unnoticed: the command
+	// was acked as done while the session kept running.
+	p, f := withFake(t, filled(t))
+	f.terminateErr = errors.New("exit status 1")
+	if err := p.SetEnabled(context.Background(), "nx-user1", false); err == nil {
+		t.Fatal("a terminate that failed, on a session still up, must fail the command")
+	}
+}
+
+func TestASessionThatEndedOnItsOwnIsNotAFailure(t *testing.T) {
+	// The client hung up between the list and the terminate.
+	p, f := withFake(t, filled(t))
+	f.terminateErr = errors.New("exit status 1")
+	f.onTerminate = func(f *fakeSwanctl) {
+		f.listSAs = strings.Split(f.listSAs, "\n")[1] + "\nlist-sas reply {}\n"
+	}
+	if err := p.SetEnabled(context.Background(), "nx-user1", false); err != nil {
+		t.Fatalf("a session that is already gone is not a failure: %v", err)
+	}
+}
+
 func TestOnlyASuccessfulListIsTheBaseline(t *testing.T) {
 	p, f := withFake(t, filled(t))
 	ctx := context.Background()

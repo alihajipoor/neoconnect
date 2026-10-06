@@ -2,6 +2,7 @@ package ikev2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,20 +49,74 @@ func filled(t *testing.T) string {
 }
 
 // fakeSwanctl stands in for strongSwan: it serves canned --list-sas
-// output and records every call it is given.
+// output, records every call it is given, and checks --terminate's
+// options the way swanctl does.
 type fakeSwanctl struct {
 	listSAs string
 	listErr error
 	calls   [][]string
+
+	// What --terminate was asked to end: an IKE SA id, or "every SA of
+	// connection X" for a bare --ike, which would be every customer.
+	terminated []string
+	// Makes --terminate fail; onTerminate runs first, if set.
+	terminateErr error
+	onTerminate  func(f *fakeSwanctl)
+}
+
+// terminateOptions is every option swanctl's terminate command registers
+// (src/swanctl/commands/terminate.c), with whether it takes a value. It
+// has no identity filter: anything else is "invalid --terminate option",
+// and nothing is sent to charon.
+var terminateOptions = map[string]bool{
+	"--help": false, "--child": true, "--ike": true, "--child-id": true, "--ike-id": true,
+	"--force": false, "--timeout": true, "--raw": false, "--pretty": false, "--loglevel": true,
 }
 
 func (f *fakeSwanctl) run(_ context.Context, args ...string) (string, string, error) {
 	f.calls = append(f.calls, append([]string(nil), args...))
-	if len(args) > 0 && args[0] == "--list-sas" {
+	if len(args) == 0 {
+		return "", "", nil
+	}
+	switch args[0] {
+	case "--list-sas":
 		if f.listErr != nil {
 			return "", f.listErr.Error(), f.listErr
 		}
 		return f.listSAs, "", nil
+	case "--terminate":
+		var ikeID, ikeName string
+		for i := 1; i < len(args); i++ {
+			takesValue, known := terminateOptions[args[i]]
+			if !known {
+				return "", "invalid --terminate option", errors.New("exit status 1")
+			}
+			if takesValue {
+				i++
+				if i >= len(args) {
+					return "", "missing argument", errors.New("exit status 1")
+				}
+				switch args[i-1] {
+				case "--ike-id":
+					ikeID = args[i]
+				case "--ike":
+					ikeName = args[i]
+				}
+			}
+		}
+		if f.onTerminate != nil {
+			f.onTerminate(f)
+		}
+		if f.terminateErr != nil {
+			return "", f.terminateErr.Error(), f.terminateErr
+		}
+		switch {
+		case ikeID != "":
+			f.terminated = append(f.terminated, ikeID)
+		case ikeName != "":
+			f.terminated = append(f.terminated, "every SA of "+ikeName)
+		}
+		return "terminate completed successfully\n", "", nil
 	}
 	return "", "", nil
 }

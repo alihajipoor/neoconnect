@@ -409,17 +409,63 @@ func (p *Provisioner) flushLocked(ctx context.Context) error {
 	return nil
 }
 
-// terminate closes any SA belonging to an identity. Best effort: a user
-// with no live session is the normal case, not a failure.
+// terminate ends every IKE SA authenticated as this identity. A user with
+// no live session is the normal case, not a failure.
+//
+// swanctl's --terminate picks SAs by connection name or by id (--ike,
+// --child, --ike-id, --child-id) and has no identity filter. This used to
+// pass `--eap-id`, which swanctl rejects as an invalid option before
+// sending anything to charon -- and the error was swallowed, so a
+// disabled, expired or deleted IKEv2 customer stayed connected until
+// their own client hung up. Nothing on the server ends it later: the
+// connection sets rekey_time = 0s and no DPD. Found by the 2026-10-06
+// review.
+//
+// So the SAs are listed, this user's picked out, and each ended by its
+// own id. --force deletes it here instead of waiting for the peer to
+// confirm, which for a phone that has gone away would hold this command,
+// and every command queued behind it, for as long as charon waits.
+// Never `--ike neoxify-ikev2` on its own: that is every customer on the
+// node.
+//
+// A failure is returned, not swallowed, so the outbox retries. A retry is
+// safe: the secret is already gone, and the list finds only what is still
+// up.
 func (p *Provisioner) terminate(ctx context.Context, username string) error {
-	if _, _, err := p.runSwanctl(ctx, "--terminate", "--ike", "neoxify-ikev2", "--eap-id", username); err != nil {
-		// Not returned as an error. The secret is already gone, so the
-		// customer cannot re-authenticate either way, and failing the
-		// whole command here would have the outbox retry a removal that
-		// has in fact happened.
-		return nil
+	sas, err := p.listSAs(ctx)
+	if err != nil {
+		return fmt.Errorf("ikev2: removed %q but could not list its sessions to end them: %w", username, err)
+	}
+	for _, sa := range sas {
+		if sa.user != username {
+			continue
+		}
+		stdout, stderr, err := p.runSwanctl(ctx, "--terminate", "--ike-id", sa.id, "--force")
+		if err == nil {
+			continue
+		}
+		// Gone between the list and the terminate: the client hung up on
+		// its own, which is the outcome wanted.
+		if up, listErr := p.saUp(ctx, sa.id); listErr == nil && !up {
+			continue
+		}
+		return fmt.Errorf("ikev2: could not end %q's session (IKE SA %s): %w (%s)", username, sa.id, err, joinOutput(stdout, stderr))
 	}
 	return nil
+}
+
+// saUp reports whether an IKE SA with this id is still listed.
+func (p *Provisioner) saUp(ctx context.Context, id string) (bool, error) {
+	sas, err := p.listSAs(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, sa := range sas {
+		if sa.id == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // execSwanctl is the real runSwanctl.
