@@ -98,15 +98,19 @@ export type StandingCheck =
   /** The slot is this device's (or there was room and it is now): the
    * degraded tunnel is the network's doing. Run the ladder. */
   | { kind: "clear" }
-  /** The API could not be asked. Say so honestly, then run the ladder. */
-  | { kind: "unanswered" }
+  /** No verdict on the slot. Say so honestly, then run the ladder.
+   * `noAnswer`: nothing came back at all, so Neoxify may be said to have
+   * been out of reach. Otherwise it answered -- a 5xx, a 404, a 429, a
+   * 200 this app cannot read -- and only did not confirm this device's
+   * slot; "could not reach" would be untrue then. */
+  | { kind: "unanswered"; noAnswer: boolean }
   | Exclude<SlotEvent, { kind: "keep" }>;
 
 /** What a claim's answer comes to. `unanswered` is kept apart from `keep`
  * only for `checkStanding`, which has to say which it was. */
 type ClaimSettled =
   | { kind: "keep" }
-  | { kind: "unanswered" }
+  | { kind: "unanswered"; noAnswer: boolean }
   | Exclude<SlotEvent, { kind: "keep" } | { kind: "displaced" }>;
 
 export interface DeviceSlotDeps {
@@ -310,7 +314,7 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
         // takeover if it named one.
         if (standing !== "held" && standing !== "unenforced" && standing !== "uncounted") standing = "unclaimed";
         retryClaim = outcome.retryable;
-        return { kind: "unanswered" };
+        return { kind: "unanswered", noAnswer: outcome.noAnswer };
       case "refused":
         standing = "none";
         pendingTakeover = [];
@@ -351,7 +355,7 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     return settled.kind === "unanswered" ? { kind: "keep" } : settled;
   }
 
-  async function renewNow(budgetMs: number): Promise<SlotEvent | { kind: "unanswered" }> {
+  async function renewNow(budgetMs: number): Promise<SlotEvent | { kind: "unanswered"; noAnswer: boolean }> {
     if (subscriptionId === null) return { kind: "keep" };
     const startedIn = epoch;
     const outcome = await track(renew(subscriptionId, budgetMs));
@@ -377,9 +381,11 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
       case "unanswered":
         // "A renewal that cannot reach the API changes nothing -- keep
         // the tunnel." Asked again on the next due poll, not sooner --
-        // and not counted as a confirmation of anything.
+        // and not counted as a confirmation of anything. Whether anything
+        // came back at all is kept for `checkStanding`, which words its
+        // note by it.
         lastAskedAt = now();
-        return { kind: "unanswered" };
+        return { kind: "unanswered", noAnswer: outcome.noAnswer };
     }
   }
 

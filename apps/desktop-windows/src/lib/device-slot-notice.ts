@@ -19,10 +19,15 @@ export type SlotNotice =
   | { kind: "displaced"; by: SlotDevice | null; at: string | null }
   /** 429: too many takeovers on this subscription in the last hour. */
   | { kind: "takeoverLimited"; retryAfterSec: number | null }
-  /** A degraded tunnel on a device whose slot was never confirmed, and
-   * the API could not be asked whether the limit is the reason. Said
-   * before the ladder runs, not instead of it (obligation 9). */
-  | { kind: "unchecked"; limit: number };
+  /** A degraded tunnel on a device whose slot was never confirmed, and no
+   * verdict on whether the limit is the reason. Said before the ladder
+   * runs, not instead of it (obligation 9).
+   *
+   * `noAnswer`: nothing came back from Neoxify, so it may be said that
+   * it could not be reached. Otherwise it answered without confirming --
+   * a 5xx, a 404, a 429, a 200 this app cannot read -- and the note says
+   * only that, never "couldn't reach". */
+  | { kind: "unchecked"; limit: number; noAnswer: boolean };
 
 export interface SlotNoticeCopy {
   /** The sentences, in order. */
@@ -195,6 +200,12 @@ export function describeSlotNotice(notice: SlotNotice, ctx: NoticeContext): Slot
       };
     }
     case "unchecked":
-      return { lines: [ctx.t("slots.unchecked", { limit: count(notice.limit, ctx) })], useHere: null, dismiss: null };
+      return {
+        lines: [
+          ctx.t(notice.noAnswer ? "slots.unchecked" : "slots.unconfirmed", { limit: count(notice.limit, ctx) }),
+        ],
+        useHere: null,
+        dismiss: null,
+      };
   }
 }

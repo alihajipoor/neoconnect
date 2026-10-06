@@ -127,7 +127,7 @@ describe("when a notice may show", () => {
   it("shows the others at once", () => {
     expect(slotNoticeShown({ kind: "displaced", by: null, at: null }, false)).toBe(true);
     expect(slotNoticeShown({ kind: "takeoverLimited", retryAfterSec: 60 }, false)).toBe(true);
-    expect(slotNoticeShown({ kind: "unchecked", limit: 1 }, false)).toBe(true);
+    expect(slotNoticeShown({ kind: "unchecked", limit: 1, noAnswer: true }, false)).toBe(true);
   });
 });
 
@@ -147,11 +147,29 @@ describe("the other notices", () => {
   });
 
   it("names the limit as a possibility when the API could not be asked, and offers nothing to press", () => {
-    const copy = describeSlotNotice({ kind: "unchecked", limit: 1 }, ctx("en"));
+    const copy = describeSlotNotice({ kind: "unchecked", limit: 1, noAnswer: true }, ctx("en"));
     expect(copy.lines[0]).toMatch(/^We couldn't reach Neoxify to check\./);
     expect(copy.lines[0]).toContain("may be the reason");
     expect(copy.useHere).toBeNull();
     expect(copy.dismiss).toBeNull();
+  });
+
+  /** Neoxify answered -- an error, a throttle, an answer this app could
+   * not read -- so "couldn't reach" would be untrue. What is true is that
+   * it did not confirm this device's slot. */
+  it("never says Neoxify could not be reached when it answered without confirming", () => {
+    const en = describeSlotNotice({ kind: "unchecked", limit: 2, noAnswer: false }, ctx("en"));
+    expect(en.lines).toEqual([
+      "Neoxify couldn't confirm this device's place on your plan right now. If Neoxify is in use on another of your devices, your plan's limit of 2 at a time may be the reason.",
+    ]);
+    expect(en.lines[0]).not.toMatch(/reach/);
+    expect(en.useHere).toBeNull();
+    expect(en.dismiss).toBeNull();
+
+    const fa = describeSlotNotice({ kind: "unchecked", limit: 2, noAnswer: false }, ctx("fa"));
+    expect(fa.lines[0]).toBe(DICTIONARIES.fa["slots.unconfirmed"].split("{limit}").join("۲"));
+    // Not the sentence that says it could not be reached.
+    expect(fa.lines[0]).not.toContain("دسترسی");
   });
 });
 

@@ -15,7 +15,7 @@ const HELD: RenewOutcome = {
   kind: "held",
   grant: { enforced: true, limit: 1, handle: "mine", renewEverySec: 60, staleAfterSec: 90 },
 };
-const UNANSWERED: ClaimOutcome & RenewOutcome = { kind: "unanswered", reason: "timeout", retryable: true };
+const UNANSWERED: ClaimOutcome & RenewOutcome = { kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true };
 /** Slots switched off on the server, or a token from before sessions: a
  * plan with a limit, and nothing counted. */
 const UNCOUNTED: ClaimOutcome = {
@@ -79,7 +79,7 @@ describe("before dialling", () => {
   /** The rule that matters most: a customer in Iran who cannot reach the
    * API still connects. */
   it("dials when the claim goes unanswered, and remembers to ask again", async () => {
-    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true }]);
+    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true }]);
     expect(await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" })).toEqual({ kind: "dial" });
     expect(h.session.standing()).toBe("unclaimed");
   });
@@ -128,7 +128,7 @@ describe("before dialling", () => {
 
 describe("once connected", () => {
   it("claims again through the tunnel when the first claim went unanswered", async () => {
-    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true }, GRANT]);
+    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true }, GRANT]);
     await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
 
     expect(await h.session.afterConnected({ protocolUserId: "cred-b" })).toEqual({ kind: "keep" });
@@ -140,7 +140,7 @@ describe("once connected", () => {
 
   /** Enforcement arriving late: the slots were in use all along. */
   it("reports a late refusal so the dashboard can disconnect and show it", async () => {
-    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true }, { kind: "refused", refusal: REFUSAL }]);
+    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true }, { kind: "refused", refusal: REFUSAL }]);
     await h.session.beforeDial({ subscriptionId: SUB });
     expect(await h.session.afterConnected({})).toEqual({ kind: "refused", refusal: REFUSAL });
     expect(h.session.standing()).toBe("none");
@@ -148,8 +148,8 @@ describe("once connected", () => {
 
   it("keeps the tunnel when the late claim is unanswered too", async () => {
     const h = harness([
-      { kind: "unanswered", reason: "timeout", retryable: true },
-      { kind: "unanswered", reason: "timeout", retryable: true },
+      { kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true },
+      { kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true },
     ]);
     await h.session.beforeDial({ subscriptionId: SUB });
     expect(await h.session.afterConnected({})).toEqual({ kind: "keep" });
@@ -162,7 +162,7 @@ describe("once connected", () => {
    * way. Past that one claim, a backend with no slots is not asked
    * again. */
   it("claims once through the tunnel after an answer that was no verdict, and not again", async () => {
-    const notSlots: ClaimOutcome = { kind: "unanswered", reason: "404", retryable: false };
+    const notSlots: ClaimOutcome = { kind: "unanswered", reason: "404", retryable: false, noAnswer: false };
     const h = harness([notSlots, notSlots]);
     expect(await h.session.beforeDial({ subscriptionId: SUB })).toEqual({ kind: "dial" });
     expect(await h.session.afterConnected({})).toEqual({ kind: "keep" });
@@ -174,7 +174,7 @@ describe("once connected", () => {
   });
 
   it("takes a grant from that claim through the tunnel like any other", async () => {
-    const h = harness([{ kind: "unanswered", reason: "409 without a code", retryable: false }, GRANT]);
+    const h = harness([{ kind: "unanswered", reason: "409 without a code", retryable: false, noAnswer: false }, GRANT]);
     await h.session.beforeDial({ subscriptionId: SUB });
     await h.session.afterConnected({});
     expect(h.session.standing()).toBe("held");
@@ -240,7 +240,7 @@ describe("renewing", () => {
   /** "A renewal that cannot reach the API changes nothing -- keep the
    * tunnel." */
   it("keeps the tunnel when a renewal cannot reach the API, and asks again a renewal later", async () => {
-    const h = harness([GRANT], [{ kind: "unanswered", reason: "timeout", retryable: true }]);
+    const h = harness([GRANT], [{ kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true }]);
     await h.session.beforeDial({ subscriptionId: SUB });
     h.advance(60_000);
     expect(await h.session.onPoll()).toEqual({ kind: "keep" });
@@ -268,8 +268,8 @@ describe("renewing", () => {
 
   it("keeps trying an unanswered claim on the renewal clock", async () => {
     const h = harness([
-      { kind: "unanswered", reason: "timeout", retryable: true },
-      { kind: "unanswered", reason: "timeout", retryable: true },
+      { kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true },
+      { kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true },
       GRANT,
     ]);
     await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
@@ -339,14 +339,14 @@ describe("before an automatic reconnect (obligation 9)", () => {
     await held.session.beforeDial({ subscriptionId: SUB });
     expect(held.session.needsStandingCheck()).toBe(false);
 
-    const unclaimed = harness([{ kind: "unanswered", reason: "timeout", retryable: true }]);
+    const unclaimed = harness([{ kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true }]);
     await unclaimed.session.beforeDial({ subscriptionId: SUB });
     expect(unclaimed.session.needsStandingCheck()).toBe(true);
   });
 
   it("renews with four seconds, and reads displaced as displaced", async () => {
     const by = { handle: "phone", label: null, platform: "android" };
-    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true }], [
+    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true }], [
       { kind: "displaced", by, at: null },
     ]);
     await h.session.beforeDial({ subscriptionId: SUB });
@@ -355,15 +355,26 @@ describe("before an automatic reconnect (obligation 9)", () => {
   });
 
   it("says when it could not ask", async () => {
-    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true }], [
-      { kind: "unanswered", reason: "timeout", retryable: true },
+    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true }], [
+      { kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true },
     ]);
     await h.session.beforeDial({ subscriptionId: SUB });
-    expect(await h.session.checkStanding()).toEqual({ kind: "unanswered" });
+    expect(await h.session.checkStanding()).toEqual({ kind: "unanswered", noAnswer: true });
+  });
+
+  /** Neoxify answered -- a 5xx, a 404, a throttle, a 200 with a status
+   * this app does not know -- and confirmed nothing. Still no verdict,
+   * and the ladder still runs; but it was reached, and the note must not
+   * say otherwise. */
+  it("says when it asked and was answered without a verdict", async () => {
+    const answered: RenewOutcome = { kind: "unanswered", reason: "Request failed (503)", retryable: true, noAnswer: false };
+    const h = harness([UNANSWERED], [answered]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    expect(await h.session.checkStanding()).toEqual({ kind: "unanswered", noAnswer: false });
   });
 
   it("clears the way when there was room after all", async () => {
-    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true }], [HELD]);
+    const h = harness([{ kind: "unanswered", reason: "timeout", retryable: true, noAnswer: true }], [HELD]);
     await h.session.beforeDial({ subscriptionId: SUB });
     expect(await h.session.checkStanding()).toEqual({ kind: "clear" });
     expect(h.session.standing()).toBe("held");
@@ -579,7 +590,14 @@ describe("a takeover the claim before dialling could not deliver", () => {
   it("says when that check could not ask", async () => {
     const h = harness([UNANSWERED, UNANSWERED]);
     await h.session.beforeDial({ subscriptionId: SUB, takeover: ["pc"] });
-    expect(await h.session.checkStanding()).toEqual({ kind: "unanswered" });
+    expect(await h.session.checkStanding()).toEqual({ kind: "unanswered", noAnswer: true });
+  });
+
+  it("says when that check was answered without a verdict", async () => {
+    const answered: ClaimOutcome = { kind: "unanswered", reason: "Request failed (502)", retryable: true, noAnswer: false };
+    const h = harness([UNANSWERED, answered]);
+    await h.session.beforeDial({ subscriptionId: SUB, takeover: ["pc"] });
+    expect(await h.session.checkStanding()).toEqual({ kind: "unanswered", noAnswer: false });
   });
 });
 
@@ -881,7 +899,7 @@ describe("the device limit's card", () => {
     const store = createSlotNoticeStore();
     const listener = vi.fn();
     store.subscribe(listener);
-    const notice = { kind: "unchecked" as const, limit: 1 };
+    const notice = { kind: "unchecked" as const, limit: 1, noAnswer: true };
     store.set(notice);
     store.set(notice);
     store.set(null);

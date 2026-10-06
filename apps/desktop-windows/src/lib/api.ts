@@ -214,6 +214,15 @@ export type RequestFailure = {
    * transport failure, which is the distinction the token refresh needs:
    * a refusal ends the session, a request that never arrived must not. */
   status?: number;
+  /** True only when no endpoint gave any HTTP answer: the request failed
+   * in transport everywhere it was sent. The one failure that may be
+   * described as "could not reach Neoxify".
+   *
+   * Absent is not the opposite. A 401 whose token refresh could not be
+   * completed has no `status` either, and the server did answer that
+   * request; so does a thrown error nobody classified. Read absent as
+   * "not known to have gone unanswered". */
+  noResponse?: true;
   /** The server's machine-readable `code`, when its answer carried one
    * (`DEVICE_LIMIT`, `TAKEOVER_LIMIT`, ...).
    *
@@ -239,6 +248,7 @@ export type ApiResult<T> = { ok: true; data: T } | RequestFailure;
 const unreachable = (): RequestFailure => ({
   ok: false,
   error: "Could not reach Neoxify. Check your internet connection.",
+  noResponse: true,
 });
 
 /** A refusal, in full: the sentence, the status, and the code.

@@ -1547,9 +1547,11 @@ export function Dashboard({
         const standing = await deviceSlot.checkStanding();
         if (standing.kind === "unanswered") {
           // Said, and then the ladder runs as usual: a limit that could
-          // not be checked is a possibility, not a verdict.
+          // not be checked is a possibility, not a verdict. Worded by
+          // whether anything came back: "couldn't reach Neoxify" only
+          // when nothing did, never over an answer that was an error.
           const limit = deviceSlot.limit() ?? subscription?.deviceLimit ?? null;
-          if (typeof limit === "number") setSlotNotice({ kind: "unchecked", limit });
+          if (typeof limit === "number") setSlotNotice({ kind: "unchecked", limit, noAnswer: standing.noAnswer });
         } else if (standing.kind !== "clear") {
           stoppedBySlot = standing;
         }

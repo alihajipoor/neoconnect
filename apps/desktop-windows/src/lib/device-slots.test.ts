@@ -341,6 +341,42 @@ describe("renew", () => {
     expect(announced).toBe(0);
   });
 
+  /** What the "unchecked" note may say rests on this. "We couldn't reach
+   * Neoxify" is true of a request that got nothing back; of a 5xx, a 404,
+   * a throttle or a 200 this app cannot read, Neoxify was reached and
+   * only did not confirm. */
+  it("says nothing came back only when nothing did", async () => {
+    replies["/customer/vpn/renew"] = ["hang", "hang"];
+    expect(await renewSlot(SUB, 50)).toMatchObject({ kind: "unanswered", noAnswer: true });
+
+    replies["/customer/vpn/renew"] = ["unreachable", "unreachable"];
+    expect(await renewSlot(SUB)).toMatchObject({ kind: "unanswered", noAnswer: true });
+
+    replies["/customer/vpn/renew"] = [
+      { status: 503 },
+      { status: 404, body: { message: "Cannot POST /customer/vpn/renew" } },
+      { status: 429, body: { statusCode: 429, message: "ThrottlerException: Too Many Requests" } },
+      { status: 403, body: { message: "Forbidden" } },
+      { status: 200, body: { status: "something new" } },
+    ];
+    for (let i = 0; i < 5; i++) {
+      expect(await renewSlot(SUB)).toMatchObject({ kind: "unanswered", noAnswer: false });
+    }
+
+    // Answered 401, and the token refresh that follows could not be
+    // completed: no status survives, and the request was still answered.
+    replies["/customer/vpn/renew"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 503 }];
+    expect(await renewSlot(SUB)).toMatchObject({ kind: "unanswered", noAnswer: false });
+  });
+
+  it("says the same of a claim", async () => {
+    replies["/customer/vpn/claim"] = ["unreachable", "unreachable", { status: 502 }, { status: 200, body: { granted: false } }];
+    expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered", noAnswer: true });
+    expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered", noAnswer: false });
+    expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered", noAnswer: false });
+  });
+
   it("still ends the session on a sign-out, as every call does", async () => {
     replies["/customer/vpn/renew"] = [{ status: 401 }];
     replies["/customer-auth/refresh"] = [{ status: 401 }];

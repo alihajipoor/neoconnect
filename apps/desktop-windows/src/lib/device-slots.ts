@@ -79,6 +79,24 @@ export interface SlotGrant {
   staleAfterSec: number;
 }
 
+/** No verdict. Dial anyway, or keep the tunnel.
+ *
+ * `retryable` says whether asking again could produce one: a timeout or
+ * a 5xx could, a 400 or a 404 will not.
+ *
+ * `noAnswer` says whether anything came back at all. True only when
+ * nothing did -- no answer within the budget, or the request failed in
+ * transport everywhere it was sent -- and only then may the screen say
+ * Neoxify could not be reached. A 5xx, a 404, a 429, a 200 this app
+ * cannot read: each is an answer, and what is true then is that Neoxify
+ * did not confirm anything, not that it was out of reach. */
+export interface NoVerdict {
+  kind: "unanswered";
+  reason: string;
+  retryable: boolean;
+  noAnswer: boolean;
+}
+
 export type ClaimOutcome =
   | { kind: "granted"; grant: SlotGrant }
   | { kind: "refused"; refusal: DeviceLimitRefusal }
@@ -88,9 +106,7 @@ export type ClaimOutcome =
   | { kind: "takeoverLimited"; retryAfterSec: number | null }
   /** The session has ended; `apiRequest` has already told the app. */
   | { kind: "signedOut" }
-  /** No verdict. Dial anyway. `retryable` says whether asking again could
-   * produce one: a timeout or a 5xx could, a 400 or a 404 will not. */
-  | { kind: "unanswered"; reason: string; retryable: boolean };
+  | NoVerdict;
 
 export type RenewOutcome =
   | { kind: "held"; grant: SlotGrant }
@@ -99,7 +115,7 @@ export type RenewOutcome =
   | { kind: "displaced"; by: SlotDevice | null; at: string | null }
   | { kind: "inactive"; subscriptionStatus: string | null }
   | { kind: "signedOut" }
-  | { kind: "unanswered"; reason: string; retryable: boolean };
+  | NoVerdict;
 
 type Fields = Record<string, unknown>;
 
@@ -174,13 +190,21 @@ export function refusalFrom(body: unknown): DeviceLimitRefusal {
 /** A failed claim or renewal that is no verdict, and whether asking
  * again could produce one: a timeout, a 5xx or a 429 could; a 400 or a
  * 404 will not. */
-function unanswered(failure: RequestFailure): { kind: "unanswered"; reason: string; retryable: boolean } {
+function unanswered(failure: RequestFailure): NoVerdict {
   // Never arrived, or arrived somewhere that could not answer: the next
   // attempt may well get through. A 429 without the slot code is the
   // request limit or a CDN, not a verdict on this device.
   const { status } = failure;
   const retryable = status === undefined || status >= 500 || status === 429 || status === 408;
-  return { kind: "unanswered", reason: failure.error, retryable };
+  // Only a transport failure everywhere is known to have gone
+  // unanswered. A failure with no status is not enough: a 401 whose
+  // refresh could not complete has none, and was answered.
+  return { kind: "unanswered", reason: failure.error, retryable, noAnswer: failure.noResponse === true };
+}
+
+/** A request that ran out of its budget: nothing came back in time. */
+function timedOut(error: string): NoVerdict {
+  return { kind: "unanswered", reason: error, retryable: true, noAnswer: true };
 }
 
 /** What a failed claim means.
@@ -273,11 +297,11 @@ export async function claimSlot(request: ClaimRequest, budgetMs = CLAIM_BUDGET_M
   if (result.ok) {
     const f = fieldsOf(result.data);
     if (!f || f.granted !== true) {
-      return { kind: "unanswered", reason: "the claim's answer was not a grant", retryable: false };
+      return { kind: "unanswered", reason: "the claim's answer was not a grant", retryable: false, noAnswer: false };
     }
     return { kind: "granted", grant: grantFrom(f) };
   }
-  if ("timedOut" in result) return { kind: "unanswered", reason: result.error, retryable: true };
+  if ("timedOut" in result) return timedOut(result.error);
   return claimFailure(result);
 }
 
@@ -301,10 +325,15 @@ export async function renewSlot(subscriptionId: string, budgetMs = RENEW_BUDGET_
       case "inactive":
         return { kind: "inactive", subscriptionStatus: text(f.subscriptionStatus) };
       default:
-        return { kind: "unanswered", reason: "the renewal's answer had no status this app knows", retryable: false };
+        return {
+          kind: "unanswered",
+          reason: "the renewal's answer had no status this app knows",
+          retryable: false,
+          noAnswer: false,
+        };
     }
   }
-  if ("timedOut" in result) return { kind: "unanswered", reason: result.error, retryable: true };
+  if ("timedOut" in result) return timedOut(result.error);
 
   // A renewal's verdicts come in a 200's `status`, never as a refusal.
   // Anything else -- a 5xx, a 429, a 404, even a 409 naming a code --

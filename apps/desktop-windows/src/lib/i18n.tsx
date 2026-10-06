@@ -623,10 +623,15 @@ const en = {
   "slots.nowInUseOn": "Neoxify is now in use on {device}.",
   "slots.takeoverLimit": "You've switched devices too many times in the last hour. Try again in {minutes} min.",
   // A degraded tunnel on a device whose slot was never confirmed, when
-  // the API could not be asked. It names the limit as a possibility,
-  // never as the cause, and says the check itself did not happen.
+  // the check got no verdict. Both name the limit as a possibility,
+  // never as the cause. The first only when nothing came back at all (no
+  // answer in time, or no answer anywhere); the second when Neoxify did
+  // answer -- an error, a throttle, something this app cannot read --
+  // and so was reached, and only did not confirm anything.
   "slots.unchecked":
     "We couldn't reach Neoxify to check. If Neoxify is in use on another of your devices, your plan's limit of {limit} at a time may be the reason.",
+  "slots.unconfirmed":
+    "Neoxify couldn't confirm this device's place on your plan right now. If Neoxify is in use on another of your devices, your plan's limit of {limit} at a time may be the reason.",
   // A device the server names by its kind alone (its `platform`, with no
   // model or name of its own), as {device} in the sentences above. The
   // kind is named here, in the reader's language, never by the device
@@ -1259,6 +1264,8 @@ const fa: Record<TranslationKey, string> = {
   "slots.takeoverLimit": "در یک ساعت گذشته دفعات زیادی دستگاه را عوض کرده‌اید. {minutes} دقیقهٔ دیگر دوباره امتحان کنید.",
   "slots.unchecked":
     "نتوانستیم برای بررسی به نئوکسیفای دسترسی پیدا کنیم. اگر نئوکسیفای روی دستگاه دیگری از شما در حال استفاده است، ممکن است دلیلش سقف {limit} دستگاه هم‌زمان در پلن شما باشد.",
+  "slots.unconfirmed":
+    "نئوکسیفای فعلاً نتوانست جای این دستگاه را در پلن شما تأیید کند. اگر نئوکسیفای روی دستگاه دیگری از شما در حال استفاده است، ممکن است دلیلش سقف {limit} دستگاه هم‌زمان در پلن شما باشد.",
   "slots.platformWindows": "یک رایانهٔ ویندوزی",
   "slots.platformMac": "یک مک",
   "slots.platformLinux": "یک رایانهٔ لینوکسی",

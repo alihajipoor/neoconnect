@@ -332,7 +332,10 @@ refusal of the device -- see obligation 2.
    check. If Neoxify is in use on another of your devices, your plan's
    limit of *{limit}* may be the reason.") and then run the ladder as
    usual. Never claim a server "couldn't be reached" if it was never
-   dialled.
+   dialled -- nor if it answered: a 5xx, a 404, a 429 or a 200 with a
+   status the app does not know is an answer without a verdict, and
+   the honest note then is that Neoxify could not confirm this device's
+   place right now, not that it could not be reached.
 10. **The label is a model or the user's own words** -- never the device's kind and never a hostname; *{device}* is named as *Naming a device on screen* says (see *Headers*).
 11. **A claim refused after connecting.** When the claim before dialling
     went unanswered (item 2), the device is already connected when its
