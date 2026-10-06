@@ -21,6 +21,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { bundleHosts, scopeGlobs } from "./capability-scope-globs.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const seedPath = join(here, "..", "src", "lib", "seed-bundle.json");
@@ -48,15 +49,14 @@ try {
   fail(err instanceof Error ? err.message : String(err));
 }
 
-// One pair of globs per registrable host in the bundle: bare and with a
-// port, because the mirrors are on a non-default port and Tauri treats
-// those as different origins.
-const hosts = new Set();
-for (const e of bundle.endpoints ?? []) {
-  if (typeof e?.url !== "string") continue;
-  try { hosts.add(new URL(e.url).hostname); } catch { /* skip a malformed entry */ }
-}
+// One pair of globs per host in the bundle -- bare and with a port,
+// because the mirrors are on a non-default port and Tauri treats those
+// as different origins -- and one pair per domain the bundle already
+// uses for several hosts, so a node added on it later is in scope for
+// this build. See capability-scope-globs.mjs.
+const hosts = bundleHosts(bundle);
 if (hosts.size === 0) fail("bundle names no hosts");
+const globs = scopeGlobs(hosts);
 
 for (const file of targets) {
   const cap = JSON.parse(readFileSync(file, "utf8"));
@@ -66,10 +66,8 @@ for (const file of targets) {
   if (!http) fail(`no http:default permission in ${file}`);
   const existing = new Set((http.allow ?? []).map((a) => a.url));
   let added = 0;
-  for (const h of hosts) {
-    for (const url of [`https://${h}/*`, `https://${h}:*/*`]) {
-      if (!existing.has(url)) { http.allow.push({ url }); existing.add(url); added++; }
-    }
+  for (const url of globs) {
+    if (!existing.has(url)) { http.allow.push({ url }); existing.add(url); added++; }
   }
   writeFileSync(file, JSON.stringify(cap, null, 2) + "\n");
   console.log(`capability-scope: ${file.split("/").slice(-3).join("/")} +${added} glob(s) for ${hosts.size} host(s)`);

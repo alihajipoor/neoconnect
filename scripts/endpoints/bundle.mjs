@@ -16,12 +16,14 @@
  * Usage:
  *   node scripts/endpoints/bundle.mjs keygen --out ./keys
  *   node scripts/endpoints/bundle.mjs sign  --in bundle.json \
- *        --key ./keys/primary.key --key-id primary --out endpoints.signed.json
+ *        --key ./keys/primary.key --key-id primary --out endpoints.signed.json \
+ *        [--previous last.signed.json]   (warns about hosts clients will refuse)
  *   node scripts/endpoints/bundle.mjs verify --in endpoints.signed.json --pub <base64>
  */
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { bundleHosts, inScope } from "../../apps/desktop-windows/scripts/capability-scope-globs.mjs";
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
@@ -67,6 +69,51 @@ function cmdKeygen() {
   );
 }
 
+/** Says, loudly, which hosts in this bundle installed clients will refuse.
+ *
+ * A client's HTTP permission is fixed when it is built, from the seed
+ * bundle it shipped with (apps/desktop-windows/scripts/
+ * capability-scope-globs.mjs), and nothing widens it at runtime. A host
+ * outside that scope is refused on the device before a request is sent,
+ * so a bundle that rotates customers onto one reaches nobody until they
+ * update -- the opposite of what a bundle is for, and silent unless this
+ * says so. Not a refusal to sign: adding a host for the next release is
+ * legitimate, as long as nobody is relying on it to reach today's users.
+ *
+ * `--previous` is the last signed bundle, the closest stand-in for what
+ * shipped builds carry. */
+function warnOutsideShippedScope(bundle, previousPath) {
+  if (!previousPath) {
+    console.error(
+      "note: pass --previous <last signed bundle> to check which hosts installed clients can call",
+    );
+    return;
+  }
+  const envelope = JSON.parse(readFileSync(previousPath, "utf8"));
+  const previous = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8"));
+  const known = bundleHosts(previous);
+  const fresh = [...bundleHosts(bundle)].filter((host) => !known.has(host));
+  const outside = fresh.filter((host) => !inScope(host, known));
+  if (outside.length > 0) {
+    console.error(
+      `\nWARNING: ${outside.length} host(s) in this bundle are outside the HTTP scope of ` +
+        "clients built from the previous one.\nInstalled clients will refuse them locally " +
+        "until they update; only builds made from a seed that includes them can use them:",
+    );
+    for (const host of outside) console.error(`  ${host}`);
+    console.error("");
+  }
+  // Inside the domain wildcard, but only for builds that have one:
+  // desktop 0.9.44 / mobile 0.2.23 and earlier scoped exact hosts only.
+  const wildcardOnly = fresh.filter((host) => inScope(host, known));
+  if (wildcardOnly.length > 0) {
+    console.error(
+      `note: ${wildcardOnly.length} new host(s) are reachable only by builds with the domain ` +
+        "wildcard (after desktop 0.9.44 / mobile 0.2.23); older installs refuse them.",
+    );
+  }
+}
+
 function cmdSign() {
   const inPath = arg("in");
   const keyPath = arg("key");
@@ -80,6 +127,7 @@ function cmdSign() {
   }
   const http = bundle.endpoints.filter((e) => !String(e.url ?? "").startsWith("https://"));
   if (http.length) die(`refusing to sign ${http.length} non-https endpoint(s)`);
+  warnOutsideShippedScope(bundle, arg("previous", ""));
 
   // Sign the exact bytes that will be published. Re-serialising on the
   // verifying side is where signature checks quietly become decorative.
