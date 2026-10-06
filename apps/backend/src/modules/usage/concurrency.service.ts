@@ -191,7 +191,10 @@ export class ConcurrencyService {
     // own counter reading the same access log.
     const counted = new Map<string, number>();
     for (const count of sessions) {
-      if (COUNTS_IGNORED.has(count.protocol)) continue;
+      // On the protocol, not the label: agents up to v0.2.9 send the
+      // VLESS WebSocket inbound's counts as "XRAY_VLESS_TLS|WS", which an
+      // exact match let through -- and with it Xray's tail, every poll.
+      if (COUNTS_IGNORED.has(count.protocol.split("|")[0])) continue;
       counted.set(count.externalUserId, Math.max(counted.get(count.externalUserId) ?? 0, count.distinctSources));
     }
     const active = new Set([...counted].filter(([, n]) => n > 0).map(([id]) => id));

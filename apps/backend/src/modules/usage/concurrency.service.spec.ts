@@ -161,7 +161,8 @@ describe("ConcurrencyService (device-limit backstop)", () => {
   it("counts one device once however many Xray inbounds report it", async () => {
     process.env.CONCURRENCY_CUT = "enforce";
     const { service, agentGateway, warn } = build({ limit: 1, rows: [row("phone", { sessionId: PHONE })] });
-    const fiveCounters = ["XRAY_VLESS_REALITY", "XRAY_TROJAN", "XRAY_VLESS_TLS", "XRAY_VLESS_TLS", "SHADOWSOCKS"].map(
+    // The WebSocket inbound's counter, as agents up to v0.2.9 label it.
+    const fiveCounters = ["XRAY_VLESS_REALITY", "XRAY_TROJAN", "XRAY_VLESS_TLS", "XRAY_VLESS_TLS|WS", "SHADOWSOCKS"].map(
       (protocol) => ({ ext: "ext-phone", sources: 1, protocol }),
     );
 
@@ -207,18 +208,22 @@ describe("ConcurrencyService (device-limit backstop)", () => {
     process.env.CONCURRENCY_CUT = "enforce";
     const { service, agentGateway, warn } = build({ limit: 1, rows: twoDevices() });
 
-    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 900, sources: 1 }] });
+    // Every Xray inbound's counter reads the same access log, the
+    // WebSocket one included -- and v0.2.9 agents label that one
+    // "XRAY_VLESS_TLS|WS", which an exact-name filter let through.
+    const wsTail = { ext: "ext-pc", sources: 1, protocol: "XRAY_VLESS_TLS|WS" };
+    await tick(service, { "node-1": [{ ext: "ext-pc", bytes: 900, sources: 1 }, wsTail] });
     // t=30: the PC opened a connection at 20 s and left at 25 s; the
     // phone is on.
     await tick(service, {
-      "node-1": [{ ext: "ext-pc", bytes: 40, sources: 1 }],
+      "node-1": [{ ext: "ext-pc", bytes: 40, sources: 1 }, wsTail],
       "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }],
     });
     // t=60 and t=90: no bytes from the PC, but Xray still counts its
     // source from 20 s.
     for (let i = 0; i < 2; i++) {
       await tick(service, {
-        "node-1": [{ ext: "ext-pc", sources: 1 }],
+        "node-1": [{ ext: "ext-pc", sources: 1 }, wsTail],
         "node-2": [{ ext: "ext-phone", bytes: 900, sources: 1 }],
       });
     }
