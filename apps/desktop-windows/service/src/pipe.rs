@@ -959,6 +959,70 @@ mod tests {
         assert_eq!(parsed["connected"], false, "{parsed}");
     }
 
+    /// A Disconnect reaches a Connect that is queued but not yet running.
+    ///
+    /// `cancel_running` only reaches the job on the owning thread, and a
+    /// connect queued behind it -- behind a disconnect's thorough pass,
+    /// which cannot be hurried -- started afterwards with a fresh token
+    /// and dialled in full, after the customer had pressed stop and been
+    /// told "disconnected". The exe directory here has no engines, so a
+    /// connect that ran would fail naming wireguard.exe; one that was
+    /// abandoned says so and never gets that far.
+    #[tokio::test]
+    async fn a_disconnect_abandons_a_connect_still_in_the_queue() {
+        let name = r"\\.\pipe\neoconnect-test-queued-connect";
+        let engines = start_server(name).await;
+
+        // Something the cancel cannot hurry, like the thorough pass.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let busy = engines.run(move |_engines: &mut Engines, _token| {
+            let _ = parked.recv_timeout(std::time::Duration::from_secs(30));
+        });
+
+        let profile = ConnectProfile::Wireguard(WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let connect = tokio::spawn(async move { round_trip(name, &request).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let disconnect = tokio::spawn(async move { round_trip(name, r#"{"type":"disconnect"}"#).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let _ = release.send(());
+        let _ = busy.await;
+
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(20), connect)
+            .await
+            .expect("the queued connect answers")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["status"], "error", "{parsed}");
+        assert_eq!(
+            parsed["message"],
+            crate::lifecycle::budget::ABANDONED,
+            "the connect ran after the disconnect: {parsed}"
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(20), disconnect).await;
+
+        // And a connect queued after the disconnect is not affected.
+        let profile = ConnectProfile::Wireguard(WireguardProfile {
+            private_key: "GMSgBTYpH7yC6bV88xblWmViQlk+bHxiTDsdsi+WgXI=".into(),
+            address: "10.77.0.8/32".into(),
+            dns: None,
+            allowed_ips: "0.0.0.0/0".into(),
+            server_public_key: "1AafKzvRrvjXvsKSmx4IQTw/BiLF/iMJ2sIBZHP4qAE=".into(),
+            endpoint: "203.0.113.5:51888".into(),
+        });
+        let request = serde_json::to_string(&Request::Connect { profile, exits: Vec::new() }).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(round_trip(name, &request).await.trim()).unwrap();
+        assert!(parsed["message"].as_str().unwrap().contains("wireguard.exe"), "{parsed}");
+    }
+
     #[tokio::test]
     async fn reports_a_missing_engine_binary_clearly() {
         let name = r"\\.\pipe\neoconnect-test-missing-engine";
@@ -1113,6 +1177,12 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledg
             // would be useless if it had to wait for it. The token it
             // cancels is the one that job published, and the one engine
             // code polls, so a single call reaches every layer.
+            //
+            // And a connect still *queued* -- behind a thorough pass, say
+            // -- is told it is no longer wanted, which no token reaches:
+            // it would otherwise start with a fresh one after this has
+            // answered "disconnected". See `Supervisor::supersede`.
+            engines.supersede();
             engines.cancel_running();
 
             let hard = engines.run(|engines: &mut Engines, token| {
@@ -1212,8 +1282,17 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledg
                         .to_string(),
                 };
             }
+            // Taken as the connect is queued, and checked when it starts:
+            // a Disconnect that arrived in between means the customer no
+            // longer wants this tunnel, and nothing is dialled.
+            let wanted = engines.generation();
             engines
                 .run(move |engines: &mut Engines, token| {
+                    if wanted.superseded() {
+                        return Response::Error {
+                            message: crate::lifecycle::budget::ABANDONED.to_string(),
+                        };
+                    }
                     crate::engines::adopt_token(token);
                     match engines.connect(&profile, &exits) {
                         Ok(()) => Response::Ok,
