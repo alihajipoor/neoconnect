@@ -117,7 +117,7 @@ Request:
 |---|---|---|
 | `subscriptionId` | yes | UUID of the subscription being connected with (`GET /customer/subscriptions`). |
 | `protocolUserId` | no | The `id` of the credential about to be dialled (`GET /customer/protocol-users`). Send it. When it is one of the subscription's shared credentials (the device's own one is not confirmed on that node yet), traffic on it then counts as this device's. |
-| `takeover` | no | Handles from a 409's `holders`, after the customer chose **Use on this device instead**. At most 16, each at most 64 characters. Only the holders named are displaced. |
+| `takeover` | no | Handles from a 409's `holders`, after the customer chose **Use on this device instead**. At most 16, each at most 64 characters. Only holders named here can be displaced, and only as many as it takes to make room -- the least recently seen first. Send every handle shown to let the server pick (on a plan of two, one device goes, not both), or one handle if the customer picked a device. If there is room by the time it arrives, nobody is displaced. |
 
 **200 -- granted.**
 
@@ -259,8 +259,11 @@ the app wants to save a round trip (claiming is still correct).
 3. **On 409 `DEVICE_LIMIT`**, do not dial. Show, in the app's language:
    "Your plan allows *{limit}* device(s) at a time. Neoxify is in use on
    *{label}* since *{since}*." with **Use on this device instead** and
-   **Cancel**. *Use here* claims again with `takeover` = the handles shown,
-   then dials. Model it on the plan-ended card.
+   **Cancel**. *Use here* claims again with `takeover` = the handles shown
+   (the server frees one slot, from the device least recently seen), then
+   dials. On a plan of more than one the app may let the customer pick
+   which device instead, and send only that handle. Model it on the
+   plan-ended card.
 4. **Keep the status and the `code`.** A 409 is not a sign-out and not a
    network failure. (The desktop's `apiRequest` currently reduces every
    failure to a message; it has to keep both.)

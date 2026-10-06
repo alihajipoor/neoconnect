@@ -264,6 +264,35 @@ describe("DeviceSlotsService", () => {
     expect(body.holders).toHaveLength(2);
   });
 
+  /** On a plan of two the refusal shows two devices; taking over must free
+   * one slot, not both. With every handle named, the device least
+   * recently seen goes. */
+  it("takes over only as many devices as it needs to, the least recently seen first", async () => {
+    const { service } = build({ limit: 2 });
+    const pc = await service.claim(as(PC), { subscriptionId: SUB }, windows);
+    await jest.advanceTimersByTimeAsync(30_000);
+    const phone = await service.claim(as(PHONE), { subscriptionId: SUB }, android);
+    await jest.advanceTimersByTimeAsync(10_000);
+    await service.renew(as(PHONE), { subscriptionId: SUB });
+
+    await service.claim(as(TABLET), { subscriptionId: SUB, takeover: [pc.handle!, phone.handle!] });
+
+    await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "displaced" });
+    await expect(service.renew(as(PHONE), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held" });
+  });
+
+  // Somebody left between the refusal and the tap: there is room now.
+  it("displaces nobody when a takeover is no longer needed", async () => {
+    const { service } = build({ limit: 2 });
+    const pc = await service.claim(as(PC), { subscriptionId: SUB }, windows);
+    await service.claim(as(PHONE), { subscriptionId: SUB }, android);
+    await service.release(as(PHONE), { subscriptionId: SUB });
+
+    await service.claim(as(TABLET), { subscriptionId: SUB, takeover: [pc.handle!] });
+
+    await expect(service.renew(as(PC), { subscriptionId: SUB })).resolves.toMatchObject({ status: "held" });
+  });
+
   // Two devices pressing Connect at the same moment.
   it("lets exactly one of two simultaneous claims in on a plan of one", async () => {
     const { service } = build();

@@ -194,9 +194,16 @@ export class DeviceSlotsService {
       const live = holders.filter((h) => now - (seen.get(h.sessionId) ?? h.lastRenew) <= STALE_MS);
       const stale = holders.filter((h) => !live.includes(h));
 
+      // Only as many as it takes to make room, from those named: the
+      // least recently seen first. A device that sent every handle a 409
+      // showed it on a plan of two must not displace both.
       const wanted = new Set(request.takeover ?? []);
-      const takenOver = live.filter((h) => wanted.has(h.handle));
-      const remaining = live.filter((h) => !wanted.has(h.handle));
+      const needed = live.length - limit + 1;
+      const takenOver = live
+        .filter((h) => wanted.has(h.handle))
+        .sort((a, b) => (seen.get(a.sessionId) ?? a.lastRenew) - (seen.get(b.sessionId) ?? b.lastRenew))
+        .slice(0, Math.max(0, needed));
+      const remaining = live.filter((h) => !takenOver.includes(h));
 
       if (remaining.length >= limit) {
         throw new ConflictException({
