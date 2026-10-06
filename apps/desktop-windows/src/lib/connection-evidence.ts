@@ -305,10 +305,30 @@ export function isTunnelUp(state: ConnectionState): boolean {
  * has stopped being able to. */
 export const LIVENESS_POLL_MS = 1_000;
 
+/** Whether a status answer's "no tunnel" is the service's verified word.
+ *
+ * `connected: false` comes from two very different places. Usually the
+ * service asked the engine it holds -- the process handle, the tunnel
+ * service's state, RAS -- or read the record of that engine ending, and
+ * says `health: down`. But when its owning thread is busy it answers
+ * from what Windows shows instead: an adapter's presence for Xray and
+ * OpenVPN, PowerShell for IKEv2. Those say "nothing" while a Custom-mode
+ * rebuild has the adapter down or PowerShell fails, and a current
+ * service marks that answer `health: unknown` -- "no trustworthy
+ * evidence", the meaning the IPC already gives it.
+ *
+ * Not a new field: the IPC is frozen, every field keeping its shape and
+ * meaning, and this needs neither. A 0.9.43 service says `down` for
+ * both, so against one this cannot tell them apart; the app's own guard
+ * (`status-disturbance`) is what covers the two causes it knows of. */
+export function noTunnelVerified(status: Pick<VpnStatus, "connected" | "health">): boolean {
+  return !status.connected && status.health.state === "down";
+}
+
 /** Whether a status answer means the tunnel the screen was vouching for
  * has gone.
  *
- * Three things have to hold, and each one is a way this could otherwise
+ * Five things have to hold, and each one is a way this could otherwise
  * say something false:
  *
  *  - **An answer arrived.** A call that failed is a miss, never a drop:
@@ -316,25 +336,33 @@ export const LIVENESS_POLL_MS = 1_000;
  *    several misses), and a customer told their tunnel dropped when it
  *    did not may go and do something they would not otherwise have done.
  *
+ *  - **It is the service's verified "no tunnel"** (`noTunnelVerified`),
+ *    not the fallback's guess while it was busy.
+ *
  *  - **Nothing of ours is changing the tunnel.** A connect tears down
  *    before it dials and a disconnect tears down because it was asked
  *    to; neither is a drop, and both own the screen while they run.
  *
+ *  - **Nothing of ours disturbed the answer** -- a Custom-mode change,
+ *    which rebuilds the tunnel, or the Custom-mode probe, which holds
+ *    the service's owning thread -- while it was being fetched. See
+ *    `status-disturbance`.
+ *
  *  - **The screen was claiming a tunnel.** Learning "nothing is running"
  *    while already showing "You're not protected" is not news.
  *
- * Then `connected: false` is the service's own verified answer -- it
- * comes from the engine's process handle, the tunnel service's state or
- * RAS -- and the honest thing is to stop claiming protection at once. */
+ * Then the honest thing is to stop claiming protection at once. */
 export function droppedFromPoll(
   shown: ConnectionState,
   intent: Intent,
-  status: Pick<VpnStatus, "connected"> | null,
+  status: Pick<VpnStatus, "connected" | "health"> | null,
+  disturbed: boolean,
 ): boolean {
   if (status === null) return false;
   if (intent !== "idle") return false;
+  if (disturbed) return false;
   if (!isTunnelUp(shown)) return false;
-  return !status.connected;
+  return noTunnelVerified(status);
 }
 
 /** How the headline is coloured. Mapped to classes by the dashboard. */

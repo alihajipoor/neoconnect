@@ -26,6 +26,7 @@ import {
   headlineFor,
   isTunnelUp,
   LIVENESS_POLL_MS,
+  noTunnelVerified,
   stateFromStatus,
   type HeadlineTone,
   type VpnStatus,
@@ -59,6 +60,7 @@ import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
 import { createSessionTracker } from "../lib/session-report";
 import { isServiceTimeout, withTimeout } from "../lib/service-call";
+import { PROBE_CAP_MS, statusDisturbances } from "../lib/status-disturbance";
 import {
   concludeIntent,
   declareIntent,
@@ -514,14 +516,6 @@ export function Dashboard({
   const [tunnelDropped, setTunnelDropped] = useState(false);
   /** Single-flight for the one-second liveness poll. */
   const livenessInFlightRef = useRef(false);
-  /** When the health poll's Custom-mode probe started, or 0 when none is
-   * running. The probe holds the service's owning thread, and a liveness
-   * status asked meanwhile would wait out its turn and fall back to
-   * asking Windows -- which, for IKEv2, means launching PowerShell. The
-   * probe takes seconds; skipping a second's look is free. A time rather
-   * than a flag, so a probe that never answers cannot switch the
-   * liveness poll off for good. */
-  const probeStartedAtRef = useRef(0);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
 
@@ -650,6 +644,20 @@ export function Dashboard({
     const phase = phaseFor(intentRef.current.intent, observed);
     setConnectionState(phase);
     return phase;
+  }
+
+  /** Puts "VPN connection lost" on screen -- the one place it is said --
+   * once `droppedFromPoll` has agreed that it is true.
+   *
+   * Returns whether it was shown; it is not when a press has overtaken
+   * the answer it rests on. */
+  function publishDrop(generation: number): boolean {
+    if (publishObserved(generation, "disconnected") === null) return false;
+    setTunnelDropped(true);
+    setConnectedAt(null);
+    strikesRef.current = 0;
+    sessionTrackerRef.current.broken();
+    return true;
   }
 
   /** What the service says, without putting it on screen.
@@ -1042,8 +1050,50 @@ export function Dashboard({
       // over a connect that had already begun, and the next press then
       // meant Disconnect.
       const generation = intentRef.current.generation;
+      // And marked, so an answer one of our own Custom-mode changes or
+      // probes may have caught can be told apart afterwards. See
+      // `status-disturbance`.
+      const mark = statusDisturbances.mark();
 
-      let fromStatus: ConnectionState;
+      // Failing to ask is not the same as learning the tunnel is down,
+      // so the last known state stands and no strike is counted.
+      //
+      // It does not stand indefinitely, though. The last answer was an
+      // observation when it arrived; a minute of silence later it is
+      // only a memory, and leaving "You're protected" on screen on the
+      // strength of a memory is the same claim-without-evidence this
+      // screen exists to refuse. Several misses in a row means the
+      // honest answer has become "we don't know".
+      const miss = () => {
+        statusMissesRef.current += 1;
+        if (statusMissesRef.current >= STATUS_MISSES_BEFORE_UNKNOWN) {
+          if (publishObserved(generation, "unknown")) strikesRef.current = 0;
+        }
+      };
+
+      let status: VpnStatus;
+      try {
+        status = await serviceStatus();
+      } catch {
+        miss();
+        return;
+      }
+
+      // A "no tunnel" the service could not verify -- its fallback's
+      // guess while the owning thread was busy -- or one our own
+      // Custom-mode change or probe may have caused, is not an
+      // observation either. It is counted as a miss, not shown: shown,
+      // it put "You're not protected" over a tunnel a Custom-mode rebuild
+      // was a second from bringing back -- and once the screen shows no
+      // tunnel, neither poll runs, so it stood until the app next
+      // reloaded its state.
+      const disturbed = statusDisturbances.since(mark);
+      if (!status.connected && (disturbed || !noTunnelVerified(status))) {
+        miss();
+        return;
+      }
+      statusMissesRef.current = 0;
+
       // Read from the status this check just took, not from the
       // `splitTunnelActive` this effect closed over. On the first check
       // after a connect that captured value is still the `false` from
@@ -1054,44 +1104,24 @@ export function Dashboard({
       // was carrying the selected apps. Measured on a Windows 11 guest:
       // curl.exe selected and exiting through the node, the screen
       // yellow for one poll.
-      let customMode: boolean;
-      try {
-        const status = await serviceStatus();
-        customMode = Boolean(status.splitTunnelActive);
-        setSplitTunnelActive(customMode);
-        setSplitTunnelProblem(status.splitTunnelProblem ?? null);
-    setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
-    setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
-        setIpv6Blocked(Boolean(status.ipv6Blocked));
-        fromStatus = stateFromStatus(status);
-        statusMissesRef.current = 0;
-      } catch {
-        // Failing to ask is not the same as learning the tunnel is
-        // down, so the last known state stands and no strike is counted.
-        //
-        // It does not stand indefinitely, though. The last answer was an
-        // observation when it arrived; a minute of silence later it is
-        // only a memory, and leaving "You're protected" on screen on the
-        // strength of a memory is the same claim-without-evidence this
-        // screen exists to refuse. Several misses in a row means the
-        // honest answer has become "we don't know".
-        statusMissesRef.current += 1;
-        if (statusMissesRef.current >= STATUS_MISSES_BEFORE_UNKNOWN) {
-          if (publishObserved(generation, "unknown")) strikesRef.current = 0;
-        }
-        return;
-      }
+      const customMode = Boolean(status.splitTunnelActive);
+      setSplitTunnelActive(customMode);
+      setSplitTunnelProblem(status.splitTunnelProblem ?? null);
+      setTunnelDnsUnprotected(status.tunnelDnsUnprotected ?? false);
+      setRestartNeeded(status.splitTunnelRestartNeeded ?? []);
+      setIpv6Blocked(Boolean(status.ipv6Blocked));
+      const fromStatus = stateFromStatus(status);
 
       if (fromStatus === "disconnected") {
         sessionTrackerRef.current.broken();
-        // Read before publishing: the screen is about to stop claiming a
-        // tunnel, and whether that is a drop depends on what it claimed.
-        const dropped = droppedFromPoll(connectionState, intentRef.current.intent, { connected: false });
-        if (publishObserved(generation, "disconnected") === null) return;
         // Usually the one-second liveness poll below gets here first.
-        // This is the same conclusion from the slower instrument, and it
-        // must be worded the same way.
-        if (dropped) setTunnelDropped(true);
+        // This is the same conclusion from the slower instrument, so it
+        // goes through the same rule and is worded the same way.
+        if (droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) {
+          publishDrop(generation);
+          return;
+        }
+        if (publishObserved(generation, "disconnected") === null) return;
         setConnectedAt(null);
         strikesRef.current = 0;
         return;
@@ -1126,13 +1156,14 @@ export function Dashboard({
         // on an Xray protocol sat on a green orb indefinitely while
         // nothing flowed -- the one instrument that could have caught it
         // was skipped in exactly the case it was needed.
-        probeStartedAtRef.current = Date.now();
+        //
+        // Marked while it runs: it holds the service's owning thread, and
+        // a liveness status asked meanwhile is answered by the fallback.
+        const probed = statusDisturbances.begin(PROBE_CAP_MS);
         const carried = await invoke("vpn_probe_split_tunnel")
           .then(() => true)
           .catch(() => false)
-          .finally(() => {
-            probeStartedAtRef.current = 0;
-          });
+          .finally(probed);
         verdict = customModePollState(fromStatus, carried);
       } else {
         const egress = await verifyEgress(baselineIpRef.current);
@@ -1223,30 +1254,32 @@ export function Dashboard({
   // now tears a dead session down the moment the kernel reports it, the
   // answer is already "nothing is running" by the time this asks. It
   // never promotes anything -- a live answer changes nothing here -- and
-  // a failed call is a miss, not a drop (`droppedFromPoll`).
+  // nothing but the service's verified "no tunnel" is a drop: not a
+  // failed call, and not the fallback's guess (`droppedFromPoll`).
   //
   // Stays out of the way of the things that own the tunnel or the
-  // service's attention: a ladder pass, a press in flight, and the
-  // Custom-mode probe.
+  // service's attention: a ladder pass, a press in flight, a Custom-mode
+  // change and the Custom-mode probe. Not only by not starting while one
+  // runs: the probe is started by the health poll after its own status
+  // returns, so one can begin while this look is already waiting on the
+  // service -- and the answer is then discarded, by the mark taken here.
   useEffect(() => {
     if (!isTunnelUp(connectionState)) return;
 
     const look = async () => {
       if (livenessInFlightRef.current || ladderInFlight()) return;
       if (intentRef.current.intent !== "idle") return;
-      if (probeStartedAtRef.current !== 0 && Date.now() - probeStartedAtRef.current < 10_000) return;
+      if (statusDisturbances.busy()) return;
       livenessInFlightRef.current = true;
       // Stamped before asking, like every other writer here: a press
       // landing while this waits makes the answer old news.
       const generation = intentRef.current.generation;
+      const mark = statusDisturbances.mark();
       try {
         const status = await serviceStatus().catch(() => null);
-        if (!droppedFromPoll(connectionState, intentRef.current.intent, status)) return;
-        if (publishObserved(generation, "disconnected") === null) return;
-        setTunnelDropped(true);
-        setConnectedAt(null);
-        strikesRef.current = 0;
-        sessionTrackerRef.current.broken();
+        const disturbed = statusDisturbances.since(mark);
+        if (!droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)) return;
+        publishDrop(generation);
       } finally {
         livenessInFlightRef.current = false;
       }

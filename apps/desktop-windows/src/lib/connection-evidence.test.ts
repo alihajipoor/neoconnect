@@ -9,6 +9,7 @@ import {
   headlineFor,
   isTunnelUp,
   LIVENESS_POLL_MS,
+  noTunnelVerified,
   stateFromStatus,
   type VpnStatus,
 } from "./connection-evidence";
@@ -275,22 +276,37 @@ describe("the wiring the pure functions cannot check", () => {
  * 17.0 seconds (8.1 in Custom mode), then "You're not protected --
  * Connect to encrypt your traffic", which describes someone who never
  * connected. These pin the app's half: the drop is recognised from one
- * status answer, nothing but a real answer counts, and the words change.
+ * status answer, nothing but the service's verified "no tunnel" counts
+ * -- not a failed call, not its busy fallback's guess, not an answer our
+ * own Custom-mode change or probe disturbed -- and the words change.
  * ------------------------------------------------------------------ */
 
 describe("noticing that the tunnel has gone", () => {
   const LIVE: ConnectionState[] = ["connected", "unverified", "degraded"];
   const NOT_LIVE: ConnectionState[] = ["disconnected", "unknown", "connecting", "verifying", "disconnecting"];
+  /** The service's own "nothing is running": from the engine it holds,
+   * or the record of that engine ending. */
+  const ENDED: Pick<VpnStatus, "connected" | "health"> = { connected: false, health: { state: "down" } };
+  /** What a current service's fallback says while its owning thread is
+   * busy and it can see no tunnel: nothing proved either way. */
+  const GUESSED: Pick<VpnStatus, "connected" | "health"> = { connected: false, health: { state: "unknown" } };
 
   it("takes the service at its word when it says nothing is running", () => {
     for (const shown of LIVE) {
-      expect(droppedFromPoll(shown, "idle", { connected: false }), shown).toBe(true);
+      expect(droppedFromPoll(shown, "idle", ENDED, false), shown).toBe(true);
     }
   });
 
   it("does not treat a live answer as anything", () => {
+    const answers: Pick<VpnStatus, "connected" | "health">[] = [
+      { connected: true, health: { state: "alive", age_secs: 3 } },
+      { connected: true, health: { state: "unknown" } },
+      { connected: true, health: { state: "neverHandshaked" } },
+    ];
     for (const shown of LIVE) {
-      expect(droppedFromPoll(shown, "idle", { connected: true }), shown).toBe(false);
+      for (const answer of answers) {
+        expect(droppedFromPoll(shown, "idle", answer, false), `${shown} ${answer.health.state}`).toBe(false);
+      }
     }
   });
 
@@ -299,7 +315,29 @@ describe("noticing that the tunnel has gone", () => {
     // "Can't tell right now"; turning one into "connection lost" would
     // tell somebody their tunnel failed on no evidence at all.
     for (const shown of LIVE) {
-      expect(droppedFromPoll(shown, "idle", null), shown).toBe(false);
+      expect(droppedFromPoll(shown, "idle", null, false), shown).toBe(false);
+    }
+  });
+
+  it("never calls the busy service's guess a drop", () => {
+    // The fallback's "no tunnel" is an adapter not seen, or PowerShell
+    // not answering -- both of which happen with a tunnel up: a
+    // Custom-mode rebuild takes the Xray adapter down for seconds, and
+    // PowerShell times out. A current service says so with `unknown`.
+    for (const shown of LIVE) {
+      expect(droppedFromPoll(shown, "idle", GUESSED, false), shown).toBe(false);
+    }
+    expect(noTunnelVerified(GUESSED)).toBe(false);
+    expect(noTunnelVerified(ENDED)).toBe(true);
+    expect(noTunnelVerified({ connected: true, health: { state: "down" } })).toBe(false);
+  });
+
+  it("never calls an answer our own Custom-mode change or probe disturbed a drop", () => {
+    // What covers a 0.9.43 service, which says `down` for the guess too,
+    // and the probe race: an answer the probe or a rebuild may have
+    // caught is set aside whatever it says.
+    for (const shown of LIVE) {
+      expect(droppedFromPoll(shown, "idle", ENDED, true), shown).toBe(false);
     }
   });
 
@@ -308,14 +346,14 @@ describe("noticing that the tunnel has gone", () => {
     // connect starts with, both produce `connected: false` while the
     // screen still shows a tunnel. Neither is a drop.
     for (const shown of LIVE) {
-      expect(droppedFromPoll(shown, "disconnect", { connected: false }), shown).toBe(false);
-      expect(droppedFromPoll(shown, "connect", { connected: false }), shown).toBe(false);
+      expect(droppedFromPoll(shown, "disconnect", ENDED, false), shown).toBe(false);
+      expect(droppedFromPoll(shown, "connect", ENDED, false), shown).toBe(false);
     }
   });
 
   it("has nothing to say when nothing was being claimed", () => {
     for (const shown of NOT_LIVE) {
-      expect(droppedFromPoll(shown, "idle", { connected: false }), shown).toBe(false);
+      expect(droppedFromPoll(shown, "idle", ENDED, false), shown).toBe(false);
     }
   });
 
@@ -327,7 +365,7 @@ describe("noticing that the tunnel has gone", () => {
     expect(headlineFor(shown, { dropped: false, customMode: false }).title).toBe("dash.protected");
 
     const answer = status({ connected: false, protocol: null, health: { state: "down" } });
-    expect(droppedFromPoll(shown, "idle", answer)).toBe(true);
+    expect(droppedFromPoll(shown, "idle", answer, false)).toBe(true);
     const next = stateFromStatus(answer);
     expect(next).toBe("disconnected");
 
@@ -384,6 +422,14 @@ describe("the liveness wiring the pure functions cannot check", () => {
   const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
   const start = dashboard.indexOf("const look = async () => {");
   const end = dashboard.indexOf("const id = setInterval(() => void look(), LIVENESS_POLL_MS);", start);
+  const look = dashboard.slice(start, end);
+  const checkStart = dashboard.indexOf("const check = async () => {");
+  const check = dashboard.slice(
+    checkStart,
+    dashboard.indexOf("const id = setInterval(() => void check(), HEALTH_POLL_MS);", checkStart),
+  );
+  const dropStart = dashboard.indexOf("function publishDrop(generation: number): boolean {");
+  const publishDrop = dashboard.slice(dropStart, dashboard.indexOf("\n  }\n", dropStart));
 
   it("polls liveness on its own interval", () => {
     expect(start).toBeGreaterThan(0);
@@ -391,23 +437,44 @@ describe("the liveness wiring the pure functions cannot check", () => {
   });
 
   it("decides through the rule and publishes through the stamp", () => {
-    const look = dashboard.slice(start, end);
-    expect(look).toContain("droppedFromPoll(connectionState, intentRef.current.intent, status)");
-    expect(look).toContain('publishObserved(generation, "disconnected")');
+    expect(look).toContain("droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)");
+    expect(look).toContain("publishDrop(generation)");
     expect(look).toContain("const generation = intentRef.current.generation;");
     expect(look).not.toContain("setConnectionState(");
   });
 
   it("stays cheap: no egress request and no probe every second", () => {
-    const look = dashboard.slice(start, end);
     expect(look).not.toContain("verifyEgress");
     expect(look).not.toContain("vpn_probe_split_tunnel");
   });
 
-  it("words the slower poll's drop the same way", () => {
-    expect(dashboard).toContain(
-      'droppedFromPoll(connectionState, intentRef.current.intent, { connected: false })',
-    );
+  it("sets aside an answer the probe or a Custom-mode change may have caught", () => {
+    // Not starting while one runs is not enough: the health poll starts
+    // the probe after its own status returns, so a probe can begin while
+    // a look is already waiting. The mark is taken before asking and
+    // read after.
+    expect(look).toContain("if (statusDisturbances.busy()) return;");
+    const asked = look.indexOf("await serviceStatus()");
+    expect(asked).toBeGreaterThan(0);
+    expect(look.indexOf("const mark = statusDisturbances.mark();")).toBeGreaterThan(0);
+    expect(look.indexOf("const mark = statusDisturbances.mark();")).toBeLessThan(asked);
+    expect(look.indexOf("statusDisturbances.since(mark)")).toBeGreaterThan(asked);
+    // And the probe is what marks itself.
+    expect(check).toContain("statusDisturbances.begin(PROBE_CAP_MS)");
+  });
+
+  it("words the slower poll's drop the same way, through the same rule", () => {
+    expect(check).toContain("droppedFromPoll(connectionState, intentRef.current.intent, status, disturbed)");
+    expect(check).toContain("publishDrop(generation)");
+    // And a "no tunnel" it cannot trust is a miss there, not a verdict.
+    expect(check).toContain("if (!status.connected && (disturbed || !noTunnelVerified(status))) {");
+  });
+
+  it("says 'connection lost' in one place, through the stamp", () => {
+    expect(dropStart).toBeGreaterThan(0);
+    expect(publishDrop).toContain('publishObserved(generation, "disconnected")');
+    expect(publishDrop).toContain("setTunnelDropped(true)");
+    expect(dashboard.split("setTunnelDropped(true)").length).toBe(2);
   });
 
   it("takes the headline from the table rather than re-deriving it", () => {
