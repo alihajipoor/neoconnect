@@ -86,12 +86,14 @@ export interface AttemptReport {
    * the start and no client sent it until 0.9.39 / 0.2.22, so every
    * unreachable row had a null here. When it was finally sent it was the
    * hostname of every address the client *would* try -- 233 characters
-   * with the current bundle, against a server limit of 200 -- so the
-   * server refused each of those reports with a 400, `send` counted the
-   * 400 as delivered, and they were lost without trace. A comment here
-   * also read the missing rows as Windows reaching the API less often
-   * than Android; the rows were the mobile app's iOS builds mislabelled
-   * as Windows (see `detectPlatform`).
+   * with the current bundle by the code, against a server limit of 200,
+   * which would have been a 400 that `send` counted as delivered. That
+   * was once written up as every such report lost; production's log
+   * says no 400 was answered (14 days to 2026-10-06: 1079 POSTs answered
+   * 204, none 400), and no row has the field set -- no report carrying
+   * the list arrived at all. A comment here also read the rows as Windows
+   * reaching the API less often than Android; they were the mobile app's
+   * iOS builds mislabelled as Windows (see `detectPlatform`).
    *
    * So it is now what actually happened, address by address, and its
    * length is fitted here and again in `send` rather than trusted. */
@@ -314,8 +316,8 @@ export async function reportAttempt(report: AttemptReport): Promise<void> {
       // validation, losing the whole report over its least important
       // field.
       reason: report.reason?.slice(0, 500),
-      // The same, for the field that actually was lost that way: every
-      // unreachable report from 0.9.39 to 0.9.43 overran it.
+      // The same, for the one field long enough to hit its limit: the
+      // hostname list 0.9.39 to 0.9.43 send would overrun the old 200.
       apiEndpoint: shaped.apiEndpoint === undefined ? undefined : clipTrace(shaped.apiEndpoint, API_ENDPOINT_MAX),
     };
 

@@ -137,8 +137,9 @@ describe("the throttle", () => {
   });
 });
 
-/** The field that lost every report it was on: a server limit of 200,
- * a list of 233, a 400 the client counted as delivered. */
+/** The field that can make the server refuse a whole report: a limit of
+ * 200 on the server still in production, traces far longer, and a 400
+ * the client counts as delivered. */
 describe("the length of apiEndpoint", () => {
   const trace = Array.from({ length: 40 }, (_, i) => `edge-${i}.example.org:2053=timeout@8000`).join(" ");
   const unreachable = { kind: "CONNECT" as const, outcome: "CONTROL_PLANE_UNREACHABLE" as const };

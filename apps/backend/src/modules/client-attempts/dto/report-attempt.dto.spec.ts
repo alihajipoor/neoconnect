@@ -62,17 +62,20 @@ describe("ReportAttemptDto", () => {
   });
 });
 
-/** The field that was capped at 200 and thereby lost every report it was
- * meant to explain. Names are RFC 2606 stand-ins of realistic length --
- * the real list is not committed (docs/node-address-hygiene.md). */
+/** The field that was capped at 200 -- shorter than what the shipped
+ * clients would put in it. Names are RFC 2606 stand-ins of realistic
+ * length; the real list is not committed (docs/node-address-hygiene.md). */
 describe("ReportAttemptDto apiEndpoint", () => {
   const unreachable = { ...base, kind: "CONNECT", outcome: "CONTROL_PLANE_UNREACHABLE", appVersion: "0.9.42" };
   /** 26 characters, the length of a node mirror's host:port today. */
   const mirror = (i: number) => `mirror-${String(i).padStart(2, "0")}.example-edge.net:2053`;
 
   /** What 0.9.39 to 0.9.43 and mobile 0.2.22 send: every hostname they
-   * would try, comma-joined. Eleven with today's bundle came to 233
-   * characters, which the old limit refused with a 400. */
+   * would try, comma-joined. Eleven with today's bundle come to 233
+   * characters by the code, which the old limit would refuse with a 400.
+   * Production logged no such 400 (see API_ENDPOINT_MAX_LENGTH): no
+   * report carrying the list arrived in the 14 days it covers, but one
+   * must be accepted when it does. */
   it("accepts the hostname list shipped clients already send", async () => {
     const hosts = Array.from({ length: 11 }, (_, i) => `mirror-${i}.example-edge.net`).join(",");
     expect(hosts.length).toBeGreaterThan(200);

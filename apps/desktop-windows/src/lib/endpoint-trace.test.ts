@@ -102,8 +102,7 @@ describe("clipTrace", () => {
     expect(clipTrace("req: a.example=net@3", 200)).toBe("req: a.example=net@3");
   });
 
-  /** Over the limit the server refuses the whole report, which is how
-   * every report carrying this field was lost. */
+  /** Over the limit the server refuses the whole report with a 400. */
   it("cuts on an entry boundary, says so, and fits", () => {
     for (const max of [LEGACY_API_ENDPOINT_MAX, 500, 64]) {
       const clipped = clipTrace(`req: ${long}`, max);

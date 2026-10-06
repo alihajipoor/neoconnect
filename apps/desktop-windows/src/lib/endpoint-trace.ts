@@ -156,10 +156,9 @@ const CUT_MARK = " [cut]";
 /** Shortens a rendered trace to `max` characters, on an entry boundary.
  *
  * Length is the one thing that can make the server refuse the whole
- * report -- that is exactly how every report carrying this field was
- * lost until the limit was raised -- so the field is fitted here rather
- * than trusted to fit. Whole entries are dropped from the end, oldest
- * kept, and the mark says something was. */
+ * report -- a 400, which `send` counts as delivered -- so the field is
+ * fitted here rather than trusted to fit. Whole entries are dropped from
+ * the end, oldest kept, and the mark says something was. */
 export function clipTrace(text: string, max: number): string {
   if (text.length <= max) return text;
   const room = Math.max(0, max - CUT_MARK.length);

@@ -369,21 +369,29 @@ day" query, which the 14-day retention cuts to about 14):
 - `apiEndpoint` is NULL on every row of every platform, and `asn` on
   every row older than 0.2.22 / 0.9.43.
 
-Two things make even the corrected numbers weaker than they look:
+**Most mobile "connect" rows were not connects,** which makes even the
+corrected numbers weaker than they look. The refresh that files them
+also runs on every foreground and every `online` event once the
+snapshot is ten minutes old, and reported itself as "connecting on
+cached credentials" regardless. Offline devices queue up to 25 and
+flush them later, and by the code a flush over twenty a minute would
+be throttled and the throttled reports dropped. So 149 of 251 is not
+"59% of connects fail".
 
-- **Desktop's zero only covers 0.9.29–0.9.38.** From 0.9.39 the client
-  filled `apiEndpoint` with every hostname it would try — 233
-  characters with the current bundle — against a server limit of 200.
-  The server answered 400, the client counted that as delivered, and
-  every unreachable report from 0.9.39–0.9.43 (and mobile 0.2.22) was
-  lost. For those versions the rate is unobservable, not zero.
-- **Most mobile "connect" rows were not connects.** The refresh that
-  files them also runs on every foreground and every `online` event
-  once the snapshot is ten minutes old, and reported itself as
-  "connecting on cached credentials" regardless. Offline devices queue
-  up to 25 and flush them later, and a flush over twenty a minute was
-  throttled and silently dropped. So 149 of 251 is not "59% of connects
-  fail".
+**Desktop's zero is not undermined by a 400.** An earlier version of
+this section said it was: from 0.9.39 the client fills `apiEndpoint`
+with every hostname it would try — 233 characters with the current
+bundle, worked out from the code — against a server limit of 200, so it
+concluded the server answered every such report 400, the client
+counted that as delivered, and the rate for 0.9.39 on was unobservable.
+Production's nginx log refutes it: in the 14 days to 2026-10-06 it
+answered 1079 `POST /api/client-attempts` with 204 and not one with a
+400, and no stored row has `apiEndpoint` set. So no report carrying the
+hostname list arrived at all, and nothing was lost to the limit; the
+zero for desktop 0.9.39–0.9.42 above is as good as the zero for the
+builds before it. What no count of delivered reports can see, for any
+version, is a report still queued on a device that has not reached the
+server since.
 
 What `claude/control-plane-telemetry` changes, so the next two weeks
 of rows can answer this: the server accepts `apiEndpoint` up to 2000

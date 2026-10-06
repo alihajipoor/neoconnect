@@ -17,21 +17,27 @@ import {
 
 /** The longest `apiEndpoint` accepted.
  *
- * It was 200, and that silently threw away every report it was meant to
- * explain. Clients from desktop 0.9.39 and mobile 0.2.22 on fill it with
- * the hostname of every control-plane address they would try -- eleven
- * of them with the current endpoint bundle, 233 characters before any
- * node mirrors are added -- and only on a CONTROL_PLANE_UNREACHABLE
- * report. Over the limit the global ValidationPipe answers 400, the
- * client counts a 400 as delivered (attempts.ts `send`), and the report
- * is neither stored nor queued. So every unreachable report those builds
- * sent was lost, and "no unreachable reports from 0.9.39 on" in the data
- * means nothing at all.
+ * It was 200. Clients from desktop 0.9.39 and mobile 0.2.22 on fill it
+ * with the hostname of every control-plane address they would try, and
+ * only on a CONTROL_PLANE_UNREACHABLE report; worked out from the code,
+ * eleven names with the current endpoint bundle come to 233 characters.
+ * Over the limit the global ValidationPipe answers 400, and the client
+ * counts a 400 as delivered (attempts.ts `send`), so such a report would
+ * be neither stored nor queued.
+ *
+ * It was once written here that every unreachable report from those
+ * builds had been lost that way. The server's own log says otherwise:
+ * in the 14 days to 2026-10-06 production answered 1079 POST
+ * /api/client-attempts with 204 and not one with a 400 -- and no stored
+ * row has `apiEndpoint` set. So no report carrying the list arrived at
+ * all in that window; the 400 was never put to the test.
  *
  * 2000 holds the per-address trace newer clients send -- address,
  * outcome and milliseconds for each one tried, in each phase -- with
- * room for the mirror list to grow. Still bounded, because this endpoint
- * is unauthenticated; the column is TEXT, so no migration. */
+ * room for the mirror list to grow. A newer client sending that to a
+ * server still on 200 would hit the 400; it resends once cut to fit (see
+ * `send`). Still bounded, because this endpoint is unauthenticated; the
+ * column is TEXT, so no migration. */
 export const API_ENDPOINT_MAX_LENGTH = 2000;
 
 /** One rung of the failover ladder, as the app recorded it.

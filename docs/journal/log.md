@@ -2778,17 +2778,29 @@ carried the seed since 4174b7c. The source comments repeating the claim
 are fixed on the branch, and `docs/windows-service-rewrite.md` "What
 this does not fix" is rewritten with the numbers.
 
-Also found by reading, and fixed on the branch: every unreachable
-report from desktop 0.9.39–0.9.43 and mobile 0.2.22 was **lost** (its
-`apiEndpoint` hostname list overran the DTO's 200-character limit; 400;
-counted as delivered), so desktop's zero means nothing past 0.9.38;
-resume/online refreshes were reported as connects; a 429 dropped queued
-reports; and the release prebuild could overwrite a fetched seed with
-the placeholder on a transient failure.
+Also found by reading, and fixed on the branch: resume/online
+refreshes were reported as connects; a 429 dropped queued reports; and
+the release prebuild could overwrite a fetched seed with the
+placeholder on a transient failure.
+
+**Correction: nothing was lost to the 400.** This entry first said, as
+the commit messages of a67ea1b, c1a9689 and f6d4b52 still do, that
+every unreachable report from desktop 0.9.39–0.9.43 and mobile 0.2.22
+was lost -- its `apiEndpoint` hostname list (233 characters, worked out
+from the code) over the DTO's 200-character limit, answered 400,
+counted as delivered -- so desktop's zero meant nothing past 0.9.38.
+That was reasoned from the code and never checked against the server.
+Production's nginx log for the 14 days to 2026-10-06 has 1079
+`POST /api/client-attempts` answered 204 and **not one 400**, and no
+stored row has `apiEndpoint` set: no report carrying the hostname list
+arrived at all. Desktop's zero stands for 0.9.39–0.9.42 as it does
+before. The raised limit and the client's resend-cut-to-200 are still
+right -- the new trace is longer than 200 and production still enforces
+200 -- but they prevent a future loss, not a past one. The comments and
+docs that repeated the claim are corrected on the branch.
 
 **Deploy order:** backend first. Until it is, new clients still work --
-a 400 on a long `apiEndpoint` is resent once cut to 200 -- but the
-already-shipped 0.9.39+/0.2.22 reports go on being lost. No migration.
+a 400 on a long `apiEndpoint` is resent once cut to 200. No migration.
 
 **Reading old rows** (they age out by about 2026-10-20; nothing was
 rewritten): treat `platform = 'windows' AND "appVersion" LIKE '0.2.%'`
