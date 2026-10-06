@@ -36,7 +36,7 @@ const { ipv4OnlyHealthIp } = await import("./health-ip-v4");
 setHealthIpTransport(ipv4OnlyHealthIp);
 
 const CDN = "https://connect.neoxify.site/api";
-const MIRROR = "https://fi1.neoxify.site:2053/api";
+const MIRROR = "https://mirror.example.net:2053/api";
 
 afterEach(() => {
   endpoints.mockReset();
