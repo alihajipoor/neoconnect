@@ -79,6 +79,7 @@ import {
   type Dial,
 } from "@shared/lib/attempts";
 import {
+  createSlotTeardown,
   deviceSlot,
   slotNoticeStore,
   slotStop,
@@ -92,7 +93,6 @@ import {
   claimWhileRefreshing,
   renewInForeground,
   slotTeardownAttempt,
-  tearDownForSlot,
   whenForegrounded,
 } from "../lib/device-slot-steps";
 import { loadAllowedApps } from "../lib/per-app";
@@ -373,10 +373,26 @@ export function Dashboard({
    * than starting a second. Beside the slot, like the card; see
    * `slotTeardown`. */
   const slotTeardownState = useSyncExternalStore(slotTeardown.subscribe, slotTeardown.state);
-  /** That teardown, while the screen shows it under way. Worded as what
-   * it is -- still disconnecting -- not as "You're not protected", which
-   * the platform has not said. */
-  const slotTeardownShowing = slotTeardownState !== "none" && connectionState === "disconnecting";
+  /** The customer's own teardown -- Disconnect, a stop pressed during a
+   * connect, or a tunnel a connect has to clear first -- from the press
+   * until the platform says the tunnel is down.
+   *
+   * The same bookkeeping as the device limit's (one attempt at a time,
+   * each bounded, tried again on the poll while it has not finished),
+   * kept apart from it because what is said differs: no card waits on
+   * this one, and its line is the plain one that the tunnel is still
+   * shutting down. One that did not finish used to be shown as
+   * "degraded", whose words -- the server isn't responding -- are about a
+   * server nothing measured. What is true is that the phone is still
+   * disconnecting. Per screen: back from Settings, the dashboard shows
+   * what the platform says. */
+  const [customerTeardown] = useState(createSlotTeardown);
+  const customerTeardownState = useSyncExternalStore(customerTeardown.subscribe, customerTeardown.state);
+  /** A teardown, either one, while the screen shows it under way. Worded
+   * as what it is -- still disconnecting -- not as "You're not
+   * protected", which the platform has not said. */
+  const teardownShowing =
+    (slotTeardownState !== "none" || customerTeardownState !== "none") && connectionState === "disconnecting";
 
   useEffect(() => {
     // The remembered route is read first and handed straight to
@@ -501,25 +517,29 @@ export function Dashboard({
     // activity is destroyed, so on open the screen has to adopt whatever
     // is actually running rather than assume disconnected.
     let adopted: ConnectionState = "disconnected";
+    // A teardown still owed -- the device limit's, or the customer's own
+    // when this runs again on the same screen (a new location, the retry
+    // button) -- is the one that decides what a tunnel still up is.
+    const tearingDown = slotTeardown.owed() || customerTeardown.owed();
     try {
       adopted = stateFromStatus(await vpnStatus());
-      // A tunnel the device limit is still taking down is shown as that,
-      // never as a connection -- back from Settings mid-teardown included.
-      setConnectionState(slotTeardownShown(slotTeardown.owed(), adopted));
+      // A tunnel still being taken down is shown as that, never as a
+      // connection -- back from Settings mid-teardown included.
+      setConnectionState(slotTeardownShown(tearingDown, adopted));
     } catch {
-      // Not "disconnected" while the device limit's teardown is owed:
-      // that would put up the card that waits for the tunnel to be down,
-      // on the strength of a question nobody answered.
-      setConnectionState(slotTeardown.owed() ? "disconnecting" : "disconnected");
+      // Not "disconnected" while a teardown is owed: that would put up
+      // the card that waits for the tunnel to be down, on the strength of
+      // a question nobody answered.
+      setConnectionState(tearingDown ? "disconnecting" : "disconnected");
     }
 
     // A tunnel this screen did not bring up -- the app reopened over a
     // running VpnService, or the dashboard back from Settings -- still
     // uses one of the plan's devices. Back from Settings, what was known
     // about its slot stands; otherwise nothing is known, and the first
-    // foreground poll claims it. Not one the device limit is taking down:
-    // that one is being given up, and the retry below goes on doing so.
-    if (adopted !== "disconnected" && !slotTeardown.owed()) {
+    // foreground poll claims it. Not one being taken down: that one is
+    // being given up, and the retry below goes on doing so.
+    if (adopted !== "disconnected" && !tearingDown) {
       deviceSlot.adopt({ subscriptionId: sub?.id, deviceLimit: sub?.deviceLimit });
     }
 
@@ -636,13 +656,29 @@ export function Dashboard({
     };
   }, [slotTeardownState]);
 
-  /** One attempt at the device limit's teardown. */
-  const slotTeardownOnce = slotTeardownAttempt({ disconnect, waitForTeardown });
+  // The customer's own teardown, tried again the same way while it has
+  // not finished: what they asked for is the tunnel down, and a phone
+  // left on "Disconnecting..." with nothing asking again would only be a
+  // new way to be stuck.
+  useEffect(() => {
+    if (customerTeardownState !== "stuck") return;
+    const id = setInterval(() => void retryCustomerTeardown(), HEALTH_POLL_MS);
+    const stopWatching = whenForegrounded(() => void retryCustomerTeardown());
+    return () => {
+      clearInterval(id);
+      stopWatching();
+    };
+  }, [customerTeardownState]);
 
-  /** What an attempt at it came to, on screen: down on the platform's
-   * word, or still disconnecting -- never "connected" or "degraded" over
-   * a tunnel this phone was told to give up. */
-  function settleSlotTeardown(result: "down" | "stuck" | null) {
+  /** One attempt at a teardown, either one: the disconnect, then the
+   * platform's word, each bounded (see `tearDownForSlot`). */
+  const teardownOnce = slotTeardownAttempt({ disconnect, waitForTeardown });
+
+  /** What an attempt came to, on screen: down on the platform's word, or
+   * still disconnecting -- never "connected" or "degraded" over a tunnel
+   * this phone is giving up. "degraded" says the server isn't responding,
+   * and nothing measured that. */
+  function settleTeardown(result: "down" | "stuck" | null) {
     if (result === "down") {
       setConnectionState("disconnected");
       setConnectedAt(null);
@@ -653,7 +689,11 @@ export function Dashboard({
   }
 
   async function retrySlotTeardown() {
-    settleSlotTeardown(await slotTeardown.retry(slotTeardownOnce));
+    settleTeardown(await slotTeardown.retry(teardownOnce));
+  }
+
+  async function retryCustomerTeardown() {
+    settleTeardown(await customerTeardown.retry(teardownOnce));
   }
 
   async function handleConnectToggle() {
@@ -671,6 +711,15 @@ export function Dashboard({
       return;
     }
 
+    // The customer's own teardown has not finished: a press on
+    // "Disconnecting..." is that teardown, asked for again now -- never a
+    // connect over a tunnel the platform still has up.
+    if (customerTeardown.owed()) {
+      setConnectionState("disconnecting");
+      await retryCustomerTeardown();
+      return;
+    }
+
     // Pressing the button during an attempt means stop, not start
     // another. Handled before the connect path below, which would
     // otherwise begin a second ladder on top of the running one.
@@ -681,30 +730,14 @@ export function Dashboard({
       void deviceSlot.release();
       setSlotNotice(null);
       setConnectionState("disconnecting");
-      try {
-        await disconnect();
-      } catch (err) {
-        // Reported, not swallowed: a teardown that could not even be
-        // requested is not a disconnect.
-        setConnectionError(classifyConnectionError(err));
-        setConnectionState("degraded");
-        return;
-      }
-      if (!(await waitForTeardown())) {
-        // Still in a tunnel. Saying "disconnected" here is the lie that
-        // sent customers to Android's settings to force-stop the app
-        // before their internet came back.
-        setConnectionError({
-          kind: "unknown",
-          messageKey: "err.teardownStuck",
-          detail: "still routed through a VPN after disconnecting",
-        });
-        setConnectionState("degraded");
-        return;
-      }
-      setConnectionState("disconnected");
-      setConnectedAt(null);
-      setExitIp(null);
+      // Down only on the platform's word. Still in a tunnel, the phone
+      // stays shown as disconnecting, with the line that says so, and the
+      // teardown is tried again on the poll: saying "disconnected" here is
+      // the lie that sent customers to Android's settings to force-stop
+      // the app before their internet came back. The platform is asked
+      // even when the disconnect call failed -- a call that failed may
+      // still have stopped the engine.
+      settleTeardown(await customerTeardown.begin(teardownOnce));
       return;
     }
 
@@ -717,28 +750,9 @@ export function Dashboard({
       void deviceSlot.release();
       setSlotNotice(null);
       setConnectionState("disconnecting");
-      try {
-        await disconnect();
-        if (!(await waitForTeardown())) {
-          setConnectionError({
-            kind: "unknown",
-            messageKey: "err.teardownStuck",
-            detail: "still routed through a VPN after disconnecting",
-          });
-          setConnectionState("degraded");
-          return;
-        }
-        setConnectionState("disconnected");
-        setConnectedAt(null);
-        setExitIp(null);
-      } catch (err) {
-        // The tunnel is still up -- that is what the failure means --
-        // but a disconnect that could not finish is not a healthy
-        // connection either, and the customer needs to see that rather
-        // than a green orb.
-        setConnectionError(classifyConnectionError(err));
-        setConnectionState("degraded");
-      }
+      // As above: down on the platform's word, or still disconnecting and
+      // tried again -- not a green orb, and not "degraded" either.
+      settleTeardown(await customerTeardown.begin(teardownOnce));
       return;
     }
 
@@ -757,40 +771,31 @@ export function Dashboard({
     // over it would hand the next engine a descriptor the last one has
     // not let go of, so if it does not come down, nothing is dialled, and
     // the card stays up beside the line that says the disconnect did not
-    // finish.
-    const owed = slotTeardown.owed();
-    const ownTeardown = !owed && (connectionState === "connected" || connectionState === "degraded");
-    if (owed || ownTeardown) setConnectionState("disconnecting");
-    const pendingTeardown = owed
-      ? slotTeardown.retry(slotTeardownOnce)
-      : ownTeardown
-        ? tearDownForSlot({ disconnect, waitForTeardown })
-        : null;
-    if (pendingTeardown) {
-      if ((await pendingTeardown) === "stuck") {
-        if (owed) {
-          // Still owed; the stuck line says so, and the retry goes on.
-          setConnectionState("disconnecting");
-          return;
-        }
-        setConnectionError({
-          kind: "unknown",
-          messageKey: "err.teardownStuck",
-          detail: "still routed through a VPN; not dialling over it",
-        });
-        setConnectionState("degraded");
-        return;
-      }
-      // Down, on the platform's word -- and said, so a connect that
-      // stops at the consent dialog below does not leave the orb on
-      // "disconnecting".
-      setConnectionState("disconnected");
-      setConnectedAt(null);
-      setExitIp(null);
+    // finish. The customer's own teardown, still owed or started here for
+    // a tunnel still up, is the same: tried, and if it does not finish,
+    // left owed and retried, with the line that says so -- shown as
+    // still disconnecting, never "degraded", which would say the server
+    // isn't responding when nothing measured that.
+    const slotOwed = slotTeardown.owed();
+    const customerOwed = customerTeardown.owed();
+    const tunnelUp = connectionState === "connected" || connectionState === "degraded";
+    if (slotOwed || customerOwed || tunnelUp) {
+      setConnectionState("disconnecting");
+      const result = slotOwed
+        ? await slotTeardown.retry(teardownOnce)
+        : customerOwed
+          ? await customerTeardown.retry(teardownOnce)
+          : await customerTeardown.begin(teardownOnce);
+      // Down, on the platform's word -- and said, so a connect that stops
+      // at the consent dialog below does not leave the orb on
+      // "disconnecting". Not down: nothing is dialled over it.
+      settleTeardown(result);
+      if (result === "stuck") return;
     }
 
     // Their own connect from here; nothing is owed any more.
     slotTeardown.clear();
+    customerTeardown.clear();
     setConnectionError(null);
     setPermissionDenied(false);
     setSlotNotice(null);
@@ -890,7 +895,7 @@ export function Dashboard({
     // Down only on the platform's word. Still routed through a VPN, the
     // phone stays shown as disconnecting: "disconnected" would be the lie
     // the toggle's own teardown refuses to tell.
-    settleSlotTeardown(await slotTeardown.begin(slotTeardownOnce));
+    settleTeardown(await slotTeardown.begin(teardownOnce));
   }
 
   /** Works down the credentials this subscription holds until one is
@@ -1456,11 +1461,12 @@ export function Dashboard({
                               : "text-sm font-semibold text-foreground"
                         }
                       >
-                        {/* The device limit's teardown, while it runs:
-                            the platform has not said the tunnel is down,
-                            so "You're not protected" is not the headline
-                            -- still disconnecting is. */}
-                        {slotTeardownShowing
+                        {/* A teardown, the device limit's or the
+                            customer's own, while it runs: the platform
+                            has not said the tunnel is down, so "You're
+                            not protected" is not the headline -- still
+                            disconnecting is. */}
+                        {teardownShowing
                           ? t("dash.disconnecting")
                           : connectionState === "connected"
                           ? t("dash.protected")
@@ -1472,7 +1478,7 @@ export function Dashboard({
                               : t("dash.notProtected")}
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        {slotTeardownShowing
+                        {teardownShowing
                           ? null
                           : connectionState === "connected"
                           ? t("dash.protectedHint")
@@ -1534,6 +1540,14 @@ export function Dashboard({
                       {slotTeardownState === "stuck" ? (
                         <p className="text-xs text-destructive">
                           {t("slots.teardownStuck")}
+                        </p>
+                      ) : customerTeardownState === "stuck" ? (
+                        // The customer's own Disconnect has not been
+                        // confirmed: said, kept while the retry keeps
+                        // trying, and gone once the platform says the
+                        // tunnel is down.
+                        <p className="text-xs text-destructive">
+                          {t("err.teardownStuck")}
                         </p>
                       ) : null}
                       {permissionDenied ? (

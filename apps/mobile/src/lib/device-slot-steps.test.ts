@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** The phone's half of the plan's device limit, through the shared slot
@@ -664,5 +665,38 @@ describe("Disconnect", () => {
 
     await slot.release();
     expect(calls.map((c) => c.path)).toEqual(["/customer/vpn/claim"]);
+  });
+});
+
+/** Source assertions, for the reason the Windows client's
+ * `connect-intent.test.ts` gives: the dashboard needs a phone, a tunnel
+ * and a network, so nothing here can watch what it shows. */
+describe("the wiring the pure functions cannot check", () => {
+  const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+  const start = dashboard.indexOf("async function handleConnectToggle()");
+  const end = dashboard.indexOf("/** Says why the device limit stopped this phone", start);
+  const presses = dashboard.slice(start, end);
+
+  it("finds the press handlers", () => {
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(presses).toContain("async function connectNow(");
+  });
+
+  /** The customer's own Disconnect, a stop pressed mid-connect and a
+   * connect clearing a tunnel first all showed "degraded" when the
+   * teardown did not finish -- "the server isn't responding", which
+   * nothing had measured. */
+  it("never shows a teardown that did not finish as degraded", () => {
+    expect(presses).not.toContain('setConnectionState("degraded")');
+  });
+
+  it("keeps the customer's own teardown owed, retried and said until the platform confirms it", () => {
+    expect(presses).toContain("customerTeardown.begin(teardownOnce)");
+    expect(presses).toContain("customerTeardown.retry(teardownOnce)");
+    expect(dashboard).toMatch(/customerTeardownState === "stuck" \? \([^)]*\{t\("err\.teardownStuck"\)\}/);
+    expect(dashboard).toMatch(
+      /if \(customerTeardownState !== "stuck"\) return;\s*const id = setInterval\(\(\) => void retryCustomerTeardown\(\)/,
+    );
   });
 });
