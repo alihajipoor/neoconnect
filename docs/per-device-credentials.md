@@ -266,10 +266,30 @@ backend works against the migrated schema (`src/migration-safety.spec.ts`
 pins that pending migrations drop, rename and tighten nothing, and that
 the FK is SET NULL). What a rollback leaves behind:
 
-- **Device rows are served to every device.** The previous backend's
-  `GET /customer/protocol-users` has no notion of devices and returns
-  every row of the customer. Nothing breaks; credentials just stop being
-  per device until the roll-forward.
+- **Every device is served every device's rows, newest first -- and that
+  does break things.** The previous backend's `GET
+  /customer/protocol-users` returns every row of the customer ordered by
+  `createdAt desc`, and the apps take the first row for a route (they do
+  not skip a row by its `status`). So on each route a device is handed
+  some device's own credential ahead of the shared one, and:
+  - a device row no node has confirmed yet (`provisionedAt IS NULL` --
+    its node's control stream was down) is dialled first and fails,
+    recorded as a failed attempt and in the per-ISP evidence;
+  - devices cache each other's credentials. After rolling forward,
+    signing out device A revokes A's rows -- including the one device B
+    cached during the rollback and may be connected with -- and B's
+    tunnel drops until B fetches its list again (its next connect does).
+
+  **Before rolling back**, remove the unconfirmed device rows, so only
+  credentials that work are served:
+  `DELETE FROM protocol_users WHERE "sessionId" IS NOT NULL AND
+  "provisionedAt" IS NULL;` -- safe without telling the nodes, because
+  no device is ever handed a row before a node confirms it, so nobody
+  holds these (a CREATE_USER still queued for one leaves a credential
+  nobody knows, gone at the engine's next restart). Setting them
+  `DISABLED` instead is not enough: the old backend still serves them,
+  first, and the apps still dial them. The cross-device caching cannot
+  be prevented; expect those drops after the roll-forward.
 - **Device rows are never revoked on sign-out** while the old code runs,
   and its sign-in pruning turns a signed-out session's rows into shared
   ones (the SET NULL). After rolling forward, find shared rows that
