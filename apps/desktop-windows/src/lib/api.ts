@@ -2,6 +2,7 @@ import { fetch } from "@tauri-apps/plugin-http";
 import { apiEndpoints, rememberEndpoint } from "./api-endpoints";
 import { deviceHeaders } from "./device-identity";
 import { maybeRefreshBundle } from "./endpoint-bundle-store";
+import { beginAttempt, failureOutcome, settleAttempt, type EndpointTrace } from "./endpoint-trace";
 import { clearTokens, getTokens, setTokens } from "./session";
 import { announceSessionRevoked } from "./session-revoked";
 import type { TokenPair } from "./types";
@@ -22,17 +23,6 @@ import type { TokenPair } from "./types";
  */
 const ENDPOINT_TIMEOUT_MS = 8_000;
 
-/** Sends one request, trying each known endpoint until one answers.
- *
- * "Answers" means a real HTTP response, whatever its status. A 401 or a
- * 500 proves the endpoint is reachable and is the service -- moving on
- * would be wrong, and would turn one rejected password into a walk
- * through every mirror. Only a transport failure, which is what a
- * blocked address looks like, rotates to the next.
- *
- * Throws if none answered, so the callers below keep their existing
- * "could not reach Neoxify" handling unchanged.
- */
 /** Walks the endpoints, one at a time, and returns the first that answers.
  *
  * The shape every request had before 0.9.39, kept for the ones that must
@@ -44,13 +34,20 @@ const ENDPOINT_TIMEOUT_MS = 8_000;
  * Each address gets its own `ENDPOINT_TIMEOUT_MS`. That was a real
  * problem for the pre-connect config refresh, whose own budget is
  * shorter than one endpoint's timeout, so the refresh expired inside the
- * first address and never tried the rest. That path is a GET and still
- * races; nothing here is inside a shorter budget.
+ * first address and never tried the rest. Its GET now races. But this
+ * walk is still inside that budget sometimes: once the access token has
+ * expired -- it lives fifteen minutes, and the refresh only runs on a
+ * snapshot over ten minutes old, so after any real idle it has -- the
+ * GET's 401 sends the token refresh, a POST, through here before the
+ * GET is retried. The endpoint trace records which leg
+ * the budget ran out in; nothing about the walk itself is changed on the
+ * strength of that reading alone.
  */
 async function fetchOneEndpointAtATime(
   path: string,
   init: RequestInit,
   endpoints: string[],
+  trace?: EndpointTrace,
 ): Promise<Response> {
   let lastError: unknown;
   // A caller's own signal, when it brought one. Each endpoint still gets
@@ -63,15 +60,22 @@ async function fetchOneEndpointAtATime(
   for (const base of endpoints) {
     if (outer?.aborted) break;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ENDPOINT_TIMEOUT_MS);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, ENDPOINT_TIMEOUT_MS);
+    const entry = beginAttempt(trace, base);
     const onOuterAbort = () => controller.abort();
     outer?.addEventListener("abort", onOuterAbort);
     try {
       const response = await fetch(`${base}${path}`, { ...init, signal: controller.signal });
+      settleAttempt(entry, `h${response.status}`);
       void rememberEndpoint(base);
       void maybeRefreshBundle(base);
       return response;
     } catch (err) {
+      settleAttempt(entry, timedOut ? "timeout" : failureOutcome(err));
       lastError = err;
     } finally {
       clearTimeout(timer);
@@ -81,15 +85,29 @@ async function fetchOneEndpointAtATime(
   throw lastError ?? new Error(outer?.aborted ? "the request ran out of time" : "no API endpoint answered");
 }
 
-async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Response> {
+/** Sends one request, trying each known endpoint until one answers.
+ *
+ * "Answers" means a real HTTP response, whatever its status. A 401 or a
+ * 500 proves the endpoint is reachable and is the service -- moving on
+ * would be wrong, and would turn one rejected password into a walk
+ * through every mirror. Only a transport failure, which is what a
+ * blocked address looks like, rotates to the next.
+ *
+ * Throws if none answered, so the callers below keep their existing
+ * "could not reach Neoxify" handling unchanged.
+ *
+ * `trace`, when given, is told about every address tried and how each
+ * attempt ended -- see endpoint-trace.ts. It changes nothing about which
+ * addresses are tried or for how long.
+ */
+async function fetchAnyEndpoint(path: string, init: RequestInit, trace?: EndpointTrace): Promise<Response> {
   const endpoints = await apiEndpoints();
   if (endpoints.length === 0) throw new Error("no API endpoint is configured");
   // A caller whose deadline has already passed gets nothing sent on its
   // behalf, by either path below.
   if (init.signal?.aborted) throw new Error("the request ran out of time");
 
-  // Raced, not walked, and the sequential version is why Windows
-  // customers could not connect on networks where Android could.
+  // Raced, not walked.
   //
   // Each endpoint used to get its own ENDPOINT_TIMEOUT_MS of 8 seconds,
   // tried one after another, with the comment explaining that a single
@@ -97,15 +115,30 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
   // other way: the pre-connect config refresh wraps this in a 6 second
   // budget (REFRESH_BUDGET_MS), which is *shorter* than one endpoint's
   // timeout -- so if the first address did not answer, the budget
-  // expired inside it and the other seven were never tried at all. One
-  // blocked address meant the refresh always failed.
+  // expired inside it and the rest were never tried at all. One blocked
+  // address meant the refresh always failed. That much was real, and
+  // read straight off the code.
   //
-  // It bit Windows and not Android because the lists differ in length.
-  // The desktop build bakes in a seed bundle of eight endpoints and puts
-  // them ahead of the compiled-in base; the mobile build has no seed, so
-  // its first address is the one that works. Same code, same network,
-  // opposite outcome -- and 162 CONTROL_PLANE_UNREACHABLE reports from
-  // Windows in thirty days against 43 from Android.
+  // What this comment used to say next was not. It blamed that for
+  // Windows reaching the API less often than Android -- "162
+  // CONTROL_PLANE_UNREACHABLE reports from Windows in thirty days" --
+  // and explained the difference by the mobile build having no seed
+  // bundle. The "Windows" rows were the mobile app's iOS builds, which
+  // the shared attempts.ts labelled "windows" until 0.2.22: every one
+  // carries a 0.2.x version, and the real Windows client had recorded
+  // none. The arithmetic bit the mobile app before 0.2.22.
+  //
+  // The seed half is open, and for iOS only. Since 4174b7c the Android
+  // and Windows release workflows refuse to build without the seed
+  // (NEOXIFY_REQUIRE_SEED). The iOS builds, 0.2.18 to 0.2.21, were made
+  // on the Mac, where nothing required it until build-ios.sh did on
+  // this branch: a failed fetch there would have baked in the
+  // placeholder, and with it a capability scope naming only the one
+  // compiled-in domain -- the one blocked in Iran -- so every other
+  // address would be refused on the device. Whether any shipped IPA was
+  // built that way is not known; it is the leading candidate for the
+  // iOS builds' unreachable rate, and docs/windows-service-rewrite.md
+  // ("What this does not fix") says how to check it.
   //
   // Racing removes the arithmetic entirely. The slowest address costs
   // nothing because nobody waits for it, and the result arrives in one
@@ -134,11 +167,20 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
   // never safe.
   const method = (init.method ?? "GET").toUpperCase();
   if (method !== "GET" && method !== "HEAD") {
-    return await fetchOneEndpointAtATime(path, init, endpoints);
+    return await fetchOneEndpointAtATime(path, init, endpoints, trace);
   }
 
   const controllers = endpoints.map(() => new AbortController());
-  const timers = controllers.map((c) => setTimeout(() => c.abort(), ENDPOINT_TIMEOUT_MS));
+  // Which aborts were our own deadline, so the trace can say "timeout"
+  // rather than the generic transport failure the abort surfaces as.
+  const timedOut = endpoints.map(() => false);
+  const timers = controllers.map((c, i) =>
+    setTimeout(() => {
+      timedOut[i] = true;
+      c.abort();
+    }, ENDPOINT_TIMEOUT_MS),
+  );
+  const entries = endpoints.map((base) => beginAttempt(trace, base));
   // The caller's signal stops every runner at once. See
   // fetchOneEndpointAtATime for why a caller may bring one.
   const outer = init.signal ?? null;
@@ -147,18 +189,29 @@ async function fetchAnyEndpoint(path: string, init: RequestInit): Promise<Respon
   outer?.addEventListener("abort", onOuterAbort);
 
   const attempts = endpoints.map(async (base, i) => {
-    const response = await fetch(`${base}${path}`, { ...init, signal: controllers[i].signal });
-    // Only a real answer counts as a win. A request that fails rejects,
-    // and Promise.any moves on to whichever endpoint actually replied.
-    return { base, response };
+    try {
+      const response = await fetch(`${base}${path}`, { ...init, signal: controllers[i].signal });
+      settleAttempt(entries[i], `h${response.status}`);
+      // Only a real answer counts as a win. A request that fails rejects,
+      // and Promise.any moves on to whichever endpoint actually replied.
+      return { base, response };
+    } catch (err) {
+      settleAttempt(entries[i], timedOut[i] ? "timeout" : failureOutcome(err));
+      throw err;
+    }
   });
 
   try {
     const { base, response } = await Promise.any(attempts);
 
-    // Everyone else can stop; the answer is in hand.
+    // Everyone else can stop; the answer is in hand. Marked as stopped
+    // before the abort lands, so the trace reads "cancel" and not as a
+    // failure of an address that may have been about to answer.
     controllers.forEach((c, i) => {
-      if (endpoints[i] !== base) c.abort();
+      if (endpoints[i] !== base) {
+        settleAttempt(entries[i], "cancel");
+        c.abort();
+      }
     });
 
     // Remembered so the next request starts here. With a race this is no
@@ -261,14 +314,20 @@ async function failureFrom(res: Response): Promise<RequestFailure> {
   return { ok: false, error, status: res.status, ...(code !== undefined ? { code, body } : {}) };
 }
 
-/** Unauthenticated request -- login/register don't have a token yet. */
-export async function publicRequest<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
+/** Unauthenticated request -- login/register don't have a token yet.
+ *
+ * `trace` records which addresses were tried; see endpoint-trace.ts. */
+export async function publicRequest<T>(path: string, init?: RequestInit, trace?: EndpointTrace): Promise<ApiResult<T>> {
   let res: Response;
   try {
-    res = await fetchAnyEndpoint(path, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...init?.headers },
-    });
+    res = await fetchAnyEndpoint(
+      path,
+      {
+        ...init,
+        headers: { "Content-Type": "application/json", ...init?.headers },
+      },
+      trace,
+    );
   } catch {
     return unreachable();
   }
@@ -301,19 +360,23 @@ type Refresh =
   /** The refresh could not be completed; the session may well be fine. */
   | { kind: "unavailable" };
 
-async function refreshTokens(): Promise<Refresh> {
+async function refreshTokens(trace?: EndpointTrace): Promise<Refresh> {
   const current = await getTokens();
   if (!current) return { kind: "none" };
 
-  const result = await publicRequest<TokenPair>("/customer-auth/refresh", {
-    method: "POST",
-    body: JSON.stringify({ refreshToken: current.refreshToken }),
-    // What this device is called on the customer's other devices
-    // ("Neoxify is in use on Windows PC"). Sent on every refresh because
-    // a session started in the system browser could not send it, and its
-    // first refresh is what names that device. See device-identity.ts.
-    headers: deviceHeaders(),
-  });
+  const result = await publicRequest<TokenPair>(
+    "/customer-auth/refresh",
+    {
+      method: "POST",
+      body: JSON.stringify({ refreshToken: current.refreshToken }),
+      // What this device is called on the customer's other devices
+      // ("Neoxify is in use on Windows PC"). Sent on every refresh because
+      // a session started in the system browser could not send it, and its
+      // first refresh is what names that device. See device-identity.ts.
+      headers: deviceHeaders(),
+    },
+    trace,
+  );
   if (!result.ok) {
     return result.status === REFRESH_REFUSED ? { kind: "refused" } : { kind: "unavailable" };
   }
@@ -340,32 +403,42 @@ type Attempt = { answered: true; res: Response } | { answered: false; failure: R
  * Split out from `apiRequest` so a second interpretation of the
  * response -- conditional requests, below -- cannot drift from this one.
  * Every failure mode is a `RequestFailure` here rather than a thrown
- * error, so no caller can accidentally let one pass as success. */
-async function authenticatedAttempt(path: string, init?: RequestInit): Promise<Attempt> {
+ * error, so no caller can accidentally let one pass as success.
+ *
+ * With a `trace`, each leg is recorded under its own phase -- the
+ * request, the token refresh, the retry -- because which of them a
+ * failure happened in is the first thing to know about it. */
+async function authenticatedAttempt(path: string, init?: RequestInit, trace?: EndpointTrace): Promise<Attempt> {
   const tokens = await getTokens();
   if (!tokens) {
     return { answered: false, failure: { ok: false, error: "Not signed in.", sessionExpired: true } };
   }
 
   const doFetch = (accessToken: string) =>
-    fetchAnyEndpoint(path, {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-        ...init?.headers,
+    fetchAnyEndpoint(
+      path,
+      {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+          ...init?.headers,
+        },
       },
-    });
+      trace,
+    );
 
   let res: Response;
   try {
+    if (trace) trace.phase = "req";
     res = await doFetch(tokens.accessToken);
   } catch {
     return { answered: false, failure: unreachable() };
   }
 
   if (res.status === 401) {
-    const refreshed = await refreshTokens();
+    if (trace) trace.phase = "refresh";
+    const refreshed = await refreshTokens(trace);
     if (refreshed.kind === "unavailable") {
       // Not a verdict on the session, so neither the tokens nor the
       // screen change. The next request tries the refresh again.
@@ -388,6 +461,7 @@ async function authenticatedAttempt(path: string, init?: RequestInit): Promise<A
       };
     }
     try {
+      if (trace) trace.phase = "retry";
       res = await doFetch(refreshed.tokens.accessToken);
     } catch {
       return { answered: false, failure: unreachable() };
@@ -403,8 +477,8 @@ async function authenticatedAttempt(path: string, init?: RequestInit): Promise<A
  * A refusal keeps its status and code. Only a 401 whose refresh the
  * server refused is a sign-out (`sessionExpired`); a 409 is an answer,
  * and the caller decides what it means. */
-export async function apiRequest<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
-  const attempt = await authenticatedAttempt(path, init);
+export async function apiRequest<T>(path: string, init?: RequestInit, trace?: EndpointTrace): Promise<ApiResult<T>> {
+  const attempt = await authenticatedAttempt(path, init, trace);
   if (!attempt.answered) return attempt.failure;
   const res = attempt.res;
 

@@ -128,39 +128,3 @@ export async function rememberEndpoint(url: string): Promise<void> {
     // Costs a little time on the next launch, nothing else.
   }
 }
-
-/** The control-plane addresses a request would try, as bare hostnames.
- *
- * For the telemetry on a failed pre-connect refresh. Every
- * CONTROL_PLANE_UNREACHABLE row recorded so far has a null endpoint,
- * which makes the commonest Windows failure unreadable: the row says
- * the control plane could not be reached and nothing about which
- * addresses were tried, so "the main domain is blocked" and "this client
- * is carrying a stale mirror list" look identical.
- *
- * Hostnames rather than URLs because the scheme and path add nothing to
- * a person scanning for a pattern, and because a hostname is the unit
- * that gets blocked. The order is the order they would be tried, which
- * is itself worth knowing -- a client whose preferred address is one
- * that no longer answers is a different problem from one whose whole
- * list is dead.
- *
- * Never throws. This decorates a report about a failure; it must not
- * become a second one.
- */
-export async function attemptedEndpoints(): Promise<string | undefined> {
-  try {
-    const hosts = (await apiEndpoints())
-      .map((url) => {
-        try {
-          return new URL(url).hostname;
-        } catch {
-          return null;
-        }
-      })
-      .filter((host): host is string => host !== null);
-    return hosts.length > 0 ? hosts.join(",") : undefined;
-  } catch {
-    return undefined;
-  }
-}

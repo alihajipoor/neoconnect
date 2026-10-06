@@ -1,5 +1,6 @@
 import { apiRequest, apiRequestRevalidated } from "./api";
 import type { ApiResult } from "./api";
+import type { EndpointTrace } from "./endpoint-trace";
 import { networkHeaders } from "./network-identity";
 import type {
   AppLinks,
@@ -17,7 +18,10 @@ import type {
 
 export const getMe = () => apiRequest<Customer>("/customer/me");
 export const getSubscriptions = () => apiRequest<Subscription[]>("/customer/subscriptions");
-export const getProtocolUsers = () => apiRequest<ProtocolUser[]>("/customer/protocol-users");
+/** `trace` is for the pre-connect refresh, which reports which addresses
+ * it tried when it fails -- see endpoint-trace.ts. */
+export const getProtocolUsers = (trace?: EndpointTrace) =>
+  apiRequest<ProtocolUser[]>("/customer/protocol-users", undefined, trace);
 export const getAppLinks = () => apiRequest<AppLinks>("/customer/links");
 
 export const getPlans = () => apiRequest<SubscriptionPlan[]>("/customer/plans");

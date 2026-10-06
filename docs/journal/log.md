@@ -3284,3 +3284,101 @@ above.
   that directory is writable -- on this PC it is, because the service is
   not installed and earlier tests created it. Every line there is test
   output. Do not read it as a field log on this machine.
+
+## 2026-10-06 — the "Windows can't reach the API" rows were iOS
+
+Branch `claude/control-plane-telemetry`, pushed, **not merged, nothing
+deployed or tagged.**
+
+**The finding.** Measured from `client_attempts`: desktop 0.9.29–0.9.42
+recorded zero `CONTROL_PLANE_UNREACHABLE`; all 182 "windows" ones carry
+mobile versions (0.2.18/0.2.20/0.2.21) -- the iOS builds, labelled
+"windows" by the shared `detectPlatform` until 81508ee. So **the
+commit messages of 7a5fd50 and a241741 are wrong** where they say
+Windows reaches the API far less reliably than Android ("160 against
+107", "162 ... against 43", "the mobile build has no seed"). Commits
+cannot be edited; this is the correction. The 6s-budget-inside-8s
+arithmetic in a241741 was real but bit the mobile app. The source
+comments repeating the claim are fixed on the branch, and
+`docs/windows-service-rewrite.md` "What this does not fix" is rewritten
+with the numbers.
+
+(This paragraph first said the mobile app "has carried the seed since
+4174b7c", and c1a9689's message answers "the mobile build has no seed"
+with release-android.yml alone. True of Android only: 4174b7c made the
+seed required in the Android and Windows release workflows. iOS
+0.2.18–0.2.21 were built on the Mac, where nothing required it until
+this branch -- see below.)
+
+Also found by reading, and fixed on the branch: resume/online
+refreshes were reported as connects; a 429 dropped queued reports; and
+the release prebuild could overwrite a fetched seed with the
+placeholder on a transient failure.
+
+**Correction: nothing was lost to the 400.** This entry first said, as
+the commit messages of a67ea1b, c1a9689 and f6d4b52 still do, that
+every unreachable report from desktop 0.9.39–0.9.43 and mobile 0.2.22
+was lost -- its `apiEndpoint` hostname list (233 characters, worked out
+from the code) over the DTO's 200-character limit, answered 400,
+counted as delivered -- so desktop's zero meant nothing past 0.9.38.
+That was reasoned from the code and never checked against the server.
+Production's nginx log for the 14 days to 2026-10-06 has 1079
+`POST /api/client-attempts` answered 204 and **not one 400**, and no
+stored row has `apiEndpoint` set: no report carrying the hostname list
+arrived at all. Desktop's zero stands for 0.9.39–0.9.42 as it does
+before. The raised limit and the client's resend-cut-to-200 are still
+right -- the new trace is longer than 200 and production still enforces
+200 -- but they prevent a future loss, not a past one. The comments and
+docs that repeated the claim are corrected on the branch.
+
+**Deploy order:** backend first. Until it is, new clients still work --
+a 400 on a long `apiEndpoint` is resent once cut to 200. No migration.
+
+**Reading old rows** (they age out by about 2026-10-20; nothing was
+rewritten): treat `platform = 'windows' AND "appVersion" LIKE '0.2.%'`
+as the mobile app on iOS (or a desktop dev run), the same inference
+the server now stores as `ios-inferred` / `mobile-inferred`. Split
+mobile unreachable rows by reason prefix: from the new builds,
+`pre-connect` / `resume` / `online` say what triggered them, and "app
+was in the background during it" marks the ones iOS suspension could
+explain.
+
+**Unverified:** why iOS fails so much more than Android. The two share
+the control-plane code but maybe not what was built into it, and that
+is the **leading candidate**: an iOS build whose seed fetch failed on
+the Mac shipped the placeholder, and with it the committed HTTP scope
+of `*.neoxify.site` alone -- the domain blocked in Iran -- so it could
+try only the compiled-in addresses on that domain. Not proven: no build
+log is in the repo, and on an unfiltered network the fetch probably
+worked. To check, on the Mac: the build output's `seed-bundle:` and
+`capability-scope:` lines if any survive; `grep -a` on the executable
+of a surviving 0.2.18/0.2.20/0.2.21 `.ipa` or `.xcarchive` for the
+`https://` allow globs (only `*.neoxify.site` = no seed applied; the
+globs do appear as plain strings in a desktop debug build); the
+checkout's `seed-bundle.json` and `git diff` of
+`apps/mobile/src-tauri/capabilities/default.json`, which reflect only
+the latest build. Details in `docs/windows-service-rewrite.md`. The
+other candidates (token-refresh chain inside the 6s budget, iOS
+suspending the app, the 0.2.20 extension aborting) are readings, not
+measurements. The probe's
+classes were checked against live TLS from this PC only (ok, cert,
+dns), never from a censored network; the Android/iOS builds of the
+new Rust were not compiled here. All of it waits on a real iPhone.
+
+**After review.** The probe had made a failed sign-in or resume
+refresh wait up to 20s before its report was even queued -- long
+enough, on iOS, for a suspended app to be killed with it. The report
+is made at once again, and the probe's answer follows: added to the
+queued entry, or sent as a follow-up row (`OTHER`, the original's
+time) if the report has already gone. And a resume probe could run
+across a connect, resume being exactly when people press Connect: it
+is now not begun while the screen shows connecting, verifying or
+disconnecting or within a minute of a connect starting, and one
+running when a connect starts is abandoned and cancelled on the Rust
+side (no new lookup, TCP handshake or ClientHello after that) --
+`probe: skipped=connect` / `probe: abandoned=connect@<ms>` say so in
+the report. A long trace is now cut from the middle and keeps the
+probe. All unit tests (vitest, `cargo test` on this PC). The mobile
+Dashboard's two refresh calls have no test of their own: the mobile
+app has no DOM test environment, and the shared refresh they call is
+tested in the desktop suite.

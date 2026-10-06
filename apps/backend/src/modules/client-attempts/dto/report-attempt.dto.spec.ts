@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
-import { ReportAttemptDto } from "./report-attempt.dto";
+import { API_ENDPOINT_MAX_LENGTH, ReportAttemptDto } from "./report-attempt.dto";
 
 /** Validated as the app's global pipe does: whitelist, and reject what
  * is not declared. An undeclared field is a 400, which a client counts as
@@ -59,5 +59,51 @@ describe("ReportAttemptDto", () => {
 
   it("bounds the attestation's length", async () => {
     expect(await errorsFor({ ...base, network: "x".repeat(81) })).toContain("network:maxLength");
+  });
+});
+
+/** The field that was capped at 200 -- shorter than what the shipped
+ * clients would put in it. Names are RFC 2606 stand-ins of realistic
+ * length; the real list is not committed (docs/node-address-hygiene.md). */
+describe("ReportAttemptDto apiEndpoint", () => {
+  const unreachable = { ...base, kind: "CONNECT", outcome: "CONTROL_PLANE_UNREACHABLE", appVersion: "0.9.42" };
+  /** 26 characters, the length of a node mirror's host:port today. */
+  const mirror = (i: number) => `mirror-${String(i).padStart(2, "0")}.example-edge.net:2053`;
+
+  /** What 0.9.39 to 0.9.43 and mobile 0.2.22 send: every hostname they
+   * would try, comma-joined. Eleven with today's bundle come to 233
+   * characters by the code, which the old limit would refuse with a 400.
+   * Production logged no such 400 (see API_ENDPOINT_MAX_LENGTH): no
+   * report carrying the list arrived in the 14 days it covers, but one
+   * must be accepted when it does. */
+  it("accepts the hostname list shipped clients already send", async () => {
+    const hosts = Array.from({ length: 11 }, (_, i) => `mirror-${i}.example-edge.net`).join(",");
+    expect(hosts.length).toBeGreaterThan(200);
+    expect(await errorsFor({ ...unreachable, apiEndpoint: hosts })).toEqual([]);
+  });
+
+  /** The per-address trace newer clients send, for a list that has grown
+   * to sixteen addresses and was walked in three phases. */
+  it("accepts a trace of sixteen addresses across three phases", async () => {
+    const phase = (name: string, outcome: string) =>
+      `${name}: ` + Array.from({ length: 16 }, (_, i) => `${mirror(i)}=${outcome}@8000`).join(" ");
+    const trace = [phase("req", "timeout"), phase("refresh", "net")].join("; ");
+    // Built to size, not cut to fit: a realistic worst case has to be
+    // inside the limit on its own.
+    expect(trace.length).toBeGreaterThan(1000);
+    expect(trace.length).toBeLessThanOrEqual(API_ENDPOINT_MAX_LENGTH);
+    expect(await errorsFor({ ...unreachable, apiEndpoint: trace })).toEqual([]);
+  });
+
+  /** Old clients send nothing here, and must keep being accepted. */
+  it("is still optional", async () => {
+    expect(await errorsFor(unreachable)).toEqual([]);
+  });
+
+  /** Still unauthenticated input, so still bounded. */
+  it("refuses anything past the limit", async () => {
+    expect(await errorsFor({ ...unreachable, apiEndpoint: "x".repeat(API_ENDPOINT_MAX_LENGTH + 1) })).toEqual([
+      "apiEndpoint:maxLength",
+    ]);
   });
 });

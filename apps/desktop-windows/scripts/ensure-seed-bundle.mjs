@@ -13,22 +13,70 @@
  *
  * Falls back to an inert placeholder so a build without network still
  * produces a working app; it simply carries no seed.
+ *
+ * But never over a seed that is already there. This runs more than once
+ * per release: the workflows fetch the seed in their own step with
+ * NEOXIFY_REQUIRE_SEED set, and then `tauri build` runs `pnpm build`,
+ * whose prebuild hook runs this again *without* it. A transient failure
+ * on that second fetch used to copy the placeholder over the seed the
+ * first one had just fetched -- and the build went on to ship with no
+ * seed, which is the failure the required step exists to prevent,
+ * reintroduced one step later. A failed refetch now keeps a valid seed
+ * that is already on disk -- only a recent one, when a seed is required
+ * -- and says so.
  */
-import { copyFileSync, existsSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const out = join(here, "..", "src", "lib", "seed-bundle.json");
+// Overridable only so the test can point it somewhere disposable.
+const out = process.env.NEOXIFY_SEED_PATH ?? join(here, "..", "src", "lib", "seed-bundle.json");
 const placeholder = join(here, "..", "src", "lib", "seed-bundle.placeholder.json");
 const url =
   process.env.NEOXIFY_BUNDLE_URL ?? "https://connect.neoxify.site/api/endpoints/bundle";
 
+/** The decoded bundle in a signed envelope, or null if it is not one
+ * that carries endpoints -- the placeholder included. */
+const decodeSeed = (raw) => {
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.payload !== "string" || parsed.payload === "" || typeof parsed?.sig !== "string") {
+      return null;
+    }
+    const decoded = JSON.parse(Buffer.from(parsed.payload, "base64").toString("utf8"));
+    return Array.isArray(decoded?.endpoints) && decoded.endpoints.length > 0 ? decoded : null;
+  } catch {
+    return null;
+  }
+};
+
+/** How recent a seed on disk must be to stand in for a failed fetch when
+ * one is required. The workflows fetch it minutes before the build that
+ * refetches it; a seed older than this was left by some earlier build on
+ * this machine -- the Mac that builds iOS releases keeps one for weeks --
+ * and a release must not quietly ship that. */
+const REQUIRED_SEED_MAX_AGE_MS = 6 * 3_600_000;
+
 const fallback = (why) => {
+  // A seed already on disk beats no seed. It was fetched by this build's
+  // own required step, or by an earlier run on this machine; either way
+  // it is a real, signed list, and the placeholder is none at all. When
+  // one is required, only a recent one counts.
+  const required = process.env.NEOXIFY_REQUIRE_SEED === "1";
+  const usable =
+    existsSync(out) && (!required || Date.now() - statSync(out).mtimeMs < REQUIRED_SEED_MAX_AGE_MS);
+  const existing = usable ? decodeSeed(readFileSync(out, "utf8")) : null;
+  if (existing) {
+    console.log(
+      `seed-bundle: kept existing v${existing.v}, ${existing.endpoints.length} endpoints (refetch failed: ${why})`,
+    );
+    return;
+  }
   // A release build that quietly falls back ships exactly the bug this
   // file exists to fix, and nothing about the installer would look wrong.
   // CI sets NEOXIFY_REQUIRE_SEED so that failure is loud instead.
-  if (process.env.NEOXIFY_REQUIRE_SEED === "1") {
+  if (required) {
     console.error(`seed-bundle: REQUIRED but unavailable (${why})`);
     process.exit(1);
   }
@@ -45,18 +93,12 @@ try {
   const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
   if (!res.ok) throw new Error(`http ${res.status}`);
   const raw = await res.text();
-  const parsed = JSON.parse(raw);
   // Shape-checked, not signature-checked: verification is the client's
   // job and happens on every read anyway. This only refuses to bake in
   // something that plainly is not a bundle.
-  if (typeof parsed?.payload !== "string" || typeof parsed?.sig !== "string") {
-    throw new Error("not a signed envelope");
-  }
-  const decoded = JSON.parse(Buffer.from(parsed.payload, "base64").toString("utf8"));
-  if (!Array.isArray(decoded?.endpoints) || decoded.endpoints.length === 0) {
-    throw new Error("bundle carries no endpoints");
-  }
-  writeFileSync(out, JSON.stringify(parsed));
+  const decoded = decodeSeed(raw);
+  if (!decoded) throw new Error("not a signed envelope carrying endpoints");
+  writeFileSync(out, JSON.stringify(JSON.parse(raw)));
   console.log(`seed-bundle: v${decoded.v}, ${decoded.endpoints.length} endpoints`);
 } catch (err) {
   fallback(err instanceof Error ? err.message : String(err));

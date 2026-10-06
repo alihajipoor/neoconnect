@@ -390,10 +390,15 @@ export function Dashboard({
   //
   // Credentials only, and only when the cache is past its horizon. See
   // useRefreshOnResume for why this is not a poll.
-  useRefreshOnResume(async () => {
+  useRefreshOnResume(async (trigger) => {
     const refreshed = await refreshConnectionConfig({
       held: protocolUsers,
       force: true,
+      // A foreground or a returning network, not a connect: its failure
+      // report must not say it is connecting. On the phones this fires
+      // on every foreground past the horizon, so it is most of them.
+      trigger,
+      appState: connectionState,
     });
     if (refreshed.source !== "network") return;
     setProtocolUsers(refreshed.protocolUsers);
@@ -872,6 +877,8 @@ export function Dashboard({
       () =>
         refreshConnectionConfig({
           held: protocolUsers.length > 0 ? protocolUsers : [protocolUser!],
+          trigger: "connect",
+          appState: connectionState,
         }),
     );
     if (refreshed.source === "network") {

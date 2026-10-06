@@ -439,6 +439,9 @@ export interface ClientAttempt {
   protocol: string | null;
   /** Null unless the client sent a ladder -- most sign-ins have none. */
   attemptsJson: AttemptRung[] | null;
+  /** Which control-plane addresses were tried, on an unreachable report
+   * only. Hostnames on desktop 0.9.39-0.9.43 / mobile 0.2.22; a trace of
+   * each address and how it failed on later builds. See the schema. */
   apiEndpoint: string | null;
   reason: string | null;
   ip: string | null;

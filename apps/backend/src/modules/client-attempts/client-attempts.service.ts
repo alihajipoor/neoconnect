@@ -43,6 +43,39 @@ export function plausibleOccurredAt(value: string | undefined, now = Date.now())
   return at;
 }
 
+/** The platform to store, given what the client said.
+ *
+ * Mobile builds up to 0.2.21 decided the platform from the user agent:
+ * "android" if it said so, "windows" for everything else. So every
+ * report from the mobile app on something other than Android -- in
+ * practice the iOS builds, which began at 0.2.18 -- was filed as a
+ * Windows one, and a 30-day query read 182 "windows" unreachable rows
+ * that were not Windows at all (149 of them from iOS-only 0.2.20). Fixed
+ * in 0.2.22, but installs that have not updated, and reports already
+ * queued on those phones, will go on arriving labelled "windows".
+ *
+ * The version gives them away. Desktop was already 0.8.9 when reporting
+ * was added, so a 0.2.x version can only be the mobile app, and the
+ * mobile app never runs on Windows in production. Stored as a value of
+ * its own rather than as "ios", because it is an inference: the same
+ * label also covers a development run of the mobile app in a desktop
+ * webview, and a reader should be able to tell the two kinds of row
+ * apart. Below 0.2.18 no iOS build existed, so there it can only have
+ * been that.
+ *
+ * Applied on write only. Rows already stored keep "windows"; they age
+ * out with the retention window, and rewriting them would be a
+ * production write for no lasting gain.
+ */
+export function recordedPlatform(platform: string, appVersion: string): string {
+  if (platform !== "windows") return platform;
+  const mobile = /^0\.2\.(\d+)$/.exec(appVersion);
+  if (!mobile) return platform;
+  const patch = Number(mobile[1]);
+  if (patch >= 22) return platform;
+  return patch >= 18 ? "ios-inferred" : "mobile-inferred";
+}
+
 @Injectable()
 export class ClientAttemptsService {
   private readonly logger = new Logger(ClientAttemptsService.name);
@@ -67,7 +100,7 @@ export class ClientAttemptsService {
       kind: dto.kind,
       outcome: dto.outcome,
       customerId,
-      platform: dto.platform,
+      platform: recordedPlatform(dto.platform, dto.appVersion),
       appVersion: dto.appVersion,
       routeId: dto.routeId ?? null,
       protocol: dto.protocol ?? null,

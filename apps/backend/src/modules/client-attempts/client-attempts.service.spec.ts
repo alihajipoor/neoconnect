@@ -3,6 +3,7 @@ import {
   ClientAttemptsService,
   RETENTION_DAYS,
   plausibleOccurredAt,
+  recordedPlatform,
 } from "./client-attempts.service";
 import type { PrismaService } from "../../prisma/prisma.service";
 import type { ReportAttemptDto } from "./dto/report-attempt.dto";
@@ -61,6 +62,47 @@ describe("ClientAttemptsService.record network", () => {
     await service.record(report({ sessionSeconds: 900 }), {});
     expect(create.mock.calls[0][0].data.sessionSeconds).toBe(900);
     expect(create.mock.calls[1][0].data.sessionSeconds).toBeNull();
+  });
+});
+
+/** Mobile up to 0.2.21 called anything that was not Android "windows".
+ * The rows that produced were iOS, and read as a Windows problem. */
+describe("recordedPlatform", () => {
+  it("files the iOS-era mobile builds' 'windows' as an inference about iOS", () => {
+    for (const v of ["0.2.18", "0.2.19", "0.2.20", "0.2.21"]) {
+      expect(recordedPlatform("windows", v)).toBe("ios-inferred");
+    }
+  });
+
+  /** No iOS build existed below 0.2.18, so it cannot be called iOS --
+   * only "the mobile app, not on Android". */
+  it("does not claim iOS for a mobile version that never had an iOS build", () => {
+    expect(recordedPlatform("windows", "0.2.17")).toBe("mobile-inferred");
+    expect(recordedPlatform("windows", "0.2.5")).toBe("mobile-inferred");
+  });
+
+  /** 0.2.22 fixed the guess, so from there "windows" is what it says. */
+  it("believes the fixed builds", () => {
+    expect(recordedPlatform("windows", "0.2.22")).toBe("windows");
+    expect(recordedPlatform("windows", "0.2.30")).toBe("windows");
+  });
+
+  /** The real Windows client, and every label the guess got right. */
+  it("leaves the desktop client and correctly labelled reports alone", () => {
+    expect(recordedPlatform("windows", "0.9.42")).toBe("windows");
+    expect(recordedPlatform("windows", "0.8.9")).toBe("windows");
+    expect(recordedPlatform("android", "0.2.20")).toBe("android");
+    expect(recordedPlatform("ios", "0.2.22")).toBe("ios");
+    expect(recordedPlatform("windows", "unknown")).toBe("windows");
+    expect(recordedPlatform("windows", "0.2.20-rc1")).toBe("windows");
+  });
+
+  it("is what reaches the database", async () => {
+    const { service, create } = build();
+    await service.record(report({ platform: "windows", appVersion: "0.2.20" }), {});
+    await service.record(report({ platform: "windows", appVersion: "0.9.42" }), {});
+    expect(create.mock.calls[0][0].data.platform).toBe("ios-inferred");
+    expect(create.mock.calls[1][0].data.platform).toBe("windows");
   });
 });
 

@@ -35,7 +35,7 @@ import { isSnapshotStale, loadSnapshot } from "./credential-cache";
  * window, not a background refresh loop that spends a censored
  * network's bandwidth on questions nobody asked.
  */
-export function useRefreshOnResume(refresh: () => void | Promise<void>): void {
+export function useRefreshOnResume(refresh: (trigger: ResumeTrigger) => void | Promise<void>): void {
   // Held in a ref so a caller passing an inline closure -- which is
   // every caller -- does not tear down and re-register three listeners
   // on every render.
@@ -45,7 +45,7 @@ export function useRefreshOnResume(refresh: () => void | Promise<void>): void {
   useEffect(() => {
     let running = false;
 
-    async function maybeRefresh() {
+    async function maybeRefresh(trigger: ResumeTrigger) {
       // Re-entrancy guard rather than a debounce. The three events below
       // commonly fire together (an Android resume raises `visibilitychange`
       // and `focus` within a few milliseconds), and two refreshes racing
@@ -58,7 +58,7 @@ export function useRefreshOnResume(refresh: () => void | Promise<void>): void {
       if (!isSnapshotStale(await loadSnapshot())) return;
       running = true;
       try {
-        await latest.current();
+        await latest.current(trigger);
       } catch {
         // A refresh that failed is the case the connect path's fallback
         // already handles. Nothing here should surface as an error --
@@ -68,14 +68,21 @@ export function useRefreshOnResume(refresh: () => void | Promise<void>): void {
       }
     }
 
-    const handler = () => void maybeRefresh();
-    document.addEventListener("visibilitychange", handler);
-    window.addEventListener("focus", handler);
-    window.addEventListener("online", handler);
+    const onResume = () => void maybeRefresh("resume");
+    const onOnline = () => void maybeRefresh("online");
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("focus", onResume);
+    window.addEventListener("online", onOnline);
     return () => {
-      document.removeEventListener("visibilitychange", handler);
-      window.removeEventListener("focus", handler);
-      window.removeEventListener("online", handler);
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("focus", onResume);
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 }
+
+/** Which event woke the refresh: the app coming back to the foreground,
+ * or the device getting a network back. Passed through to the refresh's
+ * failure report, which must not describe either as a connect -- see
+ * `RefreshTrigger` in connection-config.ts. */
+export type ResumeTrigger = "resume" | "online";

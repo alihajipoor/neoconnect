@@ -15,6 +15,31 @@ import {
   ValidateNested,
 } from "class-validator";
 
+/** The longest `apiEndpoint` accepted.
+ *
+ * It was 200. Clients from desktop 0.9.39 and mobile 0.2.22 on fill it
+ * with the hostname of every control-plane address they would try, and
+ * only on a CONTROL_PLANE_UNREACHABLE report; worked out from the code,
+ * eleven names with the current endpoint bundle come to 233 characters.
+ * Over the limit the global ValidationPipe answers 400, and the client
+ * counts a 400 as delivered (attempts.ts `send`), so such a report would
+ * be neither stored nor queued.
+ *
+ * It was once written here that every unreachable report from those
+ * builds had been lost that way. The server's own log says otherwise:
+ * in the 14 days to 2026-10-06 production answered 1079 POST
+ * /api/client-attempts with 204 and not one with a 400 -- and no stored
+ * row has `apiEndpoint` set. So no report carrying the list arrived at
+ * all in that window; the 400 was never put to the test.
+ *
+ * 2000 holds the per-address trace newer clients send -- address,
+ * outcome and milliseconds for each one tried, in each phase -- with
+ * room for the mirror list to grow. A newer client sending that to a
+ * server still on 200 would hit the 400; it resends once cut to fit (see
+ * `send`). Still bounded, because this endpoint is unauthenticated; the
+ * column is TEXT, so no migration. */
+export const API_ENDPOINT_MAX_LENGTH = 2000;
+
 /** One rung of the failover ladder, as the app recorded it.
  *
  * The client already builds exactly this to show under "show details";
@@ -60,9 +85,11 @@ export class ReportAttemptDto {
   @IsEnum(ClientAttemptOutcome)
   outcome!: ClientAttemptOutcome;
 
-  /** "windows" | "macos" | "android" | "ios". Not an enum: a new platform should show up
+  /** "windows" | "macos" | "android" | "ios", or "unknown" from a client
+   * that could not tell. Not an enum: a new platform should show up
    * in the panel as itself rather than be rejected by a server that has
-   * not been redeployed. */
+   * not been redeployed. Not stored verbatim either -- see
+   * `recordedPlatform` for the mobile builds that called iOS "windows". */
   @IsString()
   @MaxLength(32)
   platform!: string;
@@ -80,9 +107,12 @@ export class ReportAttemptDto {
   @MaxLength(64)
   protocol?: string;
 
+  /** Which control-plane addresses were tried and how each one failed,
+   * on a CONTROL_PLANE_UNREACHABLE report. See `API_ENDPOINT_MAX_LENGTH`
+   * for why the bound is what it is. */
   @IsOptional()
   @IsString()
-  @MaxLength(200)
+  @MaxLength(API_ENDPOINT_MAX_LENGTH)
   apiEndpoint?: string;
 
   /** The app's own error text. Free-form on purpose -- the enum is for
