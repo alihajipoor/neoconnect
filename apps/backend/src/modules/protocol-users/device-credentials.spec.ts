@@ -287,6 +287,26 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(result).toHaveLength(2);
   });
 
+  // A rollback to a backend that knows nothing of devices prunes signed-out
+  // sessions, and the foreign key's SET NULL turns their rows into extra
+  // shared ones. A device must still get exactly one credential per route.
+  it("fills a gap with the oldest shared row when a rollback left more than one", async () => {
+    const { service, create } = world({
+      rows: [
+        { id: "shared-original", routeId: "route-a" },
+        { id: "shared-left-by-rollback", routeId: "route-a" },
+      ],
+      routes: ["route-a"],
+    });
+    create.mockImplementationOnce(async () => {
+      throw new Error("config incomplete");
+    });
+
+    const result = await service.listForDevice(CUSTOMER, ME);
+
+    expect(result.map((u) => u.id)).toEqual(["shared-original"]);
+  });
+
   // A suspended subscription's credentials are switched off on the nodes;
   // creating an enabled one for whoever asks would undo the suspension.
   it("creates nothing for a subscription that is not ACTIVE, and shows its shared rows as they are", async () => {

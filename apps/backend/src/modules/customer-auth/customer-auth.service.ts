@@ -427,9 +427,10 @@ export class CustomerAuthService {
    *
    * Except those still holding device credentials. Those have to be
    * taken off the nodes first, which is the device-credential sweep's
-   * job (ProtocolUsersService.sweepDeadSessionCredentials) -- and the
-   * foreign key refuses the delete anyway, which here would fail the
-   * sign-in. */
+   * job (ProtocolUsersService.sweepDeadSessionCredentials). Deleting the
+   * row here instead would turn its credentials into shared ones (the
+   * foreign key is SET NULL, for the sake of rollback) that sign-out
+   * could then never reach. */
   private async openSession(customerId: string): Promise<string> {
     const idleCutoff = new Date(Date.now() - SESSION_IDLE_LIFETIME_MS);
     await this.prisma.customerSession.deleteMany({

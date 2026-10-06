@@ -766,13 +766,16 @@ model ProtocolUser {
   /// by subscriptionId -- usage, caps, expiry, re-assert -- covers both
   /// kinds unchanged. See docs/per-device-credentials.md.
   ///
-  /// Restrict, not Cascade or SetNull: a cascade would drop the row
-  /// without telling the node, and SetNull would quietly turn one
-  /// device's credential into a shared one. A session has to give its
-  /// credentials back before it can be deleted.
+  /// SetNull, and only ever reached by an older backend: this one never
+  /// deletes a session that still holds credentials (it takes them off
+  /// the nodes first, and every session delete is filtered on holding
+  /// none). Restrict made a rollback fail every sign-in that pruned such
+  /// a session; Cascade would drop the row without telling the node.
+  /// SetNull leaves it as an extra shared credential -- still metered,
+  /// still expiring -- see the migration and the doc's Rollback section.
   sessionId        String?
 
-  session        CustomerSession? @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  session        CustomerSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   subscription   Subscription   @relation(fields: [subscriptionId], references: [id])
   route          Route          @relation(fields: [routeId], references: [id])
   node           Node           @relation(fields: [nodeId], references: [id])

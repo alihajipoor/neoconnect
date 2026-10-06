@@ -301,14 +301,27 @@ export class ProtocolUsersService {
     const own = new Set(
       users.filter((u) => u.sessionId === sessionId).map((u) => `${u.subscriptionId}:${u.routeId}`),
     );
+    // One shared row per (subscription, route): the oldest. There is
+    // normally exactly one, but a rollback to a backend that knew nothing
+    // of devices can leave more -- its session pruning sets a device row's
+    // sessionId to NULL (the foreign key's SET NULL) -- and a client
+    // handed two credentials for one route would have to guess.
+    const sharedFor = new Map<string, (typeof users)[number]>();
+    for (const u of users) {
+      if (u.sessionId !== null) continue;
+      const key = `${u.subscriptionId}:${u.routeId}`;
+      const seen = sharedFor.get(key);
+      if (!seen || u.createdAt < seen.createdAt) sharedFor.set(key, u);
+    }
     // Filtered again here although the query already excludes them:
     // another device's credential reaching this response would be the one
     // failure this whole design exists to prevent.
     return users
-      .filter(
-        (u) =>
-          u.sessionId === sessionId || (u.sessionId === null && !own.has(`${u.subscriptionId}:${u.routeId}`)),
-      )
+      .filter((u) => {
+        const key = `${u.subscriptionId}:${u.routeId}`;
+        if (u.sessionId === sessionId) return true;
+        return u.sessionId === null && !own.has(key) && sharedFor.get(key) === u;
+      })
       .map(({ node, protocolConfig, ...user }) => ({
         ...withDecryptedCredentials(user),
         connection: connectionInfo(node, protocolConfig),
