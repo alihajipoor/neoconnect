@@ -27,6 +27,7 @@ import {
   isTunnelUp,
   LIVENESS_POLL_MS,
   noTunnelVerified,
+  rungJudgedByHandshake,
   stateFromStatus,
   type HeadlineTone,
   type VpnStatus,
@@ -2106,11 +2107,16 @@ export function Dashboard({
             // it", which is a distinction for the error message, not
             // for deciding whether to try the next protocol. Another
             // candidate waiting makes moving on strictly better than
-            // diagnosing.
+            // diagnosing -- except when no baseline could be taken, and
+            // no candidate can ever be proven; see
+            // `rungJudgedByHandshake`.
             verdict =
               egress.state === "throughTunnel"
                 ? "connected"
-                : isLast
+                : rungJudgedByHandshake(egress, {
+                      isLast,
+                      baselineTaken: baselineIpRef.current !== null,
+                    })
                   ? combineEvidence(await confirmReachable(), egress)
                   : "degraded";
             reason = egress.state;

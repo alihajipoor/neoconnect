@@ -209,6 +209,37 @@ export function combineEvidence(
   }
 }
 
+/** Whether a full-tunnel rung of the connect ladder that did not prove
+ * itself is judged on the handshake -- and kept, if that stands --
+ * rather than rejected outright.
+ *
+ * Always for the last rung: there is nowhere left to go, and
+ * `combineEvidence` decides what can honestly be said.
+ *
+ * For an earlier rung, only when no baseline could be taken and the
+ * egress check abstained. No baseline means our API could not be reached
+ * even unprotected -- an outage of ours, or a network that filters every
+ * address we have -- and then no candidate can ever produce the
+ * comparison that proves it. Rejecting each one for lacking that proof
+ * walked every working protocol off the ladder, the customer's chosen
+ * one first, and landed wherever the list happened to end; with the old
+ * `unreachable` it failed the lot. The handshake is the evidence there
+ * is, which is what `settleAndCaptureBaseline` always promised to fall
+ * back to.
+ *
+ * `unreachable` is never judged this way: it means our API *and* the
+ * public internet were silent through this tunnel, which is a measured
+ * negative and the next protocol deserves its turn.
+ */
+export function rungJudgedByHandshake(
+  egress: EgressVerdict,
+  { isLast, baselineTaken }: { isLast: boolean; baselineTaken: boolean },
+): boolean {
+  if (egress.state === "throughTunnel") return false;
+  if (isLast) return true;
+  return !baselineTaken && egress.state === "indeterminate";
+}
+
 /** The state to show for a *full tunnel* on a routine health poll.
  *
  * Split out from the connect path's `combineEvidence` because the poll

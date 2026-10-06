@@ -325,6 +325,12 @@ export function confirmEgressWithin(
       })
         .then((verdict) => {
           if (verdict.state === "throughTunnel") finish(verdict);
+          // With no baseline there is no proof to wait for: the best any
+          // later attempt can say is this. Waiting out the budget only
+          // held a customer whose network will not let us take one --
+          // our API down, or every address filtered -- on a spinner for
+          // thirty seconds before the handshake was even asked.
+          else if (baseline === null && verdict.state === "indeterminate") finish(verdict);
           else last = verdict;
         })
         // A rejection is no evidence either way; the next attempt is

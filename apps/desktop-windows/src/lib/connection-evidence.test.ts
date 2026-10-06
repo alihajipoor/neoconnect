@@ -10,6 +10,7 @@ import {
   isTunnelUp,
   LIVENESS_POLL_MS,
   noTunnelVerified,
+  rungJudgedByHandshake,
   stateFromStatus,
   type VpnStatus,
 } from "./connection-evidence";
@@ -208,6 +209,55 @@ describe("combining the connect path's two instruments", () => {
     expect(combineEvidence("disconnected", { state: "throughTunnel", exitIp: "1.2.3.4" })).toBe(
       "disconnected",
     );
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Our control plane down under a working tunnel.
+ *
+ * Every endpoint answers 502 (the backend container being rebuilt; every
+ * mirror proxies to it) or nothing answers at all (the panel host down)
+ * while the public internet is fine. The egress check now calls that
+ * `indeterminate` -- see egress.test.ts -- and these pin what the screen
+ * and the ladder do with it.
+ * ------------------------------------------------------------------ */
+
+describe("an outage of ours, seen from a working tunnel", () => {
+  const ourOutage: EgressVerdict = { state: "indeterminate", exitIp: null };
+  const blackHole: EgressVerdict = { state: "unreachable" };
+
+  it("does not mark a tunnel degraded on the poll, so no strike and no ladder", () => {
+    // Xray, OpenVPN, IKEv2: nothing proven, nothing refuted.
+    expect(fullTunnelPollState("unverified", ourOutage)).toBe("unverified");
+    // WireGuard with a live handshake keeps its green.
+    expect(fullTunnelPollState("connected", ourOutage)).toBe("connected");
+    // A tunnel that really is carrying nothing still says so.
+    expect(fullTunnelPollState("unverified", blackHole)).toBe("degraded");
+  });
+
+  it("judges an earlier rung on its handshake when no baseline could be taken", () => {
+    // No baseline: no candidate can ever be proven, so rejecting each for
+    // lacking proof walked every working protocol off the ladder.
+    expect(rungJudgedByHandshake(ourOutage, { isLast: false, baselineTaken: false })).toBe(true);
+    // With a baseline, an earlier rung still has to prove itself while
+    // another candidate waits.
+    expect(rungJudgedByHandshake(ourOutage, { isLast: false, baselineTaken: true })).toBe(false);
+    // A black hole is a measured negative either way: next protocol.
+    expect(rungJudgedByHandshake(blackHole, { isLast: false, baselineTaken: false })).toBe(false);
+    // The last rung always falls back to the handshake.
+    expect(rungJudgedByHandshake(blackHole, { isLast: true, baselineTaken: true })).toBe(true);
+    // And proof needs no fallback.
+    expect(
+      rungJudgedByHandshake({ state: "throughTunnel", exitIp: "203.0.113.10" }, { isLast: true, baselineTaken: true }),
+    ).toBe(false);
+  });
+
+  it("is what the connect ladder asks, rather than a bare isLast", () => {
+    const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+    expect(dashboard).toContain("rungJudgedByHandshake(egress, {");
+    expect(dashboard).toContain("baselineTaken: baselineIpRef.current !== null");
+    // The shape that rejected every earlier rung without a comparison.
+    expect(dashboard).not.toMatch(/: isLast\s*\n\s*\? combineEvidence\(await confirmReachable\(\), egress\)/);
   });
 });
 

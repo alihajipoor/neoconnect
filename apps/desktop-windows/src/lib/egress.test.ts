@@ -351,6 +351,21 @@ describe("the check made while a tunnel is coming up", () => {
     ).resolves.toEqual({ state: "bypassingTunnel", exitIp: CLIENT });
   });
 
+  it("does not wait out the budget for proof that cannot come", async () => {
+    // No baseline: our API could not be reached before connecting. Every
+    // answer from here on can only be "no comparison", so the first one
+    // is the verdict, not the thirtieth second.
+    endpoints.mockResolvedValue([CDN]);
+    answers.set(CDN, { status: 502 });
+
+    const started = Date.now();
+    await expect(confirmEgressWithin(null, 5_000, { intervalMs: 20 })).resolves.toEqual({
+      state: "indeterminate",
+      exitIp: null,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it("reports unreachable, on time, when every request stalls", async () => {
     endpoints.mockResolvedValue([CDN]);
     answers.set(CDN, "hang");
