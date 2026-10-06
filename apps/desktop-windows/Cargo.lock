@@ -2694,6 +2694,7 @@ name = "neoconnect-desktop"
 version = "0.9.43"
 dependencies = [
  "neoconnect-ipc",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",
@@ -2708,6 +2709,7 @@ dependencies = [
  "tauri-plugin-store",
  "tauri-plugin-updater",
  "tokio",
+ "webpki-roots",
  "windows-sys 0.59.0",
 ]
 

@@ -1,5 +1,6 @@
 import { apiRequest, publicRequest } from "./api";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
+import { probeControlPlane } from "./control-plane-probe";
 import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
 import { setTokens } from "./session";
 import { endCustomerSession, type SessionEnd } from "./session-end";
@@ -40,13 +41,15 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: Endpo
       return;
     }
     const outcome = outcomeFromApiError(result.error);
-    await reportAttempt({
-      kind,
-      outcome,
-      reason: result.error,
-      apiEndpoint:
-        outcome === "CONTROL_PLANE_UNREACHABLE" && trace ? renderTrace(trace) || "none dialled" : undefined,
-    });
+    let apiEndpoint: string | undefined;
+    if (outcome === "CONTROL_PLANE_UNREACHABLE" && trace) {
+      const tried = renderTrace(trace) || "none dialled";
+      // Nothing follows a failed sign-in, so the path the probe sees is
+      // the one the request saw. See control-plane-probe.ts.
+      const probe = await probeControlPlane(trace.entries);
+      apiEndpoint = probe ? `${tried}; ${probe}` : tried;
+    }
+    await reportAttempt({ kind, outcome, reason: result.error, apiEndpoint });
   })();
 }
 

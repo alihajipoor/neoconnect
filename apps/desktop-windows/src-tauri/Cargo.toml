@@ -36,6 +36,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["net", "io-util", "time"] }
 tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
+# The control-plane probe's TLS handshake (src/control_plane_probe.rs).
+# Both already in the tree through tauri-plugin-http's reqwest, at the
+# versions in Cargo.lock; named here so the probe can use them. ring and
+# not the default aws-lc-rs, which the tree does not otherwise build.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 
 [dependencies.windows-sys]
 version = "0.59"

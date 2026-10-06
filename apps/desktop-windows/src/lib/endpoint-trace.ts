@@ -42,8 +42,9 @@ export type TracePhase = "req" | "refresh" | "retry";
  * - `cancel`: another address answered first, so this one was stopped.
  * - `net`: any other transport failure. DNS, TCP and TLS all land here:
  *   the HTTP plugin reports every one as the same sentence (reqwest's
- *   Display drops the cause), so telling them apart takes a socket-level
- *   check rather than anything visible from here.
+ *   Display drops the cause), so telling them apart takes the
+ *   socket-level probe in control-plane-probe.ts, whose answer follows
+ *   the trace as a `probe:` section when it ran.
  * - `pending`: not settled yet. Rendered as `budget` when a caller gives
  *   up waiting -- see `renderTrace`.
  */

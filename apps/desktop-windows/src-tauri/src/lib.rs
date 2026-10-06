@@ -1,3 +1,4 @@
+mod control_plane_probe;
 mod vpn;
 
 use tauri::{Emitter, Manager};
@@ -158,7 +159,10 @@ pub fn run() {
             vpn::probe_tcp,
             vpn::network_fingerprint,
             get_launch_deep_link,
-            build_platform
+            build_platform,
+            // After a control-plane request fails: which stage each
+            // address failed at. See control_plane_probe.rs.
+            control_plane_probe::probe_control_plane
         ])
         // Closing the window is an instruction, and it has to be acted
         // on rather than inferred.

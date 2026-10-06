@@ -1,4 +1,5 @@
 import { reportAttempt } from "./attempts";
+import { probeControlPlane } from "./control-plane-probe";
 import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
@@ -330,21 +331,27 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     trigger === "connect"
       ? `connecting on cached credentials ${age} ${horizon}`
       : `nothing is being dialled; holding cached credentials ${age} ${horizon}`;
-  void reportAttempt({
-    kind: "CONNECT",
-    outcome: "CONTROL_PLANE_UNREACHABLE",
-    // Which addresses were actually tried, in which leg, and how each
-    // ended. Without this the row says "the control plane was
-    // unreachable" and nothing about *what* was unreachable -- a blocked
-    // domain, a client carrying the wrong mirror list, and a budget that
-    // ran out inside the token refresh all look the same. An empty trace
-    // means nothing was dialled at all, and says so rather than naming
-    // addresses that were never tried.
-    apiEndpoint: tried === "" ? "none dialled" : tried,
-    reason:
-      `${FAILURE_PREFIX[trigger]} (${detail}) after ${elapsedMs}ms; ${consequence}` +
-      (appState ? `; app showed ${appState}` : ""),
-  });
+  const report = (probe?: string) =>
+    reportAttempt({
+      kind: "CONNECT",
+      outcome: "CONTROL_PLANE_UNREACHABLE",
+      // Which addresses were actually tried, in which leg, and how each
+      // ended. Without this the row says "the control plane was
+      // unreachable" and nothing about *what* was unreachable -- a
+      // blocked domain, a client carrying the wrong mirror list, and a
+      // budget that ran out inside the token refresh all look the same.
+      // An empty trace means nothing was dialled at all, and says so
+      // rather than naming addresses that were never tried.
+      apiEndpoint: [tried === "" ? "none dialled" : tried, probe].filter(Boolean).join("; "),
+      reason:
+        `${FAILURE_PREFIX[trigger]} (${detail}) after ${elapsedMs}ms; ${consequence}` +
+        (appState ? `; app showed ${appState}` : ""),
+    });
+  // The stage each address failed at, from a socket-level probe -- but
+  // not before a connect, which starts the moment this returns and would
+  // change the path under the probe. See control-plane-probe.ts.
+  if (trigger === "connect") void report();
+  else void probeControlPlane(trace.entries).then(report);
   // Also on the console, where a beta tester reading their own log can
   // see it without a round trip through the panel.
   console.warn(

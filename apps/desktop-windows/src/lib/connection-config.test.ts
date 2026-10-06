@@ -42,6 +42,18 @@ vi.mock("./customer", () => ({ getProtocolUsers: (trace?: EndpointTrace) => fetc
 const reportAttempt = vi.fn();
 vi.mock("./attempts", () => ({ reportAttempt: (r: unknown) => reportAttempt(r) }));
 
+/** The socket-level probe, stood in for: its own tests are elsewhere.
+ * What matters here is when the refresh asks for it. */
+const probeControlPlane = vi.fn<(entries: unknown[]) => Promise<string | undefined>>();
+vi.mock("./control-plane-probe", () => ({ probeControlPlane: (e: unknown[]) => probeControlPlane(e) }));
+
+/** The report goes out after the probe when there is one, so a test
+ * waits for it rather than reading it the moment the refresh returns. */
+async function firstReport<T>(): Promise<T> {
+  await vi.waitFor(() => expect(reportAttempt).toHaveBeenCalled());
+  return reportAttempt.mock.calls[0][0] as T;
+}
+
 const { refreshConnectionConfig, describeConfigDrift } = await import("./connection-config");
 const { SNAPSHOT_TTL_MS, isSnapshotStale, saveSnapshot, loadSnapshot } = await import("./credential-cache");
 
@@ -76,6 +88,8 @@ beforeEach(() => {
   for (const data of files.values()) data.clear();
   fetchUsers.mockReset();
   reportAttempt.mockReset();
+  probeControlPlane.mockReset();
+  probeControlPlane.mockResolvedValue(undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
@@ -246,7 +260,7 @@ describe("refreshConnectionConfig", () => {
 
     await refreshConnectionConfig({ held, force: true, trigger });
 
-    const reason = (reportAttempt.mock.calls[0][0] as { reason: string }).reason;
+    const { reason } = await firstReport<{ reason: string }>();
     expect(reason.startsWith(prefix)).toBe(true);
     expect(reason).not.toContain("connecting");
     expect(reason).toContain("nothing is being dialled");
@@ -277,9 +291,43 @@ describe("refreshConnectionConfig", () => {
 
     await refreshConnectionConfig({ held, budgetMs: 30, trigger: "resume", appState: "connected" });
 
-    const reason = (reportAttempt.mock.calls[0][0] as { reason: string }).reason;
+    const { reason } = await firstReport<{ reason: string }>();
     expect(reason).toMatch(/^resume config refresh failed \(no answer within 30ms\) after \d+ms; /);
     expect(reason.endsWith("; app showed connected")).toBe(true);
+  });
+
+  /** After a refresh nothing follows, the probe's answer -- which stage
+   * each failed address failed at -- goes on the end of the trace. */
+  it("adds the probe's answer to a failed resume refresh", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation(async (trace) => {
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "timeout", 8_000);
+      return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+    });
+    probeControlPlane.mockResolvedValue("probe: api.example.net=tls@310");
+
+    await refreshConnectionConfig({ held, force: true, trigger: "resume" });
+
+    const { apiEndpoint } = await firstReport<{ apiEndpoint: string }>();
+    expect(apiEndpoint).toBe("req: api.example.net=timeout@8000; probe: api.example.net=tls@310");
+    expect(probeControlPlane).toHaveBeenCalledTimes(1);
+  });
+
+  /** A connect starts the moment the refresh gives up, and changes the
+   * path under anything still measuring it. No probe there. */
+  it("does not probe before a connect", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation(async (trace) => {
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "timeout", 8_000);
+      return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+    });
+
+    await refreshConnectionConfig({ held });
+
+    expect(probeControlPlane).not.toHaveBeenCalled();
+    expect((await firstReport<{ apiEndpoint: string }>()).apiEndpoint).toBe("req: api.example.net=timeout@8000");
   });
 
   /** Never a list of addresses that were not dialled. */

@@ -22,6 +22,10 @@ vi.mock("./attempts", async (original) => {
   return { ...real, reportAttempt: (r: unknown) => reportAttempt(r) };
 });
 
+/** The socket-level probe, stood in for; its own tests are elsewhere. */
+const probeControlPlane = vi.fn<(entries: unknown[]) => Promise<string | undefined>>();
+vi.mock("./control-plane-probe", () => ({ probeControlPlane: (e: unknown[]) => probeControlPlane(e) }));
+
 vi.mock("./pow", () => ({ solveChallengeFor: async () => undefined }));
 vi.mock("./session", () => ({ setTokens: vi.fn() }));
 vi.mock("./session-end", () => ({ endCustomerSession: vi.fn() }));
@@ -51,6 +55,8 @@ beforeEach(() => {
   publicRequest.mockReset();
   reportAttempt.mockReset();
   startSocialSignIn.mockReset();
+  probeControlPlane.mockReset();
+  probeControlPlane.mockResolvedValue(undefined);
 });
 
 describe("sign-in telemetry", () => {
@@ -80,6 +86,18 @@ describe("sign-in telemetry", () => {
     expect((await reported()).apiEndpoint).toBe("none dialled");
   });
 
+  /** Nothing follows a failed sign-in, so the probe sees the path the
+   * request saw; its answer goes on the end. */
+  it("adds which stage each address failed at", async () => {
+    publicRequest.mockImplementation(failsAfterTrying);
+    probeControlPlane.mockResolvedValue("probe: api.example.net=dns@40 mirror.example.org:2053=tcp-timeout@4001");
+    await login("someone@example.com", "pw");
+    expect((await reported()).apiEndpoint).toBe(
+      "req: api.example.net=timeout@8000 mirror.example.org:2053=net@150; " +
+        "probe: api.example.net=dns@40 mirror.example.org:2053=tcp-timeout@4001",
+    );
+  });
+
   it("names no addresses for a refusal, which reached the server", async () => {
     publicRequest.mockImplementation((trace) => {
       settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "h401", 300);
@@ -89,6 +107,7 @@ describe("sign-in telemetry", () => {
     const report = await reported();
     expect(report.outcome).toBe("REJECTED");
     expect(report.apiEndpoint).toBeUndefined();
+    expect(probeControlPlane).not.toHaveBeenCalled();
   });
 
   /** A provider that refused never reached publicRequest; there is no

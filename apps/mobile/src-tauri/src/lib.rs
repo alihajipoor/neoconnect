@@ -1,5 +1,14 @@
 mod latency;
 
+/// Which stage a failed control-plane request failed at, per address.
+///
+/// The Windows app's file, compiled here by path -- the same arrangement
+/// as the UI, which this app takes from the Windows one through the
+/// `@shared` alias -- so the two apps cannot classify the same failure
+/// differently. Its tests run with either crate's.
+#[path = "../../../desktop-windows/src-tauri/src/control_plane_probe.rs"]
+mod control_plane_probe;
+
 /// The OS this binary was compiled for: "android" or "ios" here, as the
 /// platform on attempt reports.
 ///
@@ -52,7 +61,8 @@ pub fn run() {
             // with the Windows client. Same story as the line above: it
             // only existed there, so on the phones it always rejected.
             latency::probe_tcp,
-            build_platform
+            build_platform,
+            control_plane_probe::probe_control_plane
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

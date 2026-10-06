@@ -79,7 +79,8 @@ export interface AttemptReport {
   reason?: string;
   attempts?: AttemptRung[];
   /** What was tried, on a CONTROL_PLANE_UNREACHABLE report: the
-   * rendered endpoint trace (see endpoint-trace.ts), or "none dialled".
+   * rendered endpoint trace (see endpoint-trace.ts), or "none dialled",
+   * sometimes followed by a `probe:` section (control-plane-probe.ts).
    *
    * The history of this field is a warning. The backend accepted it from
    * the start and no client sent it until 0.9.39 / 0.2.22, so every

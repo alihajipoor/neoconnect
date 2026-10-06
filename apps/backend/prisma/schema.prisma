@@ -1032,10 +1032,14 @@ model ClientAttempt {
   ///     from the full endpoint bundle -- was refused with a 400 and lost.
   ///   - a trace, from the builds after: `leg: host[:port]=outcome@ms`
   ///     for each address actually tried, legs ("req", "refresh",
-  ///     "retry") separated by "; ", or "none dialled". Ends " [cut]" if
-  ///     it had to be shortened -- to 200 characters when it reached a
-  ///     server from before the limit was raised. The vocabulary is in
-  ///     endpoint-trace.ts in the desktop client.
+  ///     "retry") separated by "; ", or "none dialled". After a failed
+  ///     sign-in or a failed refresh on resume -- never before a connect
+  ///     -- a last `probe:` section gives the stage each failed address
+  ///     failed at (dns, blockpage, tcp, tls, cert, *-timeout, ok). Ends
+  ///     " [cut]" if it had to be shortened -- to 200 characters when it
+  ///     reached a server from before the limit was raised. The
+  ///     vocabulary is in endpoint-trace.ts and control-plane-probe.ts in
+  ///     the desktop client.
   apiEndpoint String?
 
   /// The app's own error text, truncated. Free-form on purpose: the
