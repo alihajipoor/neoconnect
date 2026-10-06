@@ -26,9 +26,11 @@ function ctx(language: Language, overrides: Partial<NoticeContext> = {}): Notice
   };
 }
 
+/** As the revised contract sends a PC: no label of its own -- a kind is
+ * never one -- so it is named from its platform. */
 const PC = {
   handle: "pc",
-  label: "Windows PC",
+  label: null,
   platform: "windows",
   since: "2026-10-06T10:32:04.120Z",
   lastSeen: "2026-10-06T10:55:41.004Z",
@@ -38,7 +40,7 @@ describe("the refusal card", () => {
   it("says the limit and where Neoxify is in use, since when", () => {
     const copy = describeSlotNotice({ kind: "refused", refusal: { limit: 1, holders: [PC] } }, ctx("en"));
     expect(copy.lines[0]).toBe("Your plan allows 1 device at a time.");
-    expect(copy.lines[1]).toMatch(/^Neoxify is in use on Windows PC since 10:32\.$/);
+    expect(copy.lines[1]).toMatch(/^Neoxify is in use on a Windows PC since 10:32\.$/);
     expect(copy.useHere).toEqual({ label: "Use on this device instead", takeover: ["pc"] });
     expect(copy.dismiss).toBe("Cancel");
   });
@@ -46,8 +48,8 @@ describe("the refusal card", () => {
   it("says it in Persian, with the device named in Persian", () => {
     const copy = describeSlotNotice({ kind: "refused", refusal: { limit: 1, holders: [PC] } }, ctx("fa"));
     expect(copy.lines[0]).toBe(DICTIONARIES.fa["slots.limitOne"]);
-    expect(copy.lines[1]).toContain(DICTIONARIES.fa["slots.labelWindows"]);
-    expect(copy.lines[1]).not.toContain("Windows PC");
+    expect(copy.lines[1]).toContain(DICTIONARIES.fa["slots.platformWindows"]);
+    expect(copy.lines[1]).not.toContain("Windows");
     // Persian digits: the time is written the way a reader in Iran reads it.
     expect(copy.lines[1]).toMatch(/[۰-۹]/);
     expect(copy.useHere?.label).toBe(DICTIONARIES.fa["slots.useHere"]);
@@ -55,16 +57,16 @@ describe("the refusal card", () => {
   });
 
   it("offers every holder to the server on a plan of more than one, which frees only what it needs", () => {
-    const phone = { ...PC, handle: "phone", label: "Android phone (Pixel 7)", platform: "android", since: "2026-10-05T09:15:00.000Z" };
+    const phone = { ...PC, handle: "phone", label: "Pixel 7", platform: "android", since: "2026-10-05T09:15:00.000Z" };
     const copy = describeSlotNotice({ kind: "refused", refusal: { limit: 2, holders: [PC, phone] } }, ctx("en"));
     expect(copy.lines[0]).toBe("Your plan allows 2 devices at a time.");
-    expect(copy.lines[1]).toMatch(/^Neoxify is in use on Windows PC \(since 10:32\), Android phone \(Pixel 7\) \(since 5 Oct, 09:15\)\.$/);
+    expect(copy.lines[1]).toMatch(/^Neoxify is in use on a Windows PC \(since 10:32\), Pixel 7 \(since 5 Oct, 09:15\)\.$/);
     expect(copy.useHere?.takeover).toEqual(["pc", "phone"]);
   });
 
-  it("says \"another device\" for a device that was never named, and drops a time it cannot read", () => {
+  it("says \"another device\" for a device with neither a label nor a platform, and drops a time it cannot read", () => {
     const copy = describeSlotNotice(
-      { kind: "refused", refusal: { limit: 1, holders: [{ ...PC, label: null, since: null }] } },
+      { kind: "refused", refusal: { limit: 1, holders: [{ ...PC, platform: null, since: null }] } },
       ctx("en"),
     );
     expect(copy.lines[1]).toBe("Neoxify is in use on another device.");
@@ -78,15 +80,25 @@ describe("the refusal card", () => {
 });
 
 describe("the displaced card", () => {
-  const by = { handle: "phone", label: "Android phone (Pixel 7)", platform: "android" };
+  const by = { handle: "phone", label: "Pixel 7", platform: "android" };
 
   it("says Disconnected only once the tunnel is confirmed down", () => {
     expect(describeSlotNotice({ kind: "displaced", by, at: null }, ctx("en")).lines).toEqual([
-      "Disconnected: Neoxify is now in use on Android phone (Pixel 7).",
+      "Disconnected: Neoxify is now in use on Pixel 7.",
     ]);
     expect(describeSlotNotice({ kind: "displaced", by, at: null }, ctx("en", { tunnelDown: false })).lines).toEqual([
-      "Neoxify is now in use on Android phone (Pixel 7).",
+      "Neoxify is now in use on Pixel 7.",
     ]);
+  });
+
+  it("names a device the server sent no label for by its platform, in the app's language", () => {
+    const phone = { handle: "phone", label: null, platform: "android" };
+    expect(describeSlotNotice({ kind: "displaced", by: phone, at: null }, ctx("en")).lines).toEqual([
+      "Disconnected: Neoxify is now in use on an Android phone.",
+    ]);
+    const fa = describeSlotNotice({ kind: "displaced", by: phone, at: null }, ctx("fa")).lines[0];
+    expect(fa).toContain(DICTIONARIES.fa["slots.platformAndroid"]);
+    expect(fa).not.toMatch(/[A-Za-z]/);
   });
 
   it("offers to take the slot back from that device", () => {
@@ -97,7 +109,7 @@ describe("the displaced card", () => {
 
   it("keeps a phone model intact inside a Persian sentence", () => {
     const line = describeSlotNotice({ kind: "displaced", by, at: null }, ctx("fa")).lines[0];
-    expect(line).toContain(`${DICTIONARIES.fa["slots.labelAndroid"]} ⁨(Pixel 7)⁩`);
+    expect(line).toContain("روی ⁨Pixel 7⁩ ");
   });
 });
 
@@ -126,10 +138,46 @@ describe("the other notices", () => {
 });
 
 describe("names and times", () => {
-  it("translates only the generic part of a label", () => {
-    expect(deviceName("Windows PC", ctx("en"))).toBe("Windows PC");
-    expect(deviceName("My laptop", ctx("fa"))).toBe("⁨My laptop⁩");
-    expect(deviceName(null, ctx("fa"))).toBe(DICTIONARIES.fa["slots.anotherDevice"]);
+  /** "Naming a device on screen": the label as sent, else the platform's
+   * name in the app's language, else "another device". */
+  it("names each platform in English and in Persian when there is no label", () => {
+    const cases = [
+      ["windows", "a Windows PC", "یک رایانهٔ ویندوزی"],
+      ["macos", "a Mac", "یک مک"],
+      ["linux", "a Linux PC", "یک رایانهٔ لینوکسی"],
+      ["android", "an Android phone", "یک گوشی اندروید"],
+      ["ios", "an iPhone", "یک آیفون"],
+    ];
+    for (const [platform, en, fa] of cases) {
+      expect(deviceName({ label: null, platform }, ctx("en"))).toBe(en);
+      expect(deviceName({ label: null, platform }, ctx("fa"))).toBe(fa);
+    }
+    // The header is case-insensitive, and so is this.
+    expect(deviceName({ label: null, platform: "Windows" }, ctx("en"))).toBe("a Windows PC");
+  });
+
+  it("shows a model or the user's own words as sent, isolated inside a Persian sentence", () => {
+    expect(deviceName({ label: "Pixel 7", platform: "android" }, ctx("en"))).toBe("Pixel 7");
+    expect(deviceName({ label: "iPad", platform: "ios" }, ctx("en"))).toBe("iPad");
+    expect(deviceName({ label: "My laptop", platform: "windows" }, ctx("fa"))).toBe("⁨My laptop⁩");
+    expect(deviceName({ label: "گوشی من", platform: "android" }, ctx("fa"))).toBe("گوشی من");
+  });
+
+  it("says another device with neither a label nor a platform it knows", () => {
+    expect(deviceName(null, ctx("en"))).toBe("another device");
+    expect(deviceName({ label: null, platform: null }, ctx("fa"))).toBe(DICTIONARIES.fa["slots.anotherDevice"]);
+    expect(deviceName({ label: null, platform: "toString" }, ctx("en"))).toBe("another device");
+    expect(deviceName({ label: "  ", platform: "web" }, ctx("en"))).toBe("another device");
+  });
+
+  /** What the apps were first built to send. The kind is the reader's to
+   * name, in its own language; only the model is kept. */
+  it("names a label that is only a kind from the platform, and keeps only the model of a qualified one", () => {
+    expect(deviceName({ label: "Windows PC", platform: "windows" }, ctx("fa"))).toBe(
+      DICTIONARIES.fa["slots.platformWindows"],
+    );
+    expect(deviceName({ label: "Android phone (Pixel 7)", platform: "android" }, ctx("en"))).toBe("Pixel 7");
+    expect(deviceName({ label: "iPhone", platform: null }, ctx("en"))).toBe("another device");
   });
 
   it("gives the date as well for an earlier day, and nothing for a time it cannot read", () => {

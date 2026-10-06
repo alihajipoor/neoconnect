@@ -627,14 +627,15 @@ const en = {
   // never as the cause, and says the check itself did not happen.
   "slots.unchecked":
     "We couldn't reach Neoxify to check. If Neoxify is in use on another of your devices, your plan's limit of {limit} at a time may be the reason.",
-  // The generic names devices are given, translated where they appear
-  // on another device's screen. Never a computer's own name.
-  "slots.labelWindows": "Windows PC",
-  "slots.labelMac": "Mac",
-  "slots.labelLinux": "Linux PC",
-  "slots.labelAndroid": "Android phone",
-  "slots.labelIphone": "iPhone",
-  "slots.labelIpad": "iPad",
+  // A device the server names by its kind alone (its `platform`, with no
+  // model or name of its own), as {device} in the sentences above. The
+  // kind is named here, in the reader's language, never by the device
+  // that is being named -- it may be in another one.
+  "slots.platformWindows": "a Windows PC",
+  "slots.platformMac": "a Mac",
+  "slots.platformLinux": "a Linux PC",
+  "slots.platformAndroid": "an Android phone",
+  "slots.platformIos": "an iPhone",
 
   // "Repair my network".
   //
@@ -1258,12 +1259,11 @@ const fa: Record<TranslationKey, string> = {
   "slots.takeoverLimit": "در یک ساعت گذشته دفعات زیادی دستگاه را عوض کرده‌اید. {minutes} دقیقهٔ دیگر دوباره امتحان کنید.",
   "slots.unchecked":
     "نتوانستیم برای بررسی به نئوکسیفای دسترسی پیدا کنیم. اگر نئوکسیفای روی دستگاه دیگری از شما در حال استفاده است، ممکن است دلیلش سقف {limit} دستگاه هم‌زمان در پلن شما باشد.",
-  "slots.labelWindows": "رایانهٔ ویندوزی",
-  "slots.labelMac": "مک",
-  "slots.labelLinux": "رایانهٔ لینوکسی",
-  "slots.labelAndroid": "گوشی اندروید",
-  "slots.labelIphone": "آیفون",
-  "slots.labelIpad": "آیپد",
+  "slots.platformWindows": "یک رایانهٔ ویندوزی",
+  "slots.platformMac": "یک مک",
+  "slots.platformLinux": "یک رایانهٔ لینوکسی",
+  "slots.platformAndroid": "یک گوشی اندروید",
+  "slots.platformIos": "یک آیفون",
 
   "settings.repair": "ترمیم شبکه",
   "repair.title": "ترمیم شبکهٔ من",

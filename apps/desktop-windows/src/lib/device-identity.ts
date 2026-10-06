@@ -21,6 +21,39 @@
 
 export type DevicePlatform = "windows" | "macos" | "linux" | "android" | "ios";
 
+const DEVICE_PLATFORMS: readonly DevicePlatform[] = ["windows", "macos", "linux", "android", "ios"];
+
+/** A platform as the server sent it (`holders[].platform`, `by.platform`),
+ * or null for one this app does not know. Case-insensitive, as the
+ * header is. */
+export function parseDevicePlatform(value: string | null | undefined): DevicePlatform | null {
+  const platform = value?.trim().toLowerCase() ?? "";
+  return DEVICE_PLATFORMS.find((p) => p === platform) ?? null;
+}
+
+/** English names of device kinds -- what the apps were first built to
+ * send as a label, and what the backend now drops (device-info.ts keeps
+ * the same list). A kind is never a label: it says only what `platform`
+ * says, in one language, and the device that reads it may be in another. */
+const DEVICE_KINDS = new Set(
+  ["Windows PC", "PC", "Mac", "Linux PC", "Android phone", "Android", "iPhone", "Phone", "Computer"].map((k) =>
+    k.toLowerCase(),
+  ),
+);
+
+/** The part of a label worth showing as it is: a model or the user's own
+ * words. Null for a kind ("Windows PC"); the model out of "Android phone
+ * (Pixel 7)". The backend's own reading, applied here too so a label from
+ * before it existed reads the same, and so this app never sends a kind. */
+export function specificDeviceLabel(label: string | null | undefined): string | null {
+  const text = label?.trim();
+  if (!text) return null;
+  if (DEVICE_KINDS.has(text.toLowerCase())) return null;
+  const qualified = /^(.+?)\s*\((.+)\)$/.exec(text);
+  if (qualified && DEVICE_KINDS.has(qualified[1].trim().toLowerCase())) return specificDeviceLabel(qualified[2]);
+  return text;
+}
+
 export const DEVICE_PLATFORM_HEADER = "X-Neoxify-Device-Platform";
 export const DEVICE_LABEL_HEADER = "X-Neoxify-Device-Label";
 
