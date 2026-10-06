@@ -119,7 +119,8 @@ describe("claim", () => {
     // Nothing the API does not know: it rejects unknown fields with 400.
     expect(sent[0].body).toEqual({ subscriptionId: SUB, protocolUserId: CRED });
     expect(sent[0].headers["X-Neoxify-Device-Platform"]).toBe("windows");
-    expect(sent[0].headers["X-Neoxify-Device-Label"]).toBe("Windows PC");
+    // A PC has no model to give, and its kind is never a label.
+    expect(sent[0].headers).not.toHaveProperty("X-Neoxify-Device-Label");
     expect(sent[0].headers.Authorization).toBe("Bearer access");
   });
 
@@ -258,7 +259,7 @@ describe("refresh names the device", () => {
 
     const refresh = sent.find((s) => s.url.endsWith("/customer-auth/refresh"));
     expect(refresh?.headers["X-Neoxify-Device-Platform"]).toBe("windows");
-    expect(refresh?.headers["X-Neoxify-Device-Label"]).toBe("Windows PC");
+    expect(refresh?.headers).not.toHaveProperty("X-Neoxify-Device-Label");
     expect(refresh?.body).toEqual({ refreshToken: "refresh" });
   });
 });

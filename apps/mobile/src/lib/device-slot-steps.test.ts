@@ -296,11 +296,14 @@ describe("before dialling", () => {
     });
   });
 
+  /** The platform always; a label only with a model in it, never the
+   * phone's kind -- the reader names that, in its own language. */
   it.each([
-    ["an Android phone", "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UQ1A; wv) AppleWebKit/537.36", 5, "android", "Android phone"],
-    ["an iPhone", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15", 5, "ios", "iPhone"],
+    ["an Android phone", "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UQ1A; wv) AppleWebKit/537.36", 5, "android", "Pixel 7"],
+    ["an Android phone with a reduced user agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36", 5, "android", null],
+    ["an iPhone", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15", 5, "ios", null],
     ["an iPad", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15", 5, "ios", "iPad"],
-  ])("names %s generically on the claim, never by its model", async (_name, userAgent, touch, platform, label) => {
+  ])("names %s on the claim by its platform, and by its model only when it has one", async (_name, userAgent, touch, platform, label) => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     vi.stubGlobal("navigator", { userAgent, maxTouchPoints: touch });
     answer = () => ({ ok: true, data: GRANT });
@@ -310,7 +313,7 @@ describe("before dialling", () => {
 
     expect(calls[0].headers).toEqual({
       "X-Neoxify-Device-Platform": platform,
-      "X-Neoxify-Device-Label": label,
+      ...(label !== null ? { "X-Neoxify-Device-Label": label } : {}),
     });
   });
 });

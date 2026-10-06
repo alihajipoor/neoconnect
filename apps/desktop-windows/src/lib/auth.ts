@@ -98,7 +98,7 @@ export async function login(email: string, password: string) {
     method: "POST",
     body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
     // Names this device to the customer's others ("Neoxify is in use on
-    // Windows PC"). See device-identity.ts.
+    // a Windows PC"). See device-identity.ts.
     headers: deviceHeaders(),
   });
   if (result.ok && !("requiresVerification" in result.data)) {

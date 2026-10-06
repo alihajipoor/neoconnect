@@ -309,7 +309,7 @@ async function refreshTokens(): Promise<Refresh> {
     method: "POST",
     body: JSON.stringify({ refreshToken: current.refreshToken }),
     // What this device is called on the customer's other devices
-    // ("Neoxify is in use on Windows PC"). Sent on every refresh because
+    // ("Neoxify is in use on a Windows PC"). Sent on every refresh because
     // a session started in the system browser could not send it, and its
     // first refresh is what names that device. See device-identity.ts.
     headers: deviceHeaders(),
