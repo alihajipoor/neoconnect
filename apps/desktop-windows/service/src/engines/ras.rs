@@ -210,6 +210,9 @@ mod tests {
         ledger.close(generation);
 
         let liveness = liveness_of(0x5EED_usize as *mut c_void).expect("an event can always be made");
+        // A RAS state can change back (MOBIKE), so what it reports goes
+        // on record unconfirmed until the owning thread has asked.
+        assert!(crate::lifecycle::engine_watch::Liveness::may_return(&liveness));
         let recorded = Arc::new(AtomicBool::new(false));
         let (flag, ledger_for_watch) = (Arc::clone(&recorded), Arc::clone(&ledger));
         let guard = watch(
@@ -217,7 +220,7 @@ mod tests {
             "test-ras",
             Box::new(liveness),
             Arc::new(move |g: Gone| {
-                if ledger_for_watch.record(g.generation, g.detail, g.at) {
+                if ledger_for_watch.record(g.generation, g.detail, g.at, !g.may_return) {
                     flag.store(true, Ordering::SeqCst);
                 }
             }),
@@ -410,6 +413,14 @@ impl crate::lifecycle::engine_watch::Liveness for RasLiveness {
             // Connected, or RAS could not be asked: neither is an ending.
             _ => Look::WaitOn(self.event.raw()),
         }
+    }
+
+    /// A connection RAS reports not `Connected` can be `Connected` again
+    /// a moment later -- MOBIKE moving it to another network passes
+    /// through other states -- so what this reports is checked by the
+    /// owning thread before it is believed.
+    fn may_return(&self) -> bool {
+        true
     }
 }
 

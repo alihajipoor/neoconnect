@@ -196,6 +196,53 @@ pub enum Look {
 /// does.
 pub trait Liveness: Send + 'static {
     fn look(&mut self) -> Look;
+
+    /// Whether an ending this source reports can be undone without us.
+    ///
+    /// `false` for a process: one that has exited stays exited, so its
+    /// handle being signalled is the whole answer. `true` for the two
+    /// sources that report a *state* someone else can change back -- the
+    /// service manager restarting a WireGuard tunnel service under its
+    /// recovery actions, and RAS reporting an IKEv2 connection not
+    /// `Connected` for the moment MOBIKE moves it to another network.
+    /// What such a source reports is put on record as unconfirmed, and
+    /// the status fallbacks do not answer from it until the owning thread
+    /// has asked the engine directly (see [`Ledger::confirmed_drop`]).
+    fn may_return(&self) -> bool {
+        false
+    }
+}
+
+/// A source that is not looked at until a moment has passed.
+///
+/// For a watch started again straight after the last one ended: a source
+/// that reports an ending the engine then contradicts, over and over,
+/// would otherwise turn into a loop through the owning thread. One look
+/// a second at most is plenty for something that has just been seen
+/// alive.
+pub struct Settle {
+    until: Instant,
+    inner: Box<dyn Liveness>,
+}
+
+impl Settle {
+    pub fn new(inner: Box<dyn Liveness>, wait: std::time::Duration) -> Self {
+        Self { until: Instant::now() + wait, inner }
+    }
+}
+
+impl Liveness for Settle {
+    fn look(&mut self) -> Look {
+        if Instant::now() < self.until {
+            Look::Again
+        } else {
+            self.inner.look()
+        }
+    }
+
+    fn may_return(&self) -> bool {
+        self.inner.may_return()
+    }
 }
 
 /// A process, by a handle of our own to it: Xray and OpenVPN, which are
@@ -232,6 +279,10 @@ pub struct Gone {
     /// is recorded as a drop; the second asks for the engine to be
     /// checked, which the teardown does before acting on anything.
     pub definitive: bool,
+    /// Whether the source can come back on its own -- see
+    /// [`Liveness::may_return`]. A process cannot; a service the manager
+    /// restarts and a RAS connection that reconnects can.
+    pub may_return: bool,
     /// When the watch saw it, so the teardown can say how long after
     /// the engine ended the machine was put back.
     pub at: Instant,
@@ -312,9 +363,10 @@ fn run(generation: u64, mut liveness: Box<dyn Liveness>, stop: &OwnedHandle, on_
     // as a drop. The ledger refuses it anyway -- the generation is
     // closed before the kill -- and this is the cheaper of the two
     // guards, not the only one.
+    let may_return = liveness.may_return();
     let report = |definitive: bool, detail: Option<i64>| {
         if !stop.is_signalled() {
-            on_gone(Gone { generation, detail, definitive, at: Instant::now() });
+            on_gone(Gone { generation, detail, definitive, may_return, at: Instant::now() });
         }
     };
     loop {
@@ -364,6 +416,11 @@ pub struct Ended {
     pub protocol: &'static str,
     pub detail: Option<i64>,
     pub at: Instant,
+    /// Whether the ending is beyond doubt: a process exit, or a source
+    /// that can come back which the owning thread has since asked
+    /// directly and found ended. Only a confirmed ending answers a status
+    /// on its own -- see [`Ledger::confirmed_drop`].
+    pub confirmed: bool,
 }
 
 #[derive(Default)]
@@ -447,16 +504,56 @@ impl Ledger {
     /// and `false` when it had already been closed, which is the service
     /// tearing it down itself, or replaced. Recording twice keeps the
     /// first, so whichever of the watch and the status poll saw it first
-    /// is the one that says when.
-    pub fn record(&self, generation: u64, detail: Option<i64>, at: Instant) -> bool {
+    /// is the one that says when; a second witness that is `certain` does
+    /// confirm what the first left unconfirmed.
+    ///
+    /// `certain` is false for an ending reported by a source that can
+    /// come back on its own ([`Liveness::may_return`]). Such a record
+    /// still says when and why, and the owning thread acts on it; what it
+    /// does not do until [`confirm`](Self::confirm) is answer a status
+    /// by itself.
+    pub fn record(&self, generation: u64, detail: Option<i64>, at: Instant, certain: bool) -> bool {
         let mut state = self.state();
         if generation == 0 || state.live != generation {
             return false;
         }
-        if state.ended.as_ref().map_or(true, |e| e.generation != generation) {
-            state.ended = Some(Ended { generation, protocol: state.live_protocol, detail, at });
+        match state.ended.as_mut() {
+            Some(e) if e.generation == generation => e.confirmed |= certain,
+            _ => {
+                state.ended =
+                    Some(Ended { generation, protocol: state.live_protocol, detail, at, confirmed: certain });
+            }
         }
         true
+    }
+
+    /// The owning thread asked the engine of `generation` directly and it
+    /// has ended: what the watch put on record is now beyond doubt.
+    pub fn confirm(&self, generation: u64) {
+        if let Some(e) = self.state().ended.as_mut().filter(|e| e.generation == generation) {
+            e.confirmed = true;
+        }
+    }
+
+    /// The owning thread asked the engine of `generation` directly and it
+    /// is still running: what the watch reported was a moment, not an
+    /// ending -- a WireGuard tunnel service the manager restarted, an
+    /// IKEv2 connection that left `Connected` while MOBIKE moved it, a
+    /// service-manager query that failed. The record goes, so that no
+    /// fallback answers "no tunnel" for a tunnel that is up.
+    ///
+    /// Only while the session is still live. Once it has been closed the
+    /// record is history, and history is not rewritten.
+    pub fn retract(&self, generation: u64) -> bool {
+        let mut state = self.state();
+        if generation == 0 || state.live != generation {
+            return false;
+        }
+        if state.ended.as_ref().is_some_and(|e| e.generation == generation) {
+            state.ended = None;
+            return true;
+        }
+        false
     }
 
     pub fn is_live(&self, generation: u64) -> bool {
@@ -472,14 +569,24 @@ impl Ledger {
         generation != 0 && self.state().latest == generation
     }
 
-    /// The last session ended on its own and nothing has begun since.
-    ///
-    /// The one state in which "no tunnel" can be answered without asking
-    /// Windows: the kernel said the engine ended, and no engine has been
-    /// started after it.
+    /// The last session ended on its own and nothing has begun since --
+    /// confirmed or not. What the owning thread acts on and what the log
+    /// line quotes.
     pub fn ended_without_successor(&self) -> Option<Ended> {
         let state = self.state();
         state.ended.clone().filter(|e| e.generation == state.latest)
+    }
+
+    /// The same, only once it is beyond doubt.
+    ///
+    /// The one state in which "no tunnel" can be answered without asking
+    /// Windows: the engine is known to have ended, and no engine has been
+    /// started after it. Known means a process exit, or an ending the
+    /// owning thread has checked for itself -- not a service-manager or
+    /// RAS state seen once by the watch, which can change back and, until
+    /// it is checked, is left to the fallback's own question.
+    pub fn confirmed_drop(&self) -> Option<Ended> {
+        self.ended_without_successor().filter(|e| e.confirmed)
     }
 
     /// Drops the record, for a connect that is starting: from then on
@@ -557,7 +664,7 @@ mod tests {
         let ledger = Ledger::new();
         let g = ledger.begin("XRAY_VLESS_REALITY");
         ledger.close(g);
-        assert!(!ledger.record(g, Some(1), Instant::now()));
+        assert!(!ledger.record(g, Some(1), Instant::now(), true));
         assert!(ledger.ended_without_successor().is_none());
     }
 
@@ -566,8 +673,8 @@ mod tests {
         let ledger = Ledger::new();
         let g = ledger.begin("OPENVPN");
         let first = Instant::now();
-        assert!(ledger.record(g, Some(1), first));
-        assert!(ledger.record(g, Some(2), first + Duration::from_secs(1)), "still news to the second witness");
+        assert!(ledger.record(g, Some(1), first, true));
+        assert!(ledger.record(g, Some(2), first + Duration::from_secs(1), true), "still news to the second witness");
         let ended = ledger.ended_without_successor().expect("recorded");
         assert_eq!(ended.generation, g);
         assert_eq!(ended.protocol, "OPENVPN");
@@ -580,11 +687,11 @@ mod tests {
     fn a_new_session_makes_the_old_drop_history() {
         let ledger = Ledger::new();
         let old = ledger.begin("WIREGUARD");
-        assert!(ledger.record(old, None, Instant::now()));
+        assert!(ledger.record(old, None, Instant::now(), true));
         ledger.close(old);
         let new = ledger.begin("IKEV2");
         assert!(ledger.ended_without_successor().is_none());
-        assert!(!ledger.record(old, None, Instant::now()), "a stale generation cannot record over a live one");
+        assert!(!ledger.record(old, None, Instant::now(), true), "a stale generation cannot record over a live one");
         assert!(ledger.is_live(new));
     }
 
@@ -592,9 +699,95 @@ mod tests {
     fn forgetting_clears_the_record() {
         let ledger = Ledger::new();
         let g = ledger.begin("XRAY_TROJAN");
-        assert!(ledger.record(g, None, Instant::now()));
+        assert!(ledger.record(g, None, Instant::now(), true));
         ledger.forget();
         assert!(ledger.ended_without_successor().is_none());
+    }
+
+    /// An ending the engine turned out not to have had: a WireGuard
+    /// tunnel service the manager restarted, an IKEv2 connection that
+    /// left `Connected` for a moment. Left on record it answered "no
+    /// tunnel" for a live one for as long as the session lasted.
+    #[test]
+    fn an_ending_the_engine_contradicts_is_retracted() {
+        let ledger = Ledger::new();
+        let g = ledger.begin("WIREGUARD");
+        assert!(ledger.record(g, Some(1066), Instant::now(), false));
+        assert!(ledger.retract(g));
+        assert!(ledger.ended_without_successor().is_none());
+        assert!(ledger.confirmed_drop().is_none());
+        assert!(ledger.is_live(g), "a retraction is not a teardown");
+        assert!(!ledger.retract(g), "nothing left to retract");
+
+        // And a later, real ending is news again, with its own time.
+        let later = Instant::now();
+        assert!(ledger.record(g, Some(1), later, true));
+        assert_eq!(ledger.confirmed_drop().map(|e| (e.detail, e.at)), Some((Some(1), later)));
+    }
+
+    /// History is not rewritten: once the service has closed a session,
+    /// whatever was recorded about it stays, and a report about an older
+    /// session cannot retract a newer one's.
+    #[test]
+    fn only_a_live_sessions_own_record_can_be_retracted() {
+        let ledger = Ledger::new();
+        let g = ledger.begin("IKEV2");
+        assert!(ledger.record(g, Some(829), Instant::now(), true));
+        ledger.close(g);
+        assert!(!ledger.retract(g));
+        assert!(ledger.ended_without_successor().is_some());
+
+        let newer = ledger.begin("IKEV2");
+        assert!(ledger.record(newer, None, Instant::now(), false));
+        assert!(!ledger.retract(g), "a stale generation retracted a newer session's record");
+        assert_eq!(ledger.ended_without_successor().map(|e| e.generation), Some(newer));
+    }
+
+    /// What a source that can come back reports answers nothing on its
+    /// own until the owning thread has looked; a process exit does at
+    /// once, and a certain second witness confirms an uncertain first.
+    #[test]
+    fn an_ending_that_may_be_undone_answers_nothing_until_confirmed() {
+        let ledger = Ledger::new();
+        let g = ledger.begin("WIREGUARD");
+        let first = Instant::now();
+        assert!(ledger.record(g, Some(1066), first, false));
+        assert!(ledger.ended_without_successor().is_some(), "on record for the owning thread");
+        assert!(ledger.confirmed_drop().is_none(), "answered a status before anyone checked");
+        ledger.confirm(g);
+        assert_eq!(ledger.confirmed_drop().map(|e| (e.detail, e.at)), Some((Some(1066), first)));
+
+        let g = ledger.begin("IKEV2");
+        assert!(ledger.record(g, None, Instant::now(), false));
+        assert!(ledger.record(g, Some(5), Instant::now(), true));
+        let ended = ledger.confirmed_drop().expect("confirmed by the certain witness");
+        assert_eq!(ended.detail, None, "the first witness still says why");
+
+        let g = ledger.begin("XRAY_VLESS_REALITY");
+        assert!(ledger.record(g, Some(1), Instant::now(), true));
+        assert!(ledger.confirmed_drop().is_some(), "a process exit is beyond doubt at once");
+    }
+
+    #[test]
+    fn a_settling_source_is_not_looked_at_until_its_moment_has_passed() {
+        struct Counted(Arc<AtomicU64>);
+        impl Liveness for Counted {
+            fn look(&mut self) -> Look {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Look::Gone(Some(3))
+            }
+            fn may_return(&self) -> bool {
+                true
+            }
+        }
+        let looks = Arc::new(AtomicU64::new(0));
+        let mut settle = Settle::new(Box::new(Counted(Arc::clone(&looks))), Duration::from_millis(300));
+        assert!(settle.may_return(), "the wrapper must not change what the source is");
+        assert!(matches!(settle.look(), Look::Again));
+        assert_eq!(looks.load(Ordering::SeqCst), 0);
+        std::thread::sleep(Duration::from_millis(350));
+        assert!(matches!(settle.look(), Look::Gone(Some(3))));
+        assert_eq!(looks.load(Ordering::SeqCst), 1);
     }
 
     /// The case this module exists for, at the scale teardown bugs
@@ -618,7 +811,7 @@ mod tests {
                 "test",
                 Box::new(liveness),
                 Arc::new(move |gone: Gone| {
-                    if gone.definitive && ledger_for_watch.record(gone.generation, gone.detail, gone.at) {
+                    if gone.definitive && ledger_for_watch.record(gone.generation, gone.detail, gone.at, !gone.may_return) {
                         seen.lock().unwrap().push((i, gone.generation, pid, gone.at));
                     }
                 }),
@@ -693,7 +886,7 @@ mod tests {
                 "test",
                 Box::new(liveness),
                 Arc::new(move |gone: Gone| {
-                    if ledger_for_watch.record(gone.generation, gone.detail, gone.at) {
+                    if ledger_for_watch.record(gone.generation, gone.detail, gone.at, !gone.may_return) {
                         count.fetch_add(1, Ordering::SeqCst);
                     }
                 }),

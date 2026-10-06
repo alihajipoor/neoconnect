@@ -93,14 +93,19 @@ impl Active {
     /// Something the kernel signals in every case, never a timer: the
     /// child's own process handle for Xray and OpenVPN, the tunnel
     /// service's process for WireGuard, and an event RAS sets for IKEv2.
-    fn liveness(&self) -> io::Result<Box<dyn engine_watch::Liveness>> {
+    /// `scm` is how the WireGuard tunnel service's state is read -- the
+    /// service manager, except in tests.
+    fn liveness(&self, scm: &ScmQuery) -> io::Result<Box<dyn engine_watch::Liveness>> {
         use std::os::windows::io::AsRawHandle;
         Ok(match self {
             Active::Child { child, .. } => {
                 Box::new(engine_watch::ProcessLiveness::of_handle(child.as_raw_handle() as _)?)
             }
             Active::Ikev2(live) => Box::new(live.liveness()?),
-            Active::WireguardTunnel => Box::new(wireguard::ServiceLiveness::of_tunnel_service()),
+            Active::WireguardTunnel => {
+                let scm = Arc::clone(scm);
+                Box::new(wireguard::ServiceLiveness::with_query(move || scm()))
+            }
         })
     }
 
@@ -110,15 +115,36 @@ impl Active {
     ///
     /// The check a teardown makes before acting on a watch's report, so
     /// that nothing is taken down on the strength of a wait that merely
-    /// failed. A tunnel service that is still stopping is not an ending.
-    fn has_ended(&mut self) -> Option<bool> {
+    /// failed. A tunnel service that is still stopping, starting again,
+    /// or whose state could not be read is not an ending.
+    fn has_ended(&mut self, scm: &ScmQuery) -> Option<bool> {
         match self {
             Active::Child { child, .. } => Some(!matches!(child.try_wait(), Ok(None))),
             Active::Ikev2(live) => live.is_connected().map(|up| !up),
-            Active::WireguardTunnel => Some(!wireguard::tunnel_is_running()),
+            Active::WireguardTunnel => Some(!wireguard::counts_as_running(&scm())),
         }
     }
 }
+
+/// How the WireGuard tunnel service's state is read: the service manager
+/// in the service, a script in the tests that need a tunnel service to
+/// stop and start again on cue.
+type ScmQuery = Arc<dyn Fn() -> wireguard::ScmView + Send + Sync>;
+
+/// How soon a watch may be started again after the last one, at most.
+///
+/// A watch whose report the engine contradicts is started again at once
+/// (see [`Engines::end_dead_session`]). Once in a while that is a
+/// WireGuard tunnel service restarted, or an IKEv2 connection moved by
+/// MOBIKE. A source that kept contradicting itself would instead make
+/// it a loop through the owning thread, so a watch armed within this of
+/// the last one waits this long before its first look.
+const REARM_SPACING: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How many re-arms per session are written to `cleanup.log`. The first
+/// few say what happened; a source that flaps all session long would
+/// otherwise fill the log with one line a second.
+const REARMS_LOGGED: u32 = 3;
 
 /// The live engine, in a box that cannot be emptied quietly.
 ///
@@ -278,6 +304,11 @@ struct Session {
     /// started, in which case an engine that dies is still found by the
     /// status poll, as it always was.
     watch: Option<WatchGuard>,
+    /// When the current watch was started, and how many times it has
+    /// been started again after a report the engine contradicted. See
+    /// [`REARM_SPACING`].
+    armed_at: Instant,
+    rearms: u32,
 }
 
 impl Session {
@@ -288,6 +319,8 @@ impl Session {
             filters: SessionFilters::default(),
             generation: 0,
             watch: None,
+            armed_at: Instant::now(),
+            rearms: 0,
         }
     }
 }
@@ -313,6 +346,17 @@ enum Noticed {
 /// is far inside the 180-second window that separates alive from stale,
 /// so nothing it reports can change meaning by being this old.
 const HANDSHAKE_REUSE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A profile for the sessions tests install. IKEv2's, because it is the
+/// smallest to build; nothing connects with it.
+#[cfg(test)]
+fn test_profile() -> ConnectProfile {
+    ConnectProfile::Ikev2(neoconnect_ipc::Ikev2Profile {
+        server: "node.example.com".into(),
+        username: String::new(),
+        password: String::new(),
+    })
+}
 
 /// The WFP filters a session installed, released when this is dropped.
 #[derive(Default)]
@@ -392,6 +436,8 @@ pub struct Engines {
     /// The last WireGuard handshake reading and when it was taken. See
     /// [`HANDSHAKE_REUSE_FOR`].
     handshake_reading: Option<(Instant, wireguard::HandshakeHealth)>,
+    /// How the WireGuard tunnel service's state is read. See [`ScmQuery`].
+    wireguard_scm: ScmQuery,
     /// How many sessions have been ended, by any route. For the tests
     /// that prove a dead engine racing a Disconnect is torn down once.
     #[cfg(test)]
@@ -411,6 +457,7 @@ impl Engines {
             ledger,
             engine_gone: None,
             handshake_reading: None,
+            wireguard_scm: Arc::new(wireguard::scm_view),
             #[cfg(test)]
             sessions_ended: 0,
         }
@@ -559,18 +606,63 @@ impl Engines {
     /// Returns its generation.
     #[cfg(test)]
     pub(crate) fn begin_test_session(&mut self, protocol: &'static str, child: Child) -> u64 {
-        let profile = ConnectProfile::Ikev2(neoconnect_ipc::Ikev2Profile {
-            server: "node.example.com".into(),
-            username: String::new(),
-            password: String::new(),
-        });
-        self.begin_session(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &profile);
+        self.begin_session(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &test_profile());
+        self.active.peek().map_or(0, |s| s.generation)
+    }
+
+    /// The same, with the first watch on `first_watch` instead of the
+    /// process -- for a source that reports an ending the process then
+    /// contradicts, which is what a restarted WireGuard tunnel service or
+    /// an IKEv2 connection moved by MOBIKE look like from here. A watch
+    /// started again afterwards is on the process, as in a real session.
+    #[cfg(test)]
+    pub(crate) fn begin_test_session_watched_by(
+        &mut self,
+        protocol: &'static str,
+        child: Child,
+        first_watch: Box<dyn engine_watch::Liveness>,
+    ) -> u64 {
+        let generation = self
+            .active
+            .fill(Session::new(Active::Child { protocol, child, routes: InstalledRoutes::none() }, &test_profile()));
+        let guard = engine_watch::watch(generation, protocol, first_watch, self.report_to()).expect("starting a watch");
+        if let Some(session) = self.active.peek_mut() {
+            session.watch = Some(guard);
+        }
+        generation
+    }
+
+    /// A WireGuard session over a scripted service manager. Nothing is
+    /// installed; the script is what the watch, phase one and `status`
+    /// read the tunnel service's state from.
+    #[cfg(test)]
+    fn begin_test_wireguard_session(
+        &mut self,
+        scm: impl Fn() -> wireguard::ScmView + Send + Sync + 'static,
+    ) -> u64 {
+        self.wireguard_scm = Arc::new(scm);
+        self.begin_session(Active::WireguardTunnel, &test_profile());
         self.active.peek().map_or(0, |s| s.generation)
     }
 
     #[cfg(test)]
     pub(crate) fn has_session(&self) -> bool {
         !self.active.is_empty()
+    }
+
+    /// Whether the live session has a watch thread still running.
+    #[cfg(test)]
+    pub(crate) fn session_is_watched(&self) -> bool {
+        self.active
+            .peek()
+            .and_then(|s| s.watch.as_ref())
+            .is_some_and(|w| !w.finished().load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// How many times the live session's watch has been started again.
+    #[cfg(test)]
+    pub(crate) fn session_rearms(&self) -> u32 {
+        self.active.peek().map_or(0, |s| s.rearms)
     }
 
     #[cfg(test)]
@@ -1057,7 +1149,7 @@ impl Engines {
     /// found by the status poll exactly as before this existed.
     fn begin_session(&mut self, engine: Active, profile: &ConnectProfile) {
         let label = engine.protocol();
-        let liveness = engine.liveness();
+        let liveness = engine.liveness(&self.wireguard_scm);
         let generation = self.active.fill(Session::new(engine, profile));
 
         let started = liveness.and_then(|liveness| {
@@ -1084,13 +1176,14 @@ impl Engines {
     /// and nothing is reported. A wait that failed is not recorded --
     /// nothing is known -- but is still handed on while the session is
     /// live, because the teardown checks the engine itself before it
-    /// acts.
+    /// acts. An ending from a source that can come back is recorded
+    /// unconfirmed, and answers no status until that check confirms it.
     fn report_to(&self) -> engine_watch::OnGone {
         let ledger = Arc::clone(&self.ledger);
         let sink = self.engine_gone.clone();
         Arc::new(move |gone: engine_watch::Gone| {
             let news = if gone.definitive {
-                ledger.record(gone.generation, gone.detail, gone.at)
+                ledger.record(gone.generation, gone.detail, gone.at, !gone.may_return)
             } else {
                 ledger.is_live(gone.generation)
             };
@@ -1105,11 +1198,21 @@ impl Engines {
     /// Phase one after an engine has ended on its own: take down what the
     /// session left behind, now, rather than on the next status poll.
     ///
-    /// Returns whether it did anything. It does nothing -- and that is
-    /// the common, correct outcome of a race -- when the session is no
-    /// longer the one the watch was started for (a Disconnect, a connect
-    /// or a status poll got there first) or when the engine, asked
-    /// directly, turns out not to have ended.
+    /// Returns whether it tore the session down, which is when phase two
+    /// is owed. It does nothing -- and that is the common, correct
+    /// outcome of a race -- when the session is no longer the one the
+    /// watch was started for (a Disconnect, a connect or a status poll
+    /// got there first).
+    ///
+    /// When the engine, asked directly, turns out not to have ended, the
+    /// report was a moment rather than an ending: a WireGuard tunnel
+    /// service the manager stopped and is starting again, an IKEv2
+    /// connection out of `Connected` while MOBIKE moved it, a wait that
+    /// failed. The watch that reported it has finished, so this does two
+    /// things before returning: it takes back what the watch put on
+    /// record -- left there, the status and Disconnect fallbacks would go
+    /// on answering "no tunnel" for a live one -- and it starts the watch
+    /// again, or the session would go unwatched for the rest of its life.
     ///
     /// Only releases things. Fail open is a product decision: nothing
     /// here blocks traffic or brings a tunnel back. What changes is that
@@ -1124,20 +1227,74 @@ impl Engines {
             .ledger
             .ended_without_successor()
             .is_some_and(|ended| ended.generation == generation);
-        match self.active.peek_mut() {
-            Some(session) if session.generation == generation => match session.engine.has_ended() {
-                Some(true) => {}
-                Some(false) => return false,
+        let scm = Arc::clone(&self.wireguard_scm);
+        let ended = match self.active.peek_mut() {
+            Some(session) if session.generation == generation => match session.engine.has_ended(&scm) {
+                Some(ended) => ended,
                 // RAS cannot say right now. Its own notification already
                 // did, and that is what a record means; without one there
                 // is nothing to act on.
-                None if on_record => {}
-                None => return false,
+                None => on_record,
             },
             _ => return false,
+        };
+        if ended {
+            self.ledger.confirm(generation);
+            self.tear_down_dead_session(Noticed::ByWatch);
+            return true;
         }
-        self.tear_down_dead_session(Noticed::ByWatch);
-        true
+        let retracted = self.ledger.retract(generation);
+        self.rearm_watch(retracted);
+        false
+    }
+
+    /// Starts the live session's watch again, after a report its engine
+    /// contradicted. See [`Self::end_dead_session`].
+    ///
+    /// Spaced: a watch armed within [`REARM_SPACING`] of the last one
+    /// waits that long before its first look, so a source that keeps
+    /// reporting endings the engine keeps contradicting costs one look a
+    /// second rather than a loop through this thread.
+    fn rearm_watch(&mut self, retracted: bool) {
+        let report = self.report_to();
+        let scm = Arc::clone(&self.wireguard_scm);
+        let Some(session) = self.active.peek_mut() else {
+            return;
+        };
+        let label = session.engine.protocol();
+        let too_soon = session.armed_at.elapsed() < REARM_SPACING;
+        session.armed_at = Instant::now();
+        session.rearms = session.rearms.saturating_add(1);
+        // The old guard's thread has already returned -- it reported, and
+        // that is the last thing a watch does -- so this only closes its
+        // stop event.
+        drop(session.watch.take());
+        let started = session.engine.liveness(&scm).and_then(|liveness| {
+            let liveness: Box<dyn engine_watch::Liveness> = if too_soon {
+                Box::new(engine_watch::Settle::new(liveness, REARM_SPACING))
+            } else {
+                liveness
+            };
+            engine_watch::watch(session.generation, label, liveness, report)
+        });
+        let rearms = session.rearms;
+        let outcome = match started {
+            Ok(guard) => {
+                session.watch = Some(guard);
+                "watching it again".to_string()
+            }
+            Err(e) => format!("the watch could not be started again ({e}); a drop will only be noticed by the status poll"),
+        };
+        if rearms <= REARMS_LOGGED {
+            crate::cleanup_log::note(
+                "the tunnel engine was reported ended but is still running",
+                &format!(
+                    "{label}: {}; {outcome}{}",
+                    if retracted { "the report was taken back" } else { "the watch's wait failed" },
+                    if rearms == REARMS_LOGGED { "; further ones this session are not logged" } else { "" }
+                ),
+            );
+        }
     }
 
     /// Phase two after an engine ended on its own: the thorough pass.
@@ -1186,8 +1343,9 @@ impl Engines {
         };
         // On record before the generation closes, so a death the status
         // poll found first is a drop like one the watch found. Keeps the
-        // first witness's time if the watch already recorded it.
-        self.ledger.record(generation, None, Instant::now());
+        // first witness's time if the watch already recorded it, and is
+        // certain either way: both callers have asked the engine itself.
+        self.ledger.record(generation, None, Instant::now(), true);
         let ended = self.ledger.ended_without_successor().filter(|e| e.generation == generation);
 
         let engine = self.end_session();
@@ -1542,7 +1700,10 @@ impl Engines {
                 }
             }
             Some(Active::WireguardTunnel) => {
-                if wireguard::tunnel_is_running() {
+                // `tunnel_is_running`, through the same query the watch
+                // and phase one read -- the service manager, except in
+                // the tests that script one.
+                if wireguard::counts_as_running(&(self.wireguard_scm)()) {
                     // The handshake age needs `&self`, which cannot be
                     // taken while the slot is borrowed above, so it is
                     // read once the match has ended.
@@ -2590,8 +2751,9 @@ mod helper_tests {
         let mut engines = engines_for_test();
         let generation = engines.begin_test_session("XRAY_VLESS_REALITY", engine_stand_in());
         kill_engine_behind_its_back(&mut engines);
+        let scm = Arc::clone(&engines.wireguard_scm);
         assert!(wait_for(Duration::from_secs(5), || {
-            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended()), Some(Some(true)))
+            matches!(engines.active.peek_mut().map(|s| s.engine.has_ended(&scm)), Some(Some(true)))
         }));
 
         assert_eq!(engines.status(), (false, None, TunnelHealth::Down));
@@ -2730,6 +2892,392 @@ mod helper_tests {
             // Drop the sink, which holds a handle to this supervisor, so
             // its thread can end with the test.
             let _ = sup.run(|engines: &mut Engines, _| engines.engine_gone = None).await;
+        }
+    }
+
+    // ---- A report the engine contradicts -----------------------------
+    //
+    // Found by both reviews of this branch. The watch put a drop on
+    // record, phase one asked the engine and found it running, and
+    // returned -- leaving the record in the ledger, so the status and
+    // Disconnect fallbacks answered "no tunnel" for a live one, and the
+    // session with no watch at all, because a watch that reports has
+    // finished. What does that, on a real machine: a WireGuard tunnel
+    // service stopped and started again by the service manager, a
+    // service-manager query that fails, an IKEv2 connection out of
+    // `Connected` while MOBIKE moves it.
+
+    /// A source that reports an ending on its first look, whatever the
+    /// engine is doing -- which is what the three above look like to the
+    /// watch. A state, so it can come back.
+    struct SaysGone(Option<i64>);
+    impl engine_watch::Liveness for SaysGone {
+        fn look(&mut self) -> engine_watch::Look {
+            engine_watch::Look::Gone(self.0)
+        }
+        fn may_return(&self) -> bool {
+            true
+        }
+    }
+
+    /// The same, held back until `go` is set, so thirty-two of them can
+    /// report at one instant.
+    struct GoneWhen(engine_watch::OwnedHandle);
+    impl engine_watch::Liveness for GoneWhen {
+        fn look(&mut self) -> engine_watch::Look {
+            if self.0.is_signalled() {
+                engine_watch::Look::Gone(Some(1066))
+            } else {
+                engine_watch::Look::WaitOn(self.0.raw())
+            }
+        }
+        fn may_return(&self) -> bool {
+            true
+        }
+    }
+
+    /// A wait the kernel refuses: nothing is learned, nothing recorded.
+    struct WaitFails;
+    impl engine_watch::Liveness for WaitFails {
+        fn look(&mut self) -> engine_watch::Look {
+            engine_watch::Look::WaitOn(std::ptr::null_mut())
+        }
+    }
+
+    fn recorded(engines: &Engines, generation: u64) -> bool {
+        engines.ledger().ended_without_successor().is_some_and(|e| e.generation == generation)
+    }
+
+    fn end_test_session(engines: &mut Engines) {
+        if let Some(Active::Child { mut child, .. }) = engines.end_session() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        engines.unblock_ipv6();
+    }
+
+    /// The generic case, with a real process as the engine: the report
+    /// is taken back, the session stays up and is watched again, status
+    /// still says up -- and the engine's real death afterwards is still
+    /// caught, with its own exit code rather than the retracted one's.
+    #[test]
+    fn a_report_the_engine_contradicts_is_taken_back_and_the_session_watched_again() {
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_session_watched_by("XRAY_VLESS_REALITY", engine_stand_in(), Box::new(SaysGone(Some(1066))));
+        assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "the watch never reported");
+        assert!(engines.ledger().confirmed_drop().is_none(), "a source that can come back answered a status unchecked");
+
+        assert!(!engines.end_dead_session(g), "a running engine was torn down");
+        assert!(engines.has_session());
+        assert_eq!(engines.sessions_ended(), 0);
+        assert_eq!(engines.split_tunnel.stop_calls(), 0, "Custom mode was stopped over a live tunnel");
+        assert!(!recorded(&engines, g), "the contradicted report was left on record");
+        assert!(engines.ledger().is_live(g), "a retraction closed the generation");
+        assert_eq!(engines.session_rearms(), 1);
+        assert!(engines.session_is_watched(), "the session was left unwatched");
+        assert_eq!(engines.status(), (true, Some("XRAY_VLESS_REALITY".to_string()), TunnelHealth::Unknown));
+
+        let killed_at = kill_engine_behind_its_back(&mut engines);
+        assert!(
+            wait_for(Duration::from_secs(5), || engines.ledger().confirmed_drop().is_some()),
+            "after the re-arm, the engine's real death went unnoticed"
+        );
+        let ended = engines.ledger().confirmed_drop().unwrap();
+        assert_eq!(ended.generation, g);
+        assert_eq!(ended.detail, Some(1), "the real death's own exit code, not the retracted report's");
+        // The re-armed watch waits out REARM_SPACING before its first
+        // look, because it was armed within a second of the first.
+        assert!(ended.at.duration_since(killed_at) < Duration::from_secs(2));
+        assert!(engines.end_dead_session(g));
+        assert!(!engines.has_session());
+        assert_eq!(engines.sessions_ended(), 1);
+        assert_eq!(engines.session_rearms(), 0, "nothing left to re-arm");
+    }
+
+    /// A wait that failed records nothing; phase one asks, finds the
+    /// engine running, and starts the watch again rather than leaving the
+    /// session unwatched for good.
+    #[test]
+    fn a_watch_whose_wait_failed_is_started_again() {
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_session_watched_by("OPENVPN", engine_stand_in(), Box::new(WaitFails));
+        assert!(wait_for(Duration::from_secs(5), || !engines.session_is_watched()), "the failed wait did not end the watch");
+        assert!(!recorded(&engines, g), "a wait that failed was recorded as a drop");
+
+        assert!(!engines.end_dead_session(g));
+        assert!(engines.has_session());
+        assert_eq!(engines.session_rearms(), 1);
+        assert!(engines.session_is_watched());
+
+        kill_engine_behind_its_back(&mut engines);
+        assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "the re-armed watch missed the death");
+        assert!(engines.end_dead_session(g));
+        assert_eq!(engines.sessions_ended(), 1);
+    }
+
+    /// The WireGuard trigger, through the same query the watch, phase
+    /// one and `status` all read. The service manager is scripted; the
+    /// tunnel service's process is a real one, killed for real.
+    #[test]
+    fn a_wireguard_tunnel_service_stopped_and_started_again_is_not_a_drop() {
+        use wireguard::ScmView;
+        let mut service_process = engine_stand_in();
+        let scm = Arc::new(std::sync::Mutex::new(ScmView::Running(Some(service_process.id()))));
+        let script = Arc::clone(&scm);
+        let set = |view: ScmView| *scm.lock().unwrap() = view;
+
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_wireguard_session(move || *script.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!recorded(&engines, g), "a running tunnel service was reported gone");
+        assert!(engines.session_is_watched());
+
+        // The service's process dies and the manager marks it stopped...
+        set(ScmView::Stopped(Some(1066)));
+        service_process.kill().unwrap();
+        let _ = service_process.wait();
+        assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "the stopped service was not noticed");
+        assert!(engines.ledger().confirmed_drop().is_none(), "a Stopped seen once answered a status");
+
+        // ...and starts it again before phase one gets to ask.
+        set(ScmView::Pending);
+        assert!(!engines.end_dead_session(g), "a tunnel service starting again was taken down");
+        assert!(engines.has_session());
+        assert!(!recorded(&engines, g), "the report was left on record");
+        assert_eq!(engines.session_rearms(), 1);
+        assert!(engines.session_is_watched());
+
+        // Running again as a new process, which the re-armed watch takes up.
+        let mut restarted = engine_stand_in();
+        set(ScmView::Running(Some(restarted.id())));
+        std::thread::sleep(Duration::from_millis(1_400));
+        assert!(!recorded(&engines, g), "the restarted service was reported gone");
+        assert!(engines.session_is_watched());
+
+        // And a real ending after it is still caught, and taken down once.
+        set(ScmView::Stopped(Some(1)));
+        restarted.kill().unwrap();
+        let _ = restarted.wait();
+        assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "the real stop went unnoticed");
+        assert!(engines.end_dead_session(g), "a stopped tunnel service was not taken down");
+        assert!(!engines.has_session());
+        assert_eq!(engines.sessions_ended(), 1);
+        let ended = engines.ledger().confirmed_drop().expect("confirmed by phase one");
+        assert_eq!(ended.detail, Some(1));
+        assert_eq!(ended.protocol, "WIREGUARD");
+    }
+
+    /// A service manager that cannot be asked -- the transient
+    /// `OpenService` failure, which used to read as "not registered" --
+    /// is neither noticed as an ending by the watch nor acted on by phase
+    /// one.
+    #[test]
+    fn a_tunnel_service_whose_state_cannot_be_read_is_not_taken_down() {
+        use wireguard::ScmView;
+        let mut service_process = engine_stand_in();
+        let scm = Arc::new(std::sync::Mutex::new(ScmView::Running(Some(service_process.id()))));
+        let script = Arc::clone(&scm);
+        let set = |view: ScmView| *scm.lock().unwrap() = view;
+
+        let mut engines = engines_for_test();
+        let g = engines.begin_test_wireguard_session(move || *script.lock().unwrap());
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Unreadable for longer than a slice, with the process alive.
+        set(ScmView::Unreadable);
+        std::thread::sleep(Duration::from_millis(1_300));
+        assert!(!recorded(&engines, g), "an unanswered question was reported as an ending");
+        assert!(engines.session_is_watched());
+
+        // The watch does see a stop; by the time phase one asks, the
+        // manager cannot answer. "Could not ask" is not "down".
+        set(ScmView::Stopped(Some(1066)));
+        service_process.kill().unwrap();
+        let _ = service_process.wait();
+        assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)));
+        set(ScmView::Unreadable);
+        assert!(!engines.end_dead_session(g), "taken down on a question nobody answered");
+        assert!(engines.has_session());
+        assert!(!recorded(&engines, g));
+        assert!(engines.session_is_watched(), "left unwatched after an unanswered question");
+
+        // Once the manager answers again, the stop is caught.
+        set(ScmView::Stopped(Some(1066)));
+        assert!(wait_for(Duration::from_secs(5), || recorded(&engines, g)), "the re-armed watch missed the stop");
+        assert!(engines.end_dead_session(g));
+        assert_eq!(engines.sessions_ended(), 1);
+    }
+
+    /// Thirty-two at once, for the reason the race test above gives.
+    ///
+    /// Every session's watch reports an ending at the same instant that
+    /// its engine contradicts. Half of them have a Disconnect racing the
+    /// report; the other half are left alone. The left-alone half must
+    /// all end up up, with nothing on record and a watch running; the
+    /// raced half must be ended exactly once, by the Disconnect. Then the
+    /// left-alone half's engines are killed at once for real, and every
+    /// one must be caught by its re-armed watch and torn down exactly
+    /// once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn contradicted_reports_at_once_are_taken_back_and_real_deaths_after_them_still_caught() {
+        use crate::lifecycle::supervisor::Supervisor;
+        use windows_sys::Win32::System::Threading::{OpenProcess, SetEvent, TerminateProcess, PROCESS_TERMINATE};
+
+        const AT_ONCE: usize = 32;
+        let go = engine_watch::new_event().unwrap();
+        let mut racers = Vec::new();
+        for i in 0..AT_ONCE {
+            let sup = Supervisor::spawn(engines_for_test(), "test-contradicted");
+            let teardown = sup.clone();
+            let theirs = go.duplicate().unwrap();
+            let (pid, generation) = sup
+                .run(move |engines: &mut Engines, _| {
+                    engines.when_an_engine_ends(Arc::new(move |generation| {
+                        let _ = teardown.run_detached(move |engines: &mut Engines, _| {
+                            engines.end_dead_session(generation);
+                        });
+                    }));
+                    let child = engine_stand_in();
+                    let pid = child.id();
+                    let g = engines.begin_test_session_watched_by("XRAY_TROJAN", child, Box::new(GoneWhen(theirs)));
+                    (pid, g)
+                })
+                .await
+                .unwrap();
+            racers.push((i, sup, pid, generation));
+        }
+
+        // Every watch reports at once; the odd ones race a Disconnect.
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE + 1));
+        let mut threads = Vec::new();
+        for (i, sup, _, _) in &racers {
+            let (i, sup, start) = (*i, sup.clone(), Arc::clone(&start));
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                if i % 2 == 1 {
+                    let _ = sup.run_detached(|engines: &mut Engines, token| {
+                        adopt_token(token);
+                        let _ = crate::lifecycle::teardown::hard_stop(engines);
+                    });
+                }
+            }));
+        }
+        start.wait();
+        // SAFETY: the event is open.
+        unsafe { SetEvent(go.raw()) };
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        for (i, sup, _, g) in &racers {
+            let g = *g;
+            let mut settled = None;
+            for _ in 0..200 {
+                let state = sup
+                    .run(move |engines: &mut Engines, _| {
+                        (
+                            engines.has_session(),
+                            engines.session_rearms(),
+                            engines.session_is_watched(),
+                            recorded(engines, g),
+                            engines.sessions_ended(),
+                        )
+                    })
+                    .await
+                    .unwrap();
+                let done = if i % 2 == 0 { state.1 >= 1 && state.2 && !state.3 } else { !state.0 };
+                if done {
+                    // Long enough for anything still in flight to land.
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    settled = Some(
+                        sup.run(move |engines: &mut Engines, _| {
+                            (
+                                engines.has_session(),
+                                engines.session_is_watched(),
+                                recorded(engines, g),
+                                engines.ledger().confirmed_drop().is_some(),
+                                engines.sessions_ended(),
+                                engines.status().0,
+                            )
+                        })
+                        .await
+                        .unwrap(),
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let (has, watched, on_record, confirmed, ended, up) =
+                settled.unwrap_or_else(|| panic!("racer {i}: never settled"));
+            if i % 2 == 0 {
+                assert!(has, "racer {i}: a live tunnel was taken down over a contradicted report");
+                assert!(watched, "racer {i}: left unwatched");
+                assert!(!on_record && !confirmed, "racer {i}: the contradicted report stayed on record");
+                assert_eq!(ended, 0, "racer {i}");
+                assert!(up, "racer {i}: status said down over a live engine");
+            } else {
+                assert!(!has, "racer {i}: the Disconnect left a session");
+                assert!(!confirmed, "racer {i}: a Disconnect's own teardown read as a confirmed drop");
+                assert_eq!(ended, 1, "racer {i}: ended {ended} times");
+                assert!(!up, "racer {i}");
+            }
+        }
+
+        // The real deaths, all at once.
+        let start = Arc::new(std::sync::Barrier::new(AT_ONCE / 2));
+        let mut killers = Vec::new();
+        for (_, _, pid, _) in racers.iter().filter(|r| r.0 % 2 == 0) {
+            let (pid, start) = (*pid, Arc::clone(&start));
+            killers.push(std::thread::spawn(move || {
+                start.wait();
+                // SAFETY: plain calls; the handle is closed straight after.
+                unsafe {
+                    let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                    if !h.is_null() {
+                        TerminateProcess(h, 1);
+                        windows_sys::Win32::Foundation::CloseHandle(h);
+                    }
+                }
+            }));
+        }
+        for k in killers {
+            k.join().unwrap();
+        }
+        for (i, sup, _, g) in racers.iter().filter(|r| r.0 % 2 == 0) {
+            let g = *g;
+            let mut result = None;
+            for _ in 0..250 {
+                let (has, ended, confirmed) = sup
+                    .run(move |engines: &mut Engines, _| {
+                        (
+                            engines.has_session(),
+                            engines.sessions_ended(),
+                            engines.ledger().confirmed_drop().is_some_and(|e| e.generation == g),
+                        )
+                    })
+                    .await
+                    .unwrap();
+                if !has {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let ended = sup.run(|engines: &mut Engines, _| engines.sessions_ended()).await.unwrap();
+                    result = Some((ended, confirmed));
+                    break;
+                }
+                let _ = ended;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let (ended, confirmed) = result.unwrap_or_else(|| panic!("racer {i}: the real death was never torn down"));
+            assert_eq!(ended, 1, "racer {i}: torn down {ended} times");
+            assert!(confirmed, "racer {i}: the real death is not on record");
+        }
+
+        for (_, sup, _, _) in racers {
+            let _ = sup
+                .run(|engines: &mut Engines, _| {
+                    engines.engine_gone = None;
+                    end_test_session(engines);
+                })
+                .await;
         }
     }
 }

@@ -276,8 +276,17 @@ async fn tear_down_dead_engines(engines: &Supervisor<Engines>) -> std::io::Resul
 /// to ask `os_visible_tunnel` -- which for IKEv2, with the phonebook
 /// entry still present, launches PowerShell. The engine watch already
 /// has the kernel's word that the engine is gone.
+///
+/// Only a confirmed drop answers (`Ledger::confirmed_drop`): a process
+/// exit, or an ending the owning thread has checked. A WireGuard tunnel
+/// service seen `Stopped` once, or an IKEv2 connection seen out of
+/// `Connected` once, can be back a moment later -- the manager
+/// restarting the service, MOBIKE moving the connection -- and answering
+/// "down" from that while the owning thread is busy elsewhere would be a
+/// tunnel state nothing verified. Those fall through to the fallback's
+/// own question until phase one has asked the engine.
 fn state_after_a_drop(ledger: &Ledger) -> Option<Response> {
-    ledger.ended_without_successor().map(|_| Response::State {
+    ledger.confirmed_drop().map(|_| Response::State {
         connected: false,
         protocol: None,
         health: TunnelHealth::Down,
@@ -783,10 +792,10 @@ mod tests {
         });
         kill_from_outside(pid);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while ledger.ended_without_successor().is_none() && std::time::Instant::now() < deadline {
+        while ledger.confirmed_drop().is_none() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(ledger.ended_without_successor().is_some(), "the watch did not record the drop");
+        assert!(ledger.confirmed_drop().is_some(), "the watch did not record the drop, confirmed -- a process exit cannot be undone");
 
         let asked = std::time::Instant::now();
         let reply = tokio::time::timeout(
@@ -826,7 +835,7 @@ mod tests {
         let live = ledger.begin("WIREGUARD");
         assert!(state_after_a_drop(&ledger).is_none(), "a live session is not a drop");
 
-        assert!(ledger.record(live, Some(1066), std::time::Instant::now()));
+        assert!(ledger.record(live, Some(1066), std::time::Instant::now(), true));
         match state_after_a_drop(&ledger) {
             Some(Response::State { connected, protocol, health, .. }) => {
                 assert!(!connected);
@@ -839,6 +848,98 @@ mod tests {
         ledger.close(live);
         ledger.begin("IKEV2");
         assert!(state_after_a_drop(&ledger).is_none(), "a newer session makes the drop history");
+    }
+
+    /// A WireGuard tunnel service seen `Stopped` once, or an IKEv2
+    /// connection seen out of `Connected` once, can be back a moment
+    /// later. Until the owning thread has asked the engine, the fallback
+    /// does not answer "down" from that -- and once it has asked and
+    /// found the engine running, the record is gone.
+    #[test]
+    fn the_fallback_does_not_answer_from_an_ending_that_may_be_undone() {
+        let ledger = Ledger::new();
+        let live = ledger.begin("WIREGUARD");
+        assert!(ledger.record(live, Some(1066), std::time::Instant::now(), false));
+        assert!(state_after_a_drop(&ledger).is_none(), "a Stopped seen once answered for the tunnel");
+
+        assert!(ledger.retract(live), "phase one found it running");
+        assert!(state_after_a_drop(&ledger).is_none());
+
+        assert!(ledger.record(live, Some(1066), std::time::Instant::now(), false));
+        ledger.confirm(live);
+        assert!(state_after_a_drop(&ledger).is_some(), "checked and ended is a drop");
+    }
+
+    /// The defect both reviews found, end to end over a real pipe. The
+    /// watch reports the engine gone; phase one asks it and finds it
+    /// running -- a restarted WireGuard tunnel service, an IKEv2
+    /// connection moved by MOBIKE. The record must be taken back, so
+    /// status keeps saying up, and the session must be watched again, so
+    /// that when the engine really does die it is still noticed with
+    /// nobody asking.
+    #[tokio::test]
+    async fn an_ending_the_engine_contradicts_leaves_the_tunnel_up_and_watched() {
+        use crate::lifecycle::engine_watch::{Liveness, Look};
+        struct SaysGoneOnce;
+        impl Liveness for SaysGoneOnce {
+            fn look(&mut self) -> Look {
+                Look::Gone(Some(1066))
+            }
+            fn may_return(&self) -> bool {
+                true
+            }
+        }
+
+        let name = r"\\.\pipe\neoconnect-test-contradicted-drop";
+        let engines = start_server(name).await;
+        let (pid, ledger) = engines
+            .run(|engines: &mut Engines, _| {
+                let child = engine_stand_in();
+                let pid = child.id();
+                engines.begin_test_session_watched_by("XRAY_VLESS_REALITY", child, Box::new(SaysGoneOnce));
+                (pid, engines.ledger())
+            })
+            .await
+            .unwrap();
+
+        // Phase one runs on its own, with nobody asking. Settled once the
+        // session is watched again.
+        let mut settled = false;
+        for _ in 0..200 {
+            let (rearms, watched) = engines
+                .run(|engines: &mut Engines, _| (engines.session_rearms(), engines.session_is_watched()))
+                .await
+                .unwrap();
+            if rearms >= 1 && watched && ledger.ended_without_successor().is_none() {
+                settled = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(settled, "the contradicted report was not taken back, or the session was left unwatched");
+        assert!(ledger.confirmed_drop().is_none());
+
+        let reply = round_trip(name, r#"{"type":"status"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["connected"], true, "a live tunnel was reported down: {parsed}");
+        assert_eq!(parsed["protocol"], "XRAY_VLESS_REALITY");
+
+        // Now the real death, which only the re-armed watch can see.
+        let killed_at = std::time::Instant::now();
+        kill_from_outside(pid);
+        let mut gone = false;
+        while killed_at.elapsed() < std::time::Duration::from_secs(10) {
+            if !engines.run(|engines: &mut Engines, _| engines.has_session()).await.unwrap() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(gone, "after the re-arm, a real death went unnoticed");
+        assert!(killed_at.elapsed() < std::time::Duration::from_secs(5));
+        let reply = round_trip(name, r#"{"type":"status"}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert_eq!(parsed["connected"], false, "{parsed}");
     }
 
     #[tokio::test]
@@ -1058,8 +1159,9 @@ async fn dispatch(request: Request, engines: &Supervisor<Engines>, ledger: &Ledg
                     // The ledger first, for the reason the Status
                     // fallback gives: a thread busy tearing down a dead
                     // session is the common case here, and the kernel has
-                    // already said that tunnel is gone.
-                    let still_tunnelled = if ledger.ended_without_successor().is_some() {
+                    // already said that tunnel is gone. Confirmed only,
+                    // for the reason `state_after_a_drop` gives.
+                    let still_tunnelled = if ledger.confirmed_drop().is_some() {
                         false
                     } else {
                         tokio::task::spawn_blocking(crate::engines::os_visible_tunnel)

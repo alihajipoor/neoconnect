@@ -768,6 +768,19 @@ mod tests {
             ScmView::Unreadable
         );
     }
+
+    /// The same at the watch: a manager that cannot be asked, once or for
+    /// a while, is not an ending, and the process already held goes on
+    /// being waited on.
+    #[test]
+    fn a_tunnel_service_that_cannot_be_opened_is_not_gone() {
+        use crate::lifecycle::engine_watch::{Liveness, Look};
+        let mut liveness = ServiceLiveness::with_query(|| ScmView::Unreadable);
+        for _ in 0..3 {
+            assert!(matches!(liveness.look(), Look::Again), "an unanswered question was taken for an ending");
+        }
+        assert!(liveness.may_return(), "a stopped tunnel service can be started again without us");
+    }
 }
 
 /// What the peer's handshake says about the tunnel.
@@ -822,7 +835,7 @@ pub fn tunnel_is_running() -> bool {
 /// could not ask" is not "it is down" -- answering down there would be a
 /// tunnel state nothing verified, in the direction that tells a customer
 /// with a live tunnel that they have none.
-fn counts_as_running(view: &ScmView) -> bool {
+pub(super) fn counts_as_running(view: &ScmView) -> bool {
     match view {
         ScmView::NotRegistered | ScmView::Stopped(_) => false,
         ScmView::Running(_) | ScmView::Pending | ScmView::Unreadable => true,
@@ -845,7 +858,7 @@ pub(super) enum ScmView {
     Running(Option<u32>),
 }
 
-fn scm_view() -> ScmView {
+pub(super) fn scm_view() -> ScmView {
     use windows_service::service::ServiceExitCode;
     let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else {
         // Nothing can be asked. Treated as unreadable rather than as
@@ -905,18 +918,13 @@ fn view_of_open_error(error: &windows_service::Error) -> ScmView {
 /// and the handle being opened harmless: the manager says `Stopped` on
 /// the next look whatever the handle is waiting on.
 ///
-/// `query` is the service manager in the service and a script in tests.
+/// `query` is the service manager in the service ([`scm_view`], by way
+/// of `Engines`) and a script in tests.
 ///
 /// [`Liveness`]: crate::lifecycle::engine_watch::Liveness
 pub(super) struct ServiceLiveness<Q> {
     query: Q,
     held: Option<(u32, crate::lifecycle::engine_watch::OwnedHandle)>,
-}
-
-impl ServiceLiveness<fn() -> ScmView> {
-    pub(super) fn of_tunnel_service() -> Self {
-        Self::with_query(scm_view)
-    }
 }
 
 impl<Q: FnMut() -> ScmView> ServiceLiveness<Q> {
@@ -961,5 +969,12 @@ impl<Q: FnMut() -> ScmView + Send + 'static> crate::lifecycle::engine_watch::Liv
                 _ => Look::Again,
             },
         }
+    }
+
+    /// A stopped service can be started again without us -- by the
+    /// manager's recovery actions, or by anyone allowed to start it -- so
+    /// a `Stopped` seen once is checked before it is believed.
+    fn may_return(&self) -> bool {
+        true
     }
 }
