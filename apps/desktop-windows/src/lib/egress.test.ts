@@ -158,6 +158,39 @@ describe("comparing the address the world sees", () => {
     });
   });
 
+  it("never compares an IPv6 baseline with an IPv4 reading", async () => {
+    // A dual-stack machine: the CDN has an AAAA record, so the baseline
+    // on the bare network was the customer's IPv6 address. Connected,
+    // the service blocks IPv6 machine-wide and the next reading comes
+    // back over IPv4 -- here the customer's own IPv4, going round the
+    // tunnel, which is exactly the leak this check exists to catch. The
+    // strings differ, and the old rule called that proof.
+    endpoints.mockResolvedValue([CDN]);
+    const baseline = { ip: "2001:db8::228", from: CDN };
+    answers.set(CDN, { ip: CLIENT });
+
+    await expect(verifyEgress(baseline)).resolves.toEqual({ state: "indeterminate", exitIp: CLIENT });
+    // The other way round says nothing either.
+    await expect(verifyEgress({ ip: CLIENT, from: CDN }, { sameEndpointOnly: true })).resolves.toEqual({
+      state: "bypassingTunnel",
+      exitIp: CLIENT,
+    });
+    answers.set(CDN, { ip: "2001:db8::228" });
+    await expect(verifyEgress({ ip: CLIENT, from: CDN })).resolves.toEqual({
+      state: "indeterminate",
+      exitIp: "2001:db8::228",
+    });
+  });
+
+  it("reads an IPv4-mapped address as the IPv4 address it is", async () => {
+    endpoints.mockResolvedValue([CDN]);
+    answers.set(CDN, { ip: CLIENT });
+    await expect(verifyEgress({ ip: `::ffff:${CLIENT}`, from: CDN })).resolves.toEqual({
+      state: "bypassingTunnel",
+      exitIp: CLIENT,
+    });
+  });
+
   it("reports no baseline as no comparison rather than as a verdict", async () => {
     endpoints.mockResolvedValue([CDN]);
     answers.set(CDN, { ip: CLIENT });

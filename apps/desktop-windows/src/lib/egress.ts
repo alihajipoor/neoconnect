@@ -25,12 +25,22 @@ import { rememberNetwork } from "./network-identity";
  * changed about the route. See `IpReading` and `verifyEgress`.
  *
  * It closes that hole for **IPv4 and nothing else**, which this file
- * used to claim was no hole at all. The comparison is done over
- * whichever family reached `/health/ip`, and on every node that is
- * IPv4 -- so a machine leaking IPv6 alongside a perfectly good IPv4
- * tunnel reads as "throughTunnel". That combination was measured, on
- * three of the four protocols tested. The IPv6 check at the bottom of
- * this file exists because of it.
+ * used to claim was no hole at all. A machine leaking IPv6 alongside a
+ * perfectly good IPv4 tunnel reads as "throughTunnel". That combination
+ * was measured, on three of the four protocols tested. The IPv6 check at
+ * the bottom of this file exists because of it.
+ *
+ * And the comparison is only IPv4 at all where something makes it so.
+ * This file used to assume `/health/ip` was always reached over IPv4,
+ * which holds for a reading taken through a node -- every node is
+ * IPv4-only, and a full tunnel blocks IPv6 machine-wide -- and not for
+ * the baseline: on a machine with native IPv6, an endpoint with an AAAA
+ * record is reached over IPv6 first, so the baseline was the customer's
+ * IPv6 address. Against that, any IPv4 reading differs, and the check
+ * said "throughTunnel" whatever IPv4 was doing -- including going round
+ * the tunnel in the clear. Two things now stop that: the Windows client
+ * asks over IPv4 only (`setHealthIpTransport`, `health-ip-v4.ts`), and a
+ * pair of different families is never compared (`verifyEgress`).
  */
 
 /** Short: this runs while the customer is watching a spinner, and a
@@ -83,6 +93,52 @@ async function publicIp(onBody?: (body: Record<string, unknown>) => void): Promi
  */
 type ReadResult = { reading: IpReading | null; answered: boolean };
 
+/** What one `/health/ip` request came back with: the HTTP status, and
+ * the parsed body when there was a JSON one. */
+export type HealthIpAnswer = { status: number; body: unknown };
+
+/** How one `/health/ip` request is made. Resolves with whatever HTTP
+ * answer came back, of any status; rejects only when none did -- that
+ * difference is `ReadResult.answered`. */
+export type HealthIpTransport = (base: string, timeoutMs: number) => Promise<HealthIpAnswer>;
+
+/** The default: tauri-plugin-http's fetch, which lets the system choose
+ * the address family. What the mobile app, which shares this file, uses. */
+const fetchTransport: HealthIpTransport = async (base, timeoutMs) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${base}/health/ip`, { signal: controller.signal });
+    const body: unknown = res.ok ? await res.json().catch(() => null) : null;
+    return { status: res.status, body };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+let transport: HealthIpTransport = fetchTransport;
+
+/** Replaces how `/health/ip` is asked. The Windows client installs an
+ * IPv4-only transport at startup (`health-ip-v4.ts`, from `main.tsx`), so
+ * the baseline and every later reading are the same family. */
+export function setHealthIpTransport(next: HealthIpTransport): void {
+  transport = next;
+}
+
+/** Which family an address reported by `/health/ip` belongs to. An
+ * IPv4-mapped IPv6 literal is the IPv4 address it carries. */
+function familyOf(ip: string): 4 | 6 {
+  return plainAddress(ip).includes(":") ? 6 : 4;
+}
+
+/** An address as compared: an IPv4-mapped IPv6 literal is the IPv4
+ * address it carries, so one server writing the same address two ways
+ * cannot read as a change of route. */
+function plainAddress(ip: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  return mapped ? mapped[1] : ip;
+}
+
 /** The first answer from `bases`, tried in order.
  *
  * Each endpoint gets its own budget rather than sharing one. A first
@@ -96,26 +152,25 @@ async function readFrom(
 ): Promise<ReadResult> {
   let answered = false;
   for (const base of bases) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(`${base}/health/ip`, { signal: controller.signal });
+      const res = await transport(base, timeoutMs);
       // Set before the status is looked at: an error page is still an
       // answer, and it is the only thing that tells an outage of ours
       // apart from a tunnel carrying nothing.
       answered = true;
-      if (!res.ok) continue;
-      const body = (await res.json()) as { ip?: string };
-      if (body.ip) {
-        onBody?.(body);
-        return { reading: { ip: body.ip, from: base }, answered };
+      if (res.status < 200 || res.status >= 300) continue;
+      const body = res.body;
+      if (body !== null && typeof body === "object" && typeof (body as { ip?: unknown }).ip === "string") {
+        const ip = (body as { ip: string }).ip;
+        if (ip) {
+          onBody?.(body as Record<string, unknown>);
+          return { reading: { ip, from: base }, answered };
+        }
       }
     } catch {
       // Try the next one. Exhausting the list returns no reading, which
       // the caller already treats as "no evidence" rather than as
       // failure.
-    } finally {
-      clearTimeout(timer);
     }
   }
   return { reading: null, answered };
@@ -241,7 +296,18 @@ export async function verifyEgress(
   }
   if (baseline === null) return { state: "indeterminate", exitIp: reading.ip };
   if (reading.from !== baseline.from) return { state: "indeterminate", exitIp: reading.ip };
-  return reading.ip === baseline.ip
+  // Two families are two different questions, like two endpoints. An
+  // IPv6 baseline -- a dual-stack machine reaching an endpoint with an
+  // AAAA record before connecting -- against the IPv4 reading every full
+  // tunnel produces differs whatever IPv4 did, and called that
+  // "throughTunnel" with the customer's own IPv4 address on screen as
+  // the exit. The Windows client now asks over IPv4 only, so this does
+  // not fire there; it is what keeps the mobile app, and anything that
+  // ever skips that, from reading a non-comparison as proof.
+  if (familyOf(reading.ip) !== familyOf(baseline.ip)) {
+    return { state: "indeterminate", exitIp: reading.ip };
+  }
+  return plainAddress(reading.ip) === plainAddress(baseline.ip)
     ? { state: "bypassingTunnel", exitIp: reading.ip }
     : { state: "throughTunnel", exitIp: reading.ip };
 }
@@ -348,9 +414,11 @@ export function confirmEgressWithin(
  * The check at the top of this file compares one address against
  * another. That is a complete answer for IPv4 and no answer at all for
  * IPv6, because a machine can have both families and they can behave
- * differently: `/health/ip` is reached over IPv4, returns the node's
- * address, and the comparison says "throughTunnel" -- while the same
- * machine's IPv6 walks out of the physical NIC in clear text.
+ * differently: through a full tunnel `/health/ip` is reached over IPv4
+ * (on Windows it is only ever asked over IPv4; see the note at the top),
+ * returns the node's address, and the comparison says "throughTunnel" --
+ * while the same machine's IPv6 walks out of the physical NIC in clear
+ * text.
  *
  * That is not hypothetical. It is what was measured on client 0.9.25
  * with plain full tunnel and split tunnel off, on OpenVPN, IKEv2 and

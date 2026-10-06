@@ -42,6 +42,10 @@ tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
 # not the default aws-lc-rs, which the tree does not otherwise build.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+# The egress check's `/health/ip`, asked over IPv4 only (src/health_ip.rs).
+# Already in the tree through tauri-plugin-http, with the same TLS feature
+# that crate enables, so this names it rather than adding anything.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dependencies.windows-sys]
 version = "0.59"

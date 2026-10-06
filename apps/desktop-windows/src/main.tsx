@@ -4,7 +4,14 @@ import App from "./App";
 import { TitleBar } from "./components/TitleBar";
 import { VersionStamp } from "./components/VersionStamp";
 import { I18nProvider } from "./lib/i18n";
+import { setHealthIpTransport } from "./lib/egress";
+import { ipv4OnlyHealthIp } from "./lib/health-ip-v4";
 import "./globals.css";
+
+// Before anything can take a baseline: the egress check compares two
+// `/health/ip` readings, and they are only comparable when both are
+// IPv4. See health-ip-v4.ts.
+setHealthIpTransport(ipv4OnlyHealthIp);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

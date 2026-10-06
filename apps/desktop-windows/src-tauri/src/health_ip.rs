@@ -1,0 +1,270 @@
+//! `/health/ip`, asked over IPv4 and nothing else.
+//!
+//! The egress check (`src/lib/egress.ts`) compares the address
+//! `/health/ip` reports before connecting with the one it reports after.
+//! That comparison is only worth anything when both readings are of the
+//! same address family, and through tauri-plugin-http they were not
+//! guaranteed to be: its reqwest client resolves through the system,
+//! which on a machine with native IPv6 lists the AAAA record first, and
+//! hyper's happy-eyeballs then prefers IPv6. So the baseline, taken on
+//! the bare network, could be the customer's IPv6 address -- while every
+//! reading taken after a full-tunnel connect is IPv4, because the
+//! service blocks IPv6 machine-wide and every node is IPv4-only.
+//!
+//! An IPv6 string never equals an IPv4 one. So the check answered
+//! "through the tunnel" on every such machine whatever IPv4 did,
+//! including when IPv4 was going around the tunnel in the clear -- the
+//! case it exists to catch. Binding the request to an IPv4 local address
+//! makes hyper use the A records only (hyper-util's
+//! `split_by_preference`), so both readings are IPv4 and the comparison
+//! means what it says. IPv6 has its own instrument
+//! (`vpn::probe_ipv6_egress`).
+//!
+//! A request that got no HTTP answer at all is an `Err`, never an
+//! answer with a made-up status: the frontend tells those two apart,
+//! because an error page from our own API is an outage of ours and
+//! silence may be a dead tunnel.
+
+use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
+
+/// What one `/health/ip` request came back with.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct HealthIpAnswer {
+    /// The HTTP status the endpoint answered with.
+    pub status: u16,
+    /// The body, when it was JSON and small enough to be what this
+    /// endpoint returns. `null` otherwise -- an error page, say.
+    pub body: Option<serde_json::Value>,
+}
+
+/// Far more than `/health/ip` returns (an address, a country code, a
+/// network number and a signed note), and a bound on what any endpoint
+/// in the list can make this process hold.
+const MAX_BODY_BYTES: usize = 16 * 1024;
+
+/// The longest a caller may ask for. The frontend asks for six seconds.
+const MAX_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The same identity the app's other requests present (tauri-plugin-
+/// http's default), so the CDN in front of the API treats this request
+/// exactly as it already treats those.
+const USER_AGENT: &str = "tauri-plugin-http/2.5.9";
+
+/// The URL asked for a given API base, or why that base is refused.
+///
+/// The frontend's HTTP permission is scoped by the capability file, and
+/// this command sits outside it, so it does its own narrowing: one fixed
+/// path, https only (plain http only for a local development backend),
+/// no credentials, query or fragment smuggled in through the base.
+pub fn health_url(base: &str) -> Result<reqwest::Url, &'static str> {
+    let url = reqwest::Url::parse(&format!("{}/health/ip", base.trim_end_matches('/')))
+        .map_err(|_| "not a URL")?;
+    let local_dev = matches!(url.host_str(), Some("localhost") | Some("127.0.0.1"));
+    match url.scheme() {
+        "https" => {}
+        "http" if local_dev => {}
+        _ => return Err("not an https address"),
+    }
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("not a plain API base");
+    }
+    Ok(url)
+}
+
+/// Asks one endpoint's `/health/ip`, over IPv4 only.
+#[tauri::command]
+pub async fn health_ip_v4(base: String, timeout_ms: u64) -> Result<HealthIpAnswer, String> {
+    let url = health_url(&base).map_err(str::to_string)?;
+    let timeout = Duration::from_millis(timeout_ms.max(1)).min(MAX_TIMEOUT);
+    let client = reqwest::Client::builder()
+        // The whole point. An IPv4 local address makes the connector
+        // drop every IPv6 address the name resolves to.
+        .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+        // A redirect would hand the reading to a different endpoint than
+        // the one it is recorded against. Its status is the answer.
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|_| "could not build the request".to_string())?;
+
+    // Never the error's text: it carries the URL, and what the frontend
+    // needs is only that there was no answer.
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| "no answer".to_string())?;
+    let status = response.status().as_u16();
+
+    let mut bytes = Vec::new();
+    let mut whole = true;
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+                    whole = false;
+                    break;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => {
+                whole = false;
+                break;
+            }
+        }
+    }
+    let body = if whole { serde_json::from_slice(&bytes).ok() } else { None };
+    Ok(HealthIpAnswer { status, body })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asks_the_one_path_of_an_https_base() {
+        let url = health_url("https://connect.neoxify.site/api").unwrap();
+        assert_eq!(url.as_str(), "https://connect.neoxify.site/api/health/ip");
+        // A mirror on its own port, and a base written with a slash.
+        let url = health_url("https://mirror.example:2053/api/").unwrap();
+        assert_eq!(url.as_str(), "https://mirror.example:2053/api/health/ip");
+    }
+
+    #[test]
+    fn allows_plain_http_only_for_a_local_backend() {
+        assert!(health_url("http://localhost:4000/api").is_ok());
+        assert!(health_url("http://127.0.0.1:4000/api").is_ok());
+        assert!(health_url("http://connect.neoxify.site/api").is_err());
+    }
+
+    /// Serves exactly one HTTP response on `listener`, in a thread, and
+    /// hands back the request line it was asked with.
+    fn serve_once(
+        listener: std::net::TcpListener,
+        response: &'static str,
+    ) -> std::thread::JoinHandle<Option<String>> {
+        use std::io::{BufRead, BufReader, Write};
+        std::thread::spawn(move || {
+            listener.set_nonblocking(false).ok()?;
+            let (stream, _) = listener.accept().ok()?;
+            let mut reader = BufReader::new(stream.try_clone().ok()?);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).ok()?;
+            // Drain the headers so the client sees an orderly exchange.
+            let mut line = String::new();
+            while reader.read_line(&mut line).ok()? > 2 {
+                line.clear();
+            }
+            let mut stream = stream;
+            stream.write_all(response.as_bytes()).ok()?;
+            Some(request_line)
+        })
+    }
+
+    const OK_JSON: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"ip\":\"192.0.2.1\"}";
+    const GATEWAY_PAGE: &str = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nContent-Length: 11\r\nConnection: close\r\n\r\n<h1>502</h1>";
+
+    #[test]
+    fn reads_the_answer_from_an_ipv4_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = serve_once(listener, OK_JSON);
+
+        let answer = tauri::async_runtime::block_on(health_ip_v4(
+            format!("http://localhost:{port}/api"),
+            3_000,
+        ))
+        .expect("an IPv4 listener answers");
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.body, Some(serde_json::json!({ "ip": "192.0.2.1" })));
+        let request_line = server.join().unwrap().unwrap();
+        assert!(request_line.starts_with("GET /api/health/ip "), "{request_line}");
+    }
+
+    #[test]
+    fn reports_an_error_page_as_an_answer_with_no_body() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = serve_once(listener, GATEWAY_PAGE);
+
+        let answer = tauri::async_runtime::block_on(health_ip_v4(
+            format!("http://localhost:{port}/api"),
+            3_000,
+        ))
+        .expect("a 502 is still an answer");
+        assert_eq!(answer, HealthIpAnswer { status: 502, body: None });
+        server.join().unwrap();
+    }
+
+    /// The property the module exists for, shown on this machine's own
+    /// loopback rather than argued: `localhost` resolves to both `::1`
+    /// and `127.0.0.1` on Windows, and with only an IPv6 listener the
+    /// pinned request finds nobody, where an unpinned client -- what
+    /// tauri-plugin-http builds -- happily answers over IPv6.
+    #[test]
+    fn never_asks_over_ipv6() {
+        let Ok(listener) = std::net::TcpListener::bind("[::1]:0") else {
+            eprintln!("no IPv6 loopback here; nothing to show");
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        // Nothing may be listening on the IPv4 side of the same port.
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            eprintln!("port {port} is taken on IPv4 too; inconclusive");
+            return;
+        }
+
+        let pinned = tauri::async_runtime::block_on(health_ip_v4(
+            format!("http://localhost:{port}/api"),
+            2_000,
+        ));
+        assert_eq!(pinned, Err("no answer".to_string()));
+        // And not "connected over IPv6, then gave up waiting": the kernel
+        // completes a handshake into the backlog without `accept`, so a
+        // connection made over IPv6 would be sitting there now.
+        listener.set_nonblocking(true).unwrap();
+        assert!(
+            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "the pinned request reached the IPv6 listener",
+        );
+
+        // Control: the same request, unpinned, reaches the IPv6 listener.
+        let server = serve_once(listener, OK_JSON);
+        let unpinned = tauri::async_runtime::block_on(async move {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap();
+            client
+                .get(format!("http://localhost:{port}/api/health/ip"))
+                .send()
+                .await
+                .map(|r| r.status().as_u16())
+        });
+        assert_eq!(unpinned.ok(), Some(200), "an unpinned client uses IPv6 here");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn refuses_anything_that_is_not_a_plain_base() {
+        for base in [
+            "file:///C:/Windows/win.ini",
+            "ftp://example.com/api",
+            "https://user:secret@example.com/api",
+            "https://example.com/api?x=1#",
+            "https://example.com/api#frag",
+            "not a url",
+            "",
+        ] {
+            assert!(health_url(base).is_err(), "{base} should be refused");
+        }
+    }
+}

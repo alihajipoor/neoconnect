@@ -1,4 +1,5 @@
 mod control_plane_probe;
+mod health_ip;
 mod vpn;
 
 use tauri::{Emitter, Manager};
@@ -159,6 +160,10 @@ pub fn run() {
             // endpoints answered: is it the tunnel, or is it us? See
             // vpn::probe_ipv4_egress.
             vpn::probe_ipv4_egress,
+            // `/health/ip` for the egress check, over IPv4 only, so the
+            // before and after readings are the same family. See
+            // health_ip.rs.
+            health_ip::health_ip_v4,
             vpn::measure_latency,
             vpn::probe_tcp,
             vpn::network_fingerprint,
