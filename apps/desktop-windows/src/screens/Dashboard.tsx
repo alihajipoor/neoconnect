@@ -20,10 +20,14 @@ import {
 import {
   combineEvidence,
   customModePollState,
+  droppedFromPoll,
   fullTunnelPollState,
   handshakeEvidence,
+  headlineFor,
   isTunnelUp,
+  LIVENESS_POLL_MS,
   stateFromStatus,
+  type HeadlineTone,
   type VpnStatus,
 } from "../lib/connection-evidence";
 import { classifyConnectionError, type ClassifiedError } from "../lib/connection-errors";
@@ -98,6 +102,17 @@ function serviceStatus(): Promise<VpnStatus> {
 function serviceDisconnect(): Promise<void> {
   return withTimeout(invoke<void>("vpn_disconnect"), "vpn_disconnect");
 }
+
+/** The headline's colour for each tone `headlineFor` can ask for. Full
+ * class names, so the stylesheet build can see them. */
+const HEADLINE_TONE: Record<HeadlineTone, string> = {
+  success: "text-success",
+  highlight: "text-highlight",
+  warning: "text-warning",
+  muted: "text-muted-foreground",
+  plain: "text-foreground",
+  destructive: "text-destructive",
+};
 
 /** How often to re-check a live tunnel.
  *
@@ -492,6 +507,21 @@ export function Dashboard({
   const intentRef = useRef<IntentState>(IDLE_INTENT);
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
+  /** Whether the tunnel the screen was vouching for closed without anyone
+   * asking. Only ever true alongside "disconnected", and it changes the
+   * words from "connect to be protected" to "your connection was lost".
+   * See `droppedFromPoll`. */
+  const [tunnelDropped, setTunnelDropped] = useState(false);
+  /** Single-flight for the one-second liveness poll. */
+  const livenessInFlightRef = useRef(false);
+  /** When the health poll's Custom-mode probe started, or 0 when none is
+   * running. The probe holds the service's owning thread, and a liveness
+   * status asked meanwhile would wait out its turn and fall back to
+   * asking Windows -- which, for IKEv2, means launching PowerShell. The
+   * probe takes seconds; skipping a second's look is free. A time rather
+   * than a flag, so a probe that never answers cannot switch the
+   * liveness poll off for good. */
+  const probeStartedAtRef = useRef(0);
   const [connectionError, setConnectionError] = useState<ClassifiedError | null>(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
 
@@ -1054,7 +1084,14 @@ export function Dashboard({
 
       if (fromStatus === "disconnected") {
         sessionTrackerRef.current.broken();
+        // Read before publishing: the screen is about to stop claiming a
+        // tunnel, and whether that is a drop depends on what it claimed.
+        const dropped = droppedFromPoll(connectionState, intentRef.current.intent, { connected: false });
         if (publishObserved(generation, "disconnected") === null) return;
+        // Usually the one-second liveness poll below gets here first.
+        // This is the same conclusion from the slower instrument, and it
+        // must be worded the same way.
+        if (dropped) setTunnelDropped(true);
         setConnectedAt(null);
         strikesRef.current = 0;
         return;
@@ -1089,9 +1126,13 @@ export function Dashboard({
         // on an Xray protocol sat on a green orb indefinitely while
         // nothing flowed -- the one instrument that could have caught it
         // was skipped in exactly the case it was needed.
+        probeStartedAtRef.current = Date.now();
         const carried = await invoke("vpn_probe_split_tunnel")
           .then(() => true)
-          .catch(() => false);
+          .catch(() => false)
+          .finally(() => {
+            probeStartedAtRef.current = 0;
+          });
         verdict = customModePollState(fromStatus, carried);
       } else {
         const egress = await verifyEgress(baselineIpRef.current);
@@ -1167,6 +1208,61 @@ export function Dashboard({
     // exactly the check that matters -- the first one after a connect.
   }, [connectionState]);
 
+  // Is the tunnel still there -- asked every second, and nothing else.
+  //
+  // The poll above proves traffic flows, and it is right that it runs
+  // only every fifteen seconds: it fetches through the tunnel, on links
+  // that are often slow and censored. But its verdict then stood on
+  // screen until the next one, and that is how, measured on 2026-10-06,
+  // "You're protected" outlived a killed engine by 17.0 seconds while
+  // every packet went out direct. Custom mode: 8.1s.
+  //
+  // So the cheap half of the question is asked on its own, often. One
+  // status call: the service answers from the engine's own process
+  // handle, the tunnel service's state or RAS, and since the service
+  // now tears a dead session down the moment the kernel reports it, the
+  // answer is already "nothing is running" by the time this asks. It
+  // never promotes anything -- a live answer changes nothing here -- and
+  // a failed call is a miss, not a drop (`droppedFromPoll`).
+  //
+  // Stays out of the way of the things that own the tunnel or the
+  // service's attention: a ladder pass, a press in flight, and the
+  // Custom-mode probe.
+  useEffect(() => {
+    if (!isTunnelUp(connectionState)) return;
+
+    const look = async () => {
+      if (livenessInFlightRef.current || ladderInFlight()) return;
+      if (intentRef.current.intent !== "idle") return;
+      if (probeStartedAtRef.current !== 0 && Date.now() - probeStartedAtRef.current < 10_000) return;
+      livenessInFlightRef.current = true;
+      // Stamped before asking, like every other writer here: a press
+      // landing while this waits makes the answer old news.
+      const generation = intentRef.current.generation;
+      try {
+        const status = await serviceStatus().catch(() => null);
+        if (!droppedFromPoll(connectionState, intentRef.current.intent, status)) return;
+        if (publishObserved(generation, "disconnected") === null) return;
+        setTunnelDropped(true);
+        setConnectedAt(null);
+        strikesRef.current = 0;
+        sessionTrackerRef.current.broken();
+      } finally {
+        livenessInFlightRef.current = false;
+      }
+    };
+
+    const id = setInterval(() => void look(), LIVENESS_POLL_MS);
+    return () => clearInterval(id);
+  }, [connectionState]);
+
+  // "Connection lost" describes the moment a tunnel went, and only for as
+  // long as nothing has happened since. Any other state -- a connect
+  // starting, a tunnel adopted, a teardown -- retires it.
+  useEffect(() => {
+    if (connectionState !== "disconnected") setTunnelDropped(false);
+  }, [connectionState]);
+
   // Nothing that is only passing through gets to stay.
   //
   // "Connecting...", "Disconnecting..." and "Can't tell right now" all
@@ -1222,6 +1318,9 @@ export function Dashboard({
   async function handleConnectToggle(action: PressAction) {
     if (!protocolUser) return;
     setConnectionError(null);
+    // Whatever the press does next, the screen is no longer describing
+    // the moment the last tunnel went.
+    setTunnelDropped(false);
 
     switch (action) {
       // Pressing during a pass means stop. The ladder checks `cancelRef`
@@ -1954,6 +2053,8 @@ export function Dashboard({
   // is no longer a pair to disagree.
   const press = pressFor(connectionState);
   const connectLabel = t(press.labelKey);
+  // The same discipline for the headline: one table, one render.
+  const headline = headlineFor(connectionState, { dropped: tunnelDropped, customMode: splitTunnelActive });
 
   if (loading) {
     return (
@@ -2136,61 +2237,20 @@ export function Dashboard({
                           exists to answer, and it was set at the same
                           size and weight as a form label. It is the
                           headline; it now looks like one. */}
-                      <p
-                        className={
-                          connectionState === "connected"
-                            ? "text-base font-semibold tracking-tight text-success"
-                            : connectionState === "unverified"
-                              ? "text-base font-semibold tracking-tight text-highlight"
-                              : connectionState === "degraded"
-                              ? "text-base font-semibold tracking-tight text-warning"
-                              : connectionState === "unknown"
-                                ? "text-base font-semibold tracking-tight text-muted-foreground"
-                                : "text-base font-semibold tracking-tight text-foreground"
-                        }
-                      >
-                        {/* "Not protected" is a claim, and it only gets
-                            made where the service has actually said so.
-                            The unknown branch sits above the fallback for
-                            that reason: it is the case that used to fall
-                            through to it and tell a customer with a live
-                            tunnel that they had none. */}
-                        {connectionState === "connected"
-                          ? t("dash.protected")
-                          : connectionState === "unverified"
-                            ? t("dash.unverified")
-                            : connectionState === "degraded"
-                            ? t("dash.degraded")
-                            : connectionState === "connecting" || connectionState === "verifying"
-                              ? t("dash.verifying")
-                              : connectionState === "unknown"
-                                ? t("dash.unknown")
-                                : t("dash.notProtected")}
+                      {/* "Not protected" is a claim, and it only gets
+                          made where the service has actually said so --
+                          see `headlineFor`, which holds the whole table,
+                          including the dropped tunnel, so it can be
+                          tested without a window. */}
+                      <p className={`text-base font-semibold tracking-tight ${HEADLINE_TONE[headline.tone]}`}>
+                        {t(headline.title)}
                       </p>
                       {/* text-pretty rather than a raw wrap: these hints
                           run two lines in English and three in Persian,
                           and a one-word last line under the hero control
                           is the thing that made the block look thrown
                           together. */}
-                      <p className="mt-1 text-xs text-pretty text-muted-foreground">
-                        {connectionState === "connected"
-                          ? t("dash.protectedHint")
-                          : connectionState === "unverified"
-                            ? // Custom mode is a narrower claim than a
-                              // full tunnel, so it gets the narrower
-                              // sentence: what could not be confirmed
-                              // there is that the *chosen apps* are
-                              // being carried, which is a different fact
-                              // from whether this machine is tunnelled.
-                              t(splitTunnelActive ? "dash.unverifiedCustomHint" : "dash.unverifiedHint")
-                            : connectionState === "degraded"
-                            ? t("dash.degradedHint")
-                            : connectionState === "connecting" || connectionState === "verifying"
-                              ? t("dash.verifyingHint")
-                              : connectionState === "unknown"
-                                ? t("dash.unknownHint")
-                                : t("dash.notProtectedHint")}
-                      </p>
+                      <p className="mt-1 text-xs text-pretty text-muted-foreground">{t(headline.hint)}</p>
                       {/* The proof, shown rather than just acted on: this
                           is the address the outside world actually saw,
                           which is what makes "protected" verifiable

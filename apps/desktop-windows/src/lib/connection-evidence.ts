@@ -43,7 +43,9 @@
  */
 
 import type { ConnectionState } from "../components/ConnectOrb";
+import type { Intent } from "./connect-intent";
 import type { EgressVerdict } from "./egress";
+import type { TranslationKey } from "./i18n";
 
 /** What the helper service reports about the far end.
  *
@@ -286,4 +288,106 @@ export function customModePollState(
  */
 export function isTunnelUp(state: ConnectionState): boolean {
   return state === "connected" || state === "degraded" || state === "unverified";
+}
+
+/** How often a live tunnel is asked whether its engine is still there.
+ *
+ * Measured on 2026-10-06 in the test VM: `xray.exe` killed, traffic out
+ * direct within 0.2s, and this screen still saying "You're protected"
+ * 17.0 seconds later -- because the only thing that re-asked was the
+ * fifteen-second health poll, and "You're protected" was its last
+ * verdict, standing until the next one. Custom mode: 8.1s.
+ *
+ * One second, because the question is cheap: one status call, answered
+ * by the service from a process handle it already holds. No egress
+ * request and no probe -- those stay on the fifteen-second poll, which
+ * is the one that proves traffic flows. This one only notices that it
+ * has stopped being able to. */
+export const LIVENESS_POLL_MS = 1_000;
+
+/** Whether a status answer means the tunnel the screen was vouching for
+ * has gone.
+ *
+ * Three things have to hold, and each one is a way this could otherwise
+ * say something false:
+ *
+ *  - **An answer arrived.** A call that failed is a miss, never a drop:
+ *    not being able to ask is reported as not knowing (`unknown`, after
+ *    several misses), and a customer told their tunnel dropped when it
+ *    did not may go and do something they would not otherwise have done.
+ *
+ *  - **Nothing of ours is changing the tunnel.** A connect tears down
+ *    before it dials and a disconnect tears down because it was asked
+ *    to; neither is a drop, and both own the screen while they run.
+ *
+ *  - **The screen was claiming a tunnel.** Learning "nothing is running"
+ *    while already showing "You're not protected" is not news.
+ *
+ * Then `connected: false` is the service's own verified answer -- it
+ * comes from the engine's process handle, the tunnel service's state or
+ * RAS -- and the honest thing is to stop claiming protection at once. */
+export function droppedFromPoll(
+  shown: ConnectionState,
+  intent: Intent,
+  status: Pick<VpnStatus, "connected"> | null,
+): boolean {
+  if (status === null) return false;
+  if (intent !== "idle") return false;
+  if (!isTunnelUp(shown)) return false;
+  return !status.connected;
+}
+
+/** How the headline is coloured. Mapped to classes by the dashboard. */
+export type HeadlineTone = "success" | "highlight" | "warning" | "muted" | "plain" | "destructive";
+
+export interface Headline {
+  title: TranslationKey;
+  hint: TranslationKey;
+  tone: HeadlineTone;
+}
+
+/** The headline and the sentence under it, for every state the screen
+ * can be in.
+ *
+ * Out of the dashboard for the same reason the rest of this file is:
+ * this is the line that answers "am I protected", and it was only ever
+ * checked by reading two parallel chains of ternaries.
+ *
+ * `dropped` is the case this was pulled out for. A tunnel the screen
+ * was vouching for has gone without anyone asking, and the old words
+ * for "disconnected" -- "Connect to encrypt your traffic and hide your
+ * IP" -- describe somebody who has not connected yet. Somebody whose
+ * tunnel just closed under them needs to be told that it closed and
+ * that their traffic is going out unprotected now, in the warning
+ * colour rather than the neutral one. */
+export function headlineFor(
+  state: ConnectionState,
+  { dropped, customMode }: { dropped: boolean; customMode: boolean },
+): Headline {
+  switch (state) {
+    case "connected":
+      return { title: "dash.protected", hint: "dash.protectedHint", tone: "success" };
+    case "unverified":
+      // Custom mode is a narrower claim than a full tunnel, so it gets
+      // the narrower sentence: what could not be confirmed there is that
+      // the *chosen apps* are being carried.
+      return {
+        title: "dash.unverified",
+        hint: customMode ? "dash.unverifiedCustomHint" : "dash.unverifiedHint",
+        tone: "highlight",
+      };
+    case "degraded":
+      return { title: "dash.degraded", hint: "dash.degradedHint", tone: "warning" };
+    case "connecting":
+    case "verifying":
+      return { title: "dash.verifying", hint: "dash.verifyingHint", tone: "plain" };
+    case "unknown":
+      return { title: "dash.unknown", hint: "dash.unknownHint", tone: "muted" };
+    case "disconnected":
+      return dropped
+        ? { title: "dash.dropped", hint: "dash.droppedHint", tone: "destructive" }
+        : { title: "dash.notProtected", hint: "dash.notProtectedHint", tone: "plain" };
+    case "disconnecting":
+      return { title: "dash.notProtected", hint: "dash.notProtectedHint", tone: "plain" };
+  }
 }

@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   combineEvidence,
   customModePollState,
+  droppedFromPoll,
   fullTunnelPollState,
   handshakeEvidence,
+  headlineFor,
   isTunnelUp,
+  LIVENESS_POLL_MS,
   stateFromStatus,
   type VpnStatus,
 } from "./connection-evidence";
@@ -261,5 +264,154 @@ describe("the wiring the pure functions cannot check", () => {
     // Promoting one that only reached `unverified` would teach the app
     // to open with a protocol nothing has ever vouched for.
     expect(dashboard).toContain('if (verdict === "connected") {\n              const updated =');
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * A tunnel that goes while the screen is vouching for it.
+ *
+ * Measured on 2026-10-06 in the test VM: xray.exe killed, every packet
+ * out direct within 0.2s, and "You're protected" on screen for another
+ * 17.0 seconds (8.1 in Custom mode), then "You're not protected --
+ * Connect to encrypt your traffic", which describes someone who never
+ * connected. These pin the app's half: the drop is recognised from one
+ * status answer, nothing but a real answer counts, and the words change.
+ * ------------------------------------------------------------------ */
+
+describe("noticing that the tunnel has gone", () => {
+  const LIVE: ConnectionState[] = ["connected", "unverified", "degraded"];
+  const NOT_LIVE: ConnectionState[] = ["disconnected", "unknown", "connecting", "verifying", "disconnecting"];
+
+  it("takes the service at its word when it says nothing is running", () => {
+    for (const shown of LIVE) {
+      expect(droppedFromPoll(shown, "idle", { connected: false }), shown).toBe(true);
+    }
+  });
+
+  it("does not treat a live answer as anything", () => {
+    for (const shown of LIVE) {
+      expect(droppedFromPoll(shown, "idle", { connected: true }), shown).toBe(false);
+    }
+  });
+
+  it("never calls a failed call a drop", () => {
+    // A miss is a miss. The health poll turns several of them into
+    // "Can't tell right now"; turning one into "connection lost" would
+    // tell somebody their tunnel failed on no evidence at all.
+    for (const shown of LIVE) {
+      expect(droppedFromPoll(shown, "idle", null), shown).toBe(false);
+    }
+  });
+
+  it("is not fooled by our own teardowns", () => {
+    // A disconnect the customer asked for, and the teardown every
+    // connect starts with, both produce `connected: false` while the
+    // screen still shows a tunnel. Neither is a drop.
+    for (const shown of LIVE) {
+      expect(droppedFromPoll(shown, "disconnect", { connected: false }), shown).toBe(false);
+      expect(droppedFromPoll(shown, "connect", { connected: false }), shown).toBe(false);
+    }
+  });
+
+  it("has nothing to say when nothing was being claimed", () => {
+    for (const shown of NOT_LIVE) {
+      expect(droppedFromPoll(shown, "idle", { connected: false }), shown).toBe(false);
+    }
+  });
+
+  it("stops claiming protection the moment it is told the engine is gone", () => {
+    // The whole path, in the order the dashboard takes it: a tunnel
+    // shown as protected, one status answer saying nothing is running,
+    // and what goes on screen next.
+    const shown: ConnectionState = "connected";
+    expect(headlineFor(shown, { dropped: false, customMode: false }).title).toBe("dash.protected");
+
+    const answer = status({ connected: false, protocol: null, health: { state: "down" } });
+    expect(droppedFromPoll(shown, "idle", answer)).toBe(true);
+    const next = stateFromStatus(answer);
+    expect(next).toBe("disconnected");
+
+    const headline = headlineFor(next, { dropped: true, customMode: false });
+    expect(headline.title).toBe("dash.dropped");
+    expect(headline.hint).toBe("dash.droppedHint");
+    expect(headline.tone).toBe("destructive");
+  });
+
+  it("asks often enough that the old seventeen seconds cannot happen", () => {
+    expect(LIVENESS_POLL_MS).toBeLessThanOrEqual(1_000);
+  });
+});
+
+describe("the headline", () => {
+  const EVERY: ConnectionState[] = [
+    "disconnected",
+    "unknown",
+    "connecting",
+    "verifying",
+    "connected",
+    "unverified",
+    "degraded",
+    "disconnecting",
+  ];
+
+  it("says 'protected' for one state only, whatever else is true", () => {
+    for (const state of EVERY) {
+      for (const dropped of [false, true]) {
+        for (const customMode of [false, true]) {
+          const { title, hint } = headlineFor(state, { dropped, customMode });
+          const claims = title === "dash.protected" || hint === "dash.protectedHint";
+          expect(claims, `${state} dropped=${dropped} custom=${customMode}`).toBe(state === "connected");
+        }
+      }
+    }
+  });
+
+  it("keeps the ordinary words for somebody who simply has not connected", () => {
+    expect(headlineFor("disconnected", { dropped: false, customMode: false })).toEqual({
+      title: "dash.notProtected",
+      hint: "dash.notProtectedHint",
+      tone: "plain",
+    });
+  });
+
+  it("gives Custom mode its narrower unconfirmed sentence", () => {
+    expect(headlineFor("unverified", { dropped: false, customMode: true }).hint).toBe("dash.unverifiedCustomHint");
+    expect(headlineFor("unverified", { dropped: false, customMode: false }).hint).toBe("dash.unverifiedHint");
+  });
+});
+
+describe("the liveness wiring the pure functions cannot check", () => {
+  const dashboard = readFileSync(new URL("../screens/Dashboard.tsx", import.meta.url), "utf8");
+  const start = dashboard.indexOf("const look = async () => {");
+  const end = dashboard.indexOf("const id = setInterval(() => void look(), LIVENESS_POLL_MS);", start);
+
+  it("polls liveness on its own interval", () => {
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+  });
+
+  it("decides through the rule and publishes through the stamp", () => {
+    const look = dashboard.slice(start, end);
+    expect(look).toContain("droppedFromPoll(connectionState, intentRef.current.intent, status)");
+    expect(look).toContain('publishObserved(generation, "disconnected")');
+    expect(look).toContain("const generation = intentRef.current.generation;");
+    expect(look).not.toContain("setConnectionState(");
+  });
+
+  it("stays cheap: no egress request and no probe every second", () => {
+    const look = dashboard.slice(start, end);
+    expect(look).not.toContain("verifyEgress");
+    expect(look).not.toContain("vpn_probe_split_tunnel");
+  });
+
+  it("words the slower poll's drop the same way", () => {
+    expect(dashboard).toContain(
+      'droppedFromPoll(connectionState, intentRef.current.intent, { connected: false })',
+    );
+  });
+
+  it("takes the headline from the table rather than re-deriving it", () => {
+    expect(dashboard).toContain("headlineFor(connectionState, { dropped: tunnelDropped");
+    expect(dashboard).not.toContain('t("dash.protected")');
   });
 });

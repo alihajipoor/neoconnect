@@ -241,6 +241,29 @@ describe("what the strings are allowed to claim", () => {
     expect(fa["dash.customActive"]).toContain("پینگ");
   });
 
+  /** A tunnel that closed under the customer.
+   *
+   * Shown in place of "You're protected" within about a second of the
+   * engine ending (2026-10-06: it used to stay for 17 seconds). It has to
+   * say what is true now -- the traffic is going out without the VPN --
+   * and must not promise a reconnect, because nothing reconnects on its
+   * own: fail open is the product's decision, and the customer acts. */
+  it("says plainly that a dropped tunnel left the traffic unprotected", () => {
+    expect(en["dash.dropped"]).toMatch(/lost/i);
+    expect(en["dash.dropped"]).not.toMatch(/protected/i);
+    expect(en["dash.droppedHint"]).toMatch(/not protected/i);
+    expect(en["dash.droppedHint"]).toMatch(/without Neoxify/i);
+    expect(en["dash.droppedHint"]).toMatch(/connect again/i);
+    expect(en["dash.droppedHint"]).not.toMatch(/(automatic|reconnecting|will reconnect)/i);
+
+    expect(fa["dash.dropped"]).toContain("قطع شد");
+    expect(fa["dash.droppedHint"]).toContain("محافظت نمی‌شود");
+    expect(fa["dash.droppedHint"]).toContain("بدون نئوکسیفای");
+    expect(fa["dash.droppedHint"]).toContain("دوباره وصل");
+    expect(fa["dash.droppedHint"]).toContain("شما");
+    expect(fa["dash.droppedHint"]).not.toContain("خودکار");
+  });
+
   it("keeps Persian in the formal register", () => {
     // A sample of unambiguous informal (dovom-shakhs mofrad) verb endings.
     // «شما» takes «-ید»; these are the «تو» forms that have been rejected
