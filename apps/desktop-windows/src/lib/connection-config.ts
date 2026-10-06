@@ -1,5 +1,5 @@
-import { attemptedEndpoints } from "./api-endpoints";
 import { reportAttempt } from "./attempts";
+import { newTrace, renderTrace } from "./endpoint-trace";
 import { isSnapshotStale, loadSnapshot, SNAPSHOT_TTL_MS, updateSnapshotProtocolUsers } from "./credential-cache";
 import { getProtocolUsers } from "./customer";
 import type { ProtocolUser } from "./types";
@@ -82,18 +82,23 @@ export interface ConfigRefresh {
  * without it.
  *
  * This is not the same budget as a normal request and must not be. A
- * plain `apiRequest` walks every known endpoint at up to 8s each, which
- * is right when someone is waiting for a screen and wrong when they have
- * pressed Connect: on a filtered network that would add tens of seconds
- * of nothing-happening before the first packet of the actual tunnel, and
- * the reward for waiting it out is a config that is almost always
- * identical to the one already in hand.
+ * plain `apiRequest` gives each endpoint up to 8s, and after a 401 runs
+ * a token refresh and a retry on top -- right when someone is waiting
+ * for a screen, wrong when they have pressed Connect: on a filtered
+ * network that would add tens of seconds of nothing-happening before the
+ * first packet of the actual tunnel, and the reward for waiting it out
+ * is a config that is almost always identical to the one already in
+ * hand.
  *
- * Six seconds buys the first endpoint's answer -- which is the one that
- * worked last time, since `rememberEndpoint` puts it first -- and gives
- * up on the rest. A connect that would otherwise have started instantly
- * is delayed by at most this, once, and only when what is held is
- * already past its horizon.
+ * Six seconds covers one round of the GET, which is raced across every
+ * endpoint since 0.9.39 / 0.2.22. It is tighter when the access token
+ * has expired, because then the GET's 401 is followed by a token-refresh
+ * POST, walked one endpoint at a time, and the GET again -- three fresh
+ * connections in sequence. Which leg the budget ran out in is in the
+ * report's endpoint trace; the budget itself is left alone until that
+ * says it should change. A connect that would otherwise have started
+ * instantly is delayed by at most this, once, and only when what is held
+ * is already past its horizon.
  */
 export const REFRESH_BUDGET_MS = 6_000;
 
@@ -236,7 +241,12 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
     return { protocolUsers: held, source: "fresh", ageMs, drift: [], sessionExpired: false };
   }
 
-  const outcome = await withBudget(getProtocolUsers(), budgetMs);
+  const trace = newTrace();
+  const outcome = await withBudget(getProtocolUsers(trace), budgetMs);
+  // Read now, at the moment the wait ended, because the request carries
+  // on after a budget expires: whatever is still in flight here is what
+  // the budget ran out on, and renders as such.
+  const tried = renderTrace(trace);
   const answered = outcome === TIMED_OUT ? null : outcome;
 
   if (answered?.ok) {
@@ -283,11 +293,14 @@ export async function refreshConnectionConfig(options: RefreshOptions): Promise<
   void reportAttempt({
     kind: "CONNECT",
     outcome: "CONTROL_PLANE_UNREACHABLE",
-    // Which addresses were in play when nothing answered. Without this
-    // the row says "the control plane was unreachable" and nothing
-    // about *what* was unreachable, which is the difference between a
-    // blocked domain and a client carrying the wrong mirror list.
-    apiEndpoint: await attemptedEndpoints(),
+    // Which addresses were actually tried, in which leg, and how each
+    // ended. Without this the row says "the control plane was
+    // unreachable" and nothing about *what* was unreachable -- a blocked
+    // domain, a client carrying the wrong mirror list, and a budget that
+    // ran out inside the token refresh all look the same. An empty trace
+    // means nothing was dialled at all, and says so rather than naming
+    // addresses that were never tried.
+    apiEndpoint: tried === "" ? "none dialled" : tried,
     reason:
       `pre-connect config refresh failed (${detail}); connecting on cached credentials ` +
       (ageMs === null ? "of unknown age" : `${Math.round(ageMs / 60_000)} min old`) +

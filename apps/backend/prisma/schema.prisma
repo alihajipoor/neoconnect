@@ -1030,6 +1030,12 @@ model ClientAttempt {
   ///     failure -- not what was dialled. Until the DTO limit went from
   ///     200 to 2000, any list over 200 characters -- every one built
   ///     from the full endpoint bundle -- was refused with a 400 and lost.
+  ///   - a trace, from the builds after: `leg: host[:port]=outcome@ms`
+  ///     for each address actually tried, legs ("req", "refresh",
+  ///     "retry") separated by "; ", or "none dialled". Ends " [cut]" if
+  ///     it had to be shortened -- to 200 characters when it reached a
+  ///     server from before the limit was raised. The vocabulary is in
+  ///     endpoint-trace.ts in the desktop client.
   apiEndpoint String?
 
   /// The app's own error text, truncated. Free-form on purpose: the

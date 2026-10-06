@@ -2,6 +2,7 @@ import { load, type Store } from "@tauri-apps/plugin-store";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { publicRequest } from "./api";
+import { API_ENDPOINT_MAX, clipTrace, LEGACY_API_ENDPOINT_MAX } from "./endpoint-trace";
 import { getTokens } from "./session";
 import { currentAttestation } from "./network-identity";
 
@@ -77,19 +78,22 @@ export interface AttemptReport {
   protocol?: string;
   reason?: string;
   attempts?: AttemptRung[];
-  /** Which control-plane address or addresses were in play.
+  /** What was tried, on a CONTROL_PLANE_UNREACHABLE report: the
+   * rendered endpoint trace (see endpoint-trace.ts), or "none dialled".
    *
-   * The backend has accepted this since the table was created and the
-   * client has never once sent it, so every CONTROL_PLANE_UNREACHABLE
-   * row ever recorded has a null here -- 160 of them from Windows in
-   * thirty days, against 107 successful connects, where Android manages
-   * 43 against 323. Something about the Windows path reaches the API far
-   * less reliably, and the one column that would say whether it is the
-   * main domain being blocked or the mirror list being wrong has been
-   * empty the entire time.
+   * The history of this field is a warning. The backend accepted it from
+   * the start and no client sent it until 0.9.39 / 0.2.22, so every
+   * unreachable row had a null here. When it was finally sent it was the
+   * hostname of every address the client *would* try -- 233 characters
+   * with the current bundle, against a server limit of 200 -- so the
+   * server refused each of those reports with a 400, `send` counted the
+   * 400 as delivered, and they were lost without trace. A comment here
+   * also read the missing rows as Windows reaching the API less often
+   * than Android; the rows were the mobile app's iOS builds mislabelled
+   * as Windows (see `detectPlatform`).
    *
-   * Hostnames rather than full URLs: the path adds nothing and the
-   * column is read by a person scanning for a pattern. */
+   * So it is now what actually happened, address by address, and its
+   * length is fitted here and again in `send` rather than trusted. */
   apiEndpoint?: string;
   /** For a SESSION report: seconds the tunnel has carried traffic. */
   sessionSeconds?: number;
@@ -217,6 +221,13 @@ async function writeQueue(queue: QueuedReport[]): Promise<void> {
  * status -- counts as delivered. It means we reached it and it did not
  * want this, and retrying forever would turn one malformed report into
  * a permanent background load.
+ *
+ * With one exception, for a server older than this client. Until the
+ * limit was raised, the backend refused an `apiEndpoint` over 200
+ * characters with a 400, and an endpoint trace is often longer. Against
+ * such a server -- production, until it is redeployed -- the report is
+ * sent once more with the trace cut to fit, rather than lost whole over
+ * its longest field. A current server never sees the second request.
  */
 async function send(report: QueuedReport): Promise<boolean> {
   // Attached by hand rather than by using the authenticated helper. That
@@ -225,11 +236,17 @@ async function send(report: QueuedReport): Promise<boolean> {
   // out. An expired token here simply leaves the report anonymous --
   // the server verifies it if it can and ignores it if it cannot.
   const tokens = await getTokens();
-  const result = await publicRequest<void>("/client-attempts", {
-    method: "POST",
-    body: JSON.stringify(report),
-    headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : undefined,
-  });
+  const post = (body: QueuedReport) =>
+    publicRequest<void>("/client-attempts", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: tokens ? { Authorization: `Bearer ${tokens.accessToken}` } : undefined,
+    });
+
+  let result = await post(report);
+  if (!result.ok && result.status === 400 && (report.apiEndpoint?.length ?? 0) > LEGACY_API_ENDPOINT_MAX) {
+    result = await post({ ...report, apiEndpoint: clipTrace(report.apiEndpoint!, LEGACY_API_ENDPOINT_MAX) });
+  }
 
   if (result.ok) return true;
   // publicRequest flattens both cases into a string, and only one of
@@ -283,6 +300,9 @@ export async function reportAttempt(report: AttemptReport): Promise<void> {
       // validation, losing the whole report over its least important
       // field.
       reason: report.reason?.slice(0, 500),
+      // The same, for the field that actually was lost that way: every
+      // unreachable report from 0.9.39 to 0.9.43 overran it.
+      apiEndpoint: shaped.apiEndpoint === undefined ? undefined : clipTrace(shaped.apiEndpoint, API_ENDPOINT_MAX),
     };
 
     if (await send(queued)) {

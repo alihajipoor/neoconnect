@@ -1,6 +1,6 @@
 import { apiRequest, publicRequest } from "./api";
-import { attemptedEndpoints } from "./api-endpoints";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
+import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
 import { setTokens } from "./session";
 import { endCustomerSession, type SessionEnd } from "./session-end";
 import { clearGamingProfileCache } from "./customer";
@@ -26,17 +26,14 @@ import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from 
  * server-side; a failed sign-in has no session, and that is the honest
  * answer.
  *
- * An unreachable control plane carries the addresses that were tried,
- * as the pre-connect refresh's report already does. Sign-in was the
- * other source of CONTROL_PLANE_UNREACHABLE and sent none, so those
- * rows read "could not reach Neoxify" with no hint of *what* could not
- * be reached -- a blocked domain and a client carrying a stale mirror
- * list look identical without it, and sign-in on a filtered network is
- * exactly when it is needed. Still fire-and-forget: the lookup reads
- * the endpoint list the request itself just used, and it is only made
- * when there is something to say.
+ * An unreachable control plane carries the trace of what the request
+ * tried -- each address, and whether it timed out, failed or was never
+ * allowed -- as the pre-connect refresh's report does. Sign-in on a
+ * filtered network is exactly when it is needed. `trace` is absent for a
+ * failure that never reached `publicRequest` (a social provider that
+ * refused), and then nothing is claimed about addresses at all.
  */
-function reportAuth(kind: AttemptKind, result: ApiResult<unknown>): void {
+function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: EndpointTrace): void {
   void (async () => {
     if (result.ok) {
       await reportAttempt({ kind, outcome: "SUCCESS" });
@@ -47,7 +44,8 @@ function reportAuth(kind: AttemptKind, result: ApiResult<unknown>): void {
       kind,
       outcome,
       reason: result.error,
-      apiEndpoint: outcome === "CONTROL_PLANE_UNREACHABLE" ? await attemptedEndpoints() : undefined,
+      apiEndpoint:
+        outcome === "CONTROL_PLANE_UNREACHABLE" && trace ? renderTrace(trace) || "none dialled" : undefined,
     });
   })();
 }
@@ -62,26 +60,31 @@ export async function register(email: string, password: string, referralCode?: s
   // an account has drawn attention. Undefined when the challenge
   // endpoint could not be reached, which the server tolerates.
   const challenge = await solveChallengeFor("customer");
-  const result = await publicRequest<RequiresVerification>("/customer-auth/register", {
-    method: "POST",
-    // Omitted entirely when blank rather than sent as "": the backend
-    // treats a supplied-but-wrong code as an error, and an empty string
-    // is not a code somebody typed.
-    body: JSON.stringify({
-      email,
-      password,
-      // Read here rather than passed in by the screen, so the one call
-      // site that creates an account cannot be the one that forgets.
-      // The very first email this account receives is the verification
-      // code, and it is sent before the customer has anywhere to tell
-      // us anything -- so the language has to travel with the signup or
-      // that email is in the wrong one no matter what happens later.
-      locale: currentLanguage(),
-      ...(referralCode ? { referralCode } : {}),
-      ...(challenge ? { challenge } : {}),
-    }),
-  });
-  reportAuth("REGISTER", result);
+  const trace = newTrace();
+  const result = await publicRequest<RequiresVerification>(
+    "/customer-auth/register",
+    {
+      method: "POST",
+      // Omitted entirely when blank rather than sent as "": the backend
+      // treats a supplied-but-wrong code as an error, and an empty string
+      // is not a code somebody typed.
+      body: JSON.stringify({
+        email,
+        password,
+        // Read here rather than passed in by the screen, so the one call
+        // site that creates an account cannot be the one that forgets.
+        // The very first email this account receives is the verification
+        // code, and it is sent before the customer has anywhere to tell
+        // us anything -- so the language has to travel with the signup or
+        // that email is in the wrong one no matter what happens later.
+        locale: currentLanguage(),
+        ...(referralCode ? { referralCode } : {}),
+        ...(challenge ? { challenge } : {}),
+      }),
+    },
+    trace,
+  );
+  reportAuth("REGISTER", result, trace);
   return result;
 }
 
@@ -93,10 +96,15 @@ export async function login(email: string, password: string) {
   // price this attempt against that account's own recent failures --
   // the case per-address rate limiting cannot see.
   const challenge = await solveChallengeFor("customer", email);
-  const result = await publicRequest<LoginResult>("/customer-auth/login", {
-    method: "POST",
-    body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
-  });
+  const trace = newTrace();
+  const result = await publicRequest<LoginResult>(
+    "/customer-auth/login",
+    {
+      method: "POST",
+      body: JSON.stringify({ email, password, ...(challenge ? { challenge } : {}) }),
+    },
+    trace,
+  );
   if (result.ok && !("requiresVerification" in result.data)) {
     // Before the tokens, not after. From here on any fetch is this
     // customer's, and a cache entry still holding the previous one's
@@ -110,7 +118,7 @@ export async function login(email: string, password: string) {
   }
   // After the tokens are stored, so a successful sign-in is attributed
   // to the customer it belongs to rather than arriving anonymous.
-  reportAuth("SIGN_IN", result);
+  reportAuth("SIGN_IN", result, trace);
   return result;
 }
 
@@ -146,18 +154,27 @@ export async function socialSignIn(
   }
   if (outcome === null) return null;
 
+  const trace = newTrace();
   const result =
     outcome.kind === "apple-token"
-      ? await publicRequest<TokenPair>("/customer-auth/social", {
-          method: "POST",
-          body: JSON.stringify({ provider, token: outcome.token, locale }),
-        })
+      ? await publicRequest<TokenPair>(
+          "/customer-auth/social",
+          {
+            method: "POST",
+            body: JSON.stringify({ provider, token: outcome.token, locale }),
+          },
+          trace,
+        )
       : // Google and Facebook finished on the server; this only collects
         // the session it is already holding.
-        await publicRequest<TokenPair>("/customer-auth/social/exchange", {
-          method: "POST",
-          body: JSON.stringify({ code: outcome.code }),
-        });
+        await publicRequest<TokenPair>(
+          "/customer-auth/social/exchange",
+          {
+            method: "POST",
+            body: JSON.stringify({ code: outcome.code }),
+          },
+          trace,
+        );
 
   if (result.ok) {
     // Same reasoning as login(): before the tokens, so a stale
@@ -166,7 +183,7 @@ export async function socialSignIn(
     clearGamingProfileCache();
     await setTokens(result.data);
   }
-  reportAuth("SIGN_IN", result);
+  reportAuth("SIGN_IN", result, trace);
   return result;
 }
 

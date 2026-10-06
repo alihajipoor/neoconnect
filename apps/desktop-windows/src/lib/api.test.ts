@@ -166,3 +166,91 @@ describe("which endpoints a request is sent to", () => {
     expect(seen).toHaveLength(1);
   });
 });
+
+/** The per-address record an unreachable report carries. Each class has
+ * to come from what actually happened to that address -- a guess here
+ * would put a wrong diagnosis in front of whoever reads the report. */
+describe("the endpoint trace", () => {
+  type Trace = import("./endpoint-trace").EndpointTrace;
+  let newTrace: () => Trace;
+  let renderTrace: (t: Trace, now?: number) => string;
+
+  beforeEach(async () => {
+    ({ newTrace, renderTrace } = await import("./endpoint-trace"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A request that only ends when it is aborted -- what a blackholed
+   * address looks like. */
+  function hangsUntilAborted(_url: string, init?: RequestInit): Promise<Response> {
+    return new Promise((_, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("Request cancelled")));
+    });
+  }
+
+  it("records the address that answered and every other as stopped", async () => {
+    vi.useFakeTimers();
+    tauriFetch.mockImplementation((url: string, init?: RequestInit) =>
+      new URL(url).origin === ENDPOINTS[1] ? Promise.resolve(jsonResponse({ ok: true })) : hangsUntilAborted(url, init),
+    );
+    const trace = newTrace();
+
+    await publicRequest("/config", undefined, trace);
+
+    expect(renderTrace(trace)).toBe("req: a.example=cancel@0 b.example=h200@0 c.example=cancel@0");
+  });
+
+  /** None answered: each address says how it failed. A blackholed one
+   * hits our own deadline; one outside the app's HTTP permission never
+   * left the device; anything else is a transport failure. */
+  it("records how each address failed when none answered", async () => {
+    vi.useFakeTimers();
+    tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
+      const origin = new URL(url).origin;
+      if (origin === ENDPOINTS[0]) return Promise.reject(`error sending request for url (${url})`);
+      if (origin === ENDPOINTS[1]) return Promise.reject(`url not allowed on the configured scope: ${url}`);
+      return hangsUntilAborted(url, init);
+    });
+    const trace = newTrace();
+
+    const pending = publicRequest("/config", undefined, trace);
+    await vi.advanceTimersByTimeAsync(8_000);
+    const result = await pending;
+
+    expect(result.ok).toBe(false);
+    expect(renderTrace(trace)).toBe("req: a.example=net@0 b.example=scope@0 c.example=timeout@8000");
+  });
+
+  /** A write walks the list one address at a time; the trace is the walk. */
+  it("records a write's walk in the order it was taken", async () => {
+    vi.useFakeTimers();
+    tauriFetch.mockImplementation((url: string, init?: RequestInit) => {
+      const origin = new URL(url).origin;
+      if (origin === ENDPOINTS[0]) return hangsUntilAborted(url, init);
+      if (origin === ENDPOINTS[1]) return Promise.reject("error sending request for url");
+      return Promise.resolve(jsonResponse({ message: "wrong password" }, { status: 401 }));
+    });
+    const trace = newTrace();
+
+    const pending = publicRequest("/login", { method: "POST", body: "{}" }, trace);
+    await vi.advanceTimersByTimeAsync(8_000);
+    await pending;
+
+    expect(renderTrace(trace)).toBe("req: a.example=timeout@8000 b.example=net@0 c.example=h401@0");
+  });
+
+  /** An observer only: the request goes to the same places either way. */
+  it("changes nothing about where a request is sent", async () => {
+    const seen: string[] = [];
+    tauriFetch.mockImplementation(async (url: string) => {
+      seen.push(new URL(url).origin);
+      return jsonResponse({ ok: true });
+    });
+    await publicRequest("/config", undefined, newTrace());
+    await publicRequest("/config");
+    expect(seen.slice(0, 3).sort()).toEqual(seen.slice(3).sort());
+  });
+});

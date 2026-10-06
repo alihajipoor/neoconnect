@@ -83,3 +83,46 @@ describe("the platform a report carries", () => {
     expect(sentBodies().map((b) => b.platform)).toEqual(["android", "android"]);
   });
 });
+
+/** The field that lost every report it was on: a server limit of 200,
+ * a list of 233, a 400 the client counted as delivered. */
+describe("the length of apiEndpoint", () => {
+  const trace = Array.from({ length: 40 }, (_, i) => `edge-${i}.example.org:2053=timeout@8000`).join(" ");
+  const unreachable = { kind: "CONNECT" as const, outcome: "CONTROL_PLANE_UNREACHABLE" as const };
+
+  it("is fitted to the server's limit before it is sent", async () => {
+    invoke.mockResolvedValue("windows");
+    await attempts.reportAttempt({ ...unreachable, apiEndpoint: `req: ${trace} ${trace}` });
+    const sent = String(sentBodies()[0].apiEndpoint);
+    expect(sent.length).toBeLessThanOrEqual(2000);
+    expect(sent.startsWith("req: edge-0.example.org:2053=timeout@8000")).toBe(true);
+  });
+
+  /** Production refuses anything over 200 until it is redeployed. The
+   * report goes again, cut to fit, instead of being lost whole. */
+  it("is cut to the old limit and resent when an old server refuses it", async () => {
+    invoke.mockResolvedValue("windows");
+    publicRequest
+      .mockResolvedValueOnce({ ok: false, error: "apiEndpoint must be shorter than or equal to 200 characters", status: 400 })
+      .mockResolvedValue({ ok: true, data: undefined });
+
+    await attempts.reportAttempt({ ...unreachable, apiEndpoint: `req: ${trace}` });
+
+    const bodies = sentBodies();
+    expect(bodies).toHaveLength(2);
+    expect(String(bodies[0].apiEndpoint).length).toBeGreaterThan(200);
+    expect(String(bodies[1].apiEndpoint).length).toBeLessThanOrEqual(200);
+    expect(String(bodies[1].apiEndpoint).endsWith("[cut]")).toBe(true);
+    // Everything else is the same report.
+    expect({ ...bodies[1], apiEndpoint: null }).toEqual({ ...bodies[0], apiEndpoint: null });
+  });
+
+  /** A 400 for any other reason is not retried: the second request is
+   * only for the one field an old server is known to refuse. */
+  it("is not resent when it already fitted", async () => {
+    invoke.mockResolvedValue("windows");
+    publicRequest.mockResolvedValue({ ok: false, error: "bad", status: 400 });
+    await attempts.reportAttempt({ ...unreachable, apiEndpoint: "req: a.example=net@3" });
+    expect(publicRequest).toHaveBeenCalledTimes(1);
+  });
+});

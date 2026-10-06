@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResult } from "./api";
+import { beginAttempt, settleAttempt, type EndpointTrace } from "./endpoint-trace";
 import type { ProtocolUser } from "./types";
 
 /** The disk cache, stood in for. `credential-cache.ts` itself is the real
@@ -30,9 +31,10 @@ vi.mock("@tauri-apps/plugin-store", () => ({
   },
 }));
 
-/** The one API call the refresh makes. */
-const fetchUsers = vi.fn<() => Promise<ApiResult<ProtocolUser[]>>>();
-vi.mock("./customer", () => ({ getProtocolUsers: () => fetchUsers() }));
+/** The one API call the refresh makes. Handed the trace the refresh
+ * passes down, so a test can record on it what the real request would. */
+const fetchUsers = vi.fn<(trace?: EndpointTrace) => Promise<ApiResult<ProtocolUser[]>>>();
+vi.mock("./customer", () => ({ getProtocolUsers: (trace?: EndpointTrace) => fetchUsers(trace) }));
 
 /** Telemetry, spied on rather than sent. Whether a stale connect is
  * *visible* is half of what this change is for, so it is asserted rather
@@ -186,6 +188,58 @@ describe("refreshConnectionConfig", () => {
     expect(result.protocolUsers).toEqual(held);
     expect(Date.now() - started).toBeLessThan(1_000);
     expect((reportAttempt.mock.calls[0][0] as { reason: string }).reason).toContain("no answer within 30ms");
+  });
+
+  /** The field that was null on every row, and then a list of what the
+   * client *would* have tried. Now: what it did try, in which leg, and
+   * how each ended. RFC 2606 names stand in for the real list. */
+  it("reports each address tried, by leg, when the refresh fails", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation(async (trace) => {
+      // The usual shape after fifteen idle minutes: the GET answers 401,
+      // and the token refresh it triggers gets nowhere.
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "h401", 900);
+      settleAttempt(beginAttempt(trace, "https://edge.example.org:2053/api", 0), "cancel", 901);
+      trace!.phase = "refresh";
+      settleAttempt(beginAttempt(trace, "https://api.example.net/api", 1_000), "net", 1_200);
+      return { ok: false, error: "Could not renew your session just now. Try again in a moment." };
+    });
+
+    await refreshConnectionConfig({ held });
+
+    const report = reportAttempt.mock.calls[0][0] as { outcome: string; apiEndpoint: string };
+    expect(report.outcome).toBe("CONTROL_PLANE_UNREACHABLE");
+    expect(report.apiEndpoint).toBe(
+      "req: api.example.net=h401@900 edge.example.org:2053=cancel@901; refresh: api.example.net=net@200",
+    );
+  });
+
+  /** The question the old field could never answer: the refresh gave up
+   * while an address was still being waited on. */
+  it("names the address the budget ran out on", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockImplementation((trace) => {
+      beginAttempt(trace, "https://api.example.net/api");
+      return new Promise(() => undefined);
+    });
+
+    await refreshConnectionConfig({ held, budgetMs: 30 });
+
+    const report = reportAttempt.mock.calls[0][0] as { apiEndpoint: string };
+    expect(report.apiEndpoint).toMatch(/^req: api\.example\.net=budget@\d+$/);
+  });
+
+  /** Never a list of addresses that were not dialled. */
+  it("says so when nothing was dialled", async () => {
+    const held = [reality("cloudflare.com")];
+    await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
+    fetchUsers.mockResolvedValue({ ok: false, error: "Could not reach Neoxify. Check your internet connection." });
+
+    await refreshConnectionConfig({ held });
+
+    expect((reportAttempt.mock.calls[0][0] as { apiEndpoint: string }).apiEndpoint).toBe("none dialled");
   });
 
   it("reports an expired session without deciding what to do about it", async () => {
