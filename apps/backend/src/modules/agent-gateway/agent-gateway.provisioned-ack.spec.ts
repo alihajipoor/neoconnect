@@ -111,6 +111,39 @@ describe("AgentGatewayService records which credentials a node has confirmed", (
     });
   });
 
+  /** protocol_users keeps credentials encrypted; agent_commands kept the
+   * same credentials in the clear, forever. Once a command is acked or
+   * failed nothing replays it, so the secret goes. */
+  it.each([
+    ["acked", true],
+    ["failed", false],
+  ])("removes the credentials from a command once it is %s, and keeps the rest", async (_label, success) => {
+    const { prisma, ack } = build({
+      command: {
+        nodeId: "node-1",
+        type: "CREATE_USER",
+        payloadJson: { protocol: "WIREGUARD", externalUserId: "ext-1", credentials: { privateKey: "secret" } },
+      },
+    });
+
+    await ack({ commandId: "cmd-1", success, error: success ? "" : "boom" });
+
+    expect(prisma.agentCommand.updateMany).toHaveBeenCalledWith({
+      where: { id: "cmd-1" },
+      data: expect.objectContaining({ payloadJson: { protocol: "WIREGUARD", externalUserId: "ext-1" } }),
+    });
+  });
+
+  it("leaves a payload with no credentials untouched", async () => {
+    const { prisma, ack } = build({
+      command: { nodeId: "node-1", type: "DELETE_USER", payloadJson: { protocol: "XRAY_TROJAN", externalUserId: "ext-1" } },
+    });
+
+    await ack({ commandId: "cmd-1", success: true, error: "" });
+
+    expect(prisma.agentCommand.updateMany.mock.calls[0][0].data).not.toHaveProperty("payloadJson");
+  });
+
   // One ack per user per minute: the confirmed majority must cost nothing.
   it("touches the database not at all for the ack of an already-confirmed re-assert", async () => {
     const { prisma, ack } = build();

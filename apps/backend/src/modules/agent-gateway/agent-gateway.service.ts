@@ -3,7 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { existsSync, readFileSync } from "node:fs";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
-import { AgentCommandType } from "@prisma/client";
+import { AgentCommandType, Prisma } from "@prisma/client";
 import { after, forEachBatch } from "../../common/batching";
 import { PrismaService } from "../../prisma/prisma.service";
 import { NodesService } from "../nodes/nodes.service";
@@ -710,30 +710,38 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const command = await this.prisma.agentCommand.findUnique({
+      where: { id: ack.commandId },
+      select: { nodeId: true, type: true, payloadJson: true },
+    });
+
     // A stored CREATE_USER or ENABLE_USER the node carried out means the
-    // credential it names now exists there. Read before the status
-    // update, which is the only other thing that touches the row.
-    if (ack.success) {
-      const command = await this.prisma.agentCommand.findUnique({
-        where: { id: ack.commandId },
-        select: { nodeId: true, type: true, payloadJson: true },
-      });
-      const externalUserId = (command?.payloadJson as { externalUserId?: unknown } | null)?.externalUserId;
-      if (
-        command &&
-        (command.type === "CREATE_USER" || command.type === "ENABLE_USER") &&
-        typeof externalUserId === "string"
-      ) {
-        await this.markProvisioned({ nodeId: command.nodeId, externalUserId });
-      }
+    // credential it names now exists there.
+    const externalUserId = (command?.payloadJson as { externalUserId?: unknown } | null)?.externalUserId;
+    if (
+      ack.success &&
+      command &&
+      (command.type === "CREATE_USER" || command.type === "ENABLE_USER") &&
+      typeof externalUserId === "string"
+    ) {
+      await this.markProvisioned({ nodeId: command.nodeId, externalUserId });
     }
 
+    // The secret goes once nothing needs it. A CREATE_USER payload carries
+    // the credential in the clear -- a WireGuard private key, an OpenVPN
+    // key, an IKEv2 password -- while protocol_users holds it encrypted,
+    // and agent_commands rows were only ever deleted with their node: any
+    // database read or dump (the pre-deploy pg_dump among them) had every
+    // credential ever provisioned. Replay reads QUEUED and SENT rows only,
+    // so an acked or failed command never needs its credentials again.
+    const stripped = withoutCredentials(command?.payloadJson);
     await this.prisma.agentCommand.updateMany({
       where: { id: ack.commandId },
       data: {
         status: ack.success ? "ACKED" : "FAILED",
         ackedAt: new Date(),
         error: ack.success ? null : ack.error,
+        ...(stripped ? { payloadJson: stripped } : {}),
       },
     });
   }
@@ -801,6 +809,15 @@ export class AgentGatewayService implements OnModuleInit, OnModuleDestroy {
     }
     return command;
   }
+}
+
+/** A stored payload with its `credentials` removed, or null when it had
+ * none (nothing to rewrite). */
+function withoutCredentials(payload: unknown): Prisma.InputJsonObject | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || !("credentials" in payload)) return null;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- dropped on purpose
+  const { credentials, ...rest } = payload as Record<string, unknown>;
+  return rest as Prisma.InputJsonObject;
 }
 
 /** Which protocols this node serves from its Xray process. Not the same
