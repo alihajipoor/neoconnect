@@ -445,22 +445,63 @@ export class BillingService {
    * plan calls for. */
   async reconcile(id: string) {
     const transaction = await this.get(id);
-    if (transaction.status !== "PENDING") return transaction;
+    // FAILED too: a row written off by a declined attempt or an expired
+    // invoice can still have been paid (see confirmPayment), and this is
+    // how one already stuck that way is put right.
+    if (transaction.status !== "PENDING" && transaction.status !== "FAILED") return transaction;
 
-    if (transaction.provider === "STRIPE") {
-      const intent = await this.stripe.retrievePaymentIntent(transaction.providerRef);
-      if (intent.status === "succeeded") {
-        await this.confirmPayment(transaction.id, intent);
-      } else if (intent.status === "canceled") {
-        await this.markFailed(transaction.id, intent);
+    // One branch per provider. This used to be Stripe and "everything
+    // else", and everything else went to NowPayments -- so a Plisio row
+    // asked NowPayments about a Plisio id and could never be reconciled.
+    switch (transaction.provider) {
+      case "STRIPE": {
+        // Card payments from the apps go through Checkout, and what they
+        // record is the session id: the PaymentIntent does not exist when
+        // the session is created. paymentIntents.retrieve("cs_...") failed
+        // with "No such payment_intent", every time.
+        if (transaction.providerRef.startsWith("cs_")) {
+          const session = await this.stripe.retrieveCheckoutSession(transaction.providerRef);
+          if (session.payment_status === "paid" || session.payment_status === "no_payment_required") {
+            await this.confirmPayment(transaction.id, session);
+          } else if (session.status === "expired") {
+            await this.markFailed(transaction.id, session);
+          }
+          break;
+        }
+        const intent = await this.stripe.retrievePaymentIntent(transaction.providerRef);
+        if (intent.status === "succeeded") {
+          await this.confirmPayment(transaction.id, intent);
+        } else if (intent.status === "canceled") {
+          await this.markFailed(transaction.id, intent);
+        }
+        break;
       }
-    } else {
-      const { paymentStatus } = await this.nowpayments.getPaymentStatus(transaction.providerRef);
-      if (paymentStatus === "finished" || paymentStatus === "confirmed") {
-        await this.confirmPayment(transaction.id, { paymentStatus });
-      } else if (paymentStatus === "failed" || paymentStatus === "expired") {
-        await this.markFailed(transaction.id, { paymentStatus });
+      case "PLISIO": {
+        const status = await this.plisio.getOperationStatus(transaction.providerRef);
+        // The same reading of a status as the callback (see
+        // WebhooksController.plisioWebhook): a mismatch is left for a
+        // human, never confirmed and never failed.
+        const outcome = this.plisio.classify(status);
+        if (outcome === "paid") {
+          await this.confirmPayment(transaction.id, { status });
+        } else if (outcome === "failed") {
+          await this.markFailed(transaction.id, { status });
+        }
+        break;
       }
+      case "NOWPAYMENTS": {
+        const { paymentStatus } = await this.nowpayments.getPaymentStatus(transaction.providerRef);
+        if (paymentStatus === "finished" || paymentStatus === "confirmed") {
+          await this.confirmPayment(transaction.id, { paymentStatus });
+        } else if (paymentStatus === "failed" || paymentStatus === "expired") {
+          await this.markFailed(transaction.id, { paymentStatus });
+        }
+        break;
+      }
+      default:
+        // An App Store purchase is verified when it is redeemed and has
+        // nothing to look up afterwards.
+        throw new BadRequestException(`A ${transaction.provider} payment cannot be reconciled`);
     }
 
     return this.get(id);
