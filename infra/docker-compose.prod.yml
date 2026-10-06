@@ -139,6 +139,18 @@ services:
       # The bundle identifier, not a client id -- the native sheet has no
       # client secret. Comma separated, for a future macOS or web client.
       APPLE_SIGNIN_AUDIENCES: ${APPLE_SIGNIN_AUDIENCES:-}
+      # App Store in-app purchases (BillingService.redeemApplePurchase).
+      # Missing from this block until the 2026-10-06 review, the same gap
+      # again: set in .env, the container never saw it, and every App
+      # Store purchase and restore -- after Apple had charged the
+      # customer -- answered "Purchases are not available right now".
+      # Unset = every purchase refused. com.neoxify.mobile in production.
+      APPLE_BUNDLE_ID: ${APPLE_BUNDLE_ID:-}
+      # "true" accepts sandbox and TestFlight transactions, which anyone
+      # with a beta build can mint for free. Unset in production; an
+      # owner decision, not a default, if App Review's sandbox purchases
+      # ever have to be honoured.
+      APPLE_ALLOW_SANDBOX: ${APPLE_ALLOW_SANDBOX:-}
       # Recent failures tolerated before a sign-in must carry a solved
       # proof-of-work challenge. Unset = 5. Set to 0 to require one on
       # every attempt -- but ONLY once every customer is on a client
