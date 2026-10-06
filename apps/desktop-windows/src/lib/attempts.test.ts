@@ -180,3 +180,124 @@ describe("the length of apiEndpoint", () => {
     expect(publicRequest).toHaveBeenCalledTimes(1);
   });
 });
+
+/** The probe after an unreachable control plane takes up to twenty
+ * seconds. The report it belongs to must not wait for it: on iOS a
+ * backgrounded app is suspended within seconds and may be killed, and a
+ * report still held in memory dies with it. */
+describe("an addendum that is still being worked out", () => {
+  const UNREACHABLE: ApiResult<void> = { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
+  const queued = () => (files.get("attempt-reports.json")?.get("queue") as Record<string, unknown>[] | undefined) ?? [];
+  const report = {
+    kind: "SIGN_IN" as const,
+    outcome: "CONTROL_PLANE_UNREACHABLE" as const,
+    reason: "Could not reach Neoxify.",
+    apiEndpoint: "req: a.example=timeout@8000",
+  };
+  const PROBE = { apiEndpoint: "probe: a.example=dns@40" };
+
+  /** A promise and the function that settles it, for a probe whose
+   * answer the test decides when to give. */
+  function later<T>() {
+    let settle!: (value: T) => void;
+    const promise = new Promise<T>((resolve) => {
+      settle = resolve;
+    });
+    return { promise, settle };
+  }
+
+  beforeEach(() => invoke.mockResolvedValue("ios"));
+
+  it("does not hold the report back for it", async () => {
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    const probe = later<typeof PROBE | undefined>();
+    void attempts.reportAttempt(report, probe.promise);
+
+    // On disk before the probe has said anything.
+    await vi.waitFor(() => expect(queued()).toHaveLength(1));
+    expect(queued()[0].apiEndpoint).toBe("req: a.example=timeout@8000");
+    probe.settle(undefined);
+  });
+
+  /** The usual case: the control plane was unreachable a moment ago, so
+   * the report is still in the queue when the probe answers. */
+  it("adds a late answer to the queued report", async () => {
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    const probe = later<{ apiEndpoint: string; reason?: string } | undefined>();
+    const done = attempts.reportAttempt(report, probe.promise);
+    await vi.waitFor(() => expect(queued()).toHaveLength(1));
+
+    probe.settle({ ...PROBE, reason: "app was in the background during the probe" });
+    await done;
+
+    expect(queued()).toHaveLength(1);
+    expect(queued()[0].apiEndpoint).toBe("req: a.example=timeout@8000; probe: a.example=dns@40");
+    expect(queued()[0].reason).toBe("Could not reach Neoxify.; app was in the background during the probe");
+    // Still one report, not one plus a follow-up.
+    expect(sentBodies().every((b) => b.outcome === "CONTROL_PLANE_UNREACHABLE")).toBe(true);
+  });
+
+  it("queues an answer that was ready in time together with the report", async () => {
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    await attempts.reportAttempt(report, Promise.resolve(PROBE));
+    expect(queued()).toHaveLength(1);
+    expect(queued()[0].apiEndpoint).toBe("req: a.example=timeout@8000; probe: a.example=dns@40");
+  });
+
+  /** Gone already, so the answer goes as a row of its own -- OTHER, so it
+   * is never counted as a second failure, and naming its report. */
+  it("sends a late answer as a follow-up when the report has already gone", async () => {
+    const probe = later<typeof PROBE | undefined>();
+    const done = attempts.reportAttempt(report, probe.promise);
+    await vi.waitFor(() => expect(publicRequest).toHaveBeenCalledTimes(1));
+
+    probe.settle(PROBE);
+    await done;
+
+    const [original, followUp] = sentBodies();
+    expect(original.outcome).toBe("CONTROL_PLANE_UNREACHABLE");
+    expect(original.apiEndpoint).toBe("req: a.example=timeout@8000");
+    expect(followUp.kind).toBe("SIGN_IN");
+    expect(followUp.outcome).toBe("OTHER");
+    expect(followUp.apiEndpoint).toBe("probe: a.example=dns@40");
+    expect(followUp.occurredAt).toBe(original.occurredAt);
+    expect(String(followUp.reason)).toContain(`SIGN_IN CONTROL_PLANE_UNREACHABLE report of ${original.occurredAt}`);
+    expect(followUp.platform).toBe("ios");
+  });
+
+  /** Queued, then delivered by a flush before the probe answered. */
+  it("sends a follow-up when a flush took the queued report first", async () => {
+    publicRequest.mockResolvedValue(UNREACHABLE);
+    const probe = later<typeof PROBE | undefined>();
+    const done = attempts.reportAttempt(report, probe.promise);
+    await vi.waitFor(() => expect(queued()).toHaveLength(1));
+
+    publicRequest.mockResolvedValue({ ok: true, data: undefined });
+    await attempts.flushAttempts();
+    expect(queued()).toHaveLength(0);
+
+    probe.settle(PROBE);
+    await done;
+    const bodies = sentBodies();
+    const last = bodies[bodies.length - 1];
+    expect(last.outcome).toBe("OTHER");
+    expect(last.apiEndpoint).toBe("probe: a.example=dns@40");
+  });
+
+  it("adds nothing when there is nothing to add", async () => {
+    await attempts.reportAttempt(report, Promise.resolve(undefined));
+    expect(publicRequest).toHaveBeenCalledTimes(1);
+  });
+
+  /** The follow-up never reaches the server with a field it would refuse. */
+  it("sends no field the server does not know", async () => {
+    const probe = later<typeof PROBE | undefined>();
+    const done = attempts.reportAttempt(report, probe.promise);
+    await vi.waitFor(() => expect(publicRequest).toHaveBeenCalledTimes(1));
+    probe.settle(PROBE);
+    await done;
+    expect(Object.keys(sentBodies()[1]).sort()).toEqual(
+      ["apiEndpoint", "appVersion", "kind", "occurredAt", "outcome", "platform", "reason"].sort(),
+    );
+  });
+});

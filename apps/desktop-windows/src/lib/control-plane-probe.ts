@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AttemptAddendum } from "./attempts";
 import { endpointLabel, type TraceEntry } from "./endpoint-trace";
+import { watchBackground } from "./visibility";
 
 /** After a control-plane request has failed: at which stage did each
  * address fail -- DNS, TCP or TLS?
@@ -131,6 +133,23 @@ export async function probeControlPlane(entries: TraceEntry[], now = Date.now())
     // Decorates a report about a failure; must never become a second one.
     return undefined;
   }
+}
+
+/** The probe as an addendum to a report that has already been made (see
+ * `reportAttempt`): the report goes the moment the request has failed,
+ * and this follows it when the probe answers -- up to twenty seconds
+ * later, which on iOS is long enough for a backgrounded app to be
+ * suspended and killed with a report it was still holding.
+ *
+ * Says so if the app went to the background while the probe ran: on iOS
+ * that suspends the probe's threads, and its timeouts then describe the
+ * suspension rather than the network. */
+export async function probeAddendum(entries: TraceEntry[]): Promise<AttemptAddendum | undefined> {
+  const backgrounded = watchBackground();
+  const section = await probeControlPlane(entries);
+  const hidden = backgrounded();
+  if (section === undefined) return undefined;
+  return hidden ? { apiEndpoint: section, reason: "app was in the background during the probe" } : { apiEndpoint: section };
 }
 
 /** For tests: forget the last probe, as a fresh process would. */

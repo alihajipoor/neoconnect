@@ -1,6 +1,6 @@
 import { apiRequest, publicRequest } from "./api";
 import { outcomeFromApiError, reportAttempt } from "./attempts";
-import { probeControlPlane } from "./control-plane-probe";
+import { probeAddendum } from "./control-plane-probe";
 import { newTrace, renderTrace, type EndpointTrace } from "./endpoint-trace";
 import { setTokens } from "./session";
 import { endCustomerSession, type SessionEnd } from "./session-end";
@@ -35,22 +35,23 @@ import type { LoginResult, RequiresVerification, TokenPair, VerifyResult } from 
  * refused), and then nothing is claimed about addresses at all.
  */
 function reportAuth(kind: AttemptKind, result: ApiResult<unknown>, trace?: EndpointTrace): void {
-  void (async () => {
-    if (result.ok) {
-      await reportAttempt({ kind, outcome: "SUCCESS" });
-      return;
-    }
-    const outcome = outcomeFromApiError(result.error);
-    let apiEndpoint: string | undefined;
-    if (outcome === "CONTROL_PLANE_UNREACHABLE" && trace) {
-      const tried = renderTrace(trace) || "none dialled";
-      // Nothing follows a failed sign-in, so the path the probe sees is
-      // the one the request saw. See control-plane-probe.ts.
-      const probe = await probeControlPlane(trace.entries);
-      apiEndpoint = probe ? `${tried}; ${probe}` : tried;
-    }
-    await reportAttempt({ kind, outcome, reason: result.error, apiEndpoint });
-  })();
+  if (result.ok) {
+    void reportAttempt({ kind, outcome: "SUCCESS" });
+    return;
+  }
+  const outcome = outcomeFromApiError(result.error);
+  if (outcome !== "CONTROL_PLANE_UNREACHABLE" || !trace) {
+    void reportAttempt({ kind, outcome, reason: result.error });
+    return;
+  }
+  // Made now, with the trace; the probe's answer follows it rather than
+  // holding it back -- see `reportAttempt`. Nothing follows a failed
+  // sign-in, so the path the probe sees is the one the request saw. See
+  // control-plane-probe.ts.
+  void reportAttempt(
+    { kind, outcome, reason: result.error, apiEndpoint: renderTrace(trace) || "none dialled" },
+    probeAddendum(trace.entries),
+  );
 }
 
 /** Never returns a usable session -- see RequiresVerification's doc

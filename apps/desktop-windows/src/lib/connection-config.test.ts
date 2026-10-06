@@ -40,15 +40,17 @@ vi.mock("./customer", () => ({ getProtocolUsers: (trace?: EndpointTrace) => fetc
  * *visible* is half of what this change is for, so it is asserted rather
  * than assumed. */
 const reportAttempt = vi.fn();
-vi.mock("./attempts", () => ({ reportAttempt: (r: unknown) => reportAttempt(r) }));
+vi.mock("./attempts", () => ({ reportAttempt: (r: unknown, addendum?: unknown) => reportAttempt(r, addendum) }));
 
-/** The socket-level probe, stood in for: its own tests are elsewhere.
- * What matters here is when the refresh asks for it. */
-const probeControlPlane = vi.fn<(entries: unknown[]) => Promise<string | undefined>>();
-vi.mock("./control-plane-probe", () => ({ probeControlPlane: (e: unknown[]) => probeControlPlane(e) }));
+/** The socket-level probe, stood in for: its own tests are elsewhere,
+ * and how its answer joins the report is attempts.test.ts's. What
+ * matters here is when the refresh asks for it. */
+type Addendum = { apiEndpoint?: string; reason?: string } | undefined;
+const probeAddendum = vi.fn<(entries: unknown[]) => Promise<Addendum>>();
+vi.mock("./control-plane-probe", () => ({ probeAddendum: (e: unknown[]) => probeAddendum(e) }));
 
-/** The report goes out after the probe when there is one, so a test
- * waits for it rather than reading it the moment the refresh returns. */
+/** Reports are fire-and-forget, so a test waits for one rather than
+ * reading it the moment the refresh returns. */
 async function firstReport<T>(): Promise<T> {
   await vi.waitFor(() => expect(reportAttempt).toHaveBeenCalled());
   return reportAttempt.mock.calls[0][0] as T;
@@ -88,8 +90,8 @@ beforeEach(() => {
   for (const data of files.values()) data.clear();
   fetchUsers.mockReset();
   reportAttempt.mockReset();
-  probeControlPlane.mockReset();
-  probeControlPlane.mockResolvedValue(undefined);
+  probeAddendum.mockReset();
+  probeAddendum.mockResolvedValue(undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 
@@ -331,21 +333,27 @@ describe("refreshConnectionConfig", () => {
   });
 
   /** After a refresh nothing follows, the probe's answer -- which stage
-   * each failed address failed at -- goes on the end of the trace. */
-  it("adds the probe's answer to a failed resume refresh", async () => {
+   * each failed address failed at -- follows the report. It does not
+   * hold it back: on iOS a backgrounded app can be suspended and killed
+   * inside the twenty seconds a probe may take. */
+  it("reports a failed resume refresh at once and hands the probe on", async () => {
     const held = [reality("cloudflare.com")];
     await seedCache(held, Date.now() - SNAPSHOT_TTL_MS - 1);
     fetchUsers.mockImplementation(async (trace) => {
       settleAttempt(beginAttempt(trace, "https://api.example.net/api", 0), "timeout", 8_000);
       return { ok: false, error: "Could not reach Neoxify. Check your internet connection." };
     });
-    probeControlPlane.mockResolvedValue("probe: api.example.net=tls@310");
+    // A probe that never answers.
+    probeAddendum.mockReturnValue(new Promise<Addendum>(() => undefined));
 
     await refreshConnectionConfig({ held, force: true, trigger: "resume" });
 
-    const { apiEndpoint } = await firstReport<{ apiEndpoint: string }>();
-    expect(apiEndpoint).toBe("req: api.example.net=timeout@8000; probe: api.example.net=tls@310");
-    expect(probeControlPlane).toHaveBeenCalledTimes(1);
+    // Made by the time the refresh has returned, probe or no probe.
+    expect(reportAttempt).toHaveBeenCalledTimes(1);
+    const [report, addendum] = reportAttempt.mock.calls[0] as [{ apiEndpoint: string }, unknown];
+    expect(report.apiEndpoint).toBe("req: api.example.net=timeout@8000");
+    expect(addendum).toBeInstanceOf(Promise);
+    expect(probeAddendum).toHaveBeenCalledTimes(1);
   });
 
   /** A connect starts the moment the refresh gives up, and changes the
@@ -360,8 +368,9 @@ describe("refreshConnectionConfig", () => {
 
     await refreshConnectionConfig({ held });
 
-    expect(probeControlPlane).not.toHaveBeenCalled();
+    expect(probeAddendum).not.toHaveBeenCalled();
     expect((await firstReport<{ apiEndpoint: string }>()).apiEndpoint).toBe("req: api.example.net=timeout@8000");
+    expect(reportAttempt.mock.calls[0][1]).toBeUndefined();
   });
 
   /** Never a list of addresses that were not dialled. */

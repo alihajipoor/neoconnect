@@ -9,7 +9,7 @@ import type { TraceEntry } from "./endpoint-trace";
 const invoke = vi.fn<(cmd: string, args?: unknown) => Promise<unknown>>();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
 
-const { probeControlPlane, probeTargets, resetProbeForTests } = await import("./control-plane-probe");
+const { probeAddendum, probeControlPlane, probeTargets, resetProbeForTests } = await import("./control-plane-probe");
 
 const entry = (base: string, outcome: TraceEntry["outcome"]): TraceEntry => ({
   phase: "req",
@@ -127,5 +127,44 @@ describe("probeControlPlane", () => {
     const pending = probeControlPlane(failed, 0);
     await vi.advanceTimersByTimeAsync(20_000);
     expect(await pending).toBeUndefined();
+  });
+});
+
+/** The probe as it follows a report that has already been made. */
+describe("probeAddendum", () => {
+  const failed = [entry("https://a.example.net/api", "timeout"), entry("https://b.example.net:2053/api", "net")];
+  const answer = [
+    { outcome: "tcp-timeout", ms: 4001 },
+    { outcome: "tls", ms: 312 },
+  ];
+  const SECTION = "probe: a.example.net=tcp-timeout@4001 b.example.net:2053=tls@312";
+
+  it("carries the probe's section for the report's apiEndpoint", async () => {
+    invoke.mockResolvedValue(answer);
+    expect(await probeAddendum(failed)).toEqual({ apiEndpoint: SECTION });
+  });
+
+  it("is nothing when nothing was probed", async () => {
+    expect(await probeAddendum([entry("https://a.example.net/api", "h200")])).toBeUndefined();
+  });
+
+  /** iOS suspends a backgrounded app, probe threads and all; a timeout
+   * then measured the suspension. The addendum says so. */
+  it("says when the app went to the background while it ran", async () => {
+    const doc = Object.assign(new EventTarget(), { visibilityState: "visible" });
+    Object.assign(globalThis, { document: doc });
+    try {
+      invoke.mockImplementation(async () => {
+        doc.visibilityState = "hidden";
+        doc.dispatchEvent(new Event("visibilitychange"));
+        return answer;
+      });
+      expect(await probeAddendum(failed)).toEqual({
+        apiEndpoint: SECTION,
+        reason: "app was in the background during the probe",
+      });
+    } finally {
+      Object.assign(globalThis, { document: undefined });
+    }
   });
 });

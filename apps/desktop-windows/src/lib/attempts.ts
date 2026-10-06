@@ -295,15 +295,120 @@ export function withNetwork(report: AttemptReport, attestation = currentAttestat
   };
 }
 
+/** More to say about a report than was known when it was made: what the
+ * socket-level probe found (control-plane-probe.ts), which takes up to
+ * twenty seconds. Each field is added to the report's own after "; ". */
+export interface AttemptAddendum {
+  apiEndpoint?: string;
+  reason?: string;
+}
+
+const REASON_MAX = 500;
+
+/** `report` with `addendum` added to it, each field still fitted. */
+function amended(report: QueuedReport, addendum: AttemptAddendum): QueuedReport {
+  const join = (own?: string, more?: string) => (own && more ? `${own}; ${more}` : (own ?? more));
+  const apiEndpoint = join(report.apiEndpoint, addendum.apiEndpoint);
+  return {
+    ...report,
+    reason: join(report.reason, addendum.reason)?.slice(0, REASON_MAX),
+    apiEndpoint: apiEndpoint === undefined ? undefined : clipTrace(apiEndpoint, API_ENDPOINT_MAX),
+  };
+}
+
+/** Queues a report to go out on the next contact. */
+async function enqueue(report: QueuedReport): Promise<void> {
+  const queue = await readQueue();
+  queue.push(report);
+  await writeQueue(queue.slice(-MAX_QUEUED));
+}
+
+/** Whether a queued report is `original`, as it was made. Matched on
+ * what it was stamped with rather than an id of its own, which the
+ * server would refuse as an unknown field. */
+function isSameReport(candidate: QueuedReport, original: QueuedReport): boolean {
+  return (
+    candidate.occurredAt === original.occurredAt &&
+    candidate.kind === original.kind &&
+    candidate.outcome === original.outcome &&
+    candidate.reason === original.reason
+  );
+}
+
+/** An addendum whose report has already gone, sent as a row of its own.
+ *
+ * OTHER rather than the original's outcome, so a follow-up is never
+ * counted as a second failure -- the unreachable count is the number this
+ * telemetry exists to get right. The reason names the report it belongs
+ * to, and it carries that report's time, so the two sort together. */
+async function sendFollowUp(original: QueuedReport, addendum: AttemptAddendum): Promise<void> {
+  const followUp: QueuedReport = amended(
+    {
+      kind: original.kind,
+      outcome: "OTHER",
+      platform: original.platform,
+      appVersion: original.appVersion,
+      occurredAt: original.occurredAt,
+      ...(original.network ? { network: original.network } : {}),
+      reason: `probe follow-up to the ${original.kind} ${original.outcome} report of ${original.occurredAt}, which was no longer held when the probe answered; not an attempt`,
+    },
+    addendum,
+  );
+  if (!(await send(followUp))) await enqueue(followUp);
+}
+
+/** Adds a late addendum to its report: in the queue if the report is
+ * still waiting there, which is the usual case -- the control plane was
+ * unreachable a moment ago -- or as a follow-up if it has gone since. */
+async function addLate(original: QueuedReport, addendum: AttemptAddendum): Promise<void> {
+  const queue = await readQueue();
+  const at = queue.findIndex((r) => isSameReport(r, original));
+  if (at === -1) {
+    await sendFollowUp(original, addendum);
+    return;
+  }
+  queue[at] = amended(queue[at], addendum);
+  await writeQueue(queue);
+}
+
 /** Records how an attempt went, and tries to send it.
  *
  * Fire and forget: call it with `void`. It resolves when it is done and
  * never rejects, but nothing should wait for it.
+ *
+ * `addendum` is more of the same report that is still being worked out
+ * -- the probe after an unreachable control plane. The report does not
+ * wait for it. It is sent, or queued, as it would be without one; an
+ * addendum ready by the time it has to be queued goes in with it, and
+ * one that arrives later is added to the queued report, or sent after it
+ * as a follow-up if the report is no longer held -- delivered, by this
+ * call or a flush, or pushed out of the queue. On iOS a backgrounded app
+ * is suspended within seconds and may be killed after that, and a report
+ * held back for a twenty-second probe could die with it.
  */
-export async function reportAttempt(report: AttemptReport): Promise<void> {
+export async function reportAttempt(
+  report: AttemptReport,
+  addendum?: Promise<AttemptAddendum | undefined>,
+): Promise<void> {
   try {
     const shaped = withNetwork(report);
     if (shaped === null) return;
+
+    // Watched from the start, so an answer that lands while the report
+    // is being sent can still go in with it.
+    const early: { arrived: boolean; value?: AttemptAddendum } = { arrived: addendum === undefined };
+    const later = addendum?.then(
+      (value) => {
+        early.value = value;
+        early.arrived = true;
+        return value;
+      },
+      () => {
+        early.arrived = true;
+        return undefined;
+      },
+    );
+
     const queued: QueuedReport = {
       ...shaped,
       platform: await reportedPlatform(),
@@ -315,7 +420,7 @@ export async function reportAttempt(report: AttemptReport): Promise<void> {
       // A reason of unbounded length would be rejected by the server's
       // validation, losing the whole report over its least important
       // field.
-      reason: report.reason?.slice(0, 500),
+      reason: report.reason?.slice(0, REASON_MAX),
       // The same, for the one field long enough to hit its limit: the
       // hostname list 0.9.39 to 0.9.43 send would overrun the old 200.
       apiEndpoint: shaped.apiEndpoint === undefined ? undefined : clipTrace(shaped.apiEndpoint, API_ENDPOINT_MAX),
@@ -325,12 +430,18 @@ export async function reportAttempt(report: AttemptReport): Promise<void> {
       // Reaching the server is also the signal that anything held back
       // can go now.
       await flushAttempts();
+      const extra = await later;
+      if (extra) await sendFollowUp(queued, extra);
       return;
     }
 
-    const queue = await readQueue();
-    queue.push(queued);
-    await writeQueue(queue.slice(-MAX_QUEUED));
+    // Kept now, not once the addendum is in.
+    const inTime = early.arrived;
+    await enqueue(inTime && early.value ? amended(queued, early.value) : queued);
+    if (!inTime) {
+      const extra = await later;
+      if (extra) await addLate(queued, extra);
+    }
   } catch {
     // Reporting must never surface as a failure of the thing being
     // reported on.
