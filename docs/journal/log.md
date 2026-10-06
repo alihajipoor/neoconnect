@@ -2827,6 +2827,15 @@ going out without Neoxify and is not protected. Connect again to
 protect it." (and Persian), destructive colour. The fifteen-second poll
 is unchanged.
 
+**One behaviour goes away, on purpose.** A WireGuard tunnel whose
+service process died used to be rebuilt by the app: status kept saying
+`connected: true`, the egress check then read degraded twice, and the
+ladder reconnected -- the only protocol that recovered by itself, and
+only because the service misreported it. Now it is reported as lost,
+like the others, and nothing reconnects. Whether a dropped tunnel
+should reconnect automatically is a product decision this branch does
+not take; it only stops the false "connected".
+
 **IPC: no change.** `connected: false` is an answer every shipped
 service already gives, and the app needs nothing more to word a drop.
 The optional `tunnel_ended` field the plan mentioned was not added: the
