@@ -3709,11 +3709,32 @@ install_openvpn() {
   # unroutable -- which is exactly what happened on ir1, 2026-08-14.
   local ovpn_subnet="10.77.0.0/24"
 
+  # tls-crypt encrypts and authenticates the whole TLS control channel,
+  # so a client without this exact key is not rejected -- it is silently
+  # ignored, and the connection simply never completes. It therefore has
+  # to reach clients, which means registering it alongside the rest of
+  # this engine's parameters rather than leaving it node-local like the
+  # WireGuard/Xray server secrets.
+  #
+  # Generated before the registration and sent with it. It used to be
+  # attached afterwards with a PATCH carrying {proto, endpoint,
+  # tlsCryptKey} -- and an update replaces publicParamsJson, so that
+  # PATCH deleted subnetCidr, which a relayed OpenVPN route needs on
+  # every re-assert. Each fresh OpenVPN registration lost it; five of six
+  # configs were found without it and repaired by hand in August, and the
+  # next relay built would have lost it again. Written to a scratch file
+  # and installed only once the panel has accepted the config, so a
+  # refused registration leaves a running server's key alone.
+  local tls_crypt_dir tls_crypt_key
+  tls_crypt_dir="$(mktemp -d)"
+  openvpn --genkey secret "$tls_crypt_dir/tls-crypt.key"
+  tls_crypt_key="$(cat "$tls_crypt_dir/tls-crypt.key")"
+
   config_json="$(curl -sSL -X POST "$panel_url/protocol-configs" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $token" \
-    -d "$(jq -n --arg nodeId "$node_id" --argjson listenPort "$listen_port" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" --arg subnet "$ovpn_subnet" \
-      '{nodeId: $nodeId, protocol: "OPENVPN", listenPort: $listenPort, publicParamsJson: {proto: $proto, endpoint: $endpoint, subnetCidr: $subnet}}')")"
+    -d "$(jq -n --arg nodeId "$node_id" --argjson listenPort "$listen_port" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" --arg subnet "$ovpn_subnet" --arg k "$tls_crypt_key" \
+      '{nodeId: $nodeId, protocol: "OPENVPN", listenPort: $listenPort, publicParamsJson: {proto: $proto, endpoint: $endpoint, subnetCidr: $subnet, tlsCryptKey: $k}}')")"
 
   local ca_cert server_cert server_key config_id
   config_id="$(echo "$config_json" | jq -r '.id // empty')"
@@ -3722,6 +3743,7 @@ install_openvpn() {
   server_key="$(echo "$config_json" | jq -r '.publicParamsJson.serverKeyPem // empty')"
 
   if [[ -z "$ca_cert" ]]; then
+    rm -rf "$tls_crypt_dir"
     echo "ERROR: could not register the OpenVPN Protocol Config." >&2
     echo "  Response: $(echo "$config_json" | jq -r '.message // .' 2>/dev/null || echo "$config_json")" >&2
     exit 1
@@ -3734,26 +3756,8 @@ install_openvpn() {
   printf '%s' "$server_cert" > /etc/openvpn/server/server.crt
   printf '%s' "$server_key" > /etc/openvpn/server/server.key
   chmod 600 /etc/openvpn/server/server.key
-
-  openvpn --genkey secret /etc/openvpn/server/tls-crypt.key
-
-  # tls-crypt encrypts and authenticates the whole TLS control channel,
-  # so a client without this exact key is not rejected -- it is silently
-  # ignored, and the connection simply never completes. It therefore has
-  # to reach clients, which means registering it alongside the rest of
-  # this engine's parameters rather than leaving it node-local like the
-  # WireGuard/Xray server secrets.
-  local tls_crypt_key
-  tls_crypt_key="$(cat /etc/openvpn/server/tls-crypt.key)"
-  local update_payload
-  update_payload="$(jq -n --arg k "$tls_crypt_key" --arg proto "$proto" --arg endpoint "$endpoint_host:$listen_port" \
-    '{publicParamsJson: {proto: $proto, endpoint: $endpoint, tlsCryptKey: $k}}')"
-  if ! curl -sSL -X PATCH "$panel_url/protocol-configs/$config_id" \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer $token" \
-      -d "$update_payload" | jq -e '.id' >/dev/null; then
-    echo "WARNING: could not attach the tls-crypt key to this OpenVPN config -- clients will connect to a server that ignores them." >&2
-  fi
+  install -m 600 "$tls_crypt_dir/tls-crypt.key" /etc/openvpn/server/tls-crypt.key
+  rm -rf "$tls_crypt_dir"
 
   # -dsaparam trades a little cryptographic conservatism for a
   # dramatically faster generation (under a second vs. minutes) --
