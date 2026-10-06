@@ -112,7 +112,7 @@ describe("claim", () => {
 
     expect(outcome).toEqual({
       kind: "granted",
-      grant: { enforced: true, limit: 1, handle: "Zm9vYmFyYmF6", renewEverySec: 60 },
+      grant: { enforced: true, limit: 1, handle: "Zm9vYmFyYmF6", renewEverySec: 60, staleAfterSec: 90 },
     });
     expect(sent).toHaveLength(1);
     expect(sent[0].url).toBe("https://a.example/customer/vpn/claim");
@@ -140,7 +140,7 @@ describe("claim", () => {
     const outcome = await claimSlot({ subscriptionId: SUB });
     expect(outcome).toEqual({
       kind: "granted",
-      grant: { enforced: false, limit: null, handle: null, renewEverySec: 60 },
+      grant: { enforced: false, limit: null, handle: null, renewEverySec: 60, staleAfterSec: 90 },
     });
   });
 
@@ -282,7 +282,7 @@ describe("renew", () => {
 
     expect(await renewSlot(SUB)).toEqual({
       kind: "held",
-      grant: { enforced: true, limit: 1, handle: "h", renewEverySec: 60 },
+      grant: { enforced: true, limit: 1, handle: "h", renewEverySec: 60, staleAfterSec: 90 },
     });
     expect(await renewSlot(SUB)).toEqual({
       kind: "displaced",
@@ -308,6 +308,17 @@ describe("renew", () => {
     const second = await renewSlot(SUB);
     expect(first.kind === "held" && first.grant.renewEverySec).toBe(60);
     expect(second.kind === "held" && second.grant.renewEverySec).toBe(300);
+  });
+
+  it("keeps the stale interval within sense too, and the contract's ninety seconds when unsaid", async () => {
+    replies["/customer/vpn/renew"] = [
+      { status: 200, body: { status: "held", enforced: true, limit: 1, handle: "h", staleAfterSec: 1 } },
+      { status: 200, body: { status: "held", enforced: true, limit: 1, handle: "h" } },
+    ];
+    const first = await renewSlot(SUB);
+    const second = await renewSlot(SUB);
+    expect(first.kind === "held" && first.grant.staleAfterSec).toBe(30);
+    expect(second.kind === "held" && second.grant.staleAfterSec).toBe(90);
   });
 });
 

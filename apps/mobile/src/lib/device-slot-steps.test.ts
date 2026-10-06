@@ -228,6 +228,33 @@ describe("before dialling", () => {
     expect(calls[0].body).toEqual({ subscriptionId: SUB, protocolUserId: CRED, takeover: ["YmF6cXV4"] });
   });
 
+  /** A filtered network where the API answers only through the tunnel:
+   * the takeover cannot arrive before dialling, so the claim through the
+   * tunnel carries it. Without it the server refused again in favour of
+   * the PC, and every press of the button ended the same way. */
+  it("sends the takeover through the tunnel when it could not be sent before dialling", async () => {
+    vi.useFakeTimers();
+    answer = () => "hang";
+    const { slot } = session();
+    const pending = claimWhileRefreshing(
+      { subscriptionId: SUB, protocolUserId: CRED, takeover: ["YmF6cXV4"] },
+      fresh,
+      slot,
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect((await pending).stop).toBeNull();
+    vi.useRealTimers();
+
+    answer = () => ({ ok: true, data: GRANT });
+    expect(await slot.afterConnected({ protocolUserId: CRED })).toEqual({ kind: "keep" });
+
+    expect(calls.map((c) => c.body)).toEqual([
+      { subscriptionId: SUB, protocolUserId: CRED, takeover: ["YmF6cXV4"] },
+      { subscriptionId: SUB, protocolUserId: CRED, takeover: ["YmF6cXV4"] },
+    ]);
+    expect(slot.standing()).toBe("held");
+  });
+
   it("says when takeovers have to wait, and does not retry", async () => {
     answer = () => ({
       ok: false,

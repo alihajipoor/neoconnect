@@ -9,9 +9,22 @@ import type { ClaimOutcome, RenewOutcome } from "./device-slots";
 const SUB = "sub-1";
 const GRANT: ClaimOutcome = {
   kind: "granted",
-  grant: { enforced: true, limit: 1, handle: "mine", renewEverySec: 60 },
+  grant: { enforced: true, limit: 1, handle: "mine", renewEverySec: 60, staleAfterSec: 90 },
 };
-const HELD: RenewOutcome = { kind: "held", grant: { enforced: true, limit: 1, handle: "mine", renewEverySec: 60 } };
+const HELD: RenewOutcome = {
+  kind: "held",
+  grant: { enforced: true, limit: 1, handle: "mine", renewEverySec: 60, staleAfterSec: 90 },
+};
+const UNANSWERED: ClaimOutcome & RenewOutcome = { kind: "unanswered", reason: "timeout", retryable: true };
+/** Slots switched off on the server, or a token from before sessions: a
+ * plan with a limit, and nothing counted. */
+const UNCOUNTED: ClaimOutcome = {
+  kind: "granted",
+  grant: { enforced: false, limit: 1, handle: null, renewEverySec: 60, staleAfterSec: 90 },
+};
+
+/** Lets every answer already settled run its callbacks. */
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const REFUSAL = {
   limit: 1,
   holders: [{ handle: "pc", label: "Windows PC", platform: "windows", since: "2026-10-06T10:32:04.120Z", lastSeen: null }],
@@ -181,7 +194,9 @@ describe("renewing", () => {
   });
 
   it("uses the interval the server sent", async () => {
-    const h = harness([{ kind: "granted", grant: { enforced: true, limit: 1, handle: "mine", renewEverySec: 30 } }]);
+    const h = harness([
+      { kind: "granted", grant: { enforced: true, limit: 1, handle: "mine", renewEverySec: 30, staleAfterSec: 90 } },
+    ]);
     await h.session.beforeDial({ subscriptionId: SUB });
     h.advance(30_000);
     await h.session.onPoll();
@@ -224,12 +239,17 @@ describe("renewing", () => {
     expect(h.renew).toHaveBeenCalledTimes(2);
   });
 
-  it("does not renew a slot nothing is counting", async () => {
-    const h = harness([{ kind: "granted", grant: { enforced: false, limit: null, handle: null, renewEverySec: 60 } }]);
+  it("does not renew, or claim again, a slot nothing will count -- an unlimited plan", async () => {
+    const h = harness([
+      { kind: "granted", grant: { enforced: false, limit: null, handle: null, renewEverySec: 60, staleAfterSec: 90 } },
+    ]);
     await h.session.beforeDial({ subscriptionId: SUB });
+    expect(h.session.standing()).toBe("unenforced");
     h.advance(600_000);
     await h.session.onPoll();
     expect(h.renew).not.toHaveBeenCalled();
+    expect(h.claim).toHaveBeenCalledTimes(1);
+    expect(h.session.needsStandingCheck()).toBe(false);
   });
 
   it("keeps trying an unanswered claim on the renewal clock", async () => {
@@ -385,6 +405,294 @@ describe("release", () => {
     h.session.reset();
     expect(h.release).not.toHaveBeenCalled();
     expect(h.session.standing()).toBe("none");
+  });
+});
+
+/** "Use on this device instead" on a network where the API answers only
+ * through the tunnel: the claim before dialling never arrives, so the
+ * takeover has to travel with the claim that does. Without it the server
+ * refuses again in favour of the device the customer chose to replace,
+ * and every press ends the same way. */
+describe("a takeover the claim before dialling could not deliver", () => {
+  it("is carried by the claim made through the tunnel", async () => {
+    const h = harness([UNANSWERED, GRANT]);
+    expect(await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] })).toEqual({
+      kind: "dial",
+    });
+
+    expect(await h.session.afterConnected({ protocolUserId: "cred-a" })).toEqual({ kind: "keep" });
+
+    expect(h.claim).toHaveBeenCalledTimes(2);
+    expect(h.claim.mock.calls[1][0]).toEqual({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] });
+    expect(h.session.standing()).toBe("held");
+  });
+
+  it("is carried by the poll's retry when the claim through the tunnel goes unanswered too", async () => {
+    const h = harness([UNANSWERED, UNANSWERED, GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] });
+    await h.session.afterConnected({ protocolUserId: "cred-a" });
+    h.advance(60_000);
+    await h.session.onPoll();
+
+    expect(h.claim).toHaveBeenCalledTimes(3);
+    expect(h.claim.mock.calls[2][0]).toEqual({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] });
+    expect(h.session.standing()).toBe("held");
+  });
+
+  it("is forgotten once a claim is answered", async () => {
+    const h = harness([UNANSWERED, GRANT, GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] });
+    await h.session.afterConnected({ protocolUserId: "cred-a" });
+    // The ladder's next landing moves the slot; it takes nothing over.
+    await h.session.afterConnected({ protocolUserId: "cred-b" });
+    expect(h.claim.mock.calls[2][0]).toEqual({ subscriptionId: SUB, protocolUserId: "cred-b" });
+  });
+
+  it("is not added to a plain connect", async () => {
+    const h = harness([UNANSWERED, UNANSWERED]);
+    await h.session.beforeDial({ subscriptionId: SUB, takeover: ["pc"] });
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.afterConnected({});
+    expect(h.claim.mock.calls[1][0]).toEqual({ subscriptionId: SUB, protocolUserId: null, takeover: [] });
+    expect(h.claim.mock.calls[2][0]).toEqual({ subscriptionId: SUB, protocolUserId: null });
+  });
+
+  /** Connected without a slot, and the server will not hand one over:
+   * the same stop as before dialling, and the dashboard disconnects. */
+  it("stops the session when the server refuses it for too many takeovers", async () => {
+    const h = harness([UNANSWERED, { kind: "takeoverLimited", retryAfterSec: 1260 }]);
+    await h.session.beforeDial({ subscriptionId: SUB, takeover: ["pc"] });
+    expect(await h.session.afterConnected({})).toEqual({ kind: "takeoverLimited", retryAfterSec: 1260 });
+    expect(h.session.standing()).toBe("none");
+    expect(slotStop({ kind: "takeoverLimited", retryAfterSec: 1260 }, "whileConnected").notice).toEqual({
+      kind: "takeoverLimited",
+      retryAfterSec: 1260,
+    });
+  });
+
+  it("is refused like any late claim when the device named has moved on", async () => {
+    const h = harness([UNANSWERED, { kind: "refused", refusal: REFUSAL }]);
+    await h.session.beforeDial({ subscriptionId: SUB, takeover: ["old-handle"] });
+    expect(await h.session.afterConnected({})).toEqual({ kind: "refused", refusal: REFUSAL });
+  });
+
+  /** An automatic reconnect asks with the takeover: asking who has the
+   * slot would only name the device the customer chose to replace. */
+  it("is what the check before an automatic reconnect asks", async () => {
+    const h = harness([UNANSWERED, UNANSWERED, GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] });
+    await h.session.afterConnected({});
+    expect(h.session.needsStandingCheck()).toBe(true);
+
+    expect(await h.session.checkStanding()).toEqual({ kind: "clear" });
+
+    expect(h.renew).not.toHaveBeenCalled();
+    expect(h.claim).toHaveBeenLastCalledWith({ subscriptionId: SUB, protocolUserId: "cred-a", takeover: ["pc"] }, 4_000);
+    expect(h.session.standing()).toBe("held");
+  });
+
+  it("says when that check could not ask", async () => {
+    const h = harness([UNANSWERED, UNANSWERED]);
+    await h.session.beforeDial({ subscriptionId: SUB, takeover: ["pc"] });
+    expect(await h.session.checkStanding()).toEqual({ kind: "unanswered" });
+  });
+});
+
+/** A Disconnect that lands while a renewal or claim is still out. The
+ * request may be processed after the release, and a renewal that finds
+ * no slot gives one back when there is room -- so the server would count
+ * a device that is off, and turn the customer's other device away. */
+describe("a request still out at Disconnect", () => {
+  function pending<T>(mock: { mockImplementationOnce: (fn: () => Promise<T>) => unknown }) {
+    let finish: (value: T) => void = () => undefined;
+    mock.mockImplementationOnce(() => new Promise<T>((resolve) => (finish = resolve)));
+    return (value: T) => finish(value);
+  }
+
+  it("is followed by a second release when its answer says the slot was kept", async () => {
+    const h = harness([GRANT]);
+    const finish = pending<RenewOutcome>(h.renew);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    const poll = h.session.onPoll();
+    await h.session.release();
+    expect(h.release).toHaveBeenCalledTimes(1);
+
+    finish(HELD);
+    expect(await poll).toEqual({ kind: "keep" });
+    await settle();
+
+    expect(h.release).toHaveBeenCalledTimes(2);
+    expect(h.release).toHaveBeenLastCalledWith(SUB);
+    expect(h.session.standing()).toBe("none");
+  });
+
+  it("is followed by a second release when it got no answer -- it may have arrived", async () => {
+    const h = harness([GRANT]);
+    const finish = pending<RenewOutcome>(h.renew);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    const poll = h.session.onPoll();
+    await h.session.release();
+    finish(UNANSWERED);
+    await poll;
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(2);
+  });
+
+  it("is not followed by one when its answer says the slot is someone else's", async () => {
+    const h = harness([GRANT]);
+    const finish = pending<RenewOutcome>(h.renew);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    const poll = h.session.onPoll();
+    await h.session.release();
+    finish({ kind: "displaced", by: null, at: null });
+    await poll;
+    await settle();
+    expect(h.release).toHaveBeenCalledTimes(1);
+  });
+
+  /** Stop pressed while the claim before dialling is out. Nothing was
+   * held when it was pressed, so nothing was released then; the grant
+   * that arrives afterwards is given back. */
+  it("gives back a claim granted after the connect was stopped", async () => {
+    const h = harness([]);
+    const finish = pending<ClaimOutcome>(h.claim);
+    const decision = h.session.beforeDial({ subscriptionId: SUB });
+    await settle();
+    await h.session.release();
+    expect(h.release).not.toHaveBeenCalled();
+
+    finish(GRANT);
+    await decision;
+    await settle();
+
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.release).toHaveBeenCalledWith(SUB);
+    expect(h.session.standing()).toBe("none");
+  });
+
+  /** The second release must never land on a connect started since:
+   * the server knows this device, not this connect, and would drop the
+   * new slot. */
+  it("is not released again once a new connect has started", async () => {
+    const h = harness([GRANT, GRANT]);
+    const finish = pending<RenewOutcome>(h.renew);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    const poll = h.session.onPoll();
+    await h.session.release();
+    await h.session.beforeDial({ subscriptionId: SUB });
+
+    finish(HELD);
+    await poll;
+    await settle();
+
+    expect(h.release).toHaveBeenCalledTimes(1);
+    expect(h.session.standing()).toBe("held");
+  });
+
+  /** Connect pressed straight after Disconnect: the claim goes after the
+   * release, or the release could overtake it and drop the new slot. */
+  it("holds a new claim until the release before it has gone", async () => {
+    const h = harness([GRANT, GRANT]);
+    const finishRelease = pending<undefined>(h.release);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    const released = h.session.release();
+
+    const decision = h.session.beforeDial({ subscriptionId: SUB });
+    await settle();
+    expect(h.claim).toHaveBeenCalledTimes(1);
+
+    finishRelease(undefined);
+    await released;
+    expect(await decision).toEqual({ kind: "dial" });
+    expect(h.claim).toHaveBeenCalledTimes(2);
+  });
+});
+
+/** A plan with a limit whose grant was not counted: slots switched off on
+ * the server, or a token from before sessions. Either can change while
+ * connected, and a device that never asks again would never take a slot
+ * -- so another device would be granted the only one, and both would use
+ * the VPN. */
+describe("a grant nothing counted on a plan with a limit", () => {
+  it("is claimed again on the renewal clock until a grant is counted", async () => {
+    const h = harness([UNCOUNTED, UNCOUNTED, GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB, protocolUserId: "cred-a" });
+    expect(h.session.standing()).toBe("uncounted");
+
+    h.advance(30_000);
+    await h.session.onPoll();
+    expect(h.claim).toHaveBeenCalledTimes(1);
+
+    h.advance(30_000);
+    await h.session.onPoll();
+    expect(h.claim).toHaveBeenCalledTimes(2);
+    expect(h.claim.mock.calls[1]).toEqual([{ subscriptionId: SUB, protocolUserId: "cred-a" }, 6_000]);
+    expect(h.session.standing()).toBe("uncounted");
+
+    h.advance(60_000);
+    await h.session.onPoll();
+    expect(h.claim).toHaveBeenCalledTimes(3);
+    expect(h.session.standing()).toBe("held");
+    expect(h.renew).not.toHaveBeenCalled();
+  });
+
+  it("ends the session when the slots turn out to be in use", async () => {
+    const h = harness([UNCOUNTED, { kind: "refused", refusal: REFUSAL }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    expect(await h.session.onPoll()).toEqual({ kind: "refused", refusal: REFUSAL });
+  });
+
+  it("is asked about before an automatic reconnect, and dialled again only with a claim", async () => {
+    const h = harness([UNCOUNTED, GRANT], [{ kind: "displaced", by: null, at: null }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    expect(h.session.needsStandingCheck()).toBe(true);
+    expect(await h.session.checkStanding()).toEqual({ kind: "displaced", by: null, at: null });
+
+    const again = harness([UNCOUNTED, GRANT]);
+    await again.session.beforeDial({ subscriptionId: SUB });
+    await again.session.beforeDial({ subscriptionId: SUB });
+    expect(again.claim).toHaveBeenCalledTimes(2);
+  });
+});
+
+/** "Fresh" means confirmed by the server, not merely asked about. */
+describe("a held slot whose renewals go unanswered", () => {
+  it("is claimed again by a reconnect a renewal after it was last confirmed", async () => {
+    const h = harness([GRANT, { kind: "refused", refusal: REFUSAL }], [UNANSWERED]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    await h.session.onPoll();
+    h.advance(15_000);
+
+    expect(await h.session.beforeDial({ subscriptionId: SUB })).toEqual({ kind: "refused", refusal: REFUSAL });
+    expect(h.claim).toHaveBeenCalledTimes(2);
+  });
+
+  it("is checked before an automatic reconnect once unconfirmed for as long as the server keeps it", async () => {
+    const h = harness([GRANT], [UNANSWERED, { kind: "displaced", by: null, at: null }]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    await h.session.onPoll();
+    expect(h.session.needsStandingCheck()).toBe(false);
+
+    h.advance(30_000);
+    expect(h.session.standing()).toBe("held");
+    expect(h.session.needsStandingCheck()).toBe(true);
+    expect(await h.session.checkStanding()).toEqual({ kind: "displaced", by: null, at: null });
+  });
+
+  it("is not checked while its renewals are answered", async () => {
+    const h = harness([GRANT], [HELD]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    h.advance(60_000);
+    await h.session.onPoll();
+    h.advance(30_000);
+    expect(h.session.needsStandingCheck()).toBe(false);
   });
 });
 

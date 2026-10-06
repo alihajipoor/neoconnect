@@ -37,6 +37,9 @@ export const RELEASE_BUDGET_MS = 1_500;
 
 /** The renewal interval when a grant does not say. The contract's value. */
 export const DEFAULT_RENEW_EVERY_SEC = 60;
+/** How long the server keeps a slot nobody renews, when a grant does not
+ * say. The contract's value. */
+export const DEFAULT_STALE_AFTER_SEC = 90;
 
 /** A device as another device sees it. `label` may be null ("another
  * device"); the handle is what a takeover names. */
@@ -62,12 +65,16 @@ export interface DeviceLimitRefusal {
 }
 
 export interface SlotGrant {
-  /** False when nothing was recorded (an unlimited plan, a token from
-   * before sessions, slots switched off). Renewing is then pointless. */
+  /** False when nothing was recorded: an unlimited plan (`limit` null),
+   * or a plan with a limit whose slot was not counted -- a token from
+   * before sessions, or slots switched off on the server. */
   enforced: boolean;
   limit: number | null;
   handle: string | null;
   renewEverySec: number;
+  /** After this long with no renewal and no traffic, the server gives
+   * the slot to whichever device asks next. */
+  staleAfterSec: number;
 }
 
 export type ClaimOutcome =
@@ -123,12 +130,20 @@ function renewEvery(value: unknown): number {
   return Math.min(300, Math.max(15, sec));
 }
 
+/** The same for how long an unrenewed slot lasts. Bounded below so a
+ * stray value cannot make every slot look lapsed between two polls. */
+function staleAfter(value: unknown): number {
+  const sec = positiveInt(value) ?? DEFAULT_STALE_AFTER_SEC;
+  return Math.min(600, Math.max(30, sec));
+}
+
 function grantFrom(body: Fields): SlotGrant {
   return {
     enforced: body.enforced === true,
     limit: positiveInt(body.limit),
     handle: text(body.handle),
     renewEverySec: renewEvery(body.renewEverySec),
+    staleAfterSec: staleAfter(body.staleAfterSec),
   };
 }
 
