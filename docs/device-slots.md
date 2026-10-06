@@ -356,7 +356,9 @@ backend boots and maps the three routes. **Unverified:**
 
 - No app claims, renews or releases yet. Nothing on this page has been
   seen from a client.
-- No Redis has held a slot; no Postgres has run the migrations.
+- No Redis has held a slot. The migrations have been applied only to
+  CI's empty Postgres (they apply, and match the schema), never to a
+  database with real data.
 - The backstop has never seen a real node's report. Whether presence
   from usage deltas is as clean as reasoned (keepalives every 25 s,
   pings every 10 s) is inferred from the agent and client code, not

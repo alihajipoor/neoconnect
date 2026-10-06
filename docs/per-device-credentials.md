@@ -359,9 +359,14 @@ Low-severity review findings not fixed here, and why:
 
 Everything end to end. No node has received a device credential, no
 client has connected with one, no sign-out has been seen to remove one
-from a node, no ack has been seen to set `provisionedAt`, and no
-migration has been applied to a database. The backend unit tests,
-typecheck, lint and a local boot of the built backend (the module graph
-resolves) are the only evidence. Also unproven: that Windows' built-in
+from a node, and no ack has been seen to set `provisionedAt`. The
+evidence is the backend unit tests, typecheck and lint, a local boot of
+the built backend (the module graph resolves), and CI's new migration
+step: every migration applied in order to an **empty** Postgres 16, the
+result matched `schema.prisma` exactly (FK delete rule included), and
+the previous backend's sign-in pruning ran against it with a signed-out
+session owning a credential -- the prune succeeded and the credential
+was kept as a shared one (`test/sql/rollback-check.sql`). The migrations
+have not been applied to a database holding real data. Also unproven: that Windows' built-in
 IKEv2 and iOS's NEVPNManager profile pick up new credentials on the next
 connect rather than reusing stored ones.

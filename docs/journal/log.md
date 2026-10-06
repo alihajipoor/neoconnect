@@ -2813,8 +2813,8 @@ not deployed. Clients not started.
 **Touches:** `apps/backend` (protocol-users, usage, customer-auth,
 customers, agent-gateway, plans, billing, subscriptions, new
 `device-slots`), `infra/docker-compose.prod.yml`, `infra/.env.example`,
-agent comments only, `docs/device-slots.md` (new),
-`docs/per-device-credentials.md`.
+`.github/workflows/ci.yml` (migration step), agent comments only,
+`docs/device-slots.md` (new), `docs/per-device-credentials.md`.
 
 **Owner decisions taken (2026-10-06), so they are not re-litigated:**
 `maxConcurrentConnections` means devices *using* the VPN at the same
@@ -2868,21 +2868,29 @@ in place -- never applied anywhere: FK now SET NULL, plus
 renames or tightens anything; move its `LAST_DEPLOYED` when a deploy
 lands.
 
-**PROVEN (tests only):** backend 84 suites / 992 tests (78 / 860 at the
-start of this session), typecheck and lint clean; an HTTP-level spec of
-the slot contract on a real Nest server with the production validation
-pipe; the built backend booted locally against nothing (no DB, no Redis)
-far enough to resolve the whole module graph and map
-`/customer/vpn/{claim,renew,release}`. Desktop JS 32 files / 435 tests
-and typecheck, mobile JS 4 files / 34 tests and typecheck -- unchanged
-code, run as a baseline. **UNVERIFIED:** everything against real nodes,
-devices, Redis or Postgres. No migration has run on a database; no node
-has acked a device credential; no app claims a slot; the backstop has
-never seen a real report; presence-from-usage-deltas is reasoned from
-the agent and client code, not measured; Xray connections open when a
-hold starts may survive it; iPhone, Android in the background and an
-Iranian network untested. The agent comment edits were not compiled (no
-Go toolchain here).
+**PROVEN (tests and CI only):** backend 84 suites / 992 tests (78 / 860
+at the start of this session), typecheck and lint clean; mutation checks
+that the provisioned gate, the hold filter in the re-assert, the
+deletion lock, the endSessions lock, the slot-holder exclusion, the
+device-set rate limit, the WireGuard reserve and slot staleness are each
+caught by a test when removed; an HTTP-level spec of the slot contract
+on a real Nest server with the production validation pipe; the built
+backend booted locally against nothing far enough to resolve the whole
+module graph and map `/customer/vpn/{claim,renew,release}`. **New CI
+step** (`ci.yml`, TypeScript job): all 46 migrations applied in order to
+the job's empty Postgres 16, `migrate diff` against `schema.prisma`
+reported no difference, and `test/sql/rollback-check.sql` (the previous
+backend's sign-in prune, with a signed-out session owning a credential)
+succeeded with the credential kept as a shared one -- green on
+`a9163ab`, all four jobs, Go agent included (so the comment-only agent
+edits build). Desktop JS 32 files / 435 tests and typecheck, mobile JS 4
+files / 34 tests and typecheck -- unchanged code, run as a baseline.
+**UNVERIFIED:** everything against real nodes, devices, Redis or a
+database with real data. No node has acked a device credential; no app
+claims a slot; the backstop has never seen a real report;
+presence-from-usage-deltas is reasoned from the agent and client code,
+not measured; Xray connections open when a hold starts may survive it;
+iPhone, Android in the background and an Iranian network untested.
 
 **Next:** desktop 0.9.44 and mobile 0.2.23 implement the client side of
 `docs/device-slots.md` (claim before dialling with a 3 s budget, never
