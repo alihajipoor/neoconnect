@@ -166,6 +166,19 @@ sync_agent_gateway_certs() {
   chmod 644 /etc/neoxify/certs/fullchain.pem /etc/neoxify/certs/privkey.pem
 }
 
+# Runs after every renewal. Copying the files is half of it: the gRPC
+# gateway reads them once, when the backend starts, so without the
+# restart it went on presenting the old certificate -- and once that
+# expired, thirty days after the renewal, every agent's next TLS
+# handshake failed and the nodes went OFFLINE one by one as their
+# streams dropped, with nothing reaching them (provisioning, quota cuts,
+# sign-outs). HTTPS on 443 is renewed by nginx and kept looking fine.
+# A deploy recreated the container and hid this, as long as one
+# happened in time. The restart costs the API a few seconds once every
+# sixty days, and the agents reconnect on their own.
+#
+# Rewritten by action_update_panel too, so a panel installed before the
+# restart was added gets it on its next "Rebuild and restart".
 install_cert_sync_hook() {
   local domain="$1"
   install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
@@ -176,6 +189,7 @@ install -d -m 755 /etc/neoxify/certs
 cp "/etc/letsencrypt/live/$domain/fullchain.pem" /etc/neoxify/certs/fullchain.pem
 cp "/etc/letsencrypt/live/$domain/privkey.pem" /etc/neoxify/certs/privkey.pem
 chmod 644 /etc/neoxify/certs/fullchain.pem /etc/neoxify/certs/privkey.pem
+docker compose -f "$PROD_COMPOSE" --env-file "$PROD_ENV" restart backend
 EOF
   chmod 755 /etc/letsencrypt/renewal-hooks/deploy/neoxify-agent-gateway.sh
 }
@@ -313,6 +327,7 @@ action_update_panel() {
   domain="$(get_panel_domain)"
   if [[ -n "$domain" && -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]]; then
     sync_agent_gateway_certs "$domain"
+    install_cert_sync_hook "$domain"
   else
     echo "WARNING: couldn't determine this panel's domain (or no Let's Encrypt cert found for it) -- skipping the agent gateway cert re-sync. If Nodes are stuck PENDING with no heartbeat, this is almost certainly why; see \"Agent gRPC gateway TLS\" in docs/architecture.md." >&2
   fi
