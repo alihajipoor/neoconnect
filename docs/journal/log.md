@@ -2795,7 +2795,9 @@ rewritten): treat `platform = 'windows' AND "appVersion" LIKE '0.2.%'`
 as the mobile app on iOS (or a desktop dev run), the same inference
 the server now stores as `ios-inferred` / `mobile-inferred`. Split
 mobile unreachable rows by reason prefix: from the new builds,
-`pre-connect` / `resume` / `online` say what triggered them.
+`pre-connect` / `resume` / `online` say what triggered them, and "app
+was in the background during it" marks the ones iOS suspension could
+explain.
 
 **Unverified:** why iOS fails so much more than Android -- both share
 every line of the control-plane path; the candidates (token-refresh

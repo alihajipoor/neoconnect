@@ -393,8 +393,8 @@ each address actually tried with how it ended (`req:`/`refresh:`/
 `retry:` legs, `timeout`, `budget`, `scope`, `net`, `h<status>`),
 add a socket-level `probe:` (dns, blockpage, tcp, tls, cert) after a
 failed sign-in or resume refresh, say which trigger and app state a
-refresh failed under, keep throttled reports, and never ship without
-the endpoint seed.
+refresh failed under and whether the app was backgrounded during it,
+keep throttled reports, and never ship without the endpoint seed.
 
 **Still unexplained:** why the iOS cohort fails so much more than
 Android. Both share every line of the control-plane path. Candidates
