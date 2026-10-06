@@ -165,7 +165,11 @@ function refusalLines(refusal: DeviceLimitRefusal, ctx: NoticeContext): string[]
  * Windows PC" with "Use on this device instead", over a VPN that is
  * working, says something untrue about this device. Every other notice
  * words itself for the tunnel's state (`tunnelDown`) and may show at
- * once. */
+ * once.
+ *
+ * A teardown that does not finish does not leave the card waiting on
+ * nothing: it stays owed, the screen says it is still disconnecting,
+ * and it is tried again until the tunnel is down (`slotTeardown`). */
 export function slotNoticeShown(notice: SlotNotice, tunnelDown: boolean): boolean {
   return notice.kind !== "refused" || tunnelDown;
 }

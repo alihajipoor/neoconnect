@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDeviceSlotSession, createSlotNoticeStore, slotStop } from "./device-slot-session";
+import {
+  createDeviceSlotSession,
+  createSlotNoticeStore,
+  createSlotTeardown,
+  slotStop,
+  slotTeardownShown,
+} from "./device-slot-session";
 import type { ClaimOutcome, RenewOutcome } from "./device-slots";
 
 /** The slot's life from Connect to Disconnect, with the three calls stood
@@ -953,6 +959,113 @@ describe("a held slot whose renewals go unanswered", () => {
 
 /** The card lives beside the slot, so a refusal that lands while the
  * dashboard is away -- in Settings -- is still there when it comes back. */
+/** Obligation 11: never leave the tunnel up over a refusal. A teardown
+ * that did not finish used to leave the tunnel up with no card (it waits
+ * for "down"), no error, and nothing trying again. */
+describe("the teardown a slot stop owes", () => {
+  /** An attempt the test settles by hand: true for "the service or the
+   * platform says the tunnel is down". */
+  function attempts() {
+    const pending: ((down: boolean) => void)[] = [];
+    const tearDown = vi.fn(() => new Promise<boolean>((resolve) => pending.push(resolve)));
+    const settleNext = async (down: boolean) => {
+      pending.shift()?.(down);
+      await settle();
+    };
+    return { tearDown, settleNext };
+  }
+
+  it("is owed from the stop until an attempt confirms the tunnel down, and tried again until one does", async () => {
+    const store = createSlotTeardown();
+    const { tearDown, settleNext } = attempts();
+    expect(store.owed()).toBe(false);
+
+    const first = store.begin(tearDown);
+    expect(store.state()).toBe("tearingDown");
+    expect(store.owed()).toBe(true);
+    await settleNext(false);
+    expect(await first).toBe("stuck");
+    // Still owed -- not forgotten because one attempt did not finish.
+    expect(store.state()).toBe("stuck");
+
+    const second = store.retry(tearDown);
+    await settleNext(false);
+    expect(await second).toBe("stuck");
+    expect(store.state()).toBe("stuck");
+
+    const third = store.retry(tearDown);
+    await settleNext(true);
+    expect(await third).toBe("down");
+    expect(store.state()).toBe("none");
+    expect(store.owed()).toBe(false);
+    expect(tearDown).toHaveBeenCalledTimes(3);
+  });
+
+  it("is not tried when nothing is owed", async () => {
+    const store = createSlotTeardown();
+    const tearDown = vi.fn(async () => true);
+    expect(await store.retry(tearDown)).toBeNull();
+    expect(tearDown).not.toHaveBeenCalled();
+  });
+
+  /** Bounded: a poll that comes round while an attempt is still waiting
+   * on the service joins it rather than starting a second. */
+  it("runs one attempt at a time", async () => {
+    const store = createSlotTeardown();
+    const { tearDown, settleNext } = attempts();
+    const first = store.begin(tearDown);
+    const joined = store.retry(tearDown);
+    const again = store.begin(tearDown);
+    expect(tearDown).toHaveBeenCalledTimes(1);
+    await settleNext(false);
+    expect(await Promise.all([first, joined, again])).toEqual(["stuck", "stuck", "stuck"]);
+    expect(store.running()).toBeNull();
+  });
+
+  it("counts an attempt that throws as not down", async () => {
+    const store = createSlotTeardown();
+    expect(await store.begin(() => Promise.reject(new Error("service did not answer")))).toBe("stuck");
+    expect(store.owed()).toBe(true);
+  });
+
+  /** Sign-out, or the customer's own connect once nothing is up. */
+  it("is forgotten on clear, and an attempt settling afterwards does not bring it back", async () => {
+    const store = createSlotTeardown();
+    const { tearDown, settleNext } = attempts();
+    void store.begin(tearDown);
+    store.clear();
+    expect(store.owed()).toBe(false);
+    expect(store.running()).toBeNull();
+    await settleNext(false);
+    expect(store.state()).toBe("none");
+  });
+
+  it("tells the screen that is listening", async () => {
+    const store = createSlotTeardown();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    const { tearDown, settleNext } = attempts();
+    void store.begin(tearDown);
+    await settleNext(false);
+    void store.retry(tearDown);
+    await settleNext(true);
+    // tearingDown, stuck, none.
+    expect(listener).toHaveBeenCalledTimes(3);
+  });
+
+  /** What the screen shows meanwhile: a tunnel still up is still being
+   * disconnected, never "You're protected" over a refusal. */
+  it("shows a tunnel still up as still disconnecting, and anything else as it is", () => {
+    for (const up of ["connected", "degraded", "unverified"] as const) {
+      expect(slotTeardownShown(true, up)).toBe("disconnecting");
+      expect(slotTeardownShown(false, up)).toBe(up);
+    }
+    for (const other of ["disconnected", "unknown", "disconnecting"] as const) {
+      expect(slotTeardownShown(true, other)).toBe(other);
+    }
+  });
+});
+
 describe("the device limit's card", () => {
   it("outlives the screen that put it up", () => {
     const store = createSlotNoticeStore();

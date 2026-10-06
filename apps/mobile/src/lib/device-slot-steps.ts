@@ -21,7 +21,8 @@ import {
  *    seconds with neither a renewal nor traffic), and the first poll
  *    after the app comes back renews, or learns it was displaced.
  *  - When the slot ends the session, the tunnel comes down, and "down" is
- *    said only once the platform confirms it.
+ *    said only once the platform confirms it. Until it does, the teardown
+ *    stays owed and is tried again on the poll.
  *
  * There is no automatic ladder on the phone to hold back. Its health
  * poll reports and never redials, so a displaced phone disconnects and
@@ -131,4 +132,19 @@ export async function tearDownForSlot(deps: {
     gone = false;
   }
   return gone ? "down" : "stuck";
+}
+
+/** One attempt at that teardown, in the shape the shared `slotTeardown`
+ * takes: true only on the platform's word that the device is out of the
+ * tunnel.
+ *
+ * The shared store is what keeps it owed when an attempt is "stuck", and
+ * the dashboard asks it again on its poll until one comes back "down" --
+ * a disconnect that did not finish is not left showing a working tunnel
+ * with nothing trying again (obligation 11). */
+export function slotTeardownAttempt(deps: {
+  disconnect: () => Promise<unknown>;
+  waitForTeardown: () => Promise<boolean>;
+}): () => Promise<boolean> {
+  return async () => (await tearDownForSlot(deps)) === "down";
 }

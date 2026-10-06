@@ -17,8 +17,10 @@ import {
   type SlotGrant,
 } from "./device-slots";
 import type { AttemptReport } from "./attempts";
+import { isTunnelUp } from "./connection-evidence";
 import type { SlotNotice } from "./device-slot-notice";
 import type { SubscriptionStatus } from "./subscription-state";
+import type { ConnectionState } from "../components/ConnectOrb";
 
 /** This device's slot, from Connect to Disconnect.
  *
@@ -700,6 +702,134 @@ export function createSlotNoticeStore(): SlotNoticeStore {
 }
 
 export const slotNoticeStore: SlotNoticeStore = createSlotNoticeStore();
+
+/** Where the teardown the device limit asked for stands. */
+export type SlotTeardownState =
+  /** Nothing owed: no slot stop, or its tunnel has been confirmed down. */
+  | "none"
+  /** The device limit ended the session and the first attempt to take
+   * the tunnel down is running. */
+  | "tearingDown"
+  /** An attempt ended without the tunnel confirmed down. Still owed, and
+   * tried again on the poll until it is. */
+  | "stuck";
+
+export type SlotTeardownResult = "down" | "stuck";
+
+/** The teardown a slot stop owes, from the stop until the tunnel is
+ * confirmed down.
+ *
+ * Obligation 11: never leave the tunnel up over a refusal, and never
+ * show the refusal's card over a tunnel still carrying traffic. The card
+ * waits for "down" by design (`slotNoticeShown`), so a teardown that did
+ * not finish used to leave the screen showing a working tunnel, no card,
+ * no error -- and nothing tried again. While one is owed the dashboards
+ * show it as not finished (`slotTeardownShown`, and the stuck line), and
+ * ask again on their poll: once per poll at most, never two at once, each
+ * attempt bounded by the teardown's own deadline, until one confirms the
+ * tunnel down. The card shows then.
+ *
+ * Kept beside the slot rather than in a screen, for the same reason the
+ * card is: the dashboard unmounts while Settings is open, and the tunnel
+ * it is taking down does not wait for it. Forgotten on sign-out, whose own
+ * teardown takes the tunnel down, and on the customer's own connect,
+ * which is theirs to start once nothing is left up. */
+export interface SlotTeardown {
+  state(): SlotTeardownState;
+  /** True from a slot stop until the tunnel is confirmed down. */
+  owed(): boolean;
+  /** The attempt running now, if one is. */
+  running(): Promise<SlotTeardownResult> | null;
+  /** The device limit just ended the session: the teardown is owed from
+   * now on, and tried at once -- or the attempt already running is
+   * joined. `tearDown` resolves true only on the platform's or the
+   * service's own word that the tunnel is down. */
+  begin(tearDown: () => Promise<boolean>): Promise<SlotTeardownResult>;
+  /** On the poll, or a press: tries again when one is owed, joining an
+   * attempt already running rather than starting a second. Null when
+   * nothing is owed. */
+  retry(tearDown: () => Promise<boolean>): Promise<SlotTeardownResult | null>;
+  /** Nothing is owed any more: a sign-out, or the customer's own connect
+   * after the tunnel came down. An attempt still running is forgotten. */
+  clear(): void;
+  /** For `useSyncExternalStore`. Returns the unsubscribe. */
+  subscribe(listener: () => void): () => void;
+}
+
+export function createSlotTeardown(): SlotTeardown {
+  let state: SlotTeardownState = "none";
+  let running: Promise<SlotTeardownResult> | null = null;
+  /** Bumped by `clear`, so an attempt that settles afterwards cannot put
+   * back a teardown nobody owes any more. */
+  let epoch = 0;
+  const listeners = new Set<() => void>();
+
+  const move = (next: SlotTeardownState) => {
+    if (next === state) return;
+    state = next;
+    for (const listener of [...listeners]) listener();
+  };
+
+  function attempt(tearDown: () => Promise<boolean>): Promise<SlotTeardownResult> {
+    if (running) return running;
+    const startedIn = epoch;
+    const sent: Promise<SlotTeardownResult> = (async () => {
+      let down = false;
+      try {
+        down = await tearDown();
+      } catch {
+        // Not answered is not down.
+        down = false;
+      }
+      const result: SlotTeardownResult = down ? "down" : "stuck";
+      if (startedIn === epoch) move(down ? "none" : "stuck");
+      return result;
+    })().finally(() => {
+      if (running === sent) running = null;
+    });
+    running = sent;
+    return sent;
+  }
+
+  return {
+    state: () => state,
+    owed: () => state !== "none",
+    running: () => running,
+    begin(tearDown) {
+      if (state === "none") move("tearingDown");
+      return attempt(tearDown);
+    },
+    retry(tearDown) {
+      return state === "none" ? Promise.resolve(null) : attempt(tearDown);
+    },
+    clear() {
+      epoch += 1;
+      running = null;
+      move("none");
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+export const slotTeardown: SlotTeardown = createSlotTeardown();
+
+/** What the screen shows of an observed tunnel state while a slot stop's
+ * teardown is owed.
+ *
+ * A tunnel still up then is one this device has been told to give up:
+ * "You're protected" over it would be a working tunnel after a refusal,
+ * and "Not carrying traffic" a claim about the server nobody measured.
+ * What is true is that it is still being disconnected, and that is what
+ * is shown. Anything that is not a tunnel up -- down, or not known --
+ * is shown as it is. */
+export function slotTeardownShown(owed: boolean, observed: ConnectionState): ConnectionState {
+  return owed && isTunnelUp(observed) ? "disconnecting" : observed;
+}
 
 /** Anything the slot can say that stops this device: a connect refused
  * before dialling, or a session ended while connected. */

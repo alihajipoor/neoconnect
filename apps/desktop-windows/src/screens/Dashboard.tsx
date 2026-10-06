@@ -53,7 +53,14 @@ import { useRefreshOnResume } from "../lib/resume";
 import { IS_STORE_BUILD } from "../lib/distribution";
 import { endedNotice } from "../lib/subscription-state";
 import { failedDial, outcomeFromError, reportAttempt, rungsFrom, type Dial } from "../lib/attempts";
-import { deviceSlot, slotNoticeStore, slotStop, type SlotStopReason } from "../lib/device-slot-session";
+import {
+  deviceSlot,
+  slotNoticeStore,
+  slotStop,
+  slotTeardown,
+  slotTeardownShown,
+  type SlotStopReason,
+} from "../lib/device-slot-session";
 import { createSessionTracker } from "../lib/session-report";
 import { isServiceTimeout, withTimeout } from "../lib/service-call";
 import {
@@ -513,6 +520,15 @@ export function Dashboard({
    * comes down regardless. The card written then is here on return. */
   const slotNotice = useSyncExternalStore(slotNoticeStore.subscribe, slotNoticeStore.current);
   const setSlotNotice = slotNoticeStore.set;
+  /** Whether a teardown the device limit asked for is still owed, and
+   * whether an attempt at it has already come back without the tunnel
+   * down. Beside the slot for the same reason the card is; see
+   * `slotTeardown`. */
+  const slotTeardownState = useSyncExternalStore(slotTeardown.subscribe, slotTeardown.state);
+  /** That teardown, while the screen shows it under way. Worded as what
+   * it is -- still disconnecting -- rather than as "You're not
+   * protected", which the service has not said. */
+  const slotTeardownShowing = slotTeardownState !== "none" && connectionState === "disconnecting";
   /** Set when the device limit ended or refused this device's session.
    * The automatic ladder must not run then -- it would only take the
    * slot back from the device the customer is now using, or fail on
@@ -643,7 +659,10 @@ export function Dashboard({
    */
   function publishObserved(generation: number, observed: ConnectionState): ConnectionState | null {
     if (!isCurrent(intentRef.current, generation)) return null;
-    const phase = phaseFor(intentRef.current.intent, observed);
+    // A tunnel still up after the device limit ended the session is one
+    // still being taken down, never one that is fine -- whichever path
+    // observed it: the teardown's own check, a recheck, a remount.
+    const phase = phaseFor(intentRef.current.intent, slotTeardownShown(slotTeardown.owed(), observed));
     setConnectionState(phase);
     return phase;
   }
@@ -946,8 +965,10 @@ export function Dashboard({
     // A tunnel this window did not bring up still uses one of the plan's
     // devices. Nothing is known about its slot, so the first health poll
     // claims it -- or, if the dashboard has merely been away in
-    // Settings, carries on with what was already known.
-    if (adopted !== null && isTunnelUp(adopted)) {
+    // Settings, carries on with what was already known. Not one the
+    // device limit is still taking down: that one is not being used, it
+    // is being given up, and the recheck below goes on doing that.
+    if (adopted !== null && isTunnelUp(adopted) && !slotTeardown.owed()) {
       deviceSlot.adopt({ subscriptionId: sub?.id, deviceLimit: sub?.deviceLimit });
     }
 
@@ -1243,6 +1264,16 @@ export function Dashboard({
       // it here would put "You're not protected" on screen in the middle
       // of a connect that is still working.
       if (ladderInFlight()) return;
+      // A teardown the device limit still owes is this recheck's to try
+      // again, rather than only to look at: the tunnel it found up last
+      // time is one this device was told to give up. One attempt at a
+      // time (`retry` joins one still running), each bounded by the
+      // teardown's own deadline, every recheck until the service says
+      // the tunnel is down -- and the card waiting on that shows then.
+      if (slotTeardown.owed()) {
+        void slotTeardown.retry(tearDownForSlotOnce);
+        return;
+      }
       // Past its deadline, it owns nothing -- and the intent it declared
       // has to go with it. Leaving that standing would be a new way to
       // wedge the screen rather than a fix for the old one: `phaseFor`
@@ -1312,6 +1343,14 @@ export function Dashboard({
       // and the answer that follows is the way out of a
       // "Disconnecting..." that has stopped describing anything.
       case "disconnect": {
+        // The device limit's teardown is still owed: this press is that
+        // teardown, asked for again now rather than at the next recheck.
+        // Not the ordinary Disconnect below, which would clear the card
+        // that teardown is for -- it shows once the tunnel is down.
+        if (slotTeardown.owed()) {
+          await slotTeardown.retry(tearDownForSlotOnce);
+          return;
+        }
         const generation = beginIntent("disconnect");
         // This device stops using one of the plan's devices. Released
         // fire and forget, within a second and a half, and never in
@@ -1373,6 +1412,17 @@ export function Dashboard({
   /** A connect the customer asked for: the button, or "Use on this
    * device instead" with the devices to take the slot over from. */
   async function connectNow(takeover?: string[]) {
+    // "Use on this device instead" can be pressed while the device limit's
+    // teardown is still owed -- a takeover's card shows over a tunnel
+    // still up. That tunnel comes down first, on the service's word, and
+    // if it will not, nothing is dialled: the stuck line stays, and the
+    // pass below would otherwise start from "nothing is up" when
+    // something is.
+    if (slotTeardown.owed()) {
+      if ((await slotTeardown.retry(tearDownForSlotOnce)) === "stuck") return;
+    }
+    // Their own connect from here; nothing is owed any more.
+    slotTeardown.clear();
     setConnectionError(null);
     setSlotNotice(null);
     // Their own press: whatever the device limit stopped is theirs to
@@ -1429,7 +1479,12 @@ export function Dashboard({
    * no attempt, no route marked failing, no best route moved: the dial
    * worked and was reported as it happened; the plan refused the device.
    * "Disconnected:" waits for the service to confirm it, and a refusal's
-   * card waits for that altogether -- see DeviceSlotCard. */
+   * card waits for that altogether -- see DeviceSlotCard.
+   *
+   * A teardown that does not finish is not left there. The tunnel stays
+   * shown as still disconnecting, never as working, with the stuck line
+   * saying so; the recheck tries again until the service says it is
+   * down; and the card shows then. See `slotTeardown`. */
   async function endForSlot(event: SlotStopReason) {
     // The session has ended and the app is already on its way to the
     // sign-in screen, tunnel included; there is nothing to add.
@@ -1440,11 +1495,19 @@ export function Dashboard({
     cancelRef.current = true;
     showSlotStop(event, "whileConnected");
     setFailedOverTo(null);
+    await slotTeardown.begin(tearDownForSlotOnce);
+  }
+
+  /** One attempt at the device limit's teardown. True only when the
+   * service has said the tunnel is down; a tunnel still up after the
+   * settle time, or a service that will not answer, is not down. */
+  async function tearDownForSlotOnce(): Promise<boolean> {
     const generation = beginIntent("disconnect");
     setConnectionState("disconnecting");
     await serviceDisconnect().catch(() => undefined);
-    await confirmTornDown();
+    const state = await confirmTornDown();
     endIntent(generation);
+    return state === "disconnected";
   }
 
   /** Works down the protocols this subscription holds until one is
@@ -2373,8 +2436,14 @@ export function Dashboard({
                             The unknown branch sits above the fallback for
                             that reason: it is the case that used to fall
                             through to it and tell a customer with a live
-                            tunnel that they had none. */}
-                        {connectionState === "connected"
+                            tunnel that they had none. So does the device
+                            limit's teardown, which can outlast a moment:
+                            the service says the tunnel is still up, and
+                            the honest headline is that it is still being
+                            disconnected. */}
+                        {slotTeardownShowing
+                          ? t("dash.disconnecting")
+                          : connectionState === "connected"
                           ? t("dash.protected")
                           : connectionState === "unverified"
                             ? t("dash.unverified")
@@ -2392,7 +2461,14 @@ export function Dashboard({
                           is the thing that made the block look thrown
                           together. */}
                       <p className="mt-1 text-xs text-pretty text-muted-foreground">
-                        {connectionState === "connected"
+                        {/* Nothing to add while the device limit's
+                            teardown runs: "Connect to encrypt your
+                            traffic" is advice about a tunnel that is
+                            down, and the line below says what is
+                            happening once an attempt has not finished. */}
+                        {slotTeardownShowing
+                          ? null
+                          : connectionState === "connected"
                           ? t("dash.protectedHint")
                           : connectionState === "unverified"
                             ? // Custom mode is a narrower claim than a
@@ -2564,6 +2640,14 @@ export function Dashboard({
                     {/* Reserved space either way, so the layout doesn't
                         jump when an error appears or clears. */}
                     <div className="min-h-4 px-2 text-center">
+                      {/* The device limit ended this session and the
+                          tunnel is not confirmed down yet. Said rather than
+                          left to the orb, and kept while the recheck
+                          keeps trying; a refusal's card waits for the
+                          tunnel to be down. */}
+                      {slotTeardownState === "stuck" ? (
+                        <p className="text-xs text-destructive">{t("slots.teardownStuck")}</p>
+                      ) : null}
                       {connectionError ? (
                         <>
                           <p className="text-xs text-destructive">{t(connectionError.messageKey)}</p>

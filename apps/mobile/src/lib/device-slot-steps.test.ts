@@ -39,10 +39,12 @@ vi.mock("@shared/lib/api", () => ({
   publicRequest: () => Promise.resolve({ ok: false, error: "not used in these tests" }),
 }));
 
-const { createDeviceSlotSession, slotStop } = await import("@shared/lib/device-slot-session");
-const { claimWhileRefreshing, renewInForeground, tearDownForSlot, whenForegrounded } = await import(
-  "./device-slot-steps"
+const { createDeviceSlotSession, createSlotTeardown, slotStop, slotTeardownShown } = await import(
+  "@shared/lib/device-slot-session"
 );
+const { slotNoticeShown } = await import("@shared/lib/device-slot-notice");
+const { claimWhileRefreshing, renewInForeground, slotTeardownAttempt, tearDownForSlot, whenForegrounded } =
+  await import("./device-slot-steps");
 
 const SUB = "6f1c2b9e-0000-4000-8000-000000000001";
 const CRED = "a2b4c6d8-0000-4000-8000-000000000002";
@@ -507,6 +509,63 @@ describe("the teardown after the slot ends the session", () => {
     });
     expect(waitForTeardown).toHaveBeenCalledTimes(1);
     expect(verdict).toBe("down");
+  });
+
+  /** Obligation 11: never leave the tunnel up over a refusal. A stuck
+   * teardown used to be said once and then left: nothing tried again. */
+  it("is tried again until the platform says the tunnel is down, and owed until then", async () => {
+    const store = createSlotTeardown();
+    const gone = [false, false, true];
+    const disconnect = vi.fn(() => Promise.resolve());
+    const attempt = slotTeardownAttempt({ disconnect, waitForTeardown: () => Promise.resolve(gone.shift() ?? false) });
+
+    expect(await store.begin(attempt)).toBe("stuck");
+    expect(store.state()).toBe("stuck");
+    expect(await store.retry(attempt)).toBe("stuck");
+    expect(store.owed()).toBe(true);
+    expect(await store.retry(attempt)).toBe("down");
+    expect(store.owed()).toBe(false);
+    expect(disconnect).toHaveBeenCalledTimes(3);
+
+    // Nothing owed: the poll asks nothing more.
+    expect(await store.retry(attempt)).toBeNull();
+    expect(disconnect).toHaveBeenCalledTimes(3);
+  });
+
+  /** The whole path: a claim through the tunnel refused, a teardown that
+   * does not finish, the card held back meanwhile, and shown once a
+   * retry has the platform's word that the tunnel is down. */
+  it("holds a late refusal's card until a retry takes the tunnel down", async () => {
+    answer = () => "hang";
+    const { slot, advance } = session();
+    vi.useFakeTimers();
+    const pending = claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await pending;
+    vi.useRealTimers();
+
+    answer = () => ({ ok: false, error: REFUSAL.message, status: 409, code: "DEVICE_LIMIT", body: REFUSAL });
+    advance(60_000);
+    const event = await renewInForeground(slot, () => true);
+    if (event.kind !== "refused") throw new Error(`expected a refusal, got ${event.kind}`);
+    const notice = slotStop(event, "whileConnected").notice;
+    if (!notice) throw new Error("expected a card");
+
+    const store = createSlotTeardown();
+    const gone = [false, true];
+    const attempt = slotTeardownAttempt({
+      disconnect: () => Promise.resolve(),
+      waitForTeardown: () => Promise.resolve(gone.shift() ?? false),
+    });
+
+    expect(await store.begin(attempt)).toBe("stuck");
+    // Still up: no card, and the screen shows it as still disconnecting.
+    expect(slotNoticeShown(notice, false)).toBe(false);
+    expect(slotTeardownShown(store.owed(), "connected")).toBe("disconnecting");
+
+    expect(await store.retry(attempt)).toBe("down");
+    expect(slotNoticeShown(notice, true)).toBe(true);
+    expect(store.owed()).toBe(false);
   });
 
   it("is stuck when the platform cannot be asked", async () => {

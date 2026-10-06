@@ -335,4 +335,16 @@ describe("ending a session forgets this device's slot", () => {
 
     expect(slotNoticeStore.current()).toBeNull();
   });
+
+  /** The sign-out's own teardown takes the tunnel down; retries of the
+   * old session's must not run on into the next account's. */
+  it("forgets a teardown the device limit still owed", async () => {
+    const { slotTeardown } = await import("./device-slot-session");
+    await slotTeardown.begin(() => Promise.resolve(false));
+    expect(slotTeardown.owed()).toBe(true);
+
+    await endCustomerSession();
+
+    expect(slotTeardown.owed()).toBe(false);
+  });
 });
