@@ -51,12 +51,16 @@ func filled(t *testing.T) string {
 // output and records every call it is given.
 type fakeSwanctl struct {
 	listSAs string
+	listErr error
 	calls   [][]string
 }
 
 func (f *fakeSwanctl) run(_ context.Context, args ...string) (string, string, error) {
 	f.calls = append(f.calls, append([]string(nil), args...))
 	if len(args) > 0 && args[0] == "--list-sas" {
+		if f.listErr != nil {
+			return "", f.listErr.Error(), f.listErr
+		}
 		return f.listSAs, "", nil
 	}
 	return "", "", nil

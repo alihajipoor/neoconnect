@@ -33,6 +33,13 @@ type Provisioner struct {
 
 	mu       sync.Mutex
 	lastSeen map[string][2]uint64 // CN -> cumulative [bytesReceived, bytesSent] at last poll
+	// primed is false until the first successful read since this process
+	// started; that read is the baseline and reports nothing. OpenVPN's
+	// session totals outlive an agent restart (the daemon keeps running),
+	// so without it every connected client's whole session was billed a
+	// second time after each agent rollout. See the WireGuard
+	// provisioner's primed for the full story.
+	primed bool
 }
 
 func New(mgmtAddr, ccdDir string) *Provisioner {
@@ -91,6 +98,11 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Only a successful read can be the baseline; a failed one returned
+	// above and leaves it to the next.
+	baseline := !p.primed
+	p.primed = true
+
 	var deltas []common.UsageDelta
 	seen := make(map[string]bool)
 	for _, line := range strings.Split(out, "\n") {
@@ -123,6 +135,9 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 			deltaTx = bytesSent
 		}
 		p.lastSeen[cn] = [2]uint64{bytesReceived, bytesSent}
+		if baseline {
+			continue
+		}
 
 		if deltaRx > 0 || deltaTx > 0 {
 			// Bytes received BY THE SERVER from the client is the
@@ -188,13 +203,17 @@ func (p *Provisioner) mgmtCommand(cmd string) (string, error) {
 		line, err := reader.ReadString('\n')
 		out.WriteString(line)
 		if strings.HasPrefix(line, "END") || strings.HasPrefix(line, "SUCCESS:") || strings.HasPrefix(line, "ERROR:") {
-			break
+			return out.String(), nil
 		}
 		if err != nil {
-			break
+			// The reply stopped before its terminator: truncated, not
+			// short. This used to be returned as a complete answer, and a
+			// client cut off the end of a `status 2` looks disconnected --
+			// so StatsSince forgot its counters, and the next full read
+			// billed its whole session again.
+			return out.String(), fmt.Errorf("management reply to %q ended early: %w", cmd, err)
 		}
 	}
-	return out.String(), nil
 }
 
 func parseUint(s string) uint64 {

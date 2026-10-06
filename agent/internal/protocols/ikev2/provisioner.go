@@ -51,6 +51,15 @@ type Provisioner struct {
 	// Per-CHILD_SA byte totals from the previous poll, so a delta can be
 	// taken without a rekey looking like a customer using nothing.
 	lastBytes map[string]saBytes
+	// primed is false until the first successful read since this process
+	// started; that read is the baseline and reports nothing. strongSwan
+	// keeps running across an agent restart and the installer sets
+	// rekey_time = 0s, so a CHILD_SA's totals can span a whole connection
+	// -- and without a baseline all of it was billed again after every
+	// agent rollout. See the WireGuard provisioner's primed for the full
+	// story. Only a read takes the baseline: not a failed one, and not the
+	// early return where IKEv2 is not served here.
+	primed bool
 }
 
 // swanctlRunner runs swanctl with the given arguments and returns what it
@@ -215,6 +224,10 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Only a successful read can be the baseline -- see primed.
+	baseline := !p.primed
+	p.primed = true
+
 	perUser := map[string]*common.UsageDelta{}
 	seen := map[string]bool{}
 	for _, sa := range sas {
@@ -226,6 +239,9 @@ func (p *Provisioner) StatsSince(ctx context.Context) ([]common.UsageDelta, erro
 			seen[key] = true
 			prev := p.lastBytes[key]
 			p.lastBytes[key] = saBytes{in: child.bytesIn, out: child.bytesOut}
+			if baseline {
+				continue
+			}
 
 			d := perUser[sa.user]
 			if d == nil {

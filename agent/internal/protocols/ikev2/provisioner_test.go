@@ -2,8 +2,10 @@ package ikev2
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,5 +77,53 @@ func TestSwanctlAvailableResolvesPathsAndBareNames(t *testing.T) {
 	// Bare name that is certainly not on PATH.
 	if New("x", "neoxify-definitely-not-a-real-binary").swanctlAvailable() {
 		t.Error("a bare name not on PATH should be unavailable")
+	}
+}
+
+func TestAnAgentRestartDoesNotBillSATotalsAgain(t *testing.T) {
+	// strongSwan keeps running across an agent restart and rekey_time is
+	// 0s, so a CHILD_SA's totals can cover a whole connection. A fresh
+	// agent process used to report all of it again on its first poll.
+	lines := strings.Split(filled(t), "\n")
+	firstOnly := lines[0] + "\nlist-sas reply {}\n"
+	p, f := withFake(t, firstOnly)
+	ctx := context.Background()
+
+	deltas, err := p.StatsSince(ctx)
+	if err != nil {
+		t.Fatalf("first poll: %v", err)
+	}
+	if len(deltas) != 0 {
+		t.Fatalf("the first poll after a start must be a baseline, got %+v", deltas)
+	}
+
+	// The first customer receives 1000 bytes; a second connects after the
+	// baseline, and its SA started from zero, so all of it is new.
+	f.listSAs = strings.Replace(filled(t), "bytes-out=85956", "bytes-out=86956", 1)
+	deltas, err = p.StatsSince(ctx)
+	if err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	got := map[string][2]uint64{}
+	for _, d := range deltas {
+		got[d.ExternalUserID] = [2]uint64{d.BytesUp, d.BytesDown}
+	}
+	if len(got) != 2 || got["nx-user1"] != [2]uint64{0, 1000} || got["nx-user2"] != [2]uint64{62669, 257213} {
+		t.Fatalf("expected growth for the first customer and the new SA in full, got %v", got)
+	}
+}
+
+func TestOnlyASuccessfulListIsTheBaseline(t *testing.T) {
+	p, f := withFake(t, filled(t))
+	ctx := context.Background()
+
+	f.listErr = errors.New("connecting to 'unix:///var/run/charon.vici' failed: No such file or directory")
+	if _, err := p.StatsSince(ctx); err == nil {
+		t.Fatal("expected the failed list to be reported")
+	}
+	f.listErr = nil
+	deltas, err := p.StatsSince(ctx)
+	if err != nil || len(deltas) != 0 {
+		t.Fatalf("the first successful list must be the baseline, got %+v, %v", deltas, err)
 	}
 }
