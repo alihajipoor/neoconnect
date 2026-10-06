@@ -377,9 +377,18 @@ jobs:
             echo "TAGMSG_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # Published to the releases repository, where the download URLs in
+      # updates.service.ts point -- this repository is private, and a
+      # private repo's release assets 404 for a customer's browser. Same
+      # reasoning, and the same token, as release-desktop-windows.yml.
+      # Until 2026-10-06 this step published here instead and every
+      # Android release was copied across by hand; 0.2.22 sat behind the
+      # still-served 0.2.21 until it was.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          repository: alihajipoor/neoxify-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
           files: |
             apps/mobile/Neoxify-*.apk
             # For uploading to Play Console by hand. Safe to publish
@@ -389,4 +398,7 @@ jobs:
             apps/mobile/Neoxify-*.aab
             apps/mobile/sha256sums.txt
           body: ${{ steps.tagmsg.outputs.body }}
-          generate_release_notes: true
+          # Off: generated notes come from the commits of the repository
+          # the release lands in, which holds binaries only, and the API
+          # refuses the call with a 403. See the desktop workflow.
+          generate_release_notes: false
