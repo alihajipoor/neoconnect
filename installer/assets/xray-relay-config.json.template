@@ -180,8 +180,12 @@
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
+    {
+      "//": "First, so it is the default: on a relay, traffic that matches no route rule must go nowhere, never out of this box. Route rules exist only at runtime (CONFIGURE_ROUTE hot-adds them), so after any Xray restart, until the next route re-assert, every relayed customer matches nothing -- and with freedom as the default their traffic left from the relay itself, in Iran, while the app showed the exit's country. ir1 was hand-patched this way on 2026-08-15; the template only caught up after the 2026-10-06 review. masquerade_client_subnet and wg0's missing NAT hooks hold WireGuard/OpenVPN/IKEv2 to the same rule.",
+      "protocol": "blackhole",
+      "tag": "block"
+    },
+    { "protocol": "freedom", "tag": "direct" }
   ],
   "routing": {
     "//": "No customer may reach this node's own loopback or private addresses through their tunnel: 127.0.0.1:10085 is the Xray API (every customer's credentials, everyone's counters) and 127.0.0.1:7505 is OpenVPN's unauthenticated management port. Found by the 2026-10-06 review; live nodes are patched with installer/maintenance/block-private-egress.sh. IPIfNonMatch is part of the fix: an ip rule never sees a domain target, so without it any name resolving to 127.0.0.1 walks past the block. Rules that match by inbound tag (api-in, and the relay rules CONFIGURE_ROUTE adds) match before any resolving.",
