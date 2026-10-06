@@ -726,9 +726,16 @@ mod tests {
         kill_from_outside(pid);
 
         // No status request from here until the session is gone: only
-        // the engine watch can be what ends it.
+        // the engine watch can be what ends it. Before the watch, nothing
+        // would have, however long this waited.
+        //
+        // The bound is loose for the reason REPLY_MUST_BEAT gives: this
+        // runs beside four hundred other tests, and the teardown reads
+        // the registry. On this PC it takes tens of milliseconds; what
+        // matters is that it happens with nobody asking, and well inside
+        // the fifteen seconds the old poll took.
         let mut gone = false;
-        while killed_at.elapsed() < std::time::Duration::from_secs(5) {
+        while killed_at.elapsed() < std::time::Duration::from_secs(10) {
             let has = engines.run(|engines: &mut Engines, _| engines.has_session()).await.unwrap();
             if !has {
                 gone = true;
@@ -737,8 +744,9 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         let took = killed_at.elapsed();
-        assert!(gone, "the dead session was still in the slot 5s later, with nobody asking");
-        assert!(took < std::time::Duration::from_secs(2), "torn down {took:?} after the engine died");
+        eprintln!("dead session torn down {took:?} after the engine was killed, with nobody asking");
+        assert!(gone, "the dead session was still in the slot 10s later, with nobody asking");
+        assert!(took < std::time::Duration::from_secs(5), "torn down {took:?} after the engine died");
 
         let reply = round_trip(name, r#"{"type":"status"}"#).await;
         let parsed: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();

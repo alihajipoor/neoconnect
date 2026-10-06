@@ -647,6 +647,7 @@ mod tests {
         assert!(all_in, "only {} of {AT_ONCE} deaths were noticed", reports.len());
         assert_eq!(reports.len(), AT_ONCE, "a death was reported twice: {reports:?}");
 
+        let mut slowest = Duration::ZERO;
         for (i, generation, pid) in expected {
             let mine: Vec<_> = reports.iter().filter(|r| r.0 == i).collect();
             assert_eq!(mine.len(), 1, "session {i} was reported {} times", mine.len());
@@ -654,8 +655,12 @@ mod tests {
             assert_eq!(seen_generation, generation, "session {i} was reported under another session's generation");
             assert_eq!(seen_pid, pid);
             let after = at.saturating_duration_since(killed_at[&i]);
+            slowest = slowest.max(after);
             assert!(after < Duration::from_secs(2), "session {i} was noticed {after:?} after it died");
         }
+        // Printed for `--nocapture`, so the figure quoted in the journal
+        // can be re-taken rather than taken on trust.
+        eprintln!("slowest of {AT_ONCE} engine deaths noticed after {slowest:?}");
         drop(guards);
     }
 
