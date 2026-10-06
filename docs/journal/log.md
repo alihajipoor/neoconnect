@@ -3410,3 +3410,66 @@ probe. All unit tests (vitest, `cargo test` on this PC). The mobile
 Dashboard's two refresh calls have no test of their own: the mobile
 app has no DOM test environment, and the shared refresh they call is
 tested in the desktop suite.
+
+## 2026-10-06 (morning) — per-device backend deployed; the release candidate in the VM
+
+**Deployed.** `main` at `e50a095` (merge of `claude/per-device-credentials`,
+backend only; the agent diff is comments). DB dumped first
+(`pre-per-device-20261006-125635.sql.gz`). Migrations
+`20261007_per_device_credentials`, `20261008_concurrency_holds`,
+`20261008_session_labels` applied at start; defaults left as they are:
+`CONCURRENCY_CUT=shadow`, `DEVICE_SLOTS=enforce`, device cap 10. Before
+that the three migrations were applied to a copy of production (every
+table's schema, every table's data except `usage_records` and
+`agent_commands`) in a throwaway container on the panel host: under 4s,
+2,013 credential rows intact, FK `ON DELETE SET NULL`. Copy deleted.
+
+**Per-device credentials, end to end (proven).** The VM's 0.9.43 client
+fetched after the deploy: its session got 70 credentials of its own
+(REALITY, VLESS-TLS TCP+WS, Trojan, WireGuard, OpenVPN, Shadowsocks on
+the five live nodes), every one `provisionedAt` from a node's ack.
+IKEv2 stays on the shared credential by design. A Stealth session moved
+15 MB that `usage_records` puts on the device credential, not the
+shared one.
+
+**Release candidate `claude/rc-0.9.44`** (main + device slots + engine
+death + control-plane telemetry), built locally and installed over
+0.9.43 in the VM; the running service's hash matches the build.
+
+- **Engine death, re-measured** with the same method as the baseline
+  (pktmon at the NIC + dashboard text over DevTools, one clock). Traffic
+  still fails open, by design; the claim is what changed. "You're
+  protected" after the engine died:
+
+  | protocol (engine) | 0.9.43 | RC |
+  |---|---|---|
+  | Stealth / Xray, full tunnel | 17.0s | 1.05s |
+  | Stealth / Xray, Custom mode | 8.1s | 2.0s |
+  | Fast / WireGuard | never (until Windows restarted the tunnel ~2 min later) | 1.9s |
+  | Compatible / OpenVPN | 3.7s | 0.67s |
+  | Built-in / IKEv2 (RAS hang-up) | 9.5s | 0.80s |
+
+  Each then shows "VPN connection lost". In Custom mode the selected app
+  now goes direct at 0.3s instead of black-holing for 4.7s first,
+  because phase one releases Custom mode at once.
+- **Custom mode at the NIC** on the RC: selected app (curl) 0 packets
+  direct while connected, unselected control 13. Exit FI vs US.
+- **Device slot, one device, live backend (proven):** a connect claims
+  (`slots:<subscription>` holds the VM's session, platform windows),
+  renews, and a Disconnect releases it (key gone within seconds).
+- **A one-device plan, live:** the owner's Pro subscription was moved to
+  Starter for the test with an UPDATE of `planId` only (both plans: same
+  routes, no data cap) and moved back afterwards (confirmed Pro). The VM
+  connected and stayed "You're protected", never refused. The shadow
+  backstop saw "2 devices active against a limit of 1" -- the VM on its
+  device credential holding the slot, and another of the owner's devices
+  idling on the shared WireGuard credential (keepalives only, ~10 KB in
+  6 min) -- and logged "would hold the shared credentials", i.e. the
+  device without a slot, never the slot holder. Nothing was sent.
+
+**Not done here, and why.** The two-device refusal ("in use on ...",
+"Use on this device instead") needs a second signed-in device of one
+account; Claude does not create accounts or sign in with passwords, so
+it waits for the owner. IKEv2 sign-out revocation is still per-account
+until the agent change. Nothing of this has run on a censored network
+or a phone.
