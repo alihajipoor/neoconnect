@@ -749,6 +749,14 @@ export interface SlotTeardown {
    * attempt already running rather than starting a second. Null when
    * nothing is owed. */
   retry(tearDown: () => Promise<boolean>): Promise<SlotTeardownResult | null>;
+  /** The service or the platform said the tunnel is down, outside an
+   * attempt -- a remount reading the service, a recheck the customer
+   * pressed, the health poll. That is the same word an attempt waits
+   * for, so nothing is owed any more. Without it a teardown confirmed
+   * between retries stayed "stuck", and the line saying the tunnel had
+   * not been confirmed closed stood beside "You're not protected" for
+   * as long as nothing else asked. Does nothing when nothing is owed. */
+  confirmDown(): void;
   /** Nothing is owed any more: a sign-out, or the customer's own connect
    * after the tunnel came down. An attempt still running is forgotten. */
   clear(): void;
@@ -801,6 +809,12 @@ export function createSlotTeardown(): SlotTeardown {
     },
     retry(tearDown) {
       return state === "none" ? Promise.resolve(null) : attempt(tearDown);
+    },
+    confirmDown() {
+      // Not an epoch bump: an attempt still running reads the same
+      // service, and if it comes back with the tunnel up after this, that
+      // is the newer word.
+      move("none");
     },
     clear() {
       epoch += 1;

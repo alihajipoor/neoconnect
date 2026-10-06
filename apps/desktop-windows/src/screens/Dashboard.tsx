@@ -659,6 +659,14 @@ export function Dashboard({
    */
   function publishObserved(generation: number, observed: ConnectionState): ConnectionState | null {
     if (!isCurrent(intentRef.current, generation)) return null;
+    // The service saying the tunnel is down is what a teardown the device
+    // limit still owes waits for, whoever asked: a remount after
+    // Settings, a recheck pressed while the state was unknown, the
+    // health poll. The retry only runs on the transient recheck, which
+    // has nothing to do once the screen says "disconnected" -- so
+    // without this the stuck line, saying the tunnel has not been
+    // confirmed closed, outlived the service confirming exactly that.
+    if (observed === "disconnected") slotTeardown.confirmDown();
     // A tunnel still up after the device limit ended the session is one
     // still being taken down, never one that is fine -- whichever path
     // observed it: the teardown's own check, a recheck, a remount.

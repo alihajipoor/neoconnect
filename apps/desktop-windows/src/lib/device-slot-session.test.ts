@@ -1054,6 +1054,29 @@ describe("the teardown a slot stop owes", () => {
     expect(listener).toHaveBeenCalledTimes(3);
   });
 
+  /** Confirmed between retries -- a remount reading the service, a
+   * recheck, the health poll -- is confirmed. The retry stops once the
+   * screen says "disconnected", so a teardown confirmed that way used to
+   * stay "stuck", its line standing beside "You're not protected". */
+  it("is done when the service says the tunnel is down outside an attempt", async () => {
+    const store = createSlotTeardown();
+    expect(await store.begin(async () => false)).toBe("stuck");
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.confirmDown();
+    expect(store.state()).toBe("none");
+    expect(store.owed()).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    // Nothing owed: nothing to tell, and nothing for the poll to try.
+    store.confirmDown();
+    expect(listener).toHaveBeenCalledTimes(1);
+    const tearDown = vi.fn(async () => true);
+    expect(await store.retry(tearDown)).toBeNull();
+    expect(tearDown).not.toHaveBeenCalled();
+  });
+
   /** What the screen shows meanwhile: a tunnel still up is still being
    * disconnected, never "You're protected" over a refusal. */
   it("shows a tunnel still up as still disconnecting, and anything else as it is", () => {
@@ -1170,5 +1193,21 @@ describe("the wiring the pure functions cannot check", () => {
     expect(stop).toMatch(
       /if \(options\.automatic[^{]*\{[^}]*await slotTeardown\.begin\(tearDownForSlotOnce\);[^}]*return "refused";/,
     );
+  });
+
+  /** Every observation reaches the screen through `publishObserved`, so
+   * that is where the service's "disconnected" settles an owed teardown
+   * -- whoever asked, retry or not. */
+  it("takes an observed disconnect as the teardown confirmed", () => {
+    const start = dashboard.indexOf("function publishObserved(");
+    expect(start).toBeGreaterThan(0);
+    const end = dashboard.indexOf("async function readServiceState", start);
+    expect(end).toBeGreaterThan(start);
+    const publish = dashboard.slice(start, end);
+
+    expect(publish).toContain('if (observed === "disconnected") slotTeardown.confirmDown();');
+    // Only for an answer still current: one overtaken by a press says
+    // nothing about the tunnel as it is now.
+    expect(publish.indexOf("isCurrent(")).toBeLessThan(publish.indexOf("slotTeardown.confirmDown()"));
   });
 });
