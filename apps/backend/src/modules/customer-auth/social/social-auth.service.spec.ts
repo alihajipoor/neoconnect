@@ -163,6 +163,8 @@ describe("resolving a customer from a social identity", () => {
     await expect(serviceWith(prisma).resolveCustomer("GOOGLE", verified, "en")).rejects.toBeInstanceOf(
       UnauthorizedException,
     );
+    // Nothing written to a disabled account -- not even today's address.
+    expect(prisma.customerIdentity.update).not.toHaveBeenCalled();
   });
 
   it("creates a new account, lowercased and already verified", async () => {

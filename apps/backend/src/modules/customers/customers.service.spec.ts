@@ -50,6 +50,7 @@ describe("CustomersService", () => {
     subscription: { deleteMany: jest.Mock; updateMany: jest.Mock };
     usageRecord: { deleteMany: jest.Mock };
     customerSession: { updateMany: jest.Mock };
+    customerIdentity: { deleteMany: jest.Mock };
     $transaction: jest.Mock;
   };
   let agentGateway: { enqueueCommand: jest.Mock };
@@ -75,6 +76,7 @@ describe("CustomersService", () => {
       subscription: { deleteMany: jest.fn(), updateMany: jest.fn() },
       usageRecord: { deleteMany: jest.fn() },
       customerSession: { updateMany: jest.fn() },
+      customerIdentity: { deleteMany: jest.fn() },
       // The real $transaction takes an array of prepared operations; the
       // mocked members above are plain jest.fn()s, so simply resolving is
       // enough to assert which ones were queued.
@@ -430,6 +432,31 @@ describe("CustomersService", () => {
       expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
         where: { customerId: "customer-1", revokedAt: null },
         data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    /** The provider links held the subject and the real address the
+     * provider gave, kept past a deletion that promises to remove them --
+     * and every later "Continue with Google" by the same person found the
+     * disabled account by subject and was refused for good. */
+    it("removes the Google, Apple and Facebook links in the same transaction", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      prisma.customerIdentity.deleteMany.mockReturnValue("identity-delete-op");
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(prisma.customerIdentity.deleteMany).toHaveBeenCalledWith({ where: { customerId: "customer-1" } });
+      expect(prisma.$transaction.mock.calls[0][0]).toContain("identity-delete-op");
+    });
+
+    it("clears what every device called itself, signed out earlier or now", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1" },
+        data: { label: null, platform: null },
       });
     });
   });

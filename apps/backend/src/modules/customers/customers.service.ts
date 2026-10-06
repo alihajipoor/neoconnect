@@ -326,11 +326,26 @@ export class CustomersService {
         // Every signed-in device. tokenVersion below stops the refresh
         // tokens; this stops the access tokens still in their fifteen
         // minutes from fetching or minting anything (both check the
-        // session), and lets the sweep prune the rows.
+        // session). The rows stay -- that check reads them -- and nothing
+        // prunes them afterwards (the sweep only visits sessions still
+        // holding credentials, and these have just lost theirs), so what a
+        // device called itself goes, from every session the account ever
+        // had: a label can be the customer's own name for their device.
         this.prisma.customerSession.updateMany({
           where: { customerId: id, revokedAt: null },
           data: { revokedAt: new Date() },
         }),
+        this.prisma.customerSession.updateMany({
+          where: { customerId: id },
+          data: { label: null, platform: null },
+        }),
+        // The Google, Apple and Facebook links: the provider's subject and
+        // the real address it gave. Left behind, they were personal data
+        // kept past a deletion the app promises removes it, and every
+        // later "Continue with Google" by the same person found this
+        // disabled row by subject and was refused for ever -- they could
+        // never sign up again with that account.
+        this.prisma.customerIdentity.deleteMany({ where: { customerId: id } }),
         // Ends the subscription without deleting it -- the invoices below
         // point at it, and an invoice for a subscription that no longer
         // exists is worse than useless to an accountant.

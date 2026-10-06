@@ -96,13 +96,15 @@ export class SocialAuthService {
     });
 
     if (existing) {
+      // Refused before anything is written: a disabled account's identity
+      // row is not refreshed with the address the provider gives today.
+      if (existing.customer.status !== "ACTIVE") {
+        throw new UnauthorizedException("This account is disabled");
+      }
       await this.prisma.customerIdentity.update({
         where: { id: existing.id },
         data: { lastUsedAt: new Date(), email: identity.email ?? existing.email },
       });
-      if (existing.customer.status !== "ACTIVE") {
-        throw new UnauthorizedException("This account is disabled");
-      }
       if (!existing.customer.emailVerifiedAt) {
         // An account this route once made from an address the provider had
         // not verified. No session until something has: the provider now,
