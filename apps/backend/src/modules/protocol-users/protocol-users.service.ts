@@ -258,7 +258,17 @@ export class ProtocolUsersService {
         select: { status: true },
       });
       if (now?.status !== "ACTIVE") {
-        for (const id of created) await this.setEnabled(id, false);
+        // One at a time and each on its own: a row that has gone in the
+        // meantime must not leave the ones after it switched on.
+        for (const id of created) {
+          await this.setEnabled(id, false).catch((err: unknown) =>
+            this.logger.warn(
+              `Could not switch off device credential ${id} of a subscription no longer ACTIVE: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+          );
+        }
       }
     }
   }
@@ -367,6 +377,25 @@ export class ProtocolUsersService {
    */
   async revokeSessionCredentials(customerId: string, sessionId: string) {
     return this.customerLock.run(customerId, () => this.removeSessionCredentials(sessionId, customerId));
+  }
+
+  /** Runs work with no device provisioning or revocation for this
+   * customer in flight, and none starting until it is done.
+   *
+   * For deleting an account. Device credentials are created lazily, on a
+   * plain GET, so a fetch landing between deletion's read of the rows and
+   * its transaction either inserted a row that was then deleted without
+   * any DELETE_USER -- a live credential on the node with nothing in the
+   * database -- or, after the commit, minted ACTIVE credentials on a
+   * CANCELLED subscription for a session nothing had revoked. Under the
+   * lock a fetch either finishes first (and its rows are read and
+   * removed) or starts after, and finds the session revoked or gone.
+   *
+   * `work` must not call anything here that takes the lock itself
+   * (revokeSessionCredentials, endSessions, listForDevice): KeyedLock is
+   * not re-entrant. */
+  withCustomerLock<T>(customerId: string, work: () => Promise<T>): Promise<T> {
+    return this.customerLock.run(customerId, work);
   }
 
   /** Ends sessions in bulk and takes their device credentials back -- for
@@ -526,6 +555,13 @@ export class ProtocolUsersService {
     if (!subscription) throw new BadRequestException("Subscription not found");
     if (!route) throw new BadRequestException("Route not found");
     if (!route.isEnabled) throw new BadRequestException("Route is not enabled");
+    // A device credential is only ever made for a live subscription. The
+    // caller checked, but a suspension, an expiry or an account deletion
+    // can land in between, and an enabled credential minted after it
+    // would undo it.
+    if (sessionId && subscription.status !== "ACTIVE") {
+      throw new BadRequestException("Subscription is not active");
+    }
 
     // The relay/direct split used to be a rule of its own here, driven
     // by plan.relayOnly. It is gone: a plan is now exactly the set of

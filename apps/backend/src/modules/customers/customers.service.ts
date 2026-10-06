@@ -176,39 +176,47 @@ export class CustomersService {
       );
     }
 
-    const protocolUsers = await this.prisma.protocolUser.findMany({
-      where: { subscription: { customerId: id } },
-      select: DELETION_SELECT,
+    // Under the customer lock, so no device of this customer is minting
+    // credentials of its own between the read below and the transaction
+    // -- a row created in that window would be deleted without any
+    // DELETE_USER and stay live on its node. See withCustomerLock. A
+    // fetch queued behind this finds its session gone (cascaded with the
+    // customer) and is refused.
+    await this.protocolUsers.withCustomerLock(id, async () => {
+      const protocolUsers = await this.prisma.protocolUser.findMany({
+        where: { subscription: { customerId: id } },
+        select: DELETION_SELECT,
+      });
+
+      // Tell each node to drop the user before the row disappears --
+      // otherwise the credential keeps working on the engine while the
+      // panel believes the customer is gone. Aimed at the user's own
+      // inbound (see command-target.ts): untargeted, a WebSocket or relay
+      // customer's delete landed on the default inbound and was acked
+      // while their credential went on working.
+      for (const user of protocolUsers) {
+        await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
+      }
+
+      // Ordered by dependency, innermost first. Invoices and payment
+      // transactions are included now that an unsettled attempt no longer
+      // blocks deletion -- without them this would fail on a foreign key
+      // and surface as a raw 500, the precise failure the guard above was
+      // written to avoid. Nothing here can be a settled payment: that case
+      // was already refused.
+      await this.prisma.$transaction([
+        // Usage records outlive the ProtocolUser by design (see the
+        // UsageRecord model), but they belong to this customer's
+        // subscriptions, so they go here.
+        this.prisma.usageRecord.deleteMany({ where: { subscription: { customerId: id } } }),
+        // Before the transactions they reference.
+        this.prisma.invoice.deleteMany({ where: { customerId: id } }),
+        this.prisma.paymentTransaction.deleteMany({ where: { customerId: id } }),
+        this.prisma.protocolUser.deleteMany({ where: { subscription: { customerId: id } } }),
+        this.prisma.subscription.deleteMany({ where: { customerId: id } }),
+        this.prisma.customer.delete({ where: { id } }),
+      ]);
     });
-
-    // Tell each node to drop the user before the row disappears --
-    // otherwise the credential keeps working on the engine while the
-    // panel believes the customer is gone. Aimed at the user's own
-    // inbound (see command-target.ts): untargeted, a WebSocket or relay
-    // customer's delete landed on the default inbound and was acked
-    // while their credential went on working.
-    for (const user of protocolUsers) {
-      await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
-    }
-
-    // Ordered by dependency, innermost first. Invoices and payment
-    // transactions are included now that an unsettled attempt no longer
-    // blocks deletion -- without them this would fail on a foreign key
-    // and surface as a raw 500, the precise failure the guard above was
-    // written to avoid. Nothing here can be a settled payment: that case
-    // was already refused.
-    await this.prisma.$transaction([
-      // Usage records outlive the ProtocolUser by design (see the
-      // UsageRecord model), but they belong to this customer's
-      // subscriptions, so they go here.
-      this.prisma.usageRecord.deleteMany({ where: { subscription: { customerId: id } } }),
-      // Before the transactions they reference.
-      this.prisma.invoice.deleteMany({ where: { customerId: id } }),
-      this.prisma.paymentTransaction.deleteMany({ where: { customerId: id } }),
-      this.prisma.protocolUser.deleteMany({ where: { subscription: { customerId: id } } }),
-      this.prisma.subscription.deleteMany({ where: { customerId: id } }),
-      this.prisma.customer.delete({ where: { id } }),
-    ]);
   }
 
   /** The customer deleting their own account.
@@ -236,26 +244,6 @@ export class CustomersService {
   async deleteOwnAccount(id: string) {
     await this.get(id);
 
-    // Every credential on every node, first and outside the
-    // transaction. This is the part that actually matters: a customer
-    // whose row is gone but whose WireGuard peer is still configured on
-    // the node keeps a working tunnel indefinitely, and nothing would
-    // ever report it.
-    //
-    // Note the plural. Since failover began provisioning a credential on
-    // every route the plan allows, one customer holds several, spread
-    // across different nodes -- so this is N deletions, not one, and
-    // treating it as one would leave working credentials behind on every
-    // node but the first.
-    const protocolUsers = await this.prisma.protocolUser.findMany({
-      where: { subscription: { customerId: id } },
-      select: DELETION_SELECT,
-    });
-
-    for (const user of protocolUsers) {
-      await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
-    }
-
     // Unique, so it cannot collide with a real address or with another
     // deleted account, and `.invalid` is reserved by RFC 2606 precisely
     // so it can never be a deliverable domain. A future bug that tries
@@ -266,40 +254,77 @@ export class CustomersService {
     // Hashed rather than set to a sentinel string: argon2.verify throws
     // on input that is not a valid hash, so a sentinel would turn a
     // login attempt against a deleted account into a 500 rather than a
-    // clean rejection.
+    // clean rejection. Before taking the lock below, so the lock is held
+    // for database work only.
     const unusablePassword = await argon2.hash(randomBytes(32).toString("hex"));
 
-    await this.prisma.$transaction([
-      // The rows the nodes were just told to forget.
-      this.prisma.protocolUser.deleteMany({ where: { subscription: { customerId: id } } }),
-      // Ends the subscription without deleting it -- the invoices below
-      // point at it, and an invoice for a subscription that no longer
-      // exists is worse than useless to an accountant.
-      this.prisma.subscription.updateMany({
-        where: { customerId: id },
-        data: { status: SubscriptionStatus.CANCELLED },
-      }),
-      this.prisma.customer.update({
-        where: { id },
-        data: {
-          email: anonymisedEmail,
-          passwordHash: unusablePassword,
-          telegramId: null,
-          referralCode: null,
-          status: CustomerStatus.DISABLED,
-          // Kills every outstanding refresh token immediately. Without
-          // this the app keeps working until the access token expires,
-          // which is a deleted account still carrying traffic.
-          tokenVersion: { increment: 1 },
-          emailVerifiedAt: null,
-          emailVerificationCode: null,
-          emailVerificationCodeExpiresAt: null,
-          passwordResetCode: null,
-          passwordResetCodeExpiresAt: null,
-        },
-      }),
-    ]);
+    // Under the customer lock, so no device of this customer is minting
+    // credentials of its own between the read and the transaction. See
+    // withCustomerLock: without it a fetch in that window left either a
+    // live credential with no row, or fresh ACTIVE credentials on the
+    // CANCELLED subscription served to a session nothing had revoked.
+    const revoked = await this.protocolUsers.withCustomerLock(id, async () => {
+      // Every credential on every node, first and outside the
+      // transaction. This is the part that actually matters: a customer
+      // whose row is gone but whose WireGuard peer is still configured on
+      // the node keeps a working tunnel indefinitely, and nothing would
+      // ever report it.
+      //
+      // Note the plural. Since failover began provisioning a credential on
+      // every route the plan allows, one customer holds several, spread
+      // across different nodes -- so this is N deletions, not one, and
+      // treating it as one would leave working credentials behind on every
+      // node but the first.
+      const protocolUsers = await this.prisma.protocolUser.findMany({
+        where: { subscription: { customerId: id } },
+        select: DELETION_SELECT,
+      });
 
-    return { deleted: true, credentialsRevoked: protocolUsers.length };
+      for (const user of protocolUsers) {
+        await this.agentGateway.enqueueCommand(user.nodeId, "DELETE_USER", deleteUserPayload(user, user.protocolConfig));
+      }
+
+      await this.prisma.$transaction([
+        // The rows the nodes were just told to forget.
+        this.prisma.protocolUser.deleteMany({ where: { subscription: { customerId: id } } }),
+        // Every signed-in device. tokenVersion below stops the refresh
+        // tokens; this stops the access tokens still in their fifteen
+        // minutes from fetching or minting anything (both check the
+        // session), and lets the sweep prune the rows.
+        this.prisma.customerSession.updateMany({
+          where: { customerId: id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        }),
+        // Ends the subscription without deleting it -- the invoices below
+        // point at it, and an invoice for a subscription that no longer
+        // exists is worse than useless to an accountant.
+        this.prisma.subscription.updateMany({
+          where: { customerId: id },
+          data: { status: SubscriptionStatus.CANCELLED },
+        }),
+        this.prisma.customer.update({
+          where: { id },
+          data: {
+            email: anonymisedEmail,
+            passwordHash: unusablePassword,
+            telegramId: null,
+            referralCode: null,
+            status: CustomerStatus.DISABLED,
+            // Kills every outstanding refresh token immediately. Without
+            // this the app keeps working until the access token expires,
+            // which is a deleted account still carrying traffic.
+            tokenVersion: { increment: 1 },
+            emailVerifiedAt: null,
+            emailVerificationCode: null,
+            emailVerificationCodeExpiresAt: null,
+            passwordResetCode: null,
+            passwordResetCodeExpiresAt: null,
+          },
+        }),
+      ]);
+      return protocolUsers.length;
+    });
+
+    return { deleted: true, credentialsRevoked: revoked };
   }
 }

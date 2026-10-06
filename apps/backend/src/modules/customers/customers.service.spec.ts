@@ -2,6 +2,28 @@ import { ConflictException, NotFoundException } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { CustomersService } from "./customers.service";
 import { encryptCredentials } from "../protocol-users/credentials-crypto";
+import { KeyedLock } from "../protocol-users/keyed-lock";
+
+/** A credential row as account deletion reads it. */
+function credentialRow(id: string) {
+  return {
+    id,
+    nodeId: "node-1",
+    protocol: "XRAY_VLESS_REALITY",
+    externalUserId: `ext-${id}`,
+    credentialsJson: encryptCredentials({ uuid: `ext-${id}` }),
+    protocolConfig: { transport: "TCP", inboundTag: null },
+  };
+}
+
+/** A device's first fetch, as far as deletion can see it: it holds the
+ * customer lock while it creates its own rows. */
+function deviceFetchHolding(lock: KeyedLock, rows: unknown[], id: string) {
+  return lock.run("customer-1", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    rows.push(credentialRow(id));
+  });
+}
 
 function buildCustomer(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -26,10 +48,12 @@ describe("CustomersService", () => {
     protocolUser: { findMany: jest.Mock; deleteMany: jest.Mock };
     subscription: { deleteMany: jest.Mock; updateMany: jest.Mock };
     usageRecord: { deleteMany: jest.Mock };
+    customerSession: { updateMany: jest.Mock };
     $transaction: jest.Mock;
   };
   let agentGateway: { enqueueCommand: jest.Mock };
-  let protocolUsers: { endSessions: jest.Mock };
+  let protocolUsers: { endSessions: jest.Mock; withCustomerLock: jest.Mock };
+  let lock: KeyedLock;
 
   beforeEach(() => {
     prisma = {
@@ -48,13 +72,19 @@ describe("CustomersService", () => {
       // invoices point at them.
       subscription: { deleteMany: jest.fn(), updateMany: jest.fn() },
       usageRecord: { deleteMany: jest.fn() },
+      customerSession: { updateMany: jest.fn() },
       // The real $transaction takes an array of prepared operations; the
       // mocked members above are plain jest.fn()s, so simply resolving is
       // enough to assert which ones were queued.
       $transaction: jest.fn().mockResolvedValue([]),
     };
     agentGateway = { enqueueCommand: jest.fn().mockResolvedValue(undefined) };
-    protocolUsers = { endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }) };
+    // The real lock, so a test can hold it the way a device fetch does.
+    lock = new KeyedLock();
+    protocolUsers = {
+      endSessions: jest.fn().mockResolvedValue({ sessions: 0, revoked: 0 }),
+      withCustomerLock: jest.fn((id: string, work: () => Promise<unknown>) => lock.run(id, work)),
+    };
     service = new CustomersService(prisma as any, agentGateway as any, protocolUsers as any);
   });
 
@@ -326,6 +356,55 @@ describe("CustomersService", () => {
       prisma.customer.findUnique.mockResolvedValue(null);
       await expect(service.deleteOwnAccount("missing")).rejects.toThrow(NotFoundException);
       expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
+    });
+
+    /** Device credentials are minted on a plain GET. One landing between
+     * deletion's read and its transaction used to be deleted from the
+     * database with no DELETE_USER -- live on its node, with no row. */
+    it("waits for a device fetch in flight, so the credential it mints is taken off the node too", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const rows: unknown[] = [credentialRow("shared")];
+      prisma.protocolUser.findMany.mockImplementation(() => Promise.resolve([...rows]));
+
+      const fetch = deviceFetchHolding(lock, rows, "device");
+      const deletion = service.deleteOwnAccount("customer-1");
+      await Promise.all([fetch, deletion]);
+
+      expect(agentGateway.enqueueCommand.mock.calls.map((c) => (c[2] as { externalUserId: string }).externalUserId)).toEqual([
+        "ext-shared",
+        "ext-device",
+      ]);
+      await expect(deletion).resolves.toEqual({ deleted: true, credentialsRevoked: 2 });
+    });
+
+    // An access token lives fifteen minutes past tokenVersion; with the
+    // session revoked it can neither fetch nor mint anything.
+    it("revokes every signed-in device in the same transaction", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+
+      await service.deleteOwnAccount("customer-1");
+
+      expect(prisma.customerSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: "customer-1", revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+  });
+
+  describe("remove, with devices fetching", () => {
+    it("waits for a device fetch in flight, so the credential it mints is taken off the node too", async () => {
+      prisma.customer.findUnique.mockResolvedValue(buildCustomer());
+      const rows: unknown[] = [credentialRow("shared")];
+      prisma.protocolUser.findMany.mockImplementation(() => Promise.resolve([...rows]));
+
+      const fetch = deviceFetchHolding(lock, rows, "device");
+      const removal = service.remove("customer-1");
+      await Promise.all([fetch, removal]);
+
+      expect(agentGateway.enqueueCommand.mock.calls.map((c) => (c[2] as { externalUserId: string }).externalUserId)).toEqual([
+        "ext-shared",
+        "ext-device",
+      ]);
     });
   });
 });

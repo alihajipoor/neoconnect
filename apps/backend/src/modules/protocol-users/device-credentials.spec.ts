@@ -389,6 +389,26 @@ describe("ProtocolUsersService.listForDevice", () => {
     expect(w.rows.every((r) => r.status === "DISABLED")).toBe(true);
   });
 
+  // A row deleted in the meantime (an account deletion) used to throw out
+  // of the loop and leave every row after it switched on.
+  it("switches off the rest when one of the new rows has already gone", async () => {
+    const w = world({});
+    w.create.mockImplementation(async ({ subscriptionId, routeId }, sessionId) => {
+      w.subscriptions[0].status = "CANCELLED";
+      const row = { id: `new-${routeId}`, subscriptionId, routeId, sessionId: sessionId ?? null, nodeId: "n", protocol: "XRAY_VLESS_REALITY", status: "ACTIVE", createdAt: new Date(), provisionedAt: null };
+      w.rows.push(row);
+      return row as never;
+    });
+    w.setEnabled.mockImplementationOnce(async () => {
+      throw new Error("Protocol user not found");
+    });
+
+    await expect(w.service.listForDevice(CUSTOMER, ME)).resolves.toBeDefined();
+
+    expect(w.setEnabled).toHaveBeenCalledTimes(2);
+    expect(w.rows.find((r) => r.id === "new-route-b")?.status).toBe("DISABLED");
+  });
+
   it("takes credentials back from the least recently used device past the limit", async () => {
     process.env.CUSTOMER_DEVICE_CREDENTIAL_LIMIT = "2";
     const now = Date.now();
@@ -578,12 +598,13 @@ describe("ProtocolUsersService.provisionAll with device credentials", () => {
 });
 
 describe("ProtocolUsersService.create for a device", () => {
-  function build() {
+  function build(subscriptionStatus = "ACTIVE") {
     const stored: { credentialsJson: string; sessionId?: string }[] = [];
     const prisma = {
       subscription: {
         findUnique: jest.fn().mockResolvedValue({
           id: "sub-1",
+          status: subscriptionStatus,
           plan: { name: "Pro", allowedRoutes: [{ id: "route-wg" }], maxDownloadMbps: null, maxUploadMbps: null },
         }),
       },
@@ -630,6 +651,19 @@ describe("ProtocolUsersService.create for a device", () => {
       "CREATE_USER",
       expect.objectContaining({ protocol: "WIREGUARD", externalUserId: expect.any(String) }),
     );
+  });
+
+  // A suspension, an expiry or an account deletion can land between the
+  // caller's check and the insert; an enabled credential minted after it
+  // would undo it.
+  it("refuses a device credential for a subscription that is no longer active", async () => {
+    const { service, prisma, agentGateway } = build("CANCELLED");
+
+    await expect(service.create({ subscriptionId: "sub-1", routeId: "route-wg" }, ME)).rejects.toThrow(
+      /not active/,
+    );
+    expect(prisma.protocolUser.create).not.toHaveBeenCalled();
+    expect(agentGateway.enqueueCommand).not.toHaveBeenCalled();
   });
 
   it("leaves the shared credential's row without a session", async () => {
