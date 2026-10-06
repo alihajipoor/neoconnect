@@ -258,22 +258,38 @@ export class BillingService {
     };
   }
 
-  /** Called from both webhook handlers once a provider confirms payment.
-   * Idempotent (no-ops if the transaction isn't still PENDING) since
-   * webhooks legitimately arrive more than once for the same event --
-   * both Stripe and NowPayments document and expect this. */
+  /** Called from every webhook handler once a provider confirms payment.
+   *
+   * Idempotent, since webhooks legitimately arrive more than once for the
+   * same event -- both Stripe and NowPayments document and expect this.
+   * The transition is one conditional write, not a read and then an
+   * update: two deliveries of the same success racing each other used to
+   * both read PENDING and both renew, a second term for one payment. Only
+   * the delivery whose write lands goes on to renew and invoice.
+   *
+   * FAILED is confirmable as well as PENDING. The provider has just said
+   * the money arrived, and that outranks anything we concluded earlier: a
+   * Stripe PaymentIntent whose first card was declined can still succeed
+   * on a second, and a crypto invoice marked expired can still be paid.
+   * Refusing those left a customer charged with nothing to show for it. */
   async confirmPayment(transactionId: string, rawPayload: unknown) {
     const transaction = await this.prisma.paymentTransaction.findUnique({ where: { id: transactionId } });
     if (!transaction) {
       this.logger.warn(`Webhook confirmed unknown payment transaction ${transactionId}`);
       return;
     }
-    if (transaction.status !== "PENDING") return;
+    if (transaction.status !== "PENDING" && transaction.status !== "FAILED") return;
 
-    await this.prisma.paymentTransaction.update({
-      where: { id: transactionId },
+    const { count } = await this.prisma.paymentTransaction.updateMany({
+      where: { id: transactionId, status: { in: ["PENDING", "FAILED"] } },
       data: { status: "CONFIRMED", rawWebhookPayload: rawPayload as Prisma.InputJsonValue },
     });
+    if (count === 0) return;
+    if (transaction.status === "FAILED") {
+      this.logger.warn(
+        `Payment ${transactionId} (${transaction.provider}) was marked FAILED and has now been confirmed by the provider`,
+      );
+    }
 
     if (transaction.subscriptionId) {
       await this.renewSubscription(transaction.subscriptionId);
@@ -306,12 +322,11 @@ export class BillingService {
     }
   }
 
+  /** Conditional for the same reason confirmPayment is: a failure that
+   * lands just after a confirmation must not overwrite it. */
   async markFailed(transactionId: string, rawPayload: unknown) {
-    const transaction = await this.prisma.paymentTransaction.findUnique({ where: { id: transactionId } });
-    if (!transaction || transaction.status !== "PENDING") return;
-
-    await this.prisma.paymentTransaction.update({
-      where: { id: transactionId },
+    await this.prisma.paymentTransaction.updateMany({
+      where: { id: transactionId, status: "PENDING" },
       data: { status: "FAILED", rawWebhookPayload: rawPayload as Prisma.InputJsonValue },
     });
   }

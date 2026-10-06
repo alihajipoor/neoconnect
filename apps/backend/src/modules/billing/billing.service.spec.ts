@@ -19,6 +19,7 @@ describe("BillingService.confirmPayment expiry", () => {
           subscriptionId: "sub-1",
         }),
         update: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       subscription: {
         findUnique: jest.fn().mockResolvedValue(subscription),
@@ -101,6 +102,109 @@ describe("BillingService.confirmPayment expiry", () => {
   });
 });
 
+/** A success the provider reports after we had written the payment off.
+ *
+ * Stripe's payment_intent.payment_failed is one attempt, not the payment:
+ * hosted Checkout lets the customer try another card on the same
+ * PaymentIntent, and that success used to arrive at a FAILED row and be
+ * ignored -- the customer charged, the subscription never activated, no
+ * invoice, no log line. */
+describe("BillingService.confirmPayment after a failure", () => {
+  function build(status: string, updateCount = 1) {
+    const prisma = {
+      paymentTransaction: {
+        findUnique: jest.fn().mockResolvedValue({ id: "txn-1", status, subscriptionId: "sub-1", provider: "STRIPE" }),
+        updateMany: jest.fn().mockResolvedValue({ count: updateCount }),
+      },
+      subscription: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: "sub-1",
+          status: SubscriptionStatus.PENDING,
+          expireAt: new Date(Date.now() + 30 * DAY_MS),
+          plan: { durationDays: 30 },
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      protocolUser: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const invoices = { issueForPayment: jest.fn().mockResolvedValue({}) };
+    const service = new BillingService(
+      prisma as never,
+      { setEnabled: jest.fn(), provisionAll: jest.fn().mockResolvedValue({ created: [], revoked: [] }) } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: jest.fn() } as never,
+      { availableProviders: jest.fn().mockResolvedValue([]) } as never,
+      invoices as never,
+      {} as never,
+    );
+    jest.spyOn(service["logger"], "warn").mockImplementation(() => undefined);
+    jest.spyOn(service["logger"], "log").mockImplementation(() => undefined);
+    return { service, prisma, invoices };
+  }
+
+  it("activates and invoices a payment that was marked FAILED and then succeeded", async () => {
+    const { service, prisma, invoices } = build("FAILED");
+
+    await service.confirmPayment("txn-1", {});
+
+    expect(prisma.paymentTransaction.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "txn-1", status: { in: ["PENDING", "FAILED"] } },
+        data: expect.objectContaining({ status: "CONFIRMED" }),
+      }),
+    );
+    expect(prisma.subscription.update.mock.calls[0][0].data.status).toBe("ACTIVE");
+    expect(invoices.issueForPayment).toHaveBeenCalledWith("txn-1");
+  });
+
+  it("does nothing for a payment that is already confirmed", async () => {
+    const { service, prisma, invoices } = build("CONFIRMED");
+
+    await service.confirmPayment("txn-1", {});
+
+    expect(prisma.paymentTransaction.updateMany).not.toHaveBeenCalled();
+    expect(prisma.subscription.update).not.toHaveBeenCalled();
+    expect(invoices.issueForPayment).not.toHaveBeenCalled();
+  });
+
+  /** Two deliveries of the same success, racing: both read PENDING. Only
+   * the one whose conditional write lands may renew, or one payment buys
+   * two terms. */
+  it("renews only once when a duplicate delivery loses the race", async () => {
+    const { service, prisma, invoices } = build("PENDING", 0);
+
+    await service.confirmPayment("txn-1", {});
+
+    expect(prisma.subscription.update).not.toHaveBeenCalled();
+    expect(invoices.issueForPayment).not.toHaveBeenCalled();
+  });
+});
+
+describe("BillingService.markFailed", () => {
+  it("only ever fails a PENDING payment, in one conditional write", async () => {
+    const prisma = { paymentTransaction: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } };
+    const service = new BillingService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: jest.fn() } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    await service.markFailed("txn-1", {});
+
+    expect(prisma.paymentTransaction.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "txn-1", status: "PENDING" }, data: expect.objectContaining({ status: "FAILED" }) }),
+    );
+  });
+});
+
 /** The money has moved by the time provisioning runs. A provisioning
  * failure must not also skip the invoice -- the customer is owed one
  * whether or not a node was reachable. */
@@ -110,6 +214,7 @@ describe("BillingService.confirmPayment when provisioning fails", () => {
       paymentTransaction: {
         findUnique: jest.fn().mockResolvedValue({ id: "txn-1", status: "PENDING", subscriptionId: "sub-1", provider: "STRIPE" }),
         update: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       subscription: {
         findUnique: jest.fn().mockResolvedValue({
