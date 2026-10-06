@@ -534,6 +534,12 @@ export function Dashboard({
       return true;
     };
     const stopWatching = whenForegrounded(() => void checkSlot());
+    /** False once the state this poll was started for has moved on. A
+     * check still waiting on the egress probe when the slot check above
+     * (from the foreground handler) or a Disconnect starts a teardown
+     * must not then write "connected" over it -- a tunnel state read
+     * before the teardown, reported after it. */
+    let live = true;
 
     const id = setInterval(async () => {
       if (await checkSlot()) return;
@@ -545,6 +551,7 @@ export function Dashboard({
         // Failing to ask is not the same as learning the tunnel is down.
         return;
       }
+      if (!live) return;
 
       if (fromStatus === "disconnected") {
         sessionTrackerRef.current.broken();
@@ -559,6 +566,7 @@ export function Dashboard({
       }
 
       const egress = await verifyEgress(baselineIp);
+      if (!live) return;
       const carrying =
         egress.state === "throughTunnel" || egress.state === "indeterminate";
       if (egress.state === "throughTunnel") setExitIp(egress.exitIp);
@@ -576,6 +584,7 @@ export function Dashboard({
     }, HEALTH_POLL_MS);
 
     return () => {
+      live = false;
       clearInterval(id);
       stopWatching();
       // A change of state ends the stretch being timed, so a reconnect
