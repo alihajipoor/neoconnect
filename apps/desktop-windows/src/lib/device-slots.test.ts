@@ -227,6 +227,27 @@ describe("claim", () => {
       expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered", retryable: false });
     });
 
+    /** Exactly three answers stop a dial (obligation 2). A refusal's code
+     * on the wrong status, or a status without its code, is none of them
+     * -- a proxy or a CDN can answer 409 or 429 too. */
+    it("dials anyway on a 409 or a 429 that does not carry one of the three codes", async () => {
+      replies["/customer/vpn/claim"] = [
+        { status: 409, body: { statusCode: 409, message: "Conflict" } },
+        { status: 409, body: { statusCode: 409, code: "SOMETHING_NEW", message: "x" } },
+        { status: 409, body: { statusCode: 409, code: "TAKEOVER_LIMIT", message: "x" } },
+        { status: 429, body: { statusCode: 429, code: "DEVICE_LIMIT", message: "x", holders: [] } },
+        { status: 429, body: { statusCode: 429, message: "ThrottlerException: Too Many Requests" } },
+      ];
+      for (let i = 0; i < 5; i++) {
+        expect(await claimSlot({ subscriptionId: SUB, takeover: ["h"] })).toMatchObject({ kind: "unanswered" });
+      }
+    });
+
+    it("dials anyway when a 200 is not a grant", async () => {
+      replies["/customer/vpn/claim"] = [{ status: 200, body: { granted: false } }];
+      expect(await claimSlot({ subscriptionId: SUB })).toMatchObject({ kind: "unanswered" });
+    });
+
     it("keeps to the budget even while the token is being refreshed", async () => {
       // An expired access token: the claim's 401 sends apiRequest off to
       // refresh, and that request does not carry the claim's signal.
@@ -298,6 +319,33 @@ describe("renew", () => {
   it("changes nothing when the API cannot be reached", async () => {
     replies["/customer/vpn/renew"] = ["hang", "hang"];
     expect(await renewSlot(SUB, 50)).toMatchObject({ kind: "unanswered" });
+  });
+
+  /** A renewal's verdicts come in a 200's status. Anything else keeps
+   * the tunnel -- even a 409 naming a slot code, which the contract never
+   * sends to a renewal. */
+  it("changes nothing on any answer but a 200", async () => {
+    replies["/customer/vpn/renew"] = [
+      { status: 409, body: { statusCode: 409, code: "SUBSCRIPTION_INACTIVE", message: "x", subscriptionStatus: "EXPIRED" } },
+      { status: 409, body: DEVICE_LIMIT },
+      { status: 429, body: { statusCode: 429, message: "ThrottlerException: Too Many Requests" } },
+      { status: 429, body: { statusCode: 429, code: "TAKEOVER_LIMIT", message: "x", retryAfterSec: 60 } },
+      { status: 503 },
+      { status: 404, body: { message: "Cannot POST /customer/vpn/renew" } },
+      { status: 200, body: { status: "something new" } },
+    ];
+    for (let i = 0; i < 7; i++) {
+      expect(await renewSlot(SUB)).toMatchObject({ kind: "unanswered" });
+    }
+    expect(stored).not.toBeNull();
+    expect(announced).toBe(0);
+  });
+
+  it("still ends the session on a sign-out, as every call does", async () => {
+    replies["/customer/vpn/renew"] = [{ status: 401 }];
+    replies["/customer-auth/refresh"] = [{ status: 401 }];
+    expect(await renewSlot(SUB)).toEqual({ kind: "signedOut" });
+    expect(announced).toBe(1);
   });
 
   it("keeps the renewal interval within sense", async () => {

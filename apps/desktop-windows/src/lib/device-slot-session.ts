@@ -453,11 +453,17 @@ export function createDeviceSlotSession(deps: Partial<DeviceSlotDeps> = {}): Dev
     async afterConnected(request) {
       const protocolUserId = request.protocolUserId ?? dialledProtocolUserId;
       dialledProtocolUserId = protocolUserId;
-      if (standing === "unclaimed" && retryClaim) {
+      if (standing === "unclaimed") {
         // The claim before dialling went unanswered. With the tunnel up,
         // it may get through now -- and on a filtered network the tunnel
         // is the likeliest way to reach the API at all. It carries the
         // customer's takeover, if they chose one.
+        //
+        // Once even after an answer no repeat was expected to change (a
+        // 404, a 409 with no code): the contract asks for this claim
+        // whatever the first one got (obligation 2), and through the
+        // tunnel it may reach the API by another way. Only repeats on the
+        // renewal clock wait for an answer that could change.
         return whileConnected(await claimNow(protocolUserId, LATE_CLAIM_BUDGET_MS));
       }
       if (standing === "held" && protocolUserId !== null && protocolUserId !== claimedProtocolUserId) {

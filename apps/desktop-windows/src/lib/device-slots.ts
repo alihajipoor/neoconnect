@@ -12,11 +12,13 @@ import { deviceHeaders } from "./device-identity";
  *
  * Every answer is turned into one of a few outcomes here, so no screen
  * reads a status code. The rule they all serve: **the control plane is
- * never a precondition for connecting.** Only a definite refusal (a 409
- * or a 429 that says why) stops a dial. Anything else -- no answer in
- * time, a network error, a 5xx, an endpoint an old backend does not have
- * -- is `unanswered`, and the app dials anyway. Somebody in Iran who
- * cannot reach the API must never lose the VPN over this.
+ * never a precondition for connecting.** Exactly three answers stop a
+ * dial: 409 `DEVICE_LIMIT`, 409 `SUBSCRIPTION_INACTIVE` and 429
+ * `TAKEOVER_LIMIT`. Anything else -- no answer in time, a network error,
+ * a 5xx, a 409 or 429 without one of those codes, an endpoint an old
+ * backend does not have -- is `unanswered`, and the app dials anyway; a
+ * renewal that is not a 200 keeps the tunnel. Somebody in Iran who cannot
+ * reach the API must never lose the VPN over this.
  *
  * Shared with the mobile client through its `@shared` alias.
  */
@@ -169,25 +171,40 @@ export function refusalFrom(body: unknown): DeviceLimitRefusal {
   return { limit: positiveInt(f?.limit), holders };
 }
 
-/** What a failed claim or renewal means. Shared by both, because the
- * refusals that are not about slots read the same on either. */
-function classifyFailure(failure: RequestFailure):
-  | { kind: "signedOut" }
-  | { kind: "inactive"; subscriptionStatus: string | null }
-  | { kind: "unanswered"; reason: string; retryable: boolean }
-  | null {
+/** A failed claim or renewal that is no verdict, and whether asking
+ * again could produce one: a timeout, a 5xx or a 429 could; a 400 or a
+ * 404 will not. */
+function unanswered(failure: RequestFailure): { kind: "unanswered"; reason: string; retryable: boolean } {
+  // Never arrived, or arrived somewhere that could not answer: the next
+  // attempt may well get through. A 429 without the slot code is the
+  // request limit or a CDN, not a verdict on this device.
+  const { status } = failure;
+  const retryable = status === undefined || status >= 500 || status === 429 || status === 408;
+  return { kind: "unanswered", reason: failure.error, retryable };
+}
+
+/** What a failed claim means.
+ *
+ * Exactly three answers are a verdict (docs/device-slots.md, obligation
+ * 2): 409 `DEVICE_LIMIT`, 409 `SUBSCRIPTION_INACTIVE` and 429
+ * `TAKEOVER_LIMIT`. A sign-out is the session ending, as on any call.
+ * Everything else -- a 409 or a 429 without one of those codes, a 404,
+ * a 5xx, no answer -- is no verdict, and the app dials anyway. */
+function claimFailure(failure: RequestFailure): Exclude<ClaimOutcome, { kind: "granted" }> {
   if (failure.sessionExpired) return { kind: "signedOut" };
   const { status, code } = failure;
+  if (status === 409 && code === "DEVICE_LIMIT") return { kind: "refused", refusal: refusalFrom(failure.body) };
   if (status === 409 && code === "SUBSCRIPTION_INACTIVE") {
     return { kind: "inactive", subscriptionStatus: text(fieldsOf(failure.body)?.subscriptionStatus) };
   }
-  if (status === 409 && code === "DEVICE_LIMIT") return null;
-  if (status === 429 && code === "TAKEOVER_LIMIT") return null;
-  // Never arrived, or arrived somewhere that could not answer: the next
-  // attempt may well get through. A 429 without the slot code is a
-  // throttle or a CDN, not a verdict on this device.
-  const retryable = status === undefined || status >= 500 || status === 429 || status === 408;
-  return { kind: "unanswered", reason: failure.error, retryable };
+  if (status === 429 && code === "TAKEOVER_LIMIT") {
+    const retryAfter = fieldsOf(failure.body)?.retryAfterSec;
+    return {
+      kind: "takeoverLimited",
+      retryAfterSec: typeof retryAfter === "number" && retryAfter > 0 ? Math.ceil(retryAfter) : null,
+    };
+  }
+  return unanswered(failure);
 }
 
 /** Runs one request with a deadline of its own.
@@ -261,16 +278,7 @@ export async function claimSlot(request: ClaimRequest, budgetMs = CLAIM_BUDGET_M
     return { kind: "granted", grant: grantFrom(f) };
   }
   if ("timedOut" in result) return { kind: "unanswered", reason: result.error, retryable: true };
-
-  const classified = classifyFailure(result);
-  if (classified) return classified;
-  if (result.code === "DEVICE_LIMIT") return { kind: "refused", refusal: refusalFrom(result.body) };
-  // TAKEOVER_LIMIT, the only other code classifyFailure leaves.
-  const retryAfter = fieldsOf(result.body)?.retryAfterSec;
-  return {
-    kind: "takeoverLimited",
-    retryAfterSec: typeof retryAfter === "number" && retryAfter > 0 ? Math.ceil(retryAfter) : null,
-  };
+  return claimFailure(result);
 }
 
 /** Keeps the slot, every `renewEverySec` while connected. Never rejects. */
@@ -298,9 +306,12 @@ export async function renewSlot(subscriptionId: string, budgetMs = RENEW_BUDGET_
   }
   if ("timedOut" in result) return { kind: "unanswered", reason: result.error, retryable: true };
 
-  // A renewal is always 200 for the slot itself; a 409 or a 429 here is
-  // nothing the contract defines, so it is no verdict either.
-  return classifyFailure(result) ?? { kind: "unanswered", reason: result.error, retryable: false };
+  // A renewal's verdicts come in a 200's `status`, never as a refusal.
+  // Anything else -- a 5xx, a 429, a 404, even a 409 naming a code --
+  // changes nothing (obligation 6): keep the tunnel and ask again at the
+  // next interval. Only a sign-out ends the session, as on any call.
+  if (result.sessionExpired) return { kind: "signedOut" };
+  return unanswered(result);
 }
 
 export interface ReleaseRequest {

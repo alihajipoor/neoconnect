@@ -156,14 +156,28 @@ describe("once connected", () => {
     expect(h.session.standing()).toBe("unclaimed");
   });
 
-  it("does not keep asking a backend that has no slots", async () => {
-    const h = harness([{ kind: "unanswered", reason: "404", retryable: false }]);
-    await h.session.beforeDial({ subscriptionId: SUB });
-    await h.session.afterConnected({});
+  /** Obligation 2: any answer but the three verdicts means dial, and
+   * claim again once the tunnel is up -- a 404 or a codeless 409
+   * included, since through the tunnel the API may be reached another
+   * way. Past that one claim, a backend with no slots is not asked
+   * again. */
+  it("claims once through the tunnel after an answer that was no verdict, and not again", async () => {
+    const notSlots: ClaimOutcome = { kind: "unanswered", reason: "404", retryable: false };
+    const h = harness([notSlots, notSlots]);
+    expect(await h.session.beforeDial({ subscriptionId: SUB })).toEqual({ kind: "dial" });
+    expect(await h.session.afterConnected({})).toEqual({ kind: "keep" });
+    expect(h.claim).toHaveBeenCalledTimes(2);
     h.advance(120_000);
     await h.session.onPoll();
-    expect(h.claim).toHaveBeenCalledTimes(1);
+    expect(h.claim).toHaveBeenCalledTimes(2);
     expect(h.renew).not.toHaveBeenCalled();
+  });
+
+  it("takes a grant from that claim through the tunnel like any other", async () => {
+    const h = harness([{ kind: "unanswered", reason: "409 without a code", retryable: false }, GRANT]);
+    await h.session.beforeDial({ subscriptionId: SUB });
+    await h.session.afterConnected({});
+    expect(h.session.standing()).toBe("held");
   });
 
   it("moves the slot to the credential the ladder landed on", async () => {

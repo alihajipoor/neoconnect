@@ -188,7 +188,9 @@ describe("before dialling", () => {
     }
   });
 
-  it("dials against a backend without slots, and does not keep asking it", async () => {
+  /** Dial, claim once more through the tunnel (obligation 2: the API may
+   * be reached another way there), and then leave it be. */
+  it("dials against a backend without slots, asks once through the tunnel, and does not keep asking it", async () => {
     answer = () => ({ ok: false, error: "Cannot POST /customer/vpn/claim", status: 404 });
     const { slot, advance } = session();
 
@@ -196,9 +198,21 @@ describe("before dialling", () => {
     expect(stop).toBeNull();
 
     await slot.afterConnected({ protocolUserId: CRED });
+    expect(calls).toHaveLength(2);
     advance(10 * 60_000);
     await renewInForeground(slot, () => true);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
+  });
+
+  it.each([
+    ["a 409 with no code", { ok: false as const, error: "Conflict", status: 409 }],
+    ["a 429 from the request limit", { ok: false as const, error: "Too Many Requests", status: 429 }],
+    ["a 502", { ok: false as const, error: "Bad Gateway", status: 502 }],
+  ])("dials on %s -- only the three coded answers stop a dial", async (_name, reply) => {
+    answer = () => reply;
+    const { slot } = session();
+    const { stop } = await claimWhileRefreshing({ subscriptionId: SUB, protocolUserId: CRED }, fresh, slot);
+    expect(stop).toBeNull();
   });
 
   it("does not ask at all on a plan the subscription says is unlimited", async () => {
